@@ -73,6 +73,7 @@ jobs:
         run: |
           cd base-images
           buildah build \
+            --isolation=chroot \
             --cap-add=SYS_ADMIN \
             --cap-add=NET_ADMIN \
             --cap-add=SYS_CHROOT \
