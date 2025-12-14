@@ -28,6 +28,9 @@ on:
 jobs:
   build-minimal-bootc:
     runs-on: ubuntu-latest
+    container:
+      image: quay.io/fedora/fedora:43
+      options: --privileged
 
     strategy:
       matrix:
@@ -37,10 +40,9 @@ jobs:
           - 'rawhide'
 
     steps:
-      - name: Install Buildah
+      - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y buildah
+          dnf install -y git buildah
 
       - name: Set Fedora version
         id: set_version
