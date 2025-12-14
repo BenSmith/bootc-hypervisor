@@ -73,8 +73,9 @@ jobs:
           # Remove 'rw' from mount options (podman 4.x duplicate options bug)
           sed -i 's/type=cache,rw,id=/type=cache,id=/g' Containerfile
           sed -i 's/type=bind,rw,from=/type=bind,from=/g' Containerfile
-          echo "Patched mount options (removed rw for podman 4.x):"
-          grep "RUN --mount" Containerfile
+          echo "=== Patched Containerfile ==="
+          cat -n Containerfile
+          echo "==========================="
 
       - name: Build minimal bootc container
         run: |
