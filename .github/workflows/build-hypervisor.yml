@@ -1,0 +1,153 @@
+name: Build Hypervisor Bootc Images
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: 'Which variants to build'
+        required: true
+        default: 'base'
+        type: choice
+        options:
+          - 'base'
+          - 'all'
+          - 'base,nvidia-rpmfusion'
+          - 'base,nvidia-negativo17'
+          - 'base,amd'
+
+  # Build when hypervisor files change
+  push:
+    branches:
+      - main
+    paths:
+      - 'hypervisor*.Containerfile'
+      - '.github/workflows/build-hypervisor.yml'
+
+  # Weekly builds (Sundays at 3am UTC)
+  schedule:
+    - cron: '0 3 * * 0'
+
+jobs:
+  build-hypervisor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman --version
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Determine variants to build
+        id: variants
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VARIANTS="${{ inputs.variants }}"
+          elif [ "${{ github.event_name }}" == "schedule" ]; then
+            VARIANTS="all"
+          else
+            VARIANTS="base"
+          fi
+          echo "variants=${VARIANTS}" >> $GITHUB_OUTPUT
+
+      - name: Build base hypervisor
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=$(date +%Y%m%d-%H%M)
+
+          podman build \
+            -f hypervisor.Containerfile \
+            -t localhost/hypervisor-bootc:${TAG} \
+            -t localhost/hypervisor-bootc:latest \
+            -t ghcr.io/${OWNER}/hypervisor-bootc:${TAG} \
+            -t ghcr.io/${OWNER}/hypervisor-bootc:latest \
+            .
+
+          # Push to GHCR
+          podman push ghcr.io/${OWNER}/hypervisor-bootc:${TAG}
+          podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
+
+          echo "base_tag=${TAG}" >> $GITHUB_ENV
+
+      - name: Build NVIDIA RPMFusion variant
+        if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=${{ env.base_tag }}
+
+          podman build \
+            -f hypervisor-nvidia-rpmfusion.Containerfile \
+            -t localhost/hypervisor-nvidia:rpmfusion-${TAG} \
+            -t localhost/hypervisor-nvidia:rpmfusion \
+            .
+
+          # Tag for GHCR
+          podman tag localhost/hypervisor-nvidia:rpmfusion-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${TAG}
+          podman tag localhost/hypervisor-nvidia:rpmfusion ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+
+          # Push to GHCR
+          podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${TAG}
+          podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+
+      - name: Build NVIDIA negativo17 variant
+        if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=${{ env.base_tag }}
+
+          podman build \
+            -f hypervisor-nvidia-negativo17.Containerfile \
+            -t localhost/hypervisor-nvidia:negativo17-${TAG} \
+            -t localhost/hypervisor-nvidia:negativo17 \
+            .
+
+          # Tag for GHCR
+          podman tag localhost/hypervisor-nvidia:negativo17-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${TAG}
+          podman tag localhost/hypervisor-nvidia:negativo17 ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+
+          # Push to GHCR
+          podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${TAG}
+          podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+
+      - name: Build AMD variant
+        if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=${{ env.base_tag }}
+
+          podman build \
+            -f hypervisor-amd.Containerfile \
+            -t localhost/hypervisor-amd:${TAG} \
+            -t localhost/hypervisor-amd:latest \
+            .
+
+          # Tag for GHCR
+          podman tag localhost/hypervisor-amd:${TAG} ghcr.io/${OWNER}/hypervisor-amd:${TAG}
+          podman tag localhost/hypervisor-amd:latest ghcr.io/${OWNER}/hypervisor-amd:latest
+
+          # Push to GHCR
+          podman push ghcr.io/${OWNER}/hypervisor-amd:${TAG}
+          podman push ghcr.io/${OWNER}/hypervisor-amd:latest
+
+      - name: Summary
+        run: |
+          echo "## Build Complete! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Built variants: ${{ steps.variants.outputs.variants }}" >> $GITHUB_STEP_SUMMARY
+          echo "Tag: ${{ env.base_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images:" >> $GITHUB_STEP_SUMMARY
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:latest\`" >> $GITHUB_STEP_SUMMARY

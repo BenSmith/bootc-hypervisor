@@ -14,9 +14,9 @@ on:
           - '44'
           - 'rawhide'
 
-  # Scheduled daily build (2am UTC)
+  # Weekly build (Saturdays at 2am UTC)
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * 6'
 
   # Build on pushes to main that touch these files
   push:
@@ -37,21 +37,13 @@ jobs:
         # Build for multiple Fedora versions
         fedora_version:
           - '43'
-#          - 'rawhide'
+          - 'rawhide'
 
     steps:
-      - name: Install latest podman
+      - name: Setup podman
         run: |
-          # Remove old podman if present
-          sudo apt-get remove -y podman || true
-
-          # Add Kubic repo for latest podman
-          echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_$(lsb_release -rs)/ /" | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list
-          curl -fsSL https://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/kubic-libcontainers-unstable.gpg > /dev/null
-
           sudo apt-get update
           sudo apt-get install -y podman
-
           podman --version
 
       - name: Set Fedora version
@@ -63,6 +55,11 @@ jobs:
           else
             echo "version=${{ matrix.fedora_version }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Set build timestamp
+        id: timestamp
+        run: |
+          echo "tag=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
       - name: Clone Fedora bootc base-images
         run: |
@@ -114,6 +111,7 @@ jobs:
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
+            -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
             -t localhost/fedora-bootc-minimal:latest \
             .
@@ -132,7 +130,10 @@ jobs:
           # Lowercase repository owner for ghcr.io compatibility
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          # Tag with version
+          # Tag with timestamp and version
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+            ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+
           podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
             ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
@@ -143,6 +144,7 @@ jobs:
           fi
 
           # Push all tags
+          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
           podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
@@ -152,12 +154,12 @@ jobs:
       - name: Save image as artifact
         run: |
           mkdir -p artifacts
-          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
-            -o artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}.tar
+          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+            -o artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}
-          path: artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}.tar
+          name: fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          path: artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
           retention-days: 7
