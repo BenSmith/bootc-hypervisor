@@ -73,6 +73,28 @@ jobs:
           # Remove 'rw' from mount options (podman 4.x duplicate options bug)
           sed -i 's/type=cache,rw,id=/type=cache,id=/g' Containerfile
           sed -i 's/type=bind,rw,from=/type=bind,from=/g' Containerfile
+
+          # Convert heredoc to inline sh -c (podman 4.x doesn't support heredoc)
+          awk '
+          BEGIN { in_heredoc=0 }
+          /<<EORUN/ {
+            in_heredoc=1
+            printf "    sh -c '\''set -xeuo pipefail"
+            next
+          }
+          /^EORUN$/ {
+            in_heredoc=0
+            printf "'\''\n"
+            next
+          }
+          in_heredoc && !/^#/ && NF {
+            gsub(/\\/,"\\\\")
+            gsub(/'"'"'/,"\047")
+            printf " && %s", $0
+          }
+          !in_heredoc { print }
+          ' Containerfile > Containerfile.tmp && mv Containerfile.tmp Containerfile
+
           echo "=== Patched Containerfile ==="
           cat -n Containerfile
           echo "==========================="
