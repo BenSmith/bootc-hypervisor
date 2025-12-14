@@ -37,10 +37,19 @@ jobs:
           - 'rawhide'
 
     steps:
-      - name: Install podman
+      - name: Install latest podman
         run: |
+          # Remove old podman if present
+          sudo apt-get remove -y podman || true
+
+          # Add Kubic repo for latest podman
+          echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_$(lsb_release -rs)/ /" | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list
+          curl -fsSL https://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/kubic-libcontainers-unstable.gpg > /dev/null
+
           sudo apt-get update
           sudo apt-get install -y podman
+
+          podman --version
 
       - name: Set Fedora version
         id: set_version
@@ -57,16 +66,6 @@ jobs:
           git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git
           cd base-images
           git log -1
-
-      - name: Patch Containerfile for GitHub Actions compatibility
-        run: |
-          cd base-images
-          # Remove 'rw' from RUN --mount options to avoid conflicts
-          sed -i 's/--mount=type=\([^,]*\),rw,/--mount=type=\1,/g' Containerfile
-          sed -i 's/,rw,/,/g' Containerfile
-          sed -i 's/,rw\b//g' Containerfile
-          echo "Patched Containerfile:"
-          grep -n "RUN --mount" Containerfile || true
 
       - name: Build minimal bootc container
         run: |
