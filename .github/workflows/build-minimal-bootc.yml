@@ -70,52 +70,30 @@ jobs:
       - name: Patch Containerfile for podman 4.x compatibility
         run: |
           cd base-images
-          # Remove 'rw' from both mounts, then add readonly=false to bind mount
-          # This avoids podman 4.x duplicate options bug while keeping bind mount writable
-          sed -i 's/type=cache,rw,id=/type=cache,id=/g' Containerfile
-          sed -i 's/type=bind,rw,from=/type=bind,readonly=false,from=/g' Containerfile
+          # Replace the entire RUN --mount with COPY + RUN
+          # Bind mounts are read-only in GitHub Actions, but rpm-ostree needs write access
+          python3 << 'PYPATCH'
+import re
 
-          # Convert heredoc to inline sh -c (podman 4.x doesn't support heredoc)
-          awk '
-          BEGIN { in_heredoc=0; cmd="" }
-          /<<EORUN/ {
-            in_heredoc=1
-            # Print everything before <<EORUN on this line, then start sh -c
-            sub(/<<EORUN.*/, "\\")
-            print
-            printf "    sh -c '\''set -xeuo pipefail"
-            next
-          }
-          /^EORUN$/ {
-            in_heredoc=0
-            if (cmd != "") {
-              printf " && %s", cmd
-              cmd=""
-            }
-            printf "'\''\n"
-            next
-          }
-          in_heredoc && !/^#/ && NF {
-            # Handle line continuations
-            if ($0 ~ /\\$/) {
-              # Remove trailing backslash and accumulate
-              sub(/\\$/, "")
-              cmd = cmd $0 " "
-            } else {
-              # Complete command
-              if (cmd != "") {
-                cmd = cmd $0
-                gsub(/'"'"'/,"\047", cmd)
-                printf " && %s", cmd
-                cmd=""
-              } else {
-                gsub(/'"'"'/,"\047")
-                printf " && %s", $0
-              }
-            }
-          }
-          !in_heredoc { print }
-          ' Containerfile > Containerfile.tmp && mv Containerfile.tmp Containerfile
+with open('Containerfile', 'r') as f:
+    content = f.read()
+
+# Replace the mount-based RUN with COPY + simple RUN
+old_pattern = r'RUN --mount=type=cache,rw,id=bootc-base-image-cache,target=/cache\s+\\\s+--mount=type=bind,rw,from=repos,src=/,dst=/repos\s+<<EORUN.*?^EORUN$'
+
+new_text = '''# Copy repos to writable location (bind mounts are read-only in some environments)
+COPY --from=repos / /repos
+RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \\
+    ./install-manifests && \\
+    install -m 0755 -t /usr/libexec ./bootc-base-imagectl && \\
+    /usr/libexec/bootc-base-imagectl list >/dev/null && \\
+    /usr/libexec/bootc-base-imagectl build-rootfs --cachedir=/cache --reinject --manifest=${MANIFEST} /repos /target-rootfs' '''
+
+content = re.sub(old_pattern, new_text, content, flags=re.MULTILINE | re.DOTALL)
+
+with open('Containerfile', 'w') as f:
+    f.write(content)
+PYPATCH
 
           echo "=== Patched Containerfile ==="
           cat -n Containerfile
