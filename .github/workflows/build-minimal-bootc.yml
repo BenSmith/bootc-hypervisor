@@ -76,7 +76,7 @@ jobs:
 
           # Convert heredoc to inline sh -c (podman 4.x doesn't support heredoc)
           awk '
-          BEGIN { in_heredoc=0 }
+          BEGIN { in_heredoc=0; cmd="" }
           /<<EORUN/ {
             in_heredoc=1
             printf "    sh -c '\''set -xeuo pipefail"
@@ -84,13 +84,31 @@ jobs:
           }
           /^EORUN$/ {
             in_heredoc=0
+            if (cmd != "") {
+              printf " && %s", cmd
+              cmd=""
+            }
             printf "'\''\n"
             next
           }
           in_heredoc && !/^#/ && NF {
-            gsub(/\\/,"\\\\")
-            gsub(/'"'"'/,"\047")
-            printf " && %s", $0
+            # Handle line continuations
+            if ($0 ~ /\\$/) {
+              # Remove trailing backslash and accumulate
+              sub(/\\$/, "")
+              cmd = cmd $0 " "
+            } else {
+              # Complete command
+              if (cmd != "") {
+                cmd = cmd $0
+                gsub(/'"'"'/,"\047", cmd)
+                printf " && %s", cmd
+                cmd=""
+              } else {
+                gsub(/'"'"'/,"\047")
+                printf " && %s", $0
+              }
+            }
           }
           !in_heredoc { print }
           ' Containerfile > Containerfile.tmp && mv Containerfile.tmp Containerfile
