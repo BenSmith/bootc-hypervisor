@@ -64,6 +64,7 @@ jobs:
           cd base-images
           docker buildx build \
             --load \
+            -f Containerfile \
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
