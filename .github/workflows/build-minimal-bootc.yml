@@ -70,9 +70,10 @@ jobs:
       - name: Patch Containerfile for podman 4.x compatibility
         run: |
           cd base-images
-          # Remove 'rw' from mount options (podman 4.x duplicate options bug)
+          # Remove 'rw' from both mounts, then add readonly=false to bind mount
+          # This avoids podman 4.x duplicate options bug while keeping bind mount writable
           sed -i 's/type=cache,rw,id=/type=cache,id=/g' Containerfile
-          sed -i 's/type=bind,rw,from=/type=bind,from=/g' Containerfile
+          sed -i 's/type=bind,rw,from=/type=bind,readonly=false,from=/g' Containerfile
 
           # Convert heredoc to inline sh -c (podman 4.x doesn't support heredoc)
           awk '
