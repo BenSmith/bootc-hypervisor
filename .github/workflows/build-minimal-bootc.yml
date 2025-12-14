@@ -103,6 +103,9 @@ jobs:
         run: |
           cd base-images
           podman build \
+            --security-opt=label=disable \
+            --cap-add=all \
+            --device /dev/fuse \
             -f Containerfile \
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
