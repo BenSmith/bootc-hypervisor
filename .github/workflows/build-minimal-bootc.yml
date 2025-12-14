@@ -67,6 +67,15 @@ jobs:
           cd base-images
           git log -1
 
+      - name: Patch Containerfile for podman 4.x compatibility
+        run: |
+          cd base-images
+          # Remove 'rw' from mount options (podman 4.x duplicate options bug)
+          sed -i 's/type=cache,rw,id=/type=cache,id=/g' Containerfile
+          sed -i 's/type=bind,rw,from=/type=bind,from=/g' Containerfile
+          echo "Patched mount options (removed rw for podman 4.x):"
+          grep "RUN --mount" Containerfile
+
       - name: Build minimal bootc container
         run: |
           cd base-images
