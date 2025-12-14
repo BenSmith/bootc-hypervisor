@@ -72,28 +72,28 @@ jobs:
           cd base-images
           # Replace the entire RUN --mount with COPY + RUN
           # Bind mounts are read-only in GitHub Actions, but rpm-ostree needs write access
-          cat > /tmp/patch.py << 'EOF'
-import re
-import sys
+          cat > /tmp/patch.py << 'PATCHEOF'
+          import re
+          import sys
 
-with open('Containerfile', 'r') as f:
-    content = f.read()
+          with open('Containerfile', 'r') as f:
+              content = f.read()
 
-old_pattern = r'RUN --mount=type=cache,rw,id=bootc-base-image-cache,target=/cache\s+\\\s+--mount=type=bind,rw,from=repos,src=/,dst=/repos\s+<<EORUN.*?^EORUN$'
+          old_pattern = r'RUN --mount=type=cache,rw,id=bootc-base-image-cache,target=/cache\s+\\\s+--mount=type=bind,rw,from=repos,src=/,dst=/repos\s+<<EORUN.*?^EORUN$'
 
-new_text = """# Copy repos to writable location (bind mounts are read-only in some environments)
-COPY --from=repos / /repos
-RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \\
-    ./install-manifests && \\
-    install -m 0755 -t /usr/libexec ./bootc-base-imagectl && \\
-    /usr/libexec/bootc-base-imagectl list >/dev/null && \\
-    /usr/libexec/bootc-base-imagectl build-rootfs --cachedir=/cache --reinject --manifest=${MANIFEST} /repos /target-rootfs'"""
+          new_text = """# Copy repos to writable location (bind mounts are read-only in some environments)
+          COPY --from=repos / /repos
+          RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \\
+              ./install-manifests && \\
+              install -m 0755 -t /usr/libexec ./bootc-base-imagectl && \\
+              /usr/libexec/bootc-base-imagectl list >/dev/null && \\
+              /usr/libexec/bootc-base-imagectl build-rootfs --cachedir=/cache --reinject --manifest=${MANIFEST} /repos /target-rootfs'"""
 
-content = re.sub(old_pattern, new_text, content, flags=re.MULTILINE | re.DOTALL)
+          content = re.sub(old_pattern, new_text, content, flags=re.MULTILINE | re.DOTALL)
 
-with open('Containerfile', 'w') as f:
-    f.write(content)
-EOF
+          with open('Containerfile', 'w') as f:
+              f.write(content)
+          PATCHEOF
           python3 /tmp/patch.py
 
           echo "=== Patched Containerfile ==="
