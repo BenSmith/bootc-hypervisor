@@ -111,14 +111,14 @@ jobs:
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
-            -t localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
-            -t localhost/minimal-bootc:latest \
+            -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+            -t localhost/fedora-bootc-minimal:latest \
             .
 
       - name: Test built image
         run: |
-          podman images | grep minimal-bootc
-          podman inspect localhost/minimal-bootc:${{ steps.set_version.outputs.version }}
+          podman images | grep fedora-bootc-minimal
+          podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
       - name: Login to GitHub Container Registry
         run: |
@@ -126,32 +126,35 @@ jobs:
 
       - name: Push to GitHub Container Registry
         run: |
+          # Lowercase repository owner for ghcr.io compatibility
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
           # Tag with version
-          podman tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
-            ghcr.io/${{ github.repository_owner }}/minimal-bootc:${{ steps.set_version.outputs.version }}
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+            ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           # Also tag 'latest' for the stable version
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            podman tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
-              ghcr.io/${{ github.repository_owner }}/minimal-bootc:latest
+            podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+              ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
           # Push all tags
-          podman push ghcr.io/${{ github.repository_owner }}/minimal-bootc:${{ steps.set_version.outputs.version }}
+          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            podman push ghcr.io/${{ github.repository_owner }}/minimal-bootc:latest
+            podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
       - name: Save image as artifact
         run: |
           mkdir -p artifacts
-          podman save localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
-            -o artifacts/minimal-bootc-f${{ steps.set_version.outputs.version }}.tar
+          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+            -o artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}.tar
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: minimal-bootc-f${{ steps.set_version.outputs.version }}
-          path: artifacts/minimal-bootc-f${{ steps.set_version.outputs.version }}.tar
+          name: fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}
+          path: artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}.tar
           retention-days: 7

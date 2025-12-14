@@ -1,4 +1,4 @@
-FROM ghcr.io/BenSmith/minimal-bootc:43
+FROM ghcr.io/bensmith/minimal-bootc:43
 
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
