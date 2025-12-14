@@ -37,11 +37,10 @@ jobs:
           - 'rawhide'
 
     steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            image=moby/buildkit:latest
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
 
       - name: Set Fedora version
         id: set_version
@@ -59,11 +58,20 @@ jobs:
           cd base-images
           git log -1
 
+      - name: Patch Containerfile for GitHub Actions compatibility
+        run: |
+          cd base-images
+          # Remove 'rw' from RUN --mount options to avoid conflicts
+          sed -i 's/--mount=type=\([^,]*\),rw,/--mount=type=\1,/g' Containerfile
+          sed -i 's/,rw,/,/g' Containerfile
+          sed -i 's/,rw\b//g' Containerfile
+          echo "Patched Containerfile:"
+          grep -n "RUN --mount" Containerfile || true
+
       - name: Build minimal bootc container
         run: |
           cd base-images
-          docker buildx build \
-            --load \
+          podman build \
             -f Containerfile \
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
@@ -74,39 +82,36 @@ jobs:
 
       - name: Test built image
         run: |
-          docker images | grep minimal-bootc
-          docker inspect localhost/minimal-bootc:${{ steps.set_version.outputs.version }}
+          podman images | grep minimal-bootc
+          podman inspect localhost/minimal-bootc:${{ steps.set_version.outputs.version }}
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Push to GitHub Container Registry
         run: |
           # Tag with version
-          docker tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
+          podman tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
             ghcr.io/${{ github.repository_owner }}/minimal-bootc:${{ steps.set_version.outputs.version }}
 
           # Also tag 'latest' for the stable version
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            docker tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
+            podman tag localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
               ghcr.io/${{ github.repository_owner }}/minimal-bootc:latest
           fi
 
           # Push all tags
-          docker push ghcr.io/${{ github.repository_owner }}/minimal-bootc:${{ steps.set_version.outputs.version }}
+          podman push ghcr.io/${{ github.repository_owner }}/minimal-bootc:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            docker push ghcr.io/${{ github.repository_owner }}/minimal-bootc:latest
+            podman push ghcr.io/${{ github.repository_owner }}/minimal-bootc:latest
           fi
 
       - name: Save image as artifact
         run: |
           mkdir -p artifacts
-          docker save localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
+          podman save localhost/minimal-bootc:${{ steps.set_version.outputs.version }} \
             -o artifacts/minimal-bootc-f${{ steps.set_version.outputs.version }}.tar
 
       - name: Upload artifact
