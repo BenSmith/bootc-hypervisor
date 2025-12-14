@@ -44,6 +44,15 @@ jobs:
         run: |
           dnf install -y git buildah
 
+      - name: Configure buildah for nested containers
+        run: |
+          # Use vfs storage driver to avoid overlay-on-overlay issues
+          mkdir -p /etc/containers
+          cat > /etc/containers/storage.conf <<EOF
+          [storage]
+          driver = "vfs"
+          EOF
+
       - name: Set Fedora version
         id: set_version
         run: |
