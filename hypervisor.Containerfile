@@ -1,4 +1,4 @@
-FROM localhost/minimal-bootc
+FROM ghcr.io/BenSmith/minimal-bootc:43
 
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
@@ -66,6 +66,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     podman-compose \
     podman-docker \
     polkit \
+    prometheus-node-exporter \
     qemu-img \
     qemu-kvm \
     rpm-ostree \
@@ -73,7 +74,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     shim \
     skopeo \
     smartmontools \
-    sosreport \
+    sos \
     strace \
     sudo \
     sysstat \
@@ -92,6 +93,7 @@ RUN dnf clean all && \
     systemctl enable cockpit.socket && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
+    systemctl enable prometheus-node-exporter && \
     systemctl enable sshd && \
     systemctl enable tuned && \
     bootc container lint
