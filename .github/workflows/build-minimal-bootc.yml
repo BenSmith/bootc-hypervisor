@@ -79,6 +79,9 @@ jobs:
           BEGIN { in_heredoc=0; cmd="" }
           /<<EORUN/ {
             in_heredoc=1
+            # Print everything before <<EORUN on this line, then start sh -c
+            sub(/<<EORUN.*/, "\\")
+            print
             printf "    sh -c '\''set -xeuo pipefail"
             next
           }
