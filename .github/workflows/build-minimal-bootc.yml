@@ -96,6 +96,10 @@ jobs:
           podman images | grep fedora-bootc-minimal
           podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
+      - name: Copy image to root storage for rechunking
+        run: |
+          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} | sudo podman load
+
       - name: Rechunk image
         id: rechunk
         if: github.event_name == 'workflow_dispatch' && inputs.rechunk || github.event_name == 'schedule'
