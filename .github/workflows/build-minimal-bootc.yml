@@ -61,65 +61,35 @@ jobs:
             echo "version=${{ matrix.fedora_version }}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set build timestamp
         id: timestamp
         run: |
           echo "tag=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
-      - name: Clone Fedora bootc base-images
+      - name: Clone Fedora bootc manifests
         run: |
-          git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git
-          cd base-images
+          git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
+          cd manifests
           git log -1
-
-      - name: Patch Containerfile for podman 4.x compatibility
-        run: |
-          cd base-images
-          # Replace the entire RUN --mount with COPY + RUN
-          # Bind mounts are read-only in GitHub Actions, but rpm-ostree needs write access
-          cat > /tmp/patch.py << 'PATCHEOF'
-          import re
-          import sys
-
-          with open('Containerfile', 'r') as f:
-              content = f.read()
-
-          old_pattern = r'RUN --mount=type=cache,rw,id=bootc-base-image-cache,target=/cache\s+\\\s+--mount=type=bind,rw,from=repos,src=/,dst=/repos\s+<<EORUN.*?^EORUN$'
-
-          new_text = """# Copy repos to writable location (bind mounts are read-only in some environments)
-          COPY --from=repos / /repos
-          RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \\
-              ./install-manifests && \\
-              install -m 0755 -t /usr/libexec ./bootc-base-imagectl && \\
-              /usr/libexec/bootc-base-imagectl list >/dev/null && \\
-              /usr/libexec/bootc-base-imagectl build-rootfs --cachedir=/cache --reinject --manifest=${MANIFEST} /repos /target-rootfs'"""
-
-          content = re.sub(old_pattern, new_text, content, flags=re.MULTILINE | re.DOTALL)
-
-          with open('Containerfile', 'w') as f:
-              f.write(content)
-          PATCHEOF
-          python3 /tmp/patch.py
-
-          echo "=== Patched Containerfile ==="
-          cat -n Containerfile
-          echo "==========================="
+          echo "Using local podman 4-compatible Containerfile with upstream manifests"
 
       - name: Build minimal bootc container
         run: |
-          cd base-images
           podman build \
             --security-opt=label=disable \
             --cap-add=all \
             --device /dev/fuse \
-            -f Containerfile \
+            -f fedora-bootc-minimal.Containerfile \
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
             -t localhost/fedora-bootc-minimal:latest \
-            .
+            manifests
 
       - name: Test built image
         run: |
