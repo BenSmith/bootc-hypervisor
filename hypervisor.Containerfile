@@ -52,6 +52,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     lm_sensors \
     lsof \
     lvm2 \
+    lxc \
+    lxc-templates \
+    lxd \
     mdevctl \
     microcode_ctl \
     nano \
@@ -90,13 +93,15 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     zram-generator
 
 RUN dnf clean all && \
-    systemctl enable cockpit.socket && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
+    systemctl enable lxd.socket && \
     systemctl enable prometheus-node-exporter && \
     systemctl enable sshd && \
     systemctl enable tuned && \
     bootc container lint
+# NOTE: cockpit packages are installed but socket is NOT enabled by default
+# Users can enable with: systemctl enable --now cockpit.socket
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
