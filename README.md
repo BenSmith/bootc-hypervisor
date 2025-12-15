@@ -15,7 +15,7 @@ Bootable container images for running KVM/QEMU hypervisors with optional GPU sup
 
 - **`hypervisor-bootc`** - Full hypervisor stack
   - Based on `fedora-bootc-minimal:43`
-  - Includes: libvirt, QEMU/KVM, LXC/LXD, Podman, Cockpit, monitoring tools
+  - Includes: libvirt, QEMU/KVM, Incus, Podman, Cockpit, monitoring tools
   - Headless (no X/Wayland)
 
 ### GPU Variants
@@ -156,7 +156,7 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 
 - `sshd` - Remote access
 - `libvirtd` - Virtualization (KVM/QEMU)
-- `lxd.socket` - LXC/LXD container management
+- `incus.socket` - Incus system container management
 - `firewalld` - Firewall
 - `prometheus-node-exporter` - Metrics (port 9100)
 - `tuned` - Performance tuning
@@ -195,10 +195,10 @@ sudo firewall-cmd --reload
 The hypervisor provides multiple options for different workload types:
 
 - **KVM/QEMU** (via libvirt) - Full VMs for any OS, hardware emulation
-- **LXC/LXD** - Lightweight Linux system containers, VM-like but more efficient
+- **Incus** - Lightweight Linux system containers, VM-like but more efficient
 - **Podman** - Application containers, stateless microservices
 
-Choose the right tool for your workload: VMs for Windows/isolation, LXC for lightweight Linux instances, Podman for applications.
+Choose the right tool for your workload: VMs for Windows/isolation, Incus for lightweight Linux instances, Podman for applications.
 
 ## GitHub Actions Workflows
 

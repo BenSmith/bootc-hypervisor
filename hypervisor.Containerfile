@@ -52,9 +52,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     lm_sensors \
     lsof \
     lvm2 \
-    lxc \
-    lxc-templates \
-    lxd \
+    incus \
+    incus-tools \
     mdevctl \
     microcode_ctl \
     nano \
@@ -95,7 +94,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 RUN dnf clean all && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
-    systemctl enable lxd.socket && \
+    systemctl enable incus.socket && \
     systemctl enable prometheus-node-exporter && \
     systemctl enable sshd && \
     systemctl enable tuned && \
