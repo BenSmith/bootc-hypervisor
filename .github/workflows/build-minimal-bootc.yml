@@ -13,6 +13,11 @@ on:
           - '43'
           - '44'
           - 'rawhide'
+      rechunk:
+        description: 'Rechunk the image for better efficiency'
+        required: false
+        default: true
+        type: boolean
 
   # Weekly build (Saturdays at 2am UTC)
   schedule:
@@ -120,6 +125,19 @@ jobs:
         run: |
           podman images | grep fedora-bootc-minimal
           podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+
+      - name: Rechunk image
+        id: rechunk
+        if: github.event_name == 'workflow_dispatch' && inputs.rechunk || github.event_name == 'schedule'
+        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        with:
+          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
+          prev-ref: ghcr.io/${{ github.repository_owner }}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          ref: localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          version: ${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          pretty: Fedora ${{ steps.set_version.outputs.version }}
+          revision: ${{ github.sha }}
+          skip_compression: true
 
       - name: Login to GitHub Container Registry
         run: |
