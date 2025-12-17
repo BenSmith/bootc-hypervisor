@@ -20,17 +20,17 @@ Bootable container images for running KVM/QEMU hypervisors with optional GPU sup
 
 ### GPU Variants
 
-These include the approp
+These include the appropriate kernel drivers but not all user-space tools.
 
 All variants inherit from `hypervisor-bootc`:
 
 - **`hypervisor-nvidia:rpmfusion`** - NVIDIA drivers via RPMFusion
-  - Driver: akmod-nvidia 580+
+  - Driver: akmod-nvidia
   - Includes CUDA libraries, nvidia-container-toolkit
 
 - **`hypervisor-nvidia:negativo17`** - NVIDIA drivers via negativo17 repo
   - Driver: nvidia-driver-cuda
-  - More granular package structure, headless-optimized
+  - More granular nvidia package structure, can update earlier
 
 - **`hypervisor-amd`** - AMD GPU support
   - ROCm for compute (HIP, OpenCL)
@@ -119,8 +119,18 @@ These workarounds are temporary until GitHub Actions upgrades to podman 5.x.
 sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
 sudo systemctl reboot
 
-# Or write an iso to usb and boot/install
-sudo dd if=hypervisor-bootc-20250214-1430.iso of=/dev/sdX bs=4M status=progress
+# make an iso from one of these images:
+sudo podman pull ghcr.io/bensmith/hypervisor-bootc:latest
+sudo podman run --rm --privileged \
+  --security-opt label=type:unconfined_t \
+  -v /var/lib/containers/storage:/var/lib/containers/storage \
+  -v $(pwd)/output:/output \
+  quay.io/centos-bootc/bootc-image-builder:latest \
+  build --type anaconda-iso --rootfs xfs --output /output \
+  ghcr.io/bensmith/hypervisor-bootc:latest
+
+# write it to a usb drive and boot/install
+sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
 ```
 
 ### Update
