@@ -36,6 +36,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     strategy:
       matrix:
@@ -50,6 +51,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
           podman --version
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
 
       - name: Set Fedora version
         id: set_version
@@ -141,6 +145,18 @@ jobs:
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
             podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
+          fi
+
+      - name: Sign images with cosign
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+
+          cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+
+          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
+            cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
       - name: Save image as artifact
