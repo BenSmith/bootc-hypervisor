@@ -147,6 +147,10 @@ jobs:
             podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
+      - name: Login to GitHub Container Registry for cosign
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: Sign images with cosign
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
