@@ -91,7 +91,11 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     virt-top \
     zram-generator
 
+# cockpit is enabled but blocked by firewall intentionally. To allow on network:
+# sudo firewall-cmd --add-service=cockpit --permanent
+# sudo firewall-cmd --reload
 RUN dnf clean all && \
+    systemctl enable cockpit.socket && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
     systemctl enable incus.socket && \
@@ -99,8 +103,6 @@ RUN dnf clean all && \
     systemctl enable sshd && \
     systemctl enable tuned && \
     bootc container lint
-# NOTE: cockpit packages are installed but socket is NOT enabled by default
-# Users can enable with: systemctl enable --now cockpit.socket
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1

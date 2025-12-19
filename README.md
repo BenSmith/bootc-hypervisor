@@ -1,8 +1,8 @@
 # Bootc Hypervisor Images
 
-Bootable container images for running KVM/QEMU hypervisors with optional GPU support (NVIDIA, AMD). 
+Bootable container images for running VMs (KVM/QEMU), system containers (Incus/LXC), and application containers (Podman)
 
-[bootc](https://bootc-dev.github.io/) allows for atomic system upgrades with quick rollback.
+[bootc](https://bootc-dev.github.io/) allows for atomic system upgrades with quick rollback
 
 ## Images
 
@@ -17,10 +17,11 @@ Bootable container images for running KVM/QEMU hypervisors with optional GPU sup
   - Based on `fedora-bootc-minimal:43`
   - Includes: libvirt, QEMU/KVM, Incus, Podman, Cockpit, monitoring tools
   - Headless (no X/Wayland)
+  - If you're not doing GPU things, this is the image to use
 
 ### GPU Variants
 
-These include the appropriate kernel drivers but not all user-space tools.
+These include the appropriate kernel GPU drivers but not all user-space tools.
 
 All variants inherit from `hypervisor-bootc`:
 
@@ -86,13 +87,20 @@ just build-all
 just build-iso-base
 just build-iso-nvidia-rpmfusion
 just build-all-isos
+
+# Build ISOs with custom filesystem (default: xfs)
+just build-iso-base btrfs
+just build-iso-amd ext4
+just build-all-isos btrfs
 ```
 
 Datetime tags are automatically generated (YYYYMMDD-HHMM).
 
+ISO builds support custom root filesystems via the `rootfs` parameter (xfs, btrfs, ext4). Defaults to xfs if not specified.
+
 ### Proxy Configuration
 
-If you have a cacheing proxy - set `HTTP_PROXY` environment variable:
+If you're building the images yourself and you have a caching proxy configured appropriately for handling package mirroring (2+ GB of cache, packages can be a little over 100 MB) - set `HTTP_PROXY` environment variable
 
 ```bash
 HTTP_PROXY=http://proxy:3128 just build-base
@@ -114,20 +122,36 @@ These workarounds are temporary until GitHub Actions upgrades to podman 5.x.
 
 ### Install to bare metal
 
+#### Existing bootc system:
 ```bash
 # Download and install if you're already running a bootc system
 sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
 sudo systemctl reboot
+```
 
-# make an iso from one of these images:
-sudo podman pull ghcr.io/bensmith/hypervisor-bootc:latest
-sudo podman run --rm --privileged \
+#### Make an installer ISO from a container image:
+```bash
+# make an installer iso from one of these images:
+mkdir -p store && mkdir -p output && mkdir -p rpmmd
+sudo podman pull ghcr.io/bensmith/hypervisor-bootc
+sudo podman run \
+  --privileged \
+  --pull=newer \
+  --rm \
   --security-opt label=type:unconfined_t \
-  -v /var/lib/containers/storage:/var/lib/containers/storage \
+  -v $(pwd)/config.toml:/config.toml:ro \
   -v $(pwd)/output:/output \
-  quay.io/centos-bootc/bootc-image-builder:latest \
-  build --type anaconda-iso --rootfs xfs --output /output \
-  ghcr.io/bensmith/hypervisor-bootc:latest
+  -v $(pwd)/rpmmd:/rpmmd \
+  -v $(pwd)/store:/store \
+  -v /var/lib/containers/storage:/var/lib/containers/storage \
+  quay.io/centos-bootc/bootc-image-builder:latest build \
+    --chown $(id -u):$(id -g) \
+    --output /output \
+    --rootfs xfs \
+    --rpmmd /rpmmd \
+    --store /store \
+    --type anaconda-iso \
+  ghcr.io/bensmith/hypervisor-bootc
 
 # write it to a usb drive and boot/install
 sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
@@ -152,6 +176,26 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
 sudo systemctl reboot
 ```
 
+### Verify image signatures
+
+The `fedora-bootc-minimal` base images are signed with cosign using keyless signing (OIDC).
+
+Verify signatures before use:
+
+```bash
+# Install cosign
+curl -LO https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+sudo install cosign-linux-amd64 /usr/local/bin/cosign
+
+# Verify image signature
+cosign verify \
+  --certificate-identity-regexp "https://github.com/.*/bootc-hypervisor" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/bensmith/fedora-bootc-minimal:latest
+```
+
+Signatures are stored in Sigstore's public transparency log and tied to GitHub Actions OIDC tokens.
+
 ## Architecture
 
 ```
@@ -164,25 +208,18 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 
 ## Enabled Services
 
-- `sshd` - Remote access
-- `libvirtd` - Virtualization (KVM/QEMU)
-- `incus.socket` - Incus system container management
-- `firewalld` - Firewall
-- `prometheus-node-exporter` - Metrics (port 9100)
-- `tuned` - Performance tuning
-- `nvidia-persistenced` - NVIDIA variants only
-
-**Not enabled by default (for security):**
 - `cockpit.socket` - Web management UI
+- `firewalld` - Firewall
+- `incus.socket` - Incus system container management
+- `libvirtd` - Virtualization (KVM/QEMU)
+- `prometheus-node-exporter` - Metrics (port 9100)
+- `nvidia-persistenced` - NVIDIA variants only
+- `sshd` - Remote access
+- `tuned` - Performance tuning
 
 ### Using Cockpit Web UI
 
-Cockpit is installed but not enabled by default for security.
-
-**Enable Cockpit:**
-```bash
-sudo systemctl enable --now cockpit.socket
-```
+Cockpit is installed but not exposed to the network by default for security.
 
 **Access via SSH tunnel (recommended):**
 ```bash
@@ -215,6 +252,7 @@ Choose the right tool for your workload: VMs for Windows/isolation, Incus for li
 ### `build-minimal-bootc.yml`
 - Builds Fedora minimal bootc base
 - Rechunks for efficient updates [hhd-dev/rechunk v1.2.4](https://github.com/hhd-dev/rechunk)
+- Signs images with cosign (keyless/OIDC)
 - Pushes to ghcr.io
 - Weekly on Saturdays at 2am UTC
 
