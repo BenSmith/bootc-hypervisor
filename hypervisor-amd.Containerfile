@@ -8,7 +8,7 @@ RUN dnf install --setopt=install_weak_deps=False -y \
     mesa-vulkan-drivers \
     rocm-hip \
     rocm-opencl \
-    rocm-smi \
+    rocm-smi && \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 
