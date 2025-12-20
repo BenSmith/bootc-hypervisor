@@ -2,12 +2,13 @@ FROM ghcr.io/bensmith/hypervisor-bootc:latest
 
 # Install AMD GPU support (ROCm for compute, Mesa for graphics)
 RUN dnf install --setopt=install_weak_deps=False -y \
+    amd-gpu-firmware \
+    libva-utils \
+    mesa-va-drivers \
+    mesa-vulkan-drivers \
     rocm-hip \
     rocm-opencl \
     rocm-smi \
-    mesa-vulkan-drivers \
-    mesa-va-drivers \
-    libva-utils && \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 

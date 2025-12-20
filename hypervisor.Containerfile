@@ -4,10 +4,17 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    alsa-sof-firmware \
+    amd-ucode-firmware \
+    atheros-firmware \
     attr \
     bash-completion \
+    bcrmfmac-firmware \
     bind-utils \
+    borgbackup \
     bridge-utils \
+    btrfs-progs \
+    btop \
     cifs-utils \
     cockpit \
     cockpit-bridge \
@@ -24,17 +31,22 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     criu-libs \
     crun \
     cryptsetup \
+    curl \
     distrobox \
     dmidecode \
     dnsmasq \
     efibootmgr \
+    ethtool \
+    fail2ban \
     firewalld \
     fwupd \
+    git \
     grub2 \
     grub2-efi-x64 \
     guestfs-tools \
     hostname \
     htop \
+    iotop \
     ipmitool \
     iproute \
     iptables-nft \
@@ -54,16 +66,25 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     lvm2 \
     incus \
     incus-tools \
+    intel-audio-firmware \
+    intel-gpu-firmware \
+    iwlwifi-mld-firmware \
+    iwlwifi-mvm-firmware \
     mdevctl \
+    mediatek-firmware \
     microcode_ctl \
+    mt7xxx-firmware \
     nano \
     nc \
+    neovim \
     NetworkManager \
     nfs-utils \
+    nxpwireless-firmware \
     openssh-clients \
     openssh-server \
     parted \
     pciutils \
+    perf \
     podman \
     podman-compose \
     podman-docker \
@@ -71,6 +92,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     prometheus-node-exporter \
     qemu-img \
     qemu-kvm \
+    realtek-firmware \
     rpm-ostree \
     rsync \
     shim \
@@ -84,11 +106,15 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     tcpdump \
     tmux \
     traceroute \
+    tree \
     tuned \
+    usbutils \
     tzdata \
     vim-minimal \
     virt-install \
     virt-top \
+    wget \
+    wireguard-tools \
     zram-generator
 
 # cockpit is enabled but blocked by firewall intentionally. To allow on network:

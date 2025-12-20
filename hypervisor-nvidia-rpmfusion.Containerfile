@@ -12,10 +12,10 @@ RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-co
 # Install NVIDIA drivers and tools, headless
 RUN dnf install --setopt=install_weak_deps=False -y \
     akmod-nvidia \
+    nvidia-container-toolkit \
+    nvidia-gpu-firmware \
     nvidia-modprobe \
-    nvidia-persistenced \
-    xorg-x11-drv-nvidia-cuda-libs \
-    nvidia-container-toolkit && \
+    nvidia-persistenced && \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 
