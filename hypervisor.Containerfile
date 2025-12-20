@@ -9,7 +9,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     atheros-firmware \
     attr \
     bash-completion \
-    bcrmfmac-firmware \
+    brcmfmac-firmware \
     bind-utils \
     borgbackup \
     bridge-utils \
