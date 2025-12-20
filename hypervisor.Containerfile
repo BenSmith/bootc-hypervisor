@@ -68,6 +68,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     incus-tools \
     intel-audio-firmware \
     intel-gpu-firmware \
+    inxi \
     iwlwifi-mld-firmware \
     iwlwifi-mvm-firmware \
     mdevctl \
