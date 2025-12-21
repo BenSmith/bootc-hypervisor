@@ -4,17 +4,18 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    NetworkManager \
     alsa-sof-firmware \
     amd-ucode-firmware \
     atheros-firmware \
     attr \
     bash-completion \
-    brcmfmac-firmware \
     bind-utils \
     borgbackup \
+    brcmfmac-firmware \
     bridge-utils \
-    btrfs-progs \
     btop \
+    btrfs-progs \
     cifs-utils \
     cockpit \
     cockpit-bridge \
@@ -38,6 +39,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     efibootmgr \
     ethtool \
     fail2ban \
+    fastfetch \
     firewalld \
     fwupd \
     git \
@@ -46,10 +48,17 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     guestfs-tools \
     hostname \
     htop \
+    incus \
+    incus-tools \
+    intel-audio-firmware \
+    intel-gpu-firmware \
+    inxi \
     iotop \
     ipmitool \
     iproute \
     iptables-nft \
+    iwlwifi-mld-firmware \
+    iwlwifi-mvm-firmware \
     jq \
     just \
     less \
@@ -62,15 +71,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     libvirt-dbus \
     linux-firmware \
     lm_sensors \
+    lshw \
     lsof \
     lvm2 \
-    incus \
-    incus-tools \
-    intel-audio-firmware \
-    intel-gpu-firmware \
-    inxi \
-    iwlwifi-mld-firmware \
-    iwlwifi-mvm-firmware \
     mdevctl \
     mediatek-firmware \
     microcode_ctl \
@@ -78,7 +81,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     nano \
     nc \
     neovim \
-    NetworkManager \
     nfs-utils \
     nxpwireless-firmware \
     openssh-clients \
@@ -109,13 +111,14 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     traceroute \
     tree \
     tuned \
-    usbutils \
     tzdata \
+    usbutils \
     vim-minimal \
     virt-install \
     virt-top \
     wget \
     wireguard-tools \
+    wpa_supplicant \
     zram-generator
 
 # cockpit is enabled but blocked by firewall intentionally. To allow on network:
