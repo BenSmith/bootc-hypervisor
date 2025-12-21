@@ -65,6 +65,16 @@ jobs:
           fi
           echo "variants=${VARIANTS}" >> $GITHUB_OUTPUT
 
+      - name: Free up disk space
+        run: |
+          # Remove unnecessary packages and cleanup
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h
+
       - name: Build base hypervisor
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -77,16 +87,6 @@ jobs:
             .
 
           echo "base_tag=${TAG}" >> $GITHUB_ENV
-
-      - name: Free up disk space
-        run: |
-          # Remove unnecessary packages and cleanup
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-          df -h
 
       - name: Copy base image to root storage for rechunking
         run: |
