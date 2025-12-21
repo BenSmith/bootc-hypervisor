@@ -4,7 +4,6 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
-    NetworkManager \
     alsa-sof-firmware \
     amd-ucode-firmware \
     atheros-firmware \
@@ -81,6 +80,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     nano \
     nc \
     neovim \
+    NetworkManager \
+    NetworkManager-openvpn \
+    NetworkManager-wifi \
     nfs-utils \
     nxpwireless-firmware \
     openssh-clients \
@@ -105,6 +107,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     strace \
     sudo \
     sysstat \
+    tailscale \
     tar \
     tcpdump \
     tmux \
