@@ -33,7 +33,7 @@ on:
 
 jobs:
   build-minimal-bootc:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Required by rechunk action for advanced podman features
     permissions:
       contents: read
       packages: write
@@ -83,7 +83,8 @@ jobs:
 
       - name: Build minimal bootc container
         run: |
-          # Build directly in root storage to avoid copy step before rechunking
+          # Build directly in root storage with only timestamped tag
+          # Other tags will be created after rechunking
           sudo podman build \
             --security-opt=label=disable \
             --cap-add=all \
@@ -93,14 +94,12 @@ jobs:
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
             -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
-            -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
-            -t localhost/fedora-bootc-minimal:latest \
             manifests
 
       - name: Test built image
         run: |
           sudo podman images | grep fedora-bootc-minimal
-          sudo podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          sudo podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
 
       - name: Rechunk image
         id: rechunk
@@ -116,7 +115,8 @@ jobs:
 
       - name: Retag rechunked image
         run: |
-          # Update version and latest tags to point to rechunked image
+          # After rechunk, the timestamped tag points to the rechunked image
+          # Create version and latest tags from it
           sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
           sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
@@ -168,17 +168,24 @@ jobs:
             cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
-      - name: Save image as artifact
+      - name: Cleanup local images
         run: |
-          mkdir -p artifacts
-          sudo podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
-            -o artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
-          # Fix ownership so artifact upload can read it
-          sudo chown $(id -u):$(id -g) artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-          path: artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
-          retention-days: 7
+          # Remove all local tags from root storage
+          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
+          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
+          sudo podman rmi localhost/fedora-bootc-minimal:latest || true
+          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
+
+          # Also clean up :latest tag if it was pushed
+          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
+            sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:latest || true
+          fi
+
+          # Prune root storage to remove dangling layers
+          sudo podman system prune -af --volumes
+
+          # Show final disk usage
+          df -h
