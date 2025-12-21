@@ -106,7 +106,6 @@ jobs:
 
       - name: Rechunk image
         id: rechunk
-        if: github.event_name == 'workflow_dispatch' && inputs.rechunk || github.event_name == 'schedule'
         uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
         with:
           rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'

@@ -34,6 +34,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -44,6 +45,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
           podman --version
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
 
       - name: Login to GitHub Container Registry
         run: |
@@ -70,15 +74,36 @@ jobs:
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:${TAG} \
             -t localhost/hypervisor-bootc:latest \
-            -t ghcr.io/${OWNER}/hypervisor-bootc:${TAG} \
-            -t ghcr.io/${OWNER}/hypervisor-bootc:latest \
             .
 
-          # Push to GHCR
-          podman push ghcr.io/${OWNER}/hypervisor-bootc:${TAG}
-          podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
-
           echo "base_tag=${TAG}" >> $GITHUB_ENV
+
+      - name: Copy base image to root storage for rechunking
+        run: |
+          podman save localhost/hypervisor-bootc:${{ env.base_tag }} | sudo podman load
+
+      - name: Rechunk base hypervisor image
+        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        with:
+          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
+          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-bootc:latest
+          ref: localhost/hypervisor-bootc:${{ env.base_tag }}
+          version: ${{ env.base_tag }}
+          pretty: Hypervisor Base
+          revision: ${{ github.sha }}
+          skip_compression: true
+
+      - name: Push base hypervisor to GHCR
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          # Tag for GHCR
+          podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:latest
+
+          # Push to GHCR
+          podman push ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
 
       - name: Build NVIDIA RPMFusion variant
         if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
@@ -92,9 +117,32 @@ jobs:
             -t localhost/hypervisor-nvidia:rpmfusion \
             .
 
+      - name: Copy NVIDIA RPMFusion image to root storage for rechunking
+        if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          podman save localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} | sudo podman load
+
+      - name: Rechunk NVIDIA RPMFusion variant image
+        if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
+        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        with:
+          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
+          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-nvidia:rpmfusion
+          ref: localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          version: ${{ env.base_tag }}
+          pretty: Hypervisor NVIDIA RPMFusion
+          revision: ${{ github.sha }}
+          skip_compression: true
+
+      - name: Push NVIDIA RPMFusion variant to GHCR
+        if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=${{ env.base_tag }}
+
           # Tag for GHCR
           podman tag localhost/hypervisor-nvidia:rpmfusion-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${TAG}
-          podman tag localhost/hypervisor-nvidia:rpmfusion ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          podman tag localhost/hypervisor-nvidia:rpmfusion-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
           # Push to GHCR
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${TAG}
@@ -112,9 +160,32 @@ jobs:
             -t localhost/hypervisor-nvidia:negativo17 \
             .
 
+      - name: Copy NVIDIA negativo17 image to root storage for rechunking
+        if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          podman save localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} | sudo podman load
+
+      - name: Rechunk NVIDIA negativo17 variant image
+        if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
+        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        with:
+          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
+          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-nvidia:negativo17
+          ref: localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          version: ${{ env.base_tag }}
+          pretty: Hypervisor NVIDIA negativo17
+          revision: ${{ github.sha }}
+          skip_compression: true
+
+      - name: Push NVIDIA negativo17 variant to GHCR
+        if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG=${{ env.base_tag }}
+
           # Tag for GHCR
           podman tag localhost/hypervisor-nvidia:negativo17-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${TAG}
-          podman tag localhost/hypervisor-nvidia:negativo17 ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+          podman tag localhost/hypervisor-nvidia:negativo17-${TAG} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
 
           # Push to GHCR
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${TAG}
@@ -132,13 +203,66 @@ jobs:
             -t localhost/hypervisor-amd:latest \
             .
 
+      - name: Copy AMD image to root storage for rechunking
+        if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          podman save localhost/hypervisor-amd:${{ env.base_tag }} | sudo podman load
+
+      - name: Rechunk AMD variant image
+        if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
+        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        with:
+          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
+          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-amd:latest
+          ref: localhost/hypervisor-amd:${{ env.base_tag }}
+          version: ${{ env.base_tag }}
+          pretty: Hypervisor AMD
+          revision: ${{ github.sha }}
+          skip_compression: true
+
+      - name: Push AMD variant to GHCR
+        if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
           # Tag for GHCR
-          podman tag localhost/hypervisor-amd:${TAG} ghcr.io/${OWNER}/hypervisor-amd:${TAG}
-          podman tag localhost/hypervisor-amd:latest ghcr.io/${OWNER}/hypervisor-amd:latest
+          podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
 
           # Push to GHCR
-          podman push ghcr.io/${OWNER}/hypervisor-amd:${TAG}
+          podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
           podman push ghcr.io/${OWNER}/hypervisor-amd:latest
+
+      - name: Login to GitHub Container Registry for cosign
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Sign base hypervisor images
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:latest
+
+      - name: Sign NVIDIA RPMFusion images
+        if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+
+      - name: Sign NVIDIA negativo17 images
+        if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+
+      - name: Sign AMD images
+        if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:latest
 
       - name: Summary
         run: |
@@ -149,5 +273,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images:" >> $GITHUB_STEP_SUMMARY
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}\` ✅ Signed" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:latest\` ✅ Signed" >> $GITHUB_STEP_SUMMARY
