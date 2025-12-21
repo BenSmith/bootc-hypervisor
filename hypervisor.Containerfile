@@ -56,6 +56,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     ipmitool \
     iproute \
     iptables-nft \
+    iputils \
     iwlwifi-mld-firmware \
     iwlwifi-mvm-firmware \
     jq \
