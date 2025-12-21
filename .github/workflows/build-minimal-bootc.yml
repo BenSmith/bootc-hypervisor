@@ -83,9 +83,8 @@ jobs:
 
       - name: Build minimal bootc container
         run: |
-          # Build directly in root storage with only timestamped tag
-          # Other tags will be created after rechunking
-          sudo podman build \
+          # Build in user storage (rechunk action accesses user storage)
+          podman build \
             --security-opt=label=disable \
             --cap-add=all \
             --device /dev/fuse \
@@ -98,8 +97,8 @@ jobs:
 
       - name: Test built image
         run: |
-          sudo podman images | grep fedora-bootc-minimal
-          sudo podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          podman images | grep fedora-bootc-minimal
+          podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
 
       - name: Rechunk image
         id: rechunk
@@ -117,14 +116,14 @@ jobs:
         run: |
           # After rechunk, the timestamped tag points to the rechunked image
           # Create version and latest tags from it
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             localhost/fedora-bootc-minimal:latest
 
       - name: Login to GitHub Container Registry
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Push to GitHub Container Registry
         run: |
@@ -132,24 +131,24 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           # Tag with timestamp and version
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
 
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
             ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           # Also tag 'latest' for the stable version
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+            podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
               ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
           # Push all tags
-          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
+            podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
       - name: Login to GitHub Container Registry for cosign
@@ -172,20 +171,20 @@ jobs:
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          # Remove all local tags from root storage
-          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
-          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
-          sudo podman rmi localhost/fedora-bootc-minimal:latest || true
-          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
+          # Remove all local tags from user storage
+          podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
+          podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
+          podman rmi localhost/fedora-bootc-minimal:latest || true
+          podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
+          podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
 
           # Also clean up :latest tag if it was pushed
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:latest || true
+            podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:latest || true
           fi
 
-          # Prune root storage to remove dangling layers
-          sudo podman system prune -af --volumes
+          # Prune user storage to remove dangling layers
+          podman system prune -af --volumes
 
           # Show final disk usage
           df -h
