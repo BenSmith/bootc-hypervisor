@@ -1,4 +1,4 @@
-FROM ghcr.io/bensmith/hypervisor-bootc:latest
+FROM localhost/hypervisor-bootc:latest
 
 # Install AMD GPU support (ROCm for compute, Mesa for graphics)
 RUN dnf install --setopt=install_weak_deps=False -y \

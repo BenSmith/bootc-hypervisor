@@ -1,4 +1,4 @@
-FROM ghcr.io/bensmith/hypervisor-bootc:latest
+FROM localhost/hypervisor-bootc:latest
 
 # Add negativo17 NVIDIA repository (modular alternative to RPMFusion)
 RUN curl -s -L https://negativo17.org/repos/fedora-nvidia.repo \

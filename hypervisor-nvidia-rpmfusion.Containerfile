@@ -1,4 +1,4 @@
-FROM ghcr.io/bensmith/hypervisor-bootc:latest
+FROM localhost/hypervisor-bootc:latest
 
 # Add RPMFusion repositories for NVIDIA proprietary drivers
 RUN dnf install -y \

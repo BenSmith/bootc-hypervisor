@@ -78,6 +78,16 @@ jobs:
 
           echo "base_tag=${TAG}" >> $GITHUB_ENV
 
+      - name: Free up disk space
+        run: |
+          # Remove unnecessary packages and cleanup
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h
+
       - name: Copy base image to root storage for rechunking
         run: |
           podman save localhost/hypervisor-bootc:${{ env.base_tag }} | sudo podman load
@@ -104,6 +114,8 @@ jobs:
           # Push to GHCR
           podman push ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
           podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
+
+          # Note: Don't clean up base image yet - variants need it for their builds
 
       - name: Build NVIDIA RPMFusion variant
         if: contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all')
@@ -148,6 +160,10 @@ jobs:
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${TAG}
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
+          # Clean up to free space
+          sudo podman rmi localhost/hypervisor-nvidia:rpmfusion-${TAG} || true
+          podman system prune -af --volumes
+
       - name: Build NVIDIA negativo17 variant
         if: contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all')
         run: |
@@ -191,6 +207,10 @@ jobs:
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${TAG}
           podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
 
+          # Clean up to free space
+          sudo podman rmi localhost/hypervisor-nvidia:negativo17-${TAG} || true
+          podman system prune -af --volumes
+
       - name: Build AMD variant
         if: contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all')
         run: |
@@ -232,6 +252,10 @@ jobs:
           # Push to GHCR
           podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
           podman push ghcr.io/${OWNER}/hypervisor-amd:latest
+
+          # Clean up to free space
+          sudo podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
+          podman system prune -af --volumes
 
       - name: Login to GitHub Container Registry for cosign
         run: |
