@@ -249,18 +249,52 @@ Choose the right tool for your workload: VMs for Windows/isolation, Incus for li
 
 ## GitHub Actions Workflows
 
+### Build Flow
+
+All images follow this standardized build pipeline:
+
+```
+1. Build          → Create container image with podman
+2. Copy to root   → Transfer to root storage for rechunking
+3. Rechunk        → Optimize with composefs chunking (hhd-dev/rechunk)
+4. Retag          → Update tags to point to rechunked image
+5. Push           → Upload to ghcr.io
+6. Cleanup        → Free disk space for next variant
+7. Sign           → Cryptographically sign with cosign (keyless)
+```
+
 ### `build-minimal-bootc.yml`
-- Builds Fedora minimal bootc base
-- Rechunks for efficient updates [hhd-dev/rechunk v1.2.4](https://github.com/hhd-dev/rechunk)
-- Signs images with cosign (keyless/OIDC)
-- Pushes to ghcr.io
-- Weekly on Saturdays at 2am UTC
+
+Builds Fedora minimal bootc base images.
+
+**Flow:**
+1. Build with 3 tags: `{version}-{timestamp}`, `{version}`, `latest`
+2. Copy to root storage
+3. Rechunk with [hhd-dev/rechunk v1.2.4](https://github.com/hhd-dev/rechunk)
+4. Retag version and latest to rechunked image
+5. Push all tags to ghcr.io
+6. Sign all tags with cosign
+
+**Matrix builds:** Fedora 43 and rawhide in parallel
 
 ### `build-hypervisor.yml`
-- Builds hypervisor + GPU variants
-- Selectable variants (manual trigger)
-- Pushes to ghcr.io
-- Weekly on Sundays at 3am UTC
+
+Builds base hypervisor and GPU variants.
+
+**Flow (per variant):**
+1. Build with 2 tags: `{timestamp}`, `latest` (or variant name)
+2. Copy to root storage
+3. Rechunk with composefs optimization
+4. Retag latest/variant to rechunked image
+5. Push both tags to ghcr.io
+6. Cleanup to free space for next variant
+7. Sign all pushed images (batched at end)
+
+**Variants:**
+- `base` - Base hypervisor (always built)
+- `nvidia-rpmfusion` - NVIDIA via RPMFusion
+- `nvidia-negativo17` - NVIDIA via negativo17
+- `amd` - AMD GPU support
 
 ## License
 

@@ -116,6 +116,14 @@ jobs:
           revision: ${{ github.sha }}
           skip_compression: true
 
+      - name: Retag rechunked image
+        run: |
+          # Update version and latest tags to point to rechunked image
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+            localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+            localhost/fedora-bootc-minimal:latest
+
       - name: Login to GitHub Container Registry
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
