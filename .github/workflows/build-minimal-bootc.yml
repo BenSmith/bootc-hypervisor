@@ -83,7 +83,8 @@ jobs:
 
       - name: Build minimal bootc container
         run: |
-          podman build \
+          # Build directly in root storage to avoid copy step before rechunking
+          sudo podman build \
             --security-opt=label=disable \
             --cap-add=all \
             --device /dev/fuse \
@@ -98,12 +99,8 @@ jobs:
 
       - name: Test built image
         run: |
-          podman images | grep fedora-bootc-minimal
-          podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-
-      - name: Copy image to root storage for rechunking
-        run: |
-          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} | sudo podman load
+          sudo podman images | grep fedora-bootc-minimal
+          sudo podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
       - name: Rechunk image
         id: rechunk
@@ -120,14 +117,14 @@ jobs:
       - name: Retag rechunked image
         run: |
           # Update version and latest tags to point to rechunked image
-          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             localhost/fedora-bootc-minimal:latest
 
       - name: Login to GitHub Container Registry
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Push to GitHub Container Registry
         run: |
@@ -135,24 +132,24 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           # Tag with timestamp and version
-          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
 
-          podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
             ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           # Also tag 'latest' for the stable version
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
+            sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
               ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
           # Push all tags
-          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-          podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
+            sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
       - name: Login to GitHub Container Registry for cosign
@@ -174,8 +171,10 @@ jobs:
       - name: Save image as artifact
         run: |
           mkdir -p artifacts
-          podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+          sudo podman save localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
             -o artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
+          # Fix ownership so artifact upload can read it
+          sudo chown $(id -u):$(id -g) artifacts/fedora-bootc-minimal-f${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}.tar
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
