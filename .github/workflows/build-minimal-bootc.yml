@@ -28,6 +28,7 @@ on:
     branches:
       - main
     paths:
+      - 'fedora-bootc-minimal.Containerfile'
       - '.github/workflows/build-minimal-bootc.yml'
 
 jobs:

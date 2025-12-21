@@ -296,6 +296,14 @@ Builds base hypervisor and GPU variants.
 - `nvidia-negativo17` - NVIDIA via negativo17
 - `amd` - AMD GPU support
 
+**Triggers:**
+- **Auto**: Runs after minimal build completes successfully
+- Weekly on Sundays at 3am UTC (backup)
+- Manual dispatch with variant selection
+- Push to main affecting Containerfiles or workflow
+
+**Build dependency:** Won't start if minimal build is running or failed. Ensures hypervisor always uses freshly-built minimal base.
+
 ## License
 
 Containerfiles and configurations: MIT
