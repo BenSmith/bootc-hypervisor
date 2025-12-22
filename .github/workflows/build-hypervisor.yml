@@ -125,8 +125,13 @@ jobs:
 
           # Build in root storage (rechunk action accesses root storage)
           # --pull=always ensures we get the latest minimal base from GHCR
+          # Security options needed for dracut/bootc operations
           sudo podman build \
             --pull=always \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:${TAG} \
             -t localhost/hypervisor-bootc:latest \
@@ -172,6 +177,10 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
             -f hypervisor-nvidia-rpmfusion.Containerfile \
             -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
             .
@@ -221,6 +230,10 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
             -f hypervisor-nvidia-negativo17.Containerfile \
             -t localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
             .
@@ -267,6 +280,10 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
             -f hypervisor-amd.Containerfile \
             -t localhost/hypervisor-amd:${{ env.base_tag }} \
             .
