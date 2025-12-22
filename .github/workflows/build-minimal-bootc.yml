@@ -83,8 +83,10 @@ jobs:
 
       - name: Build minimal bootc container
         run: |
-          # Build in root storage (rechunk action accesses user storage)
+          # Build in root storage (rechunk action accesses root storage)
+          # --privileged allows dracut to handle xattrs/SELinux properly in container
           sudo podman build \
+            --privileged \
             --security-opt=label=disable \
             --cap-add=all \
             --device /dev/fuse \
@@ -117,6 +119,10 @@ jobs:
           # Find the rechunked image (most recently created) and apply all tags
           IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
           echo "Rechunked image ID: $IMAGE_ID"
+
+          # List all images to verify rechunk created the image
+          echo "All images:"
+          sudo podman images
 
           # Apply all the tags we need
           sudo podman tag $IMAGE_ID localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}

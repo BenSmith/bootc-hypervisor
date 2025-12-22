@@ -123,9 +123,11 @@ jobs:
           TAG=$(date +%Y%m%d-%H%M)
           echo "base_tag=${TAG}" >> $GITHUB_ENV
 
-          # Build in root storage (rechunk action accesses user storage)
+          # Build in root storage (rechunk action accesses root storage)
           # --pull=always ensures we get the latest minimal base from GHCR
+          # --privileged allows dracut to handle xattrs/SELinux properly in container
           sudo podman build \
+            --privileged \
             --pull=always \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:${TAG} \
@@ -172,6 +174,7 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --privileged \
             -f hypervisor-nvidia-rpmfusion.Containerfile \
             -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
             .
@@ -221,6 +224,7 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --privileged \
             -f hypervisor-nvidia-negativo17.Containerfile \
             -t localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
             .
@@ -267,6 +271,7 @@ jobs:
         run: |
           # Build in root storage with only timestamped tag
           sudo podman build \
+            --privileged \
             -f hypervisor-amd.Containerfile \
             -t localhost/hypervisor-amd:${{ env.base_tag }} \
             .
