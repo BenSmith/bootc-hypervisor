@@ -84,10 +84,10 @@ jobs:
       - name: Build minimal bootc container
         run: |
           # Build in root storage (rechunk action accesses root storage)
-          # --privileged allows dracut to handle xattrs/SELinux properly in container
+          # Additional security options to handle xattr/SELinux in container builds
           sudo podman build \
-            --privileged \
             --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
             --cap-add=all \
             --device /dev/fuse \
             -f fedora-bootc-minimal.Containerfile \
