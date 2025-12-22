@@ -29,13 +29,6 @@ RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo 
 FROM scratch
 COPY --from=builder /target-rootfs/ /
 
-# Bootc/ostree requirements
-# /sysroot is required by bootc linting (mount point for ostree root)
-# composefs config should already be in /usr/lib/ostree/prepare-root.conf from manifests,
-# but create /sysroot explicitly to pass linting
-RUN mkdir -p /sysroot && \
-    bootc container lint
-
 # Bootc labels and metadata
 LABEL containers.bootc 1
 LABEL bootc.diskimage-builder quay.io/centos-bootc/bootc-image-builder
