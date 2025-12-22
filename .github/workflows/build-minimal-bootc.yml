@@ -85,11 +85,13 @@ jobs:
         run: |
           # Build in root storage (rechunk action accesses root storage)
           # Additional security options to handle xattr/SELinux in container builds
+          # --ipc=host needed for dracut to access sysfs
           sudo podman build \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --device /dev/fuse \
+            --ipc=host \
             -f fedora-bootc-minimal.Containerfile \
             --build-arg MANIFEST=minimal \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
