@@ -82,7 +82,7 @@ jobs:
 
       - name: Build minimal bootc container
         run: |
-          podman build \
+          sudo podman build \
             --security-opt=label=disable \
             --cap-add=all \
             --device /dev/fuse \
