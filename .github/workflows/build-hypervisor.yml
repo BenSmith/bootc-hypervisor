@@ -139,24 +139,22 @@ jobs:
 
       - name: Rechunk base hypervisor image
         if: steps.should_build.outputs.run == 'true'
-        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
-        with:
-          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
-          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-bootc:latest
-          ref: localhost/hypervisor-bootc:${{ env.base_tag }}
-          version: ${{ env.base_tag }}
-          pretty: Hypervisor Base
-          revision: ${{ github.sha }}
-          skip_compression: true
+        run: |
+          # Use bootc-base-imagectl rechunk (official bootc method)
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:rawhide \
+            bootc-base-imagectl rechunk \
+            localhost/hypervisor-bootc:${{ env.base_tag }} \
+            localhost/hypervisor-bootc:rechunked
 
       - name: Tag rechunked base image
         if: steps.should_build.outputs.run == 'true'
         run: |
-          # Find rechunked image and apply all needed tags
-          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
-          echo "Rechunked base image ID: $IMAGE_ID"
-          sudo podman tag $IMAGE_ID localhost/hypervisor-bootc:${{ env.base_tag }}
-          sudo podman tag $IMAGE_ID localhost/hypervisor-bootc:latest
+          # Apply all needed tags to rechunked image
+          sudo podman tag localhost/hypervisor-bootc:rechunked localhost/hypervisor-bootc:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-bootc:rechunked localhost/hypervisor-bootc:latest
+          sudo podman rmi localhost/hypervisor-bootc:rechunked
 
       - name: Push base hypervisor to GHCR
         if: steps.should_build.outputs.run == 'true'
@@ -187,23 +185,21 @@ jobs:
 
       - name: Rechunk NVIDIA RPMFusion variant image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
-        with:
-          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
-          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-nvidia:rpmfusion
-          ref: localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          version: ${{ env.base_tag }}
-          pretty: Hypervisor NVIDIA RPMFusion
-          revision: ${{ github.sha }}
-          skip_compression: true
+        run: |
+          # Use bootc-base-imagectl rechunk (official bootc method)
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:rawhide \
+            bootc-base-imagectl rechunk \
+            localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
+            localhost/hypervisor-nvidia:rechunked
 
       - name: Tag rechunked NVIDIA RPMFusion image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Find rechunked image and apply tag
-          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
-          echo "Rechunked NVIDIA RPMFusion image ID: $IMAGE_ID"
-          sudo podman tag $IMAGE_ID localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          # Apply tag to rechunked image
+          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman rmi localhost/hypervisor-nvidia:rechunked
 
       - name: Push NVIDIA RPMFusion variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
@@ -240,23 +236,21 @@ jobs:
 
       - name: Rechunk NVIDIA negativo17 variant image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
-        with:
-          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
-          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-nvidia:negativo17
-          ref: localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          version: ${{ env.base_tag }}
-          pretty: Hypervisor NVIDIA negativo17
-          revision: ${{ github.sha }}
-          skip_compression: true
+        run: |
+          # Use bootc-base-imagectl rechunk (official bootc method)
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:rawhide \
+            bootc-base-imagectl rechunk \
+            localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
+            localhost/hypervisor-nvidia:rechunked
 
       - name: Tag rechunked NVIDIA negativo17 image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Find rechunked image and apply tag
-          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
-          echo "Rechunked NVIDIA negativo17 image ID: $IMAGE_ID"
-          sudo podman tag $IMAGE_ID localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          # Apply tag to rechunked image
+          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          sudo podman rmi localhost/hypervisor-nvidia:rechunked
 
       - name: Push NVIDIA negativo17 variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
@@ -290,24 +284,22 @@ jobs:
 
       - name: Rechunk AMD variant image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
-        with:
-          rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
-          prev-ref: ghcr.io/${{ github.repository_owner }}/hypervisor-amd:latest
-          ref: localhost/hypervisor-amd:${{ env.base_tag }}
-          version: ${{ env.base_tag }}
-          pretty: Hypervisor AMD
-          revision: ${{ github.sha }}
-          skip_compression: true
+        run: |
+          # Use bootc-base-imagectl rechunk (official bootc method)
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:rawhide \
+            bootc-base-imagectl rechunk \
+            localhost/hypervisor-amd:${{ env.base_tag }} \
+            localhost/hypervisor-amd:rechunked
 
       - name: Tag rechunked AMD image
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Find rechunked image and apply tags
-          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
-          echo "Rechunked AMD image ID: $IMAGE_ID"
-          sudo podman tag $IMAGE_ID localhost/hypervisor-amd:${{ env.base_tag }}
-          sudo podman tag $IMAGE_ID localhost/hypervisor-amd:latest
+          # Apply tags to rechunked image
+          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:latest
+          sudo podman rmi localhost/hypervisor-amd:rechunked
 
       - name: Push AMD variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
