@@ -129,6 +129,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 # sudo firewall-cmd --add-service=cockpit --permanent
 # sudo firewall-cmd --reload
 RUN dnf clean all && \
+    rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/* && \
     systemctl enable cockpit.socket && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
