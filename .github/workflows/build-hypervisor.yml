@@ -144,7 +144,7 @@ jobs:
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
-            bootc-base-imagectl rechunk \
+            /usr/libexec/bootc-base-imagectl rechunk \
             localhost/hypervisor-bootc:${{ env.base_tag }} \
             localhost/hypervisor-bootc:rechunked
 
@@ -190,7 +190,7 @@ jobs:
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
-            bootc-base-imagectl rechunk \
+            /usr/libexec/bootc-base-imagectl rechunk \
             localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
             localhost/hypervisor-nvidia:rechunked
 
@@ -241,7 +241,7 @@ jobs:
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
-            bootc-base-imagectl rechunk \
+            /usr/libexec/bootc-base-imagectl rechunk \
             localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
             localhost/hypervisor-nvidia:rechunked
 
@@ -289,7 +289,7 @@ jobs:
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
-            bootc-base-imagectl rechunk \
+            /usr/libexec/bootc-base-imagectl rechunk \
             localhost/hypervisor-amd:${{ env.base_tag }} \
             localhost/hypervisor-amd:rechunked
 
