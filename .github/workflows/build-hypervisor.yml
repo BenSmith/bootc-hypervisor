@@ -89,7 +89,7 @@ jobs:
       - name: Login to GitHub Container Registry
         if: steps.should_build.outputs.run == 'true'
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Determine variants to build
         if: steps.should_build.outputs.run == 'true'
@@ -123,8 +123,8 @@ jobs:
           TAG=$(date +%Y%m%d-%H%M)
           echo "base_tag=${TAG}" >> $GITHUB_ENV
 
-          # Build in user storage (rechunk action accesses user storage)
-          podman build \
+          # Build in root storage (rechunk action accesses user storage)
+          sudo podman build \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:${TAG} \
             -t localhost/hypervisor-bootc:latest \
@@ -142,31 +142,34 @@ jobs:
           revision: ${{ github.sha }}
           skip_compression: true
 
-      - name: Retag rechunked base image as latest
+      - name: Tag rechunked base image
         if: steps.should_build.outputs.run == 'true'
         run: |
-          # Ensure :latest tag points to rechunked image for variant builds
-          podman tag localhost/hypervisor-bootc:${{ env.base_tag }} localhost/hypervisor-bootc:latest
+          # Find rechunked image and apply all needed tags
+          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
+          echo "Rechunked base image ID: $IMAGE_ID"
+          sudo podman tag $IMAGE_ID localhost/hypervisor-bootc:${{ env.base_tag }}
+          sudo podman tag $IMAGE_ID localhost/hypervisor-bootc:latest
 
       - name: Push base hypervisor to GHCR
         if: steps.should_build.outputs.run == 'true'
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:latest
+          sudo podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:latest
 
-          podman push ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
+          sudo podman push ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
 
-          podman rmi ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-bootc:latest || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:latest || true
 
       - name: Build NVIDIA RPMFusion variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Build in user storage with only timestamped tag
-          podman build \
+          # Build in root storage with only timestamped tag
+          sudo podman build \
             -f hypervisor-nvidia-rpmfusion.Containerfile \
             -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
             .
@@ -183,31 +186,39 @@ jobs:
           revision: ${{ github.sha }}
           skip_compression: true
 
+      - name: Tag rechunked NVIDIA RPMFusion image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        run: |
+          # Find rechunked image and apply tag
+          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
+          echo "Rechunked NVIDIA RPMFusion image ID: $IMAGE_ID"
+          sudo podman tag $IMAGE_ID localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+
       - name: Push NVIDIA RPMFusion variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           # Tag for GHCR
-          podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
           # Push to GHCR
-          podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
-          # Clean up all local tags from user storage
-          podman rmi localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
+          # Clean up all local tags from root storage
+          sudo podman rmi localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
 
-          podman system prune -af --volumes
+          sudo podman system prune -af --volumes
 
       - name: Build NVIDIA negativo17 variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Build in user storage with only timestamped tag
-          podman build \
+          # Build in root storage with only timestamped tag
+          sudo podman build \
             -f hypervisor-nvidia-negativo17.Containerfile \
             -t localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
             .
@@ -224,28 +235,36 @@ jobs:
           revision: ${{ github.sha }}
           skip_compression: true
 
+      - name: Tag rechunked NVIDIA negativo17 image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        run: |
+          # Find rechunked image and apply tag
+          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
+          echo "Rechunked NVIDIA negativo17 image ID: $IMAGE_ID"
+          sudo podman tag $IMAGE_ID localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+
       - name: Push NVIDIA negativo17 variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+          sudo podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
 
-          podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
 
-          podman rmi localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17 || true
+          sudo podman rmi localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17 || true
 
-          podman system prune -af --volumes
+          sudo podman system prune -af --volumes
 
       - name: Build AMD variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Build in user storage with only timestamped tag
-          podman build \
+          # Build in root storage with only timestamped tag
+          sudo podman build \
             -f hypervisor-amd.Containerfile \
             -t localhost/hypervisor-amd:${{ env.base_tag }} \
             .
@@ -262,22 +281,31 @@ jobs:
           revision: ${{ github.sha }}
           skip_compression: true
 
+      - name: Tag rechunked AMD image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        run: |
+          # Find rechunked image and apply tags
+          IMAGE_ID=$(sudo podman images --format='{{.ID}}' --sort=created | head -1)
+          echo "Rechunked AMD image ID: $IMAGE_ID"
+          sudo podman tag $IMAGE_ID localhost/hypervisor-amd:${{ env.base_tag }}
+          sudo podman tag $IMAGE_ID localhost/hypervisor-amd:latest
+
       - name: Push AMD variant to GHCR
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
+          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
 
-          podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          podman push ghcr.io/${OWNER}/hypervisor-amd:latest
+          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:latest
 
-          podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
-          podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
+          sudo podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
 
-          podman system prune -af --volumes
+          sudo podman system prune -af --volumes
 
       - name: Login to GitHub Container Registry for cosign
         if: steps.should_build.outputs.run == 'true'
