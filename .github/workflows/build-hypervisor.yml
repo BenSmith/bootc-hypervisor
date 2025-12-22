@@ -170,6 +170,10 @@ jobs:
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }} || true
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:latest || true
 
+          # Verify localhost tags still exist for variant builds
+          echo "Remaining localhost images:"
+          sudo podman images | grep hypervisor-bootc
+
       - name: Build AMD variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
@@ -219,7 +223,8 @@ jobs:
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
 
-          sudo podman system prune -af --volumes
+          # Only prune dangling images (no -a flag) to preserve base image for next variant
+          sudo podman system prune -f --volumes
 
       - name: Build NVIDIA negativo17 variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
@@ -269,7 +274,8 @@ jobs:
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17 || true
 
-          sudo podman system prune -af --volumes
+          # Only prune dangling images (no -a flag) to preserve base image for next variant
+          sudo podman system prune -f --volumes
 
       - name: Build NVIDIA RPMFusion variant
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
@@ -322,6 +328,7 @@ jobs:
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
 
+          # Final prune can be aggressive since all variants are done
           sudo podman system prune -af --volumes
 
       - name: Login to GitHub Container Registry for cosign
