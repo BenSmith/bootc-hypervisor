@@ -124,7 +124,9 @@ jobs:
           echo "base_tag=${TAG}" >> $GITHUB_ENV
 
           # Build in root storage (rechunk action accesses user storage)
+          # --pull=always ensures we get the latest minimal base from GHCR
           sudo podman build \
+            --pull=always \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:${TAG} \
             -t localhost/hypervisor-bootc:latest \
