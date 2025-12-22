@@ -170,54 +170,54 @@ jobs:
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }} || true
           sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:latest || true
 
-      - name: Build NVIDIA RPMFusion variant
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Build AMD variant
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
+          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
+            --pull=never \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --ipc=host \
-            -f hypervisor-nvidia-rpmfusion.Containerfile \
-            -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
+            -f hypervisor-amd.Containerfile \
+            -t localhost/hypervisor-amd:${{ env.base_tag }} \
             .
 
-      - name: Rechunk NVIDIA RPMFusion variant image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Rechunk AMD variant image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
             /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
-            localhost/hypervisor-nvidia:rechunked
+            localhost/hypervisor-amd:${{ env.base_tag }} \
+            localhost/hypervisor-amd:rechunked
 
-      - name: Tag rechunked NVIDIA RPMFusion image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Tag rechunked AMD image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Apply tag to rechunked image
-          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman rmi localhost/hypervisor-nvidia:rechunked
+          # Apply tags to rechunked image
+          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:latest
+          sudo podman rmi localhost/hypervisor-amd:rechunked
 
-      - name: Push NVIDIA RPMFusion variant to GHCR
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Push AMD variant to GHCR
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          # Tag for GHCR
-          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
 
-          # Push to GHCR
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:latest
 
-          # Clean up all local tags from root storage
-          sudo podman rmi localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
+          sudo podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
 
           sudo podman system prune -af --volumes
 
@@ -225,7 +225,9 @@ jobs:
         if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
+          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
+            --pull=never \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -269,52 +271,56 @@ jobs:
 
           sudo podman system prune -af --volumes
 
-      - name: Build AMD variant
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Build NVIDIA RPMFusion variant
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
+          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
+            --pull=never \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --ipc=host \
-            -f hypervisor-amd.Containerfile \
-            -t localhost/hypervisor-amd:${{ env.base_tag }} \
+            -f hypervisor-nvidia-rpmfusion.Containerfile \
+            -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
             .
 
-      - name: Rechunk AMD variant image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Rechunk NVIDIA RPMFusion variant image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:rawhide \
             /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-amd:${{ env.base_tag }} \
-            localhost/hypervisor-amd:rechunked
+            localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
+            localhost/hypervisor-nvidia:rechunked
 
-      - name: Tag rechunked AMD image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Tag rechunked NVIDIA RPMFusion image
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
-          # Apply tags to rechunked image
-          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:latest
-          sudo podman rmi localhost/hypervisor-amd:rechunked
+          # Apply tag to rechunked image
+          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman rmi localhost/hypervisor-nvidia:rechunked
 
-      - name: Push AMD variant to GHCR
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+      - name: Push NVIDIA RPMFusion variant to GHCR
+        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
+          # Tag for GHCR
+          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
-          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:latest
+          # Push to GHCR
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
-          sudo podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
+          # Clean up all local tags from root storage
+          sudo podman rmi localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
+          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
 
           sudo podman system prune -af --volumes
 
