@@ -44,7 +44,6 @@ jobs:
         # Build for multiple Fedora versions
         fedora_version:
           - '43'
-          - 'rawhide'
 
     steps:
       - name: Setup podman
