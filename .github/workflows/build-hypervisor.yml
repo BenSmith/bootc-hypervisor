@@ -32,10 +32,6 @@ on:
       - 'hypervisor*.Containerfile'
       - '.github/workflows/build-hypervisor.yml'
 
-  # Weekly builds (Sundays at 3am UTC) - backup if workflow_run doesn't trigger
-  schedule:
-    - cron: '0 3 * * 0'
-
 jobs:
   build-hypervisor:
     runs-on: ubuntu-24.04  # Required by rechunk action for advanced podman features
@@ -117,7 +113,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             VARIANTS="${{ inputs.variants }}"
-          elif [ "${{ github.event_name }}" == "schedule" ]; then
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
             VARIANTS="all"
           else
             VARIANTS="base"
@@ -212,9 +208,8 @@ jobs:
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
-          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
-            --pull=never \
+            --pull=always \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -276,9 +271,8 @@ jobs:
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
-          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
-            --pull=never \
+            --pull=always \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -339,9 +333,8 @@ jobs:
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
-          # --pull=never forces using local base image instead of trying to pull
           sudo podman build \
-            --pull=never \
+            --pull=always \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \

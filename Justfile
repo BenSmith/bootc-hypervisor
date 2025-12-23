@@ -74,7 +74,17 @@ build-base:
   -t ghcr.io/bensmith/hypervisor-bootc:latest \
   -f hypervisor.Containerfile .
 
-build-nvidia-rpmfusion: build-base
+# Local testing - use locally-built minimal (whatever version you built)
+build-base-local:
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  podman build \
+  --from localhost/fedora-bootc-minimal:latest \
+  --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+  -t localhost/hypervisor-bootc:local \
+  -t localhost/hypervisor-bootc:latest \
+  -f hypervisor.Containerfile .
+
+build-nvidia-rpmfusion:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
@@ -84,7 +94,7 @@ build-nvidia-rpmfusion: build-base
   -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion \
   -f hypervisor-nvidia-rpmfusion.Containerfile .
 
-build-nvidia-negativo17: build-base
+build-nvidia-negativo17:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
@@ -94,7 +104,7 @@ build-nvidia-negativo17: build-base
   -t ghcr.io/bensmith/hypervisor-nvidia:negativo17 \
   -f hypervisor-nvidia-negativo17.Containerfile .
 
-build-amd: build-base
+build-amd:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
@@ -102,7 +112,34 @@ build-amd: build-base
   -t localhost/hypervisor-amd:latest \
   -f hypervisor-amd.Containerfile .
 
+# Local testing variants - use locally-built base instead of GHCR
+build-amd-local: build-base
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  podman build \
+  --from localhost/hypervisor-bootc:latest \
+  --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+  -t localhost/hypervisor-amd:local \
+  -f hypervisor-amd.Containerfile .
+
+build-nvidia-rpmfusion-local: build-base-local
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  podman build \
+  --from localhost/hypervisor-bootc:latest \
+  --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+  -t localhost/hypervisor-nvidia:rpmfusion-local \
+  -f hypervisor-nvidia-rpmfusion.Containerfile .
+
+build-nvidia-negativo17-local: build-base-local
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  podman build \
+  --from localhost/hypervisor-bootc:latest \
+  --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+  -t localhost/hypervisor-nvidia:negativo17-local \
+  -f hypervisor-nvidia-negativo17.Containerfile .
+
 build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
+
+build-all-local: build-base build-amd-local build-nvidia-rpmfusion-local build-nvidia-negativo17-local
 
 build-iso-base rootfs="xfs":
   @mkdir -p store output/base rpmmd
