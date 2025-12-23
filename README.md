@@ -254,13 +254,12 @@ Choose the right tool for your workload: VMs for Windows/isolation, Incus for li
 All images follow this standardized build pipeline:
 
 ```
-1. Build          → Create container image with podman
-2. Copy to root   → Transfer to root storage for rechunking
-3. Rechunk        → Optimize with composefs chunking (hhd-dev/rechunk)
-4. Retag          → Update tags to point to rechunked image
-5. Push           → Upload to ghcr.io
-6. Cleanup        → Free disk space for next variant
-7. Sign           → Cryptographically sign with cosign (keyless)
+1. Build          → Create container image with podman (in root storage)
+2. Rechunk        → Optimize with bootc-base-imagectl rechunk (official bootc method)
+3. Retag          → Update tags to point to rechunked image
+4. Push           → Upload to ghcr.io
+5. Cleanup        → Free disk space for next variant
+6. Sign           → Cryptographically sign with cosign (keyless)
 ```
 
 ### `build-minimal-bootc.yml`
@@ -269,13 +268,12 @@ Builds Fedora minimal bootc base images.
 
 **Flow:**
 1. Build with 3 tags: `{version}-{timestamp}`, `{version}`, `latest`
-2. Copy to root storage
-3. Rechunk with [hhd-dev/rechunk v1.2.4](https://github.com/hhd-dev/rechunk)
-4. Retag version and latest to rechunked image
-5. Push all tags to ghcr.io
-6. Sign all tags with cosign
+2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
+3. Retag version and latest to rechunked image
+4. Push all tags to ghcr.io
+5. Sign all tags with cosign
 
-**Matrix builds:** Fedora 43 and rawhide in parallel
+**Matrix builds:** Fedora 43 (rawhide builds disabled in matrix but available via manual dispatch)
 
 ### `build-hypervisor.yml`
 
@@ -283,12 +281,11 @@ Builds base hypervisor and GPU variants.
 
 **Flow (per variant):**
 1. Build with 2 tags: `{timestamp}`, `latest` (or variant name)
-2. Copy to root storage
-3. Rechunk with composefs optimization
-4. Retag latest/variant to rechunked image
-5. Push both tags to ghcr.io
-6. Cleanup to free space for next variant
-7. Sign all pushed images (batched at end)
+2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
+3. Retag latest/variant to rechunked image
+4. Push both tags to ghcr.io
+5. Cleanup to free space for next variant
+6. Sign all pushed images (batched at end)
 
 **Variants:**
 - `base` - Base hypervisor (always built)
