@@ -4,6 +4,7 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
 COPY policy.json /etc/containers/policy.json
+COPY freeipmi.conf /usr/lib/tmpfiles.d/freeipmi.conf
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     alsa-sof-firmware \
@@ -130,6 +131,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 # cockpit is enabled but blocked by firewall intentionally. To allow on network:
 # sudo firewall-cmd --add-service=cockpit --permanent
 # sudo firewall-cmd --reload
+# the pcp and gssproxy bootc lint warnings are because these packages (upon which others depend)
+# store data in /var/lib, and bootc would prefer they're in /usr/lib
 RUN dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* && \
     rm -rf /boot && mkdir -p /boot && \
@@ -140,7 +143,13 @@ RUN dnf clean all && \
     systemctl enable prometheus-node-exporter && \
     systemctl enable sshd && \
     systemctl enable tuned && \
-    bootc container lint
+    find /var -type f \
+        -not -path '/var/lib/gssproxy/*' \
+        -not -path '/var/lib/pcp/*' \
+        -not -path '/var/lib/rpm-state/*' \
+        -delete && \
+    find /var -depth -type d -empty -delete && \
+    bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
