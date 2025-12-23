@@ -267,7 +267,7 @@ All images follow this standardized build pipeline:
 Builds Fedora minimal bootc base images.
 
 **Flow:**
-1. Build with 3 tags: `{version}-{timestamp}`, `{version}`, `latest`
+1. Build with three tags: `{version}-{timestamp}`, `{version}`, `latest`
 2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
 3. Retag version and latest to rechunked image
 4. Push all tags to ghcr.io
@@ -280,11 +280,11 @@ Builds Fedora minimal bootc base images.
 Builds base hypervisor and GPU variants.
 
 **Flow (per variant):**
-1. Build with 2 tags: `{timestamp}`, `latest` (or variant name)
+1. Build with two tags: `{timestamp}`, `latest` (or variant name)
 2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
 3. Retag latest/variant to rechunked image
 4. Push both tags to ghcr.io
-5. Cleanup to free space for next variant
+5. Cleanup to free space for the next variant
 6. Sign all pushed images (batched at end)
 
 **Variants:**
@@ -294,12 +294,12 @@ Builds base hypervisor and GPU variants.
 - `amd` - AMD GPU support
 
 **Triggers:**
-- **Auto**: Runs after minimal build completes successfully
+- **Auto**: Runs after a minimal build completes successfully
 - Weekly on Sundays at 3am UTC (backup)
 - Manual dispatch with variant selection
-- Push to main affecting Containerfiles or workflow
+- Push to the main branch, affecting Containerfiles or workflow
 
-**Build dependency:** Won't start if minimal build is running or failed. Ensures hypervisor always uses freshly-built minimal base.
+**Build dependency:** Won't start if the minimal build is running or failed. This ensures hypervisor always uses a freshly built minimal base.
 
 ## License
 

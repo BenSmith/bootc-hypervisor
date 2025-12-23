@@ -1,0 +1,23 @@
+{
+  "default": [{"type": "insecureAcceptAnything"}],
+  "transports": {
+    "docker": {
+      "ghcr.io/__REGISTRY_NAMESPACE__/": [
+        {
+          "type": "sigstoreSigned",
+          "fulcio": {
+            "caPath": "/etc/pki/fulcio/fulcio.crt.pem",
+            "oidcIssuer": "https://token.actions.githubusercontent.com",
+            "subjectEmail": "https://github.com/__MINIMAL_WORKFLOW_REF__"
+          },
+          "rekorPublicKeyPath": "/etc/pki/rekor/rekor.pub",
+          "signedIdentity": {
+            "type": "matchRepository"
+          }
+        }
+      ],
+      "ghcr.io": [{"type": "insecureAcceptAnything"}]
+    },
+    "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
+  }
+}

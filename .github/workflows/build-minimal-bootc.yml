@@ -68,6 +68,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate /etc/containers/policy.json for github keyless signing
+        # owner needs to be lowercase, but workflow ref needs to preserve case
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              -e "s|__MINIMAL_WORKFLOW_REF__|${MINIMAL_WORKFLOW_REF}|g" \
+              policy-minimal.json.template > policy.json
+
+          echo "Generated policy.json for minimal:"
+          cat policy.json
+
       - name: Set build timestamp
         id: timestamp
         run: |
@@ -79,6 +91,11 @@ jobs:
           cd manifests
           git log -1
           echo "Using local podman 4-compatible Containerfile with upstream manifests"
+
+      - name: Copy policy.json into build context
+        run: |
+          cp policy.json manifests/policy.json
+          echo "Copied policy.json to manifests/ directory"
 
       - name: Build minimal bootc container
         run: |

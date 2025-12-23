@@ -52,6 +52,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate policy.json from template
+        run: |
+          # owner needs to be lowercase, but workflow ref needs to preserve case
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME="${{ github.event.repository.name }}"
+
+          # Generate the minimal workflow ref (predictable pattern)
+          MINIMAL_WORKFLOW_REF="${{ github.repository }}/.github/workflows/build-minimal-bootc.yml@${{ github.ref }}"
+
+          # Use the current workflow ref for hypervisor
+          HYPERVISOR_WORKFLOW_REF="${{ github.workflow_ref }}"
+
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              -e "s|__MINIMAL_WORKFLOW_REF__|${MINIMAL_WORKFLOW_REF}|g" \
+              -e "s|__HYPERVISOR_WORKFLOW_REF__|${HYPERVISOR_WORKFLOW_REF}|g" \
+              policy-hypervisor.json.template > policy.json
+
+          echo "Generated policy.json:"
+          cat policy.json
+
       - name: Check if should skip build
         id: should_build
         run: |
@@ -174,8 +194,22 @@ jobs:
           echo "Remaining localhost images:"
           sudo podman images | grep hypervisor-bootc
 
+      - name: Login to GitHub Container Registry for cosign
+        if: steps.should_build.outputs.run == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Sign base hypervisor images
+        id: base_complete
+        if: steps.should_build.outputs.run == 'true'
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:latest
+
       - name: Build AMD variant
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
           # --pull=never forces using local base image instead of trying to pull
@@ -190,7 +224,8 @@ jobs:
             .
 
       - name: Rechunk AMD variant image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
@@ -201,7 +236,8 @@ jobs:
             localhost/hypervisor-amd:rechunked
 
       - name: Tag rechunked AMD image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Apply tags to rechunked image
           sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:${{ env.base_tag }}
@@ -209,7 +245,8 @@ jobs:
           sudo podman rmi localhost/hypervisor-amd:rechunked
 
       - name: Push AMD variant to GHCR
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
@@ -226,8 +263,17 @@ jobs:
           # Only prune dangling images (no -a flag) to preserve base image for next variant
           sudo podman system prune -f --volumes
 
+      - name: Sign AMD images
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:latest
+
       - name: Build NVIDIA negativo17 variant
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
           # --pull=never forces using local base image instead of trying to pull
@@ -242,7 +288,8 @@ jobs:
             .
 
       - name: Rechunk NVIDIA negativo17 variant image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
@@ -253,14 +300,16 @@ jobs:
             localhost/hypervisor-nvidia:rechunked
 
       - name: Tag rechunked NVIDIA negativo17 image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Apply tag to rechunked image
           sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
           sudo podman rmi localhost/hypervisor-nvidia:rechunked
 
       - name: Push NVIDIA negativo17 variant to GHCR
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
@@ -277,8 +326,17 @@ jobs:
           # Only prune dangling images (no -a flag) to preserve base image for next variant
           sudo podman system prune -f --volumes
 
+      - name: Sign NVIDIA negativo17 images
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+
       - name: Build NVIDIA RPMFusion variant
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Build in root storage with only timestamped tag
           # --pull=never forces using local base image instead of trying to pull
@@ -293,7 +351,8 @@ jobs:
             .
 
       - name: Rechunk NVIDIA RPMFusion variant image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
@@ -304,14 +363,16 @@ jobs:
             localhost/hypervisor-nvidia:rechunked
 
       - name: Tag rechunked NVIDIA RPMFusion image
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           # Apply tag to rechunked image
           sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
           sudo podman rmi localhost/hypervisor-nvidia:rechunked
 
       - name: Push NVIDIA RPMFusion variant to GHCR
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
@@ -331,43 +392,18 @@ jobs:
           # Final prune can be aggressive since all variants are done
           sudo podman system prune -af --volumes
 
-      - name: Login to GitHub Container Registry for cosign
-        if: steps.should_build.outputs.run == 'true'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Sign base hypervisor images
-        if: steps.should_build.outputs.run == 'true'
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:latest
-
       - name: Sign NVIDIA RPMFusion images
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        continue-on-error: true
+        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
           cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
-      - name: Sign NVIDIA negativo17 images
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
-
-      - name: Sign AMD images
-        if: steps.should_build.outputs.run == 'true' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:latest
-
       - name: Summary
         if: steps.should_build.outputs.run == 'true'
         run: |
-          echo "## Build Complete! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "## Build Complete!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Built variants: ${{ steps.variants.outputs.variants }}" >> $GITHUB_STEP_SUMMARY
           echo "Tag: ${{ env.base_tag }}" >> $GITHUB_STEP_SUMMARY

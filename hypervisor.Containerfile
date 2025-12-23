@@ -3,6 +3,8 @@ FROM ghcr.io/bensmith/fedora-bootc-minimal:43
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
+COPY policy.json /etc/containers/policy.json
+
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     alsa-sof-firmware \
     amd-ucode-firmware \
