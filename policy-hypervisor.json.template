@@ -1,5 +1,5 @@
 {
-  "default": [{"type": "insecureAcceptAnything"}],
+  "default": [{"type": "reject"}],
   "transports": {
     "docker": {
       "ghcr.io/__REGISTRY_NAMESPACE__/": [
