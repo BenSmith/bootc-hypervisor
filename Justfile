@@ -4,6 +4,66 @@ proxy := env_var_or_default('HTTP_PROXY', '')
 
 tag := `date +%Y%m%d-%H%M`
 
+build-minimal version="43" rechunk="false":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  # Clone Fedora bootc manifests if not already present
+  if [ ! -d "manifests" ]; then
+    echo "Cloning Fedora bootc manifests..."
+    git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
+  fi
+
+  # Build the minimal bootc image (requires sudo for nested containerization)
+  echo "Building fedora-bootc-minimal:{{version}}..."
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  sudo podman build \
+    --network=host \
+    --security-opt=label=disable \
+    --cap-add=all \
+    --device /dev/fuse \
+    --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+    -f fedora-bootc-minimal.Containerfile \
+    --build-arg MANIFEST=minimal \
+    --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:{{version}} \
+    --build-arg REPOS_IMAGE=quay.io/fedora/fedora:{{version}} \
+    -t localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
+    -t localhost/fedora-bootc-minimal:{{version}} \
+    -t localhost/fedora-bootc-minimal:latest \
+    -t ghcr.io/bensmith/fedora-bootc-minimal:{{version}} \
+    -t ghcr.io/bensmith/fedora-bootc-minimal:latest \
+    manifests
+
+  # Optionally rechunk the image for better efficiency
+  if [ "{{rechunk}}" == "true" ]; then
+    echo "Rechunking image (requires sudo)..."
+    sudo podman run --rm --privileged \
+      -v /var/lib/containers:/var/lib/containers \
+      quay.io/fedora/fedora-bootc:{{version}} \
+      /usr/libexec/bootc-base-imagectl rechunk \
+      localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
+      localhost/fedora-bootc-minimal:rechunked
+
+    # Re-tag rechunked image
+    sudo podman tag localhost/fedora-bootc-minimal:rechunked \
+      localhost/fedora-bootc-minimal:{{version}}-{{tag}}
+    sudo podman tag localhost/fedora-bootc-minimal:rechunked \
+      localhost/fedora-bootc-minimal:{{version}}
+    sudo podman tag localhost/fedora-bootc-minimal:rechunked \
+      localhost/fedora-bootc-minimal:latest
+
+    # Clean up temporary tag
+    sudo podman rmi localhost/fedora-bootc-minimal:rechunked
+  fi
+
+  # Copy image from root storage to user storage for local development
+  echo "Copying image to user storage..."
+  sudo podman save localhost/fedora-bootc-minimal:{{version}} | podman load
+  sudo podman save localhost/fedora-bootc-minimal:latest | podman load
+
+  echo "Build complete: localhost/fedora-bootc-minimal:{{version}}"
+  echo "Image available in both root and user storage"
+
 build-base:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
