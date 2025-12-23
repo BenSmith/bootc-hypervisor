@@ -74,7 +74,7 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
-              -e "s|__MINIMAL_WORKFLOW_REF__|${MINIMAL_WORKFLOW_REF}|g" \
+              -e "s|__MINIMAL_WORKFLOW_REF__|${{ github.workflow_ref }}|g" \
               policy-minimal.json.template > policy.json
 
           echo "Generated policy.json for minimal:"
