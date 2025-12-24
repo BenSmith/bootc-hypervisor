@@ -24,13 +24,13 @@ on:
           - 'base,nvidia-negativo17'
           - 'base,amd'
 
-  # Build when hypervisor files change
-  push:
-    branches:
-      - main
-    paths:
-      - 'hypervisor*.Containerfile'
-      - '.github/workflows/build-hypervisor.yml'
+  # Build when hypervisor files change (disabled - use workflow_dispatch for manual builds)
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - 'hypervisor*.Containerfile'
+  #     - '.github/workflows/build-hypervisor.yml'
 
 jobs:
   build-hypervisor:
