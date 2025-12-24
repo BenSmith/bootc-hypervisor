@@ -18,6 +18,7 @@ RUN rm -vf /src/*.repo      # Remove hardcoded .repo files, use base image repos
 
 # PODMAN 4/GitHub Actions: Copy repos to writable location instead of bind mount
 COPY --from=repos / /repos
+RUN rm -f /etc/yum.repos.d/fedora-cisco-openh264.repo || true
 
 # PODMAN 4 COMPATIBILITY: Inline sh -c instead of heredoc
 RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \

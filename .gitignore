@@ -1,0 +1,9 @@
+policy.json
+.idea/
+.claude/
+manifests/
+output/
+rpmmd/
+store/
+base-images/
+bootc-src

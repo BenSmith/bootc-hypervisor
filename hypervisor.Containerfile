@@ -6,6 +6,8 @@ LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/
 COPY policy.json /etc/containers/policy.json
 COPY freeipmi.conf /usr/lib/tmpfiles.d/freeipmi.conf
 
+RUN rm -f /etc/yum.repos.d/fedora-cisco-openh264.repo || true
+
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     alsa-sof-firmware \
     amd-ucode-firmware \

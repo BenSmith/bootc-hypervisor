@@ -65,6 +65,10 @@ build-minimal version="43" rechunk="false":
   echo "Image available in both root and user storage"
 
 build-base:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # Use permissive policy for local builds
+  cp policy-local.json policy.json
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
@@ -76,6 +80,10 @@ build-base:
 
 # Local testing - use locally-built minimal (whatever version you built)
 build-base-local:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # Use permissive policy for local builds
+  cp policy-local.json policy.json
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --from localhost/fedora-bootc-minimal:latest \
@@ -163,9 +171,9 @@ build-iso-base rootfs="xfs":
       --store /store \
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-bootc
-  @echo "Renaming ISO..."
-  @cp output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso
-  @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso"
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
+  @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
 
 build-iso-nvidia-rpmfusion rootfs="xfs":
   @mkdir -p store output/nvidia-rpmfusion rpmmd
@@ -189,9 +197,9 @@ build-iso-nvidia-rpmfusion rootfs="xfs":
       --store /store \
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-nvidia:rpmfusion
-  @echo "Renaming ISO..."
-  @cp output/nvidia-rpmfusion/bootiso/install.iso output/hypervisor-nvidia-rpmfusion-{{tag}}.iso
-  @echo "ISO ready: output/hypervisor-nvidia-rpmfusion-{{tag}}.iso"
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/nvidia-rpmfusion/bootiso/install.iso output/hypervisor-nvidia-rpmfusion-{{tag}}.iso "HV-NV-RPMFUSION"
+  @echo "ISO ready: output/hypervisor-nvidia-rpmfusion-{{tag}}.iso (label: HV-NV-RPMFUSION)"
 
 build-iso-nvidia-negativo17 rootfs="xfs":
   @mkdir -p store output/nvidia-negativo17 rpmmd
@@ -215,9 +223,9 @@ build-iso-nvidia-negativo17 rootfs="xfs":
       --store /store \
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-nvidia:negativo17
-  @echo "Renaming ISO..."
-  @cp output/nvidia-negativo17/bootiso/install.iso output/hypervisor-nvidia-negativo17-{{tag}}.iso
-  @echo "ISO ready: output/hypervisor-nvidia-negativo17-{{tag}}.iso"
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/nvidia-negativo17/bootiso/install.iso output/hypervisor-nvidia-negativo17-{{tag}}.iso "HV-NV-NEG17"
+  @echo "ISO ready: output/hypervisor-nvidia-negativo17-{{tag}}.iso (label: HV-NV-NEG17)"
 
 build-iso-amd rootfs="xfs":
   @mkdir -p store output/amd rpmmd
@@ -241,9 +249,17 @@ build-iso-amd rootfs="xfs":
       --store /store \
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-amd
-  @echo "Renaming ISO..."
-  @cp output/amd/bootiso/install.iso output/hypervisor-amd-{{tag}}.iso
-  @echo "ISO ready: output/hypervisor-amd-{{tag}}.iso"
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/amd/bootiso/install.iso output/hypervisor-amd-{{tag}}.iso "HV-AMD"
+  @echo "ISO ready: output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
+
+# Relabel an ISO with a custom volume label
+relabel-iso input output label:
+  @echo "Relabeling {{input}} -> {{output}} with label '{{label}}'"
+  xorriso -indev {{input}} \
+          -outdev {{output}} \
+          -volid "{{label}}" \
+          -boot_image any replay
 
 build-all-isos rootfs="xfs":
   just build-iso-base {{rootfs}}
