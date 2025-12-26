@@ -17,6 +17,9 @@ RUN dnf clean all && \
 RUN mkdir -p /etc/cdi && \
     bootc container lint
 
+# rocm-smi tries to use libdrm_amdgpu.so, this is a workaround to provide it
+RUN ln -s /usr/lib64/libdrm_amdgpu.so.1 /usr/lib64/libdrm_amdgpu.so
+
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
 LABEL ostree.bootable 1
