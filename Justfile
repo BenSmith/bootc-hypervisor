@@ -86,6 +86,7 @@ build-base-local:
   cp policy-local.json policy.json
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+  --network=host \
   --from localhost/fedora-bootc-minimal:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
@@ -121,9 +122,10 @@ build-amd:
   -f hypervisor-amd.Containerfile .
 
 # Local testing variants - use locally-built base instead of GHCR
-build-amd-local: build-base
+build-amd-local: build-base-local
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+  --network=host \
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-amd:local \
@@ -132,6 +134,7 @@ build-amd-local: build-base
 build-nvidia-rpmfusion-local: build-base-local
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+  --network=host \
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-nvidia:rpmfusion-local \
@@ -140,6 +143,7 @@ build-nvidia-rpmfusion-local: build-base-local
 build-nvidia-negativo17-local: build-base-local
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+  --network=host \
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-nvidia:negativo17-local \
@@ -253,13 +257,61 @@ build-iso-amd rootfs="xfs":
   @just relabel-iso output/amd/bootiso/install.iso output/hypervisor-amd-{{tag}}.iso "HV-AMD"
   @echo "ISO ready: output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
 
-# Relabel an ISO with a custom volume label
+# Relabel an ISO with a custom volume label and update boot configs
 relabel-iso input output label:
-  @echo "Relabeling {{input}} -> {{output}} with label '{{label}}'"
-  xorriso -indev {{input}} \
-          -outdev {{output}} \
-          -volid "{{label}}" \
-          -boot_image any replay
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  echo "Relabeling {{input}} -> {{output}} with label '{{label}}'"
+
+  # Create temporary directory for ISO extraction
+  TMPDIR=$(mktemp -d)
+  trap "rm -rf $TMPDIR" EXIT
+
+  # Mount the original ISO
+  MOUNT_DIR="$TMPDIR/mount"
+  mkdir -p "$MOUNT_DIR"
+  sudo mount -o loop,ro "{{input}}" "$MOUNT_DIR"
+
+  # Copy ISO contents to working directory
+  WORK_DIR="$TMPDIR/iso"
+  mkdir -p "$WORK_DIR"
+  sudo cp -a "$MOUNT_DIR"/* "$WORK_DIR/" 2>/dev/null || true
+  sudo cp -a "$MOUNT_DIR"/.[!.]* "$WORK_DIR/" 2>/dev/null || true
+  sudo umount "$MOUNT_DIR"
+
+  # Get the original volume label
+  ORIG_LABEL=$(isoinfo -d -i "{{input}}" | grep "Volume id:" | sed 's/Volume id: //')
+  echo "Original label: $ORIG_LABEL"
+  echo "New label: {{label}}"
+
+  # Update grub configs to replace old label with new label
+  for grub_cfg in "$WORK_DIR/boot/grub2/grub.cfg" "$WORK_DIR/EFI/BOOT/grub.cfg"; do
+    if [ -f "$grub_cfg" ]; then
+      echo "Updating $grub_cfg..."
+      sudo sed -i "s/$ORIG_LABEL/{{label}}/g" "$grub_cfg"
+    fi
+  done
+
+  # Create new ISO with updated label and configs
+  sudo xorriso -as mkisofs \
+    -V "{{label}}" \
+    -r -J \
+    -b images/eltorito.img \
+    -c boot.cat \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -boot-info-table \
+    -eltorito-alt-boot \
+    -e images/efiboot.img \
+    -no-emul-boot \
+    -o "{{output}}" \
+    "$WORK_DIR"
+
+  # Fix ownership
+  sudo chown $(id -u):$(id -g) "{{output}}"
+
+  echo "ISO relabeled successfully: {{output}}"
 
 build-all-isos rootfs="xfs":
   just build-iso-base {{rootfs}}
