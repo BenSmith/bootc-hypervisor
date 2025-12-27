@@ -155,33 +155,24 @@ RUN dnf clean all && \
 
 # Configure device access for containerized workloads
 # These udev rules set host device permissions that containers inherit
+# For homelab use, devices are world-accessible (physical security is the boundary)
 RUN printf '# Hypervisor Device Access for Containerized Workloads\n' > /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
     printf '# GPU render nodes - world accessible for container compute\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
     printf 'SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf '# GPU card nodes - group accessible for display/rendering\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'SUBSYSTEM=="drm", KERNEL=="card[0-9]*", GROUP="video", MODE="0660"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf '# Input devices - group accessible for container passthrough\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'SUBSYSTEM=="input", GROUP="input", MODE="0660"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="uinput", GROUP="input", MODE="0660"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="event[0-9]*", GROUP="input", MODE="0660"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
+    printf '# GPU card nodes - world accessible for rootless containers\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf 'SUBSYSTEM=="drm", KERNEL=="card[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf '# Input devices - world accessible for rootless containers\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf 'SUBSYSTEM=="input", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf 'KERNEL=="uinput", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf 'KERNEL=="event[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
 
 # Ensure device access groups exist
 RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
 
-# Configure PAM to automatically add users to device groups at login
-# This enables rootless containers (user quadlets) to access devices
-RUN mkdir -p /etc/security/group.conf.d && \
-    printf '# Automatically add all users to device access groups on login\n' > /etc/security/group.conf.d/50-hypervisor-device-access.conf && \
-    printf '# Format: services;ttys;users;times;groups\n' >> /etc/security/group.conf.d/50-hypervisor-device-access.conf && \
-    printf '*;*;*;Al0000-2400;video,render,input\n' >> /etc/security/group.conf.d/50-hypervisor-device-access.conf && \
-    if ! grep -q "pam_group.so" /etc/pam.d/systemd-user 2>/dev/null; then \
-        echo "session     optional      pam_group.so" >> /etc/pam.d/systemd-user; \
-    fi && \
-    if ! grep -q "pam_group.so" /etc/pam.d/password-auth 2>/dev/null; then \
-        sed -i '/session.*pam_systemd\.so/a session     optional      pam_group.so' /etc/pam.d/password-auth; \
-    fi
+# Note: No need for group membership management - devices are world-accessible
+# This works for homelab environments where physical security is the boundary
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
