@@ -13,6 +13,11 @@ RUN dnf clean all && \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 
+# Add AMD-specific device access rules (extends base hypervisor rules)
+# ROCm KFD device for AI workloads
+RUN printf '# AMD ROCm KFD device - world accessible for AI workloads\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
+    printf 'SUBSYSTEM=="kfd", KERNEL=="kfd", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
+
 # AMD GPUs work with podman automatically via CDI
 RUN mkdir -p /etc/cdi && \
     bootc container lint
