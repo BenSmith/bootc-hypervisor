@@ -178,6 +178,9 @@ RUN mkdir -p /etc/security/group.conf.d && \
     printf '*;*;*;Al0000-2400;video,render,input\n' >> /etc/security/group.conf.d/50-hypervisor-device-access.conf && \
     if ! grep -q "pam_group.so" /etc/pam.d/systemd-user 2>/dev/null; then \
         echo "session     optional      pam_group.so" >> /etc/pam.d/systemd-user; \
+    fi && \
+    if ! grep -q "pam_group.so" /etc/pam.d/password-auth 2>/dev/null; then \
+        sed -i '/session.*pam_systemd\.so/a session     optional      pam_group.so' /etc/pam.d/password-auth; \
     fi
 
 # Define required labels for this bootc image to be recognized as such
