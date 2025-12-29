@@ -24,14 +24,6 @@ on:
           - 'base,nvidia-negativo17'
           - 'base,amd'
 
-  # Build when hypervisor files change (disabled - use workflow_dispatch for manual builds)
-  # push:
-  #   branches:
-  #     - main
-  #   paths:
-  #     - 'hypervisor*.Containerfile'
-  #     - '.github/workflows/build-hypervisor.yml'
-
 jobs:
   build-hypervisor:
     runs-on: ubuntu-24.04  # Required by rechunk action for advanced podman features
