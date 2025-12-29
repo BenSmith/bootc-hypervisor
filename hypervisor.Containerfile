@@ -133,6 +133,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 # cockpit is enabled but blocked by firewall intentionally. To allow on network:
 # sudo firewall-cmd --add-service=cockpit --permanent
 # sudo firewall-cmd --reload
+#
 # the pcp and gssproxy bootc lint warnings are because these packages (upon which others depend)
 # store data in /var/lib, and bootc would prefer they're in /usr/lib
 RUN dnf clean all && \
@@ -153,26 +154,10 @@ RUN dnf clean all && \
     find /var -depth -type d -empty -delete && \
     bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
 
-# Configure device access for containerized workloads
-# These udev rules set host device permissions that containers inherit
-# For homelab use, devices are world-accessible (physical security is the boundary)
-RUN printf '# Hypervisor Device Access for Containerized Workloads\n' > /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf '# GPU render nodes - world accessible for container compute\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf '# GPU card nodes - world accessible for rootless containers\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'SUBSYSTEM=="drm", KERNEL=="card[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf '# Input devices - world accessible for rootless containers\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'SUBSYSTEM=="input", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="uinput", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="event[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
-
 # Ensure device access groups exist
 RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
-
-# Note: No need for group membership management - devices are world-accessible
-# This works for homelab environments where physical security is the boundary
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1

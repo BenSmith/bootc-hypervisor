@@ -19,18 +19,12 @@ RUN dnf install --setopt=install_weak_deps=False -y \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 
-# Add NVIDIA-specific device access rules (extends base hypervisor rules)
-# NVIDIA devices need special permissions for rootless containers
-RUN printf '# NVIDIA GPU devices - group accessible\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="nvidia[0-9]*", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="nvidiactl", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="nvidia-uvm", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="nvidia-uvm-tools", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules && \
-    printf 'KERNEL=="nvidia-modeset", MODE="0666"\n' >> /usr/lib/udev/rules.d/71-hypervisor-device-access.rules
-
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
+# Install service to generate CDI spec on first boot
+COPY services/nvidia-cdi-generate.service /etc/systemd/system/nvidia-cdi-generate.service
 RUN mkdir -p /etc/cdi && \
     systemctl enable nvidia-persistenced && \
+    systemctl enable nvidia-cdi-generate.service && \
     bootc container lint
 
 # Define required labels for this bootc image to be recognized as such

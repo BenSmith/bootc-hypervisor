@@ -91,6 +91,8 @@ build-base-local:
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
   -t localhost/hypervisor-bootc:latest \
+  -t box:5000/hypervisor-bootc:latest \
+  -t box:5000/hypervisor-bootc:local \
   -f hypervisor.Containerfile .
 
 build-nvidia-rpmfusion:
@@ -129,6 +131,8 @@ build-amd-local: build-base-local
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-amd:local \
+  -t box:5000/hypervisor-amd:latest \
+  -t box:5000/hypervisor-amd:local \
   -f hypervisor-amd.Containerfile .
 
 build-nvidia-rpmfusion-local: build-base-local
@@ -175,6 +179,32 @@ build-iso-base rootfs="xfs":
       --store /store \
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-bootc
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
+  @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
+
+build-iso-base-local rootfs="xfs":
+  @mkdir -p store output/base rpmmd
+  @echo "Copying image to rootful storage..."
+  sudo podman pull box:5000/hypervisor-bootc:latest
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config.toml:/config.toml:ro \
+    -v $(pwd)/output/base:/output \
+    -v $(pwd)/rpmmd:/rpmmd \
+    -v $(pwd)/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs {{rootfs}} \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type anaconda-iso \
+    box:5000/hypervisor-bootc
   @echo "Relabeling and copying ISO..."
   @just relabel-iso output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
   @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
