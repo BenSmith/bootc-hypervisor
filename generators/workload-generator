@@ -252,7 +252,7 @@ def generate_system_service(workload_id, config, uid, user_name):
         "ExecStartPre=+/usr/bin/systemd-sysusers",
         "ExecStartPre=+/usr/bin/systemctl --quiet restart workload-setup.service",
         "",
-    ]
+    ])
 
     # Add image pull command unless policy is "never"
     if pull_policy != "never":

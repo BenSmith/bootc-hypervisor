@@ -1,2 +1,8 @@
+[[customizations.user]]
+name = "ben"
+groups = ["wheel"]
+key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC0zKTiPFRXDjvDYvBXFY3yuhKfe+8Z6DYs+iqtfxGwH ben@tp"
+
 [customizations.installer.kickstart]
 contents = ""
+

@@ -89,6 +89,7 @@ build-base-local:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --network=host \
+  --layers=false \
   --from localhost/fedora-bootc-minimal:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
