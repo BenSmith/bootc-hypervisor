@@ -157,7 +157,19 @@ RUN dnf clean all && \
 # Ensure device access groups exist
 RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
+    printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
+    printf 'g workloads - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
+
+# Configure passwordless sudo for wheel group
+RUN echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel-nopasswd && \
+    chmod 0440 /etc/sudoers.d/wheel-nopasswd
+
+# Create directory for workload configs
+# Note: Per-user quadlet files go in /run/containers/systemd/users/{uid}/ (created by generator)
+RUN mkdir -p /etc/workloads.d
+
+# Copy example workload configurations (disabled by default)
+COPY workloads.d/ /etc/workloads.d/
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
