@@ -6,6 +6,10 @@ LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/
 COPY policy.json /etc/containers/policy.json
 COPY freeipmi.conf /usr/lib/tmpfiles.d/freeipmi.conf
 
+# Configure local registry for development (libvirt default bridge IP)
+RUN printf '[[registry]]\nlocation = "registry.local:5000"\ninsecure = true\n' > \
+    /etc/containers/registries.conf.d/local-registry.conf
+
 RUN rm -f /etc/yum.repos.d/fedora-cisco-openh264.repo || true
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
@@ -100,6 +104,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     podman-compose \
     podman-docker \
     polkit \
+    policycoreutils-python-utils \
     prometheus-node-exporter \
     qemu-img \
     qemu-kvm \
@@ -162,11 +167,30 @@ RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
 
 # Configure passwordless sudo for wheel group
 RUN echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel-nopasswd && \
-    chmod 0440 /etc/sudoers.d/wheel-nopasswd
+    chmod 0440 /etc/sudoers.d/wheel-nopasswd && \
+    echo '192.168.122.1 registry.local' >> /etc/hosts && \
+    echo '192.168.0.64 box' >> /etc/hosts
 
-# Create directory for workload configs
-# Note: Per-user quadlet files go in /run/containers/systemd/users/{uid}/ (created by generator)
-RUN mkdir -p /etc/workloads.d
+
+# Install workload provisioning system
+# Copy generator and setup service
+COPY generators/workload-generator /usr/lib/systemd/system-generators/
+COPY services/workload-setup.service /usr/lib/systemd/system/
+COPY services/workload-setup.py /usr/lib/systemd/
+COPY services/workload-ctl /usr/local/bin/
+
+# Set executable permissions
+RUN chmod +x /usr/lib/systemd/system-generators/workload-generator && \
+    chmod +x /usr/lib/systemd/workload-setup.py && \
+    chmod +x /usr/local/bin/workload-ctl
+
+# Enable setup service
+RUN systemctl enable workload-setup.service
+
+# Create workload directory and tmpfiles.d config
+RUN mkdir -p /var/lib/workloads /etc/workloads.d && \
+    printf 'd /var/lib/workloads 0755 root root - -\n' > \
+    /usr/lib/tmpfiles.d/workloads.conf
 
 # Copy example workload configurations (disabled by default)
 COPY workloads.d/ /etc/workloads.d/
