@@ -1,0 +1,348 @@
+#!/usr/bin/python3
+"""
+Systemd generator for dynamic rootless workload provisioning.
+Reads workload configs from /etc/workloads.d/*.toml and generates:
+- systemd-sysusers configs for user creation
+- podman quadlet configs in per-user directories
+- enables lingering for each workload user
+"""
+
+# Early logging before any imports
+def _early_log(msg):
+    """Log to kmsg before imports complete"""
+    try:
+        with open("/dev/kmsg", "w") as kmsg:
+            kmsg.write(f"<6>workload-generator[EARLY]: {msg}\n")
+    except:
+        pass  # Silently fail if kmsg unavailable
+
+_early_log("Generator invoked")
+
+import sys
+# Disable bytecode generation - /usr is read-only on bootc systems
+sys.dont_write_bytecode = True
+
+_early_log("Python imports starting")
+
+try:
+    import os
+    import tomllib
+    import traceback
+    import subprocess
+    from pathlib import Path
+    _early_log("Python imports complete")
+except Exception as e:
+    _early_log(f"Import failed: {e}")
+    raise
+
+# Generator arguments from systemd
+NORMAL_DIR = sys.argv[1] if len(sys.argv) > 1 else "/tmp"
+EARLY_DIR = sys.argv[2] if len(sys.argv) > 2 else "/tmp"
+
+# Allow override for testing
+WORKLOAD_CONFIG_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d"))
+# Sysusers configs must go in /run/sysusers.d/ for systemd-sysusers to find them
+# (NOT in generator.early - that's only for unit files)
+SYSUSERS_DIR = Path("/run/sysusers.d")
+# System service files go in NORMAL_DIR (passed by systemd as first argument)
+# This will be /run/systemd/system/ or similar
+SERVICES_DIR = Path(NORMAL_DIR) if len(sys.argv) > 1 else Path("/run/systemd/system")
+
+
+def log_msg(msg, level="info"):
+    """Log to kernel message buffer (available during generator execution).
+
+    Systemd generators run very early and cannot rely on journald.
+    Use /dev/kmsg which is always available.
+
+    Messages will appear in dmesg and eventually in the journal.
+    """
+    # kmsg priority levels (same as syslog)
+    # 3=err, 4=warning, 5=notice, 6=info, 7=debug
+    priority_map = {
+        "err": 3,
+        "warning": 4,
+        "notice": 5,
+        "info": 6,
+        "debug": 7
+    }
+    priority = priority_map.get(level, 6)
+
+    try:
+        with open("/dev/kmsg", "w") as kmsg:
+            kmsg.write(f"<{priority}>workload-generator: {msg}\n")
+    except Exception:
+        # Fallback to stderr if kmsg unavailable (e.g., testing)
+        print(f"workload-generator: {msg}", file=sys.stderr, flush=True)
+
+
+def validate_username(username):
+    """Validate username meets system requirements.
+
+    Linux username constraints:
+    - Max 32 characters (LOGIN_NAME_MAX)
+    - Must start with letter or underscore
+    - Can contain: lowercase letters, digits, underscore, dash
+    """
+    max_len = 32
+
+    if len(username) > max_len:
+        raise ValueError(
+            f"Username '{username}' is {len(username)} chars "
+            f"(max {max_len}). Use a shorter workload name."
+        )
+
+    # Username requirements: must start with letter or underscore
+    if not username[0].isalpha() and username[0] != '_':
+        raise ValueError(f"Username must start with letter or underscore")
+
+    # Check valid characters: lowercase alphanumeric, underscore, dash
+    import re
+    if not re.match(r'^[a-z_][a-z0-9_-]*$', username):
+        raise ValueError(
+            f"Username '{username}' contains invalid characters. "
+            f"Use only lowercase letters, numbers, underscore, dash."
+        )
+
+    return True
+
+def generate_sysuser_config(workload_id, config):
+    """Generate systemd-sysusers config for workload user.
+
+    Returns tuple of (config_content, uid, username)
+    """
+    name = config["workload"]["name"]
+    user_name = f"_wl-{name}-{workload_id}"
+    home_dir = config.get("storage", {}).get("home", f"/var/lib/workloads/{name}-{workload_id}")
+
+    # Validate username meets system requirements
+    validate_username(user_name)
+
+    # Assign deterministic UID based on workload ID
+    # Base UID 10000, stays below DynamicUser range (60000-64999)
+    base_uid = 10000
+    try:
+        uid = base_uid + int(workload_id)
+    except ValueError:
+        # If workload_id is not numeric, hash it to get a number
+        uid = base_uid + (hash(workload_id) % 50000)
+
+    extra_groups = config.get("security", {}).get("extra_groups", [])
+
+    lines = [
+        f"# Workload user for {name} (ID: {workload_id})",
+        f"u {user_name} {uid} \"{name} workload\" {home_dir}",
+    ]
+
+    # Add to workloads group (for linger management)
+    lines.append(f"m {user_name} workloads")
+
+    # Add additional group memberships
+    for group in extra_groups:
+        lines.append(f"m {user_name} {group}")
+
+    return "\n".join(lines) + "\n", uid, user_name
+
+
+def generate_system_service(workload_id, config, uid, user_name):
+    """Generate systemd system service for rootless podman execution."""
+    name = config["workload"]["name"]
+    container_name = f"workload-{name}-{workload_id}"
+    home_dir = config.get("storage", {}).get("home", f"/var/lib/workloads/{name}-{workload_id}")
+
+    image = config["container"]["image"]
+    command = config["container"].get("command", None)
+    pull_policy = config["container"].get("pull", "missing")  # missing, always, newer, never
+    gpu_type = config.get("gpu", {}).get("type", "none")
+
+    # Get GID from UID (same for our workload users)
+    gid = uid
+
+    # Build Unit section
+    lines = [
+        f"# Rootless workload service for {name}",
+        "# Generated by workload-generator",
+        "",
+        "[Unit]",
+        f"Description={name} rootless workload (UID {uid})",
+        "After=network.target workload-setup.service",
+        "Requires=workload-setup.service",
+    ]
+
+    # Add dependency on nvidia-cdi-generate if using nvidia
+    if gpu_type == "nvidia":
+        lines.append("After=nvidia-cdi-generate.service")
+
+    # Build podman run command arguments
+    podman_args = [
+        "/usr/bin/podman run",
+        f"--name {container_name}",
+        "--rm",
+        "--sdnotify=conmon",
+        "--userns=keep-id",
+        "--group-add=keep-groups",
+    ]
+
+    # GPU devices
+    if gpu_type == "amd":
+        podman_args.extend([
+            "--device /dev/kfd",
+            "--device /dev/dri",
+        ])
+    elif gpu_type == "nvidia":
+        nvidia_devices = config.get("gpu", {}).get("devices", "all")
+        podman_args.extend([
+            f"--device=nvidia.com/gpu={nvidia_devices}",
+            "--device /dev/dri",
+        ])
+
+    # Input devices
+    devices_config = config.get("devices", {})
+    if devices_config.get("input", False):
+        podman_args.extend([
+            "--device /dev/input",
+            "--device /dev/uinput",
+        ])
+
+    # Network configuration
+    # Default to host networking - pasta port forwarding doesn't work correctly
+    # for rootless containers from system services
+    network_config = config.get("network", {})
+    network_mode = network_config.get("mode", "host")
+
+    if network_mode == "host":
+        podman_args.append("--network=host")
+    else:
+        # Pasta mode (may have port forwarding issues with system services)
+        podman_args.append("--network=pasta")
+        # Add port mappings
+        for port in network_config.get("ports", []):
+            podman_args.append(f"--publish {port}")
+
+    # Volumes (no SELinux labeling - rootless containers in system services can't relabel)
+    podman_args.append(f"--volume {home_dir}:/data:rw")
+    for volume in config.get("storage", {}).get("volumes", []):
+        podman_args.append(f"--volume {volume}")
+
+    # Image
+    podman_args.append(image)
+
+    # Command override
+    if command:
+        if isinstance(command, list):
+            podman_args.extend(command)
+        else:
+            podman_args.append(command)
+
+    # Join all args into single line command (systemd doesn't support backslash continuations)
+    podman_cmd = " ".join(podman_args)
+
+    # Build Service section
+    lines.extend([
+        "",
+        "[Service]",
+        "Type=notify",
+        "NotifyAccess=all",
+        f"User={user_name}",
+        f"Group={user_name}",
+        f"Environment=HOME={home_dir}",
+        f"Environment=XDG_RUNTIME_DIR=/run/user/{uid}",
+        "",
+        "# Ensure user is created and configured (runs as root with + prefix)",
+        "ExecStartPre=+/usr/bin/systemd-sysusers",
+        "ExecStartPre=+/usr/bin/systemctl --quiet restart workload-setup.service",
+        "",
+    ]
+
+    # Add image pull command unless policy is "never"
+    if pull_policy != "never":
+        lines.extend([
+            f"# Pull image before starting (pull={pull_policy}, runs as workload user)",
+            f"ExecStartPre=/usr/bin/podman pull --pull={pull_policy} {image}",
+            "",
+        ])
+
+    lines.extend([
+        "# Run container",
+        f"ExecStart={podman_cmd}",
+        "",
+        f"ExecStop=/usr/bin/podman stop -t 10 {container_name}",
+        "",
+        "Restart=on-failure",
+        "RestartSec=5s",
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
+        "TimeoutStartSec=300",
+        "TimeoutStopSec=30",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "",
+    ])
+
+    return "\n".join(lines)
+
+
+def main():
+    """Main generator logic."""
+    log_msg(f"Checking {WORKLOAD_CONFIG_DIR}")
+    if not WORKLOAD_CONFIG_DIR.exists():
+        log_msg("Workload config dir does not exist, exiting")
+        return
+
+    # Ensure output directories exist
+    log_msg(f"Creating directories: {SYSUSERS_DIR}")
+    SYSUSERS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Process each workload config
+    config_files = list(WORKLOAD_CONFIG_DIR.glob("*.toml"))
+    log_msg(f"Found {len(config_files)} config files")
+
+    for config_file in config_files:
+        try:
+            log_msg(f"Processing {config_file}")
+            with open(config_file, "rb") as f:
+                config = tomllib.load(f)
+
+            # Skip disabled workloads
+            enabled = config.get("workload", {}).get("enabled", True)
+            if not enabled:
+                log_msg(f"  Skipping {config_file} (disabled)")
+                continue
+
+            name = config["workload"]["name"]
+            workload_id = config["container"]["id"]
+            log_msg(f"  Creating workload {name}-{workload_id}")
+
+            # Generate sysusers config
+            sysuser_content, uid, user_name = generate_sysuser_config(workload_id, config)
+            sysuser_file = SYSUSERS_DIR / f"workload-{name}-{workload_id}.conf"
+            sysuser_file.write_text(sysuser_content)
+            log_msg(f"  Created sysusers config with UID {uid}")
+
+            # Ensure services directory exists
+            SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Generate system service
+            service_content = generate_system_service(workload_id, config, uid, user_name)
+            service_file = SERVICES_DIR / f"workload-{name}-{workload_id}.service"
+            service_file.write_text(service_content)
+            log_msg(f"  Created system service at {service_file}")
+            # Note: Service is not auto-enabled - use 'systemctl enable' or 'workload-ctl enable'
+
+        except Exception as e:
+            # Log errors but don't fail the boot
+            log_msg(f"ERROR processing {config_file}: {e}", level="err")
+            log_msg(traceback.format_exc(), level="err")
+            continue
+
+
+if __name__ == "__main__":
+    try:
+        log_msg("Starting rootless workload generator", level="notice")
+        main()
+        log_msg("Generator completed successfully", level="notice")
+    except Exception as e:
+        log_msg(f"FATAL ERROR: {e}", level="err")
+        log_msg(traceback.format_exc(), level="err")
+        sys.exit(1)

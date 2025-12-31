@@ -1,0 +1,25 @@
+# Simple test workload - nginx web server (rootless-compatible)
+# No GPU or special hardware needed
+
+[workload]
+name = "webserver"
+enabled = false
+
+[container]
+# Use nginx-unprivileged image designed for rootless containers
+# This image runs nginx on port 8080 internally (not 80)
+image = "192.168.122.1:5000/nginxinc/nginx-unprivileged:alpine"
+id = "1"  # Becomes UID 10001 (base 10000 + id)
+
+[gpu]
+type = "none"
+
+[devices]
+input = false
+
+[security]
+extra_groups = []
+
+[network]
+# nginx-unprivileged listens on port 8080 internally
+ports = ["8080:8080"]

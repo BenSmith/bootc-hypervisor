@@ -1,0 +1,248 @@
+#!/bin/bash
+# Workload management helper for rootless system workloads
+# Usage: workload-ctl {enable|disable|restart|status|list} [workload-name]
+
+set -e
+
+WORKLOAD_DIR="/etc/workloads.d"
+
+print_usage() {
+    cat << EOF
+Usage: workload-ctl <command> [options] [workload-name]
+
+Commands:
+  enable <name>          - Enable and start a workload
+  disable [--purge] <name> - Stop and disable a workload
+                           --purge: Also remove user, home, and subuid/subgid
+  restart <name>         - Restart a running workload
+  status <name>          - Show workload service status
+  list                   - List all available workloads
+
+Examples:
+  workload-ctl enable webserver
+  workload-ctl disable webserver
+  workload-ctl disable --purge webserver
+  workload-ctl status webserver
+  workload-ctl list
+EOF
+}
+
+ensure_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: This command must be run as root (use sudo)" >&2
+        exit 1
+    fi
+}
+
+get_workload_id() {
+    local name=$1
+    local config="$WORKLOAD_DIR/$name.toml"
+
+    if [[ ! -f "$config" ]]; then
+        echo "Error: Workload config not found: $config" >&2
+        exit 1
+    fi
+
+    # Extract ID from TOML (handles whitespace and quoted/unquoted values)
+    local id=$(grep '^id[[:space:]]*=' "$config" | head -1 | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
+    if [[ -z "$id" ]]; then
+        echo "Error: Could not find 'id' in $config" >&2
+        exit 1
+    fi
+
+    echo "$id"
+}
+
+cmd_enable() {
+    ensure_root
+    local name=$1
+
+    if [[ -z "$name" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local config="$WORKLOAD_DIR/$name.toml"
+
+    if [[ ! -f "$config" ]]; then
+        echo "Error: Workload config not found: $config" >&2
+        exit 1
+    fi
+
+    echo "Enabling workload: $name"
+
+    # Enable in config file (handles any whitespace around =)
+    sed -i 's/enabled[[:space:]]*=[[:space:]]*false/enabled = true/' "$config"
+
+    # Reload systemd to pick up changes
+    echo "  Reloading systemd..."
+    systemctl daemon-reload
+
+    # Create user if needed
+    echo "  Running systemd-sysusers..."
+    systemd-sysusers
+
+    # Configure user (subuid/subgid/linger/home)
+    echo "  Configuring workload user..."
+    systemctl restart workload-setup.service
+
+    # Get the workload ID to construct service name
+    local id=$(get_workload_id "$name")
+    local service="workload-$name-$id.service"
+
+    # Enable and start the service
+    echo "  Starting $service..."
+    systemctl enable --now "$service"
+
+    echo "✓ Workload '$name' enabled and started"
+    echo "  Check status: workload-ctl status $name"
+}
+
+cmd_disable() {
+    ensure_root
+    local name=$1
+    local purge=false
+
+    # Check for --purge flag
+    if [[ "$name" == "--purge" ]]; then
+        purge=true
+        name=$2
+    elif [[ "$2" == "--purge" ]]; then
+        purge=true
+    fi
+
+    if [[ -z "$name" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local id=$(get_workload_id "$name")
+    local service="workload-$name-$id.service"
+    local config="$WORKLOAD_DIR/$name.toml"
+    local username="_wl-$name-$id"
+
+    if [[ "$purge" == true ]]; then
+        echo "Disabling and purging workload: $name"
+    else
+        echo "Disabling workload: $name"
+    fi
+
+    # Stop and disable service
+    echo "  Stopping $service..."
+    systemctl disable --now "$service" 2>/dev/null || true
+
+    # Disable in config file (handles any whitespace around =)
+    sed -i 's/enabled[[:space:]]*=[[:space:]]*true/enabled = false/' "$config"
+
+    if [[ "$purge" == true ]]; then
+        # Get user info before deletion
+        local uid=$(id -u "$username" 2>/dev/null || echo "")
+        local home_dir=$(getent passwd "$username" 2>/dev/null | cut -d: -f6 || echo "")
+
+        # Disable linger
+        if [[ -n "$uid" ]]; then
+            echo "  Disabling linger for $username..."
+            loginctl disable-linger "$uid" 2>/dev/null || true
+        fi
+
+        # Remove subuid/subgid entries
+        echo "  Removing subuid/subgid entries..."
+        sed -i "/^$username:/d" /etc/subuid 2>/dev/null || true
+        sed -i "/^$username:/d" /etc/subgid 2>/dev/null || true
+
+        # Remove user
+        echo "  Removing user $username..."
+        userdel "$username" 2>/dev/null || true
+
+        # Remove home directory (if it exists and wasn't removed by userdel)
+        if [[ -n "$home_dir" && -d "$home_dir" ]]; then
+            echo "  Removing home directory $home_dir..."
+            rm -rf "$home_dir"
+        fi
+
+        echo "✓ Workload '$name' disabled and purged (user, home, subuid/subgid removed)"
+    else
+        echo "✓ Workload '$name' disabled and stopped (use --purge to fully remove)"
+    fi
+}
+
+cmd_restart() {
+    ensure_root
+    local name=$1
+
+    if [[ -z "$name" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local id=$(get_workload_id "$name")
+    local service="workload-$name-$id.service"
+
+    echo "Restarting workload: $name"
+    systemctl restart "$service"
+    echo "✓ Workload '$name' restarted"
+}
+
+cmd_status() {
+    local name=$1
+
+    if [[ -z "$name" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local id=$(get_workload_id "$name")
+    local service="workload-$name-$id.service"
+
+    systemctl status "$service"
+}
+
+cmd_list() {
+    echo "Available workloads in $WORKLOAD_DIR:"
+    echo ""
+
+    for config in "$WORKLOAD_DIR"/*.toml; do
+        if [[ ! -f "$config" ]]; then
+            echo "  No workload configs found"
+            break
+        fi
+
+        local filename=$(basename "$config" .toml)
+        local enabled=$(grep '^enabled[[:space:]]*=' "$config" | head -1 | grep -q 'true' && echo "enabled" || echo "disabled")
+        local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
+        local id=$(grep '^id[[:space:]]*=' "$config" | sed -n '/\[container\]/,/\[/p' | grep '^id[[:space:]]*=' | head -1 | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
+
+        printf "  %-20s %-10s (name: %s, id: %s)\n" "$filename" "[$enabled]" "$name" "$id"
+    done
+}
+
+# Main command dispatcher
+case "${1:-}" in
+    enable)
+        cmd_enable "$2"
+        ;;
+    disable)
+        cmd_disable "$2" "$3"
+        ;;
+    restart)
+        cmd_restart "$2"
+        ;;
+    status)
+        cmd_status "$2"
+        ;;
+    list)
+        cmd_list
+        ;;
+    ""|help|-h|--help)
+        print_usage
+        ;;
+    *)
+        echo "Error: Unknown command: $1" >&2
+        print_usage
+        exit 1
+        ;;
+esac
