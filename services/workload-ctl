@@ -43,8 +43,8 @@ get_workload_id() {
         exit 1
     fi
 
-    # Extract ID from TOML (handles whitespace and quoted/unquoted values)
-    local id=$(grep '^id[[:space:]]*=' "$config" | head -1 | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
+    # Extract ID from TOML (handles whitespace, quoted/unquoted values, and strips comments)
+    local id=$(grep '^id[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
     if [[ -z "$id" ]]; then
         echo "Error: Could not find 'id' in $config" >&2
         exit 1
@@ -213,8 +213,8 @@ cmd_list() {
 
         local filename=$(basename "$config" .toml)
         local enabled=$(grep '^enabled[[:space:]]*=' "$config" | head -1 | grep -q 'true' && echo "enabled" || echo "disabled")
-        local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
-        local id=$(grep '^id[[:space:]]*=' "$config" | sed -n '/\[container\]/,/\[/p' | grep '^id[[:space:]]*=' | head -1 | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/')
+        local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
+        local id=$(grep '^id[[:space:]]*=' "$config" | sed -n '/\[container\]/,/\[/p' | grep '^id[[:space:]]*=' | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
 
         printf "  %-20s %-10s (name: %s, id: %s)\n" "$filename" "[$enabled]" "$name" "$id"
     done
