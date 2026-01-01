@@ -170,7 +170,7 @@ COPY generators/workload-generator /usr/lib/systemd/system-generators/
 COPY systemd/workload-setup.service /usr/lib/systemd/system/
 COPY libexec/workload-setup.py /usr/lib/systemd/
 COPY bin/workload-ctl /usr/local/bin/
-COPY completions/workload-ctl /usr/share/bash-completion/completions/workload-ctl
+COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
 
 # Set permissions
 RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
