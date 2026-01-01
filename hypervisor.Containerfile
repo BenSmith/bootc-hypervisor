@@ -186,7 +186,6 @@ COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/complet
 # Copy documentation
 RUN mkdir -p /usr/share/doc/workload-ctl
 COPY docs/workloads.md /usr/share/doc/workload-ctl/
-COPY docs/WORKLOADS-HOMELAB-GUIDE.md /usr/share/doc/workload-ctl/
 COPY workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
 
 # Set permissions

@@ -35,7 +35,7 @@ image = "ghcr.io/example/workload:latest"
 # UID calculation: 10000 + id (e.g., id="1" → UID 10001)
 # Recommendation: Use sequential numbers like "1", "2", "3", etc.
 # Advanced: Can use any number 0-49999 (to stay below DynamicUser range)
-id = "1"
+id = "0"
 
 # Optional: Command to run in container (overrides image CMD)
 # Type: array of strings
