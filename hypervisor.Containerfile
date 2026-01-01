@@ -1,5 +1,8 @@
 FROM ghcr.io/bensmith/fedora-bootc-minimal:43
 
+# Build argument for local development (enables passwordless sudo)
+ARG ENABLE_PASSWORDLESS_SUDO=false
+
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
@@ -163,6 +166,13 @@ RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
 # Copy device groups from /usr/lib/group (immutable) to /etc/group (mutable)
 # This is needed on bootc systems to allow usermod to add workload users to these groups
 RUN grep -E "^(video|render|input):" /usr/lib/group >> /etc/group || true
+
+# Optional: Enable passwordless sudo for local development
+# Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
+RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
+        echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel-nopasswd && \
+        chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
+    fi
 
 # Install workload provisioning system
 # Copy generator and setup service

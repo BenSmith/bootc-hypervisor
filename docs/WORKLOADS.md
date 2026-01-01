@@ -124,6 +124,45 @@ workload-ctl status example-webserver
 ```
 Shows the systemd service status (no sudo needed for read-only status).
 
+**Open interactive shell in container:**
+```bash
+workload-ctl shell example-webserver
+```
+Opens an interactive shell (tries `/bin/bash`, falls back to `/bin/sh`). Useful for debugging, inspecting files, or running ad-hoc commands.
+
+**Execute command in container:**
+```bash
+workload-ctl exec example-webserver ls -la /data
+workload-ctl exec example-webserver cat /etc/os-release
+```
+Runs arbitrary commands inside the container without opening a shell. Perfect for quick inspections or scripting.
+
+**View workload logs:**
+```bash
+workload-ctl logs example-webserver
+workload-ctl logs -f example-webserver              # Follow logs in real-time
+workload-ctl logs -n 50 example-webserver           # Last 50 lines
+workload-ctl logs --since "10 minutes ago" example-webserver
+```
+Shows container logs from systemd journal. Wrapper around `journalctl` with automatic service name lookup.
+
+**Show all running containers:**
+```bash
+workload-ctl ps
+```
+Lists all running workload containers across all users. Shows which user owns each container and their status.
+
+**Equivalent systemctl commands:**
+
+For reference, `workload-ctl` commands map to systemctl:
+```bash
+# These are equivalent:
+workload-ctl restart webserver
+sudo systemctl restart workload-webserver-1.service
+
+# workload-ctl is just more convenient - shorter names, no need to know the ID
+```
+
 ### Manual Enable/Disable (Without workload-ctl)
 
 If you prefer to manage workloads manually or need more control:
@@ -537,6 +576,31 @@ sudo chcon -t container_file_t /path/to/volume
 
 ### Checking Workload Status
 
+**Using workload-ctl (easiest):**
+```bash
+# List all workloads with status
+workload-ctl list
+
+# Check specific workload status
+workload-ctl status example-webserver
+
+# View logs
+workload-ctl logs example-webserver
+workload-ctl logs -f example-webserver  # Follow in real-time
+
+# Show all running containers
+workload-ctl ps
+
+# Open shell in container for debugging
+workload-ctl shell example-webserver
+
+# Run diagnostic commands
+workload-ctl exec example-webserver id
+workload-ctl exec example-webserver df -h
+workload-ctl exec example-webserver ps aux
+```
+
+**Using systemctl and podman directly:**
 ```bash
 # List all workload services
 systemctl list-units 'workload-*'
@@ -555,6 +619,10 @@ id _wl-{name}-{id}
 
 # Check container is running
 sudo -u _wl-{name}-{id} XDG_RUNTIME_DIR=/run/user/{uid} podman ps
+
+# Get shell in container (manual method)
+sudo -u _wl-{name}-{id} XDG_RUNTIME_DIR=/run/user/{uid} \
+  podman exec -it workload-{name}-{id} /bin/sh
 ```
 
 ### Generator Debugging

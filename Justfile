@@ -91,6 +91,7 @@ build-base-local:
   --network=host \
   --layers=false \
   --from localhost/fedora-bootc-minimal:latest \
+  --build-arg ENABLE_PASSWORDLESS_SUDO=true \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
   -t localhost/hypervisor-bootc:latest \

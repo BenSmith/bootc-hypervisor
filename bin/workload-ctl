@@ -11,12 +11,17 @@ print_usage() {
 Usage: workload-ctl <command> [options] [workload-name]
 
 Commands:
-  enable <name>          - Enable and start a workload
-  disable [--purge] <name> - Stop and disable a workload
-                           --purge: Also remove user, home, and subuid/subgid
-  restart <name>         - Restart a running workload
-  status <name>          - Show workload service status
-  list                   - List all available workloads
+  disable [--purge] <name>  - Stop and disable a workload
+                              --purge: Also remove user, home, and subuid/subgid
+  enable <name>             - Enable and start a workload
+  exec <name> <command...>  - Execute command in workload container
+  list                      - List all available workloads
+  logs [options] <name>     - View workload logs (journalctl wrapper)
+                              -f: follow, -n N: last N lines, --since TIME
+  ps                        - Show all running workload containers
+  restart <name>            - Restart a running workload
+  shell <name>              - Open interactive shell in workload container
+  status <name>             - Show workload service status
 
 Examples:
   workload-ctl enable webserver
@@ -24,6 +29,11 @@ Examples:
   workload-ctl disable --purge webserver
   workload-ctl status webserver
   workload-ctl list
+  workload-ctl shell webserver
+  workload-ctl exec webserver ls -la /data
+  workload-ctl logs -f webserver
+  workload-ctl logs -n 50 webserver
+  workload-ctl ps
 EOF
 }
 
@@ -242,28 +252,180 @@ cmd_list() {
         local filename=$(basename "$config" .toml)
         local enabled=$(grep '^enabled[[:space:]]*=' "$config" | head -1 | grep -q 'true' && echo "enabled" || echo "disabled")
         local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
-        local id=$(grep '^id[[:space:]]*=' "$config" | sed -n '/\[container\]/,/\[/p' | grep '^id[[:space:]]*=' | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
+        local id=$(sed -n '/\[container\]/,/\[/p' "$config" | grep '^id[[:space:]]*=' | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
 
         printf "  %-20s %-10s (name: %s, id: %s)\n" "$filename" "[$enabled]" "$name" "$id"
     done
 }
 
+cmd_logs() {
+    # Parse options and workload name
+    local journalctl_opts=()
+    local filename=""
+
+    # Collect all arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*)
+                # It's an option, collect it and its potential argument
+                journalctl_opts+=("$1")
+                shift
+                # Check if next arg is a value for this option (doesn't start with -)
+                if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
+                    # Special handling for options that take values
+                    case "${journalctl_opts[-1]}" in
+                        -n|--lines|--since|--until|-u|--unit|-o|--output|-p|--priority)
+                            journalctl_opts+=("$1")
+                            shift
+                            ;;
+                    esac
+                fi
+                ;;
+            *)
+                # Not an option, must be the workload name
+                filename="$1"
+                shift
+                break
+                ;;
+        esac
+    done
+
+    if [[ -z "$filename" ]]; then
+        echo "Error: Workload name required" >&2
+        echo "Usage: workload-ctl logs [options] <workload>" >&2
+        echo "Examples:" >&2
+        echo "  workload-ctl logs webserver" >&2
+        echo "  workload-ctl logs -f webserver" >&2
+        echo "  workload-ctl logs -n 50 webserver" >&2
+        echo "  workload-ctl logs --since '10 minutes ago' webserver" >&2
+        exit 1
+    fi
+
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
+    local service="workload-$name-$id.service"
+
+    # Run journalctl with collected options
+    journalctl -u "$service" "${journalctl_opts[@]}"
+}
+
+cmd_shell() {
+    local filename=$1
+
+    if [[ -z "$filename" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
+    local username="_wl-$name-$id"
+    local uid=$(id -u "$username" 2>/dev/null || echo "")
+    local container_name="workload-$name-$id"
+
+    if [[ -z "$uid" ]]; then
+        echo "Error: Workload user '$username' does not exist" >&2
+        echo "Is the workload enabled and running?" >&2
+        exit 1
+    fi
+
+    echo "Opening shell in $container_name..."
+    echo "(Try /bin/sh if /bin/bash is not available)"
+    echo ""
+
+    # Try bash first, fall back to sh if bash fails
+    if ! sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
+        podman exec -it "$container_name" /bin/bash 2>/dev/null; then
+        sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
+            podman exec -it "$container_name" /bin/sh
+    fi
+}
+
+cmd_exec() {
+    local filename=$1
+    shift
+
+    if [[ -z "$filename" ]]; then
+        echo "Error: Workload name required" >&2
+        print_usage
+        exit 1
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        echo "Error: Command required" >&2
+        echo "Usage: workload-ctl exec <workload> <command> [args...]" >&2
+        exit 1
+    fi
+
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
+    local username="_wl-$name-$id"
+    local uid=$(id -u "$username" 2>/dev/null || echo "")
+    local container_name="workload-$name-$id"
+
+    if [[ -z "$uid" ]]; then
+        echo "Error: Workload user '$username' does not exist" >&2
+        echo "Is the workload enabled and running?" >&2
+        exit 1
+    fi
+
+    sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
+        podman exec -it "$container_name" "$@"
+}
+
+cmd_ps() {
+    echo "Workload containers:"
+    echo ""
+
+    local found=false
+    for user in $(getent passwd | grep '^_wl-' | cut -d: -f1 | sort); do
+        local uid=$(id -u "$user")
+        local containers=$(sudo -u "$user" XDG_RUNTIME_DIR=/run/user/$uid podman ps --format "{{.Names}}" 2>/dev/null || true)
+
+        if [[ -n "$containers" ]]; then
+            found=true
+            echo "=== $user (UID $uid) ==="
+            sudo -u "$user" XDG_RUNTIME_DIR=/run/user/$uid podman ps
+            echo ""
+        fi
+    done
+
+    if [[ "$found" == "false" ]]; then
+        echo "  No running workload containers found"
+    fi
+}
+
 # Main command dispatcher
 case "${1:-}" in
+    disable)
+        cmd_disable "$2" "$3"
+        ;;
     enable)
         cmd_enable "$2"
         ;;
-    disable)
-        cmd_disable "$2" "$3"
+    exec)
+        shift
+        cmd_exec "$@"
+        ;;
+    list)
+        cmd_list
+        ;;
+    logs)
+        shift
+        cmd_logs "$@"
+        ;;
+    ps)
+        cmd_ps
         ;;
     restart)
         cmd_restart "$2"
         ;;
+    shell)
+        cmd_shell "$2"
+        ;;
     status)
         cmd_status "$2"
-        ;;
-    list)
-        cmd_list
         ;;
     ""|help|-h|--help)
         print_usage
