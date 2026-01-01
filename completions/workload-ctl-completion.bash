@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="enable disable restart status list help"
+    local commands="disable enable exec list logs ps restart shell status help"
     local workload_dir="/etc/workloads.d"
 
     # Get list of workload names (without .toml extension)
@@ -22,7 +22,7 @@ _workload_ctl_completion() {
 
     # Second argument: depends on the command
     case "${words[1]}" in
-        enable|restart|status)
+        enable|restart|status|shell|exec|logs)
             # Complete with workload names
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             return 0
@@ -36,7 +36,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        list|help)
+        list|ps|help)
             # No completion needed
             return 0
             ;;
