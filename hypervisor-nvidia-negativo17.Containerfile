@@ -20,10 +20,10 @@ RUN dnf install --setopt=install_weak_deps=False -y \
 
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot
-COPY services/nvidia-cdi-generate.service /etc/systemd/system/nvidia-cdi-generate.service
+COPY systemd/nvidia-cdi-generator.service /etc/systemd/system/nvidia-cdi-generator.service
 RUN mkdir -p /etc/cdi && \
     systemctl enable nvidia-persistenced && \
-    systemctl enable nvidia-cdi-generate.service && \
+    systemctl enable nvidia-cdi-generator.service && \
     bootc container lint
 
 # Define required labels for this bootc image to be recognized as such

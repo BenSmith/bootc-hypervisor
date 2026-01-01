@@ -183,9 +183,9 @@ def generate_system_service(workload_id, config, uid, user_name):
         "StartLimitBurst=5",
     ]
 
-    # Add dependency on nvidia-cdi-generate if using nvidia
+    # Add dependency on nvidia-cdi-generator if using nvidia
     if gpu_type == "nvidia":
-        lines.append("After=nvidia-cdi-generate.service")
+        lines.append("After=nvidia-cdi-generator.service")
 
     # Build podman run command arguments
     # Quote container name if it has spaces (shouldn't happen, but be safe)
