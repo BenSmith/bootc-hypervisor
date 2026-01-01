@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="disable enable exec list logs ps restart shell status help"
+    local commands="attach cp disable edit enable exec health images info list logs ports ps restart shell stats status update validate help"
     local workload_dir="/etc/workloads.d"
 
     # Get list of workload names (without .toml extension)
@@ -22,7 +22,7 @@ _workload_ctl_completion() {
 
     # Second argument: depends on the command
     case "${words[1]}" in
-        enable|restart|status|shell|exec|logs)
+        attach|edit|enable|exec|health|info|logs|ports|restart|shell|status)
             # Complete with workload names
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             return 0
@@ -34,6 +34,44 @@ _workload_ctl_completion() {
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
+            return 0
+            ;;
+        update)
+            # Complete with --force, --all, or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--force --all" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        validate)
+            # Complete with --all or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--all" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        stats)
+            # Complete with -f, --follow, or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-f --follow" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        images)
+            # Complete with list or prune subcommands
+            COMPREPLY=( $(compgen -W "list prune" -- "$cur") )
+            return 0
+            ;;
+        cp)
+            # Complete with workload:path syntax or files
+            # For now, just do file completion
+            _filedir
             return 0
             ;;
         list|ps|help)

@@ -1,33 +1,86 @@
 # Rootless Workload Provisioning System
 
-## Overview
+## Quick Start
 
-The workload provisioning system allows you to declaratively define long-running containerized workloads that start automatically at boot. Each workload runs as a dedicated system user with rootless podman, providing isolation while maintaining access to host hardware like GPUs and input devices.
+Deploy a web server in 3 simple steps:
 
-## Architecture
-
-```
-Boot Flow:
-1. systemd-generators → workload-generator creates user and service configs
-2. systemd-sysusers.service → creates workload users with group memberships
-3. workload-setup.service → configures subuid/subgid ranges and home directories
-4. workload-{name}-{id}.service → individual containers start
+**1. Create a config file:**
+```bash
+sudo nano /etc/workloads.d/webserver.toml
 ```
 
-### Components
+**2. Add this minimal configuration:**
+```toml
+[workload]
+name = "webserver"
+enabled = true
 
-- **Generator** (`/usr/lib/systemd/system-generators/workload-generator`): Reads TOML configs from `/etc/workloads.d/` and generates systemd-sysusers configs and systemd services
-- **Setup Service** (`workload-setup.service`): Configures subordinate UID/GID ranges, creates home directories, enables linger
-- **Workload Services**: Per-workload systemd services that run `podman run` as dedicated users
+[container]
+image = "docker.io/nginxinc/nginx-unprivileged:alpine"
+id = "1"
 
-### User Management
+[gpu]
+type = "none"
 
-Each enabled workload gets a dedicated user:
-- **Username:** `_wl-{name}-{id}` (e.g., `_wl-webserver-1`)
-- **UID:** `10000 + id` (e.g., id=1 → UID 10001)
-- **Subuid range:** `100000 + (uid_offset * 100000)` with 65536 UIDs
-- **Home directory:** `/var/lib/workloads/{name}-{id}`
-- **Shell:** `/usr/sbin/nologin` (service user, no interactive login)
+[devices]
+input = false
+
+[security]
+extra_groups = []
+
+[network]
+ports = ["8080:8080"]
+```
+
+**3. Enable and start:**
+```bash
+sudo workload-ctl enable webserver
+```
+
+That's it! Your web server is now running, will start automatically at boot, and runs as an isolated unprivileged user with rootless podman.
+
+Check it's running:
+```bash
+workload-ctl status webserver
+curl http://localhost:8080
+```
+
+## What Can You Do?
+
+The `workload-ctl` command gives you Docker/kubectl-like management for your workloads:
+
+```bash
+# List all workloads
+workload-ctl list
+
+# Get detailed info
+workload-ctl info webserver
+
+# View logs in real-time
+workload-ctl logs -f webserver
+
+# Open a shell in the container
+workload-ctl shell webserver
+
+# Update to latest image
+sudo workload-ctl update webserver
+
+# Monitor resource usage
+workload-ctl stats -f
+
+# Check health
+workload-ctl health webserver
+
+# And much more...
+```
+
+**Key benefits:**
+- ✅ Declarative configuration with simple TOML files
+- ✅ Automatic startup at boot via systemd
+- ✅ Rootless containers for security isolation
+- ✅ GPU and hardware device access when needed
+- ✅ Docker/kubectl-like CLI for easy management
+- ✅ No root required for read-only operations
 
 ## Configuration
 
@@ -152,6 +205,98 @@ workload-ctl ps
 ```
 Lists all running workload containers across all users. Shows which user owns each container and their status.
 
+**Update workload image:**
+```bash
+sudo workload-ctl update example-webserver
+sudo workload-ctl update --force example-webserver  # Force pull even if cached
+sudo workload-ctl update --all                      # Update all workloads
+```
+Pulls the latest image and restarts the workload. Shows before/after image IDs. Use `--force` to bypass cache and force a fresh pull. Use `--all` to update all enabled workloads at once.
+
+**Show detailed workload information:**
+```bash
+workload-ctl info example-webserver
+```
+Displays comprehensive information about a workload including container details, user configuration, network settings, storage usage, and service status. No sudo needed for read-only info display. Output includes:
+- Container name, image, and ID
+- User name, UID, home directory, and groups
+- Network mode and port mappings
+- Storage usage
+- Service status and uptime
+- Quick command references
+
+**Validate workload configuration:**
+```bash
+workload-ctl validate example-webserver
+workload-ctl validate --all
+```
+Checks configuration for errors before enabling. Validates:
+- Required fields (name, image, id)
+- Username length (< 32 chars)
+- ID range and uniqueness
+- Volume paths exist
+- System groups exist
+Provides clear error messages and suggested fixes for any issues found.
+
+**Edit workload configuration:**
+```bash
+sudo workload-ctl edit example-webserver
+```
+Opens the workload config in your `$EDITOR` (nano by default). After saving:
+1. Validates the new configuration
+2. Shows a diff of changes
+3. Prompts for confirmation
+4. Applies changes with `daemon-reload` and service restart if confirmed
+
+**Monitor resource usage:**
+```bash
+workload-ctl stats example-webserver
+workload-ctl stats                    # All workloads
+workload-ctl stats -f                 # Follow in real-time
+workload-ctl stats --follow           # Same as -f
+```
+Shows CPU usage, memory usage/limits, network I/O, and block I/O for workload containers. Use `-f` or `--follow` for live updating display.
+
+**Show port information:**
+```bash
+workload-ctl ports example-webserver
+```
+Displays network mode, container ports, and accessibility information. For host networking mode, shows which ports the container listens on and where they're accessible. For pasta mode, shows port mappings.
+
+**Copy files to/from container:**
+```bash
+workload-ctl cp example-webserver:/etc/nginx/nginx.conf ./nginx.conf
+workload-ctl cp ./config.json example-webserver:/app/config.json
+```
+Copies files between the host and container. Use `workload:path` syntax for container paths, similar to `docker cp` and `kubectl cp`.
+
+**Attach to container process:**
+```bash
+workload-ctl attach example-webserver
+```
+Attaches to the container's main process stdin/stdout/stderr. Different from `shell` - this connects to the running process rather than starting a new shell. Use Ctrl+C to detach.
+
+**Manage container images:**
+```bash
+workload-ctl images list             # Show images used by workloads
+workload-ctl images prune            # Remove unused images
+```
+Lists all images used by workloads with size and age information, or cleans up unused images to free disk space. Prune runs `podman image prune` for each workload user.
+
+**Check workload health:**
+```bash
+workload-ctl health example-webserver
+```
+Performs comprehensive health checks on a workload including:
+- Service status (systemd active state)
+- User existence
+- Container running state
+- Port accessibility (tests TCP connections to configured ports)
+- Recent log errors (scans last 100 lines)
+- Uptime information
+
+Returns exit code 0 if healthy, 1 if unhealthy. Supports `--json` for structured output. Perfect for monitoring systems and automated health checks.
+
 **Equivalent systemctl commands:**
 
 For reference, `workload-ctl` commands map to systemctl:
@@ -237,6 +382,37 @@ sudo systemctl restart workload-webserver-1.service
 ```
 
 **Note:** The `daemon-reload` step is important - it re-runs the generator to update the systemd service with new podman arguments.
+
+## Architecture
+
+Understanding how the system works internally:
+
+```
+Boot Flow:
+1. systemd-generators → workload-generator creates user and service configs
+2. systemd-sysusers.service → creates workload users with group memberships
+3. workload-setup.service → configures subuid/subgid ranges and home directories
+4. workload-{name}-{id}.service → individual containers start
+```
+
+### Components
+
+- **Generator** (`/usr/lib/systemd/system-generators/workload-generator`): Reads TOML configs from `/etc/workloads.d/` and generates systemd-sysusers configs and systemd services
+- **Setup Service** (`workload-setup.service`): Configures subordinate UID/GID ranges, creates home directories, enables linger
+- **Workload Services**: Per-workload systemd services that run `podman run` as dedicated users
+- **Management Tool** (`workload-ctl`): Docker/kubectl-like CLI for managing workloads
+
+### User Management
+
+Each enabled workload gets a dedicated system user:
+- **Username:** `_wl-{name}-{id}` (e.g., `_wl-webserver-1`)
+- **UID:** `10000 + id` (e.g., id=1 → UID 10001)
+- **Subuid range:** `100000 + (uid_offset * 100000)` with 65536 UIDs
+- **Home directory:** `/var/lib/workloads/{name}-{id}`
+- **Shell:** `/usr/sbin/nologin` (service user, no interactive login)
+- **Isolation:** Rootless podman with user namespaces, SELinux, and systemd service boundaries
+
+The workload provisioning system allows you to declaratively define long-running containerized workloads that start automatically at boot. Each workload runs as a dedicated system user with rootless podman, providing isolation while maintaining access to host hardware like GPUs and input devices when explicitly configured.
 
 ## Important Limitations and Tradeoffs
 
@@ -397,14 +573,16 @@ sudo sed -i "/^_wl-{name}-{id}:/d" /etc/subuid /etc/subgid
 
 ### 2. Error Messages and Debugging
 
-**Current:** Errors logged to kmsg (dmesg) and journal.
+**Current:** Errors logged to kmsg (dmesg) and journal. Validation available via `workload-ctl validate`.
 
-**Issues:**
+**Implemented:**
+- ✅ `workload-ctl validate` - Pre-flight config validation
+- ✅ `workload-ctl info` - Detailed diagnostic information
+- ✅ Clear error messages with suggested fixes
+
+**Remaining issues:**
 - Generator runs early, errors may not be in journal
-- No clear feedback when configs are invalid
-- Service failures can be cryptic
-
-**Improvement:** Better validation with clear error messages, and a `workload-ctl validate` command.
+- Service failures can still be cryptic without running validation first
 
 ### 3. GPU Support Completeness
 
@@ -584,12 +762,25 @@ workload-ctl list
 # Check specific workload status
 workload-ctl status example-webserver
 
+# Get detailed information
+workload-ctl info example-webserver
+
 # View logs
 workload-ctl logs example-webserver
 workload-ctl logs -f example-webserver  # Follow in real-time
 
+# Monitor resource usage
+workload-ctl stats example-webserver
+workload-ctl stats -f  # All workloads, live updating
+
 # Show all running containers
 workload-ctl ps
+
+# Check port configuration
+workload-ctl ports example-webserver
+
+# Validate configuration
+workload-ctl validate example-webserver
 
 # Open shell in container for debugging
 workload-ctl shell example-webserver
@@ -651,6 +842,10 @@ sudo systemctl restart workload-{name}-{id}
 
 **Force image update:**
 ```bash
+# Easy way with workload-ctl:
+sudo workload-ctl update --force example-webserver
+
+# Manual way:
 sudo -u _wl-{name}-{id} XDG_RUNTIME_DIR=/run/user/{uid} podman pull {image}
 sudo systemctl restart workload-{name}-{id}
 ```
@@ -698,15 +893,21 @@ Consider firewall rules for untrusted workloads.
 
 ## Future Improvements
 
-Potential enhancements:
-1. **Interactive management tool:** `workload-ctl create`, `workload-ctl logs`, etc.
-2. **Better networking:** Solve pasta port forwarding for proper network isolation
-3. **Resource limits:** CPU, memory, storage quotas via systemd
-4. **Health checks:** Automatic restart on container health failures
-5. **Backup/restore:** Built-in snapshot and restore functionality
-6. **Multi-container workloads:** Pod support for related containers
-7. **Template system:** Pre-configured workload templates for common use cases
-8. **Web UI:** Cockpit integration for workload management
+**Implemented features:**
+- ✅ **Interactive management tool:** `workload-ctl` with update, info, validate, edit, stats, cp, ports, images, attach commands
+- ✅ **Resource monitoring:** Real-time stats with `workload-ctl stats`
+- ✅ **Configuration validation:** Pre-flight checks with `workload-ctl validate`
+- ✅ **Image management:** Update and prune commands
+
+**Potential future enhancements:**
+1. **Better networking:** Solve pasta port forwarding for proper network isolation
+2. **Resource limits:** CPU, memory, storage quotas via systemd (can be added to configs)
+3. **Health checks:** Automatic restart on container health failures
+4. **Backup/restore:** Built-in snapshot and restore functionality
+5. **Multi-container workloads:** Pod support for related containers
+6. **Template system:** Pre-configured workload templates with `workload-ctl create`
+7. **Web UI:** Cockpit integration for workload management
+8. **JSON output:** Add `--json` flag for all commands for scripting integration
 
 ## Additional Resources
 
