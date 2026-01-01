@@ -14,7 +14,7 @@ enabled = false  # Set to true to test group preservation
 
 [container]
 # Simple alpine container that sleeps forever (so we can exec into it)
-image = "registry.local:5000/alpine:latest"
+image = "public.ecr.aws/docker/library/alpine:latest"
 id = "2"  # UID 10002
 command = ["sleep", "infinity"]  # Keep container running
 

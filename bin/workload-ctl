@@ -34,9 +34,28 @@ ensure_root() {
     fi
 }
 
+get_workload_name() {
+    local filename=$1
+    local config="$WORKLOAD_DIR/$filename.toml"
+
+    if [[ ! -f "$config" ]]; then
+        echo "Error: Workload config not found: $config" >&2
+        exit 1
+    fi
+
+    # Extract name from TOML (handles whitespace, quoted/unquoted values, and strips comments)
+    local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
+    if [[ -z "$name" ]]; then
+        echo "Error: Could not find 'name' in $config" >&2
+        exit 1
+    fi
+
+    echo "$name"
+}
+
 get_workload_id() {
-    local name=$1
-    local config="$WORKLOAD_DIR/$name.toml"
+    local filename=$1
+    local config="$WORKLOAD_DIR/$filename.toml"
 
     if [[ ! -f "$config" ]]; then
         echo "Error: Workload config not found: $config" >&2
@@ -55,22 +74,22 @@ get_workload_id() {
 
 cmd_enable() {
     ensure_root
-    local name=$1
+    local filename=$1
 
-    if [[ -z "$name" ]]; then
+    if [[ -z "$filename" ]]; then
         echo "Error: Workload name required" >&2
         print_usage
         exit 1
     fi
 
-    local config="$WORKLOAD_DIR/$name.toml"
+    local config="$WORKLOAD_DIR/$filename.toml"
 
     if [[ ! -f "$config" ]]; then
         echo "Error: Workload config not found: $config" >&2
         exit 1
     fi
 
-    echo "Enabling workload: $name"
+    echo "Enabling workload: $filename"
 
     # Enable in config file (handles any whitespace around =)
     sed -i 's/enabled[[:space:]]*=[[:space:]]*false/enabled = true/' "$config"
@@ -85,55 +104,59 @@ cmd_enable() {
 
     # Configure user (subuid/subgid/linger/home)
     echo "  Configuring workload user..."
-    systemctl restart workload-setup.service
+    systemctl start workload-setup.service
 
-    # Get the workload ID to construct service name
-    local id=$(get_workload_id "$name")
+    # Get the workload name and ID from TOML to construct service name
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
     local service="workload-$name-$id.service"
 
-    # Enable and start the service
+    # Start the service (generator already created the enable symlink)
     echo "  Starting $service..."
-    systemctl enable --now "$service"
+    echo "  (Image pull may take a few minutes on first start)"
+    systemctl start --no-block "$service"
 
-    echo "✓ Workload '$name' enabled and started"
-    echo "  Check status: workload-ctl status $name"
+    echo "✓ Workload '$filename' enabled and starting"
+    echo "  Check status: workload-ctl status $filename"
+    echo "  Watch logs: sudo journalctl -fu $service"
 }
 
 cmd_disable() {
     ensure_root
-    local name=$1
+    local filename=$1
     local purge=false
 
     # Check for --purge flag
-    if [[ "$name" == "--purge" ]]; then
+    if [[ "$filename" == "--purge" ]]; then
         purge=true
-        name=$2
+        filename=$2
     elif [[ "$2" == "--purge" ]]; then
         purge=true
     fi
 
-    if [[ -z "$name" ]]; then
+    if [[ -z "$filename" ]]; then
         echo "Error: Workload name required" >&2
         print_usage
         exit 1
     fi
 
-    local id=$(get_workload_id "$name")
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
     local service="workload-$name-$id.service"
-    local config="$WORKLOAD_DIR/$name.toml"
+    local config="$WORKLOAD_DIR/$filename.toml"
     local username="_wl-$name-$id"
 
     if [[ "$purge" == true ]]; then
-        echo "Disabling and purging workload: $name"
+        echo "Disabling and purging workload: $filename"
     else
-        echo "Disabling workload: $name"
+        echo "Disabling workload: $filename"
     fi
 
-    # Stop and disable service
+    # Stop service
     echo "  Stopping $service..."
-    systemctl disable --now "$service" 2>/dev/null || true
+    systemctl stop "$service" 2>/dev/null || true
 
-    # Disable in config file (handles any whitespace around =)
+
     sed -i 's/enabled[[:space:]]*=[[:space:]]*true/enabled = false/' "$config"
 
     if [[ "$purge" == true ]]; then
@@ -141,10 +164,13 @@ cmd_disable() {
         local uid=$(id -u "$username" 2>/dev/null || echo "")
         local home_dir=$(getent passwd "$username" 2>/dev/null | cut -d: -f6 || echo "")
 
-        # Disable linger
+        # Terminate user sessions and disable linger
         if [[ -n "$uid" ]]; then
-            echo "  Disabling linger for $username..."
+            echo "  Terminating user sessions for $username..."
+            loginctl terminate-user "$uid" 2>/dev/null || true
             loginctl disable-linger "$uid" 2>/dev/null || true
+            # Give systemd time to clean up
+            sleep 1
         fi
 
         # Remove subuid/subgid entries
@@ -152,9 +178,9 @@ cmd_disable() {
         sed -i "/^$username:/d" /etc/subuid 2>/dev/null || true
         sed -i "/^$username:/d" /etc/subgid 2>/dev/null || true
 
-        # Remove user
+        # Remove user (with force flag to handle any remaining processes)
         echo "  Removing user $username..."
-        userdel "$username" 2>/dev/null || true
+        userdel -f "$username" 2>/dev/null || true
 
         # Remove home directory (if it exists and wasn't removed by userdel)
         if [[ -n "$home_dir" && -d "$home_dir" ]]; then
@@ -162,40 +188,42 @@ cmd_disable() {
             rm -rf "$home_dir"
         fi
 
-        echo "✓ Workload '$name' disabled and purged (user, home, subuid/subgid removed)"
+        echo "✓ Workload '$filename' disabled and purged (user, home, subuid/subgid removed)"
     else
-        echo "✓ Workload '$name' disabled and stopped (use --purge to fully remove)"
+        echo "✓ Workload '$filename' disabled and stopped (use --purge to fully remove)"
     fi
 }
 
 cmd_restart() {
     ensure_root
-    local name=$1
+    local filename=$1
 
-    if [[ -z "$name" ]]; then
+    if [[ -z "$filename" ]]; then
         echo "Error: Workload name required" >&2
         print_usage
         exit 1
     fi
 
-    local id=$(get_workload_id "$name")
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
     local service="workload-$name-$id.service"
 
-    echo "Restarting workload: $name"
+    echo "Restarting workload: $filename"
     systemctl restart "$service"
-    echo "✓ Workload '$name' restarted"
+    echo "✓ Workload '$filename' restarted"
 }
 
 cmd_status() {
-    local name=$1
+    local filename=$1
 
-    if [[ -z "$name" ]]; then
+    if [[ -z "$filename" ]]; then
         echo "Error: Workload name required" >&2
         print_usage
         exit 1
     fi
 
-    local id=$(get_workload_id "$name")
+    local name=$(get_workload_name "$filename")
+    local id=$(get_workload_id "$filename")
     local service="workload-$name-$id.service"
 
     systemctl status "$service"

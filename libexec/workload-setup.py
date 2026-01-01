@@ -242,6 +242,7 @@ def main():
     setup_selinux_policy()
 
     # Configure subuid/subgid, create home dirs, and enable linger for each enabled workload
+    # Note: Group memberships are handled by systemd-sysusers 'm' directives in the generator
     for username in enabled_users:
         if not user_exists(username):
             log(f"  WARNING: User {username} does not exist (should have been created by sysusers)")

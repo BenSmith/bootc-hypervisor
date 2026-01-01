@@ -6,10 +6,6 @@ LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/
 COPY policy.json /etc/containers/policy.json
 COPY freeipmi.conf /usr/lib/tmpfiles.d/freeipmi.conf
 
-# Configure local registry for development (libvirt default bridge IP)
-RUN printf '[[registry]]\nlocation = "registry.local:5000"\ninsecure = true\n' > \
-    /etc/containers/registries.conf.d/local-registry.conf
-
 RUN rm -f /etc/yum.repos.d/fedora-cisco-openh264.repo || true
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
@@ -162,27 +158,25 @@ RUN dnf clean all && \
 # Ensure device access groups exist
 RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g workloads - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
+    printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
 
-# Configure passwordless sudo for wheel group
-RUN echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel-nopasswd && \
-    chmod 0440 /etc/sudoers.d/wheel-nopasswd && \
-    echo '192.168.122.1 registry.local' >> /etc/hosts && \
-    echo '192.168.0.64 box' >> /etc/hosts
-
+# Copy device groups from /usr/lib/group (immutable) to /etc/group (mutable)
+# This is needed on bootc systems to allow usermod to add workload users to these groups
+RUN grep -E "^(video|render|input):" /usr/lib/group >> /etc/group || true
 
 # Install workload provisioning system
 # Copy generator and setup service
 COPY generators/workload-generator /usr/lib/systemd/system-generators/
-COPY services/workload-setup.service /usr/lib/systemd/system/
-COPY services/workload-setup.py /usr/lib/systemd/
-COPY services/workload-ctl /usr/local/bin/
+COPY systemd/workload-setup.service /usr/lib/systemd/system/
+COPY libexec/workload-setup.py /usr/lib/systemd/
+COPY bin/workload-ctl /usr/local/bin/
+COPY completions/workload-ctl /usr/share/bash-completion/completions/workload-ctl
 
-# Set executable permissions
-RUN chmod +x /usr/lib/systemd/system-generators/workload-generator && \
-    chmod +x /usr/lib/systemd/workload-setup.py && \
-    chmod +x /usr/local/bin/workload-ctl
+# Set permissions
+RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
+    chmod 0755 /usr/lib/systemd/workload-setup.py && \
+    chmod 0755 /usr/local/bin/workload-ctl && \
+    chmod 0644 /usr/share/bash-completion/completions/workload-ctl
 
 # Enable setup service
 RUN systemctl enable workload-setup.service
