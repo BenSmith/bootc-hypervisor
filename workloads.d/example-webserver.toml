@@ -8,7 +8,7 @@ enabled = false
 [container]
 # Use nginx-unprivileged image designed for rootless containers
 # This image runs nginx on port 8080 internally (not 80)
-image = "registry.local:5000/nginxinc/nginx-unprivileged:alpine"
+image = "docker.io/nginxinc/nginx-unprivileged:alpine"
 id = "1"  # Becomes UID 10001 (base 10000 + id)
 
 [gpu]

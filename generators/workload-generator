@@ -29,6 +29,7 @@ try:
     import tomllib
     import traceback
     import subprocess
+    import shlex
     from pathlib import Path
     _early_log("Python imports complete")
 except Exception as e:
@@ -134,14 +135,24 @@ def generate_sysuser_config(workload_id, config):
         f"u {user_name} {uid} \"{name} workload\" {home_dir}",
     ]
 
-    # Add to workloads group (for linger management)
-    lines.append(f"m {user_name} workloads")
-
-    # Add additional group memberships
+    # Add group memberships for device access
     for group in extra_groups:
         lines.append(f"m {user_name} {group}")
 
     return "\n".join(lines) + "\n", uid, user_name
+
+
+def get_group_gid(group_name):
+    """Get GID for a group name by reading /etc/group."""
+    try:
+        with open("/etc/group", "r") as f:
+            for line in f:
+                parts = line.strip().split(":")
+                if len(parts) >= 3 and parts[0] == group_name:
+                    return int(parts[2])
+    except Exception:
+        pass
+    return None
 
 
 def generate_system_service(workload_id, config, uid, user_name):
@@ -154,6 +165,7 @@ def generate_system_service(workload_id, config, uid, user_name):
     command = config["container"].get("command", None)
     pull_policy = config["container"].get("pull", "missing")  # missing, always, newer, never
     gpu_type = config.get("gpu", {}).get("type", "none")
+    extra_groups = config.get("security", {}).get("extra_groups", [])
 
     # Get GID from UID (same for our workload users)
     gid = uid
@@ -167,6 +179,8 @@ def generate_system_service(workload_id, config, uid, user_name):
         f"Description={name} rootless workload (UID {uid})",
         "After=network.target workload-setup.service",
         "Requires=workload-setup.service",
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
     ]
 
     # Add dependency on nvidia-cdi-generate if using nvidia
@@ -174,14 +188,26 @@ def generate_system_service(workload_id, config, uid, user_name):
         lines.append("After=nvidia-cdi-generate.service")
 
     # Build podman run command arguments
+    # Quote container name if it has spaces (shouldn't happen, but be safe)
+    container_name_quoted = shlex.quote(container_name) if ' ' in container_name else container_name
     podman_args = [
         "/usr/bin/podman run",
-        f"--name {container_name}",
+        f"--name {container_name_quoted}",
         "--rm",
         "--sdnotify=conmon",
+        f"--pull={pull_policy}",
         "--userns=keep-id",
-        "--group-add=keep-groups",
     ]
+
+    # Add explicit group GIDs for device access (host GIDs, not container GIDs)
+    # This allows the container to access host devices with these group permissions
+    for group in extra_groups:
+        gid = get_group_gid(group)
+        if gid is not None:
+            podman_args.append(f"--group-add={gid}")
+        else:
+            # Log to kmsg for debugging
+            kmsg(f"WARNING: Group '{group}' not found in /etc/group, skipping")
 
     # GPU devices
     if gpu_type == "amd":
@@ -220,21 +246,34 @@ def generate_system_service(workload_id, config, uid, user_name):
             podman_args.append(f"--publish {port}")
 
     # Volumes (no SELinux labeling - rootless containers in system services can't relabel)
-    podman_args.append(f"--volume {home_dir}:/data:rw")
+    # Quote paths that might contain spaces
+    home_dir_quoted = shlex.quote(home_dir) if ' ' in home_dir else home_dir
+    podman_args.append(f"--volume {home_dir_quoted}:/data:rw")
     for volume in config.get("storage", {}).get("volumes", []):
+        # Volume format: "host_path:container_path:options"
+        # Only quote the host path part if needed
+        if ':' in volume:
+            parts = volume.split(':', 2)
+            parts[0] = shlex.quote(parts[0]) if ' ' in parts[0] else parts[0]
+            volume = ':'.join(parts)
+        else:
+            volume = shlex.quote(volume) if ' ' in volume else volume
         podman_args.append(f"--volume {volume}")
 
-    # Image
-    podman_args.append(image)
+    # Image (quote if it contains spaces)
+    image_quoted = shlex.quote(image) if ' ' in image else image
+    podman_args.append(image_quoted)
 
     # Command override
     if command:
         if isinstance(command, list):
-            podman_args.extend(command)
+            # Quote each command argument that might contain spaces
+            podman_args.extend([shlex.quote(arg) if ' ' in arg else arg for arg in command])
         else:
-            podman_args.append(command)
+            podman_args.append(shlex.quote(command) if ' ' in command else command)
 
     # Join all args into single line command (systemd doesn't support backslash continuations)
+    # Arguments with spaces are already quoted
     podman_cmd = " ".join(podman_args)
 
     # Build Service section
@@ -250,28 +289,21 @@ def generate_system_service(workload_id, config, uid, user_name):
         "",
         "# Ensure user is created and configured (runs as root with + prefix)",
         "ExecStartPre=+/usr/bin/systemd-sysusers",
-        "ExecStartPre=+/usr/bin/systemctl --quiet restart workload-setup.service",
+        "ExecStartPre=+/usr/bin/systemctl --quiet start workload-setup.service",
         "",
     ])
 
-    # Add image pull command unless policy is "never"
-    if pull_policy != "never":
-        lines.extend([
-            f"# Pull image before starting (pull={pull_policy}, runs as workload user)",
-            f"ExecStartPre=/usr/bin/podman pull --pull={pull_policy} {image}",
-            "",
-        ])
+    # Note: Image pulling is handled by podman run --pull={pull_policy}
+    # No separate ExecStartPre needed
 
     lines.extend([
         "# Run container",
         f"ExecStart={podman_cmd}",
         "",
-        f"ExecStop=/usr/bin/podman stop -t 10 {container_name}",
+        f"ExecStop=/usr/bin/podman stop -t 10 {container_name_quoted}",
         "",
         "Restart=on-failure",
         "RestartSec=5s",
-        "StartLimitIntervalSec=300",
-        "StartLimitBurst=5",
         "TimeoutStartSec=300",
         "TimeoutStopSec=30",
         "",
@@ -328,7 +360,17 @@ def main():
             service_file = SERVICES_DIR / f"workload-{name}-{workload_id}.service"
             service_file.write_text(service_content)
             log_msg(f"  Created system service at {service_file}")
-            # Note: Service is not auto-enabled - use 'systemctl enable' or 'workload-ctl enable'
+
+            # Create symlink for auto-start (equivalent to systemctl enable)
+            wants_dir = SERVICES_DIR / "multi-user.target.wants"
+            wants_dir.mkdir(parents=True, exist_ok=True)
+            symlink_path = wants_dir / f"workload-{name}-{workload_id}.service"
+
+            if symlink_path.exists() or symlink_path.is_symlink():
+                symlink_path.unlink()
+            # Create relative symlink
+            symlink_path.symlink_to(f"../workload-{name}-{workload_id}.service")
+            log_msg(f"  Enabled service for auto-start")
 
         except Exception as e:
             # Log errors but don't fail the boot
