@@ -1,0 +1,289 @@
+# ============================================================================
+# Workload Configuration Schema Reference
+# ============================================================================
+# This file documents ALL possible configuration options for rootless workloads.
+# Copy and modify sections to create your own workload configurations.
+#
+# This example is disabled so it won't be loaded by the generator.
+# ============================================================================
+
+[workload]
+# Required: Unique name for this workload (used in user name and service name)
+# Type: string
+# Constraints: Keep short (max ~22 chars) to fit in username limit
+# Example: "gaming", "sunshine", "dev-env", "webserver"
+name = "schema-reference"
+
+# Optional: Whether this workload should be enabled
+# Type: boolean
+# Default: true
+# Set to false to disable without deleting the config file
+enabled = false
+
+[container]
+# Required: Container image to run
+# Type: string (any valid podman/docker image reference)
+# Examples:
+#   "ghcr.io/user/image:latest"
+#   "docker.io/library/nginx:alpine"
+#   "localhost/my-image:dev"
+image = "ghcr.io/example/workload:latest"
+
+# Required: Unique identifier for this workload instance
+# Type: string (numeric recommended)
+# Used to create unique user: _wl-{name}-{id}
+# UID calculation: 10000 + id (e.g., id="1" → UID 10001)
+# Recommendation: Use sequential numbers like "1", "2", "3", etc.
+# Advanced: Can use any number 0-49999 (to stay below DynamicUser range)
+id = "0"
+
+# Optional: Command to run in container (overrides image CMD)
+# Type: array of strings
+# Default: (uses image's default CMD/ENTRYPOINT)
+# Example: ["sleep", "infinity"] for testing
+# Example: ["/usr/bin/my-app", "--config", "/etc/app.conf"]
+# command = ["sleep", "infinity"]
+
+[gpu]
+# Optional: GPU type for hardware acceleration
+# Type: string
+# Options: "amd", "nvidia", "none"
+# Default: "none"
+#
+# "amd"    - Provides access to /dev/kfd and /dev/dri (ROCm support)
+#            Requires: extra_groups = ["video", "render"]
+# "nvidia" - Provides access via NVIDIA CDI (requires nvidia variant image)
+#            Requires: extra_groups = ["video"]
+# "none"   - No GPU access
+type = "amd"
+
+# Optional: For NVIDIA only - which GPU devices to expose
+# Type: string
+# Default: "all"
+# Examples: "all", "0", "0,1", "gpu-0"
+# Only used when gpu.type = "nvidia"
+# devices = "all"
+
+[devices]
+# Optional: Enable input device access (/dev/input/*, /dev/uinput)
+# Type: boolean
+# Default: false
+# Useful for: game streaming, virtual input, controllers
+# Requires: extra_groups = ["input"]
+input = true
+
+[security]
+# Optional: Additional system groups for the workload user
+# Type: array of strings
+# Default: [] (no additional groups)
+#
+# Common groups (must exist on host):
+#   "video"  - Video device access (/dev/dri/card*, /dev/nvidia*)
+#   "render" - GPU rendering access (/dev/dri/renderD*, /dev/kfd)
+#   "input"  - Input device access (/dev/input/*, /dev/uinput)
+#   "audio"  - Audio device access
+#
+# IMPORTANT: You must explicitly specify groups needed for device access!
+# Example for AMD GPU: ["video", "render"]
+# Example for NVIDIA GPU: ["video"]
+# Example for input devices: ["input"]
+extra_groups = ["video", "render", "input"]
+
+[storage]
+# Optional: Custom home directory for the workload user
+# Type: string (absolute path)
+# Default: "/var/lib/workloads/{name}-{id}"
+# This directory is created automatically and mounted to /data in the container
+# Example: "/custom/path/for/workload"
+# home = "/var/lib/workloads/my-custom-path"
+
+# Optional: Additional volume mounts
+# Type: array of strings
+# Default: []
+# Format: "host-path:container-path[:options]"
+# Examples:
+#   "/mnt/data:/data:ro"           - Read-only mount
+#   "/mnt/shared:/shared"          - Read-write mount
+#   "/etc/config:/config:ro,z"     - SELinux relabeled
+volumes = [
+    "/mnt/games:/games:ro",
+    "/mnt/saves:/saves"
+]
+
+[network]
+# Optional: Container network mode
+# Type: string
+# Default: (podman default, usually bridge with slirp4netns for rootless)
+# Options:
+#   "host" - Use host network namespace (no isolation, better performance)
+#   (other modes like "bridge", "none" use podman defaults)
+# Note: Rootless containers use slirp4netns by default (slower but secure)
+mode = "host"
+
+# Optional: Port publishing (port forwarding)
+# Type: array of strings
+# Default: [] (no ports published)
+# Format: "host-port:container-port[/protocol]"
+# Examples:
+#   "8080:80"              - Map host port 8080 to container port 80
+#   "8443:443/tcp"         - Map host port 8443 to container port 443 TCP
+#   "127.0.0.1:9000:9000"  - Bind only to localhost
+# Note: Rootless containers cannot bind to ports < 1024 without special config
+ports = ["8080:80", "8443:443"]
+
+# ============================================================================
+# USAGE EXAMPLES
+# ============================================================================
+
+# Example 1: Gaming workload with AMD GPU
+# ----------------------------------------
+# [workload]
+# name = "gaming"
+# enabled = true
+#
+# [container]
+# image = "ghcr.io/user/gaming-vm:latest"
+# id = "1"
+#
+# [gpu]
+# type = "amd"
+#
+# [devices]
+# input = true
+#
+# [security]
+# extra_groups = ["video", "render", "input"]
+#
+# [network]
+# mode = "host"
+
+# Example 2: NVIDIA Game Streaming (Sunshine)
+# --------------------------------------------
+# [workload]
+# name = "sunshine"
+# enabled = true
+#
+# [container]
+# image = "ghcr.io/lizardbyte/sunshine:latest"
+# id = "2"
+#
+# [gpu]
+# type = "nvidia"
+# devices = "0"
+#
+# [devices]
+# input = true
+#
+# [security]
+# extra_groups = ["video", "input"]
+#
+# [network]
+# ports = ["47984:47984", "47989:47989", "48010:48010"]
+
+# Example 3: Simple webserver (no GPU)
+# -------------------------------------
+# [workload]
+# name = "webserver"
+# enabled = true
+#
+# [container]
+# image = "docker.io/library/nginx:alpine"
+# id = "1"
+#
+# [gpu]
+# type = "none"
+#
+# [devices]
+# input = false
+#
+# [security]
+# extra_groups = []
+#
+# [network]
+# ports = ["8080:80"]
+
+# Example 4: Development environment with custom volumes
+# -------------------------------------------------------
+# [workload]
+# name = "devenv"
+# enabled = true
+#
+# [container]
+# image = "localhost/my-devenv:latest"
+# id = "3"
+#
+# [gpu]
+# type = "none"
+#
+# [security]
+# extra_groups = []
+#
+# [storage]
+# volumes = [
+#   "/home/user/code:/workspace",
+#   "/home/user/.ssh:/home/dev/.ssh:ro"
+# ]
+#
+# [network]
+# ports = ["3000:3000", "8000:8000"]
+
+# Example 5: Test container for group verification
+# -------------------------------------------------
+# [workload]
+# name = "groups-test"
+# enabled = true
+#
+# [container]
+# image = "docker.io/library/alpine:latest"
+# id = "99"
+# command = ["sleep", "infinity"]
+#
+# [gpu]
+# type = "none"
+#
+# [security]
+# extra_groups = ["video", "render", "input"]
+#
+# To verify groups work:
+#   id _wl-groups-test-99
+#   podman exec workload-groups-test-99 id
+
+# ============================================================================
+# TECHNICAL DETAILS
+# ============================================================================
+#
+# User and UID Assignment:
+# - Username format: _wl-{name}-{id}
+# - UID: 10000 + id (e.g., id="1" → UID 10001)
+# - Username max length: 32 characters
+# - UID range: 10000-59999 (stays below systemd DynamicUser range)
+#
+# Rootless Architecture:
+# - Each workload runs in its own user systemd session
+# - Podman runs rootless (no root privileges)
+# - User namespace isolation (UserNS=keep-id)
+# - Host groups preserved in container (GroupAdd=keep-groups)
+# - Linger enabled (session starts at boot)
+#
+# File Locations:
+# - Workload configs: /etc/workloads.d/*.toml
+# - Per-user quadlets: /run/containers/systemd/users/{uid}/
+# - User home: /var/lib/workloads/{name}-{id}
+# - Mounted in container as: /data
+#
+# Service Management:
+# - Service name: {name}.service (in user session)
+# - Start: systemctl --user -M _wl-{name}-{id}@ start {name}.service
+# - Status: systemctl --user -M _wl-{name}-{id}@ status {name}.service
+# - Logs: journalctl --user -M _wl-{name}-{id}@ -u {name}.service
+#
+# Networking:
+# - Default: slirp4netns (slower, no privileged ports)
+# - mode="host": Host network (faster, can use any port)
+# - Rootless can't bind ports < 1024 by default
+#
+# For more information, see:
+# - Podman Quadlet: man podman-systemd.unit
+# - Systemd generators: man systemd.generator
+# - User sessions: man systemd.user
+# ============================================================================

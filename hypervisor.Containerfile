@@ -1,5 +1,8 @@
 FROM ghcr.io/bensmith/fedora-bootc-minimal:43
 
+# Build argument for local development (enables passwordless sudo)
+ARG ENABLE_PASSWORDLESS_SUDO=false
+
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
 
@@ -100,6 +103,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     podman-compose \
     podman-docker \
     polkit \
+    policycoreutils-python-utils \
     prometheus-node-exporter \
     qemu-img \
     qemu-kvm \
@@ -158,6 +162,51 @@ RUN dnf clean all && \
 RUN printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
+
+# Copy device groups from /usr/lib/group (immutable) to /etc/group (mutable)
+# This is needed on bootc systems to allow usermod to add workload users to these groups
+RUN grep -E "^(video|render|input):" /usr/lib/group >> /etc/group || true
+
+# Optional: Enable passwordless sudo for local development
+# Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
+RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
+        echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel-nopasswd && \
+        chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
+    fi
+
+# Install workload provisioning system
+# Copy generator and setup service
+COPY generators/workload-generator /usr/lib/systemd/system-generators/
+COPY systemd/workload-setup.service /usr/lib/systemd/system/
+COPY libexec/workload-setup.py /usr/lib/systemd/
+COPY bin/workload-ctl /usr/local/bin/
+COPY bin/test-workload-ctl.sh /usr/local/bin/
+COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
+
+# Copy documentation
+RUN mkdir -p /usr/share/doc/workload-ctl
+COPY docs/workloads.md /usr/share/doc/workload-ctl/
+COPY workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
+
+# Set permissions
+RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
+    chmod 0755 /usr/lib/systemd/workload-setup.py && \
+    chmod 0755 /usr/local/bin/workload-ctl && \
+    chmod 0755 /usr/local/bin/test-workload-ctl.sh && \
+    chmod 0644 /usr/share/bash-completion/completions/workload-ctl && \
+    chmod 0644 /usr/share/doc/workload-ctl/*.md && \
+    chmod 0644 /usr/share/doc/workload-ctl/*.toml
+
+# Enable setup service
+RUN systemctl enable workload-setup.service
+
+# Create workload directory and tmpfiles.d config
+RUN mkdir -p /var/lib/workloads /etc/workloads.d && \
+    printf 'd /var/lib/workloads 0755 root root - -\n' > \
+    /usr/lib/tmpfiles.d/workloads.conf
+
+# Copy example workload configurations (disabled by default)
+COPY workloads.d/ /etc/workloads.d/
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1

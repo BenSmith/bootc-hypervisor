@@ -14,6 +14,8 @@ build-minimal version="43" rechunk="false":
     git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
   fi
 
+  cp policy-local.json manifests/policy.json
+
   # Build the minimal bootc image (requires sudo for nested containerization)
   echo "Building fedora-bootc-minimal:{{version}}..."
   http_proxy={{proxy}} https_proxy={{proxy}} \
@@ -87,7 +89,9 @@ build-base-local:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --network=host \
+  --layers=false \
   --from localhost/fedora-bootc-minimal:latest \
+  --build-arg ENABLE_PASSWORDLESS_SUDO=true \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
   -t localhost/hypervisor-bootc:latest \
@@ -286,6 +290,148 @@ build-iso-amd rootfs="xfs":
   @echo "Relabeling and copying ISO..."
   @just relabel-iso output/amd/bootiso/install.iso output/hypervisor-amd-{{tag}}.iso "HV-AMD"
   @echo "ISO ready: output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
+
+build-qcow2-base rootfs="xfs":
+  @mkdir -p store output/base-qcow2 rpmmd
+  @echo "Pulling image from ghcr.io..."
+  sudo podman pull ghcr.io/bensmith/hypervisor-bootc:latest
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config.toml:/config.toml:ro \
+    -v $(pwd)/output/base-qcow2:/output \
+    -v $(pwd)/rpmmd:/rpmmd \
+    -v $(pwd)/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs {{rootfs}} \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type qcow2 \
+    ghcr.io/bensmith/hypervisor-bootc
+  @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
+  @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
+
+build-qcow2-base-local rootfs="xfs":
+  @mkdir -p store output/base-qcow2 rpmmd
+  @echo "Pulling image from local registry..."
+  sudo podman pull box:5000/hypervisor-bootc:latest
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config.toml:/config.toml:ro \
+    -v $(pwd)/output/base-qcow2:/output \
+    -v $(pwd)/rpmmd:/rpmmd \
+    -v $(pwd)/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs {{rootfs}} \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type qcow2 \
+    box:5000/hypervisor-bootc
+  @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
+  @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
+
+
+# All-in-one: build container, build qcow2, and deploy to libvirt VM
+aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo "=== Step 1: Building container image ==="
+  just build-base-local
+
+  echo ""
+  echo "=== Step 1.5: Pushing image to local registry ==="
+  podman push box:5000/hypervisor-bootc:latest
+
+  echo ""
+  echo "=== Step 2: Building qcow2 disk image ==="
+  just build-qcow2-base-local {{rootfs}}
+
+  echo ""
+  echo "=== Step 3: Deploying to VM '{{vmname}}' ==="
+
+  # Copy to system libvirt storage
+  sudo mkdir -p /var/lib/libvirt/images
+  sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2
+
+  # Destroy old VM if it exists
+  if sudo virsh dominfo {{vmname}} &>/dev/null; then
+    echo "Destroying existing VM '{{vmname}}'..."
+    sudo virsh destroy {{vmname}} 2>/dev/null || true
+    sudo virsh undefine {{vmname}}
+  fi
+
+  # Create and start new VM (system libvirt for proper networking)
+  echo "Creating VM '{{vmname}}' ({{memory}}MB RAM, {{vcpus}} vCPUs)..."
+  sudo virt-install \
+    --name {{vmname}} \
+    --memory {{memory}} \
+    --vcpus {{vcpus}} \
+    --disk path=/var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2,format=qcow2 \
+    --import \
+    --os-variant fedora41 \
+    --network network=default \
+    --noautoconsole
+
+  echo ""
+  echo "=== Waiting for VM to boot and obtain IP address ==="
+
+  # Wait up to 60 seconds for IP address
+  timeout=60
+  elapsed=0
+  ip_addr=""
+
+  while [ $elapsed -lt $timeout ]; do
+    sleep 2
+    elapsed=$((elapsed + 2))
+
+    # Try to get IP address
+    ip_line=$(sudo virsh domifaddr {{vmname}} 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
+
+    if [ -n "$ip_line" ]; then
+      ip_addr="$ip_line"
+      break
+    fi
+
+    echo -n "."
+  done
+
+  echo ""
+  echo ""
+  echo "=== Deployment complete! ==="
+  echo "VM name: {{vmname}}"
+  echo "Disk: /var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2"
+
+  if [ -n "$ip_addr" ]; then
+    echo "IP address: $ip_addr"
+    echo ""
+    echo "To connect:"
+    echo "  ssh ben@$ip_addr"
+    echo "  sudo virsh console {{vmname}}         # Serial console (Ctrl+] to exit)"
+  else
+    echo "IP address: (timeout waiting for DHCP - check with: sudo virsh domifaddr {{vmname}})"
+    echo ""
+    echo "To connect:"
+    echo "  sudo virsh domifaddr {{vmname}}       # Get IP address"
+    echo "  sudo virsh console {{vmname}}         # Serial console (Ctrl+] to exit)"
+  fi
+
+  echo ""
+  echo "VM management:"
+  echo "  sudo virsh start {{vmname}}           # Start VM"
+  echo "  sudo virsh shutdown {{vmname}}        # Graceful shutdown"
+  echo "  sudo virsh destroy {{vmname}}         # Force power off"
+  echo "  sudo virsh undefine {{vmname}}        # Delete VM config"
 
 # Relabel an ISO with a custom volume label and update boot configs
 relabel-iso input output label:
