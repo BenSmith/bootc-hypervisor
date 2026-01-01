@@ -180,13 +180,23 @@ COPY generators/workload-generator /usr/lib/systemd/system-generators/
 COPY systemd/workload-setup.service /usr/lib/systemd/system/
 COPY libexec/workload-setup.py /usr/lib/systemd/
 COPY bin/workload-ctl /usr/local/bin/
+COPY bin/test-workload-ctl.sh /usr/local/bin/
 COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
+
+# Copy documentation
+RUN mkdir -p /usr/share/doc/workload-ctl
+COPY docs/workloads.md /usr/share/doc/workload-ctl/
+COPY docs/WORKLOADS-HOMELAB-GUIDE.md /usr/share/doc/workload-ctl/
+COPY workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
 
 # Set permissions
 RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
     chmod 0755 /usr/lib/systemd/workload-setup.py && \
     chmod 0755 /usr/local/bin/workload-ctl && \
-    chmod 0644 /usr/share/bash-completion/completions/workload-ctl
+    chmod 0755 /usr/local/bin/test-workload-ctl.sh && \
+    chmod 0644 /usr/share/bash-completion/completions/workload-ctl && \
+    chmod 0644 /usr/share/doc/workload-ctl/*.md && \
+    chmod 0644 /usr/share/doc/workload-ctl/*.toml
 
 # Enable setup service
 RUN systemctl enable workload-setup.service

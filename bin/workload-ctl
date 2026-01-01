@@ -1,438 +1,1408 @@
-#!/bin/bash
-# Workload management helper for rootless system workloads
-# Usage: workload-ctl {enable|disable|restart|status|list} [workload-name]
+#!/usr/bin/env python3
+"""
+workload-ctl - Manage rootless system workloads
 
-set -e
+Provides Docker/kubectl-like CLI for managing containerized workloads
+running as system services with rootless podman.
+"""
 
-WORKLOAD_DIR="/etc/workloads.d"
+import argparse
+import grp
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
 
-print_usage() {
-    cat << EOF
-Usage: workload-ctl <command> [options] [workload-name]
+# Allow override via environment variable for testing
+WORKLOAD_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d"))
 
-Commands:
-  disable [--purge] <name>  - Stop and disable a workload
-                              --purge: Also remove user, home, and subuid/subgid
-  enable <name>             - Enable and start a workload
-  exec <name> <command...>  - Execute command in workload container
-  list                      - List all available workloads
-  logs [options] <name>     - View workload logs (journalctl wrapper)
-                              -f: follow, -n N: last N lines, --since TIME
-  ps                        - Show all running workload containers
-  restart <name>            - Restart a running workload
-  shell <name>              - Open interactive shell in workload container
-  status <name>             - Show workload service status
 
-Examples:
-  workload-ctl enable webserver
-  workload-ctl disable webserver
-  workload-ctl disable --purge webserver
-  workload-ctl status webserver
-  workload-ctl list
-  workload-ctl shell webserver
-  workload-ctl exec webserver ls -la /data
-  workload-ctl logs -f webserver
-  workload-ctl logs -n 50 webserver
-  workload-ctl ps
-EOF
-}
+def require_root():
+    """Ensure running as root"""
+    if os.geteuid() != 0:
+        print("Error: This command must be run as root (use sudo)", file=sys.stderr)
+        sys.exit(1)
 
-ensure_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "Error: This command must be run as root (use sudo)" >&2
-        exit 1
-    fi
-}
 
-get_workload_name() {
-    local filename=$1
-    local config="$WORKLOAD_DIR/$filename.toml"
+class WorkloadConfig:
+    """Represents a workload configuration file"""
 
-    if [[ ! -f "$config" ]]; then
-        echo "Error: Workload config not found: $config" >&2
-        exit 1
-    fi
+    def __init__(self, filename: str):
+        self.filename = filename
+        self.path = WORKLOAD_DIR / f"{filename}.toml"
 
-    # Extract name from TOML (handles whitespace, quoted/unquoted values, and strips comments)
-    local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
-    if [[ -z "$name" ]]; then
-        echo "Error: Could not find 'name' in $config" >&2
-        exit 1
-    fi
+        if not self.path.exists():
+            raise FileNotFoundError(f"Config not found: {self.path}")
 
-    echo "$name"
-}
+        with open(self.path, "rb") as f:
+            self.config = tomllib.load(f)
 
-get_workload_id() {
-    local filename=$1
-    local config="$WORKLOAD_DIR/$filename.toml"
+    @property
+    def name(self) -> str:
+        return self.config["workload"]["name"]
 
-    if [[ ! -f "$config" ]]; then
-        echo "Error: Workload config not found: $config" >&2
-        exit 1
-    fi
+    @property
+    def id(self) -> str:
+        return str(self.config["container"]["id"])
 
-    # Extract ID from TOML (handles whitespace, quoted/unquoted values, and strips comments)
-    local id=$(grep '^id[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
-    if [[ -z "$id" ]]; then
-        echo "Error: Could not find 'id' in $config" >&2
-        exit 1
-    fi
+    @property
+    def image(self) -> str:
+        return self.config["container"]["image"]
 
-    echo "$id"
-}
+    @property
+    def enabled(self) -> bool:
+        return self.config.get("workload", {}).get("enabled", True)
 
-cmd_enable() {
-    ensure_root
-    local filename=$1
+    @property
+    def username(self) -> str:
+        return f"_wl-{self.name}-{self.id}"
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
+    @property
+    def uid(self) -> int:
+        return 10000 + int(self.id)
 
-    local config="$WORKLOAD_DIR/$filename.toml"
+    @property
+    def service_name(self) -> str:
+        return f"workload-{self.name}-{self.id}.service"
 
-    if [[ ! -f "$config" ]]; then
-        echo "Error: Workload config not found: $config" >&2
-        exit 1
-    fi
+    @property
+    def container_name(self) -> str:
+        return f"workload-{self.name}-{self.id}"
 
-    echo "Enabling workload: $filename"
+    @property
+    def home_dir(self) -> Path:
+        """Get the home directory path"""
+        custom_home = self.config.get("storage", {}).get("home")
+        if custom_home:
+            return Path(custom_home)
+        return Path(f"/var/lib/workloads/{self.name}-{self.id}")
 
-    # Enable in config file (handles any whitespace around =)
-    sed -i 's/enabled[[:space:]]*=[[:space:]]*false/enabled = true/' "$config"
+    def get_network_mode(self) -> str:
+        return self.config.get("network", {}).get("mode", "default")
 
-    # Reload systemd to pick up changes
-    echo "  Reloading systemd..."
-    systemctl daemon-reload
+    def get_ports(self) -> list[str]:
+        return self.config.get("network", {}).get("ports", [])
+
+    def get_volumes(self) -> list[str]:
+        return self.config.get("storage", {}).get("volumes", [])
+
+    def get_extra_groups(self) -> list[str]:
+        return self.config.get("security", {}).get("extra_groups", [])
+
+
+class WorkloadManager:
+    """Manages workload operations"""
+
+    def __init__(self):
+        self.workload_dir = WORKLOAD_DIR
+
+    def run_podman(self, config: WorkloadConfig, *args, capture_output=False, check=False):
+        """Run podman command as workload user"""
+        env = os.environ.copy()
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{config.uid}"
+        env["HOME"] = str(config.home_dir)
+
+        cmd = ["sudo", "-u", config.username] + list(args)
+
+        # Convert args to properly handle environment variables
+        env_args = []
+        for key, val in [("XDG_RUNTIME_DIR", env["XDG_RUNTIME_DIR"]),
+                         ("HOME", env["HOME"])]:
+            env_args.extend(["-E", f"{key}={val}"])
+
+        cmd = ["sudo", "-u", config.username] + env_args + ["podman"] + list(args)
+
+        result = subprocess.run(cmd, capture_output=capture_output, text=True, check=check)
+        return result
+
+    def get_image_id(self, config: WorkloadConfig) -> str:
+        """Get current image ID"""
+        try:
+            result = self.run_podman(
+                config, "images", "--format", "{{.ID}}", config.image,
+                capture_output=True
+            )
+            lines = result.stdout.strip().split('\n')
+            return lines[0] if lines and lines[0] else ""
+        except subprocess.CalledProcessError:
+            return ""
+
+    def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
+        """Get all workload configs"""
+        configs = []
+        for path in sorted(self.workload_dir.glob("*.toml")):
+            try:
+                config = WorkloadConfig(path.stem)
+                if not enabled_only or config.enabled:
+                    configs.append(config)
+            except Exception as e:
+                print(f"Warning: Failed to load {path.name}: {e}", file=sys.stderr)
+        return configs
+
+    def user_exists(self, config: WorkloadConfig) -> bool:
+        """Check if workload user exists"""
+        try:
+            pwd.getpwnam(config.username)
+            return True
+        except KeyError:
+            return False
+
+
+# Command implementations
+
+def cmd_list(args, manager: WorkloadManager):
+    """List all available workloads"""
+    configs = manager.get_all_configs()
+
+    if args.json:
+        workloads = []
+        for config in configs:
+            workloads.append({
+                "filename": config.filename,
+                "name": config.name,
+                "id": config.id,
+                "enabled": config.enabled,
+                "image": config.image,
+                "username": config.username,
+                "uid": config.uid
+            })
+        print(json.dumps({"workloads": workloads}, indent=2))
+        return
+
+    print(f"Available workloads in {WORKLOAD_DIR}:")
+    print()
+
+    if not configs:
+        print("  No workload configs found")
+        return
+
+    for config in configs:
+        status = "enabled" if config.enabled else "disabled"
+        print(f"  {config.filename:20} [{status:8}]  (name: {config.name}, id: {config.id})")
+
+
+def cmd_status(args, manager: WorkloadManager):
+    """Show workload service status"""
+    config = WorkloadConfig(args.workload)
+    subprocess.run(["systemctl", "status", config.service_name])
+
+
+def cmd_enable(args, manager: WorkloadManager):
+    """Enable and start a workload"""
+    require_root()
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Enabling workload: {args.workload}")
+
+    # Enable in config file
+    content = config_path.read_text()
+    content = re.sub(
+        r'enabled\s*=\s*false',
+        'enabled = true',
+        content
+    )
+    config_path.write_text(content)
+
+    print("  Reloading systemd...")
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
 
     # Create user if needed
-    echo "  Running systemd-sysusers..."
-    systemd-sysusers
+    print("  Running systemd-sysusers...")
+    subprocess.run(["systemd-sysusers"], check=True)
 
-    # Configure user (subuid/subgid/linger/home)
-    echo "  Configuring workload user..."
-    systemctl start workload-setup.service
+    print("  Configuring workload user...")
+    subprocess.run(["systemctl", "start", "workload-setup.service"], check=True)
 
-    # Get the workload name and ID from TOML to construct service name
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local service="workload-$name-$id.service"
+    # Reload config to get service name
+    config = WorkloadConfig(args.workload)
 
-    # Start the service (generator already created the enable symlink)
-    echo "  Starting $service..."
-    echo "  (Image pull may take a few minutes on first start)"
-    systemctl start --no-block "$service"
+    print(f"  Starting {config.service_name}...")
+    print("  (Image pull may take a few minutes on first start)")
+    subprocess.run(["systemctl", "start", "--no-block", config.service_name], check=True)
 
-    echo "✓ Workload '$filename' enabled and starting"
-    echo "  Check status: workload-ctl status $filename"
-    echo "  Watch logs: sudo journalctl -fu $service"
-}
-
-cmd_disable() {
-    ensure_root
-    local filename=$1
-    local purge=false
-
-    # Check for --purge flag
-    if [[ "$filename" == "--purge" ]]; then
-        purge=true
-        filename=$2
-    elif [[ "$2" == "--purge" ]]; then
-        purge=true
-    fi
-
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
-
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local service="workload-$name-$id.service"
-    local config="$WORKLOAD_DIR/$filename.toml"
-    local username="_wl-$name-$id"
-
-    if [[ "$purge" == true ]]; then
-        echo "Disabling and purging workload: $filename"
-    else
-        echo "Disabling workload: $filename"
-    fi
-
-    # Stop service
-    echo "  Stopping $service..."
-    systemctl stop "$service" 2>/dev/null || true
+    print(f"✓ Workload '{args.workload}' enabled and starting")
+    print(f"  Check status: workload-ctl status {args.workload}")
+    print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
-    sed -i 's/enabled[[:space:]]*=[[:space:]]*true/enabled = false/' "$config"
+def cmd_disable(args, manager: WorkloadManager):
+    """Disable and stop a workload"""
+    require_root()
 
-    if [[ "$purge" == true ]]; then
+    config = WorkloadConfig(args.workload)
+    purge = args.purge
+
+    if purge:
+        print(f"Disabling and purging workload: {args.workload}")
+    else:
+        print(f"Disabling workload: {args.workload}")
+
+    print(f"  Stopping {config.service_name}...")
+    subprocess.run(["systemctl", "stop", config.service_name], check=False)
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    content = config_path.read_text()
+    content = re.sub(
+        r'enabled\s*=\s*true',
+        'enabled = false',
+        content
+    )
+    config_path.write_text(content)
+
+    if purge:
         # Get user info before deletion
-        local uid=$(id -u "$username" 2>/dev/null || echo "")
-        local home_dir=$(getent passwd "$username" 2>/dev/null | cut -d: -f6 || echo "")
+        try:
+            pw = pwd.getpwnam(config.username)
+            uid = pw.pw_uid
+            home_dir = pw.pw_dir
 
-        # Terminate user sessions and disable linger
-        if [[ -n "$uid" ]]; then
-            echo "  Terminating user sessions for $username..."
-            loginctl terminate-user "$uid" 2>/dev/null || true
-            loginctl disable-linger "$uid" 2>/dev/null || true
-            # Give systemd time to clean up
-            sleep 1
-        fi
+            print(f"  Terminating user sessions for {config.username}...")
+            subprocess.run(["loginctl", "terminate-user", str(uid)], check=False)
+            subprocess.run(["loginctl", "disable-linger", str(uid)], check=False)
+            import time
+            time.sleep(1)
 
-        # Remove subuid/subgid entries
-        echo "  Removing subuid/subgid entries..."
-        sed -i "/^$username:/d" /etc/subuid 2>/dev/null || true
-        sed -i "/^$username:/d" /etc/subgid 2>/dev/null || true
+            print("  Removing subuid/subgid entries...")
+            for file in ["/etc/subuid", "/etc/subgid"]:
+                if Path(file).exists():
+                    lines = Path(file).read_text().split('\n')
+                    lines = [l for l in lines if not l.startswith(f"{config.username}:")]
+                    Path(file).write_text('\n'.join(lines))
 
-        # Remove user (with force flag to handle any remaining processes)
-        echo "  Removing user $username..."
-        userdel -f "$username" 2>/dev/null || true
+            print(f"  Removing user {config.username}...")
+            subprocess.run(["userdel", "-f", config.username], check=False)
 
-        # Remove home directory (if it exists and wasn't removed by userdel)
-        if [[ -n "$home_dir" && -d "$home_dir" ]]; then
-            echo "  Removing home directory $home_dir..."
-            rm -rf "$home_dir"
-        fi
+            home_path = Path(home_dir)
+            if home_path.exists():
+                print(f"  Removing home directory {home_dir}...")
+                shutil.rmtree(home_dir, ignore_errors=True)
 
-        echo "✓ Workload '$filename' disabled and purged (user, home, subuid/subgid removed)"
-    else
-        echo "✓ Workload '$filename' disabled and stopped (use --purge to fully remove)"
-    fi
-}
+            print(f"✓ Workload '{args.workload}' disabled and purged")
+        except KeyError:
+            print(f"✓ Workload '{args.workload}' disabled (user not found)")
+    else:
+        print(f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)")
 
-cmd_restart() {
-    ensure_root
-    local filename=$1
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
+def cmd_restart(args, manager: WorkloadManager):
+    """Restart a workload"""
+    require_root()
+    config = WorkloadConfig(args.workload)
 
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local service="workload-$name-$id.service"
+    print(f"Restarting workload: {args.workload}")
+    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    print(f"✓ Workload '{args.workload}' restarted")
 
-    echo "Restarting workload: $filename"
-    systemctl restart "$service"
-    echo "✓ Workload '$filename' restarted"
-}
 
-cmd_status() {
-    local filename=$1
+def cmd_shell(args, manager: WorkloadManager):
+    """Open interactive shell in workload container"""
+    config = WorkloadConfig(args.workload)
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Is the workload enabled and running?", file=sys.stderr)
+        sys.exit(1)
 
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local service="workload-$name-$id.service"
+    print(f"Opening shell in {config.container_name}...")
+    print("(Try /bin/sh if /bin/bash is not available)")
+    print()
 
-    systemctl status "$service"
-}
+    # Try bash first, fall back to sh
+    result = manager.run_podman(config, "exec", "-it", config.container_name, "/bin/bash")
+    if result.returncode != 0:
+        manager.run_podman(config, "exec", "-it", config.container_name, "/bin/sh", check=True)
 
-cmd_list() {
-    echo "Available workloads in $WORKLOAD_DIR:"
-    echo ""
 
-    for config in "$WORKLOAD_DIR"/*.toml; do
-        if [[ ! -f "$config" ]]; then
-            echo "  No workload configs found"
-            break
-        fi
+def cmd_exec(args, manager: WorkloadManager):
+    """Execute command in workload container"""
+    config = WorkloadConfig(args.workload)
 
-        local filename=$(basename "$config" .toml)
-        local enabled=$(grep '^enabled[[:space:]]*=' "$config" | head -1 | grep -q 'true' && echo "enabled" || echo "disabled")
-        local name=$(grep '^name[[:space:]]*=' "$config" | head -1 | sed 's/#.*//' | sed 's/^name[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
-        local id=$(sed -n '/\[container\]/,/\[/p' "$config" | grep '^id[[:space:]]*=' | head -1 | sed 's/#.*//' | sed 's/^id[[:space:]]*=[[:space:]]*["\x27]\?\([^"\x27]*\)["\x27]\?/\1/' | sed 's/[[:space:]]*$//')
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Is the workload enabled and running?", file=sys.stderr)
+        sys.exit(1)
 
-        printf "  %-20s %-10s (name: %s, id: %s)\n" "$filename" "[$enabled]" "$name" "$id"
-    done
-}
+    manager.run_podman(config, "exec", "-it", config.container_name, *args.command, check=True)
 
-cmd_logs() {
-    # Parse options and workload name
-    local journalctl_opts=()
-    local filename=""
 
-    # Collect all arguments
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -*)
-                # It's an option, collect it and its potential argument
-                journalctl_opts+=("$1")
-                shift
-                # Check if next arg is a value for this option (doesn't start with -)
-                if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
-                    # Special handling for options that take values
-                    case "${journalctl_opts[-1]}" in
-                        -n|--lines|--since|--until|-u|--unit|-o|--output|-p|--priority)
-                            journalctl_opts+=("$1")
-                            shift
-                            ;;
-                    esac
-                fi
-                ;;
-            *)
-                # Not an option, must be the workload name
-                filename="$1"
-                shift
-                break
-                ;;
-        esac
-    done
+def cmd_logs(args, manager: WorkloadManager):
+    """View workload logs"""
+    config = WorkloadConfig(args.workload)
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        echo "Usage: workload-ctl logs [options] <workload>" >&2
-        echo "Examples:" >&2
-        echo "  workload-ctl logs webserver" >&2
-        echo "  workload-ctl logs -f webserver" >&2
-        echo "  workload-ctl logs -n 50 webserver" >&2
-        echo "  workload-ctl logs --since '10 minutes ago' webserver" >&2
-        exit 1
-    fi
+    cmd = ["journalctl", "-u", config.service_name]
 
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local service="workload-$name-$id.service"
+    # Add options
+    if args.follow:
+        cmd.append("-f")
+    if args.lines:
+        cmd.extend(["-n", str(args.lines)])
+    if args.since:
+        cmd.extend(["--since", args.since])
 
-    # Run journalctl with collected options
-    journalctl -u "$service" "${journalctl_opts[@]}"
-}
+    if args.extra_args:
+        cmd.extend(args.extra_args)
 
-cmd_shell() {
-    local filename=$1
+    subprocess.run(cmd)
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
 
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local username="_wl-$name-$id"
-    local uid=$(id -u "$username" 2>/dev/null || echo "")
-    local container_name="workload-$name-$id"
+def cmd_ps(args, manager: WorkloadManager):
+    """Show all running workload containers"""
+    # Get all workload users
+    users = []
+    for entry in pwd.getpwall():
+        if entry.pw_name.startswith("_wl-"):
+            users.append(entry.pw_name)
 
-    if [[ -z "$uid" ]]; then
-        echo "Error: Workload user '$username' does not exist" >&2
-        echo "Is the workload enabled and running?" >&2
-        exit 1
-    fi
+    users.sort()
 
-    echo "Opening shell in $container_name..."
-    echo "(Try /bin/sh if /bin/bash is not available)"
-    echo ""
+    if args.json:
+        # Collect container info for JSON output
+        containers_data = []
+        for username in users:
+            try:
+                pw = pwd.getpwnam(username)
+                uid = pw.pw_uid
 
-    # Try bash first, fall back to sh if bash fails
-    if ! sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
-        podman exec -it "$container_name" /bin/bash 2>/dev/null; then
-        sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
-            podman exec -it "$container_name" /bin/sh
-    fi
-}
+                result = subprocess.run(
+                    ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     "podman", "ps", "--format", "json"],
+                    capture_output=True, text=True
+                )
 
-cmd_exec() {
-    local filename=$1
-    shift
+                if result.returncode == 0 and result.stdout.strip():
+                    containers = json.loads(result.stdout)
+                    for container in containers:
+                        containers_data.append({
+                            "username": username,
+                            "uid": uid,
+                            "id": container.get("Id", ""),
+                            "name": container.get("Names", [""])[0] if container.get("Names") else "",
+                            "image": container.get("Image", ""),
+                            "status": container.get("Status", ""),
+                            "created": container.get("Created", ""),
+                        })
+            except Exception:
+                continue
 
-    if [[ -z "$filename" ]]; then
-        echo "Error: Workload name required" >&2
-        print_usage
-        exit 1
-    fi
+        print(json.dumps({"containers": containers_data}, indent=2))
+        return
 
-    if [[ $# -eq 0 ]]; then
-        echo "Error: Command required" >&2
-        echo "Usage: workload-ctl exec <workload> <command> [args...]" >&2
-        exit 1
-    fi
+    # Human-readable output
+    print("Workload containers:")
+    print()
 
-    local name=$(get_workload_name "$filename")
-    local id=$(get_workload_id "$filename")
-    local username="_wl-$name-$id"
-    local uid=$(id -u "$username" 2>/dev/null || echo "")
-    local container_name="workload-$name-$id"
+    found = False
+    for username in users:
+        try:
+            pw = pwd.getpwnam(username)
+            uid = pw.pw_uid
 
-    if [[ -z "$uid" ]]; then
-        echo "Error: Workload user '$username' does not exist" >&2
-        echo "Is the workload enabled and running?" >&2
-        exit 1
-    fi
+            # Check for containers
+            result = subprocess.run(
+                ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                 "podman", "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True
+            )
 
-    sudo -u "$username" XDG_RUNTIME_DIR=/run/user/$uid \
-        podman exec -it "$container_name" "$@"
-}
+            if result.returncode == 0 and result.stdout.strip():
+                found = True
+                print(f"=== {username} (UID {uid}) ===")
+                subprocess.run(
+                    ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     "podman", "ps"]
+                )
+                print()
+        except Exception:
+            continue
 
-cmd_ps() {
-    echo "Workload containers:"
-    echo ""
+    if not found:
+        print("  No running workload containers found")
 
-    local found=false
-    for user in $(getent passwd | grep '^_wl-' | cut -d: -f1 | sort); do
-        local uid=$(id -u "$user")
-        local containers=$(sudo -u "$user" XDG_RUNTIME_DIR=/run/user/$uid podman ps --format "{{.Names}}" 2>/dev/null || true)
 
-        if [[ -n "$containers" ]]; then
-            found=true
-            echo "=== $user (UID $uid) ==="
-            sudo -u "$user" XDG_RUNTIME_DIR=/run/user/$uid podman ps
-            echo ""
-        fi
-    done
+def cmd_update(args, manager: WorkloadManager):
+    """Update workload image and restart"""
+    require_root()
 
-    if [[ "$found" == "false" ]]; then
-        echo "  No running workload containers found"
-    fi
-}
+    if args.all:
+        configs = manager.get_all_configs(enabled_only=True)
+        if not configs:
+            print("No enabled workloads found")
+            return
 
-# Main command dispatcher
-case "${1:-}" in
-    disable)
-        cmd_disable "$2" "$3"
-        ;;
-    enable)
-        cmd_enable "$2"
-        ;;
-    exec)
-        shift
-        cmd_exec "$@"
-        ;;
-    list)
-        cmd_list
-        ;;
-    logs)
-        shift
-        cmd_logs "$@"
-        ;;
-    ps)
-        cmd_ps
-        ;;
-    restart)
-        cmd_restart "$2"
-        ;;
-    shell)
-        cmd_shell "$2"
-        ;;
-    status)
-        cmd_status "$2"
-        ;;
-    ""|help|-h|--help)
-        print_usage
-        ;;
-    *)
-        echo "Error: Unknown command: $1" >&2
-        print_usage
-        exit 1
-        ;;
-esac
+        for config in configs:
+            update_single(config, manager, args.force)
+            print()
+    else:
+        if not args.workload:
+            print("Error: Workload name required (or use --all)", file=sys.stderr)
+            sys.exit(1)
+        config = WorkloadConfig(args.workload)
+        update_single(config, manager, args.force)
+
+
+def update_single(config: WorkloadConfig, manager: WorkloadManager, force: bool):
+    """Update a single workload"""
+    print(f"Updating {config.filename} ({config.image})...")
+
+    if not manager.user_exists(config):
+        print(f"  Skipping: user {config.username} does not exist (workload not enabled?)")
+        return
+
+    old_id = manager.get_image_id(config)
+
+    pull_args = ["pull"]
+    if force:
+        pull_args.append("--force-pull")
+    pull_args.append(config.image)
+
+    result = manager.run_podman(config, *pull_args)
+    if result.returncode != 0:
+        print(f"✗ Failed to pull image", file=sys.stderr)
+        return
+
+    new_id = manager.get_image_id(config)
+
+    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+
+    if old_id and new_id and old_id == new_id:
+        print(f"✓ Already up to date ({new_id[:12]})")
+    elif old_id and new_id:
+        print(f"✓ Updated {old_id[:12]} → {new_id[:12]}")
+    else:
+        print(f"✓ Updated to {new_id[:12] if new_id else 'unknown'}")
+
+
+def cmd_info(args, manager: WorkloadManager):
+    """Show detailed workload information"""
+    config = WorkloadConfig(args.workload)
+
+    # Collect data for JSON output
+    info_data = {
+        "workload": {
+            "name": config.name,
+            "filename": config.filename,
+            "config_path": str(config.path),
+            "enabled": config.enabled
+        },
+        "container": {
+            "name": config.container_name,
+            "image": config.image
+        },
+        "user": {
+            "name": config.username,
+            "uid": config.uid,
+            "exists": manager.user_exists(config)
+        },
+        "network": {
+            "mode": config.get_network_mode(),
+            "ports": config.get_ports()
+        },
+        "storage": {},
+        "service": {
+            "name": config.service_name
+        }
+    }
+
+    if manager.user_exists(config):
+        image_id = manager.get_image_id(config)
+        if image_id:
+            info_data["container"]["image_id"] = image_id
+
+    if manager.user_exists(config):
+        try:
+            pw = pwd.getpwnam(config.username)
+            info_data["user"]["home"] = pw.pw_dir
+            groups_list = [grp.getgrgid(gid).gr_name for gid in os.getgrouplist(config.username, pw.pw_gid)]
+            info_data["user"]["groups"] = groups_list
+        except (KeyError, OSError):
+            pass
+
+    if manager.user_exists(config):
+        home_path = config.home_dir
+        info_data["storage"]["home"] = str(home_path)
+        if home_path.exists():
+            result = subprocess.run(
+                ["du", "-sh", str(home_path)],
+                capture_output=True, text=True
+            )
+            size = result.stdout.split()[0] if result.returncode == 0 else "unknown"
+            info_data["storage"]["size"] = size
+            info_data["storage"]["exists"] = True
+        else:
+            info_data["storage"]["exists"] = False
+
+    result = subprocess.run(
+        ["systemctl", "is-active", config.service_name],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        info_data["service"]["state"] = "active"
+        result = subprocess.run(
+            ["systemctl", "show", config.service_name,
+             "--property=ActiveEnterTimestamp", "--value"],
+            capture_output=True, text=True
+        )
+        active_since = result.stdout.strip()
+        info_data["service"]["active_since"] = active_since
+    else:
+        state = result.stdout.strip() or "inactive"
+        info_data["service"]["state"] = state
+
+    if args.json:
+        print(json.dumps(info_data, indent=2))
+        return
+
+    # Human-readable output
+    print(f"Workload: {config.name}")
+    print(f"Config:   {config.path}")
+    print(f"Status:   {'enabled' if config.enabled else 'disabled'}")
+    print()
+
+    print("Container:")
+    print(f"  Name:   {config.container_name}")
+    print(f"  Image:  {config.image}")
+    if "image_id" in info_data["container"]:
+        print(f"  ID:     sha256:{info_data['container']['image_id'][:12]}...")
+    print()
+
+    print("User:")
+    print(f"  Name:   {config.username}")
+    if info_data["user"]["exists"]:
+        print(f"  UID:    {config.uid}")
+        if "home" in info_data["user"]:
+            print(f"  Home:   {info_data['user']['home']}")
+        if "groups" in info_data["user"]:
+            print(f"  Groups: {','.join(info_data['user']['groups'])}")
+    else:
+        print("  (User not created - workload not enabled)")
+    print()
+
+    print("Network:")
+    network_mode = info_data["network"]["mode"]
+    if network_mode == "default":
+        network_mode = "default (slirp4netns)"
+    print(f"  Mode:   {network_mode}")
+    if info_data["network"]["ports"]:
+        print(f"  Ports:  {', '.join(info_data['network']['ports'])}")
+    print()
+
+    print("Storage:")
+    if info_data["storage"]:
+        if "home" in info_data["storage"]:
+            home = info_data["storage"]["home"]
+            if info_data["storage"].get("exists"):
+                size = info_data["storage"].get("size", "unknown")
+                print(f"  Home:   {home} ({size} used)")
+            else:
+                print(f"  Home:   {home} (not created)")
+    print()
+
+    print("Service:")
+    print(f"  Name:   {config.service_name}")
+    if info_data["service"]["state"] == "active":
+        active_since = info_data["service"].get("active_since", "")
+        print(f"  Active: active (running) since {active_since}")
+    else:
+        print(f"  Active: {info_data['service']['state']}")
+    print()
+
+    print("Quick commands:")
+    print(f"  Shell:    workload-ctl shell {config.filename}")
+    print(f"  Logs:     workload-ctl logs -f {config.filename}")
+    print(f"  Restart:  workload-ctl restart {config.filename}")
+
+
+def cmd_validate(args, manager: WorkloadManager):
+    """Validate workload configuration"""
+    if args.all:
+        configs = manager.get_all_configs()
+        results = []
+        success = True
+        for config in configs:
+            result = validate_single(config, manager, json_mode=args.json)
+            results.append(result)
+            if not result["passed"]:
+                success = False
+            if not args.json:
+                print()
+
+        if args.json:
+            print(json.dumps({"validation_results": results, "all_passed": success}, indent=2))
+        sys.exit(0 if success else 1)
+    else:
+        config = WorkloadConfig(args.workload)
+        result = validate_single(config, manager, json_mode=args.json)
+
+        if args.json:
+            print(json.dumps(result, indent=2))
+        sys.exit(0 if result["passed"] else 1)
+
+
+def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=False) -> dict:
+    """Validate a single workload config. Returns dict with validation results."""
+    errors = 0
+    warnings = 0
+    checks = []
+
+    checks.append({
+        "check": "required_fields",
+        "passed": True,
+        "message": f"Required fields present: name={config.name}, id={config.id}"
+    })
+
+    username_len = len(config.username)
+    if username_len >= 32:
+        checks.append({
+            "check": "username_length",
+            "passed": False,
+            "message": f"Username too long: {config.username} ({username_len} chars, max 31)",
+            "fix": "Use shorter workload name"
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "username_length",
+            "passed": True,
+            "message": f"Username length OK ({username_len} chars)"
+        })
+
+    if config.uid < 10000 or config.uid >= 60000:
+        checks.append({
+            "check": "id_range",
+            "passed": False,
+            "message": f"ID out of range: {config.id} (UID {config.uid}, should be 10000-59999)"
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "id_range",
+            "passed": True,
+            "message": f"ID in valid range (UID: {config.uid})"
+        })
+
+    all_configs = manager.get_all_configs()
+    conflicts = [c for c in all_configs
+                 if c.id == config.id and c.filename != config.filename]
+    if conflicts:
+        checks.append({
+            "check": "id_uniqueness",
+            "passed": False,
+            "message": f"ID conflict: ID {config.id} also used in {conflicts[0].filename}"
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "id_uniqueness",
+            "passed": True,
+            "message": "ID is unique"
+        })
+
+    for vol in config.get_volumes():
+        host_path = vol.split(':')[0]
+        if Path(host_path).exists():
+            checks.append({
+                "check": "volume_path",
+                "passed": True,
+                "message": f"Volume path exists: {host_path}",
+                "path": host_path
+            })
+        else:
+            checks.append({
+                "check": "volume_path",
+                "passed": False,
+                "message": f"Volume path does not exist: {host_path}",
+                "path": host_path,
+                "fix": f"mkdir -p {host_path}"
+            })
+            errors += 1
+
+    for group in config.get_extra_groups():
+        try:
+            grp.getgrnam(group)
+            checks.append({
+                "check": "group_exists",
+                "passed": True,
+                "message": f"Group exists: {group}",
+                "group": group
+            })
+        except KeyError:
+            checks.append({
+                "check": "group_exists",
+                "passed": False,
+                "message": f"Group does not exist: {group}",
+                "group": group
+            })
+            errors += 1
+
+    passed = errors == 0
+    result = {
+        "workload": config.filename,
+        "passed": passed,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks
+    }
+
+    # Human-readable output if not JSON mode
+    if not json_mode:
+        print(f"Validating: {config.filename}")
+        print()
+
+        for check in checks:
+            symbol = "✓" if check["passed"] else "✗"
+            print(f"{symbol} {check['message']}")
+            if "fix" in check:
+                print(f"  Suggested fix: {check['fix']}")
+
+        print()
+        if passed:
+            if warnings == 0:
+                print("✓ Validation passed")
+            else:
+                print(f"⚠ Validation passed with {warnings} warning(s)")
+        else:
+            print(f"✗ Validation failed with {errors} error(s) and {warnings} warning(s)")
+            print("  Fix errors before enabling workload")
+
+    return result
+
+
+def cmd_edit(args, manager: WorkloadManager):
+    """Edit config and apply changes"""
+    require_root()
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Create backup
+    backup_path = Path(tempfile.mktemp(prefix=f"workload-{args.workload}-", suffix=".toml"))
+    shutil.copy2(config_path, backup_path)
+
+    editor = os.environ.get("EDITOR", "nano")
+
+    # Open editor
+    result = subprocess.run([editor, str(config_path)])
+    if result.returncode != 0:
+        print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
+        backup_path.unlink()
+        sys.exit(1)
+
+    # Check if file changed
+    if config_path.read_text() == backup_path.read_text():
+        print("No changes made")
+        backup_path.unlink()
+        return
+
+    print()
+    print("Config changed. Validating...")
+    print()
+
+    try:
+        config = WorkloadConfig(args.workload)
+        if not validate_single(config, manager):
+            print()
+            response = input("Validation failed. Restore backup? [y/N] ")
+            if response.lower() in ["y", "yes"]:
+                shutil.copy2(backup_path, config_path)
+                print("Backup restored")
+            else:
+                print("Config saved with errors - fix before enabling")
+            backup_path.unlink()
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        response = input("Restore backup? [y/N] ")
+        if response.lower() in ["y", "yes"]:
+            shutil.copy2(backup_path, config_path)
+            print("Backup restored")
+        backup_path.unlink()
+        sys.exit(1)
+
+    print()
+    print("Validation passed. Changes:")
+    print()
+    subprocess.run(["diff", "-u", str(backup_path), str(config_path)])
+    print()
+
+    if config.enabled:
+        response = input("Apply changes and restart workload? [y/N] ")
+        if response.lower() in ["y", "yes"]:
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            subprocess.run(["systemctl", "restart", config.service_name], check=True)
+            print("✓ Changes applied and service restarted")
+        else:
+            print("Changes saved but not applied. Run 'systemctl daemon-reload' and restart to apply.")
+    else:
+        print("✓ Changes saved (workload is disabled)")
+
+    backup_path.unlink()
+
+
+def cmd_stats(args, manager: WorkloadManager):
+    """Show resource usage statistics"""
+    if args.workload:
+        config = WorkloadConfig(args.workload)
+
+        if not manager.user_exists(config):
+            print(f"Error: Workload user not found. Is workload enabled?", file=sys.stderr)
+            sys.exit(1)
+
+        if args.follow:
+            manager.run_podman(config, "stats", config.container_name, check=True)
+        else:
+            manager.run_podman(config, "stats", "--no-stream", config.container_name, check=True)
+    else:
+        # All workloads
+        containers = []
+        first_config = None
+
+        # Collect all running containers
+        for entry in pwd.getpwall():
+            if entry.pw_name.startswith("_wl-"):
+                try:
+                    # Parse username to get config
+                    # Format: _wl-{name}-{id}
+                    parts = entry.pw_name[4:].rsplit('-', 1)
+                    if len(parts) == 2:
+                        name, wl_id = parts
+
+                        for config_file in WORKLOAD_DIR.glob("*.toml"):
+                            try:
+                                test_config = WorkloadConfig(config_file.stem)
+                                if test_config.name == name and test_config.id == wl_id:
+                                    containers.append(test_config.container_name)
+                                    if not first_config:
+                                        first_config = test_config
+                                    break
+                            except:
+                                continue
+                except:
+                    continue
+
+        if not containers:
+            print("No running workload containers found")
+            return
+
+        if args.follow:
+            manager.run_podman(first_config, "stats", *containers, check=True)
+        else:
+            manager.run_podman(first_config, "stats", "--no-stream", *containers, check=True)
+
+
+def cmd_cp(args, manager: WorkloadManager):
+    """Copy files to/from container"""
+    src = args.source
+    dest = args.destination
+
+    # Parse workload:path syntax
+    workload_pattern = re.compile(r'^([^:]+):(.+)$')
+
+    src_match = workload_pattern.match(src)
+    dest_match = workload_pattern.match(dest)
+
+    if src_match and not dest_match:
+        # Copy from container
+        workload = src_match.group(1)
+        container_path = src_match.group(2)
+        host_path = dest
+        direction = "from"
+    elif dest_match and not src_match:
+        # Copy to container
+        workload = dest_match.group(1)
+        container_path = dest_match.group(2)
+        host_path = src
+        direction = "to"
+    else:
+        print("Error: One argument must be in workload:path format", file=sys.stderr)
+        print("Examples:", file=sys.stderr)
+        print("  workload-ctl cp webserver:/etc/config ./config", file=sys.stderr)
+        print("  workload-ctl cp ./file.txt webserver:/data/file.txt", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(workload)
+
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Is the workload enabled and running?", file=sys.stderr)
+        sys.exit(1)
+
+    if direction == "from":
+        manager.run_podman(config, "cp", f"{config.container_name}:{container_path}", host_path, check=True)
+    else:
+        manager.run_podman(config, "cp", host_path, f"{config.container_name}:{container_path}", check=True)
+
+    print("✓ Copied successfully")
+
+
+def cmd_ports(args, manager: WorkloadManager):
+    """Show port information"""
+    config = WorkloadConfig(args.workload)
+
+    network_mode = config.get_network_mode()
+    network_mode_display = network_mode
+    if network_mode == "default":
+        network_mode_display = "default (slirp4netns)"
+
+    ports = config.get_ports()
+
+    port_data = {
+        "workload": config.name,
+        "network_mode": network_mode,
+        "ports": ports,
+        "accessible_at": []
+    }
+
+    if ports:
+        if network_mode == "host":
+            result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+            ips = result.stdout.strip().split() if result.returncode == 0 else []
+
+            for port_spec in ports:
+                port = port_spec.split(':')[-1].split('/')[0]
+                port_data["accessible_at"].append(f"http://localhost:{port}")
+                for ip in ips:
+                    port_data["accessible_at"].append(f"http://{ip}:{port}")
+            port_data["note"] = "Host networking - container ports directly accessible on host"
+        else:
+            for port_spec in ports:
+                parts = port_spec.split(':')
+                if len(parts) >= 2:
+                    host_port = parts[0]
+                    container_port = parts[1].split('/')[0]
+                    port_data["accessible_at"].append({
+                        "host": f"http://localhost:{host_port}",
+                        "container": container_port
+                    })
+                else:
+                    port = parts[0].split('/')[0]
+                    port_data["accessible_at"].append(f"http://localhost:{port}")
+
+    if args.json:
+        print(json.dumps(port_data, indent=2))
+        return
+
+    # Human-readable output
+    print(f"Workload: {config.name}")
+    print(f"Network Mode: {network_mode_display}")
+    print()
+
+    if not ports:
+        print("No ports configured")
+        return
+
+    print("Container listens on:")
+    for port in ports:
+        print(f"  {port}")
+
+    print()
+    print("Accessible at:")
+
+    if network_mode == "host":
+        for port_spec in ports:
+            port = port_spec.split(':')[-1].split('/')[0]
+            print(f"  http://localhost:{port}")
+            result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+            ips = result.stdout.strip().split() if result.returncode == 0 else []
+            for ip in ips:
+                print(f"  http://{ip}:{port}")
+        print()
+        print("Note: Host networking - container ports directly accessible on host")
+    else:
+        for port_spec in ports:
+            parts = port_spec.split(':')
+            if len(parts) >= 2:
+                host_port = parts[0]
+                container_port = parts[1].split('/')[0]
+                print(f"  http://localhost:{host_port} → container:{container_port}")
+            else:
+                port = parts[0].split('/')[0]
+                print(f"  http://localhost:{port}")
+
+
+def cmd_images(args, manager: WorkloadManager):
+    """Show images used by workloads or prune unused images"""
+    if args.subcommand == "prune":
+        require_root()
+        print("Pruning unused images from all workloads...")
+        print()
+
+        pruned = False
+        for entry in pwd.getpwall():
+            if entry.pw_name.startswith("_wl-"):
+                print(f"Pruning images for {entry.pw_name}...")
+                try:
+                    # Create a minimal config just for podman access
+                    uid = entry.pw_uid
+                    env = os.environ.copy()
+                    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+
+                    result = subprocess.run(
+                        ["sudo", "-u", entry.pw_name, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                         "podman", "image", "prune", "-f"],
+                        capture_output=True, text=True
+                    )
+                    if result.returncode == 0:
+                        pruned = True
+                except:
+                    continue
+
+        if pruned:
+            print()
+            print("✓ Image pruning complete")
+        else:
+            print("No images to prune")
+    else:
+        # List images
+        configs = manager.get_all_configs()
+        images_data = []
+
+        for config in configs:
+            if not manager.user_exists(config):
+                continue
+
+            result = manager.run_podman(
+                config, "images", "--format", "{{.Size}}|{{.CreatedSince}}",
+                config.image, capture_output=True
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                if lines and lines[0]:
+                    parts = lines[0].split('|')
+                    size = parts[0] if len(parts) > 0 else "unknown"
+                    pulled = parts[1] if len(parts) > 1 else "unknown"
+
+                    images_data.append({
+                        "workload": config.filename,
+                        "image": config.image,
+                        "size": size,
+                        "pulled": pulled
+                    })
+
+        if args.json:
+            print(json.dumps({"images": images_data, "total": len(images_data)}, indent=2))
+            return
+
+        # Human-readable output
+        print(f"{'WORKLOAD':<20} {'IMAGE':<50} {'SIZE':<10} {'PULLED':<15}")
+        print("-" * 95)
+
+        for img in images_data:
+            image = img["image"]
+            if len(image) > 50:
+                image = image[:47] + "..."
+            print(f"{img['workload']:<20} {image:<50} {img['size']:<10} {img['pulled']:<15}")
+
+        print()
+        if len(images_data) == 0:
+            print("No workload images found")
+        else:
+            print(f"Total: {len(images_data)} workload image(s)")
+
+
+def cmd_attach(args, manager: WorkloadManager):
+    """Attach to container process"""
+    config = WorkloadConfig(args.workload)
+
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Is the workload enabled and running?", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Attaching to {config.container_name}...")
+    print("(Press Ctrl+C to detach)")
+    print()
+
+    manager.run_podman(config, "attach", config.container_name, check=True)
+
+
+def cmd_health(args, manager: WorkloadManager):
+    """Check workload health"""
+    config = WorkloadConfig(args.workload)
+
+    health_data = {
+        "workload": config.name,
+        "overall": "UNKNOWN",
+        "checks": []
+    }
+
+    all_healthy = True
+
+    # Check 1: Service status
+    result = subprocess.run(
+        ["systemctl", "is-active", config.service_name],
+        capture_output=True, text=True
+    )
+    service_active = result.returncode == 0
+    service_state = result.stdout.strip() if result.stdout else "unknown"
+
+    health_data["checks"].append({
+        "check": "service_status",
+        "healthy": service_active,
+        "message": f"Service active and running" if service_active else f"Service {service_state}",
+        "details": {"state": service_state}
+    })
+    if not service_active:
+        all_healthy = False
+
+    # Check 2: User exists
+    user_exists = manager.user_exists(config)
+    health_data["checks"].append({
+        "check": "user_exists",
+        "healthy": user_exists,
+        "message": f"User {config.username} exists" if user_exists else f"User {config.username} does not exist"
+    })
+    if not user_exists:
+        all_healthy = False
+
+    # Check 3: Container running (only if user exists)
+    container_running = False
+    container_status = "unknown"
+    if user_exists:
+        result = manager.run_podman(
+            config, "ps", "--filter", f"name={config.container_name}",
+            "--format", "{{.Status}}", capture_output=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            container_running = True
+            container_status = result.stdout.strip()
+            health_data["checks"].append({
+                "check": "container_running",
+                "healthy": True,
+                "message": f"Container running",
+                "details": {"status": container_status}
+            })
+        else:
+            health_data["checks"].append({
+                "check": "container_running",
+                "healthy": False,
+                "message": "Container not running"
+            })
+            all_healthy = False
+
+    # Check 4: Port accessibility (if ports defined and container running)
+    ports = config.get_ports()
+    if ports and container_running:
+        import socket
+        for port_spec in ports:
+            # Extract port number
+            port = port_spec.split(':')[-1].split('/')[0]
+            try:
+                port_num = int(port)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                result = sock.connect_ex(('localhost', port_num))
+                sock.close()
+
+                port_accessible = result == 0
+                health_data["checks"].append({
+                    "check": "port_accessibility",
+                    "healthy": port_accessible,
+                    "message": f"Port {port} accessible" if port_accessible else f"Port {port} not accessible",
+                    "details": {"port": port}
+                })
+                if not port_accessible:
+                    all_healthy = False
+            except ValueError:
+                pass  # Skip invalid port numbers
+
+    # Check 5: Recent errors in logs
+    if service_active:
+        result = subprocess.run(
+            ["journalctl", "-u", config.service_name, "-n", "100", "--no-pager"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            log_lines = result.stdout.strip().split('\n')
+            error_count = sum(1 for line in log_lines if 'error' in line.lower() or 'fail' in line.lower())
+
+            has_recent_errors = error_count > 0
+            health_data["checks"].append({
+                "check": "recent_logs",
+                "healthy": not has_recent_errors,
+                "message": f"No errors in recent logs" if not has_recent_errors else f"{error_count} error(s) in recent logs",
+                "details": {"error_count": error_count}
+            })
+            if has_recent_errors:
+                all_healthy = False
+
+    # Check 6: Uptime (if service active)
+    if service_active:
+        result = subprocess.run(
+            ["systemctl", "show", config.service_name,
+             "--property=ActiveEnterTimestamp", "--value"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            active_since = result.stdout.strip()
+            health_data["checks"].append({
+                "check": "uptime",
+                "healthy": True,
+                "message": f"Running since {active_since}",
+                "details": {"active_since": active_since}
+            })
+
+    # Determine overall health
+    health_data["overall"] = "HEALTHY" if all_healthy else "UNHEALTHY"
+
+    # Output
+    if args.json:
+        print(json.dumps(health_data, indent=2))
+        sys.exit(0 if all_healthy else 1)
+
+    # Human-readable output
+    print(f"Workload: {config.name}")
+    print(f"Overall: {health_data['overall']}")
+    print()
+
+    for check in health_data["checks"]:
+        symbol = "✓" if check["healthy"] else "✗"
+        print(f"{symbol} {check['message']}")
+
+    sys.exit(0 if all_healthy else 1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="workload-ctl",
+        description="Manage rootless system workloads",
+        epilog="For more information, see /usr/share/doc/workloads/"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
+
+    attach_parser = subparsers.add_parser("attach", help="Attach to container process")
+    attach_parser.add_argument("workload", help="Workload name")
+
+    cp_parser = subparsers.add_parser("cp", help="Copy files to/from container")
+    cp_parser.add_argument("source", help="Source (workload:path or path)")
+    cp_parser.add_argument("destination", help="Destination (workload:path or path)")
+
+    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload")
+    disable_parser.add_argument("workload", help="Workload name")
+    disable_parser.add_argument("--purge", action="store_true",
+                               help="Also remove user, home, and subuid/subgid")
+
+    edit_parser = subparsers.add_parser("edit", help="Edit config and apply changes")
+    edit_parser.add_argument("workload", help="Workload name")
+
+    enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
+    enable_parser.add_argument("workload", help="Workload name")
+
+    exec_parser = subparsers.add_parser("exec", help="Execute command in workload container")
+    exec_parser.add_argument("workload", help="Workload name")
+    exec_parser.add_argument("command", nargs="+", help="Command to execute")
+
+    health_parser = subparsers.add_parser("health", help="Check workload health")
+    health_parser.add_argument("workload", help="Workload name")
+    health_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    images_parser = subparsers.add_parser("images", help="Show images or prune unused")
+    images_parser.add_argument("subcommand", nargs="?", default="list",
+                              choices=["list", "prune"], help="Subcommand (list or prune)")
+    images_parser.add_argument("--json", action="store_true", help="Output in JSON format (for list)")
+
+    info_parser = subparsers.add_parser("info", help="Show detailed workload information")
+    info_parser.add_argument("workload", help="Workload name")
+    info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    list_parser = subparsers.add_parser("list", help="List all available workloads")
+    list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    logs_parser = subparsers.add_parser("logs", help="View workload logs (journalctl wrapper)")
+    logs_parser.add_argument("workload", help="Workload name")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+    logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines")
+    logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
+    logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
+
+    ports_parser = subparsers.add_parser("ports", help="Show port information")
+    ports_parser.add_argument("workload", help="Workload name")
+    ports_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    ps_parser = subparsers.add_parser("ps", help="Show all running workload containers")
+    ps_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    restart_parser = subparsers.add_parser("restart", help="Restart a running workload")
+    restart_parser.add_argument("workload", help="Workload name")
+
+    shell_parser = subparsers.add_parser("shell", help="Open interactive shell in workload container")
+    shell_parser.add_argument("workload", help="Workload name")
+
+    stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
+    stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
+    stats_parser.add_argument("-f", "--follow", action="store_true", help="Follow stats (live updating)")
+
+    status_parser = subparsers.add_parser("status", help="Show workload service status")
+    status_parser.add_argument("workload", help="Workload name")
+
+    update_parser = subparsers.add_parser("update", help="Pull latest image and restart")
+    update_parser.add_argument("workload", nargs="?", help="Workload name")
+    update_parser.add_argument("--force", action="store_true", help="Force pull even if cached")
+    update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
+
+    validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")
+    validate_parser.add_argument("workload", nargs="?", help="Workload name")
+    validate_parser.add_argument("--all", action="store_true", help="Validate all workloads")
+    validate_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+
+    args = parser.parse_args()
+
+    # Create manager
+    manager = WorkloadManager()
+
+    command_map = {
+        "attach": cmd_attach,
+        "cp": cmd_cp,
+        "disable": cmd_disable,
+        "edit": cmd_edit,
+        "enable": cmd_enable,
+        "exec": cmd_exec,
+        "health": cmd_health,
+        "images": cmd_images,
+        "info": cmd_info,
+        "list": cmd_list,
+        "logs": cmd_logs,
+        "ports": cmd_ports,
+        "ps": cmd_ps,
+        "restart": cmd_restart,
+        "shell": cmd_shell,
+        "stats": cmd_stats,
+        "status": cmd_status,
+        "update": cmd_update,
+        "validate": cmd_validate,
+    }
+
+    handler = command_map.get(args.command)
+    if handler:
+        handler(args, manager)
+    else:
+        print(f"Command '{args.command}' not yet implemented", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted", file=sys.stderr)
+        sys.exit(130)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
