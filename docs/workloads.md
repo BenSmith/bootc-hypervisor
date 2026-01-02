@@ -1,40 +1,17 @@
+# DRAFT DRAFT DRAFT DRAFT
+
 # Rootless Workload Provisioning System
 
 ## Quick Start
 
-Deploy a web server in 3 simple steps:
+Deploy a web server in just one command:
 
-**1. Create a config file:**
+**Easy way (using create command):**
 ```bash
-sudo nano /etc/workloads.d/webserver.toml
-```
-
-**2. Add this minimal configuration:**
-```toml
-[workload]
-name = "webserver"
-enabled = true
-
-[container]
-image = "docker.io/nginxinc/nginx-unprivileged:alpine"
-id = "1"
-
-[gpu]
-type = "none"
-
-[devices]
-input = false
-
-[security]
-extra_groups = []
-
-[network]
-ports = ["8080:8080"]
-```
-
-**3. Enable and start:**
-```bash
-sudo workload-ctl enable webserver
+sudo workload-ctl create webserver \
+  --image docker.io/nginxinc/nginx-unprivileged:alpine \
+  --ports 8080:8080 \
+  --enable
 ```
 
 That's it! Your web server is now running, will start automatically at boot, and runs as an isolated unprivileged user with rootless podman.
@@ -45,11 +22,41 @@ workload-ctl status webserver
 curl http://localhost:8080
 ```
 
+---
+
+**Manual way (for bootc images or advanced use):**
+
+1. Create a config file:
+```bash
+sudo nano /etc/workloads.d/webserver.toml
+```
+
+2. Add this minimal configuration:
+```toml
+[workload]
+name = "webserver"
+
+[container]
+image = "docker.io/nginxinc/nginx-unprivileged:alpine"
+id = "1"
+
+[network]
+ports = ["8080:8080"]
+```
+
+3. Enable and start:
+```bash
+sudo workload-ctl enable webserver
+```
+
 ## What Can You Do?
 
 The `workload-ctl` command gives you Docker/kubectl-like management for your workloads:
 
 ```bash
+# Create a new workload
+sudo workload-ctl create jellyfin --image=jellyfin/jellyfin:latest --enable
+
 # List all workloads
 workload-ctl list
 
@@ -123,6 +130,77 @@ sudo systemctl restart workload-{name}-{id}.service
 ### Using workload-ctl (Recommended)
 
 The `workload-ctl` command provides a convenient interface for managing workloads:
+
+**Create a new workload:**
+```bash
+sudo workload-ctl create NAME --image IMAGE [OPTIONS]
+```
+Creates a new workload configuration file in `/etc/workloads.d/`. This is the easiest way to get started on regular Fedora systems.
+
+**Required arguments:**
+- `NAME` - Workload name (lowercase letters, numbers, hyphens only)
+- `--image IMAGE` - Container image to use (e.g., `docker.io/library/nginx:alpine`)
+
+**Optional arguments:**
+- `--id N` - Explicit workload ID (default: auto-assign next available)
+- `--gpu TYPE` - GPU type: `amd`, `nvidia`, or `none`
+- `--groups GROUP...` - Additional system groups (e.g., `video render input`)
+- `--ports PORT...` - Port mappings (e.g., `8080:80 8443:443`)
+- `--network MODE` - Network mode: `host`, `bridge`, or `none`
+- `--volumes VOL...` - Volume mounts (e.g., `/host/path:/container/path:ro`)
+- `--enable` - Enable and start the workload immediately after creation
+- `--disabled` - Create as disabled (`enabled = false`)
+
+**Examples:**
+
+Minimal workload (auto-assigns ID):
+```bash
+sudo workload-ctl create jellyfin --image=jellyfin/jellyfin:latest
+```
+
+With common options:
+```bash
+sudo workload-ctl create sunshine \
+  --image=ghcr.io/lizardbyte/sunshine:latest \
+  --gpu=nvidia \
+  --groups video input \
+  --ports 47984:47984 47989:47989 \
+  --network=host \
+  --enable
+```
+
+With volumes and explicit ID:
+```bash
+sudo workload-ctl create minecraft \
+  --image=itzg/minecraft-server:latest \
+  --id=42 \
+  --volumes /mnt/games/minecraft:/data \
+  --ports 25565:25565 \
+  --enable
+```
+
+Create but don't enable:
+```bash
+sudo workload-ctl create test-app \
+  --image=myapp:latest \
+  --disabled
+```
+
+**How it works:**
+1. Validates the workload name (must be lowercase, numbers, hyphens)
+2. Auto-assigns the next available ID (0-49999) if `--id` not specified
+3. Checks for naming conflicts and ID collisions
+4. Validates username length (must be < 32 characters)
+5. Creates `/etc/workloads.d/NAME.toml` with specified options
+6. Validates the generated configuration
+7. If `--enable` is used, runs the enable process immediately
+
+After creation, you can:
+- Edit the config: `sudo workload-ctl edit NAME`
+- Enable it: `sudo workload-ctl enable NAME`
+- View it: `workload-ctl info NAME`
+
+**Note for bootc users:** On bootc images, it's recommended to create TOML configs manually and bake them into your image for immutability. The `create` command is most useful on regular (mutable) Fedora systems.
 
 **List all workloads:**
 ```bash

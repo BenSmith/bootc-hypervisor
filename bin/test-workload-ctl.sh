@@ -63,13 +63,10 @@ WORKLOAD_DIR="/etc/workloads.d"
 CONTEXT="unknown"
 
 # Check if we're in the repo (workload-ctl exists in same directory as this script)
-if [[ -f "$SCRIPT_DIR/workload-ctl" ]]; then
+if [[ -d "$SCRIPT_DIR/../workloads.d" ]]; then
     WORKLOAD_CTL="$SCRIPT_DIR/workload-ctl"
     CONTEXT="repo"
-    # In repo, workloads.d is in parent directory
-    if [[ -d "$SCRIPT_DIR/../workloads.d" ]]; then
-        WORKLOAD_DIR="$SCRIPT_DIR/../workloads.d"
-    fi
+    WORKLOAD_DIR="$SCRIPT_DIR/../workloads.d"
 elif command -v workload-ctl &> /dev/null; then
     WORKLOAD_CTL="workload-ctl"
     CONTEXT="installed"
@@ -361,6 +358,172 @@ if validate_json "$output"; then
 else
     test_fail "validate --all --json produces invalid JSON"
     echo "Output was: $output"
+fi
+
+echo ""
+echo "========================================"
+echo "Testing: create command"
+echo "========================================"
+
+# Only test create if running as root (it requires write access to /etc/workloads.d)
+if check_root; then
+    TEST_WORKLOAD_NAME="test-create-$$"
+    TEST_CONFIG_PATH="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME}.toml"
+
+    # Test: create with minimal options
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME" --image "docker.io/library/alpine:latest" 2>&1); then
+        test_pass "create command works with minimal options"
+
+        # Check that config file was created
+        if [[ -f "$TEST_CONFIG_PATH" ]]; then
+            test_pass "create command created config file"
+
+            # Check that file contains expected content
+            if grep -q "name = \"$TEST_WORKLOAD_NAME\"" "$TEST_CONFIG_PATH" && \
+               grep -q 'image = "docker.io/library/alpine:latest"' "$TEST_CONFIG_PATH"; then
+                test_pass "created config has correct content"
+            else
+                test_fail "created config missing expected content"
+            fi
+
+            # Validate the created config
+            if "$WORKLOAD_CTL" validate "$TEST_WORKLOAD_NAME" > /dev/null 2>&1; then
+                test_pass "created workload validates successfully"
+            else
+                test_fail "created workload failed validation"
+            fi
+        else
+            test_fail "create command did not create config file"
+        fi
+    else
+        test_fail "create command failed with minimal options"
+    fi
+
+    # Test: create with duplicate name should fail
+    if "$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME" --image "docker.io/library/nginx:latest" > /dev/null 2>&1; then
+        test_fail "create should reject duplicate workload name"
+    else
+        test_pass "create properly rejects duplicate workload name"
+    fi
+
+    # Clean up first test workload
+    if [[ -f "$TEST_CONFIG_PATH" ]]; then
+        rm -f "$TEST_CONFIG_PATH"
+    fi
+
+    # Test: create with options (gpu, ports, groups)
+    TEST_WORKLOAD_NAME2="test-create-opts-$$"
+    TEST_CONFIG_PATH2="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME2}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME2" \
+        --image "docker.io/library/nginx:alpine" \
+        --gpu "amd" \
+        --ports "8080:80" "8443:443" \
+        --groups "video" "render" \
+        --network "host" 2>&1); then
+        test_pass "create command works with multiple options"
+
+        if [[ -f "$TEST_CONFIG_PATH2" ]]; then
+            # Check that all options were written to config
+            content=$(cat "$TEST_CONFIG_PATH2")
+            all_ok=true
+
+            if ! echo "$content" | grep -q 'type = "amd"'; then
+                test_fail "created config missing gpu.type"
+                all_ok=false
+            fi
+
+            if ! echo "$content" | grep -q '"8080:80"'; then
+                test_fail "created config missing ports"
+                all_ok=false
+            fi
+
+            if ! echo "$content" | grep -q '"video"'; then
+                test_fail "created config missing extra_groups"
+                all_ok=false
+            fi
+
+            if ! echo "$content" | grep -q 'mode = "host"'; then
+                test_fail "created config missing network.mode"
+                all_ok=false
+            fi
+
+            if $all_ok; then
+                test_pass "created config includes all specified options"
+            fi
+        else
+            test_fail "create command with options did not create config file"
+        fi
+    else
+        test_fail "create command failed with multiple options"
+    fi
+
+    # Clean up second test workload
+    if [[ -f "$TEST_CONFIG_PATH2" ]]; then
+        rm -f "$TEST_CONFIG_PATH2"
+    fi
+
+    # Test: create with invalid name
+    if "$WORKLOAD_CTL" create "Invalid_Name!" --image "alpine:latest" > /dev/null 2>&1; then
+        test_fail "create should reject invalid workload name"
+        # Clean up if it somehow created it
+        rm -f "$WORKLOAD_DIR/Invalid_Name!.toml"
+    else
+        test_pass "create properly rejects invalid workload name"
+    fi
+
+    # Test: create with explicit ID
+    TEST_WORKLOAD_NAME3="test-create-id-$$"
+    TEST_CONFIG_PATH3="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME3}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME3" \
+        --image "alpine:latest" \
+        --id 9999 2>&1); then
+        test_pass "create command works with explicit --id"
+
+        if [[ -f "$TEST_CONFIG_PATH3" ]]; then
+            if grep -q 'id = "9999"' "$TEST_CONFIG_PATH3"; then
+                test_pass "created config has correct explicit ID"
+            else
+                test_fail "created config missing explicit ID"
+            fi
+        fi
+    else
+        test_fail "create command failed with explicit ID"
+    fi
+
+    # Clean up third test workload
+    if [[ -f "$TEST_CONFIG_PATH3" ]]; then
+        rm -f "$TEST_CONFIG_PATH3"
+    fi
+
+    # Test: create --disabled
+    TEST_WORKLOAD_NAME4="test-create-disabled-$$"
+    TEST_CONFIG_PATH4="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME4}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME4" \
+        --image "alpine:latest" \
+        --disabled 2>&1); then
+        test_pass "create command works with --disabled"
+
+        if [[ -f "$TEST_CONFIG_PATH4" ]]; then
+            if grep -q 'enabled = false' "$TEST_CONFIG_PATH4"; then
+                test_pass "created config has enabled=false"
+            else
+                test_fail "created config missing enabled=false"
+            fi
+        fi
+    else
+        test_fail "create command failed with --disabled"
+    fi
+
+    # Clean up fourth test workload
+    if [[ -f "$TEST_CONFIG_PATH4" ]]; then
+        rm -f "$TEST_CONFIG_PATH4"
+    fi
+
+else
+    test_skip "Skipping create command tests (requires root)"
 fi
 
 echo ""

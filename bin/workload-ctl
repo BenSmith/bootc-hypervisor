@@ -153,8 +153,174 @@ class WorkloadManager:
         except KeyError:
             return False
 
+    def find_next_available_id(self) -> int:
+        """Find the next available workload ID (0-49999)"""
+        configs = self.get_all_configs()
+        used_ids = set()
+
+        for config in configs:
+            try:
+                used_ids.add(int(config.id))
+            except (ValueError, AttributeError):
+                continue
+
+        # Find lowest unused ID
+        for i in range(50000):
+            if i not in used_ids:
+                return i
+
+        raise RuntimeError("No available IDs (all 0-49999 in use)")
+
 
 # Command implementations
+
+def cmd_create(args, manager: WorkloadManager):
+    """Create a new workload configuration"""
+    require_root()
+
+    name = args.name
+    image = args.image
+
+    # Validate name
+    if not re.match(r'^[a-z0-9-]+$', name):
+        print("Error: Workload name must contain only lowercase letters, numbers, and hyphens", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if config already exists
+    config_path = WORKLOAD_DIR / f"{name}.toml"
+    if config_path.exists():
+        print(f"Error: Workload config already exists: {config_path}", file=sys.stderr)
+        print(f"Use 'workload-ctl edit {name}' to modify it", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine ID
+    if args.id is not None:
+        workload_id = args.id
+        # Validate ID range
+        if workload_id < 0 or workload_id >= 50000:
+            print(f"Error: ID must be between 0 and 49999", file=sys.stderr)
+            sys.exit(1)
+
+        # Check for ID conflicts
+        configs = manager.get_all_configs()
+        conflicts = [c for c in configs if c.id == str(workload_id)]
+        if conflicts:
+            print(f"Error: ID {workload_id} is already used by {conflicts[0].filename}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        workload_id = manager.find_next_available_id()
+
+    # Check username length (username format: _wl-{name}-{id})
+    username = f"_wl-{name}-{workload_id}"
+    if len(username) >= 32:
+        print(f"Error: Generated username too long: {username} ({len(username)} chars, max 31)", file=sys.stderr)
+        print(f"Try a shorter workload name", file=sys.stderr)
+        sys.exit(1)
+
+    # Build configuration
+    config_lines = [
+        "[workload]",
+        f'name = "{name}"',
+    ]
+
+    if args.disabled:
+        config_lines.append("enabled = false")
+
+    config_lines.extend([
+        "",
+        "[container]",
+        f'image = "{image}"',
+        f'id = "{workload_id}"',
+    ])
+
+    # Add optional sections
+    if args.gpu:
+        config_lines.extend([
+            "",
+            "[gpu]",
+            f'type = "{args.gpu}"',
+        ])
+
+    if args.groups:
+        groups_list = ", ".join([f'"{g}"' for g in args.groups])
+        config_lines.extend([
+            "",
+            "[security]",
+            f"extra_groups = [{groups_list}]",
+        ])
+
+    if args.ports:
+        ports_list = ", ".join([f'"{p}"' for p in args.ports])
+        config_lines.extend([
+            "",
+            "[network]",
+            f"ports = [{ports_list}]",
+        ])
+
+    if args.network:
+        if "[network]" not in config_lines:
+            config_lines.extend(["", "[network]"])
+        config_lines.append(f'mode = "{args.network}"')
+
+    if args.volumes:
+        volumes_list = ", ".join([f'"{v}"' for v in args.volumes])
+        config_lines.extend([
+            "",
+            "[storage]",
+            f"volumes = [{volumes_list}]",
+        ])
+
+    # Write config file
+    config_content = "\n".join(config_lines) + "\n"
+
+    print(f"Creating workload: {name}")
+    print(f"  Config: {config_path}")
+    print(f"  Image:  {image}")
+    print(f"  ID:     {workload_id} (UID: {10000 + workload_id})")
+    print(f"  User:   {username}")
+    print()
+
+    config_path.write_text(config_content)
+    print(f"✓ Created {config_path}")
+
+    # Validate the new config
+    print()
+    print("Validating configuration...")
+    print()
+    try:
+        config = WorkloadConfig(name)
+        result = validate_single(config, manager, json_mode=False)
+        if not result["passed"]:
+            print()
+            print("Warning: Validation found issues. Fix them before enabling.", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error: Failed to validate config: {e}", file=sys.stderr)
+        config_path.unlink()
+        sys.exit(1)
+
+    # Optionally enable immediately
+    if args.enable:
+        print()
+        print("Enabling workload...")
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemd-sysusers"], check=True)
+        subprocess.run(["systemctl", "start", "workload-setup.service"], check=True)
+
+        service_name = f"workload-{name}-{workload_id}.service"
+        print(f"Starting {service_name}...")
+        subprocess.run(["systemctl", "start", "--no-block", service_name], check=True)
+        print(f"✓ Workload '{name}' created and enabled")
+        print()
+        print("Next steps:")
+        print(f"  Check status: workload-ctl status {name}")
+        print(f"  View logs:    workload-ctl logs -f {name}")
+    else:
+        print()
+        print("Next steps:")
+        print(f"  Edit config:  workload-ctl edit {name}")
+        print(f"  Enable:       workload-ctl enable {name}")
+
 
 def cmd_list(args, manager: WorkloadManager):
     """List all available workloads"""
@@ -1290,6 +1456,18 @@ def main():
     cp_parser.add_argument("source", help="Source (workload:path or path)")
     cp_parser.add_argument("destination", help="Destination (workload:path or path)")
 
+    create_parser = subparsers.add_parser("create", help="Create a new workload configuration")
+    create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens)")
+    create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
+    create_parser.add_argument("--id", type=int, metavar="N", help="Workload ID (default: auto-assign next available)")
+    create_parser.add_argument("--gpu", choices=["amd", "nvidia", "none"], help="GPU type for hardware acceleration")
+    create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input)")
+    create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
+    create_parser.add_argument("--network", choices=["host", "bridge", "none"], help="Network mode")
+    create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
+    create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
+    create_parser.add_argument("--disabled", action="store_true", help="Create as disabled (enabled=false)")
+
     disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload")
     disable_parser.add_argument("workload", help="Workload name")
     disable_parser.add_argument("--purge", action="store_true",
@@ -1367,6 +1545,7 @@ def main():
     command_map = {
         "attach": cmd_attach,
         "cp": cmd_cp,
+        "create": cmd_create,
         "disable": cmd_disable,
         "edit": cmd_edit,
         "enable": cmd_enable,
