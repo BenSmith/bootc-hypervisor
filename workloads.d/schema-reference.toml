@@ -65,12 +65,47 @@ type = "amd"
 # devices = "all"
 
 [devices]
+# Optional: Generic device passthrough
+# Type: array of strings (device paths or CDI device names)
+# Default: [] (no devices)
+# Format: Regular device paths (/dev/xxx) or CDI names (nvidia.com/gpu=0)
+# Examples:
+#   ["/dev/sdb"]                        - Block device (WARNING: grants raw disk access!)
+#   ["/dev/tpm0"]                       - TPM device
+#   ["/dev/ttyUSB0"]                    - USB serial device (Zigbee/Z-Wave stick)
+#   ["/dev/video0", "/dev/video1"]      - Webcams or capture cards
+#   ["nvidia.com/gpu=0"]                - NVIDIA GPU via CDI (alternative to gpu.type)
+# Note: Device paths must exist on the host and may change on reboot
+# Note: You must add appropriate groups (dialout, video, disk, tpm, etc.) to security.extra_groups
+devices = ["/dev/ttyUSB0", "/dev/video0"]
+
+# CONVENIENCE FLAGS (for complex multi-device scenarios)
+# These are shortcuts that expand to multiple devices and/or special handling
+
 # Optional: Enable input device access (/dev/input/*, /dev/uinput)
 # Type: boolean
 # Default: false
+# Expands to: --device /dev/input --device /dev/uinput
 # Useful for: game streaming, virtual input, controllers
 # Requires: extra_groups = ["input"]
 input = true
+
+# Optional: Enable audio device access
+# Type: boolean
+# Default: false
+# Expands to: --device /dev/snd + auto-detects/mounts PulseAudio/PipeWire sockets
+# Useful for: media servers, game streaming, audio processing
+# Requires: extra_groups = ["audio"]
+# Special: Auto-detects and mounts audio server sockets from /run/user/1000/
+audio = true
+
+# Optional: Enable virtualization support (KVM)
+# Type: boolean
+# Default: false
+# Expands to: --device /dev/kvm --device /dev/vhost-net --device /dev/vhost-vsock
+# Useful for: nested virtualization, running VMs in containers
+# Requires: extra_groups = ["kvm"]
+virtualization = true
 
 [security]
 # Optional: Additional system groups for the workload user
@@ -78,16 +113,24 @@ input = true
 # Default: [] (no additional groups)
 #
 # Common groups (must exist on host):
-#   "video"  - Video device access (/dev/dri/card*, /dev/nvidia*)
-#   "render" - GPU rendering access (/dev/dri/renderD*, /dev/kfd)
-#   "input"  - Input device access (/dev/input/*, /dev/uinput)
-#   "audio"  - Audio device access
+#   "audio"   - Audio device access (/dev/snd/*)
+#   "dialout" - Serial device access (/dev/ttyUSB*, /dev/ttyACM*)
+#   "disk"    - Block device access (/dev/sd*, /dev/nvme*)
+#   "input"   - Input device access (/dev/input/*, /dev/uinput)
+#   "kvm"     - Virtualization access (/dev/kvm)
+#   "render"  - GPU rendering access (/dev/dri/renderD*, /dev/kfd)
+#   "tpm"     - TPM device access (/dev/tpm*)
+#   "video"   - Video device access (/dev/dri/card*, /dev/nvidia*, /dev/video*)
 #
 # IMPORTANT: You must explicitly specify groups needed for device access!
 # Example for AMD GPU: ["video", "render"]
 # Example for NVIDIA GPU: ["video"]
 # Example for input devices: ["input"]
-extra_groups = ["video", "render", "input"]
+# Example for USB serial devices: ["dialout"]
+# Example for audio: ["audio"]
+# Example for video capture: ["video"]
+# Example for virtualization: ["kvm"]
+extra_groups = ["video", "render", "input", "dialout", "audio"]
 
 [storage]
 # Optional: Custom home directory for the workload user
@@ -102,9 +145,9 @@ extra_groups = ["video", "render", "input"]
 # Default: []
 # Format: "host-path:container-path[:options]"
 # Examples:
+#   "/etc/config:/config:ro,z"     - SELinux relabeled
 #   "/mnt/data:/data:ro"           - Read-only mount
 #   "/mnt/shared:/shared"          - Read-write mount
-#   "/etc/config:/config:ro,z"     - SELinux relabeled
 volumes = [
     "/mnt/games:/games:ro",
     "/mnt/saves:/saves"
@@ -115,10 +158,10 @@ volumes = [
 # Type: string
 # Default: "pasta" (rootless networking with port forwarding, works in Podman 5.3+)
 # Options:
-#   "pasta"      - Isolated networking with port forwarding (recommended, secure & fast)
 #   "host"       - Use host network namespace (no isolation, maximum performance)
-#   "none"       - No networking (container is completely isolated)
 #   "mynetwork"  - Custom network name (user-defined network, must create first)
+#   "none"       - No networking (container is completely isolated)
+#   "pasta"      - Isolated networking with port forwarding (recommended, secure & fast)
 #
 # Custom networks enable container-to-container communication:
 #   1. Create network: sudo -u _wl-myapp-1 podman network create mynetwork
@@ -234,7 +277,39 @@ ports = ["8080:80", "8443:443"]
 # [network]
 # ports = ["3000:3000", "8000:8000"]
 
-# Example 5: Test container for group verification
+# Example 5: Home Assistant with Zigbee USB stick
+# ------------------------------------------------
+# [workload]
+# name = "homeassistant"
+# enabled = true
+#
+# [container]
+# image = "ghcr.io/home-assistant/home-assistant:stable"
+# id = "5"
+#
+# [gpu]
+# type = "none"
+#
+# [devices]
+# # Pass through Zigbee USB stick (Conbee II on /dev/ttyACM0)
+# devices = ["/dev/ttyACM0"]
+#
+# [security]
+# # dialout group needed for serial device access
+# extra_groups = ["dialout"]
+#
+# [network]
+# mode = "host"  # Host networking for mDNS discovery
+#
+# [storage]
+# volumes = ["/etc/localtime:/etc/localtime:ro"]
+#
+# Note: USB device paths may change on reboot. Consider using udev rules for stable names:
+# - Create /etc/udev/rules.d/99-zigbee.rules:
+#   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="zigbee"
+# - Then use devices = ["/dev/zigbee"] in the config
+
+# Example 6: Test container for group verification
 # -------------------------------------------------
 # [workload]
 # name = "groups-test"
@@ -254,6 +329,72 @@ ports = ["8080:80", "8443:443"]
 # To verify groups work:
 #   id _wl-groups-test-99
 #   podman exec workload-groups-test-99 id
+
+# Example 7: Plex with audio transcoding
+# ---------------------------------------
+# [workload]
+# name = "plex"
+# enabled = true
+#
+# [container]
+# image = "docker.io/plexinc/pms-docker:latest"
+# id = "7"
+#
+# [gpu]
+# type = "amd"  # Or "nvidia" for hardware transcoding
+#
+# [devices]
+# audio = true  # For audio passthrough
+#
+# [security]
+# extra_groups = ["video", "render", "audio"]
+#
+# [network]
+# mode = "host"  # For network discovery
+
+# Example 8: Frigate NVR with camera
+# -----------------------------------
+# [workload]
+# name = "frigate"
+# enabled = true
+#
+# [container]
+# image = "ghcr.io/blakeblackshear/frigate:stable"
+# id = "8"
+#
+# [devices]
+# devices = ["/dev/video0", "/dev/video1"]  # USB cameras or capture cards
+#
+# [security]
+# extra_groups = ["video"]
+#
+# [network]
+# ports = ["5000:5000", "8554:8554"]
+#
+# [storage]
+# volumes = ["/mnt/storage/frigate:/media/frigate"]
+
+# Example 9: QEMU with KVM (nested virtualization)
+# -------------------------------------------------
+# [workload]
+# name = "qemu-vm"
+# enabled = true
+#
+# [container]
+# image = "tianon/qemu:latest"
+# id = "9"
+#
+# [devices]
+# virtualization = true  # Enable KVM
+#
+# [security]
+# extra_groups = ["kvm"]
+#
+# [network]
+# mode = "host"
+#
+# [storage]
+# volumes = ["/mnt/vms:/vms"]
 
 # ============================================================================
 # TECHNICAL DETAILS

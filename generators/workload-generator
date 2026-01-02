@@ -223,12 +223,36 @@ def generate_system_service(workload_id, config, uid, user_name):
             "--device /dev/dri",
         ])
 
-    # Input devices
+    # Generic device passthrough
     devices_config = config.get("devices", {})
+    generic_devices = devices_config.get("devices", [])
+    for device in generic_devices:
+        podman_args.append(f"--device {device}")
+
+    # CONVENIENCE FLAGS (multi-device shortcuts)
+
+    # Input devices (2 devices)
     if devices_config.get("input", False):
         podman_args.extend([
             "--device /dev/input",
             "--device /dev/uinput",
+        ])
+
+    # Audio devices (device + socket auto-detection)
+    if devices_config.get("audio", False):
+        podman_args.append("--device /dev/snd")
+        # Try to mount PulseAudio/PipeWire socket from host
+        # Check common locations for audio sockets
+        for audio_path in ["/run/user/1000/pulse", "/run/user/1000/pipewire-0"]:
+            if os.path.exists(audio_path):
+                podman_args.append(f"--volume {audio_path}:{audio_path}:ro")
+
+    # Virtualization devices (3 devices)
+    if devices_config.get("virtualization", False):
+        podman_args.extend([
+            "--device /dev/kvm",
+            "--device /dev/vhost-net",
+            "--device /dev/vhost-vsock",
         ])
 
     # Network configuration

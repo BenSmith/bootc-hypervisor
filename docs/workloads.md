@@ -152,11 +152,15 @@ Creates a new workload configuration file in `/etc/workloads.d/`. This is the ea
 
 **Optional arguments:**
 - `--id N` - Explicit workload ID (default: auto-assign next available)
-- `--gpu TYPE` - GPU type: `amd`, `nvidia`, or `none`
-- `--groups GROUP...` - Additional system groups (e.g., `video render input`)
+- `--groups GROUP...` - Additional system groups (e.g., `video render input dialout audio kvm`)
 - `--ports PORT...` - Port mappings (e.g., `8080:80 8443:443`)
 - `--network MODE` - Network mode: `pasta` (default), `host`, `none`, or custom network name
 - `--volumes VOL...` - Volume mounts (e.g., `/host/path:/container/path:ro`)
+- `--device DEVICE...` - Generic device passthrough (e.g., `/dev/ttyUSB0 /dev/video0 /dev/sdb`)
+- `--gpu TYPE` - GPU convenience flag: `amd`, `nvidia`, or `none` (expands to multiple devices)
+- `--input` - Input device convenience flag (expands to `/dev/input` + `/dev/uinput`)
+- `--audio` - Audio convenience flag (expands to `/dev/snd` + auto-mounts PulseAudio/PipeWire)
+- `--virtualization` - KVM convenience flag (expands to `/dev/kvm` + vhost devices)
 - `--enable` - Enable and start the workload immediately after creation
 - `--disabled` - Create as disabled (`enabled = false`)
 
@@ -185,6 +189,27 @@ sudo workload-ctl create minecraft \
   --id=42 \
   --volumes /mnt/games/minecraft:/data \
   --ports 25565:25565 \
+  --enable
+```
+
+With generic devices (Home Assistant + Zigbee):
+```bash
+sudo workload-ctl create homeassistant \
+  --image=ghcr.io/home-assistant/home-assistant:stable \
+  --device /dev/ttyACM0 \
+  --groups dialout \
+  --network=host \
+  --enable
+```
+
+With convenience flags (gaming workload):
+```bash
+sudo workload-ctl create gaming \
+  --image=myapp:latest \
+  --gpu=amd \
+  --input \
+  --audio \
+  --groups video render input audio \
   --enable
 ```
 
@@ -989,8 +1014,568 @@ While containers run as unprivileged users, keep in mind:
 Adding a user to `video`, `render`, or `input` groups grants:
 - `video`/`render`: Full GPU access (can run arbitrary compute workloads, access video memory)
 - `input`: Can read keyboard/mouse input and inject events
+- `dialout`: Serial device access (USB serial ports like /dev/ttyUSB*, /dev/ttyACM*)
 
 Only grant these to trusted workloads.
+
+### Device Passthrough
+
+**Pass any device to containers** using generic device passthrough or convenience flags for complex scenarios.
+
+#### Generic Device Passthrough
+
+Use `--device` for any device path. This is the most flexible approach and works with any device.
+
+**Using workload-ctl create:**
+```bash
+# USB serial device (Zigbee/Z-Wave stick)
+sudo workload-ctl create homeassistant \
+  --image ghcr.io/home-assistant/home-assistant:stable \
+  --device /dev/ttyACM0 \
+  --groups dialout \
+  --network host \
+  --enable
+
+# Webcam for video surveillance
+sudo workload-ctl create frigate \
+  --image ghcr.io/blakeblackshear/frigate:stable \
+  --device /dev/video0 \
+  --device /dev/video1 \
+  --groups video \
+  --enable
+
+# TPM device for hardware secrets
+sudo workload-ctl create vault \
+  --image vault:latest \
+  --device /dev/tpm0 \
+  --groups tpm \
+  --enable
+
+# Mix multiple devices
+sudo workload-ctl create myapp \
+  --image myapp:latest \
+  --device /dev/ttyUSB0 \
+  --device /dev/video0 \
+  --device /dev/sdb \
+  --groups dialout video disk \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Generic device array - works with ANY device
+devices = ["/dev/ttyACM0", "/dev/video0", "/dev/tpm0"]
+
+# Can mix with convenience flags
+input = true
+audio = true
+
+[security]
+# Add groups as needed for device access
+extra_groups = ["dialout", "video", "input", "audio"]
+```
+
+#### Convenience Flags (for complex scenarios)
+
+For scenarios requiring multiple devices or special handling, use convenience flags:
+
+**GPU (`--gpu amd|nvidia|none`)**
+```bash
+# AMD GPU - expands to --device /dev/kfd --device /dev/dri
+sudo workload-ctl create gaming \
+  --image myapp:latest \
+  --gpu amd \
+  --groups video render \
+  --enable
+
+# NVIDIA GPU - expands to --device=nvidia.com/gpu=all --device /dev/dri
+sudo workload-ctl create sunshine \
+  --image lizardbyte/sunshine:latest \
+  --gpu nvidia \
+  --groups video \
+  --enable
+```
+
+**Input (`--input`)**
+```bash
+# Input devices - expands to --device /dev/input --device /dev/uinput
+sudo workload-ctl create streaming \
+  --image myapp:latest \
+  --input \
+  --groups input \
+  --enable
+```
+
+**Audio (`--audio`)**
+```bash
+# Audio - expands to --device /dev/snd + auto-mounts PulseAudio/PipeWire sockets
+sudo workload-ctl create plex \
+  --image plexinc/pms-docker:latest \
+  --audio \
+  --groups audio \
+  --enable
+```
+
+**Virtualization (`--virtualization`)**
+```bash
+# KVM - expands to --device /dev/kvm --device /dev/vhost-net --device /dev/vhost-vsock
+sudo workload-ctl create qemu \
+  --image tianon/qemu:latest \
+  --virtualization \
+  --groups kvm \
+  --enable
+```
+
+**Mix generic and convenience flags:**
+```bash
+sudo workload-ctl create multimedia \
+  --image myapp:latest \
+  --gpu amd \
+  --input \
+  --audio \
+  --device /dev/video0 \
+  --device /dev/ttyUSB0 \
+  --groups video render input audio dialout \
+  --enable
+```
+
+#### Common Use Cases
+
+**Generic device passthrough examples:**
+- Zigbee/Z-Wave controllers (`/dev/ttyACM0`, `/dev/ttyUSB0`)
+- USB serial adapters (`/dev/ttyUSB*`)
+- Webcams and capture cards (`/dev/video*`)
+- Block devices for VMs (`/dev/sdb`, `/dev/nvme*`)
+- TPM devices (`/dev/tpm0`)
+- Any other device path
+
+**Important: Device paths can change on reboot**
+
+Device paths like `/dev/ttyUSB0` or `/dev/video0` may change when you reboot or reconnect the device. Use **udev rules** for stable device names:
+
+**Create `/etc/udev/rules.d/99-usb-devices.rules`:**
+```bash
+# Zigbee stick (Conbee II - check vendor/product ID with lsusb)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="zigbee"
+
+# Z-Wave stick (Aeotec Z-Stick)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0658", ATTRS{idProduct}=="0200", SYMLINK+="zwave"
+
+# Or use serial number for stability
+SUBSYSTEM=="tty", ATTRS{serial}=="ABC123XYZ", SYMLINK+="mydevice"
+```
+
+**Apply udev rules:**
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+**Find device vendor/product ID:**
+```bash
+lsusb
+# Look for your device, example output:
+# Bus 001 Device 005: ID 0403:6015 Future Technology Devices International
+
+# Or get serial number:
+udevadm info -a -n /dev/ttyACM0 | grep serial
+```
+
+**Use stable symlink in config:**
+```toml
+[devices]
+devices = ["/dev/zigbee", "/dev/zwave"]  # Stable names instead of ttyACM0
+```
+
+**Verification:**
+```bash
+# Check device exists
+ls -l /dev/zigbee
+
+# Check permissions
+ls -l /dev/ttyACM0
+# Should show: crw-rw---- ... root dialout
+
+# Verify user has dialout group
+id _wl-homeassistant-1
+# Should show: groups=... dialout ...
+
+# Test inside container
+workload-ctl exec homeassistant ls -l /dev/zigbee
+```
+
+---
+
+**Note:** The sections below (Audio, Video, Block, Virtualization, TPM) have been consolidated into the **Device Passthrough** section above, which covers both generic `--device` usage and convenience flags like `--audio`, `--input`, and `--virtualization`.
+
+For quick reference, see the [Device Passthrough](#device-passthrough) section for:
+- Generic device passthrough with `--device`
+- Convenience flags (`--gpu`, `--input`, `--audio`, `--virtualization`)
+- Examples mixing both approaches
+
+---
+
+**Using workload-ctl create:**
+```bash
+sudo workload-ctl create plex \
+  --image docker.io/plexinc/pms-docker:latest \
+  --gpu amd \
+  --groups video render audio \
+  --audio \
+  --network host \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Enable audio device access
+audio = true
+
+[security]
+# audio group needed for /dev/snd access
+extra_groups = ["audio"]
+```
+
+**What this provides:**
+- Access to `/dev/snd/*` devices (ALSA)
+- Automatic detection and mounting of PulseAudio socket (`/run/user/1000/pulse`)
+- Automatic detection and mounting of PipeWire socket (`/run/user/1000/pipewire-0`)
+
+**Common use cases:**
+- Media servers (Plex, Jellyfin) with audio transcoding
+- Game streaming servers (Sunshine) with audio capture
+- Music production software
+- Voice assistant containers
+- Audio processing pipelines
+
+**Important notes:**
+- The generator auto-detects PulseAudio/PipeWire sockets at common locations
+- Socket paths are mounted read-only for security
+- Requires `audio` group membership for `/dev/snd` access
+- Host audio server (PulseAudio/PipeWire) must be running
+
+**Verification:**
+```bash
+# Check device access
+workload-ctl exec plex ls -l /dev/snd/
+
+# Check audio socket
+workload-ctl exec plex ls -l /run/user/1000/pulse
+
+# Verify user has audio group
+id _wl-plex-1
+# Should show: groups=... audio ...
+
+# Test audio inside container (if paplay available)
+workload-ctl exec plex paplay --list-sinks
+```
+
+### Video Capture Devices
+
+**Pass video capture devices to containers** for webcams, capture cards, and video surveillance.
+
+**Using workload-ctl create:**
+```bash
+sudo workload-ctl create frigate \
+  --image ghcr.io/blakeblackshear/frigate:stable \
+  --groups video \
+  --video-capture /dev/video0 /dev/video1 \
+  --network host \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Single webcam
+video_capture = ["/dev/video0"]
+
+# Multiple cameras
+video_capture = ["/dev/video0", "/dev/video1", "/dev/video2"]
+
+[security]
+# video group needed for camera access
+extra_groups = ["video"]
+```
+
+**Common use cases:**
+- Video surveillance systems (Frigate NVR, ZoneMinder)
+- Webcam streaming servers
+- Video capture and recording
+- HDMI capture cards for game streaming
+- Computer vision applications
+
+**Important notes:**
+- Device paths can change on reboot - consider udev rules for stability
+- Requires `video` group membership
+- Some devices may require additional permissions
+- Multiple `/dev/video*` devices may represent the same physical camera (different formats)
+
+**Finding your video devices:**
+```bash
+# List all video devices
+ls -l /dev/video*
+
+# Get device info
+v4l2-ctl --list-devices
+
+# Test camera works
+ffplay /dev/video0
+```
+
+**Verification:**
+```bash
+# Check device access inside container
+workload-ctl exec frigate ls -l /dev/video0
+
+# Verify user has video group
+id _wl-frigate-1
+# Should show: groups=... video ...
+
+# Test camera access (if v4l-utils available in container)
+workload-ctl exec frigate v4l2-ctl --list-formats-ext -d /dev/video0
+```
+
+### Block Device Access
+
+**Pass block devices to containers** for VMs, ZFS pools, and direct disk access.
+
+**⚠️ WARNING:** Block device access grants low-level disk access. Only use for trusted workloads!
+
+**Using workload-ctl create:**
+```bash
+sudo workload-ctl create qemu-vm \
+  --image tianon/qemu:latest \
+  --groups kvm disk \
+  --block /dev/sdb \
+  --network host \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Single disk
+block = ["/dev/sdb"]
+
+# Multiple disks
+block = ["/dev/sdc", "/dev/sdd"]
+
+# NVMe device
+block = ["/dev/nvme1n1"]
+
+[security]
+# disk group needed for block device access
+extra_groups = ["disk"]
+```
+
+**Common use cases:**
+- Running VMs inside containers (QEMU/KVM)
+- ZFS pool management
+- Disk imaging and cloning
+- Storage management containers
+- Low-level disk utilities
+
+**Important notes:**
+- **DANGEROUS:** Full read/write access to raw disks - can corrupt data!
+- Only grant to fully trusted workloads
+- Requires `disk` group membership
+- Can bypass filesystem permissions
+- Consider read-only mounts for safety: use podman volume options `ro`
+
+**Security best practices:**
+```toml
+# If you only need read access, add :ro in volumes section
+[storage]
+volumes = ["/dev/sdb:/dev/sdb:ro"]  # Read-only block device
+```
+
+**Verification:**
+```bash
+# Check device access
+workload-ctl exec qemu-vm ls -l /dev/sdb
+
+# Verify user has disk group
+id _wl-qemu-vm-1
+# Should show: groups=... disk ...
+
+# Test device is accessible (non-destructive read test)
+workload-ctl exec qemu-vm blockdev --report /dev/sdb
+```
+
+### Virtualization (KVM) Support
+
+**Enable KVM for nested virtualization** - run VMs inside containers.
+
+**Using workload-ctl create:**
+```bash
+sudo workload-ctl create qemu \
+  --image tianon/qemu:latest \
+  --groups kvm \
+  --virtualization \
+  --network host \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Enable KVM support
+virtualization = true
+
+[security]
+# kvm group needed for /dev/kvm access
+extra_groups = ["kvm"]
+```
+
+**What this provides:**
+- Access to `/dev/kvm` (KVM kernel module)
+- Access to `/dev/vhost-net` (high-performance networking)
+- Access to `/dev/vhost-vsock` (VM socket communication)
+
+**Common use cases:**
+- Running QEMU/KVM virtual machines in containers
+- Nested virtualization for testing
+- Android emulators (require KVM acceleration)
+- Firecracker microVMs
+- Cloud-init VM testing
+
+**Requirements:**
+- Host must have KVM support (Intel VT-x or AMD-V)
+- KVM kernel module must be loaded
+- CPU virtualization must be enabled in BIOS
+
+**Check KVM availability:**
+```bash
+# Check if KVM module is loaded
+lsmod | grep kvm
+
+# Check CPU virtualization support
+grep -E 'vmx|svm' /proc/cpuinfo
+
+# Check /dev/kvm exists and has correct permissions
+ls -l /dev/kvm
+# Should show: crw-rw----+ ... root kvm
+```
+
+**Verification:**
+```bash
+# Check KVM device access
+workload-ctl exec qemu ls -l /dev/kvm
+
+# Verify user has kvm group
+id _wl-qemu-1
+# Should show: groups=... kvm ...
+
+# Test KVM access (if qemu available in container)
+workload-ctl exec qemu qemu-system-x86_64 -accel kvm -cpu host -M q35 --version
+```
+
+**Example: Running QEMU with KVM:**
+```toml
+[workload]
+name = "win10-vm"
+
+[container]
+image = "tianon/qemu:latest"
+id = "10"
+command = [
+  "qemu-system-x86_64",
+  "-enable-kvm",
+  "-cpu", "host",
+  "-m", "4096",
+  "-hda", "/data/win10.qcow2"
+]
+
+[devices]
+virtualization = true
+
+[security]
+extra_groups = ["kvm"]
+
+[network]
+mode = "host"
+
+[storage]
+volumes = ["/mnt/vms:/data"]
+```
+
+### TPM Device Access
+
+**Pass TPM devices to containers** for hardware-backed secrets and attestation.
+
+**Using workload-ctl create:**
+```bash
+sudo workload-ctl create vault \
+  --image vault:latest \
+  --groups tpm \
+  --tpm \
+  --enable
+```
+
+**Manual TOML configuration:**
+```toml
+[devices]
+# Enable TPM access
+tpm = true
+
+[security]
+# tpm group needed for /dev/tpm0 access
+extra_groups = ["tpm"]
+```
+
+**What this provides:**
+- Access to `/dev/tpm0` (TPM 2.0 device)
+- Hardware-backed cryptographic operations
+- Secure key storage
+- Platform attestation
+
+**Common use cases:**
+- HashiCorp Vault with TPM auto-unseal
+- Key management services
+- Secure boot verification
+- Hardware security modules (HSM) integration
+- Platform integrity measurement
+
+**Requirements:**
+- Host must have a TPM 2.0 chip
+- TPM must be enabled in BIOS
+- `tpm` group must exist on the host
+
+**Check TPM availability:**
+```bash
+# Check if TPM device exists
+ls -l /dev/tpm0
+# Should show: crw-rw---- ... tss tpm
+
+# Check TPM version
+cat /sys/class/tpm/tpm0/tpm_version_major
+
+# Test TPM with tpm2-tools (if installed)
+tpm2_getrandom 8 --hex
+```
+
+**Verification:**
+```bash
+# Check TPM device access
+workload-ctl exec vault ls -l /dev/tpm0
+
+# Verify user has tpm group
+id _wl-vault-1
+# Should show: groups=... tpm ...
+
+# Test TPM access (if tpm2-tools available in container)
+workload-ctl exec vault tpm2_getcap properties-fixed
+```
+
+**Important notes:**
+- TPM access is exclusive - only one process can access at a time
+- Container must have TPM libraries (tpm2-tools, tpm2-tss)
+- Some operations require additional permissions
+- TPM state persists across container restarts
+- Be cautious with TPM clear/reset operations
 
 ### Network Access
 
@@ -1003,12 +1588,6 @@ Consider firewall rules for untrusted workloads.
 
 ## Future Improvements
 
-**Implemented features:**
-- ✅ **Interactive management tool:** `workload-ctl` with update, info, validate, edit, stats, cp, ports, images, attach commands
-- ✅ **Resource monitoring:** Real-time stats with `workload-ctl stats`
-- ✅ **Configuration validation:** Pre-flight checks with `workload-ctl validate`
-- ✅ **Image management:** Update and prune commands
-
 **Potential future enhancements:**
 1. **Better networking:** Solve pasta port forwarding for proper network isolation
 2. **Resource limits:** CPU, memory, storage quotas via systemd (can be added to configs)
@@ -1017,7 +1596,6 @@ Consider firewall rules for untrusted workloads.
 5. **Multi-container workloads:** Pod support for related containers
 6. **Template system:** Pre-configured workload templates with `workload-ctl create`
 7. **Web UI:** Cockpit integration for workload management
-8. **JSON output:** Add `--json` flag for all commands for scripting integration
 
 ## Additional Resources
 
