@@ -234,13 +234,6 @@ def cmd_create(args, manager: WorkloadManager):
     ])
 
     # Add optional sections
-    if args.gpu:
-        config_lines.extend([
-            "",
-            "[gpu]",
-            f'type = "{args.gpu}"',
-        ])
-
     if args.groups:
         groups_list = ", ".join([f'"{g}"' for g in args.groups])
         config_lines.extend([
@@ -248,6 +241,28 @@ def cmd_create(args, manager: WorkloadManager):
             "[security]",
             f"extra_groups = [{groups_list}]",
         ])
+
+    # Devices section - add if any devices specified
+    if args.device or args.gpu or args.input or args.audio or args.virtualization:
+        config_lines.extend(["", "[devices]"])
+
+        # Generic device passthrough
+        if args.device:
+            devices_list = ", ".join([f'"{d}"' for d in args.device])
+            config_lines.append(f"devices = [{devices_list}]")
+
+        # Convenience flags
+        if args.gpu:
+            config_lines.append(f'gpu = "{args.gpu}"')
+
+        if args.input:
+            config_lines.append("input = true")
+
+        if args.audio:
+            config_lines.append("audio = true")
+
+        if args.virtualization:
+            config_lines.append("virtualization = true")
 
     # Network section - only add if explicitly set or ports specified
     if args.network or args.ports:
@@ -1495,11 +1510,15 @@ def main():
     create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens)")
     create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
     create_parser.add_argument("--id", type=int, metavar="N", help="Workload ID (default: auto-assign next available)")
-    create_parser.add_argument("--gpu", choices=["amd", "nvidia", "none"], help="GPU type for hardware acceleration")
-    create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input)")
+    create_parser.add_argument("--gpu", choices=["amd", "nvidia", "none"], help="GPU type for hardware acceleration (convenience flag)")
+    create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input dialout audio kvm)")
     create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
     create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")
     create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
+    create_parser.add_argument("--device", metavar="DEVICE", nargs="+", help="Generic device passthrough (e.g., /dev/ttyUSB0 /dev/video0 /dev/sdb)")
+    create_parser.add_argument("--input", action="store_true", help="Enable input devices (/dev/input + /dev/uinput) - convenience flag")
+    create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
+    create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
     create_parser.add_argument("--disabled", action="store_true", help="Create as disabled (enabled=false)")
 

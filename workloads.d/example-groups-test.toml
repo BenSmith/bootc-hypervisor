@@ -18,12 +18,6 @@ image = "public.ecr.aws/docker/library/alpine:latest"
 id = "2"  # UID 10002
 command = ["sleep", "infinity"]  # Keep container running
 
-[gpu]
-type = "none"
-
-[devices]
-input = false
-
 [security]
 # Add user to system groups - these should be visible in the container
 extra_groups = ["video", "render", "input"]
