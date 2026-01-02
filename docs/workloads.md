@@ -110,15 +110,6 @@ enabled = true
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
 id = "1"
 
-[gpu]
-type = "none"
-
-[devices]
-input = false
-
-[security]
-extra_groups = []
-
 [network]
 # mode = "pasta"  # Default - isolated networking with port forwarding
 # mode = "host"   # Share host network (no isolation, maximum performance)

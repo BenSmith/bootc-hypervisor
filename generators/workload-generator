@@ -165,7 +165,7 @@ def generate_system_service(workload_id, config, uid, user_name):
     image = config["container"]["image"]
     command = config["container"].get("command", None)
     pull_policy = config["container"].get("pull", "missing")  # missing, always, newer, never
-    gpu_type = config.get("gpu", {}).get("type", "none")
+    gpu_type = config.get("devices", {}).get("gpu", "none")
     extra_groups = config.get("security", {}).get("extra_groups", [])
 
     # Get GID from UID (same for our workload users)
@@ -210,16 +210,16 @@ def generate_system_service(workload_id, config, uid, user_name):
             # Log to kmsg for debugging
             kmsg(f"WARNING: Group '{group}' not found in /etc/group, skipping")
 
-    # GPU devices
+    # GPU devices (convenience flag)
     if gpu_type == "amd":
         podman_args.extend([
             "--device /dev/kfd",
             "--device /dev/dri",
         ])
     elif gpu_type == "nvidia":
-        nvidia_devices = config.get("gpu", {}).get("devices", "all")
+        # Default to "all" GPUs; for specific GPU selection use devices = ["nvidia.com/gpu=0"]
         podman_args.extend([
-            f"--device=nvidia.com/gpu={nvidia_devices}",
+            "--device=nvidia.com/gpu=all",
             "--device /dev/dri",
         ])
 

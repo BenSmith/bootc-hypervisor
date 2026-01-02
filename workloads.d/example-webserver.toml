@@ -11,15 +11,6 @@ enabled = false
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
 id = "1"  # Becomes UID 10001 (base 10000 + id)
 
-[gpu]
-type = "none"
-
-[devices]
-input = false
-
-[security]
-extra_groups = []
-
 [network]
 # Network modes:
 #   "pasta"      - Default, isolated with port forwarding (recommended)

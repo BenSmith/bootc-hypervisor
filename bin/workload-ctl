@@ -234,13 +234,6 @@ def cmd_create(args, manager: WorkloadManager):
     ])
 
     # Add optional sections
-    if args.gpu:
-        config_lines.extend([
-            "",
-            "[gpu]",
-            f'type = "{args.gpu}"',
-        ])
-
     if args.groups:
         groups_list = ", ".join([f'"{g}"' for g in args.groups])
         config_lines.extend([
@@ -250,7 +243,7 @@ def cmd_create(args, manager: WorkloadManager):
         ])
 
     # Devices section - add if any devices specified
-    if args.device or args.input or args.audio or args.virtualization:
+    if args.device or args.gpu or args.input or args.audio or args.virtualization:
         config_lines.extend(["", "[devices]"])
 
         # Generic device passthrough
@@ -259,6 +252,9 @@ def cmd_create(args, manager: WorkloadManager):
             config_lines.append(f"devices = [{devices_list}]")
 
         # Convenience flags
+        if args.gpu:
+            config_lines.append(f'gpu = "{args.gpu}"')
+
         if args.input:
             config_lines.append("input = true")
 

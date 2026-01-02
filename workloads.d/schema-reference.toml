@@ -44,26 +44,6 @@ id = "0"
 # Example: ["/usr/bin/my-app", "--config", "/etc/app.conf"]
 # command = ["sleep", "infinity"]
 
-[gpu]
-# Optional: GPU type for hardware acceleration
-# Type: string
-# Options: "amd", "nvidia", "none"
-# Default: "none"
-#
-# "amd"    - Provides access to /dev/kfd and /dev/dri (ROCm support)
-#            Requires: extra_groups = ["video", "render"]
-# "nvidia" - Provides access via NVIDIA CDI (requires nvidia variant image)
-#            Requires: extra_groups = ["video"]
-# "none"   - No GPU access
-type = "amd"
-
-# Optional: For NVIDIA only - which GPU devices to expose
-# Type: string
-# Default: "all"
-# Examples: "all", "0", "0,1", "gpu-0"
-# Only used when gpu.type = "nvidia"
-# devices = "all"
-
 [devices]
 # Optional: Generic device passthrough
 # Type: array of strings (device paths or CDI device names)
@@ -81,6 +61,19 @@ devices = ["/dev/ttyUSB0", "/dev/video0"]
 
 # CONVENIENCE FLAGS (for complex multi-device scenarios)
 # These are shortcuts that expand to multiple devices and/or special handling
+
+# Optional: GPU type for hardware acceleration
+# Type: string
+# Options: "amd", "nvidia", "none"
+# Default: "none"
+# "amd"    - Expands to: --device /dev/kfd --device /dev/dri
+#            Requires: extra_groups = ["video", "render"]
+# "nvidia" - Expands to: --device=nvidia.com/gpu=all --device /dev/dri
+#            Requires: extra_groups = ["video"]
+# "none"   - No GPU access
+# Advanced: For specific NVIDIA GPU selection, use generic devices instead:
+#           devices = ["nvidia.com/gpu=0", "/dev/dri"]
+gpu = "amd"
 
 # Optional: Enable input device access (/dev/input/*, /dev/uinput)
 # Type: boolean
@@ -195,10 +188,8 @@ ports = ["8080:80", "8443:443"]
 # image = "ghcr.io/user/gaming-vm:latest"
 # id = "1"
 #
-# [gpu]
-# type = "amd"
-#
 # [devices]
+# gpu = "amd"
 # input = true
 #
 # [security]
@@ -217,12 +208,12 @@ ports = ["8080:80", "8443:443"]
 # image = "ghcr.io/lizardbyte/sunshine:latest"
 # id = "2"
 #
-# [gpu]
-# type = "nvidia"
-# devices = "0"
-#
 # [devices]
+# gpu = "nvidia"
 # input = true
+#
+# # Alternative for specific GPU selection:
+# # devices = ["nvidia.com/gpu=0", "/dev/dri"]
 #
 # [security]
 # extra_groups = ["video", "input"]
@@ -240,12 +231,6 @@ ports = ["8080:80", "8443:443"]
 # image = "docker.io/library/nginx:alpine"
 # id = "1"
 #
-# [gpu]
-# type = "none"
-#
-# [devices]
-# input = false
-#
 # [security]
 # extra_groups = []
 #
@@ -261,9 +246,6 @@ ports = ["8080:80", "8443:443"]
 # [container]
 # image = "localhost/my-devenv:latest"
 # id = "3"
-#
-# [gpu]
-# type = "none"
 #
 # [security]
 # extra_groups = []
@@ -286,9 +268,6 @@ ports = ["8080:80", "8443:443"]
 # [container]
 # image = "ghcr.io/home-assistant/home-assistant:stable"
 # id = "5"
-#
-# [gpu]
-# type = "none"
 #
 # [devices]
 # # Pass through Zigbee USB stick (Conbee II on /dev/ttyACM0)
@@ -320,9 +299,6 @@ ports = ["8080:80", "8443:443"]
 # id = "99"
 # command = ["sleep", "infinity"]
 #
-# [gpu]
-# type = "none"
-#
 # [security]
 # extra_groups = ["video", "render", "input"]
 #
@@ -340,11 +316,9 @@ ports = ["8080:80", "8443:443"]
 # image = "docker.io/plexinc/pms-docker:latest"
 # id = "7"
 #
-# [gpu]
-# type = "amd"  # Or "nvidia" for hardware transcoding
-#
 # [devices]
-# audio = true  # For audio passthrough
+# gpu = "amd"  # Or "nvidia" for hardware transcoding
+# audio = true
 #
 # [security]
 # extra_groups = ["video", "render", "audio"]
