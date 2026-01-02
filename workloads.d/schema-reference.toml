@@ -113,12 +113,18 @@ volumes = [
 [network]
 # Optional: Container network mode
 # Type: string
-# Default: (podman default, usually bridge with slirp4netns for rootless)
+# Default: "pasta" (rootless networking with port forwarding, works in Podman 5.3+)
 # Options:
-#   "host" - Use host network namespace (no isolation, better performance)
-#   (other modes like "bridge", "none" use podman defaults)
-# Note: Rootless containers use slirp4netns by default (slower but secure)
-mode = "host"
+#   "pasta"      - Isolated networking with port forwarding (recommended, secure & fast)
+#   "host"       - Use host network namespace (no isolation, maximum performance)
+#   "none"       - No networking (container is completely isolated)
+#   "mynetwork"  - Custom network name (user-defined network, must create first)
+#
+# Custom networks enable container-to-container communication:
+#   1. Create network: sudo -u _wl-myapp-1 podman network create mynetwork
+#   2. Set mode = "mynetwork" in workload configs
+#   3. Containers on same network can communicate by name/IP
+mode = "pasta"
 
 # Optional: Port publishing (port forwarding)
 # Type: array of strings
@@ -128,6 +134,7 @@ mode = "host"
 #   "8080:80"              - Map host port 8080 to container port 80
 #   "8443:443/tcp"         - Map host port 8443 to container port 443 TCP
 #   "127.0.0.1:9000:9000"  - Bind only to localhost
+# Note: Port publishing works with pasta mode and custom networks (ignored for host/none)
 # Note: Rootless containers cannot bind to ports < 1024 without special config
 ports = ["8080:80", "8443:443"]
 

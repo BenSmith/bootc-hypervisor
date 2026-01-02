@@ -522,8 +522,277 @@ if check_root; then
         rm -f "$TEST_CONFIG_PATH4"
     fi
 
+    echo ""
+    echo "--- Testing: Network modes (syntax only) ---"
+
+    # Test pasta mode
+    TEST_WORKLOAD_PASTA="test-pasta-$$"
+    TEST_CONFIG_PASTA="$WORKLOAD_DIR/${TEST_WORKLOAD_PASTA}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_PASTA" --image alpine:latest --network pasta --ports 8080:80 2>&1); then
+        test_pass "create accepts --network pasta"
+
+        if [[ -f "$TEST_CONFIG_PASTA" ]]; then
+            if grep -q 'mode = "pasta"' "$TEST_CONFIG_PASTA" && grep -q '"8080:80"' "$TEST_CONFIG_PASTA"; then
+                test_pass "pasta mode config has correct content"
+            else
+                test_fail "pasta mode config missing expected content"
+            fi
+        fi
+        rm -f "$TEST_CONFIG_PASTA"
+    else
+        test_fail "create rejects --network pasta"
+    fi
+
+    # Test none mode
+    TEST_WORKLOAD_NONE="test-none-$$"
+    TEST_CONFIG_NONE="$WORKLOAD_DIR/${TEST_WORKLOAD_NONE}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NONE" --image alpine:latest --network none 2>&1); then
+        test_pass "create accepts --network none"
+
+        if [[ -f "$TEST_CONFIG_NONE" ]]; then
+            if grep -q 'mode = "none"' "$TEST_CONFIG_NONE"; then
+                test_pass "none mode config has correct content"
+            else
+                test_fail "none mode config missing mode=none"
+            fi
+        fi
+        rm -f "$TEST_CONFIG_NONE"
+    else
+        test_fail "create rejects --network none"
+    fi
+
+    # Test custom network name
+    TEST_WORKLOAD_CUSTOM="test-custom-$$"
+    TEST_CONFIG_CUSTOM="$WORKLOAD_DIR/${TEST_WORKLOAD_CUSTOM}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_CUSTOM" --image alpine:latest --network mynetwork 2>&1); then
+        test_pass "create accepts custom network name"
+
+        if [[ -f "$TEST_CONFIG_CUSTOM" ]]; then
+            if grep -q 'mode = "mynetwork"' "$TEST_CONFIG_CUSTOM"; then
+                test_pass "custom network config has correct content"
+            else
+                test_fail "custom network config missing mode=mynetwork"
+            fi
+        fi
+        rm -f "$TEST_CONFIG_CUSTOM"
+    else
+        test_fail "create rejects custom network name"
+    fi
+
+    # Test default mode (ports specified, no --network)
+    TEST_WORKLOAD_DEFAULT="test-default-$$"
+    TEST_CONFIG_DEFAULT="$WORKLOAD_DIR/${TEST_WORKLOAD_DEFAULT}.toml"
+
+    if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_DEFAULT" --image alpine:latest --ports 9090:90 2>&1); then
+        test_pass "create accepts ports without --network"
+
+        if [[ -f "$TEST_CONFIG_DEFAULT" ]]; then
+            if grep -q 'mode = "pasta"' "$TEST_CONFIG_DEFAULT"; then
+                test_pass "defaults to pasta mode when ports specified"
+            else
+                test_fail "does not default to pasta mode"
+            fi
+        fi
+        rm -f "$TEST_CONFIG_DEFAULT"
+    else
+        test_fail "create fails with ports but no --network"
+    fi
+
 else
     test_skip "Skipping create command tests (requires root)"
+fi
+
+echo ""
+echo "========================================"
+echo "Testing: Generator output (network flags)"
+echo "========================================"
+
+# Generator tests don't require root - they use temp directories
+# Check both repo location and installed location
+if [[ -f "$SCRIPT_DIR/../generators/workload-generator" ]]; then
+    GENERATOR="$SCRIPT_DIR/../generators/workload-generator"
+elif [[ -f "/usr/lib/systemd/system-generators/workload-generator" ]]; then
+    GENERATOR="/usr/lib/systemd/system-generators/workload-generator"
+else
+    GENERATOR=""
+fi
+
+if [[ -n "$GENERATOR" ]]; then
+    # Create temporary workload config directory for generator tests
+    TEMP_WORKLOAD_DIR=$(mktemp -d)
+
+    # Test generator with pasta mode
+    TEST_GEN_CONFIG="$TEMP_WORKLOAD_DIR/test-gen-pasta.toml"
+
+    # Create test config
+    cat > "$TEST_GEN_CONFIG" <<EOF
+[workload]
+name = "genpasta"
+enabled = true
+
+[container]
+image = "alpine:latest"
+id = "99"
+
+[network]
+mode = "pasta"
+ports = ["8080:80", "8443:443"]
+EOF
+
+    # Run generator to temporary directory
+    TEMP_GEN_DIR=$(mktemp -d)
+    TEMP_SYSUSERS_DIR=$(mktemp -d)
+    WORKLOAD_CONFIG_DIR="$TEMP_WORKLOAD_DIR" SYSUSERS_DIR="$TEMP_SYSUSERS_DIR" "$GENERATOR" "$TEMP_GEN_DIR" "$TEMP_GEN_DIR" 2>/dev/null
+
+    # Check generated service file
+    if [[ -f "$TEMP_GEN_DIR/workload-genpasta-99.service" ]]; then
+        test_pass "generator creates service file for pasta mode"
+
+        # Check for --network=pasta flag
+        if grep -q -- "--network=pasta" "$TEMP_GEN_DIR/workload-genpasta-99.service"; then
+            test_pass "service file contains --network=pasta"
+        else
+            test_fail "service file missing --network=pasta"
+        fi
+
+        # Check for port publishing
+        if grep -q -- "--publish 8080:80" "$TEMP_GEN_DIR/workload-genpasta-99.service" && \
+           grep -q -- "--publish 8443:443" "$TEMP_GEN_DIR/workload-genpasta-99.service"; then
+            test_pass "service file contains correct port mappings"
+        else
+            test_fail "service file missing or incorrect port mappings"
+        fi
+    else
+        test_fail "generator did not create service file"
+    fi
+
+    rm -rf "$TEMP_GEN_DIR" "$TEMP_SYSUSERS_DIR"
+
+    # Test generator with host mode
+    TEST_GEN_CONFIG="$TEMP_WORKLOAD_DIR/test-gen-host.toml"
+
+    cat > "$TEST_GEN_CONFIG" <<EOF
+[workload]
+name = "genhost"
+enabled = true
+
+[container]
+image = "alpine:latest"
+id = "98"
+
+[network]
+mode = "host"
+EOF
+
+    TEMP_GEN_DIR=$(mktemp -d)
+    TEMP_SYSUSERS_DIR=$(mktemp -d)
+    WORKLOAD_CONFIG_DIR="$TEMP_WORKLOAD_DIR" SYSUSERS_DIR="$TEMP_SYSUSERS_DIR" "$GENERATOR" "$TEMP_GEN_DIR" "$TEMP_GEN_DIR" 2>/dev/null
+
+    if [[ -f "$TEMP_GEN_DIR/workload-genhost-98.service" ]]; then
+        test_pass "generator creates service file for host mode"
+
+        if grep -q -- "--network=host" "$TEMP_GEN_DIR/workload-genhost-98.service"; then
+            test_pass "service file contains --network=host"
+        else
+            test_fail "service file missing --network=host"
+        fi
+
+        # Should NOT have port publishing in host mode
+        if ! grep -q -- "--publish" "$TEMP_GEN_DIR/workload-genhost-98.service"; then
+            test_pass "service file correctly omits port publishing for host mode"
+        else
+            test_fail "service file incorrectly includes port publishing for host mode"
+        fi
+    else
+        test_fail "generator did not create service file for host mode"
+    fi
+
+    rm -rf "$TEMP_GEN_DIR" "$TEMP_SYSUSERS_DIR"
+
+    # Test generator with none mode
+    TEST_GEN_CONFIG="$TEMP_WORKLOAD_DIR/test-gen-none.toml"
+
+    cat > "$TEST_GEN_CONFIG" <<EOF
+[workload]
+name = "gennone"
+enabled = true
+
+[container]
+image = "alpine:latest"
+id = "97"
+command = ["sleep", "infinity"]
+
+[network]
+mode = "none"
+EOF
+
+    TEMP_GEN_DIR=$(mktemp -d)
+    TEMP_SYSUSERS_DIR=$(mktemp -d)
+    WORKLOAD_CONFIG_DIR="$TEMP_WORKLOAD_DIR" SYSUSERS_DIR="$TEMP_SYSUSERS_DIR" "$GENERATOR" "$TEMP_GEN_DIR" "$TEMP_GEN_DIR" 2>/dev/null
+
+    if [[ -f "$TEMP_GEN_DIR/workload-gennone-97.service" ]]; then
+        test_pass "generator creates service file for none mode"
+
+        if grep -q -- "--network=none" "$TEMP_GEN_DIR/workload-gennone-97.service"; then
+            test_pass "service file contains --network=none"
+        else
+            test_fail "service file missing --network=none"
+        fi
+    else
+        test_fail "generator did not create service file for none mode"
+    fi
+
+    rm -rf "$TEMP_GEN_DIR" "$TEMP_SYSUSERS_DIR"
+
+    # Test generator with custom network
+    TEST_GEN_CONFIG="$TEMP_WORKLOAD_DIR/test-gen-custom.toml"
+
+    cat > "$TEST_GEN_CONFIG" <<EOF
+[workload]
+name = "gencustom"
+enabled = true
+
+[container]
+image = "alpine:latest"
+id = "96"
+
+[network]
+mode = "mynetwork"
+ports = ["5000:5000"]
+EOF
+
+    TEMP_GEN_DIR=$(mktemp -d)
+    TEMP_SYSUSERS_DIR=$(mktemp -d)
+    WORKLOAD_CONFIG_DIR="$TEMP_WORKLOAD_DIR" SYSUSERS_DIR="$TEMP_SYSUSERS_DIR" "$GENERATOR" "$TEMP_GEN_DIR" "$TEMP_GEN_DIR" 2>/dev/null
+
+    if [[ -f "$TEMP_GEN_DIR/workload-gencustom-96.service" ]]; then
+        test_pass "generator creates service file for custom network"
+
+        if grep -q -- "--network=mynetwork" "$TEMP_GEN_DIR/workload-gencustom-96.service"; then
+            test_pass "service file contains --network=mynetwork"
+        else
+            test_fail "service file missing --network=mynetwork"
+        fi
+
+        # Should have port publishing for custom network
+        if grep -q -- "--publish 5000:5000" "$TEMP_GEN_DIR/workload-gencustom-96.service"; then
+            test_pass "service file includes port publishing for custom network"
+        else
+            test_fail "service file missing port publishing for custom network"
+        fi
+    else
+        test_fail "generator did not create service file for custom network"
+    fi
+
+    rm -rf "$TEMP_GEN_DIR" "$TEMP_SYSUSERS_DIR"
+
+    # Cleanup temp workload directory
+    rm -rf "$TEMP_WORKLOAD_DIR"
+else
+    test_skip "Generator not found, skipping generator tests"
 fi
 
 echo ""

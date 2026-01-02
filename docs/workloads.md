@@ -12,6 +12,12 @@ sudo workload-ctl create webserver \
   --image docker.io/nginxinc/nginx-unprivileged:alpine \
   --ports 8080:8080 \
   --enable
+
+# Or with host networking for maximum performance:
+sudo workload-ctl create webserver \
+  --image docker.io/nginxinc/nginx-unprivileged:alpine \
+  --network host \
+  --enable
 ```
 
 That's it! Your web server is now running, will start automatically at boot, and runs as an isolated unprivileged user with rootless podman.
@@ -114,6 +120,9 @@ input = false
 extra_groups = []
 
 [network]
+# mode = "pasta"  # Default - isolated networking with port forwarding
+# mode = "host"   # Share host network (no isolation, maximum performance)
+# mode = "none"   # No networking
 ports = ["8080:8080"]
 ```
 
@@ -146,7 +155,7 @@ Creates a new workload configuration file in `/etc/workloads.d/`. This is the ea
 - `--gpu TYPE` - GPU type: `amd`, `nvidia`, or `none`
 - `--groups GROUP...` - Additional system groups (e.g., `video render input`)
 - `--ports PORT...` - Port mappings (e.g., `8080:80 8443:443`)
-- `--network MODE` - Network mode: `host`, `bridge`, or `none`
+- `--network MODE` - Network mode: `pasta` (default), `host`, `none`, or custom network name
 - `--volumes VOL...` - Volume mounts (e.g., `/host/path:/container/path:ro`)
 - `--enable` - Enable and start the workload immediately after creation
 - `--disabled` - Create as disabled (`enabled = false`)
@@ -494,23 +503,33 @@ The workload provisioning system allows you to declaratively define long-running
 
 ## Important Limitations and Tradeoffs
 
-### 1. Network Mode Defaults to Host
+### 1. Network Modes
 
-**Issue:** Rootless containers run as system services cannot use pasta (rootless bridge networking) with reliable port forwarding.
+**Default:** The default network mode is `pasta`, providing network isolation with port forwarding.
 
-**Tradeoff:** The default network mode is `host`, meaning:
-- Containers share the host network namespace
-- No port mapping needed (container ports are directly accessible)
-- No network isolation between containers
-- Port conflicts possible if multiple containers use the same port
+**Available modes:**
+- **pasta** (default): Isolated networking with port forwarding - secure and works reliably in Podman 5.3+
+- **host**: Share host network namespace - no isolation, maximum performance, no port mapping needed
+- **none**: No networking at all - complete isolation
+- **custom**: User-defined network name for container-to-container communication
 
-**Workaround:** Set `network.mode = "pasta"` for isolation, but be aware of potential port forwarding issues with rootless containers started by system services.
+**When to use host mode:**
+- Apps requiring network discovery (mDNS, UPnP, DLNA) - examples: Plex, Home Assistant
+- Maximum network performance needed
+- Apps that dynamically bind many ports
+
+**When to use pasta mode (default):**
+- Security-sensitive workloads needing network isolation
+- Standard web services with known ports
+- Most containerized applications
 
 ```toml
 [network]
-mode = "host"  # Default - shares host network, no isolation
-# mode = "pasta"  # Isolated network, but port forwarding may not work reliably
-ports = ["8080:8080"]  # Only used with pasta mode
+mode = "pasta"  # Default - isolated network with port forwarding (recommended)
+# mode = "host"   # Share host network, no isolation
+# mode = "none"   # No networking at all
+# mode = "mynet"  # Custom network (create first: podman network create mynet)
+ports = ["8080:8080"]  # Port forwarding for pasta and custom network modes
 ```
 
 ### 2. Group Names Appear as Numbers in Containers
@@ -586,28 +605,36 @@ sudo sed -i "/^_wl-{name}-{id}:/d" /etc/subuid /etc/subgid
 
 ## Known Incomplete Areas (TODOs)
 
-### Networking (TODO)
+### Networking (PARTIALLY COMPLETE)
 
-**Status:** INCOMPLETE - Only basic host and pasta modes are implemented.
+**Status:** Basic networking implemented and working. Advanced features still TODO.
 
 **Current implementation:**
-- `network.mode = "host"` - Shares host network namespace (default)
-- `network.mode = "pasta"` - Isolated network with pasta, but port forwarding is unreliable for rootless containers in system services
-- `network.ports` - Port mappings (only works with pasta mode)
+- `network.mode = "pasta"` - Isolated network with port forwarding (default, works reliably in Podman 5.3+)
+- `network.mode = "host"` - Shares host network namespace (no isolation, maximum performance)
+- `network.mode = "none"` - No networking (complete isolation)
+- `network.mode = "<network-name>"` - Custom user-defined networks (user creates with `podman network create`)
+- `network.ports` - Port mappings (works with pasta and custom network modes)
 
 **Missing / Needs work:**
-- **Bridge networking** - Proper isolated networks with reliable port forwarding
-- **Network namespaces** - Better isolation between workloads
+- **Automatic network creation** - Currently users must manually create custom networks with `podman network create`
+- **Network lifecycle management** - Networks are not automatically created/deleted with workloads
 - **DNS configuration** - Custom DNS servers, search domains
 - **Network policies** - Firewall rules, traffic shaping
-- **Multiple networks** - Connecting containers to multiple networks
-- **Network sharing** - Shared networks between workloads
+- **Multiple networks per container** - Connecting single container to multiple networks
 - **IPv6 support** - Currently untested
+- **Network inspection** - Better visibility into network configuration and connectivity
 
-**Why it's incomplete:** Rootless containers started by system services have fundamental limitations with pasta port forwarding. A proper solution requires either:
-1. CNI plugin configuration for rootless containers
-2. Bridge networking with slirp4netns improvements
-3. Alternative approaches like VPN tunnels or proxy containers
+**Example - Custom network for container-to-container communication:**
+```bash
+# Create network as workload user
+sudo -u _wl-app-1 XDG_RUNTIME_DIR=/run/user/10001 podman network create mynetwork
+
+# Configure workloads to use it
+[network]
+mode = "mynetwork"
+ports = ["8080:8080"]  # External access
+```
 
 ### Storage (TODO)
 
@@ -701,7 +728,7 @@ name = "long-name"  # Bad
 name = "app"        # Good
 ```
 
-### 2. Port Already in Use (Host Networking)
+### 2. Port Already in Use
 
 **Symptom:** Container fails to start, journal shows "address already in use".
 
@@ -710,10 +737,15 @@ $ sudo journalctl -u workload-webserver-1
 Error: rootlessport listen tcp 0.0.0.0:8080: bind: address already in use
 ```
 
+**Common causes:**
+- Another container or service is using the same port
+- Conflicting workloads both using host mode
+- Port mapping conflict in pasta mode
+
 **Fix:** Either:
-- Change the port in the config
+- Change the port in the config (different host port)
 - Stop the conflicting service
-- Use pasta mode (if port forwarding works for your use case)
+- Check all workloads: `workload-ctl list` and `workload-ctl ports <name>`
 
 ### 3. Forgetting to Enable Workload
 

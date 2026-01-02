@@ -44,7 +44,8 @@ EARLY_DIR = sys.argv[2] if len(sys.argv) > 2 else "/tmp"
 WORKLOAD_CONFIG_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d"))
 # Sysusers configs must go in /run/sysusers.d/ for systemd-sysusers to find them
 # (NOT in generator.early - that's only for unit files)
-SYSUSERS_DIR = Path("/run/sysusers.d")
+# Allow override for testing (when set, sysusers files go to temp dir instead of /run/sysusers.d)
+SYSUSERS_DIR = Path(os.environ.get("SYSUSERS_DIR", "/run/sysusers.d"))
 # System service files go in NORMAL_DIR (passed by systemd as first argument)
 # This will be /run/systemd/system/ or similar
 SERVICES_DIR = Path(NORMAL_DIR) if len(sys.argv) > 1 else Path("/run/systemd/system")
@@ -231,17 +232,22 @@ def generate_system_service(workload_id, config, uid, user_name):
         ])
 
     # Network configuration
-    # Default to host networking - pasta port forwarding doesn't work correctly
-    # for rootless containers from system services
     network_config = config.get("network", {})
-    network_mode = network_config.get("mode", "host")
+    network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
 
     if network_mode == "host":
         podman_args.append("--network=host")
-    else:
-        # Pasta mode (may have port forwarding issues with system services)
+    elif network_mode == "none":
+        podman_args.append("--network=none")
+    elif network_mode == "pasta":
         podman_args.append("--network=pasta")
-        # Add port mappings
+        # Add port mappings for pasta
+        for port in network_config.get("ports", []):
+            podman_args.append(f"--publish {port}")
+    else:
+        # Assume it's a custom network name - pass through to podman
+        podman_args.append(f"--network={network_mode}")
+        # Add port mappings for custom networks too
         for port in network_config.get("ports", []):
             podman_args.append(f"--publish {port}")
 

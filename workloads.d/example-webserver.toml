@@ -21,5 +21,11 @@ input = false
 extra_groups = []
 
 [network]
+# Network modes:
+#   "pasta"      - Default, isolated with port forwarding (recommended)
+#   "host"       - Share host network (no isolation, maximum performance)
+#   "none"       - No networking
+#   "mynetwork"  - Custom network (create first: podman network create mynetwork)
+mode = "pasta"  # Default mode, can be omitted
 # nginx-unprivileged listens on port 8080 internally
 ports = ["8080:8080"]

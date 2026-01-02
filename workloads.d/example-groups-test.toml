@@ -29,4 +29,4 @@ input = false
 extra_groups = ["video", "render", "input"]
 
 [network]
-# No network needed for this test
+mode = "none"  # No network needed for this test

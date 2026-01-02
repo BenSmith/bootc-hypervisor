@@ -249,18 +249,24 @@ def cmd_create(args, manager: WorkloadManager):
             f"extra_groups = [{groups_list}]",
         ])
 
-    if args.ports:
-        ports_list = ", ".join([f'"{p}"' for p in args.ports])
-        config_lines.extend([
-            "",
-            "[network]",
-            f"ports = [{ports_list}]",
-        ])
-
-    if args.network:
+    # Network section - only add if explicitly set or ports specified
+    if args.network or args.ports:
         if "[network]" not in config_lines:
             config_lines.extend(["", "[network]"])
-        config_lines.append(f'mode = "{args.network}"')
+
+        # Determine mode
+        if args.network:
+            config_lines.append(f'mode = "{args.network}"')
+        elif args.ports:
+            # If ports specified but no mode, default to pasta
+            config_lines.append('mode = "pasta"')
+
+        # Add ports if specified and mode supports them (not host or none)
+        if args.ports:
+            mode = args.network if args.network else "pasta"
+            if mode not in ["host", "none"]:
+                ports_list = ", ".join([f'"{p}"' for p in args.ports])
+                config_lines.append(f"ports = [{ports_list}]")
 
     if args.volumes:
         volumes_list = ", ".join([f'"{v}"' for v in args.volumes])
@@ -519,6 +525,35 @@ def cmd_logs(args, manager: WorkloadManager):
         cmd.extend(args.extra_args)
 
     subprocess.run(cmd)
+
+
+def cmd_network(args, manager: WorkloadManager):
+    """Manage podman networks"""
+    if args.subcommand == "create":
+        # Get workload config
+        config = WorkloadConfig(args.workload)
+        workload_user = config.user_name
+        uid = config.uid
+        network_name = args.network_name
+
+        print(f"Creating network '{network_name}' for user {workload_user} (UID {uid})...")
+
+        # Run podman network create as the workload user
+        cmd = [
+            "sudo", "-u", workload_user,
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            "podman", "network", "create", network_name
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✓ Network '{network_name}' created successfully")
+            print(f"\nTo use this network in a workload, add to your TOML config:")
+            print(f"  [network]")
+            print(f"  mode = \"{network_name}\"")
+        else:
+            print(f"Error creating network: {result.stderr}", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_ps(args, manager: WorkloadManager):
@@ -1463,7 +1498,7 @@ def main():
     create_parser.add_argument("--gpu", choices=["amd", "nvidia", "none"], help="GPU type for hardware acceleration")
     create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input)")
     create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
-    create_parser.add_argument("--network", choices=["host", "bridge", "none"], help="Network mode")
+    create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")
     create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
     create_parser.add_argument("--disabled", action="store_true", help="Create as disabled (enabled=false)")
@@ -1505,6 +1540,11 @@ def main():
     logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines")
     logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
     logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
+
+    network_parser = subparsers.add_parser("network", help="Manage podman networks")
+    network_parser.add_argument("subcommand", choices=["create"], help="Subcommand (create)")
+    network_parser.add_argument("network_name", help="Network name")
+    network_parser.add_argument("workload", help="Workload to create network for")
 
     ports_parser = subparsers.add_parser("ports", help="Show port information")
     ports_parser.add_argument("workload", help="Workload name")
@@ -1555,6 +1595,7 @@ def main():
         "info": cmd_info,
         "list": cmd_list,
         "logs": cmd_logs,
+        "network": cmd_network,
         "ports": cmd_ports,
         "ps": cmd_ps,
         "restart": cmd_restart,
