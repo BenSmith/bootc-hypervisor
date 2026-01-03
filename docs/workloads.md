@@ -133,6 +133,406 @@ sudo systemctl daemon-reload  # Regenerates configs
 sudo systemctl restart workload-{name}-{id}.service
 ```
 
+## Resource Constraints
+
+Control CPU, memory, I/O, and process limits for workloads using systemd cgroup v2 controls. Resource limits prevent workloads from consuming excessive system resources and allow you to prioritize critical workloads.
+
+### Philosophy
+
+Resource constraints follow a simple-to-advanced approach:
+- **Simple:** Use percentage/size strings for common cases (`"50%"`, `"2G"`)
+- **Advanced:** Use custom systemd directives for fine-grained control
+- **Optional:** No limits by default - add only what you need
+
+### Quick Examples
+
+**Lightweight web server (limit resources):**
+```toml
+[workload]
+name = "nginx"
+
+[container]
+image = "nginx:alpine"
+id = "1"
+
+[resources]
+cpu_quota = "50%"      # Half a CPU core max
+memory_max = "512M"    # 512MB hard limit
+memory_high = "384M"   # Start throttling at 384MB
+tasks_max = 50         # Limit worker processes
+```
+
+**High-priority gaming workload:**
+```toml
+[workload]
+name = "gaming"
+
+[container]
+image = "gaming-vm:latest"
+id = "1"
+
+[resources]
+cpu_weight = 500        # Higher CPU priority when competing
+memory_max = "8G"       # Generous memory limit
+memory_swap_max = "0"   # Disable swap for low latency
+io_weight = 500         # Higher I/O priority
+```
+
+**Database with stable resources:**
+```toml
+[workload]
+name = "postgres"
+
+[container]
+image = "postgres:16"
+id = "1"
+
+[resources]
+cpu_quota = "200%"      # 2 CPU cores
+memory_max = "4G"
+memory_high = "3G"
+memory_swap_max = "0"   # No swap for databases
+io_weight = 500         # High I/O priority
+io_read_bandwidth_max = ["/dev/sda 200M"]   # Limit disk reads
+io_write_bandwidth_max = ["/dev/sda 100M"]  # Limit disk writes
+```
+
+### Creating Workloads with Resource Limits
+
+**Using workload-ctl create:**
+```bash
+# Create a lightweight web server with resource limits
+sudo workload-ctl create nginx \
+  --image nginx:alpine \
+  --ports 8080:80 \
+  --cpu-quota "50%" \
+  --memory-max "512M" \
+  --memory-high "384M" \
+  --tasks-max 50 \
+  --enable
+
+# Create a high-priority gaming workload
+sudo workload-ctl create gaming \
+  --image gaming-vm:latest \
+  --network host \
+  --gpu amd \
+  --groups video render input \
+  --cpu-weight 500 \
+  --memory-max "8G" \
+  --memory-swap-max "0" \
+  --enable
+
+# Create a database with I/O limits (edit config for I/O bandwidth limits)
+sudo workload-ctl create postgres \
+  --image postgres:16 \
+  --ports 5432:5432 \
+  --cpu-quota "200%" \
+  --memory-max "4G" \
+  --memory-swap-max "0" \
+  --io-weight 500 \
+  --enable
+```
+
+**Available resource flags:**
+- `--cpu-quota PERCENT` - CPU quota (e.g., 50%, 100%, 200%)
+- `--cpu-weight WEIGHT` - CPU scheduling weight (1-10000)
+- `--memory-max SIZE` - Maximum memory (e.g., 512M, 2G)
+- `--memory-high SIZE` - Memory soft limit (e.g., 384M, 1.5G)
+- `--memory-swap-max SIZE` - Max swap (0 to disable, or size)
+- `--io-weight WEIGHT` - I/O scheduling weight (1-10000)
+- `--tasks-max NUM` - Maximum tasks/threads
+
+**Note:** For advanced options like I/O bandwidth limits or custom directives, create the workload first, then edit the config file with `workload-ctl edit <name>`.
+
+### CPU Limits
+
+**cpu_quota** - Percentage of CPU time (hard limit)
+```toml
+[resources]
+cpu_quota = "100%"   # One full CPU core
+cpu_quota = "200%"   # Two CPU cores
+cpu_quota = "50%"    # Half a core
+cpu_quota = "350%"   # 3.5 cores
+```
+- Format: `"N%"` where N is percentage of one CPU core
+- Enforced over 100ms period by default
+- Systemd directive: `CPUQuota=`
+
+**cpu_weight** - CPU scheduling priority (relative)
+```toml
+[resources]
+cpu_weight = 100   # Default priority
+cpu_weight = 200   # Double priority (more CPU when competing)
+cpu_weight = 50    # Half priority (less CPU when competing)
+cpu_weight = 1000  # Very high priority
+```
+- Range: 1-10000 (default: 100)
+- Only matters when CPUs are saturated
+- Controls relative CPU time when workloads compete
+- Systemd directive: `CPUWeight=`
+
+### Memory Limits
+
+**memory_max** - Maximum memory (hard limit)
+```toml
+[resources]
+memory_max = "2G"     # 2 gigabytes
+memory_max = "512M"   # 512 megabytes
+memory_max = "1.5G"   # 1.5 gigabytes
+```
+- If exceeded, processes are OOM killed
+- Prevents runaway memory consumption
+- Systemd directive: `MemoryMax=`
+
+**memory_high** - Memory soft limit (throttle threshold)
+```toml
+[resources]
+memory_high = "1.5G"   # Start throttling at 1.5GB
+```
+- If exceeded, kernel aggressively reclaims memory (throttles but doesn't kill)
+- Set to ~75% of `memory_max` to avoid OOM kills
+- Systemd directive: `MemoryHigh=`
+
+**memory_swap_max** - Maximum swap usage
+```toml
+[resources]
+memory_swap_max = "0"      # Disable swap entirely
+memory_swap_max = "512M"   # Allow 512MB swap
+memory_swap_max = "1G"     # Allow 1GB swap
+```
+- Use `"0"` to disable swap for latency-sensitive workloads
+- Limits swap separately from `memory_max`
+- Systemd directive: `MemorySwapMax=`
+
+### I/O Limits
+
+**io_weight** - I/O scheduling priority (relative)
+```toml
+[resources]
+io_weight = 100   # Default priority
+io_weight = 500   # High I/O priority
+io_weight = 25    # Low I/O priority
+```
+- Range: 1-10000 (default: 100)
+- Only matters when disk is saturated
+- Controls relative I/O bandwidth when workloads compete
+- Systemd directive: `IOWeight=`
+
+**io_read_bandwidth_max** - Limit disk read bandwidth
+```toml
+[resources]
+io_read_bandwidth_max = ["/dev/sda 50M"]                    # Limit sda reads to 50 MB/s
+io_read_bandwidth_max = ["/dev/nvme0n1 100M"]               # Limit nvme reads to 100 MB/s
+io_read_bandwidth_max = ["/dev/sda 50M", "/dev/sdb 20M"]    # Multiple devices
+```
+- Format: Array of `"device-path bandwidth"` strings
+- Units: K, M, G (KB/s, MB/s, GB/s)
+- Prevents workload from saturating storage bandwidth
+- Systemd directive: `IOReadBandwidthMax=`
+
+**io_write_bandwidth_max** - Limit disk write bandwidth
+```toml
+[resources]
+io_write_bandwidth_max = ["/dev/sda 50M"]   # Limit sda writes to 50 MB/s
+```
+- Format: Same as `io_read_bandwidth_max`
+- Prevents excessive write I/O
+- Systemd directive: `IOWriteBandwidthMax=`
+
+### Process Limits
+
+**tasks_max** - Maximum number of tasks (processes + threads)
+```toml
+[resources]
+tasks_max = 100        # Limit to 100 tasks total
+tasks_max = 1000       # Limit to 1000 tasks
+tasks_max = "infinity" # No limit (default)
+```
+- Prevents fork bombs and runaway thread creation
+- Each thread counts as one task
+- Systemd directive: `TasksMax=`
+
+### Timeout Overrides
+
+**timeout_start_sec** - Service startup timeout
+```toml
+[resources]
+timeout_start_sec = 300   # 5 minutes (default)
+timeout_start_sec = 600   # 10 minutes for slow pulls
+```
+- How long to wait for container to start before failing
+- Increase for slow image pulls or complex startup scripts
+- Systemd directive: `TimeoutStartSec=`
+
+**timeout_stop_sec** - Service shutdown timeout
+```toml
+[resources]
+timeout_stop_sec = 30   # 30 seconds (default)
+timeout_stop_sec = 60   # 1 minute for graceful shutdown
+```
+- How long to wait for graceful shutdown before force-killing
+- Increase for applications with long shutdown procedures
+- Systemd directive: `TimeoutStopSec=`
+
+### Escape Hatch: Custom Directives
+
+For advanced users who need fine-grained control not covered by the convenience options:
+
+```toml
+[resources]
+# Standard options
+cpu_quota = "200%"
+memory_max = "2G"
+
+# Custom systemd directives (escape hatch)
+custom_directives = {
+  LimitNOFILE = "65536",           # Max open file descriptors
+  OOMScoreAdjust = "-500",         # Less likely to be OOM killed
+  CPUAffinity = "0-3",             # Pin to CPU cores 0-3
+  Nice = "-5",                     # Process priority (-20 to 19)
+  IOSchedulingClass = "realtime",  # Real-time I/O scheduling
+  IOSchedulingPriority = "0"       # Highest I/O priority (0-7)
+}
+```
+
+**Available custom directives:**
+- `LimitNOFILE` - Max open file descriptors
+- `LimitNPROC` - Max processes (alternative to `tasks_max`)
+- `OOMScoreAdjust` - OOM killer priority (-1000 to 1000)
+- `CPUAffinity` - Pin to specific CPU cores (`"0-3"`, `"0,2,4"`)
+- `Nice` - Process priority (-20 highest to 19 lowest)
+- `IOSchedulingClass` - I/O scheduling class (`"realtime"`, `"best-effort"`, `"idle"`)
+- `IOSchedulingPriority` - I/O priority (0-7 for realtime/best-effort)
+
+**Warning:** Custom directives are passed directly to systemd. Typos or invalid values will cause service failures.
+
+**Reference:** See `man systemd.exec` and `man systemd.resource-control` for all available directives.
+
+### Use Cases and Patterns
+
+**Pattern 1: Background tasks (minimal resources)**
+```toml
+[resources]
+cpu_quota = "25%"       # Quarter of a CPU
+cpu_weight = 25         # Low priority when system busy
+memory_max = "256M"
+io_weight = 25          # Low I/O priority
+tasks_max = 20
+```
+
+**Pattern 2: Media server (generous resources)**
+```toml
+[resources]
+cpu_quota = "400%"      # Up to 4 CPU cores for transcoding
+memory_max = "6G"
+io_read_bandwidth_max = ["/dev/sda 100M"]  # Limit media library reads
+```
+
+**Pattern 3: Real-time game streaming (high priority)**
+```toml
+[resources]
+cpu_weight = 500        # High CPU priority
+memory_max = "8G"
+memory_swap_max = "0"   # No swap for low latency
+io_weight = 500         # High I/O priority
+custom_directives = { Nice = "-10" }  # High process priority
+```
+
+**Pattern 4: Development environment (balanced)**
+```toml
+[resources]
+cpu_quota = "200%"      # 2 cores for builds
+memory_max = "4G"
+io_weight = 200         # Higher I/O for builds
+```
+
+### Monitoring Resource Usage
+
+**Check resource usage with systemd:**
+```bash
+# View current resource usage
+systemctl status workload-{name}-{id}.service
+
+# Detailed cgroup statistics
+systemd-cgtop
+```
+
+**Check resource usage with podman:**
+```bash
+# Real-time stats for one workload
+workload-ctl stats webserver
+
+# All workloads (live updating)
+workload-ctl stats -f
+```
+
+**Check memory limits:**
+```bash
+# View memory cgroup limits
+cat /sys/fs/cgroup/system.slice/workload-{name}-{id}.service/memory.max
+cat /sys/fs/cgroup/system.slice/workload-{name}-{id}.service/memory.high
+
+# View current memory usage
+cat /sys/fs/cgroup/system.slice/workload-{name}-{id}.service/memory.current
+```
+
+**Check CPU limits:**
+```bash
+# View CPU quota
+systemctl show workload-{name}-{id}.service -p CPUQuota
+
+# View CPU weight
+systemctl show workload-{name}-{id}.service -p CPUWeight
+```
+
+### Testing Resource Limits
+
+**Test CPU limit:**
+```bash
+# Create a CPU-intensive workload
+workload-ctl create cpu-test --image=alpine:latest \
+  --command='["sh", "-c", "while true; do :; done"]' \
+  --enable
+
+# Add CPU limit to config
+sudo nano /etc/workloads.d/cpu-test.toml
+# Add: [resources]
+#      cpu_quota = "50%"
+
+# Restart and monitor
+sudo systemctl daemon-reload
+sudo systemctl restart workload-cpu-test-*.service
+htop  # Should show ~50% CPU usage
+```
+
+**Test memory limit:**
+```bash
+# Create memory-hungry workload
+workload-ctl create mem-test --image=alpine:latest \
+  --command='["sh", "-c", "stress --vm 1 --vm-bytes 1G"]' \
+  --enable
+
+# Add memory limit
+sudo nano /etc/workloads.d/mem-test.toml
+# Add: [resources]
+#      memory_max = "512M"
+
+# Restart and observe OOM kill
+sudo systemctl daemon-reload
+sudo systemctl restart workload-mem-test-*.service
+workload-ctl logs -f mem-test  # Should see OOM kill
+```
+
+### Complete Reference
+
+See `workloads.d/schema-reference.toml` for:
+- Complete list of all resource options
+- Detailed examples for each option
+- Real-world usage patterns
+- Advanced use cases
+
+All resource limits are documented in the schema reference with comprehensive examples and explanations.
+
 ## Secrets Management
 
 The workload system uses **systemd credentials** for secure secrets management. This allows you to safely store API keys, passwords, certificates, and other sensitive data.

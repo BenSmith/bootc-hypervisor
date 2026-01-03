@@ -291,6 +291,35 @@ def cmd_create(args, manager: WorkloadManager):
             f"volumes = [{volumes_list}]",
         ])
 
+    has_resources = any([
+        args.cpu_quota, args.cpu_weight, args.memory_max, args.memory_high,
+        args.memory_swap_max, args.io_weight, args.tasks_max
+    ])
+
+    if has_resources:
+        config_lines.extend(["", "[resources]"])
+
+        if args.cpu_quota:
+            config_lines.append(f'cpu_quota = "{args.cpu_quota}"')
+
+        if args.cpu_weight:
+            config_lines.append(f"cpu_weight = {args.cpu_weight}")
+
+        if args.memory_max:
+            config_lines.append(f'memory_max = "{args.memory_max}"')
+
+        if args.memory_high:
+            config_lines.append(f'memory_high = "{args.memory_high}"')
+
+        if args.memory_swap_max:
+            config_lines.append(f'memory_swap_max = "{args.memory_swap_max}"')
+
+        if args.io_weight:
+            config_lines.append(f"io_weight = {args.io_weight}")
+
+        if args.tasks_max:
+            config_lines.append(f"tasks_max = {args.tasks_max}")
+
     # Write config file
     config_content = "\n".join(config_lines) + "\n"
 
@@ -1700,6 +1729,15 @@ def main():
     create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
     create_parser.add_argument("--disabled", action="store_true", help="Create as disabled (enabled=false)")
+
+    # Resource limit flags
+    create_parser.add_argument("--cpu-quota", metavar="PERCENT", help="CPU quota (e.g., 50%%, 100%%, 200%%)")
+    create_parser.add_argument("--cpu-weight", type=int, metavar="WEIGHT", help="CPU scheduling weight (1-10000, default 100)")
+    create_parser.add_argument("--memory-max", metavar="SIZE", help="Maximum memory (e.g., 512M, 2G, 4G)")
+    create_parser.add_argument("--memory-high", metavar="SIZE", help="Memory soft limit for throttling (e.g., 384M, 1.5G)")
+    create_parser.add_argument("--memory-swap-max", metavar="SIZE", help="Maximum swap usage (0 to disable, or size like 512M)")
+    create_parser.add_argument("--io-weight", type=int, metavar="WEIGHT", help="I/O scheduling weight (1-10000, default 100)")
+    create_parser.add_argument("--tasks-max", type=int, metavar="NUM", help="Maximum number of tasks/threads")
 
     disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload")
     disable_parser.add_argument("workload", help="Workload name")
