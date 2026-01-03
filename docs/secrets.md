@@ -206,16 +206,14 @@ JELLYFIN_DB_PASSWORD = "${SECRET:db-password}"                # Secret reference
 
 # Secrets configuration
 [secrets]
-# Load systemd credentials (encrypted at rest)
-credentials = [
-    "jellyfin-api-key",
-    "db-password"
-]
-
-# Optional: Mount secrets as files (for config files with embedded secrets)
+# Mount secrets as files (for config files with embedded secrets)
+# Credentials are auto-detected from ${SECRET:...} env vars and files[] entries
+# Files are mounted read-only (mode = "ro") by default for security
+# Use mode = "rw" only if the container needs to modify the secret temporarily (rare)
 files = [
-    { credential = "tls-cert", path = "/config/cert.pem" },
-    { credential = "tls-key", path = "/config/key.pem" }
+    { credential = "tls-cert", path = "/config/cert.pem" },                    # defaults to ro
+    { credential = "tls-key", path = "/config/key.pem", mode = "ro" },         # explicit ro
+    # { credential = "writable-secret", path = "/data/secret", mode = "rw" }   # must explicitly set rw
 ]
 ```
 
@@ -223,18 +221,25 @@ files = [
 
 The systemd generator (`workload-generator`) runs during `daemon-reload` and processes the configuration:
 
-1. **Reads** `[secrets]` section from TOML
+1. **Auto-detects** needed credentials by scanning:
+   - Environment variables for `${SECRET:name}` references
+   - `secrets.files` array for credential references
 2. **Generates** systemd service file with `LoadCredentialEncrypted=` directives:
    ```ini
    [Service]
    LoadCredentialEncrypted=jellyfin-api-key:/etc/credstore.encrypted/jellyfin-api-key
    LoadCredentialEncrypted=db-password:/etc/credstore.encrypted/db-password
+   LoadCredentialEncrypted=tls-cert:/etc/credstore.encrypted/tls-cert
+   LoadCredentialEncrypted=tls-key:/etc/credstore.encrypted/tls-key
    ```
 3. **Converts** `${SECRET:name}` references in environment variables to shell command substitution:
    - TOML: `JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"`
    - Becomes: `--env JELLYFIN_API_KEY=$(<${CREDENTIALS_DIRECTORY}/jellyfin-api-key)`
    - `${CREDENTIALS_DIRECTORY}` is set by systemd to `/run/credentials/workload-{name}-{id}.service`
-4. **Generates** ExecStart command with environment variables for `podman run`
+4. **Mounts** credential files into container:
+   - TOML: `{ credential = "tls-cert", path = "/config/cert.pem" }`
+   - Becomes: `--volume /run/credentials/workload-jellyfin-1.service/tls-cert:/config/cert.pem:ro`
+5. **Generates** ExecStart command with environment variables and volume mounts for `podman run`
 
 At service start time, the shell expands `$(<file)` to read the decrypted credentials.
 
@@ -244,8 +249,12 @@ When the workload service starts:
 
 1. **systemd decrypts** credentials into `/run/credentials/{service}/`
 2. **Shell expands** command substitution syntax (e.g., `$(<${CREDENTIALS_DIRECTORY}/secret-name)`)
-3. **Podman starts** container with fully expanded environment variables
-4. **Container sees** plain environment variables (no knowledge of systemd credentials)
+3. **Podman starts** container with:
+   - Fully expanded environment variables
+   - Credential files mounted at specified paths
+4. **Container sees**:
+   - Plain environment variables (no knowledge of systemd credentials)
+   - Credential files as regular files in the filesystem
 
 **Note:** The generator runs during `daemon-reload`, not at service start time. It generates the service file with shell command substitution syntax that gets expanded when the service actually starts.
 
@@ -254,6 +263,65 @@ When the workload service stops:
 1. **systemd removes** `/run/credentials/{service}/` directory
 2. **tmpfs clears** memory (plaintext secrets gone)
 3. **Encrypted credentials** remain safely on disk
+
+### Credential Mutability and Persistence
+
+**Important:** Even if credentials are mounted with `mode = "rw"`, modifications **do not persist** across service restarts.
+
+#### Why Changes Don't Persist
+
+1. **Credentials live in tmpfs (RAM only)**
+   - Location: `/run/credentials/workload-{name}-{id}.service/`
+   - tmpfs = temporary filesystem in memory, never written to disk
+   - All contents erased when service stops
+
+2. **Fresh decryption on every start**
+   ```
+   Service Start:
+   1. systemd decrypts /etc/credstore.encrypted/{name}
+   2. Writes plaintext to /run/credentials/{service}/{name} (fresh copy)
+   3. Container mounts and can read (or modify if mode=rw)
+
+   Service Stop/Restart:
+   1. systemd removes /run/credentials/{service}/ directory
+   2. All modifications lost (RAM cleared)
+
+   Next Service Start:
+   1. Fresh decryption from /etc/credstore.encrypted/ (original value)
+   2. Any previous modifications are gone
+   ```
+
+3. **Source of truth is always `/etc/credstore.encrypted/`**
+   - Only the encrypted file persists across reboots
+   - Container cannot modify the encrypted source
+   - Each start = fresh decryption of original encrypted value
+
+#### Security Implications
+
+This ephemeral nature is a **security feature**:
+
+- ✅ **Container compromise can't permanently corrupt secrets**
+  - Even if attacker modifies credentials in running container
+  - Service restart restores original values
+
+- ✅ **No persistent damage**
+  - Malicious changes exist only during current service lifetime
+  - Restart = automatic remediation
+
+- ✅ **Immutable credential source**
+  - Container has no write access to `/etc/credstore.encrypted/`
+  - Only systemd (with decryption keys) can modify source
+
+#### When to Use `mode = "rw"`
+
+Since modifications don't persist, `mode = "rw"` is rarely needed. Possible use cases:
+
+- **Temporary in-memory modifications**: Container needs to reformat or process the credential before use
+- **Application requirements**: Some applications expect to write to credential files even if changes aren't persisted
+
+**Note:** For persistent credential updates, use `workload-ctl secret rotate` to update the encrypted source.
+
+Most workloads should use `mode = "ro"` (the default).
 
 ## Setup and Usage
 
@@ -312,9 +380,7 @@ image = "jellyfin/jellyfin:latest"
 
 [container.environment]
 JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"
-
-[secrets]
-credentials = ["jellyfin-api-key"]
+# Credentials auto-detected from ${SECRET:...} references
 ```
 
 ### Enable and Start Workload
@@ -604,6 +670,7 @@ Combine both strategies:
 | **Steal encrypted .cred file** | ✅ YES | Encrypted with TPM2/host key - useless without the machine |
 | **Shell as workload user** | ⚠️ PARTIAL | Can read own workload's credentials but NOT other workloads |
 | **Root on running system** | ❌ NO | Root can read `/run/credentials/` (all secrets decrypted in memory) |
+| **Modify credentials in container** | ✅ YES | Changes only in tmpfs RAM, lost on restart - fresh decryption restores originals |
 | **Physical disk access (machine off)** | ✅ YES | Secrets encrypted at rest, RAM cleared when powered off |
 | **Swap TPM2 chip** | ✅ YES | TPM2 is unique per machine, can't decrypt on different TPM |
 | **Boot malicious USB/kernel** | ✅ YES* | *IF using PCR policy (see Advanced Configuration) |
@@ -768,8 +835,10 @@ Organize credentials by sensitivity:
 - ✅ Per-workload user isolation
 - ✅ `[container.environment]` section in TOML schema
 - ✅ `[secrets]` section in TOML schema
+- ✅ Auto-detection of credentials from env vars and file mounts
 - ✅ Generator support for `LoadCredentialEncrypted=`
 - ✅ `${SECRET:name}` expansion in environment variables
+- ✅ `secrets.files` - volume-mounted credential files
 - ✅ `workload-ctl secret` commands:
   - ✅ `workload-ctl secret create <name>`
   - ✅ `workload-ctl secret list`
@@ -778,7 +847,6 @@ Organize credentials by sensitivity:
   - ✅ `workload-ctl secret rotate <name>`
 
 ### Possible Future Enhancements
-- ⏳ Volume-mounted secrets (credential files in container filesystem)
 - ⏳ Registry credential automation
 - ⏳ Credential expiration enforcement
 - ⏳ PCR policy validation
@@ -805,9 +873,7 @@ image = "myapp:latest"
 
 [container.environment]
 API_KEY = "${SECRET:myapp-api-key}"
-
-[secrets]
-credentials = ["myapp-api-key"]
+# Credentials auto-detected from ${SECRET:...} references
 ```
 
 ```bash
@@ -838,7 +904,7 @@ POSTGRES_PASSWORD = "${SECRET:db-password}"
 POSTGRES_USER = "${SECRET:db-username}"
 
 [secrets]
-credentials = ["db-password", "db-username", "tls-cert", "tls-key"]
+# Credentials auto-detected from ${SECRET:...} env vars and files[] entries
 files = [
     { credential = "tls-cert", path = "/var/lib/postgresql/server.crt" },
     { credential = "tls-key", path = "/var/lib/postgresql/server.key" }
@@ -866,9 +932,7 @@ image = "tailscale/tailscale:latest"
 
 [container.environment]
 TS_AUTHKEY = "${SECRET:tailscale-authkey}"
-
-[secrets]
-credentials = ["tailscale-authkey"]
+# Credentials auto-detected from ${SECRET:...} references
 ```
 
 ```bash

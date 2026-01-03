@@ -155,6 +155,35 @@ def get_group_gid(group_name):
     return None
 
 
+def auto_detect_credentials(config):
+    """Auto-detect which credentials are needed by scanning config.
+
+    Scans:
+    - Environment variables for ${SECRET:name} references
+    - secrets.files for credential field references
+
+    Returns set of credential names.
+    """
+    import re
+    needed_credentials = set()
+
+    # Scan environment variables for ${SECRET:name}
+    env_vars = config.get("container", {}).get("environment", {})
+    pattern = r'\$\{SECRET:([a-zA-Z0-9_-]+)\}'
+
+    for value in env_vars.values():
+        for match in re.finditer(pattern, str(value)):
+            needed_credentials.add(match.group(1))
+
+    # Scan secrets.files for credential references
+    secrets_files = config.get("secrets", {}).get("files", [])
+    for file_spec in secrets_files:
+        if "credential" in file_spec:
+            needed_credentials.add(file_spec["credential"])
+
+    return needed_credentials
+
+
 def build_env_args_for_podman(config, service_name):
     """Build --env arguments for podman command.
 
@@ -330,10 +359,43 @@ def generate_system_service(workload_id, config, uid, user_name):
             volume = shlex.quote(volume) if ' ' in volume else volume
         podman_args.append(f"--volume {volume}")
 
-    secrets_config = config.get("secrets", {})
-    credentials = secrets_config.get("credentials", [])
+    # Auto-detect credentials needed (from env vars and file mounts)
+    credentials = auto_detect_credentials(config)
 
+    # Mount credential files into container
     service_name = f"workload-{name}-{workload_id}.service"
+    secrets_config = config.get("secrets", {})
+    secrets_files = secrets_config.get("files", [])
+
+    for file_spec in secrets_files:
+        credential_name = file_spec.get("credential")
+        container_path = file_spec.get("path")
+
+        if not credential_name or not container_path:
+            log_msg(f"WARNING: secrets.files entry missing 'credential' or 'path', skipping", level="warning")
+            continue
+
+        # Credential will be decrypted to /run/credentials/{service}/
+        source_path = f"/run/credentials/{service_name}/{credential_name}"
+
+        # Validate and default to read-only for security
+        mode = file_spec.get("mode", "ro")
+        valid_modes = ["ro", "rw"]
+        if mode not in valid_modes:
+            log_msg(
+                f"WARNING: Invalid mode '{mode}' for credential '{credential_name}', "
+                f"must be 'ro' or 'rw'. Defaulting to 'ro'.",
+                level="warning"
+            )
+            mode = "ro"
+
+        # Quote paths if they contain spaces
+        source_quoted = shlex.quote(source_path) if ' ' in source_path else source_path
+        container_quoted = shlex.quote(container_path) if ' ' in container_path else container_path
+
+        podman_args.append(f"--volume {source_quoted}:{container_quoted}:{mode}")
+        log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {mode})")
+
     env_args = build_env_args_for_podman(config, service_name)
 
     podman_args.extend(env_args)
