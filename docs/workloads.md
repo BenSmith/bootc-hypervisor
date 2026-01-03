@@ -1,4 +1,12 @@
 # DRAFT DRAFT DRAFT DRAFT
+### This has not been thoroughly tested, and the implementation is AI-generated, so ... 
+### DO NOT count on this for important things until you've vetted it yourself.
+
+I'll be spending time on more testing after I'm done with the initial implementation =)
+
+It's looking very good so far, imo.
+
+---
 
 # Rootless Workload Provisioning System
 
@@ -124,6 +132,135 @@ After modifying configs:
 sudo systemctl daemon-reload  # Regenerates configs
 sudo systemctl restart workload-{name}-{id}.service
 ```
+
+## Secrets Management
+
+The workload system uses **systemd credentials** for secure secrets management. This allows you to safely store API keys, passwords, certificates, and other sensitive data.
+
+### Quick Start with Secrets
+
+1. **Create an encrypted credential:**
+```bash
+echo -n "my-secret-api-key" | \
+  sudo systemd-creds encrypt --with-key=tpm2 \
+  --name=my-api-key - \
+  /etc/credstore.encrypted/my-api-key.cred
+```
+
+Or using workload-ctl:
+```bash
+sudo workload-ctl secret create my-api-key
+# Type the secret, then press Ctrl+D
+```
+
+2. **Reference the secret in your workload config:**
+```toml
+[workload]
+name = "myapp"
+
+[container]
+image = "myapp:latest"
+id = "1"
+
+[container.environment]
+API_KEY = "${SECRET:my-api-key}"
+DATABASE_PASSWORD = "${SECRET:db-password}"
+PUBLIC_URL = "https://example.com"  # Plain values work too
+
+[secrets]
+credentials = ["my-api-key", "db-password"]
+```
+
+3. **Enable the workload:**
+```bash
+sudo workload-ctl enable myapp
+```
+
+The secrets are automatically decrypted at boot and injected as environment variables into your container.
+
+### Secret Commands
+
+**Create a secret interactively:**
+```bash
+sudo workload-ctl secret create my-api-key
+```
+
+**Create from a file (for certificates, keys):**
+```bash
+sudo workload-ctl secret create tls-cert --file /path/to/cert.pem
+```
+
+**List all secrets:**
+```bash
+sudo workload-ctl secret list
+```
+
+**Show a decrypted secret (for debugging):**
+```bash
+sudo workload-ctl secret show my-api-key
+```
+
+**Rotate a secret (updates and restarts affected workloads):**
+```bash
+sudo workload-ctl secret rotate my-api-key
+```
+
+**Delete a secret:**
+```bash
+sudo workload-ctl secret delete my-api-key
+```
+
+### Mounting Secrets as Files
+
+For TLS certificates, SSH keys, or config files:
+
+```toml
+[secrets]
+credentials = ["tls-cert", "tls-key", "ssh-key"]
+
+files = [
+    { credential = "tls-cert", path = "/etc/ssl/cert.pem" },
+    { credential = "tls-key", path = "/etc/ssl/key.pem" },
+    { credential = "ssh-key", path = "/home/user/.ssh/id_rsa" }
+]
+```
+
+### Security Features
+
+- **Encrypted at rest** with AES256-GCM
+- **TPM2-backed encryption** (hardware security)
+- **Decrypted into RAM only** (tmpfs, never touches disk unencrypted)
+- **Per-workload isolation** (workloads can't see each other's secrets)
+- **Automatic cleanup** when service stops
+- **Safe to commit to git** (encrypted .cred files)
+
+### Encryption Key Types
+
+- **tpm2** (recommended): Hardware-backed, machine-specific
+- **host**: Software key, machine-specific
+- **host+tpm2**: Both required (maximum security)
+
+Example with custom key type:
+```bash
+sudo workload-ctl secret create my-secret --key-type host+tpm2
+```
+
+### Advanced: PCR Policies
+
+Bind decryption to boot state (Secure Boot, kernel cmdline):
+```bash
+sudo systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7+11 \
+  --name=my-secret - /etc/credstore.encrypted/my-secret.cred
+```
+
+This prevents decryption if Secure Boot is disabled or kernel is modified.
+
+### Complete Documentation
+
+For comprehensive secrets management documentation, see:
+- [docs/SECRETS-MANAGEMENT.md](SECRETS-MANAGEMENT.md) - Complete guide
+- [workloads.d/example-with-secrets.toml](../workloads.d/example-with-secrets.toml) - Working example
+- [workloads.d/schema-reference.toml](../workloads.d/schema-reference.toml) - Full schema with secrets
 
 ## Managing Workloads
 

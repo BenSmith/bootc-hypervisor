@@ -95,7 +95,7 @@ echo ""
 # Get first available workload for testing
 WORKLOAD=""
 if [[ -d "$WORKLOAD_DIR" ]]; then
-    WORKLOAD=$(ls "$WORKLOAD_DIR"/*.toml 2>/dev/null | head -1 | xargs -r basename -s .toml)
+    WORKLOAD=$(find "$WORKLOAD_DIR" -maxdepth 1 -name "*.toml" -type f 2>/dev/null | head -1 | xargs -r basename -s .toml)
 fi
 
 if [[ -z "$WORKLOAD" ]]; then
@@ -239,27 +239,25 @@ if [[ -n "$WORKLOAD" ]]; then
         test_info "validate command ran (may have found issues)"
     fi
 
-    # Test: validate --json
-    if output=$("$WORKLOAD_CTL" validate "$WORKLOAD" --json 2>&1); then
-        if validate_json "$output"; then
-            test_pass "validate --json produces valid JSON"
-            # Check structure
-            keys_found=0
-            for key in "workload" "passed" "errors" "warnings" "checks"; do
-                if echo "$output" | grep -q "\"$key\""; then
-                    ((keys_found++))
-                fi
-            done
-            if [[ $keys_found -eq 5 ]]; then
-                test_pass "validate --json has all required keys"
-            else
-                test_fail "validate --json missing some keys (found $keys_found/5)"
+    # Test: validate --json (exit code may be non-zero if validation fails, which is expected)
+    output=$("$WORKLOAD_CTL" validate "$WORKLOAD" --json 2>&1) || true
+    if validate_json "$output"; then
+        test_pass "validate --json produces valid JSON"
+        # Check structure
+        keys_found=0
+        for key in "workload" "passed" "errors" "warnings" "checks"; do
+            if echo "$output" | grep -q "\"$key\""; then
+                ((keys_found++))
             fi
+        done
+        if [[ $keys_found -eq 5 ]]; then
+            test_pass "validate --json has all required keys"
         else
-            test_fail "validate --json produces invalid JSON"
+            test_fail "validate --json missing some keys (found $keys_found/5)"
         fi
     else
-        test_fail "validate --json command failed"
+        test_fail "validate --json produces invalid JSON"
+        echo "Output was: $output"
     fi
 
     echo ""
@@ -367,6 +365,16 @@ echo "========================================"
 
 # Only test create if running as root (it requires write access to /etc/workloads.d)
 if check_root; then
+    # In repo mode, use a temporary directory since root can't write to NFS-mounted workloads.d
+    if [[ "$CONTEXT" == "repo" ]]; then
+        TEMP_CREATE_DIR=$(mktemp -d)
+        ORIGINAL_WORKLOAD_CONFIG_DIR="$WORKLOAD_CONFIG_DIR"
+        ORIGINAL_WORKLOAD_DIR="$WORKLOAD_DIR"
+        export WORKLOAD_CONFIG_DIR="$TEMP_CREATE_DIR"
+        WORKLOAD_DIR="$TEMP_CREATE_DIR"
+        test_info "Using temporary directory for create tests (NFS workaround): $TEMP_CREATE_DIR"
+    fi
+
     TEST_WORKLOAD_NAME="test-create-$$"
     TEST_CONFIG_PATH="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME}.toml"
 
@@ -412,7 +420,7 @@ if check_root; then
     fi
 
     # Test: create with options (gpu, ports, groups)
-    TEST_WORKLOAD_NAME2="test-create-opts-$$"
+    TEST_WORKLOAD_NAME2="test-opts-$$"
     TEST_CONFIG_PATH2="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME2}.toml"
 
     if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME2" \
@@ -420,7 +428,7 @@ if check_root; then
         --gpu "amd" \
         --ports "8080:80" "8443:443" \
         --groups "video" "render" \
-        --network "host" 2>&1); then
+        --network "pasta" 2>&1); then
         test_pass "create command works with multiple options"
 
         if [[ -f "$TEST_CONFIG_PATH2" ]]; then
@@ -428,8 +436,8 @@ if check_root; then
             content=$(cat "$TEST_CONFIG_PATH2")
             all_ok=true
 
-            if ! echo "$content" | grep -q 'type = "amd"'; then
-                test_fail "created config missing gpu.type"
+            if ! echo "$content" | grep -q 'gpu = "amd"'; then
+                test_fail "created config missing devices.gpu"
                 all_ok=false
             fi
 
@@ -443,7 +451,7 @@ if check_root; then
                 all_ok=false
             fi
 
-            if ! echo "$content" | grep -q 'mode = "host"'; then
+            if ! echo "$content" | grep -q 'mode = "pasta"'; then
                 test_fail "created config missing network.mode"
                 all_ok=false
             fi
@@ -473,7 +481,7 @@ if check_root; then
     fi
 
     # Test: create with explicit ID
-    TEST_WORKLOAD_NAME3="test-create-id-$$"
+    TEST_WORKLOAD_NAME3="test-id-$$"
     TEST_CONFIG_PATH3="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME3}.toml"
 
     if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME3" \
@@ -498,7 +506,7 @@ if check_root; then
     fi
 
     # Test: create --disabled
-    TEST_WORKLOAD_NAME4="test-create-disabled-$$"
+    TEST_WORKLOAD_NAME4="test-dis-$$"
     TEST_CONFIG_PATH4="$WORKLOAD_DIR/${TEST_WORKLOAD_NAME4}.toml"
 
     if output=$("$WORKLOAD_CTL" create "$TEST_WORKLOAD_NAME4" \
@@ -512,9 +520,12 @@ if check_root; then
             else
                 test_fail "created config missing enabled=false"
             fi
+        else
+            test_fail "created config file not found"
         fi
     else
         test_fail "create command failed with --disabled"
+        echo "Output: $output"
     fi
 
     # Clean up fourth test workload
@@ -599,6 +610,17 @@ if check_root; then
         rm -f "$TEST_CONFIG_DEFAULT"
     else
         test_fail "create fails with ports but no --network"
+    fi
+
+    # Clean up temporary directory and restore original config dir if we changed it
+    if [[ -n "$TEMP_CREATE_DIR" ]] && [[ -d "$TEMP_CREATE_DIR" ]]; then
+        rm -rf "$TEMP_CREATE_DIR"
+        test_info "Cleaned up temporary directory"
+        # Restore original config directory
+        if [[ -n "$ORIGINAL_WORKLOAD_CONFIG_DIR" ]]; then
+            export WORKLOAD_CONFIG_DIR="$ORIGINAL_WORKLOAD_CONFIG_DIR"
+            WORKLOAD_DIR="$ORIGINAL_WORKLOAD_DIR"
+        fi
     fi
 
 else
