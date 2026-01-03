@@ -184,7 +184,7 @@ def build_env_args_for_podman(config, service_name):
                 # Avoid f-string brace confusion by using concatenation
                 runtime_value = runtime_value.replace(
                     f'${{SECRET:{secret_name}}}',
-                    '$(<${CREDENTIALS_DIRECTORY}/' + secret_name + '})'
+                    '$(<${CREDENTIALS_DIRECTORY}/' + secret_name + ')'
                 )
 
             # Add as --env with runtime expansion (will be evaluated by shell)
@@ -330,7 +330,14 @@ def generate_system_service(workload_id, config, uid, user_name):
             volume = shlex.quote(volume) if ' ' in volume else volume
         podman_args.append(f"--volume {volume}")
 
-    # Image (quote if it contains spaces)
+    secrets_config = config.get("secrets", {})
+    credentials = secrets_config.get("credentials", [])
+
+    service_name = f"workload-{name}-{workload_id}.service"
+    env_args = build_env_args_for_podman(config, service_name)
+
+    podman_args.extend(env_args)
+
     image_quoted = shlex.quote(image) if ' ' in image else image
     podman_args.append(image_quoted)
 
@@ -341,17 +348,6 @@ def generate_system_service(workload_id, config, uid, user_name):
             podman_args.extend([shlex.quote(arg) if ' ' in arg else arg for arg in command])
         else:
             podman_args.append(shlex.quote(command) if ' ' in command else command)
-
-    # Get secrets configuration
-    secrets_config = config.get("secrets", {})
-    credentials = secrets_config.get("credentials", [])
-
-    # Build environment variable arguments for podman
-    service_name = f"workload-{name}-{workload_id}.service"
-    env_args = build_env_args_for_podman(config, service_name)
-
-    # Add environment args to podman command
-    podman_args.extend(env_args)
 
     # Join all args into single line command
     podman_cmd = " ".join(podman_args)
@@ -372,12 +368,12 @@ def generate_system_service(workload_id, config, uid, user_name):
         "",
     ])
 
-    # Add LoadCredential directives for each secret
+    # Add LoadCredentialEncrypted directives for each secret
     if credentials:
-        lines.append("# Load encrypted credentials (decrypted to /run/credentials/{service}/)")
+        lines.append("# Load encrypted credentials (auto-decrypted to /run/credentials/{service}/)")
         for cred_name in credentials:
-            cred_file = f"/etc/credstore.encrypted/{cred_name}.cred"
-            lines.append(f"LoadCredential={cred_name}:{cred_file}")
+            cred_file = f"/etc/credstore.encrypted/{cred_name}"
+            lines.append(f"LoadCredentialEncrypted={cred_name}:{cred_file}")
         lines.append("")
 
     lines.extend([
