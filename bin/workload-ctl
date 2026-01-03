@@ -198,7 +198,7 @@ def cmd_create(args, manager: WorkloadManager):
         workload_id = args.id
         # Validate ID range
         if workload_id < 0 or workload_id >= 50000:
-            print(f"Error: ID must be between 0 and 49999", file=sys.stderr)
+            print("Error: ID must be between 0 and 49999", file=sys.stderr)
             sys.exit(1)
 
         # Check for ID conflicts
@@ -214,7 +214,7 @@ def cmd_create(args, manager: WorkloadManager):
     username = f"_wl-{name}-{workload_id}"
     if len(username) >= 32:
         print(f"Error: Generated username too long: {username} ({len(username)} chars, max 31)", file=sys.stderr)
-        print(f"Try a shorter workload name", file=sys.stderr)
+        print("Try a shorter workload name", file=sys.stderr)
         sys.exit(1)
 
     # Build configuration
@@ -463,7 +463,7 @@ def cmd_disable(args, manager: WorkloadManager):
             for file in ["/etc/subuid", "/etc/subgid"]:
                 if Path(file).exists():
                     lines = Path(file).read_text().split('\n')
-                    lines = [l for l in lines if not l.startswith(f"{config.username}:")]
+                    lines = [line for line in lines if not line.startswith(f"{config.username}:")]
                     Path(file).write_text('\n'.join(lines))
 
             print(f"  Removing user {config.username}...")
@@ -563,8 +563,8 @@ def cmd_network(args, manager: WorkloadManager):
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             print(f"✓ Network '{network_name}' created successfully")
-            print(f"\nTo use this network in a workload, add to your TOML config:")
-            print(f"  [network]")
+            print("\nTo use this network in a workload, add to your TOML config:")
+            print("  [network]")
             print(f"  mode = \"{network_name}\"")
         else:
             print(f"Error creating network: {result.stderr}", file=sys.stderr)
@@ -683,7 +683,7 @@ def update_single(config: WorkloadConfig, manager: WorkloadManager, force: bool)
 
     result = manager.run_podman(config, *pull_args)
     if result.returncode != 0:
-        print(f"✗ Failed to pull image", file=sys.stderr)
+        print("✗ Failed to pull image", file=sys.stderr)
         return
 
     new_id = manager.get_image_id(config)
@@ -1072,7 +1072,7 @@ def cmd_stats(args, manager: WorkloadManager):
         config = WorkloadConfig(args.workload)
 
         if not manager.user_exists(config):
-            print(f"Error: Workload user not found. Is workload enabled?", file=sys.stderr)
+            print("Error: Workload user not found. Is workload enabled?", file=sys.stderr)
             sys.exit(1)
 
         if args.follow:
@@ -1102,9 +1102,9 @@ def cmd_stats(args, manager: WorkloadManager):
                                     if not first_config:
                                         first_config = test_config
                                     break
-                            except:
+                            except Exception:
                                 continue
-                except:
+                except Exception:
                     continue
 
         if not containers:
@@ -1271,7 +1271,7 @@ def cmd_images(args, manager: WorkloadManager):
                     )
                     if result.returncode == 0:
                         pruned = True
-                except:
+                except Exception:
                     continue
 
         if pruned:
@@ -1367,7 +1367,7 @@ def cmd_health(args, manager: WorkloadManager):
     health_data["checks"].append({
         "check": "service_status",
         "healthy": service_active,
-        "message": f"Service active and running" if service_active else f"Service {service_state}",
+        "message": "Service active and running" if service_active else f"Service {service_state}",
         "details": {"state": service_state}
     })
     if not service_active:
@@ -1397,7 +1397,7 @@ def cmd_health(args, manager: WorkloadManager):
             health_data["checks"].append({
                 "check": "container_running",
                 "healthy": True,
-                "message": f"Container running",
+                "message": "Container running",
                 "details": {"status": container_status}
             })
         else:
@@ -1448,7 +1448,7 @@ def cmd_health(args, manager: WorkloadManager):
             health_data["checks"].append({
                 "check": "recent_logs",
                 "healthy": not has_recent_errors,
-                "message": f"No errors in recent logs" if not has_recent_errors else f"{error_count} error(s) in recent logs",
+                "message": "No errors in recent logs" if not has_recent_errors else f"{error_count} error(s) in recent logs",
                 "details": {"error_count": error_count}
             })
             if has_recent_errors:
@@ -1488,6 +1488,185 @@ def cmd_health(args, manager: WorkloadManager):
         print(f"{symbol} {check['message']}")
 
     sys.exit(0 if all_healthy else 1)
+
+
+def cmd_secret(args, manager: WorkloadManager):
+    """Manage secrets (systemd credentials)"""
+    cred_dir = Path("/etc/credstore.encrypted")
+
+    if args.subcommand == "create":
+        require_root()
+        name = args.name
+
+        # Validate secret name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+            print("Error: Secret name must contain only letters, numbers, underscore, and hyphen", file=sys.stderr)
+            sys.exit(1)
+
+        cred_file = cred_dir / f"{name}.cred"
+
+        if cred_file.exists() and not args.force:
+            print(f"Error: Credential '{name}' already exists. Use --force to overwrite.", file=sys.stderr)
+            sys.exit(1)
+
+        # Create credstore directory if it doesn't exist
+        cred_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine encryption key type
+        key_type = args.key_type or "tpm2"
+
+        # Read secret from stdin or file
+        if args.file:
+            # Encrypt from file
+            cmd = [
+                "systemd-creds", "encrypt",
+                f"--with-key={key_type}",
+                str(Path(args.file).expanduser()),
+                str(cred_file)
+            ]
+        else:
+            # Encrypt from stdin
+            print(f"Enter secret value for '{name}' (press Ctrl+D when done):")
+            cmd = [
+                "systemd-creds", "encrypt",
+                f"--with-key={key_type}",
+                f"--name={name}",
+                "-", str(cred_file)
+            ]
+
+        try:
+            result = subprocess.run(cmd, check=True)
+            os.chmod(cred_file, 0o600)
+            print(f"✓ Created encrypted credential: {cred_file}")
+            print(f"  Encryption: {key_type}")
+            print(f"  Size: {cred_file.stat().st_size} bytes")
+        except subprocess.CalledProcessError as e:
+            print(f"Error: Failed to create credential: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.subcommand == "list":
+        if not cred_dir.exists():
+            print("No credentials found (directory does not exist)")
+            return
+
+        creds = sorted(cred_dir.glob("*.cred"))
+
+        if not creds:
+            print("No credentials found")
+            return
+
+        print(f"{'NAME':<30} {'SIZE':<10} {'MODIFIED':<20}")
+        print("-" * 60)
+        for cred in creds:
+            name = cred.stem
+            size = cred.stat().st_size
+            mtime = cred.stat().st_mtime
+            import datetime
+            mod_time = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{name:<30} {size:<10} {mod_time:<20}")
+
+        print(f"\nTotal: {len(creds)} credential(s)")
+        print(f"Location: {cred_dir}")
+
+    elif args.subcommand == "delete":
+        require_root()
+        name = args.name
+        cred_file = cred_dir / f"{name}.cred"
+
+        if not cred_file.exists():
+            print(f"Error: Credential '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        if not args.force:
+            response = input(f"Delete credential '{name}'? [y/N]: ")
+            if response.lower() != 'y':
+                print("Cancelled")
+                return
+
+        cred_file.unlink()
+        print(f"✓ Deleted credential: {name}")
+
+    elif args.subcommand == "show":
+        require_root()
+        name = args.name
+        cred_file = cred_dir / f"{name}.cred"
+
+        if not cred_file.exists():
+            print(f"Error: Credential '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        # Decrypt and show
+        try:
+            result = subprocess.run(
+                ["systemd-creds", "decrypt", str(cred_file), "-"],
+                capture_output=True,
+                check=True,
+                text=True
+            )
+            print(f"Credential: {name}")
+            print(f"Value: {result.stdout}", end="")
+            if not result.stdout.endswith("\n"):
+                print()  # Add newline if value doesn't have one
+        except subprocess.CalledProcessError as e:
+            print(f"Error: Failed to decrypt credential: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.subcommand == "rotate":
+        require_root()
+        name = args.name
+        cred_file = cred_dir / f"{name}.cred"
+
+        if not cred_file.exists():
+            print(f"Error: Credential '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        # Find workloads using this credential
+        affected_workloads = []
+        for workload_file in WORKLOAD_DIR.glob("*.toml"):
+            try:
+                with open(workload_file, "rb") as f:
+                    config = tomllib.load(f)
+                    credentials = config.get("secrets", {}).get("credentials", [])
+                    if name in credentials:
+                        affected_workloads.append(config["workload"]["name"])
+            except Exception:
+                pass
+
+        if affected_workloads:
+            print(f"The following workloads use credential '{name}':")
+            for wl in affected_workloads:
+                print(f"  - {wl}")
+            print()
+
+        # Prompt for new value
+        print(f"Enter new secret value for '{name}' (press Ctrl+D when done):")
+        key_type = args.key_type or "tpm2"
+
+        cmd = [
+            "systemd-creds", "encrypt",
+            f"--with-key={key_type}",
+            f"--name={name}",
+            "-", str(cred_file)
+        ]
+
+        try:
+            subprocess.run(cmd, check=True)
+            os.chmod(cred_file, 0o600)
+            print(f"✓ Rotated credential: {name}")
+
+            # Restart affected workloads
+            if affected_workloads:
+                print("\nRestarting affected workloads...")
+                for wl_name in affected_workloads:
+                    try:
+                        wl = WorkloadConfig(wl_name)
+                        subprocess.run(["systemctl", "restart", wl.service_name], check=True)
+                        print(f"  ✓ Restarted {wl_name}")
+                    except Exception as e:
+                        print(f"  ✗ Failed to restart {wl_name}: {e}", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            print(f"Error: Failed to rotate credential: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def main():
@@ -1575,6 +1754,28 @@ def main():
     restart_parser = subparsers.add_parser("restart", help="Restart a running workload")
     restart_parser.add_argument("workload", help="Workload name")
 
+    secret_parser = subparsers.add_parser("secret", help="Manage secrets (systemd credentials)")
+    secret_subparsers = secret_parser.add_subparsers(dest="subcommand", required=True, help="Secret operation")
+
+    secret_create = secret_subparsers.add_parser("create", help="Create a new encrypted credential")
+    secret_create.add_argument("name", help="Credential name")
+    secret_create.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+    secret_create.add_argument("--file", help="Read secret from file instead of stdin")
+    secret_create.add_argument("--force", action="store_true", help="Overwrite if exists")
+
+    secret_subparsers.add_parser("list", help="List all encrypted credentials")
+
+    secret_delete = secret_subparsers.add_parser("delete", help="Delete an encrypted credential")
+    secret_delete.add_argument("name", help="Credential name")
+    secret_delete.add_argument("--force", action="store_true", help="Skip confirmation")
+
+    secret_show = secret_subparsers.add_parser("show", help="Decrypt and show credential value")
+    secret_show.add_argument("name", help="Credential name")
+
+    secret_rotate = secret_subparsers.add_parser("rotate", help="Rotate a credential and restart affected workloads")
+    secret_rotate.add_argument("name", help="Credential name")
+    secret_rotate.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+
     shell_parser = subparsers.add_parser("shell", help="Open interactive shell in workload container")
     shell_parser.add_argument("workload", help="Workload name")
 
@@ -1618,6 +1819,7 @@ def main():
         "ports": cmd_ports,
         "ps": cmd_ps,
         "restart": cmd_restart,
+        "secret": cmd_secret,
         "shell": cmd_shell,
         "stats": cmd_stats,
         "status": cmd_status,

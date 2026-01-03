@@ -13,12 +13,12 @@ def _early_log(msg):
     try:
         with open("/dev/kmsg", "w") as kmsg:
             kmsg.write(f"<6>workload-generator[EARLY]: {msg}\n")
-    except:
+    except OSError:
         pass  # Silently fail if kmsg unavailable
 
 _early_log("Generator invoked")
 
-import sys
+import sys  # noqa: E402 - Early logging before imports is intentional
 # Disable bytecode generation - /usr is read-only on bootc systems
 sys.dont_write_bytecode = True
 
@@ -28,7 +28,6 @@ try:
     import os
     import tomllib
     import traceback
-    import subprocess
     import shlex
     from pathlib import Path
     _early_log("Python imports complete")
@@ -96,7 +95,7 @@ def validate_username(username):
 
     # Username requirements: must start with letter or underscore
     if not username[0].isalpha() and username[0] != '_':
-        raise ValueError(f"Username must start with letter or underscore")
+        raise ValueError("Username must start with letter or underscore")
 
     # Check valid characters: lowercase alphanumeric, underscore, dash
     import re
@@ -156,6 +155,47 @@ def get_group_gid(group_name):
     return None
 
 
+def build_env_args_for_podman(config, service_name):
+    """Build --env arguments for podman command.
+
+    Returns a list of --env arguments. For secrets, uses shell command substitution
+    to read from CREDENTIALS_DIRECTORY at runtime.
+    """
+    import re
+
+    env_vars = config.get("container", {}).get("environment", {})
+    env_args = []
+
+    for key, value in env_vars.items():
+        # Check if value contains ${SECRET:name} references
+        pattern = r'\$\{SECRET:([a-zA-Z0-9_-]+)\}'
+
+        # For values with secret references, we need shell expansion at runtime
+        if re.search(pattern, str(value)):
+            # Build the value with credential file reads
+            # We'll wrap this in quotes and use command substitution
+            runtime_value = str(value)
+
+            # Find all secret references
+            for match in re.finditer(pattern, str(value)):
+                secret_name = match.group(1)
+                # Replace ${SECRET:name} with $(<${CREDENTIALS_DIRECTORY}/name)
+                # The $(<file) syntax reads file contents in bash
+                # Avoid f-string brace confusion by using concatenation
+                runtime_value = runtime_value.replace(
+                    f'${{SECRET:{secret_name}}}',
+                    '$(<${CREDENTIALS_DIRECTORY}/' + secret_name + ')'
+                )
+
+            # Add as --env with runtime expansion (will be evaluated by shell)
+            env_args.append(f'--env {shlex.quote(key)}="{runtime_value}"')
+        else:
+            # Plain value - quote it properly
+            env_args.append(f'--env {shlex.quote(key)}={shlex.quote(str(value))}')
+
+    return env_args
+
+
 def generate_system_service(workload_id, config, uid, user_name):
     """Generate systemd system service for rootless podman execution."""
     name = config["workload"]["name"]
@@ -208,7 +248,7 @@ def generate_system_service(workload_id, config, uid, user_name):
             podman_args.append(f"--group-add={gid}")
         else:
             # Log to kmsg for debugging
-            kmsg(f"WARNING: Group '{group}' not found in /etc/group, skipping")
+            log_msg(f"WARNING: Group '{group}' not found in /etc/group, skipping", level="warning")
 
     # GPU devices (convenience flag)
     if gpu_type == "amd":
@@ -290,7 +330,14 @@ def generate_system_service(workload_id, config, uid, user_name):
             volume = shlex.quote(volume) if ' ' in volume else volume
         podman_args.append(f"--volume {volume}")
 
-    # Image (quote if it contains spaces)
+    secrets_config = config.get("secrets", {})
+    credentials = secrets_config.get("credentials", [])
+
+    service_name = f"workload-{name}-{workload_id}.service"
+    env_args = build_env_args_for_podman(config, service_name)
+
+    podman_args.extend(env_args)
+
     image_quoted = shlex.quote(image) if ' ' in image else image
     podman_args.append(image_quoted)
 
@@ -302,9 +349,11 @@ def generate_system_service(workload_id, config, uid, user_name):
         else:
             podman_args.append(shlex.quote(command) if ' ' in command else command)
 
-    # Join all args into single line command (systemd doesn't support backslash continuations)
-    # Arguments with spaces are already quoted
+    # Join all args into single line command
     podman_cmd = " ".join(podman_args)
+
+    # If we have env vars with secrets, we need to wrap in shell for expansion
+    needs_shell_wrapper = any('${CREDENTIALS_DIRECTORY}' in arg for arg in env_args)
 
     # Build Service section
     lines.extend([
@@ -317,6 +366,17 @@ def generate_system_service(workload_id, config, uid, user_name):
         f"Environment=HOME={home_dir}",
         f"Environment=XDG_RUNTIME_DIR=/run/user/{uid}",
         "",
+    ])
+
+    # Add LoadCredentialEncrypted directives for each secret
+    if credentials:
+        lines.append("# Load encrypted credentials (auto-decrypted to /run/credentials/{service}/)")
+        for cred_name in credentials:
+            cred_file = f"/etc/credstore.encrypted/{cred_name}"
+            lines.append(f"LoadCredentialEncrypted={cred_name}:{cred_file}")
+        lines.append("")
+
+    lines.extend([
         "# Ensure user is created and configured (runs as root with + prefix)",
         "ExecStartPre=+/usr/bin/systemd-sysusers",
         "ExecStartPre=+/usr/bin/systemctl --quiet start workload-setup.service",
@@ -328,7 +388,16 @@ def generate_system_service(workload_id, config, uid, user_name):
 
     lines.extend([
         "# Run container",
-        f"ExecStart={podman_cmd}",
+    ])
+
+    if needs_shell_wrapper:
+        # Wrap in shell to expand ${CREDENTIALS_DIRECTORY} references
+        lines.append(f"ExecStart=/bin/sh -c 'exec {podman_cmd}'")
+    else:
+        # No secrets, run podman directly
+        lines.append(f"ExecStart={podman_cmd}")
+
+    lines.extend([
         "",
         f"ExecStop=/usr/bin/podman stop -t 10 {container_name_quoted}",
         "",
@@ -400,7 +469,7 @@ def main():
                 symlink_path.unlink()
             # Create relative symlink
             symlink_path.symlink_to(f"../workload-{name}-{workload_id}.service")
-            log_msg(f"  Enabled service for auto-start")
+            log_msg("  Enabled service for auto-start")
 
         except Exception as e:
             # Log errors but don't fail the boot

@@ -44,6 +44,61 @@ id = "0"
 # Example: ["/usr/bin/my-app", "--config", "/etc/app.conf"]
 # command = ["sleep", "infinity"]
 
+# Optional: Pull policy for container images
+# Type: string
+# Default: "missing" (pull only if image not present locally)
+# Options:
+#   "missing" - Pull only if image doesn't exist locally (default)
+#   "always"  - Always pull image on start (latest version)
+#   "newer"   - Pull if newer version available in registry
+#   "never"   - Never pull, use only local images (fails if not present)
+# pull = "missing"
+
+[container.environment]
+# Optional: Environment variables to inject into the container
+# Type: table (key-value pairs)
+# Default: {}
+# Values can be plain strings or secret references using ${SECRET:name} syntax
+# Examples:
+#   PUBLIC_URL = "https://example.com"           - Plain value
+#   API_KEY = "${SECRET:api-key}"                - Secret reference (loaded from systemd credential)
+#   DB_PASSWORD = "${SECRET:db-password}"        - Secret reference
+#   DEBUG = "true"                               - Plain value
+# Note: Secret references require corresponding entries in [secrets.credentials]
+PUBLIC_URL = "https://example.com"
+API_KEY = "${SECRET:example-api-key}"
+DEBUG = "false"
+
+[secrets]
+# Optional: Systemd credentials (encrypted secrets at rest)
+# Type: array of strings
+# Default: [] (no secrets)
+# Each credential listed here must have a corresponding encrypted file:
+#   /etc/credstore.encrypted/{credential-name}.cred
+# At runtime, systemd will decrypt these to:
+#   /run/credentials/workload-{name}-{id}.service/{credential-name}
+# These can be referenced in environment variables using ${SECRET:name} syntax
+# Examples:
+#   credentials = ["api-key", "db-password", "oauth-secret"]
+#
+# To create encrypted credentials:
+#   echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=api-key - /etc/credstore.encrypted/api-key.cred
+credentials = ["example-api-key"]
+
+# Optional: Mount secrets as files inside the container
+# Type: array of tables
+# Default: [] (no file-mounted secrets)
+# Each entry mounts a systemd credential as a file in the container
+# Format: { credential = "name", path = "/container/path", mode = "0400" }
+# Examples:
+#   files = [
+#     { credential = "tls-cert", path = "/app/cert.pem" },
+#     { credential = "tls-key", path = "/app/key.pem", mode = "0400" },
+#     { credential = "ssh-key", path = "/home/user/.ssh/id_rsa", mode = "0600" }
+#   ]
+# Note: Files are created in a tmpfs directory and mounted read-only into the container
+# files = []
+
 [devices]
 # Optional: Generic device passthrough
 # Type: array of strings (device paths or CDI device names)
@@ -369,6 +424,143 @@ ports = ["8080:80", "8443:443"]
 #
 # [storage]
 # volumes = ["/mnt/vms:/vms"]
+
+# Example 10: Application with API secrets
+# -----------------------------------------
+# [workload]
+# name = "webapp"
+# enabled = true
+#
+# [container]
+# image = "myapp:latest"
+# id = "10"
+#
+# [container.environment]
+# PUBLIC_URL = "https://app.example.com"
+# API_KEY = "${SECRET:webapp-api-key}"
+# DB_PASSWORD = "${SECRET:db-password}"
+# DEBUG = "false"
+#
+# [secrets]
+# credentials = ["webapp-api-key", "db-password"]
+#
+# [network]
+# ports = ["8080:8080"]
+#
+# Setup:
+#   echo -n "sk-1234567890abcdef" | sudo systemd-creds encrypt --with-key=tpm2 --name=webapp-api-key - /etc/credstore.encrypted/webapp-api-key.cred
+#   echo -n "secure-db-password" | sudo systemd-creds encrypt --with-key=tpm2 --name=db-password - /etc/credstore.encrypted/db-password.cred
+
+# Example 11: Database with TLS certificates
+# -------------------------------------------
+# [workload]
+# name = "postgres"
+# enabled = true
+#
+# [container]
+# image = "postgres:16"
+# id = "11"
+#
+# [container.environment]
+# POSTGRES_USER = "dbadmin"
+# POSTGRES_PASSWORD = "${SECRET:postgres-password}"
+# POSTGRES_DB = "myapp"
+#
+# [secrets]
+# credentials = ["postgres-password", "tls-cert", "tls-key"]
+# files = [
+#   { credential = "tls-cert", path = "/var/lib/postgresql/server.crt" },
+#   { credential = "tls-key", path = "/var/lib/postgresql/server.key" }
+# ]
+#
+# [network]
+# ports = ["5432:5432"]
+#
+# Setup:
+#   echo -n "secure-password-123" | sudo systemd-creds encrypt --with-key=tpm2 --name=postgres-password - /etc/credstore.encrypted/postgres-password.cred
+#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.crt /etc/credstore.encrypted/tls-cert.cred
+#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.key /etc/credstore.encrypted/tls-key.cred
+
+# Example 12: Jellyfin with API key and mixed environment
+# --------------------------------------------------------
+# [workload]
+# name = "jellyfin"
+# enabled = true
+#
+# [container]
+# image = "jellyfin/jellyfin:latest"
+# id = "12"
+#
+# [container.environment]
+# JELLYFIN_PublishedServerUrl = "https://jellyfin.example.com"
+# JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"
+# TZ = "America/New_York"
+#
+# [secrets]
+# credentials = ["jellyfin-api-key"]
+#
+# [devices]
+# gpu = "amd"
+# audio = true
+#
+# [security]
+# extra_groups = ["video", "render", "audio"]
+#
+# [network]
+# mode = "host"
+#
+# [storage]
+# volumes = ["/mnt/media:/media:ro"]
+
+# ============================================================================
+# SECRETS MANAGEMENT
+# ============================================================================
+#
+# The workload system uses systemd credentials for secure secrets management.
+# See docs/SECRETS-MANAGEMENT.md for complete documentation.
+#
+# Quick Start:
+# 1. Create encrypted credential:
+#    echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=my-api-key - /etc/credstore.encrypted/my-api-key.cred
+#
+# 2. Reference in workload config:
+#    [container.environment]
+#    API_KEY = "${SECRET:my-api-key}"
+#
+#    [secrets]
+#    credentials = ["my-api-key"]
+#
+# 3. Enable workload:
+#    sudo workload-ctl enable myworkload
+#
+# Security Features:
+# - Encrypted at rest with AES256-GCM
+# - TPM2-backed encryption (hardware security)
+# - Decrypted into RAM-only tmpfs (never touches disk unencrypted)
+# - Per-workload isolation (workloads can't see each other's secrets)
+# - Automatic cleanup on service stop
+#
+# Encryption Key Types:
+# - tpm2: Hardware-backed, machine-specific (most secure)
+# - host: Software key, machine-specific
+# - host+tpm2: Both required (maximum security)
+#
+# Managing Secrets:
+# - Create: systemd-creds encrypt --with-key=tpm2 --name=NAME - /etc/credstore.encrypted/NAME.cred
+# - Verify: sudo systemd-creds decrypt /etc/credstore.encrypted/NAME.cred -
+# - Rotate: Create new credential and restart workload
+# - List: ls -la /etc/credstore.encrypted/
+#
+# Advanced Features:
+# - PCR policies: Bind decryption to boot state (Secure Boot, kernel cmdline)
+# - Expiration: Time-limited credentials (--not-after="+90days")
+# - File mounting: Mount secrets as files in container (certificates, keys)
+# - Bootc integration: Encrypted credentials safe to commit to git
+#
+# For more information:
+# - Read docs/SECRETS-MANAGEMENT.md
+# - Run: workload-ctl secret --help (once implemented)
+# - See: man systemd-creds
 
 # ============================================================================
 # TECHNICAL DETAILS
