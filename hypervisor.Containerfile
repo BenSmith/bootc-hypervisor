@@ -4,7 +4,7 @@ FROM ghcr.io/bensmith/fedora-bootc-minimal:43
 ARG ENABLE_PASSWORDLESS_SUDO=false
 
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
-LABEL org.opencontainers.image.description="Bootc-based hypervisor with libvirt/QEMU/KVM"
+LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/lxc/libvirt/QEMU/KVM"
 
 COPY policy.json /etc/containers/policy.json
 COPY freeipmi.conf /usr/lib/tmpfiles.d/freeipmi.conf
@@ -107,9 +107,11 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     prometheus-node-exporter \
     qemu-img \
     qemu-kvm \
+    virglrenderer \
     realtek-firmware \
     rpm-ostree \
     rsync \
+    seatd \
     shim \
     skopeo \
     smartmontools \
@@ -159,12 +161,14 @@ RUN dnf clean all && \
     bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
 
 # Ensure device access groups exist
-RUN printf 'g audio - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
+RUN \
+    printf 'g audio - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g dialout - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g disk - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g kvm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
+    printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf
 
@@ -175,10 +179,9 @@ RUN printf 'g audio - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
 #   dialout - serial devices (USB serial, Zigbee, Z-Wave)
 #   disk - block devices (raw disk access)
 #   input - input devices (/dev/input, /dev/uinput)
-#   kvm - virtualization (/dev/kvm)
 #   tpm - TPM devices (/dev/tpm0)
 #   video, render - GPU access
-RUN grep -E "^(video|render|input|audio|dialout|disk|kvm|tpm):" /usr/lib/group >> /etc/group || true
+RUN grep -E "^(video|render|input|audio|dialout|disk|tpm):" /usr/lib/group >> /etc/group || true
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true

@@ -316,7 +316,7 @@ build-qcow2-base rootfs="xfs":
   @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
   @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
 
-build-qcow2-base-local rootfs="xfs":
+build-qcow2-base-local rootfs="xfs" size="20G":
   @mkdir -p store output/base-qcow2 rpmmd
   @echo "Pulling image from local registry..."
   sudo podman pull box:5000/hypervisor-bootc:latest
@@ -338,12 +338,14 @@ build-qcow2-base-local rootfs="xfs":
       --store /store \
       --type qcow2 \
     box:5000/hypervisor-bootc
+  @echo "Resizing disk to {{size}}..."
+  qemu-img resize output/base-qcow2/qcow2/disk.qcow2 {{size}}
   @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
   @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
 
 
 # All-in-one: build container, build qcow2, and deploy to libvirt VM
-aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs":
+aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20G":
   #!/usr/bin/env bash
   set -euo pipefail
   echo "=== Step 1: Building container image ==="
@@ -355,7 +357,7 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs":
 
   echo ""
   echo "=== Step 2: Building qcow2 disk image ==="
-  just build-qcow2-base-local {{rootfs}}
+  just build-qcow2-base-local {{rootfs}} {{size}}
 
   echo ""
   echo "=== Step 3: Deploying to VM '{{vmname}}' ==="
@@ -381,6 +383,8 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs":
     --import \
     --os-variant fedora41 \
     --network network=default \
+    --graphics spice,gl.enable=yes,listen=none \
+    --video virtio \
     --noautoconsole
 
   echo ""

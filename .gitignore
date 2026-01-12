@@ -7,3 +7,6 @@ rpmmd/
 store/
 base-images/
 bootc-src
+rpm/rpm-output/
+__pycache__/
+
