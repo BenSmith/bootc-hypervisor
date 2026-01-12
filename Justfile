@@ -161,6 +161,32 @@ build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
 
 build-all-local: build-base build-amd-local build-nvidia-rpmfusion-local build-nvidia-negativo17-local
 
+build-iso-minimal rootfs="xfs":
+  @mkdir -p store output/minimal rpmmd
+  @echo "Pulling image from ghcr.io..."
+  sudo podman pull ghcr.io/bensmith/fedora-bootc-minimal:latest
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config.toml:/config.toml:ro \
+    -v $(pwd)/output/minimal:/output \
+    -v $(pwd)/rpmmd:/rpmmd \
+    -v $(pwd)/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs {{rootfs}} \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type anaconda-iso \
+    ghcr.io/bensmith/fedora-bootc-minimal:latest
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso output/minimal/bootiso/install.iso output/fedora-bootc-minimal-{{tag}}.iso "BOOTC-MIN"
+  @echo "ISO ready: output/fedora-bootc-minimal-{{tag}}.iso (label: BOOTC-MIN)"
+
 build-iso-base rootfs="xfs":
   @mkdir -p store output/base rpmmd
   @echo "Copying image to rootful storage..."
