@@ -158,7 +158,19 @@ sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
 ```
 
 ### Update
+If you're running an install from an ISO of a locally built image, you'll need to switch to the "unverified" image first, for live updates:
+```bash
+sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
+sudo reboot
+```
 
+To update to a signed image from an unverified:
+```bash
+sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest --enforce-container-sigpolicy
+sudo reboot
+```
+
+Regular updates:
 ```bash
 # Check for updates
 bootc upgrade --check
