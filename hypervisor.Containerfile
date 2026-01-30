@@ -170,7 +170,7 @@ RUN \
     printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g video - -\n' > /usr/lib/sysusers.d/hypervisor-groups.conf
+    printf 'g video - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
 
 # Copy device groups from /usr/lib/group (immutable) to /etc/group (mutable)
 # This is needed on bootc systems to allow usermod to add workload users to these groups
