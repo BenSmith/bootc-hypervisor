@@ -18,5 +18,5 @@ id = "1"  # Becomes UID 10001 (base 10000 + id)
 #   "none"       - No networking
 #   "mynetwork"  - Custom network (create first: podman network create mynetwork)
 mode = "pasta"  # Default mode, can be omitted
-# nginx-unprivileged listens on port 8080 internally
+# nginx-unprivileged listens on port 8080 internally - ipv4 only
 ports = ["8080:8080"]
