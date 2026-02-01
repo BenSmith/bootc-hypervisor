@@ -354,7 +354,7 @@ def cmd_create(args, manager: WorkloadManager):
         print()
         print("Enabling workload...")
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-        subprocess.run(["systemd-sysusers"], check=True)
+        subprocess.run(["systemd-sysusers", f"/run/sysusers.d/workload-{name}-{workload_id}.conf"], check=True)
         subprocess.run(["systemctl", "start", "workload-setup.service"], check=True)
 
         service_name = f"workload-{name}-{workload_id}.service"
@@ -432,15 +432,15 @@ def cmd_enable(args, manager: WorkloadManager):
     print("  Reloading systemd...")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
 
+    # Load config to get name and id for sysusers
+    config = WorkloadConfig(args.workload)
+
     # Create user if needed
     print("  Running systemd-sysusers...")
-    subprocess.run(["systemd-sysusers"], check=True)
+    subprocess.run(["systemd-sysusers", f"/run/sysusers.d/workload-{config.name}-{config.id}.conf"], check=True)
 
     print("  Configuring workload user...")
     subprocess.run(["systemctl", "start", "workload-setup.service"], check=True)
-
-    # Reload config to get service name
-    config = WorkloadConfig(args.workload)
 
     print(f"  Starting {config.service_name}...")
     print("  (Image pull may take a few minutes on first start)")
