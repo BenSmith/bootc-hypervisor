@@ -24,12 +24,12 @@ def log(msg):
     print(msg, flush=True)
 
 
-def get_enabled_workload_users():
-    """Parse workload configs and return list of usernames for enabled workloads."""
-    enabled_users = []
+def get_enabled_workload_configs():
+    """Parse workload configs and return list of (username, config) tuples for enabled workloads."""
+    enabled_configs = []
 
     if not WORKLOAD_CONFIG_DIR.exists():
-        return enabled_users
+        return enabled_configs
 
     for config_file in WORKLOAD_CONFIG_DIR.glob("*.toml"):
         try:
@@ -46,13 +46,13 @@ def get_enabled_workload_users():
 
             if name and workload_id:
                 username = f"_wl-{name}-{workload_id}"
-                enabled_users.append(username)
+                enabled_configs.append((username, config))
 
         except Exception as e:
             log(f"WARNING: Failed to parse {config_file}: {e}")
             continue
 
-    return enabled_users
+    return enabled_configs
 
 
 def user_exists(username):
@@ -64,7 +64,7 @@ def user_exists(username):
         return False
 
 
-def configure_subuid_subgid(username):
+def configure_subuid_subgid(username, config):
     """Configure subordinate UID/GID ranges for rootless containers."""
     try:
         user_info = pwd.getpwnam(username)
@@ -138,6 +138,33 @@ def configure_subuid_subgid(username):
             # Ensure correct ownership even if dir exists
             os.chown(home_dir, uid, gid)
             os.chmod(home_dir, 0o700)
+
+        # Create volume mount directories from config
+        volumes = config.get("storage", {}).get("volumes", [])
+        for volume_spec in volumes:
+            # Parse volume spec: "/host/path:/container/path:options"
+            parts = volume_spec.split(":")
+            if not parts:
+                continue
+
+            host_path = Path(parts[0])
+
+            # Only create directories that are within the home directory
+            # This is for safety - don't create arbitrary system directories
+            try:
+                # Check if host_path is relative to home_dir
+                host_path.relative_to(home_path)
+
+                # It's inside the home directory, safe to create
+                if not host_path.exists():
+                    log(f"  Creating volume directory {host_path}")
+                    host_path.mkdir(parents=True, exist_ok=True)
+                    os.chown(host_path, uid, gid)
+                    os.chmod(host_path, 0o755)
+            except ValueError:
+                # Path is not relative to home directory, skip
+                # These should be created manually by the admin
+                pass
 
         # Set SELinux label for container access
         log(f"  Setting SELinux context for {home_dir}")
@@ -230,11 +257,11 @@ def enable_linger(username):
 def main():
     log("Starting workload setup")
 
-    # Get enabled workload users from configs
-    enabled_users = get_enabled_workload_users()
-    log(f"Found {len(enabled_users)} enabled workload(s)")
+    # Get enabled workload configs
+    enabled_configs = get_enabled_workload_configs()
+    log(f"Found {len(enabled_configs)} enabled workload(s)")
 
-    if not enabled_users:
+    if not enabled_configs:
         log("No enabled workloads, nothing to do")
         return 0
 
@@ -243,13 +270,13 @@ def main():
 
     # Configure subuid/subgid, create home dirs, and enable linger for each enabled workload
     # Note: Group memberships are handled by systemd-sysusers 'm' directives in the generator
-    for username in enabled_users:
+    for username, config in enabled_configs:
         if not user_exists(username):
             log(f"  WARNING: User {username} does not exist (should have been created by sysusers)")
             continue
 
         log(f"  Configuring {username}")
-        configure_subuid_subgid(username)
+        configure_subuid_subgid(username, config)
         enable_linger(username)
 
     log("Workload setup complete")

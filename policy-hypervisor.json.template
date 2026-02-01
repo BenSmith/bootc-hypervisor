@@ -28,7 +28,8 @@
           }
         }
       ],
-      "ghcr.io": [{"type": "insecureAcceptAnything"}]
+      "ghcr.io": [{"type": "insecureAcceptAnything"}],
+      "docker.io": [{"type": "insecureAcceptAnything"}]
     },
     "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
   }
