@@ -118,7 +118,8 @@ class WorkloadManager:
 
         cmd = ["sudo", "-u", config.username] + env_args + ["podman"] + list(args)
 
-        result = subprocess.run(cmd, capture_output=capture_output, text=True, check=check)
+        # Run from /tmp to avoid permission issues with current directory
+        result = subprocess.run(cmd, capture_output=capture_output, text=True, check=check, cwd="/tmp")
         return result
 
     def get_image_id(self, config: WorkloadConfig) -> str:
@@ -620,7 +621,7 @@ def cmd_ps(args, manager: WorkloadManager):
 
                 result = subprocess.run(
                     ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     "podman", "--log-level=error", "ps", "--format", "json"],
+                     "sh", "-c", "cd /tmp && podman --log-level=error ps --format json"],
                     capture_output=True, text=True
                 )
 
@@ -655,7 +656,7 @@ def cmd_ps(args, manager: WorkloadManager):
             # Check for containers
             result = subprocess.run(
                 ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                 "podman", "--log-level=error", "ps", "--format", "{{.Names}}"],
+                 "sh", "-c", "cd /tmp && podman --log-level=error ps --format '{{.Names}}'"],
                 capture_output=True, text=True
             )
 
@@ -664,7 +665,7 @@ def cmd_ps(args, manager: WorkloadManager):
                 print(f"=== {username} (UID {uid}) ===")
                 subprocess.run(
                     ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     "podman", "--log-level=error", "ps"]
+                     "sh", "-c", "cd /tmp && podman --log-level=error ps"]
                 )
                 print()
         except Exception:
