@@ -76,6 +76,7 @@ build-base:
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:{{tag}} \
   -t localhost/hypervisor-bootc:latest \
+  -t registry.local:5000/hypervisor-bootc:latest \
   -t ghcr.io/bensmith/hypervisor-bootc:{{tag}} \
   -t ghcr.io/bensmith/hypervisor-bootc:latest \
   -f hypervisor.Containerfile .
@@ -95,8 +96,8 @@ build-base-local:
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-bootc:local \
   -t localhost/hypervisor-bootc:latest \
-  -t box:5000/hypervisor-bootc:latest \
-  -t box:5000/hypervisor-bootc:local \
+  -t registry.local:5000/hypervisor-bootc:latest \
+  -t registry.local:5000/hypervisor-bootc:local \
   -f hypervisor.Containerfile .
 
 build-nvidia-rpmfusion:
@@ -128,15 +129,14 @@ build-amd:
   -f hypervisor-amd.Containerfile .
 
 # Local testing variants - use locally-built base instead of GHCR
-build-amd-local: build-base-local
+build-amd-local:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --network=host \
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
   -t localhost/hypervisor-amd:local \
-  -t box:5000/hypervisor-amd:latest \
-  -t box:5000/hypervisor-amd:local \
+  -t registry.local:5000/hypervisor-amd:latest \
   -f hypervisor-amd.Containerfile .
 
 build-nvidia-rpmfusion-local: build-base-local

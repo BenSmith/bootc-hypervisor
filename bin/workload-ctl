@@ -620,7 +620,7 @@ def cmd_ps(args, manager: WorkloadManager):
 
                 result = subprocess.run(
                     ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     "podman", "ps", "--format", "json"],
+                     "podman", "--log-level=error", "ps", "--format", "json"],
                     capture_output=True, text=True
                 )
 
@@ -655,7 +655,7 @@ def cmd_ps(args, manager: WorkloadManager):
             # Check for containers
             result = subprocess.run(
                 ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                 "podman", "ps", "--format", "{{.Names}}"],
+                 "podman", "--log-level=error", "ps", "--format", "{{.Names}}"],
                 capture_output=True, text=True
             )
 
@@ -664,7 +664,7 @@ def cmd_ps(args, manager: WorkloadManager):
                 print(f"=== {username} (UID {uid}) ===")
                 subprocess.run(
                     ["sudo", "-u", username, "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     "podman", "ps"]
+                     "podman", "--log-level=error", "ps"]
                 )
                 print()
         except Exception:

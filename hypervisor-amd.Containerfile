@@ -1,9 +1,16 @@
 FROM ghcr.io/bensmith/hypervisor-bootc:latest
 
-# Install AMD GPU support (ROCm for compute, Mesa for graphics)
-RUN dnf clean all && \
-    dnf install --setopt=install_weak_deps=False -y \
+# Install core dependencies that ROCm needs (missing from minimal base)
+RUN dnf install -y \
+    libdrm \
     elfutils-libelf \
+    libgcc \
+    numactl-libs \
+    python3 && \
+    dnf clean all
+
+# Install AMD GPU support (ROCm for compute, Mesa for graphics)
+RUN dnf install -y \
     linux-firmware \
     linux-firmware-whence \
     amd-gpu-firmware \

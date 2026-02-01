@@ -160,17 +160,12 @@ RUN dnf clean all && \
     find /var -depth -type d -empty -delete && \
     bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
 
-# Ensure device access groups exist
+# Ensure device access groups exist (only define groups not provided by base packages)
+# Most device groups (kvm, video, audio, etc.) are already defined by system packages
+# We only need to ensure seat and tpm exist for workload device access
 RUN \
-    printf 'g audio - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g dialout - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g disk - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g input - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g kvm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g render - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
-    printf 'g video - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
+    printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf
 
 # Copy device groups from /usr/lib/group (immutable) to /etc/group (mutable)
 # This is needed on bootc systems to allow usermod to add workload users to these groups
@@ -179,9 +174,11 @@ RUN \
 #   dialout - serial devices (USB serial, Zigbee, Z-Wave)
 #   disk - block devices (raw disk access)
 #   input - input devices (/dev/input, /dev/uinput)
+#   kvm - KVM virtualization (/dev/kvm)
+#   seat - seatd for GPU/input access
 #   tpm - TPM devices (/dev/tpm0)
 #   video, render - GPU access
-RUN grep -E "^(video|render|input|audio|dialout|disk|tpm):" /usr/lib/group >> /etc/group || true
+RUN grep -E "^(video|render|input|audio|dialout|disk|kvm|seat|tpm):" /usr/lib/group >> /etc/group || true
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
