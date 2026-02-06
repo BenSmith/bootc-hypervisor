@@ -10,6 +10,7 @@ StartLimitBurst=10
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/systemd/workload-setup.py
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
