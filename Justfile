@@ -135,7 +135,7 @@ build-amd-local:
   --network=host \
   --from localhost/hypervisor-bootc:latest \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-  -t localhost/hypervisor-amd:local \
+  -t localhost/hypervisor-amd:latest \
   -t registry.local:5000/hypervisor-amd:latest \
   -f hypervisor-amd.Containerfile .
 

@@ -156,6 +156,7 @@ RUN dnf clean all && \
         -not -path '/var/lib/gssproxy/*' \
         -not -path '/var/lib/pcp/*' \
         -not -path '/var/lib/rpm-state/*' \
+        -not -path '/var/lib/rpm/*' \
         -delete && \
     find /var -depth -type d -empty -delete && \
     bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
