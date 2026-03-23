@@ -1,0 +1,100 @@
+#!/usr/bin/python3
+"""
+Write secret environment variables to a file for podman --env-file.
+
+Runs as ExecStartPre=+ (root) after workload-ensure-user.  Reads
+${SECRET:name} references from the workload TOML config, resolves them
+from $CREDENTIALS_DIRECTORY, and writes KEY=value lines to a file
+readable only by the workload user.
+
+Usage: workload-write-env <workload-name>
+"""
+
+import os
+import pwd
+import sys
+import tomllib
+from pathlib import Path
+
+from workload_lib import (
+    WORKLOAD_CONFIG_DIR, workload_username, resolve_secret_env_vars,
+    auto_detect_credentials, SECRET_PATTERN, validate_env_key,
+)
+
+
+ENV_DIR = Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <workload-name>", file=sys.stderr)
+        return 1
+
+    name = sys.argv[1]
+
+    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    with open(config_path, "rb") as f:
+        config = tomllib.load(f)
+
+    # Check if any env vars reference secrets
+    env_vars = config.get("container", {}).get("environment", {})
+    has_secret_env_vars = any(
+        SECRET_PATTERN.search(str(v)) for v in env_vars.values()
+    )
+    if not has_secret_env_vars:
+        return 0  # Nothing to do
+
+    creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not creds_dir:
+        print(f"ERROR: CREDENTIALS_DIRECTORY not set", file=sys.stderr)
+        return 1
+
+    # Resolve secret references to actual values
+    try:
+        resolved = resolve_secret_env_vars(config, creds_dir)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    # Write the env file
+    ENV_DIR.mkdir(parents=True, exist_ok=True)
+    env_file = ENV_DIR / f"workload-{name}.secrets"
+
+    lines = []
+    for key, value in resolved.items():
+        if not validate_env_key(key):
+            print(f"ERROR: Invalid env var key: {key!r}", file=sys.stderr)
+            return 1
+        # Env-file format: KEY=VALUE (one per line, no quoting needed)
+        # Newlines in values would inject extra env vars — reject them
+        if '\n' in value:
+            print(f"ERROR: Secret value for {key} contains newlines; "
+                  f"use secrets.files[] instead of env var injection",
+                  file=sys.stderr)
+            return 1
+        lines.append(f"{key}={value}")
+
+    content = '\n'.join(lines) + '\n' if lines else ''
+
+    # Create file with restricted permissions from the start (no world-readable window)
+    username = workload_username(name)
+    try:
+        pw = pwd.getpwnam(username)
+    except KeyError:
+        print(f"WARNING: User {username} not found, env file owned by root",
+              file=sys.stderr)
+        pw = None
+
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+
+    if pw:
+        os.chown(env_file, pw.pw_uid, pw.pw_gid)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

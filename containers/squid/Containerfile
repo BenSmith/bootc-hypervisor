@@ -1,0 +1,21 @@
+FROM registry.fedoraproject.org/fedora:43
+
+LABEL org.opencontainers.image.title="Squid Proxy"
+LABEL org.opencontainers.image.description="Squid caching proxy server"
+
+# Install Squid
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    squid \
+    && dnf clean all
+
+# /var/spool/squid is the cache dir — volume-mounted at runtime, owned by
+# workload-ensure-user.  /var/log/squid and /var/run/squid are not needed:
+# squid.conf sends logs to stdio and puts the PID in /var/spool/squid.
+RUN mkdir -p /var/spool/squid
+
+COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
+
+# Squid proxy port
+EXPOSE 3128
+
+CMD ["/entrypoint.sh"]

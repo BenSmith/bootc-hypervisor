@@ -1,0 +1,18 @@
+[Unit]
+Description=Wayfire Wayland Compositor
+ConditionPathExists=/run/seatd.sock
+
+[Service]
+Type=simple
+
+EnvironmentFile=/etc/cosy-user.env
+Environment=LIBSEAT_BACKEND=seatd
+Environment=SEATD_SOCK=/run/seatd.sock
+Environment=WLR_BACKENDS=drm,libinput
+Environment=WLR_NO_HARDWARE_CURSORS=1
+Environment=WLR_DRM_NO_MODIFIERS=1
+
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- /bin/sh -c 'cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
+
+[Install]
+WantedBy=multi-user.target

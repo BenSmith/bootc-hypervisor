@@ -1,0 +1,73 @@
+# Desktop VNC - Labwc Wayland desktop accessible via VNC
+# Connect with any VNC client: vncviewer <host-ip>:5900
+#
+# Labwc runs in headless mode with wayvnc for remote access.
+# GPU acceleration via renderD128 if available, falls back to software rendering.
+#
+# Keyboard shortcuts:
+#   Super+Return  - Terminal (foot)
+#   Super+D       - App launcher (fuzzel)
+#   Super+Q       - Close window
+#   Super+F       - Toggle fullscreen
+#   Alt+Tab       - Switch windows
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/desktop-vnc && sudo ./build.sh
+#
+#   2. Enable the workload:
+#        sudo workload-ctl enable desktop-vnc
+#
+#   3. Configure firewall:
+#        sudo firewall-cmd --add-port=5900/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only:
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="5900" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+#   4. Connect from any VNC client:
+#        vncviewer <host-ip>:5900
+#
+# Persistent data:
+#   Mount shared directories to access files across workloads:
+#     volumes = ["./data:/home/desktop/data", "/shared/projects:/home/desktop/Projects"]
+#
+# Security note:
+#   VNC is unencrypted. For remote access over untrusted networks,
+#   use an SSH tunnel: ssh -L 5900:localhost:5900 user@hypervisor
+
+[workload]
+name = "desktop-vnc"
+enabled = false
+
+[container]
+image = "localhost/desktop-vnc:latest"
+pull = "never"
+
+[container.health]
+cmd = "pgrep -x wayvnc > /dev/null || exit 1"
+interval = "30s"
+start_period = "10s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./data:/home/desktop/data",
+]
+
+[devices]
+gpu = "amd"
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+extra_groups = ["video", "render"]
+
+[network]
+mode = "pasta"
+ports = ["5900:5900"]
+
+[resources]
+memory_max = "4G"
+memory_high = "3G"
+cpu_quota = "200%"

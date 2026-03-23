@@ -10,8 +10,13 @@
 [workload]
 # Required: Unique name for this workload (used in user name and service name)
 # Type: string
-# Constraints: Keep short (max ~22 chars) to fit in username limit
+# Constraints: Max 27 chars (username limit is 31 chars, "_wl-" prefix uses 4 chars)
+# Best practice: Match filename to name (e.g., "webserver" for webserver.toml)
+# Valid characters: lowercase letters, numbers, hyphen (must start with letter)
 # Example: "gaming", "sunshine", "dev-env", "webserver"
+# Username format: _wl-{name}
+# UID: Auto-assigned from range 10000-52948
+# Home directory: /var/lib/workloads/{name}
 name = "schema-reference"
 
 # Optional: Whether this workload should be enabled
@@ -19,6 +24,24 @@ name = "schema-reference"
 # Default: true
 # Set to false to disable without deleting the config file
 enabled = false
+
+[setup]
+# Optional: Files that must exist before the workload can be enabled.
+# workload-ctl enable checks these before starting and prints copy instructions if missing.
+# Paths starting with ./ are relative to the workload home dir (/var/lib/workloads/{name}/).
+#
+# Fields:
+#   path  (required) - Path that must exist (file, not directory)
+#   hint  (optional) - Source path shown in the copy instruction
+#
+# Example:
+#   required_files = [
+#       { path = "./smb.conf", hint = "/usr/share/workload-containers/smb-server/smb.conf" },
+#       { path = "./app.conf" },   # No hint - just flags it as missing
+#   ]
+#
+# Note: Missing volume directories are checked separately (no setup entry needed for dirs).
+# required_files = []
 
 [container]
 # Required: Container image to run
@@ -29,20 +52,20 @@ enabled = false
 #   "localhost/my-image:dev"
 image = "ghcr.io/example/workload:latest"
 
-# Required: Unique identifier for this workload instance
-# Type: string (numeric recommended)
-# Used to create unique user: _wl-{name}-{id}
-# UID calculation: 10000 + id (e.g., id="1" → UID 10001)
-# Recommendation: Use sequential numbers like "1", "2", "3", etc.
-# Advanced: Can use any number 0-49999 (to stay below DynamicUser range)
-id = "0"
-
 # Optional: Command to run in container (overrides image CMD)
 # Type: array of strings
 # Default: (uses image's default CMD/ENTRYPOINT)
 # Example: ["sleep", "infinity"] for testing
 # Example: ["/usr/bin/my-app", "--config", "/etc/app.conf"]
 # command = ["sleep", "infinity"]
+
+# Optional: Override the container image's USER directive
+# Type: string (UID or username)
+# Default: (uses the image's USER — typically root or nobody)
+# Use this when the image runs as an unprivileged user (e.g., nobody) but the
+# workload's volume directories are owned by the workload user. Common pattern:
+#   user = "0" with userns = "host" — container root maps to the workload user.
+# user = "0"
 
 # Optional: Pull policy for container images
 # Type: string
@@ -54,6 +77,99 @@ id = "0"
 #   "never"   - Never pull, use only local images (fails if not present)
 # pull = "missing"
 
+# ============================================================================
+# ZOMBIE PROCESS REAPING
+# ============================================================================
+# All workload containers run with --init, which injects podman's built-in
+# init process (catatonit) as PID 1. This:
+#
+# - Reaps zombie (defunct) processes that accumulate when child processes exit
+# - Forwards signals (SIGTERM, SIGINT) to the container's main process
+# - Is a no-op for containers that already handle PID 1 properly (e.g. systemd)
+#
+# This is always enabled and not configurable per-workload. Without it,
+# containers running shell entrypoints as PID 1 would leak zombie processes
+# over time, especially multi-process workloads (desktop environments, etc.).
+# ============================================================================
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+# Container logs are sent to the host's systemd journal using the journald
+# log driver (--log-driver=journald). This provides:
+#
+# - Integration with journalctl for querying logs
+# - Automatic log rotation via systemd journal settings (journald.conf)
+# - Structured metadata (container name, ID, etc.)
+# - No additional configuration needed
+#
+# View logs:
+#   journalctl -u workload-{name}.service      # Service and container logs
+#   journalctl CONTAINER_NAME=workload-{name}  # Container logs only
+#   journalctl -f CONTAINER_NAME=workload-{name}  # Follow container logs
+#
+# For systemd containers (containers running systemd inside):
+#   - Internal journal entries appear in host journal automatically
+#   - Filter by process: journalctl CONTAINER_NAME=... | grep sshd
+#
+# Alternative: Use podman logs command
+#   sudo -u _wl-{name} -E XDG_RUNTIME_DIR=/run/user/{uid} podman logs {container}
+#
+# This is not configurable per-workload. Log rotation is managed by journald.
+# ============================================================================
+
+[container.health]
+# Optional: Health check configuration
+# Runs a command inside the container periodically to verify the workload is
+# functioning correctly. If the check fails after the configured retries,
+# podman marks the container as unhealthy.
+#
+# The cmd field is required to enable health checks. All other fields have
+# sensible defaults.
+#
+# Examples:
+#   cmd = "curl -f http://localhost:8080/health || exit 1"
+#   cmd = "pg_isready -U postgres"
+#   cmd = "redis-cli ping"
+#   cmd = "wget -qO- http://localhost/admin/ || exit 1"
+
+# Required: Command to run inside the container
+# Type: string (shell command, run via /bin/sh -c)
+# cmd = "curl -f http://localhost:8080/ || exit 1"
+
+# Optional: Time between health checks
+# Type: string (duration)
+# Default: "30s" (podman default)
+# interval = "30s"
+
+# Optional: Max time a single health check can take before being killed
+# Type: string (duration)
+# Default: "30s" (podman default)
+# timeout = "30s"
+
+# Optional: Number of consecutive failures before marking unhealthy
+# Type: integer
+# Default: 3 (podman default)
+# retries = 3
+
+# Optional: Grace period after container start before health checks begin
+# Type: string (duration)
+# Default: "0s" (podman default)
+# Use this for containers that need time to initialize (e.g. database migration)
+# start_period = "60s"
+
+# Optional: What to do when the container becomes unhealthy
+# Type: string
+# Default: "none"
+# Options:
+#   "none"    - Only mark as unhealthy (visible in podman inspect / metrics)
+#   "kill"    - Kill the container (systemd will restart it via Restart=on-failure)
+#   "restart" - Restart the container (podman-level restart, not systemd)
+#   "stop"    - Stop the container (systemd will restart it via Restart=on-failure)
+# Recommended: "kill" or "stop" — lets systemd handle the restart and track it
+#   in NRestarts, which surfaces in monitoring.
+# on_failure = "none"
+
 [container.environment]
 # Optional: Environment variables to inject into the container
 # Type: table (key-value pairs)
@@ -61,43 +177,47 @@ id = "0"
 # Values can be plain strings or secret references using ${SECRET:name} syntax
 # Examples:
 #   PUBLIC_URL = "https://example.com"           - Plain value
-#   API_KEY = "${SECRET:api-key}"                - Secret reference (loaded from systemd credential)
-#   DB_PASSWORD = "${SECRET:db-password}"        - Secret reference
+#   API_KEY = "${SECRET:api-key}"                - Secret reference (auto-detected, loaded from systemd credential)
+#   DB_PASSWORD = "${SECRET:db-password}"        - Secret reference (auto-detected)
 #   DEBUG = "true"                               - Plain value
-# Note: Secret references require corresponding entries in [secrets.credentials]
+# Note: Secrets are auto-detected from ${SECRET:name} references and loaded automatically
+# Optionally use [secrets.files] to mount credentials as files in the container
 PUBLIC_URL = "https://example.com"
 API_KEY = "${SECRET:example-api-key}"
 DEBUG = "false"
 
 [secrets]
-# Optional: Systemd credentials (encrypted secrets at rest)
-# Type: array of strings
-# Default: [] (no secrets)
-# Each credential listed here must have a corresponding encrypted file:
-#   /etc/credstore.encrypted/{credential-name}.cred
-# At runtime, systemd will decrypt these to:
-#   /run/credentials/workload-{name}-{id}.service/{credential-name}
-# These can be referenced in environment variables using ${SECRET:name} syntax
-# Examples:
-#   credentials = ["api-key", "db-password", "oauth-secret"]
-#
-# To create encrypted credentials:
-#   echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=api-key - /etc/credstore.encrypted/api-key.cred
-credentials = ["example-api-key"]
-
-# Optional: Mount secrets as files inside the container
+# Optional: Mount systemd credentials as files inside the container
 # Type: array of tables
 # Default: [] (no file-mounted secrets)
+#
+# AUTOMATIC SECRET DETECTION:
+# Secrets referenced in environment variables using ${SECRET:name} syntax are
+# automatically detected and loaded. You don't need to list them here unless
+# you want to mount them as files.
+#
 # Each entry mounts a systemd credential as a file in the container
-# Format: { credential = "name", path = "/container/path", mode = "0400" }
+# Format: { credential = "name", path = "/container/path", mode = "ro" }
+#
+# Each credential must have a corresponding encrypted file:
+#   /etc/credstore.encrypted/{credential-name}
+# At runtime, systemd will decrypt these to:
+#   /run/credentials/workload-{name}.service/{credential-name}
+#
 # Examples:
 #   files = [
 #     { credential = "tls-cert", path = "/app/cert.pem" },
-#     { credential = "tls-key", path = "/app/key.pem", mode = "0400" },
-#     { credential = "ssh-key", path = "/home/user/.ssh/id_rsa", mode = "0600" }
+#     { credential = "tls-key", path = "/app/key.pem", mode = "ro" },
+#     { credential = "ssh-key", path = "/home/user/.ssh/id_rsa", mode = "ro" }
 #   ]
-# Note: Files are created in a tmpfs directory and mounted read-only into the container
-# files = []
+#
+# To create encrypted credentials:
+#   echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=api-key - /etc/credstore.encrypted/api-key
+#
+# Note: Files are mounted read-only by default for security
+files = [
+    { credential = "example-api-key", path = "/run/secrets/api-key" }
+]
 
 [devices]
 # Optional: Generic device passthrough
@@ -144,7 +264,8 @@ input = true
 # Expands to: --device /dev/snd + auto-detects/mounts PulseAudio/PipeWire sockets
 # Useful for: media servers, game streaming, audio processing
 # Requires: extra_groups = ["audio"]
-# Special: Auto-detects and mounts audio server sockets from /run/user/1000/
+# Auto-detects and mounts audio server sockets from /run/user/{uid}/
+# (PulseAudio: /run/user/{uid}/pulse, PipeWire: /run/user/{uid}/pipewire-0)
 audio = true
 
 # Optional: Enable virtualization support (KVM)
@@ -156,6 +277,80 @@ audio = true
 virtualization = true
 
 [security]
+# Optional: User namespace mode
+# Type: string
+# Default: "keep-id"
+# Options:
+#   "keep-id" - Container UID matches host UID (maximum isolation)
+#               Container root (UID 0) → subuid (~100000+) on host
+#               Workload user (UID 10009) → same inside container
+#               Best for: Maximum security, non-systemd containers
+#   "keep-id:uid=N,gid=N" - Like keep-id, but remap workload user to container UID N
+#               Workload user on host → container UID N (instead of same UID)
+#               Use when the container image runs as a fixed non-root UID
+#               (e.g. nobody=65534, git=1000) and volumes need to be writable
+#               Same security as keep-id — no container root access
+#   "host"    - Container root maps to workload user on host
+#               Container root (UID 0) → workload user (UID 10009) on host
+#               Required for: systemd-based containers (pihole, etc.)
+#               Security trade-off: Container escape = workload user access
+#
+# IMPORTANT: Use "host" only for trusted containers that need systemd
+# Prefer "keep-id:uid=N,gid=N" over "host" + user="0" when the container
+# just needs a different UID (not actual root privileges).
+# Examples:
+#   userns = "keep-id"                        # Default - maximum security
+#   userns = "keep-id:uid=65534,gid=65534"   # Remap to nobody (e.g. Prometheus)
+#   userns = "keep-id:uid=1000,gid=1000"     # Remap to UID 1000 (e.g. Forgejo)
+#   userns = "host"                           # Required for systemd containers
+# userns = "keep-id"
+
+# Optional: Linux capabilities to add to the container
+# Type: array of strings
+# Default: [] (no additional capabilities)
+# Format: List of capability names (without CAP_ prefix)
+# Examples:
+#   ["NET_BIND_SERVICE"]              # Bind to privileged ports (< 1024)
+#   ["NET_ADMIN", "NET_RAW"]          # Network administration, raw sockets
+#   ["SYS_ADMIN"]                     # System administration (mount, etc.)
+#   ["CHOWN", "SETUID", "SETGID"]     # File ownership, user/group changes
+#   ["SYS_CHROOT"]                    # chroot capability
+#   ["AUDIT_WRITE"]                   # Write to audit log
+#
+# Common capability needs:
+#   DNS server (pihole):        ["NET_BIND_SERVICE", "NET_ADMIN", "CHOWN"]
+#   Backup server (borgbackup): ["SETUID", "SETGID", "SYS_CHROOT"]
+#   System management (cockpit):["SYS_ADMIN", "NET_ADMIN", "AUDIT_WRITE"]
+#
+# NOTE: Prefer specific capabilities over privileged = true
+# See: man capabilities(7) for full capability list
+# capabilities = []
+
+# Optional: Security options for SELinux, seccomp, apparmor, etc.
+# Type: array of strings
+# Default: [] (use podman defaults)
+# Format: List of security options passed to podman --security-opt
+#
+# Common SELinux options:
+#   ["label=type:container_t"]           # Default container type (explicit)
+#   ["label=type:custom_container_t"]    # Custom SELinux type
+#   ["label=level:s0:c100,c200"]         # Custom MCS categories
+#   ["label=disable"]                    # Disable SELinux (NOT recommended)
+#
+# Other options:
+#   ["seccomp=unconfined"]               # Disable seccomp filtering
+#   ["apparmor=unconfined"]              # Disable AppArmor
+#   ["no-new-privileges=true"]           # Prevent privilege escalation
+#
+# Examples:
+#   # Custom SELinux type with specific MCS label
+#   security_opt = ["label=type:workload_container_t", "label=level:s0:c100,c200"]
+#
+#   # Disable SELinux for troubleshooting
+#   security_opt = ["label=disable"]
+#
+# security_opt = []
+
 # Optional: Additional system groups for the workload user
 # Type: array of strings
 # Default: [] (no additional groups)
@@ -180,11 +375,19 @@ virtualization = true
 # Example for virtualization: ["kvm"]
 extra_groups = ["video", "render", "input", "dialout", "audio"]
 
+# Optional: Run container in privileged mode
+# Type: boolean
+# Default: false
+# WARNING: Privileged containers have ALL capabilities and access to ALL devices
+# Consider using specific capabilities instead (capabilities = [...])
+# Only use for backward compatibility or extreme edge cases
+# privileged = false
+
 [storage]
 # Optional: Custom home directory for the workload user
 # Type: string (absolute path)
-# Default: "/var/lib/workloads/{name}-{id}"
-# This directory is created automatically and mounted to /data in the container
+# Default: "/var/lib/workloads/{name}"
+# This directory is created automatically
 # Example: "/custom/path/for/workload"
 # home = "/var/lib/workloads/my-custom-path"
 
@@ -192,11 +395,19 @@ extra_groups = ["video", "render", "input", "dialout", "audio"]
 # Type: array of strings
 # Default: []
 # Format: "host-path:container-path[:options]"
+#
+# Path substitution:
+#   ./ prefix expands to workload home directory (/var/lib/workloads/{name})
+#   Example: "./cache:/data" becomes "/var/lib/workloads/myapp/cache:/data"
+#
 # Examples:
-#   "/etc/config:/config:ro,z"     - SELinux relabeled
-#   "/mnt/data:/data:ro"           - Read-only mount
-#   "/mnt/shared:/shared"          - Read-write mount
+#   "./config:/config:ro"          - Workload home subdirectory (read-only)
+#   "./data:/data"                 - Workload home subdirectory (read-write)
+#   "/etc/config:/config:ro,z"     - Absolute path, SELinux relabeled
+#   "/mnt/data:/data:ro"           - Absolute path, read-only mount
+#   "/mnt/shared:/shared"          - Absolute path, read-write mount
 volumes = [
+    "./config:/config:ro",
     "/mnt/games:/games:ro",
     "/mnt/saves:/saves"
 ]
@@ -371,8 +582,29 @@ ports = ["8080:80", "8443:443"]
 # tasks_max = 100
 
 # ============================================================================
-# STARTUP/SHUTDOWN TIMEOUTS
+# SERVICE TYPE AND TIMEOUTS
 # ============================================================================
+
+# Optional: Systemd service type
+# Type: string
+# Default: "notify"
+# Valid values: "simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"
+# Purpose: Controls how systemd tracks the service state
+#
+# Common values:
+#   "notify" (default) - Wait for readiness notification from container
+#                        Works best with containers that support sd-notify
+#                        Provides accurate "active" state
+#   "simple"           - Consider service started immediately after exec
+#                        Use for containers that don't send notifications
+#                        Example: registry, most simple HTTP servers
+#   "exec"             - Similar to simple but waits for initial process fork
+#
+# Use "simple" if the workload gets stuck in "activating (start)" state
+# despite the container running successfully.
+#
+# Systemd directive: Type=
+# service_type = "notify"
 
 # Optional: Service startup timeout
 # Type: integer (seconds)
@@ -424,7 +656,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "ghcr.io/user/gaming-vm:latest"
-# id = "1"
 #
 # [devices]
 # gpu = "amd"
@@ -449,7 +680,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "ghcr.io/lizardbyte/sunshine:latest"
-# id = "2"
 #
 # [devices]
 # gpu = "nvidia"
@@ -472,7 +702,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "docker.io/library/nginx:alpine"
-# id = "1"
 #
 # [security]
 # extra_groups = []
@@ -494,7 +723,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "localhost/my-devenv:latest"
-# id = "3"
 #
 # [security]
 # extra_groups = []
@@ -516,7 +744,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "ghcr.io/home-assistant/home-assistant:stable"
-# id = "5"
 #
 # [devices]
 # # Pass through Zigbee USB stick (Conbee II on /dev/ttyACM0)
@@ -545,15 +772,14 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "docker.io/library/alpine:latest"
-# id = "99"
 # command = ["sleep", "infinity"]
 #
 # [security]
 # extra_groups = ["video", "render", "input"]
 #
 # To verify groups work:
-#   id _wl-groups-test-99
-#   podman exec workload-groups-test-99 id
+#   id _wl-groups-test
+#   podman exec workload-groups-test id
 
 # Example 7: Plex with audio transcoding
 # ---------------------------------------
@@ -563,7 +789,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "docker.io/plexinc/pms-docker:latest"
-# id = "7"
 #
 # [devices]
 # gpu = "amd"  # Or "nvidia" for hardware transcoding
@@ -583,7 +808,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "ghcr.io/blakeblackshear/frigate:stable"
-# id = "8"
 #
 # [devices]
 # devices = ["/dev/video0", "/dev/video1"]  # USB cameras or capture cards
@@ -605,7 +829,6 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "tianon/qemu:latest"
-# id = "9"
 #
 # [devices]
 # virtualization = true  # Enable KVM
@@ -627,23 +850,21 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "myapp:latest"
-# id = "10"
 #
 # [container.environment]
 # PUBLIC_URL = "https://app.example.com"
-# API_KEY = "${SECRET:webapp-api-key}"
-# DB_PASSWORD = "${SECRET:db-password}"
+# API_KEY = "${SECRET:webapp-api-key}"          # Auto-detected and loaded
+# DB_PASSWORD = "${SECRET:db-password}"         # Auto-detected and loaded
 # DEBUG = "false"
 #
-# [secrets]
-# credentials = ["webapp-api-key", "db-password"]
+# # No [secrets] section needed - secrets are auto-detected from ${SECRET:name} references
 #
 # [network]
 # ports = ["8080:8080"]
 #
 # Setup:
-#   echo -n "sk-1234567890abcdef" | sudo systemd-creds encrypt --with-key=tpm2 --name=webapp-api-key - /etc/credstore.encrypted/webapp-api-key.cred
-#   echo -n "secure-db-password" | sudo systemd-creds encrypt --with-key=tpm2 --name=db-password - /etc/credstore.encrypted/db-password.cred
+#   echo -n "sk-1234567890abcdef" | sudo systemd-creds encrypt --with-key=tpm2 --name=webapp-api-key - /etc/credstore.encrypted/webapp-api-key
+#   echo -n "secure-db-password" | sudo systemd-creds encrypt --with-key=tpm2 --name=db-password - /etc/credstore.encrypted/db-password
 
 # Example 11: Database with TLS certificates
 # -------------------------------------------
@@ -653,15 +874,15 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "postgres:16"
-# id = "11"
 #
 # [container.environment]
 # POSTGRES_USER = "dbadmin"
-# POSTGRES_PASSWORD = "${SECRET:postgres-password}"
+# POSTGRES_PASSWORD = "${SECRET:postgres-password}"  # Auto-detected
 # POSTGRES_DB = "myapp"
 #
 # [secrets]
-# credentials = ["postgres-password", "tls-cert", "tls-key"]
+# # postgres-password is auto-detected from env var
+# # tls-cert and tls-key are mounted as files
 # files = [
 #   { credential = "tls-cert", path = "/var/lib/postgresql/server.crt" },
 #   { credential = "tls-key", path = "/var/lib/postgresql/server.key" }
@@ -680,9 +901,9 @@ ports = ["8080:80", "8443:443"]
 # io_write_bandwidth_max = ["/dev/sda 100M"]
 #
 # Setup:
-#   echo -n "secure-password-123" | sudo systemd-creds encrypt --with-key=tpm2 --name=postgres-password - /etc/credstore.encrypted/postgres-password.cred
-#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.crt /etc/credstore.encrypted/tls-cert.cred
-#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.key /etc/credstore.encrypted/tls-key.cred
+#   echo -n "secure-password-123" | sudo systemd-creds encrypt --with-key=tpm2 --name=postgres-password - /etc/credstore.encrypted/postgres-password
+#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.crt /etc/credstore.encrypted/tls-cert
+#   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.key /etc/credstore.encrypted/tls-key
 
 # Example 12: Jellyfin with API key and mixed environment
 # --------------------------------------------------------
@@ -692,15 +913,13 @@ ports = ["8080:80", "8443:443"]
 #
 # [container]
 # image = "jellyfin/jellyfin:latest"
-# id = "12"
 #
 # [container.environment]
 # JELLYFIN_PublishedServerUrl = "https://jellyfin.example.com"
-# JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"
+# JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"  # Auto-detected and loaded
 # TZ = "America/New_York"
 #
-# [secrets]
-# credentials = ["jellyfin-api-key"]
+# # No [secrets] section needed - secret is auto-detected from ${SECRET:name} reference
 #
 # [devices]
 # gpu = "amd"
@@ -720,18 +939,17 @@ ports = ["8080:80", "8443:443"]
 # ============================================================================
 #
 # The workload system uses systemd credentials for secure secrets management.
-# See docs/SECRETS-MANAGEMENT.md for complete documentation.
+# See docs/secrets.md for complete documentation.
 #
 # Quick Start:
 # 1. Create encrypted credential:
-#    echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=my-api-key - /etc/credstore.encrypted/my-api-key.cred
+#    echo -n "my-secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=my-api-key - /etc/credstore.encrypted/my-api-key
 #
-# 2. Reference in workload config:
+# 2. Reference in workload config (auto-detected):
 #    [container.environment]
 #    API_KEY = "${SECRET:my-api-key}"
 #
-#    [secrets]
-#    credentials = ["my-api-key"]
+#    # No [secrets] section needed - secrets are auto-detected!
 #
 # 3. Enable workload:
 #    sudo workload-ctl enable myworkload
@@ -749,8 +967,8 @@ ports = ["8080:80", "8443:443"]
 # - host+tpm2: Both required (maximum security)
 #
 # Managing Secrets:
-# - Create: systemd-creds encrypt --with-key=tpm2 --name=NAME - /etc/credstore.encrypted/NAME.cred
-# - Verify: sudo systemd-creds decrypt /etc/credstore.encrypted/NAME.cred -
+# - Create: systemd-creds encrypt --with-key=tpm2 --name=NAME - /etc/credstore.encrypted/NAME
+# - Verify: sudo systemd-creds decrypt /etc/credstore.encrypted/NAME -
 # - Rotate: Create new credential and restart workload
 # - List: ls -la /etc/credstore.encrypted/
 #
@@ -761,8 +979,8 @@ ports = ["8080:80", "8443:443"]
 # - Bootc integration: Encrypted credentials safe to commit to git
 #
 # For more information:
-# - Read docs/SECRETS-MANAGEMENT.md
-# - Run: workload-ctl secret --help (once implemented)
+# - Read docs/secrets.md
+# - Run: workload-ctl secret --help
 # - See: man systemd-creds
 
 # ============================================================================
@@ -770,37 +988,56 @@ ports = ["8080:80", "8443:443"]
 # ============================================================================
 #
 # User and UID Assignment:
-# - Username format: _wl-{name}-{id}
-# - UID: 10000 + id (e.g., id="1" → UID 10001)
-# - Username max length: 32 characters
-# - UID range: 10000-59999 (stays below systemd DynamicUser range)
+# - Username format: _wl-{name}
+# - UID: Auto-assigned from range 10000-52948
+# - UID assignment: Finds lowest available UID not in use
+# - UID persistence: Managed by systemd-sysusers (stored in /etc/passwd)
+# - Username max length: 31 characters (27 for name + 4 for "_wl-" prefix)
+# - UID range: 10000-52948 (capped to prevent uint32 overflow in /etc/subuid;
+#   stays below systemd DynamicUser range 60000+)
 #
 # Rootless Architecture:
-# - Each workload runs in its own user systemd session
+# - Each workload runs as a dedicated user with rootless podman
 # - Podman runs rootless (no root privileges)
-# - User namespace isolation (UserNS=keep-id)
-# - Host groups preserved in container (GroupAdd=keep-groups)
-# - Linger enabled (session starts at boot)
+# - User namespace isolation (--userns=keep-id by default)
+# - Host groups passed to container (--group-add for extra_groups)
+# - Linger enabled (systemd user session starts at boot)
+# - Subuid/subgid ranges: Auto-configured in /etc/subuid and /etc/subgid
+# - --init (catatonit) as PID 1 for zombie reaping and signal forwarding
 #
 # File Locations:
 # - Workload configs: /etc/workloads.d/*.toml
-# - Per-user quadlets: /run/containers/systemd/users/{uid}/
-# - User home: /var/lib/workloads/{name}-{id}
-# - Mounted in container as: /data
+# - Generated sysusers configs: /run/sysusers.d/workload-{name}.conf
+# - Generated service files: /run/systemd/system/workload-{name}.service
+# - User home directory: /var/lib/workloads/{name}
+# - Encrypted credentials: /etc/credstore.encrypted/{credential-name}
+# - Runtime credentials: /run/credentials/workload-{name}.service/{credential-name}
 #
 # Service Management:
-# - Service name: {name}.service (in user session)
-# - Start: systemctl --user -M _wl-{name}-{id}@ start {name}.service
-# - Status: systemctl --user -M _wl-{name}-{id}@ status {name}.service
-# - Logs: journalctl --user -M _wl-{name}-{id}@ -u {name}.service
+# - Service name: workload-{name}.service (system service)
+# - Start: sudo systemctl start workload-{name}.service
+# - Status: sudo systemctl status workload-{name}.service
+# - Logs: sudo journalctl -u workload-{name}.service
+# - Container logs: sudo journalctl CONTAINER_NAME=workload-{name}
+# - Enable/disable: sudo systemctl enable/disable workload-{name}.service
+# - Or use: sudo workload-ctl enable/disable/restart/status/logs {name}
 #
 # Networking:
-# - Default: slirp4netns (slower, no privileged ports)
-# - mode="host": Host network (faster, can use any port)
-# - Rootless can't bind ports < 1024 by default
+# - Default: pasta (rootless networking with port forwarding, Podman 5.3+)
+# - mode="host": Host network (no isolation, maximum performance)
+# - mode="pasta": Isolated networking with port forwarding (recommended)
+# - Custom networks: Create with podman network create, reference by name
+# - Rootless can't bind ports < 1024 without special sysctl configuration
+#
+# Container Naming:
+# - Container name: workload-{name}
+# - Service name: workload-{name}.service
+# - Username: _wl-{name}
+# - All names are based on workload name only (no ID suffix)
 #
 # For more information, see:
-# - Podman Quadlet: man podman-systemd.unit
+# - Podman: man podman-run
+# - Systemd service: man systemd.service, man systemd.exec, man systemd.resource-control
 # - Systemd generators: man systemd.generator
-# - User sessions: man systemd.user
+# - Systemd credentials: man systemd-creds
 # ============================================================================

@@ -1,0 +1,129 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Workload Status",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "Down", "color": "red" }, "1": { "text": "Active", "color": "green" } }, "type": "value" }
+          ]
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Active" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }] },
+          { "matcher": { "id": "byName", "options": "Failed" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "options": { "0": { "text": "No", "color": "green" }, "1": { "text": "Yes", "color": "red" } }, "type": "value" }] }] }
+        ]
+      },
+      "targets": [
+        { "expr": "workload_active", "format": "table", "instant": true, "legendFormat": "Active" },
+        { "expr": "workload_failed", "format": "table", "instant": true, "legendFormat": "Failed" },
+        { "expr": "workload_restarts_total", "format": "table", "instant": true, "legendFormat": "Restarts" },
+        { "expr": "workload_uptime_seconds / 3600", "format": "table", "instant": true, "legendFormat": "Uptime (hours)" }
+      ],
+      "transformations": [
+        { "id": "seriesToColumns", "options": { "byField": "workload" } },
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true }, "renameByName": { "Value #A": "Active", "Value #B": "Failed", "Value #C": "Restarts", "Value #D": "Uptime (hours)", "workload": "Workload" } } }
+      ]
+    },
+    {
+      "title": "Memory Usage by Workload",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [
+        { "expr": "workload_memory_current_bytes", "legendFormat": "{{ workload }}" }
+      ]
+    },
+    {
+      "title": "CPU Usage by Workload",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        { "expr": "rate(workload_cpu_usage_seconds_total[5m])", "legendFormat": "{{ workload }}" }
+      ]
+    },
+    {
+      "title": "Memory Usage vs Limit",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "red", "value": 0.9 }] }
+        }
+      },
+      "targets": [
+        { "expr": "workload_memory_current_bytes / workload_memory_max_bytes", "legendFormat": "{{ workload }}" }
+      ]
+    },
+    {
+      "title": "Processes per Workload",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "workload_pids_current", "legendFormat": "{{ workload }}" }
+      ]
+    },
+    {
+      "title": "Restarts Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "increase(workload_restarts_total[1h])", "legendFormat": "{{ workload }}" }
+      ]
+    },
+    {
+      "title": "Enabled Workloads",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "workload_enabled_total", "legendFormat": "Total" }
+      ]
+    },
+    {
+      "title": "Active Workloads",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "targets": [
+        { "expr": "count(workload_active == 1)", "legendFormat": "Active" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["workloads", "hypervisor"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 2,
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Workload Overview",
+  "uid": "workload-overview"
+}

@@ -4,7 +4,7 @@
 > 
 > Review periodically and pick what sounds interesting.
 
-**Last Updated:** 2026-01-11
+**Last Updated:** 2026-03-16
 
 ---
 
@@ -18,18 +18,13 @@
 **Interest:** High
 
 **Services to implement:**
-- [ ] Pi-hole (DNS/ad blocking)
-- [ ] Local container registry (private image storage)
-- [ ] Squid proxy (caching HTTP/rpm proxy)
-- [ ] VPN web proxy (route traffic through VPN tunnel)
-- [ ] Fileserver (Samba/NFS)
-- [ ] Gitea or other self-hosted git
-- [ ] Jellyfin (media server)
-- [ ] Monitoring stack (Prometheus + Grafana)
-
-**Next action:** Start with Pi-hole or local registry (both straightforward)
-
-**Status:** Ready to start
+- [x] Pi-hole (DNS/ad blocking)
+- [x] Local container registry (private image storage)
+- [x] Squid proxy (caching HTTP/rpm proxy)
+- [x] VPN web proxy (route traffic through VPN tunnel)
+- [x] Fileserver (Samba)
+- [x] Gitea or other self-hosted git
+- [x] Monitoring stack (Prometheus + Grafana)
 
 ---
 
@@ -101,8 +96,7 @@ Stream games from beefy computer to thin client in another room
 - vLLM (production serving)
 
 **Notes:**
-- **Config:** Straightforward - GPU passthrough to Tesla P40, host networking for API
-- **Next action:** Create Ollama workload on Tesla P40 #1
+- **Config:** Straightforward - GPU passthrough, host networking for API
 - **Status:** Ready to start
 
 ---
@@ -153,61 +147,11 @@ Stream games from beefy computer to thin client in another room
 **What gets packaged:**
 - workload-ctl
 - workload-generator
-- workload-setup.py
+- workload-ensure-user
 - systemd integration files
 - Documentation
 
 **When:** After workload library proves value (have examples to show)
-**Status:** Not started
-
----
-
-### Containerize Base Image Services
-**Why:** Smaller bootc base, modular updates, user choice
-- **Effort:** Medium per service
-- **Value:** Medium (optimization, not requirement)
-- **Interest:** Low
-
-**Services to consider:**
-- Cockpit (complex - needs libvirt socket access for VM management)
-- Prometheus node exporter (easy - good first candidate)
-- Fail2ban (medium - needs firewall/log access)
-- Borgbackup (easy - just mounts and schedule)
-- Tailscale (medium - networking complexity)
-- Monitoring tools → distrobox (btop, htop, inxi, etc.)
-
-**Benefits of containerizing:**
-- On immutable/bootc systems: Users can enable/disable without rebuilding image
-- Smaller base image
-- Independent service updates
-- User choice (enable only what they need)
-
-**Challenges:**
-- Cockpit needs deep host integration (libvirt, D-Bus, system management)
-- More complexity vs just including in base
-
-**Decision:** Low priority - bootc immutability benefits exist but not urgent
-**Status:** Not started
-
----
-
-## Low Priority / Maybe Later
-
-### Image Variants
-**Why:** Users pick the right starting point for their use case
-- **Effort:** Medium (CI/CD pipeline, Containerfile templates)
-- **Value:** Medium (convenience for users)
-- **Interest:** Low
-
-**Potential variants:**
-- hypervisor-minimal (core only, no extras)
-- hypervisor-full (current - everything included)
-- hypervisor-headless (no Cockpit/web tools)
-- hypervisor-gpu-amd (optimized for AMD)
-- hypervisor-gpu-nvidia (optimized for NVIDIA)
-- home-automation-appliance (minimal + Home Assistant)
-
-**When:** If there's external demand
 **Status:** Not started
 
 ---
@@ -239,7 +183,6 @@ Stream games from beefy computer to thin client in another room
 - Bind mount options (more granular ro/rw/nosuid/noexec)
 - Storage quotas (limit container storage size)
 - Automatic cleanup (remove old images/volumes)
-- Backup/restore (snapshot volume data)
 - Volume drivers (different storage backends)
 - Data migration tools
 
@@ -280,37 +223,30 @@ Stream games from beefy computer to thin client in another room
 
 Start here when unsure what to work on:
 
-- [ ] **Pi-hole workload** (1 day, immediately useful)
-- [ ] **Local container registry** (1 day, useful for dev)
+- [x] **Pi-hole workload** (1 day, immediately useful)
+- [x] **Local container registry** (1 day, useful for dev)
 - [ ] **Simple dev container** (1 day, one language stack)
-- [ ] **Prometheus node exporter** (1 day, easy containerization example)
+- [x] **Prometheus node exporter** (1 day, easy containerization example)
 
 ---
 
-## Review Schedule
+## Investigate / Validate
 
-- **Created:** 2026-01-03
-- **Last Review:** 2026-01-11
-- **Next Review:** When picking next thing to work on
+### SELinux fcontext for workload directories
+**Question:** Do we actually need the `semanage fcontext -a -t container_file_t` rule for `/var/lib/workloads`?
+- `workload-ensure-user` currently calls `setup_selinux_policy()` + `restore_selinux_labels()` on every service start
+- If the default context works fine in practice (podman may handle this itself), this is dead code
+- **Test:** Disable the SELinux functions, run a workload, check `ls -Z /var/lib/workloads/`
+- **Status:** Not tested yet
 
-**Review process:**
-1. Read through sections
-2. Move ideas between sections as interest changes
-3. Add new ideas to "Random Ideas"
-4. Pick something
-5. Update status as work progresses
-6. Commit changes to git
+---
 
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*
 
-- VPN killswitch for proxy workload (ensure traffic doesn't leak)
-- Automatic backup of workload configs (git-based or scheduled)
-- Web UI for workload management (Cockpit integration plugin?)
+- Web UI for workload management
 - Workload health monitoring with alerts (email/webhook on failures)
-- Resource usage dashboard (Grafana + custom metrics)
-- Automated testing of workload examples (CI that validates each config)
 - Container image builder workload (dedicated build environment)
 - CI/CD runner workload (GitLab/GitHub/Gitea runner)
 - Game server workloads (Valheim, Factorio, etc.)
@@ -323,5 +259,7 @@ Start here when unsure what to work on:
 - Secrets rotation automation (auto-rotate credentials periodically)
 - Workload migration tools (move between hosts)
 - Resource recommendations (suggest limits based on usage)
-- Cost analysis (if running on cloud, estimate costs)
-
+- Generate seccomp profile instead of static, so it will handle changes in the distribution policies
+- Scheduled image updates: systemd timer that runs `workload-ctl update --all` periodically.
+  Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
+  Could add configurable schedule, notification on updates, and update log.

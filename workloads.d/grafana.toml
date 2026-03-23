@@ -1,0 +1,85 @@
+# Grafana - Observability dashboards and data visualization
+# Pairs with the prometheus workload for system monitoring.
+# Web interface: http://<host-ip>:3000
+# Default login: admin / admin — change it on first login.
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/grafana && sudo ./build.sh
+#
+#   2. (Optional) Create an encrypted admin password:
+#        echo -n "your-password" | \
+#          sudo workload-ctl secret create grafana-admin-password
+#      Then set GF_SECURITY_ADMIN_PASSWORD = "${SECRET:grafana-admin-password}"
+#      in [container.environment] below.
+#
+#   3. Run enable once to create the workload home and volume directories:
+#        sudo workload-ctl enable grafana
+#      (This will fail with a missing grafana.ini error — that's expected.)
+#
+#   4. Copy the config template and edit as needed:
+#        sudo cp /usr/share/workload-containers/grafana/grafana.ini \
+#                 /var/lib/workloads/grafana/grafana.ini
+#        sudo nano /var/lib/workloads/grafana/grafana.ini
+#
+#   5. Enable again (now that grafana.ini is in place):
+#        sudo workload-ctl enable grafana
+#
+#   6. Configure firewall to allow Grafana web interface:
+#        sudo firewall-cmd --add-port=3000/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only (more secure):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="3000" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+# Monitoring stack:
+#   Grafana auto-provisions a Prometheus data source (localhost:9090) and a
+#   workload overview dashboard. Enable prometheus + prometheus-server workloads
+#   for the full stack. The workload-metrics timer collects workload status
+#   automatically — no per-workload config needed.
+
+[workload]
+name = "grafana"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./grafana.ini", hint = "/usr/share/workload-containers/grafana/grafana.ini" },
+]
+
+[container]
+image = "localhost/grafana:latest"
+pull = "never"
+
+[container.health]
+cmd = "wget -qO- http://localhost:3000/api/health > /dev/null || exit 1"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[container.environment]
+GF_SECURITY_ADMIN_USER = "admin"
+
+# Use a plain value for quick start, or reference a secret for production:
+GF_SECURITY_ADMIN_PASSWORD = "admin"
+# GF_SECURITY_ADMIN_PASSWORD = "${SECRET:grafana-admin-password}"
+
+# Disable public account sign-up
+GF_USERS_ALLOW_SIGN_UP = "false"
+GF_LOG_MODE = "console"
+
+[storage]
+volumes = [
+    "./grafana.ini:/etc/grafana/grafana.ini:ro",
+    "./data:/usr/share/grafana/data",
+]
+
+[network]
+# Host networking: Grafana needs to reach Prometheus on localhost:9090
+mode = "host"
+
+[resources]
+memory_max = "512M"
+memory_high = "384M"
+cpu_quota = "100%"

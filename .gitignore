@@ -9,4 +9,6 @@ base-images/
 bootc-src
 rpm/rpm-output/
 __pycache__/
+bin/cosy
+man/cosy.1
 

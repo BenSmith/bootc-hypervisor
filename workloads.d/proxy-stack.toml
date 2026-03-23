@@ -1,0 +1,96 @@
+# Proxy Stack - Caching proxy with DNS-level ad blocking and VPN exit
+#
+# Traffic path for HTTP/S: client → Squid :3128 (cache) → WireGuard VPN
+# Traffic path for SOCKS5: client → microsocks :1080 → WireGuard VPN
+# Traffic path for DNS:    client → Pi-hole :53 (DNS block) → WireGuard VPN → upstream DNS
+#
+# Squid caches HTTP responses. microsocks provides SOCKS5 for apps that support
+# it. Pi-hole blocks ad/tracking domains at DNS. All traffic exits through a
+# WireGuard VPN tunnel.
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/proxy-stack && sudo ./build.sh
+#
+#   2. Copy your WireGuard config and squid.conf template:
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/proxy-stack/wg0.conf
+#        podman run --rm localhost/proxy-stack:latest cat /usr/share/proxy-stack/squid.conf \
+#          | sudo tee /var/lib/workloads/proxy-stack/squid.conf
+#        sudo workload-ctl enable proxy-stack
+#
+#   3. Configure firewall:
+#        sudo firewall-cmd --add-service=dns --permanent
+#        sudo firewall-cmd --add-service=http --permanent
+#        sudo firewall-cmd --add-port=3128/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#   4. Run gravity to download Pi-hole blocklists:
+#        sudo workload-ctl exec proxy-stack pihole -g
+#
+#   5. Point clients at this host:
+#        DNS:        <host-ip>
+#        HTTP proxy: http://<host-ip>:3128
+#        HTTPS proxy: http://<host-ip>:3128
+#
+#      On Linux with environment variables:
+#        export http_proxy=http://<host-ip>:3128
+#        export https_proxy=http://<host-ip>:3128
+#
+#      In /etc/dnf/dnf.conf:
+#        proxy=http://<host-ip>:3128
+
+[workload]
+name = "proxy-stack"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./wg0.conf",   hint = "WireGuard client config from your VPN provider" },
+    { path = "./squid.conf", hint = "Copy template: podman run --rm localhost/proxy-stack:latest cat /usr/share/proxy-stack/squid.conf" },
+]
+
+[container]
+image = "localhost/proxy-stack:latest"
+pull = "never"
+
+[container.health]
+cmd = "dig +short +time=2 @127.0.0.1 pi.hole || exit 1"
+interval = "30s"
+start_period = "60s"
+on_failure = "kill"
+
+[container.environment]
+TZ = "America/Los_Angeles"
+WG_INTERFACE = "wg0"
+SOCKS_PORT = "1080"
+
+# Leave empty to disable Pi-hole web interface auth, or use a secret:
+WEBPASSWORD = ""
+# WEBPASSWORD = "${SECRET:proxy-stack-webpassword}"
+
+# Override the DNS server from wg0.conf if needed:
+# UPSTREAM_DNS = "10.5.0.1"
+
+[storage]
+volumes = [
+    "./wg0.conf:/etc/wireguard/wg0.conf:ro",
+    "./squid.conf:/etc/squid/squid.conf:ro",
+    "./etc-pihole:/etc/pihole",
+    "./etc-dnsmasq.d:/etc/dnsmasq.d",
+    "./cache:/var/spool/squid",
+]
+
+[network]
+mode = "pasta"
+ports = ["3128:3128/tcp", "1080:1080/tcp", "53:53/udp", "53:53/tcp", "80:80/tcp"]
+
+[security]
+# userns=host: wg-quick, Pi-hole's entrypoint, and Squid all require root.
+# Container UID 0 maps to the workload user on the host — no actual host root access.
+userns = "host"
+capabilities = ["NET_ADMIN"]
+
+[resources]
+memory_max = "512M"
+memory_high = "384M"
+cpu_quota = "30%"

@@ -1,0 +1,36 @@
+# Test workload: prometheus node-exporter (HTTP endpoint check)
+[workload]
+name = "prometheus"
+enabled = true
+
+[container]
+image = "192.168.0.64:5000/prometheus/node-exporter:latest"
+pull = "missing"
+command = [
+    "--path.rootfs=/host",
+    "--path.procfs=/host/proc",
+    "--path.sysfs=/host/sys",
+    "--collector.textfile.directory=/textfile"
+]
+
+[container.health]
+cmd = "wget -qO- http://localhost:9100/metrics > /dev/null || exit 1"
+interval = "15s"
+start_period = "10s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "/:/host:ro,rslave",
+    "/proc:/host/proc:ro,rslave",
+    "/sys:/host/sys:ro,rslave",
+    "/var/lib/prometheus/node-exporter:/textfile:ro",
+]
+
+[network]
+mode = "pasta"
+ports = ["9100:9100"]
+
+[resources]
+memory_max = "128M"
+cpu_quota = "20%"

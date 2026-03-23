@@ -1,0 +1,13 @@
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    grafana \
+    && dnf clean all
+
+# Auto-provision Prometheus data source and workload dashboard
+COPY --link provisioning/ /etc/grafana/provisioning/
+COPY --link dashboards/ /etc/grafana/dashboards/
+
+EXPOSE 3000
+
+CMD ["/usr/sbin/grafana", "server", "--homepath=/usr/share/grafana"]

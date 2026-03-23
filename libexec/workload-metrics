@@ -1,0 +1,326 @@
+#!/usr/bin/python3
+"""
+Collect metrics for all enabled workloads and write a Prometheus textfile.
+
+Reads /etc/workloads.d/*.toml, queries systemd service state and cgroup v2
+resource counters, then writes metrics in Prometheus exposition format to
+a .prom file that node-exporter's textfile collector picks up.
+
+Runs as a systemd timer (every 30s). Designed to be fast and safe — never
+blocks boot, never fails loudly.
+
+Usage: workload-metrics [output-dir]
+  output-dir: Directory for .prom file (default: /var/lib/prometheus/node-exporter)
+"""
+
+import os
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+
+WORKLOAD_CONFIG_DIR = Path(
+    os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
+)
+DEFAULT_OUTPUT_DIR = Path("/var/lib/prometheus/node-exporter")
+OUTPUT_FILENAME = "workloads.prom"
+
+
+def get_enabled_workloads():
+    """Read all enabled workload configs from config directory.
+
+    Returns list of (name, has_health_check) tuples.
+    """
+    workloads = []
+    if not WORKLOAD_CONFIG_DIR.is_dir():
+        return workloads
+
+    for toml_path in sorted(WORKLOAD_CONFIG_DIR.glob("*.toml")):
+        # Skip masked workloads (symlink to /dev/null)
+        try:
+            if toml_path.resolve() == Path("/dev/null"):
+                continue
+        except OSError:
+            continue
+
+        try:
+            with open(toml_path, "rb") as f:
+                config = tomllib.load(f)
+            if config.get("workload", {}).get("enabled", True):
+                name = config.get("workload", {}).get("name", "")
+                has_health = bool(
+                    config.get("container", {}).get("health", {}).get("cmd", "")
+                )
+                if name:
+                    workloads.append((name, has_health))
+        except Exception:
+            continue
+
+    return workloads
+
+
+def systemd_show(service, *properties):
+    """Query systemd properties for a service. Returns dict."""
+    props = ",".join(properties)
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", service, f"--property={props}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return {}
+        out = {}
+        for line in result.stdout.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k] = v
+        return out
+    except Exception:
+        return {}
+
+
+def get_service_metrics(name):
+    """Get systemd service metrics for a workload."""
+    service = f"workload-{name}.service"
+    props = systemd_show(
+        service,
+        "ActiveState",
+        "SubState",
+        "NRestarts",
+        "ActiveEnterTimestampMonotonic",
+        "ExecMainStatus",
+    )
+    if not props:
+        return None
+
+    active_state = props.get("ActiveState", "unknown")
+
+    metrics = {
+        "active": 1 if active_state == "active" else 0,
+        "failed": 1 if active_state == "failed" else 0,
+        "restarts_total": int(props.get("NRestarts", 0)),
+    }
+
+    # Uptime: monotonic timestamp of when the service entered active state
+    enter_mono = int(props.get("ActiveEnterTimestampMonotonic", 0))
+    if enter_mono > 0 and active_state == "active":
+        # Read system monotonic clock
+        try:
+            now_mono = time.monotonic_ns() // 1000  # convert ns to µs
+            metrics["uptime_seconds"] = max(0, (now_mono - enter_mono) / 1_000_000)
+        except Exception:
+            pass
+
+    return metrics
+
+
+def get_container_health(name):
+    """Query podman container health status for a workload.
+
+    Returns "healthy", "unhealthy", "starting", or None if no health check.
+    Runs podman inspect as the workload user.
+    """
+    username = f"_wl-{name}"
+    try:
+        import pwd as _pwd
+        pw = _pwd.getpwnam(username)
+        uid = pw.pw_uid
+    except (KeyError, ImportError):
+        return None
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-u", username,
+             "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+             "-E", f"HOME={pw.pw_dir}",
+             "podman", "inspect", "--format",
+             "{{.State.Health.Status}}", f"workload-{name}"],
+            capture_output=True, text=True, timeout=5, cwd="/tmp",
+        )
+        if result.returncode == 0:
+            status = result.stdout.strip()
+            if status:
+                return status
+    except Exception:
+        pass
+    return None
+
+
+def find_workload_cgroup(name):
+    """Find the cgroup path for a workload's podman container.
+
+    Rootless podman containers live under:
+    /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/libpod-*.scope
+
+    We find the user's slice via the workload username, then look for
+    libpod scopes under it.
+    """
+    username = f"_wl-{name}"
+    try:
+        import pwd
+        pw = pwd.getpwnam(username)
+        uid = pw.pw_uid
+    except (KeyError, ImportError):
+        return None
+
+    user_slice = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service")
+    if not user_slice.is_dir():
+        return None
+
+    # Look for libpod container scopes
+    for scope in user_slice.rglob("libpod-*.scope"):
+        if scope.is_dir():
+            return scope
+
+    return None
+
+
+def read_cgroup_metric(cgroup_path, filename):
+    """Read a single value from a cgroup file."""
+    try:
+        content = (cgroup_path / filename).read_text().strip()
+        if content == "max":
+            return None
+        return int(content)
+    except (OSError, ValueError):
+        return None
+
+
+def read_cpu_usage(cgroup_path):
+    """Read total CPU usage in seconds from cpu.stat."""
+    try:
+        content = (cgroup_path / "cpu.stat").read_text()
+        for line in content.splitlines():
+            if line.startswith("usage_usec"):
+                return int(line.split()[1]) / 1_000_000  # µs → seconds
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def get_cgroup_metrics(name):
+    """Get resource metrics from cgroup v2 for a workload."""
+    cgroup = find_workload_cgroup(name)
+    if not cgroup:
+        return {}
+
+    metrics = {}
+
+    cpu = read_cpu_usage(cgroup)
+    if cpu is not None:
+        metrics["cpu_usage_seconds_total"] = cpu
+
+    mem = read_cgroup_metric(cgroup, "memory.current")
+    if mem is not None:
+        metrics["memory_current_bytes"] = mem
+
+    mem_max = read_cgroup_metric(cgroup, "memory.max")
+    if mem_max is not None:
+        metrics["memory_max_bytes"] = mem_max
+
+    pids = read_cgroup_metric(cgroup, "pids.current")
+    if pids is not None:
+        metrics["pids_current"] = pids
+
+    return metrics
+
+
+def format_metrics(all_metrics):
+    """Format metrics in Prometheus exposition format."""
+    lines = [
+        "# Workload metrics collected by workload-metrics",
+        f"# Generated at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        "",
+    ]
+
+    # Define metric types
+    type_defs = [
+        ("workload_active", "gauge", "Whether the workload service is active (1) or not (0)"),
+        ("workload_failed", "gauge", "Whether the workload service is in failed state (1) or not (0)"),
+        ("workload_restarts_total", "counter", "Total number of service restarts"),
+        ("workload_uptime_seconds", "gauge", "Seconds since the service entered active state"),
+        ("workload_cpu_usage_seconds_total", "counter", "Total CPU time consumed in seconds"),
+        ("workload_memory_current_bytes", "gauge", "Current memory usage in bytes"),
+        ("workload_memory_max_bytes", "gauge", "Memory limit in bytes"),
+        ("workload_pids_current", "gauge", "Current number of processes"),
+        ("workload_health", "gauge", "Container health check status (1=healthy, 0=unhealthy)"),
+    ]
+
+    for metric_name, metric_type, help_text in type_defs:
+        lines.append(f"# HELP {metric_name} {help_text}")
+        lines.append(f"# TYPE {metric_name} {metric_type}")
+
+        for workload_name, svc_metrics, cgroup_metrics in all_metrics:
+            # Check service metrics
+            key = metric_name.replace("workload_", "")
+            if key in svc_metrics:
+                value = svc_metrics[key]
+                if isinstance(value, float):
+                    lines.append(f'{metric_name}{{workload="{workload_name}"}} {value:.2f}')
+                else:
+                    lines.append(f'{metric_name}{{workload="{workload_name}"}} {value}')
+            # Check cgroup metrics
+            elif key in cgroup_metrics:
+                value = cgroup_metrics[key]
+                if isinstance(value, float):
+                    lines.append(f'{metric_name}{{workload="{workload_name}"}} {value:.6f}')
+                else:
+                    lines.append(f'{metric_name}{{workload="{workload_name}"}} {value}')
+
+        lines.append("")
+
+    # Meta-metrics
+    lines.append("# HELP workload_enabled_total Total number of enabled workloads")
+    lines.append("# TYPE workload_enabled_total gauge")
+    lines.append(f"workload_enabled_total {len(all_metrics)}")
+    lines.append("")
+
+    lines.append("# HELP workload_metrics_last_collect_timestamp_seconds Unix timestamp of last metrics collection")
+    lines.append("# TYPE workload_metrics_last_collect_timestamp_seconds gauge")
+    lines.append(f"workload_metrics_last_collect_timestamp_seconds {time.time():.0f}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def main():
+    output_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUTPUT_DIR
+    output_file = output_dir / OUTPUT_FILENAME
+
+    workloads = get_enabled_workloads()
+    if not workloads:
+        # Write empty metrics (clears stale data)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(
+            "# No enabled workloads\n"
+            "workload_enabled_total 0\n"
+        )
+        return
+
+    all_metrics = []
+    for name, has_health in workloads:
+        svc_metrics = get_service_metrics(name) or {}
+        cgroup_metrics = get_cgroup_metrics(name)
+        # Query container health if workload has a health check configured
+        if has_health:
+            health_status = get_container_health(name)
+            if health_status is not None:
+                svc_metrics["health"] = 1 if health_status == "healthy" else 0
+        all_metrics.append((name, svc_metrics, cgroup_metrics))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Atomic write: write to temp file then rename
+    tmp_file = output_file.with_suffix(".tmp")
+    tmp_file.write_text(format_metrics(all_metrics))
+    tmp_file.rename(output_file)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"workload-metrics: {e}", file=sys.stderr)
+        sys.exit(0)  # Never fail — stale metrics are better than no metrics

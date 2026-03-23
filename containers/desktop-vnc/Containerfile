@@ -1,0 +1,47 @@
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    adwaita-cursor-theme \
+    adwaita-icon-theme \
+    bash-completion \
+    dbus-daemon \
+    fira-code-fonts \
+    firefox \
+    foot \
+    fuzzel \
+    grim \
+    htop \
+    labwc \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    mesa-libGL \
+    mesa-vulkan-drivers \
+    neovim \
+    procps-ng \
+    slurp \
+    sudo \
+    swaybg \
+    waybar \
+    wayvnc \
+    wl-clipboard \
+    xorg-x11-server-Xwayland \
+    && dnf clean all
+
+# Create desktop user with passwordless sudo
+RUN useradd -m -s /bin/bash -G wheel desktop && \
+    echo "desktop ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/desktop && \
+    chmod 0440 /etc/sudoers.d/desktop
+
+# Foot terminal config
+RUN mkdir -p /etc/xdg/foot && \
+    printf '[main]\nfont=Fira Code:size=14\n' > /etc/xdg/foot/foot.ini
+
+COPY --link --chmod=0644 labwc-config/rc.xml /etc/xdg/labwc/rc.xml
+COPY --link --chmod=0755 labwc-config/autostart /etc/xdg/labwc/autostart
+COPY --link --chmod=0644 labwc-config/waybar-config /etc/xdg/waybar/config
+COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
+
+EXPOSE 5900
+
+USER desktop
+CMD ["/entrypoint.sh"]

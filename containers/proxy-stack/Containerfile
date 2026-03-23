@@ -1,0 +1,31 @@
+FROM alpine AS microsocks-builder
+
+RUN apk add --no-cache ca-certificates build-base git
+
+RUN git clone --depth=1 https://github.com/rofl0r/microsocks /build/microsocks
+WORKDIR /build/microsocks
+RUN make
+
+
+FROM docker.io/pihole/pihole:latest
+
+LABEL org.opencontainers.image.title="Proxy Stack"
+LABEL org.opencontainers.image.description="Squid (cache) + microsocks (SOCKS5) + Pi-hole (DNS block) + WireGuard VPN exit"
+
+RUN apk add --no-cache wireguard-tools iproute2 squid
+
+COPY --link --from=microsocks-builder /build/microsocks/microsocks /usr/local/bin/microsocks
+
+# wireguard-tools creates /etc/wireguard with mode 700; placeholder ensures
+# podman bind-mounts wg0.conf as a file rather than creating a directory.
+RUN touch /etc/wireguard/wg0.conf
+
+RUN mkdir -p /var/spool/squid
+
+# Ship default config as a template users can copy out as a starting point.
+COPY --link squid.conf /usr/share/proxy-stack/squid.conf
+
+COPY --link entrypoint.sh /vpn-entrypoint.sh
+RUN chmod +x /vpn-entrypoint.sh
+
+ENTRYPOINT ["/vpn-entrypoint.sh"]

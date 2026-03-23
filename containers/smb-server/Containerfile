@@ -1,0 +1,13 @@
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    samba \
+    && dnf clean all
+
+RUN mkdir -p /exports
+
+COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
+
+EXPOSE 445
+
+CMD ["/entrypoint.sh"]

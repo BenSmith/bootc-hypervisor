@@ -1,0 +1,19 @@
+# Prometheus configuration for hypervisor monitoring
+# Scrapes node-exporter which serves both system metrics and workload metrics
+# (via the textfile collector populated by workload-metrics timer).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Node exporter: system metrics (CPU, memory, disk, network) +
+  # workload metrics (active, failed, restarts, cgroup resource usage)
+  - job_name: "node"
+    static_configs:
+      - targets: ["localhost:9100"]
+        labels:
+          instance: "hypervisor"
