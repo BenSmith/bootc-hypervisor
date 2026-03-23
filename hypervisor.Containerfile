@@ -6,8 +6,8 @@ ARG ENABLE_PASSWORDLESS_SUDO=false
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/lxc/libvirt/QEMU/KVM"
 
-COPY --link policy.json /etc/containers/policy.json
-COPY --link security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
+COPY policy.json /etc/containers/policy.json
+COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
@@ -167,7 +167,7 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
 # and allow containers to access host devices (GPU, input)
 RUN setsebool -P container_use_devices on
 
-COPY --link security/seatd_container.te /tmp/seatd_container.te
+COPY security/seatd_container.te /tmp/seatd_container.te
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
     checkmodule -M -m -o /tmp/seatd_container.mod /tmp/seatd_container.te && \
     semodule_package -o /tmp/seatd_container.pp -m /tmp/seatd_container.mod && \
@@ -182,28 +182,28 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
     fi
 
 # Install workload provisioning system
-COPY --link lib/workload_lib.py /tmp/workload_lib.py
+COPY lib/workload_lib.py /tmp/workload_lib.py
 RUN mkdir -p "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" && \
     install -m 0644 /tmp/workload_lib.py \
         "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"/workload_lib.py && \
     rm /tmp/workload_lib.py
-COPY --link generators/workload-generator-wrapper /usr/lib/systemd/system-generators/workload-generator
-COPY --link generators/workload-generate /usr/libexec/
-COPY --link systemd/workloads-dirs.conf /usr/lib/tmpfiles.d/workloads-dirs.conf
-COPY --link systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
-COPY --link libexec/workload-ensure-user /usr/libexec/
-COPY --link libexec/workload-write-env /usr/libexec/
-COPY --link libexec/workload-metrics /usr/libexec/
-COPY --link systemd/workload-metrics.service /usr/lib/systemd/system/
-COPY --link systemd/workload-metrics.timer /usr/lib/systemd/system/
-COPY --link bin/workload-ctl /usr/bin/
-COPY --link bin/cosy /usr/bin/
-COPY --link man/cosy.1 /usr/share/man/man1/cosy.1
-COPY --link completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
-COPY --link docs/workloads.md /usr/share/doc/workload-ctl/
-COPY --link workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
-COPY --link containers/ /usr/share/workload-containers/
-COPY --link seccomp-workload-baseline.json /usr/share/containers/
+COPY generators/workload-generator-wrapper /usr/lib/systemd/system-generators/workload-generator
+COPY generators/workload-generate /usr/libexec/
+COPY systemd/workloads-dirs.conf /usr/lib/tmpfiles.d/workloads-dirs.conf
+COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
+COPY libexec/workload-ensure-user /usr/libexec/
+COPY libexec/workload-write-env /usr/libexec/
+COPY libexec/workload-metrics /usr/libexec/
+COPY systemd/workload-metrics.service /usr/lib/systemd/system/
+COPY systemd/workload-metrics.timer /usr/lib/systemd/system/
+COPY bin/workload-ctl /usr/bin/
+COPY bin/cosy /usr/bin/
+COPY man/cosy.1 /usr/share/man/man1/cosy.1
+COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
+COPY docs/workloads.md /usr/share/doc/workload-ctl/
+COPY workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
+COPY containers/ /usr/share/workload-containers/
+COPY seccomp-workload-baseline.json /usr/share/containers/
 
 RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
     chmod 0755 /usr/libexec/workload-generate && \
@@ -228,7 +228,7 @@ RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
     systemctl enable workload-metrics.timer
 
 # Copy workload configurations - disabled by default
-COPY --link workloads.d/ /etc/workloads.d/
+COPY workloads.d/ /etc/workloads.d/
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1
