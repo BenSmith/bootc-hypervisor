@@ -1,0 +1,88 @@
+# Alert rules for workload monitoring
+# These fire based on workload metrics from the textfile collector.
+
+groups:
+  - name: workload-health
+    rules:
+      # Workload has been down for more than 2 minutes
+      - alert: WorkloadDown
+        expr: workload_active == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Workload {{ $labels.workload }} is down"
+          description: "Workload {{ $labels.workload }} has not been active for more than 2 minutes."
+
+      # Workload is in failed state
+      - alert: WorkloadFailed
+        expr: workload_failed == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Workload {{ $labels.workload }} has failed"
+          description: "Workload {{ $labels.workload }} is in failed state."
+
+      # Workload has restarted more than 3 times in the last hour
+      - alert: WorkloadRestartLoop
+        expr: increase(workload_restarts_total[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workload {{ $labels.workload }} is restart-looping"
+          description: "Workload {{ $labels.workload }} has restarted {{ $value }} times in the last hour."
+
+  - name: workload-resources
+    rules:
+      # Memory usage above 90% of limit
+      - alert: WorkloadMemoryHigh
+        expr: workload_memory_current_bytes / workload_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workload {{ $labels.workload }} memory above 90%"
+          description: "Workload {{ $labels.workload }} is using {{ $value | humanizePercentage }} of its memory limit."
+
+  - name: host-health
+    rules:
+      # Host disk space below 10%
+      - alert: HostDiskSpaceLow
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Root filesystem below 10% free"
+          description: "Root filesystem has {{ $value | humanizePercentage }} free space remaining."
+
+      # Host memory below 10%
+      - alert: HostMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory below 10% available"
+          description: "Host has {{ $value | humanizePercentage }} memory available."
+
+      # High CPU usage (>90% sustained)
+      - alert: HostCpuHigh
+        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU usage above 90%"
+          description: "Host CPU usage has been above 90% for 10 minutes."
+
+      # Workload metrics collector is stale (timer stopped)
+      - alert: WorkloadMetricsStale
+        expr: time() - workload_metrics_last_collect_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workload metrics are stale"
+          description: "The workload-metrics timer may have stopped. Last collection was {{ $value | humanizeDuration }} ago."

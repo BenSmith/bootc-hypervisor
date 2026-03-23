@@ -1,0 +1,12 @@
+# Test workload: embedded secret in a larger value
+[workload]
+name = "echo-mixed"
+enabled = true
+
+[container]
+image = "192.168.0.64:5000/library/busybox:latest"
+command = ["sh", "-c", "echo DSN=$DSN; sleep infinity"]
+pull = "missing"
+
+[container.environment]
+DSN = "host=db password=${SECRET:test-db-pass} port=5432"

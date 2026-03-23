@@ -2,7 +2,7 @@
 
 > Bootable container images for running VMs (KVM/QEMU), system containers (Incus/LXC), and application containers (Podman) with rootless workload provisioning.
 
-A complete virtualization and containerization platform delivered as immutable bootc images, featuring declarative workload management, hardware passthrough, and TPM2-backed secrets management.
+A complete virtualization and containerization platform delivered as immutable bootc images, featuring declarative workload management, hardware passthrough, and TPM2-backed secrets management. Includes comprehensive documentation with quick reference tables and troubleshooting guides.
 
 ## Project Overview
 
@@ -35,10 +35,7 @@ hypervisor/
 │   └── workload-generator            # Converts TOML → systemd units (~23KB)
 │
 ├── libexec/                          # Helper scripts
-│   └── workload-setup.py             # User/subuid/home setup (~8KB)
-│
-├── systemd/                          # systemd units
-│   └── workload-setup.service        # Bootstrap service for workloads
+│   └── workload-ensure-user          # Per-workload user/subuid/home setup
 │
 ├── workloads.d/                      # Example workload configs
 │   ├── schema-reference.toml         # Complete schema documentation
@@ -47,7 +44,7 @@ hypervisor/
 │   └── example-groups-test.toml      # Device access groups example
 │
 ├── docs/                             # Documentation
-│   ├── workloads.md                  # Comprehensive workload guide
+│   ├── workloads.md                  # Complete guide with TOC and quick reference tables
 │   ├── secrets.md                    # Secrets management deep dive
 │   ├── MULTI-CONTAINER-PLAN.md       # Future multi-container design
 │   └── ideas.md                      # Development notes
@@ -95,42 +92,43 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 - TPM2-backed secrets management
 
 **User Isolation:**
-- Each workload gets dedicated user: `_wl-{name}-{id}`
-- UID formula: `10000 + id` (e.g., id=1 → UID 10001)
+- Each workload gets dedicated user: `_wl-{name}` (e.g., `_wl-webserver`)
+- UID: Auto-assigned from range 10000-52948, persisted in `/etc/passwd`
 - Subuid range: `100000 + (uid_offset * 100000)` with 65536 UIDs
-- Home directory: `/var/lib/workloads/{name}-{id}`
+- Home directory: `/var/lib/workloads/{name}`
 - Shell: `/usr/sbin/nologin` (service user, no interactive login)
 
 **Boot Flow:**
 ```
-1. systemd-generators → workload-generator creates user and service configs
+1. systemd-generators → workload-generator creates sysusers configs and service files
 2. systemd-sysusers.service → creates workload users with group memberships
-3. workload-setup.service → configures subuid/subgid ranges and home directories
-4. workload-{name}-{id}.service → individual containers start
+3. ExecStartPre=+workload-ensure-user → configures subuid/subgid, home directory, EnvironmentFile, linger
+4. workload-{name}.service → individual containers start
 ```
 
 ### Hardware Access Model
 
-**Generic Device Passthrough:**
+**Generic Device Passthrough (primary method):**
 ```toml
 [devices]
-devices = ["/dev/ttyUSB0", "/dev/video0", "/dev/tpm0"]
+devices = ["/dev/ttyUSB0", "/dev/video0", "/dev/tpm0"]  # Works with any device
 ```
 
-**Convenience Flags (for complex scenarios):**
-- `gpu = "amd"` → `--device /dev/kfd --device /dev/dri` + groups: video, render
-- `gpu = "nvidia"` → `--device=nvidia.com/gpu=all --device /dev/dri` + groups: video
-- `input = true` → `--device /dev/input --device /dev/uinput` + groups: input
-- `audio = true` → `--device /dev/snd` + auto-mounts PulseAudio/PipeWire sockets + groups: audio
-- `virtualization = true` → `/dev/kvm`, `/dev/vhost-net`, `/dev/vhost-vsock` + groups: kvm
+**Convenience Flags (for multi-device scenarios):**
+- `gpu = "amd"` → `/dev/kfd`, `/dev/dri` + groups: video, render
+- `gpu = "nvidia"` → `nvidia.com/gpu=all`, `/dev/dri` + groups: video
+- `input = true` → `/dev/input`, `/dev/uinput` + groups: input
+- `audio = true` → `/dev/snd` + auto-mounts PulseAudio/PipeWire + groups: audio
+- `virtualization = true` → `/dev/kvm`, `/dev/vhost-*` + groups: kvm
 
-**Security Groups:**
-- `video`/`render`: GPU access (compute, video memory)
-- `input`: Keyboard/mouse read and injection
-- `audio`: Sound device access
-- `dialout`: Serial devices (USB serial, Zigbee/Z-Wave)
-- `kvm`: KVM virtualization
-- `disk`: Block device access (WARNING: raw disk access!)
+**Device Access Groups (risk levels):**
+- `video`/`render`: GPU access (Medium - compute, video memory)
+- `input`: Keyboard/mouse read and injection (High - can capture passwords)
+- `audio`: Sound device access (Low - audio capture only)
+- `dialout`: Serial devices (Medium - USB serial, Zigbee/Z-Wave)
+- `kvm`: KVM virtualization (Medium - can run VMs)
+- `disk`: Block device access (CRITICAL - raw disk access!)
+- `tpm`: TPM device access (High - hardware security operations)
 
 ### Secrets Management
 
@@ -228,6 +226,7 @@ Docker/kubectl-like interface for managing workloads.
 workload-ctl create NAME --image IMAGE [OPTIONS]   # Create workload
 workload-ctl enable NAME                            # Enable and start
 workload-ctl disable NAME [--purge]                 # Stop and disable
+workload-ctl cleanup [--apply]                      # Remove orphaned users/dirs
 workload-ctl restart NAME                           # Restart service
 workload-ctl update NAME [--force] [--all]          # Update images
 ```
@@ -279,27 +278,31 @@ workload-ctl edit NAME                              # Edit config (validates, sh
 
 ### workload-generator
 
-systemd generator (runs during `daemon-reload`):
+systemd generator (runs during `daemon-reload` and at boot):
 1. Reads TOML configs from `/etc/workloads.d/`
 2. Auto-detects credentials from `${SECRET:...}` env vars and file mounts
-3. Generates systemd-sysusers configs for workload users
+3. Generates systemd-sysusers configs for workload users (pins UID if user exists, range syntax otherwise)
 4. Generates systemd service files with:
+   - `EnvironmentFile=/run/workload-env/workload-{name}.env` for UID-dependent values
    - `LoadCredentialEncrypted=` directives for secrets
    - Environment variable expansion: `$(<${CREDENTIALS_DIRECTORY}/secret)`
    - Podman run commands with all flags
    - Volume mounts for credential files
 5. Validates configuration (username length, required fields)
+6. Always generates service files even if the user doesn't exist yet (UID-dependent values deferred to EnvironmentFile)
 
 **Output:**
-- `/run/systemd/generator/workload-{name}-{id}.service`
-- `/run/sysusers.d/workload-{name}-{id}.conf`
+- `/run/systemd/generator/workload-{name}.service`
+- `/run/sysusers.d/workload-{name}.conf`
 
-### workload-setup.service
+### workload-ensure-user
 
-Bootstrap service (runs before workloads start):
+Per-workload setup script (runs as `ExecStartPre=+` in each workload service):
 - Configures subordinate UID/GID ranges in `/etc/subuid` and `/etc/subgid`
-- Creates home directories at `/var/lib/workloads/{name}-{id}`
-- Sets SELinux context: `container_file_t`
+- Creates and chowns home directory at `/var/lib/workloads/{name}`
+- Creates and chowns volume directories under the home directory
+- Sets SELinux fcontext policy and restores labels (`container_file_t`)
+- Writes EnvironmentFile (`/run/workload-env/workload-{name}.env`) with `XDG_RUNTIME_DIR`
 - Enables systemd-logind linger for rootless podman
 
 ## Image Variants
@@ -334,7 +337,7 @@ Base hypervisor stack (headless):
 - `cockpit.socket`, `firewalld`, `incus.socket`
 - `libvirtd`, `sshd`, `tuned`
 - `prometheus-node-exporter` (port 9100)
-- `workload-setup.service`
+- `workload-generator` (systemd generator, runs at boot/daemon-reload)
 
 ### hypervisor-nvidia:rpmfusion
 
@@ -471,7 +474,6 @@ enabled = true
 
 [container]
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
-id = "1"
 
 [network]
 ports = ["8080:8080"]
@@ -540,12 +542,11 @@ sudo workload-ctl create homeassistant \
 ### TOML Schema Sections
 
 **[workload]** - Basic metadata
-- `name` (string, required): Workload name (max ~22 chars)
+- `name` (string, required): Workload name (max ~27 chars due to 32-char username limit)
 - `enabled` (boolean, default: true): Enable/disable
 
 **[container]** - Container configuration
 - `image` (string, required): Container image reference
-- `id` (string, required): Unique identifier (0-49999)
 - `command` (array): Override CMD/ENTRYPOINT
 - `pull` (string): Pull policy (missing/always/newer/never)
 
@@ -633,7 +634,7 @@ sudo workload-ctl create homeassistant \
 
 **Username Length:**
 - Max 32 characters (Linux LOGIN_NAME_MAX)
-- Workload names limited to ~22 chars
+- Workload names limited to ~27 chars (32 - 4 for `_wl-` prefix - 1)
 
 **Groups in Containers:**
 - Host GIDs shown as numbers (not names)
@@ -646,7 +647,7 @@ sudo workload-ctl create homeassistant \
 **No Automatic Cleanup:**
 - Disabled workloads leave users/homes/subuid ranges
 - Safety feature: prevents accidental data loss
-- Manual cleanup if needed
+- Use `workload-ctl cleanup --apply` for bulk removal of orphaned users/dirs
 
 ## Development Status
 
@@ -656,9 +657,10 @@ sudo workload-ctl create homeassistant \
 - ✅ GPU support (AMD, NVIDIA)
 - ✅ Secrets management (TPM2)
 - ✅ Resource limits (CPU, memory, I/O)
-- ✅ workload-ctl CLI
-- ✅ Device passthrough
-- ✅ Network modes
+- ✅ workload-ctl CLI (comprehensive Docker/kubectl-like interface)
+- ✅ Device passthrough (generic + convenience flags)
+- ✅ Network modes (pasta, host, none, custom)
+- ✅ Comprehensive documentation with quick reference tables
 
 **In Progress:**
 - ⏳ Network lifecycle management (custom networks)
@@ -680,6 +682,18 @@ Created to provide a complete virtualization platform as an immutable bootc imag
 - Developer experience (Docker/kubectl-like CLI)
 
 Built with assistance from Claude Code for rapid prototyping of the workload provisioning system.
+
+## Documentation Features
+
+The project includes comprehensive, well-structured documentation:
+- **Table of contents** with anchor links for easy navigation
+- **Quick reference tables** for common commands, resource limits, and device flags
+- **Consolidated sections** eliminating redundancy while preserving detail
+- **Troubleshooting guide** with common issues and solutions
+- **Security considerations** with risk levels for each device access group
+- **Complete examples** for common use cases
+
+Main documentation: `docs/workloads.md` (~1,400 lines, 33% shorter than original while preserving all information)
 
 ## Target Use Cases
 

@@ -125,6 +125,13 @@ jobs:
           docker-images: true   # Remove cached Docker images (doesn't affect podman)
           swap-storage: true    # ~4 GB - Remove swap file
 
+      - name: Fetch cosy
+        if: steps.should_build.outputs.run == 'true'
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
       - name: Build base hypervisor
         if: steps.should_build.outputs.run == 'true'
         run: |

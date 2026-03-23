@@ -1,0 +1,55 @@
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    adwaita-cursor-theme \
+    adwaita-icon-theme \
+    alsa-utils \
+    bash-completion \
+    dbus-daemon \
+    foot \
+    fuzzel \
+    grim \
+    htop \
+    labwc \
+    libevdev \
+    libinput \
+    libseat \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    mesa-libGL \
+    mesa-libgbm \
+    mesa-vulkan-drivers \
+    neovim \
+    pipewire \
+    pipewire-alsa \
+    pipewire-pulseaudio \
+    procps-ng \
+    slurp \
+    sudo \
+    swaybg \
+    systemd \
+    systemd-udev \
+    util-linux \
+    waybar \
+    wireplumber \
+    wl-clipboard \
+    xorg-x11-server-Xwayland \
+    && dnf clean all
+
+# Labwc config
+COPY --link --chmod=0644 labwc-config/rc.xml /etc/xdg/labwc/rc.xml
+COPY --link --chmod=0755 labwc-config/autostart /etc/xdg/labwc/autostart
+COPY --link --chmod=0644 labwc-config/waybar-config /etc/xdg/waybar/config
+
+# systemd services
+COPY --link --chmod=0644 systemd/labwc.service /usr/lib/systemd/system/labwc.service
+
+# Mask udevd — conflicts with host /run/udev:ro mount (KMS)
+RUN mkdir -p /etc/systemd/system && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    systemctl enable labwc
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

@@ -1,11 +1,4 @@
-# WARNING WARNING WARNING
-### This has not been thoroughly tested, and the implementation is AI-generated, so ... 
-### DO NOT count on this to be your sole mechanism to access important things.
-
-It would be wise to have a recovery plan regardless of system maturity.
-
----
-
+> **Disclaimer:** This documentation and the software it describes are provided as-is, without warranty of fitness for any particular purpose. The implementation is largely AI-assisted. Regardless of system maturity, maintain a recovery plan — do not rely on any single mechanism as the sole means of accessing critical secrets.
 
 # Secrets Management for Workloads
 
@@ -69,9 +62,9 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
 │    - Host key (/var/lib/systemd/credential.secret)              │
 │                                                                  │
 │  Writes decrypted secret to:                                    │
-│    /run/credentials/workload-jellyfin-1.service/api-key         │
+│    /run/credentials/workload-jellyfin.service/api-key         │
 │                                                                  │
-│  Permissions: _wl-jellyfin-1:root 0400 (read-only)              │
+│  Permissions: _wl-jellyfin:root 0400 (read-only)              │
 │  Location: tmpfs (RAM only, never hits disk)                    │
 └─────────────────────────────────────────────────────────────────┘
                            ↓
@@ -79,8 +72,8 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
 │ 3. RUNTIME (Service access)                                     │
 │                                                                  │
 │  Only the workload service can read its credentials:            │
-│    - Runs as user: _wl-jellyfin-1                               │
-│    - Sees: /run/credentials/workload-jellyfin-1.service/        │
+│    - Runs as user: _wl-jellyfin                               │
+│    - Sees: /run/credentials/workload-jellyfin.service/        │
 │    - Cannot see other workload's credentials                    │
 │                                                                  │
 │  Generator reads credential and:                                │
@@ -92,7 +85,7 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
 │ 4. SHUTDOWN (Automatic cleanup)                                 │
 │                                                                  │
 │  When service stops:                                            │
-│    - /run/credentials/workload-jellyfin-1.service/ deleted      │
+│    - /run/credentials/workload-jellyfin.service/ deleted      │
 │    - Memory cleared (tmpfs wiped)                               │
 │    - Encrypted credential remains safely on disk                │
 └─────────────────────────────────────────────────────────────────┘
@@ -168,23 +161,25 @@ sudo systemd-creds encrypt --with-key=host+tpm2 --name=my-secret - /etc/credstor
 Each service gets its own credential directory with strict permissions:
 
 ```bash
-# Jellyfin workload (user: _wl-jellyfin-1, UID: 10001)
-/run/credentials/workload-jellyfin-1.service/
+# Jellyfin workload (user: _wl-jellyfin, UID: 10001)
+/run/credentials/workload-jellyfin.service/
   ├── api-key          (owner: 10001:root, mode: 0400)
   └── db-password      (owner: 10001:root, mode: 0400)
 
-# Plex workload (user: _wl-plex-2, UID: 10002)
-/run/credentials/workload-plex-2.service/
+# Plex workload (user: _wl-plex, UID: 10002)
+/run/credentials/workload-plex.service/
   └── claim-token      (owner: 10002:root, mode: 0400)
 ```
 
 **Isolation guarantees:**
-- User `_wl-jellyfin-1` **cannot** read `_wl-plex-2`'s credentials
+- User `_wl-jellyfin` **cannot** read `_wl-plex`'s credentials
 - Even if jellyfin container is compromised, it cannot access plex secrets
 - Standard Linux DAC (discretionary access control) enforces this
 - No shared credential namespace
 
 ## How It Works
+
+> **Key point:** You do not need to manually declare credentials anywhere beyond the TOML config. The generator **automatically detects** every `${SECRET:name}` reference in `[container.environment]` and every credential listed in `[secrets.files]`, then emits the required `LoadCredentialEncrypted=` directives in the generated service file. Just use the syntax and the plumbing is handled for you.
 
 ### Workload Configuration (TOML)
 
@@ -193,7 +188,6 @@ Define secrets in your workload configuration:
 ```toml
 [workload]
 name = "jellyfin"
-id = "1"
 
 [container]
 image = "jellyfin/jellyfin:latest"
@@ -235,10 +229,10 @@ The systemd generator (`workload-generator`) runs during `daemon-reload` and pro
 3. **Converts** `${SECRET:name}` references in environment variables to shell command substitution:
    - TOML: `JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"`
    - Becomes: `--env JELLYFIN_API_KEY=$(<${CREDENTIALS_DIRECTORY}/jellyfin-api-key)`
-   - `${CREDENTIALS_DIRECTORY}` is set by systemd to `/run/credentials/workload-{name}-{id}.service`
+   - `${CREDENTIALS_DIRECTORY}` is set by systemd to `/run/credentials/workload-{name}.service`
 4. **Mounts** credential files into container:
    - TOML: `{ credential = "tls-cert", path = "/config/cert.pem" }`
-   - Becomes: `--volume /run/credentials/workload-jellyfin-1.service/tls-cert:/config/cert.pem:ro`
+   - Becomes: `--volume /run/credentials/workload-jellyfin.service/tls-cert:/config/cert.pem:ro`
 5. **Generates** ExecStart command with environment variables and volume mounts for `podman run`
 
 At service start time, the shell expands `$(<file)` to read the decrypted credentials.
@@ -271,7 +265,7 @@ When the workload service stops:
 #### Why Changes Don't Persist
 
 1. **Credentials live in tmpfs (RAM only)**
-   - Location: `/run/credentials/workload-{name}-{id}.service/`
+   - Location: `/run/credentials/workload-{name}.service/`
    - tmpfs = temporary filesystem in memory, never written to disk
    - All contents erased when service stops
 
@@ -350,7 +344,7 @@ sudo systemd-creds encrypt --with-key=tpm2 --name=tls-cert /path/to/cert.pem /et
 #### Verify Encryption
 
 ```bash
-# Encrypted files are base64-encoded (will show encoded text)
+# Encrypted files are binary blobs; cat will produce garbled terminal output
 sudo cat /etc/credstore.encrypted/jellyfin-api-key
 
 # Check file permissions (should be 600 or 644)
@@ -373,7 +367,6 @@ Create or edit `/etc/workloads.d/jellyfin.toml`:
 ```toml
 [workload]
 name = "jellyfin"
-id = "1"
 
 [container]
 image = "jellyfin/jellyfin:latest"
@@ -390,18 +383,18 @@ JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"
 sudo workload-ctl enable jellyfin
 
 # Check service status
-sudo systemctl status workload-jellyfin-1.service
+sudo systemctl status workload-jellyfin.service
 
 # View decrypted credentials (as root)
-sudo ls -la /run/credentials/workload-jellyfin-1.service/
-sudo cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo ls -la /run/credentials/workload-jellyfin.service/
+sudo cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 ```
 
 ### Verify Container Sees Environment Variable
 
 ```bash
 # Check environment inside container (using workload user for rootless containers)
-sudo -u _wl-jellyfin-1 podman exec workload-jellyfin-1 env | grep JELLYFIN_API_KEY
+sudo -u _wl-jellyfin podman exec workload-jellyfin env | grep JELLYFIN_API_KEY
 # Should show: JELLYFIN_API_KEY=my-super-secret-value
 
 # Or use workload-ctl if available (may not work for all setups)
@@ -418,7 +411,7 @@ echo -n "new-secret-value" | \
   sudo systemd-creds encrypt --with-key=tpm2 --name=jellyfin-api-key - /etc/credstore.encrypted/jellyfin-api-key
 
 # 2. Restart workload to pick up new secret
-sudo systemctl restart workload-jellyfin-1.service
+sudo systemctl restart workload-jellyfin.service
 ```
 
 #### Remove a Secret
@@ -430,7 +423,7 @@ sudo workload-ctl edit jellyfin
 
 # 2. Reload and restart
 sudo systemctl daemon-reload
-sudo systemctl restart workload-jellyfin-1.service
+sudo systemctl restart workload-jellyfin.service
 
 # 3. Optionally delete encrypted file
 sudo rm /etc/credstore.encrypted/jellyfin-api-key
@@ -450,7 +443,7 @@ After setting up secrets, you can verify they're working correctly and securely:
 
 ```bash
 # Check that systemd decrypted the credential to tmpfs (RAM-only)
-sudo ls -la /run/credentials/workload-jellyfin-1.service/
+sudo ls -la /run/credentials/workload-jellyfin.service/
 
 # Expected output:
 # dr-xr-x---+ 2 root root  60 <date> .
@@ -458,7 +451,7 @@ sudo ls -la /run/credentials/workload-jellyfin-1.service/
 # Note: The + indicates ACLs for user access
 
 # Verify the plaintext secret (should NOT be the encrypted blob)
-sudo cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 # Expected: my-super-secret-value (plaintext)
 # NOT: base64-encoded encrypted data
 ```
@@ -467,15 +460,15 @@ sudo cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
 
 ```bash
 # For rootless containers, use the workload user (NOT root's podman)
-# Get the workload user from the service name (e.g., _wl-jellyfin-1)
-WORKLOAD_USER="_wl-jellyfin-1"
+# Get the workload user from the service name (e.g., _wl-jellyfin)
+WORKLOAD_USER="_wl-jellyfin"
 
 # Check environment variables inside the running container
-sudo -u $WORKLOAD_USER podman exec workload-jellyfin-1 env | grep JELLYFIN_API_KEY
+sudo -u $WORKLOAD_USER podman exec workload-jellyfin env | grep JELLYFIN_API_KEY
 # Expected: JELLYFIN_API_KEY=my-super-secret-value
 
 # Verify mixed expansion (if using embedded secrets)
-sudo -u $WORKLOAD_USER podman exec workload-jellyfin-1 env | grep DATABASE_URL
+sudo -u $WORKLOAD_USER podman exec workload-jellyfin env | grep DATABASE_URL
 # Expected: DATABASE_URL=postgresql://dbuser:my-password@localhost:5432/myapp
 ```
 
@@ -485,11 +478,11 @@ sudo -u $WORKLOAD_USER podman exec workload-jellyfin-1 env | grep DATABASE_URL
 
 ```bash
 # Check that credentials are NOT readable by other users
-sudo -u nobody cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo -u nobody cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 # Expected: Permission denied
 
 # If you have multiple workloads, verify they can't see each other's secrets
-sudo -u _wl-plex-2 cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo -u _wl-plex cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 # Expected: Permission denied
 ```
 
@@ -497,11 +490,11 @@ sudo -u _wl-plex-2 cat /run/credentials/workload-jellyfin-1.service/jellyfin-api
 
 ```bash
 # Check ACLs on credential file (should show workload user has access)
-sudo getfacl /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo getfacl /run/credentials/workload-jellyfin.service/jellyfin-api-key
 
 # Expected output includes:
 # user::r--
-# user:_wl-jellyfin-1:r--
+# user:_wl-jellyfin:r--
 # This proves the workload user has read access via ACL
 ```
 
@@ -509,16 +502,16 @@ sudo getfacl /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
 
 ```bash
 # Stop the workload
-sudo systemctl stop workload-jellyfin-1.service
+sudo systemctl stop workload-jellyfin.service
 
 # Verify credentials directory is removed
-ls /run/credentials/workload-jellyfin-1.service/
+ls /run/credentials/workload-jellyfin.service/
 # Expected: No such file or directory
 
 # Restart and verify credentials are recreated
-sudo systemctl start workload-jellyfin-1.service
+sudo systemctl start workload-jellyfin.service
 sleep 2
-sudo cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
+sudo cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 # Expected: my-super-secret-value (recreated from encrypted file)
 ```
 
@@ -526,10 +519,10 @@ sudo cat /run/credentials/workload-jellyfin-1.service/jellyfin-api-key
 
 ```bash
 # If credentials aren't working, check systemd logs
-sudo journalctl -u workload-jellyfin-1.service | grep -i credential
+sudo journalctl -u workload-jellyfin.service | grep -i credential
 
 # Verify the service file has LoadCredentialEncrypted
-sudo grep LoadCredential /run/systemd/generator/workload-jellyfin-1.service
+sudo grep LoadCredential /run/systemd/generator/workload-jellyfin.service
 # Expected: LoadCredentialEncrypted=jellyfin-api-key:/etc/credstore.encrypted/jellyfin-api-key
 
 # Test manual decryption
@@ -543,8 +536,7 @@ Run this complete test to verify everything works:
 
 ```bash
 WORKLOAD="jellyfin"
-WORKLOAD_ID="1"
-WORKLOAD_USER="_wl-jellyfin-1"
+WORKLOAD_USER="_wl-jellyfin"
 SECRET_NAME="jellyfin-api-key"
 
 echo "=== Secrets Verification Checklist ==="
@@ -559,16 +551,16 @@ sudo systemd-creds decrypt "/etc/credstore.encrypted/$SECRET_NAME" - >/dev/null 
 
 # 3. Service is running
 echo -n "3. Workload service running: "
-sudo systemctl is-active workload-$WORKLOAD-$WORKLOAD_ID.service >/dev/null 2>&1 && echo "✓" || echo "✗"
+sudo systemctl is-active workload-$WORKLOAD.service >/dev/null 2>&1 && echo "✓" || echo "✗"
 
 # 4. Credentials directory exists
 echo -n "4. Credentials directory exists: "
-[[ -d "/run/credentials/workload-$WORKLOAD-$WORKLOAD_ID.service" ]] && echo "✓" || echo "✗"
+[[ -d "/run/credentials/workload-$WORKLOAD.service" ]] && echo "✓" || echo "✗"
 
-# 5. Credential is decrypted (plaintext, not base64/encrypted blob)
+# 5. Credential is decrypted (plaintext, not encrypted binary blob)
 echo -n "5. Credential is plaintext: "
-CRED_CONTENT=$(sudo cat "/run/credentials/workload-$WORKLOAD-$WORKLOAD_ID.service/$SECRET_NAME" 2>/dev/null)
-# Check: not empty, less than 200 bytes (encrypted blobs are typically 150+ bytes of base64)
+CRED_CONTENT=$(sudo cat "/run/credentials/workload-$WORKLOAD.service/$SECRET_NAME" 2>/dev/null)
+# Check: not empty, less than 200 bytes (encrypted blobs are much larger binary objects)
 if [[ -n "$CRED_CONTENT" ]] && [[ ${#CRED_CONTENT} -lt 200 ]]; then
     echo "✓"
 else
@@ -577,11 +569,11 @@ fi
 
 # 6. Container is running
 echo -n "6. Container is running: "
-sudo -u $WORKLOAD_USER podman ps --filter "name=workload-$WORKLOAD-$WORKLOAD_ID" --quiet | grep -q . && echo "✓" || echo "✗"
+sudo -u $WORKLOAD_USER podman ps --filter "name=workload-$WORKLOAD" --quiet | grep -q . && echo "✓" || echo "✗"
 
 # 7. Environment variable is set in container (customize JELLYFIN_API_KEY to match your env var)
 echo -n "7. Secret in container env: "
-sudo -u $WORKLOAD_USER podman exec workload-$WORKLOAD-$WORKLOAD_ID env 2>/dev/null | grep -q "JELLYFIN_API_KEY" && echo "✓" || echo "✗"
+sudo -u $WORKLOAD_USER podman exec workload-$WORKLOAD env 2>/dev/null | grep -q "JELLYFIN_API_KEY" && echo "✓" || echo "✗"
 
 echo ""
 echo "If all checks show ✓, your secrets are working correctly!"
@@ -667,7 +659,7 @@ Combine both strategies:
 
 | Attack Vector | Protected? | Explanation |
 |--------------|------------|-------------|
-| **Steal encrypted .cred file** | ✅ YES | Encrypted with TPM2/host key - useless without the machine |
+| **Steal encrypted credential file** | ✅ YES | Encrypted with TPM2/host key - useless without the machine |
 | **Shell as workload user** | ⚠️ PARTIAL | Can read own workload's credentials but NOT other workloads |
 | **Root on running system** | ❌ NO | Root can read `/run/credentials/` (all secrets decrypted in memory) |
 | **Modify credentials in container** | ✅ YES | Changes only in tmpfs RAM, lost on restart - fresh decryption restores originals |
@@ -675,7 +667,7 @@ Combine both strategies:
 | **Swap TPM2 chip** | ✅ YES | TPM2 is unique per machine, can't decrypt on different TPM |
 | **Boot malicious USB/kernel** | ✅ YES* | *IF using PCR policy (see Advanced Configuration) |
 | **Container escape to host** | ⚠️ PARTIAL | Can read own service's credentials, but not encryption keys |
-| **Backup tape stolen** | ✅ YES | Backups contain encrypted .cred files only |
+| **Backup tape stolen** | ✅ YES | Backups contain encrypted credential files only |
 | **Network sniffing** | ✅ YES | Secrets never transmitted over network |
 | **Memory dump (cold boot)** | ⚠️ MAYBE | Depends on attack timing, tmpfs may retain data briefly |
 | **Compromised container registry** | ✅ YES | Secrets not in images, only in encrypted credentials |
@@ -866,7 +858,6 @@ Organize credentials by sensitivity:
 # /etc/workloads.d/myapp.toml
 [workload]
 name = "myapp"
-id = "5"
 
 [container]
 image = "myapp:latest"
@@ -885,7 +876,7 @@ echo -n "sk-1234567890abcdef" | \
 sudo workload-ctl enable myapp
 
 # Verify (use the workload user for rootless containers)
-sudo -u _wl-myapp-5 podman exec workload-myapp-5 env | grep API_KEY
+sudo -u _wl-myapp podman exec workload-myapp env | grep API_KEY
 ```
 
 ### Example 2: Multiple Secrets + Config File
@@ -894,7 +885,6 @@ sudo -u _wl-myapp-5 podman exec workload-myapp-5 env | grep API_KEY
 # /etc/workloads.d/database.toml
 [workload]
 name = "postgres"
-id = "10"
 
 [container]
 image = "postgres:16"
@@ -925,7 +915,6 @@ sudo systemd-creds encrypt --with-key=tpm2 --name=tls-key /path/to/server.key /e
 # /etc/workloads.d/tailscale.toml (baked into image)
 [workload]
 name = "tailscale"
-id = "99"
 
 [container]
 image = "tailscale/tailscale:latest"

@@ -1,6 +1,7 @@
 #!/usr/bin/env just --justfile
 
 proxy := env_var_or_default('HTTP_PROXY', '')
+build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 
 tag := `date +%Y%m%d-%H%M`
 
@@ -66,7 +67,20 @@ build-minimal version="43" rechunk="false":
   echo "Build complete: localhost/fedora-bootc-minimal:{{version}}"
   echo "Image available in both root and user storage"
 
-build-base:
+sync-cosy:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  mkdir -p bin man
+  if [ -f ../cosy/src/cosy ] && [ -f ../cosy/src/cosy.1 ]; then
+    cp ../cosy/src/cosy bin/cosy
+    cp ../cosy/src/cosy.1 man/cosy.1
+  else
+    echo "Local cosy not found, fetching from GitHub..."
+    curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+    curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+  fi
+
+build-base: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   # Use permissive policy for local builds
@@ -82,7 +96,7 @@ build-base:
   -f hypervisor.Containerfile .
 
 # Local testing - use locally-built minimal (whatever version you built)
-build-base-local:
+build-base-local: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   # Use permissive policy for local builds
@@ -90,14 +104,11 @@ build-base-local:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
   --network=host \
-  --layers=false \
   --from localhost/fedora-bootc-minimal:latest \
   --build-arg ENABLE_PASSWORDLESS_SUDO=true \
   --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-  -t localhost/hypervisor-bootc:local \
   -t localhost/hypervisor-bootc:latest \
   -t registry.local:5000/hypervisor-bootc:latest \
-  -t registry.local:5000/hypervisor-bootc:local \
   -f hypervisor.Containerfile .
 
 build-nvidia-rpmfusion:
@@ -162,7 +173,7 @@ build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
 build-all-local: build-base build-amd-local build-nvidia-rpmfusion-local build-nvidia-negativo17-local
 
 build-iso-minimal rootfs="xfs":
-  @mkdir -p store output/minimal rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/minimal {{build_dir}}/rpmmd
   @echo "Pulling image from ghcr.io..."
   sudo podman pull ghcr.io/bensmith/fedora-bootc-minimal:latest
   sudo podman run \
@@ -170,10 +181,10 @@ build-iso-minimal rootfs="xfs":
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/minimal:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/minimal:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -184,11 +195,11 @@ build-iso-minimal rootfs="xfs":
       --type anaconda-iso \
     ghcr.io/bensmith/fedora-bootc-minimal:latest
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/minimal/bootiso/install.iso output/fedora-bootc-minimal-{{tag}}.iso "BOOTC-MIN"
-  @echo "ISO ready: output/fedora-bootc-minimal-{{tag}}.iso (label: BOOTC-MIN)"
+  @just relabel-iso {{build_dir}}/output/minimal/bootiso/install.iso {{build_dir}}/output/fedora-bootc-minimal-{{tag}}.iso "BOOTC-MIN"
+  @echo "ISO ready: {{build_dir}}/output/fedora-bootc-minimal-{{tag}}.iso (label: BOOTC-MIN)"
 
 build-iso-base rootfs="xfs":
-  @mkdir -p store output/base rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/base {{build_dir}}/rpmmd
   @echo "Copying image to rootful storage..."
   sudo podman pull ghcr.io/bensmith/hypervisor-bootc:latest
   sudo podman run \
@@ -196,10 +207,10 @@ build-iso-base rootfs="xfs":
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/base:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/base:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -210,11 +221,11 @@ build-iso-base rootfs="xfs":
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-bootc
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
-  @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
+  @just relabel-iso {{build_dir}}/output/base/bootiso/install.iso {{build_dir}}/output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
 
 build-iso-base-local rootfs="xfs":
-  @mkdir -p store output/base rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/base {{build_dir}}/rpmmd
   @echo "Copying image to rootful storage..."
   sudo podman pull box:5000/hypervisor-bootc:latest
   sudo podman run \
@@ -222,10 +233,10 @@ build-iso-base-local rootfs="xfs":
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/base:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/base:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -236,11 +247,11 @@ build-iso-base-local rootfs="xfs":
       --type anaconda-iso \
     box:5000/hypervisor-bootc
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/base/bootiso/install.iso output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
-  @echo "ISO ready: output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
+  @just relabel-iso {{build_dir}}/output/base/bootiso/install.iso {{build_dir}}/output/hypervisor-bootc-{{tag}}.iso "HV-BASE"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-bootc-{{tag}}.iso (label: HV-BASE)"
 
 build-iso-nvidia-rpmfusion rootfs="xfs":
-  @mkdir -p store output/nvidia-rpmfusion rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/nvidia-rpmfusion {{build_dir}}/rpmmd
   @echo "Pulling image from ghcr.io..."
   sudo podman pull ghcr.io/bensmith/hypervisor-nvidia:rpmfusion
   sudo podman run \
@@ -248,10 +259,10 @@ build-iso-nvidia-rpmfusion rootfs="xfs":
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/nvidia-rpmfusion:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/nvidia-rpmfusion:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -262,11 +273,11 @@ build-iso-nvidia-rpmfusion rootfs="xfs":
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-nvidia:rpmfusion
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/nvidia-rpmfusion/bootiso/install.iso output/hypervisor-nvidia-rpmfusion-{{tag}}.iso "HV-NV-RPMFUSION"
-  @echo "ISO ready: output/hypervisor-nvidia-rpmfusion-{{tag}}.iso (label: HV-NV-RPMFUSION)"
+  @just relabel-iso {{build_dir}}/output/nvidia-rpmfusion/bootiso/install.iso {{build_dir}}/output/hypervisor-nvidia-rpmfusion-{{tag}}.iso "HV-NV-RPMFUSION"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-nvidia-rpmfusion-{{tag}}.iso (label: HV-NV-RPMFUSION)"
 
 build-iso-nvidia-negativo17 rootfs="xfs":
-  @mkdir -p store output/nvidia-negativo17 rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/nvidia-negativo17 {{build_dir}}/rpmmd
   @echo "Pulling image from ghcr.io..."
   sudo podman pull ghcr.io/bensmith/hypervisor-nvidia:negativo17
   sudo podman run \
@@ -274,10 +285,10 @@ build-iso-nvidia-negativo17 rootfs="xfs":
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/nvidia-negativo17:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/nvidia-negativo17:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -288,22 +299,22 @@ build-iso-nvidia-negativo17 rootfs="xfs":
       --type anaconda-iso \
     ghcr.io/bensmith/hypervisor-nvidia:negativo17
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/nvidia-negativo17/bootiso/install.iso output/hypervisor-nvidia-negativo17-{{tag}}.iso "HV-NV-NEG17"
-  @echo "ISO ready: output/hypervisor-nvidia-negativo17-{{tag}}.iso (label: HV-NV-NEG17)"
+  @just relabel-iso {{build_dir}}/output/nvidia-negativo17/bootiso/install.iso {{build_dir}}/output/hypervisor-nvidia-negativo17-{{tag}}.iso "HV-NV-NEG17"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-nvidia-negativo17-{{tag}}.iso (label: HV-NV-NEG17)"
 
 build-iso-amd rootfs="xfs":
-  @mkdir -p store output/amd rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/amd {{build_dir}}/rpmmd
   @echo "Pulling image from ghcr.io..."
-  sudo podman pull ghcr.io/bensmith/hypervisor-amd
+  sudo podman pull ghcr.io/bensmith/hypervisor-amd:latest
   sudo podman run \
     --privileged \
     --pull=newer \
     --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/amd:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/amd:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -312,13 +323,39 @@ build-iso-amd rootfs="xfs":
       --rpmmd /rpmmd \
       --store /store \
       --type anaconda-iso \
-    ghcr.io/bensmith/hypervisor-amd
+    ghcr.io/bensmith/hypervisor-amd:latest
   @echo "Relabeling and copying ISO..."
-  @just relabel-iso output/amd/bootiso/install.iso output/hypervisor-amd-{{tag}}.iso "HV-AMD"
-  @echo "ISO ready: output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
+  @just relabel-iso {{build_dir}}/output/amd/bootiso/install.iso {{build_dir}}/output/hypervisor-amd-{{tag}}.iso "HV-AMD"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
+
+build-iso-amd-local rootfs="xfs":
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/amd {{build_dir}}/rpmmd
+  @echo "Pulling image from ghcr.io..."
+  sudo podman pull registry.local:5000/hypervisor-amd:latest
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config-iso.toml:/config.toml:ro \
+    -v {{build_dir}}/output/amd:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs {{rootfs}} \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type anaconda-iso \
+    registry.local:5000/hypervisor-amd:latest
+  @echo "Relabeling and copying ISO..."
+  @just relabel-iso {{build_dir}}/output/amd/bootiso/install.iso {{build_dir}}/output/hypervisor-amd-{{tag}}.iso "HV-AMD"
+  @echo "ISO ready: {{build_dir}}/output/hypervisor-amd-{{tag}}.iso (label: HV-AMD)"
 
 build-qcow2-base rootfs="xfs":
-  @mkdir -p store output/base-qcow2 rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/base-qcow2 {{build_dir}}/rpmmd
   @echo "Pulling image from ghcr.io..."
   sudo podman pull ghcr.io/bensmith/hypervisor-bootc:latest
   sudo podman run \
@@ -327,9 +364,9 @@ build-qcow2-base rootfs="xfs":
     --rm \
     --security-opt label=type:unconfined_t \
     -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/base-qcow2:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v {{build_dir}}/output/base-qcow2:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -339,11 +376,11 @@ build-qcow2-base rootfs="xfs":
       --store /store \
       --type qcow2 \
     ghcr.io/bensmith/hypervisor-bootc
-  @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
-  @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
+  @echo "QCOW2 image ready: {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2"
+  @echo "To use: sudo cp {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
 
 build-qcow2-base-local rootfs="xfs" size="20G":
-  @mkdir -p store output/base-qcow2 rpmmd
+  @mkdir -p {{build_dir}}/store {{build_dir}}/output/base-qcow2 {{build_dir}}/rpmmd
   @echo "Pulling image from local registry..."
   sudo podman pull box:5000/hypervisor-bootc:latest
   sudo podman run \
@@ -352,9 +389,9 @@ build-qcow2-base-local rootfs="xfs" size="20G":
     --rm \
     --security-opt label=type:unconfined_t \
     -v $(pwd)/config.toml:/config.toml:ro \
-    -v $(pwd)/output/base-qcow2:/output \
-    -v $(pwd)/rpmmd:/rpmmd \
-    -v $(pwd)/store:/store \
+    -v {{build_dir}}/output/base-qcow2:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     quay.io/centos-bootc/bootc-image-builder:latest build \
       --chown $(id -u):$(id -g) \
@@ -365,9 +402,9 @@ build-qcow2-base-local rootfs="xfs" size="20G":
       --type qcow2 \
     box:5000/hypervisor-bootc
   @echo "Resizing disk to {{size}}..."
-  qemu-img resize output/base-qcow2/qcow2/disk.qcow2 {{size}}
-  @echo "QCOW2 image ready: output/base-qcow2/qcow2/disk.qcow2"
-  @echo "To use: sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
+  qemu-img resize {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2 {{size}}
+  @echo "QCOW2 image ready: {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2"
+  @echo "To use: sudo cp {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/hypervisor-{{tag}}.qcow2"
 
 
 # All-in-one: build container, build qcow2, and deploy to libvirt VM
@@ -379,7 +416,7 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
 
   echo ""
   echo "=== Step 1.5: Pushing image to local registry ==="
-  podman push box:5000/hypervisor-bootc:latest
+  podman push registry.local:5000/hypervisor-bootc:latest
 
   echo ""
   echo "=== Step 2: Building qcow2 disk image ==="
@@ -390,7 +427,7 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
 
   # Copy to system libvirt storage
   sudo mkdir -p /var/lib/libvirt/images
-  sudo cp output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2
+  sudo cp {{build_dir}}/output/base-qcow2/qcow2/disk.qcow2 /var/lib/libvirt/images/{{vmname}}-{{tag}}.qcow2
 
   # Destroy old VM if it exists
   if sudo virsh dominfo {{vmname}} &>/dev/null; then
@@ -472,7 +509,7 @@ relabel-iso input output label:
 
   # Create temporary directory for ISO extraction
   TMPDIR=$(mktemp -d)
-  trap "rm -rf $TMPDIR" EXIT
+  trap "sudo rm -rf $TMPDIR" EXIT
 
   # Mount the original ISO
   MOUNT_DIR="$TMPDIR/mount"
@@ -518,6 +555,248 @@ relabel-iso input output label:
   sudo chown $(id -u):$(id -g) "{{output}}"
 
   echo "ISO relabeled successfully: {{output}}"
+
+test:
+  PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+test-unit:
+  PYTHONPATH=lib python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env -v
+
+test-integration:
+  PYTHONPATH=lib python3 -m unittest tests.test_integration -v
+
+# ---------------------------------------------------------------------------
+# VM integration tests (requires sudo, QEMU, swtpm)
+# ---------------------------------------------------------------------------
+
+# Build the test VM image: base hypervisor image + test workload configs
+test-vm-build:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  echo "=== Building base image (if needed) ==="
+  # Ensure the base image exists locally
+  if ! podman image exists localhost/hypervisor-bootc:latest; then
+    echo "Base image not found. Building with: just build-base-local"
+    just build-base-local
+  fi
+
+  echo ""
+  echo "=== Building test VM image ==="
+  podman build --no-cache \
+    -f tests/vm/test-vm.Containerfile \
+    -t localhost/hypervisor-test:latest \
+    tests/vm/
+
+  echo ""
+  echo "=== Copying image to rootful storage ==="
+  podman save localhost/hypervisor-test:latest | sudo podman load
+
+  echo ""
+  echo "=== Building qcow2 disk ==="
+  mkdir -p {{build_dir}}/store {{build_dir}}/output/test-vm {{build_dir}}/rpmmd
+
+  sudo podman run \
+    --privileged \
+    --pull=newer \
+    --rm \
+    --security-opt label=type:unconfined_t \
+    -v $(pwd)/config.toml:/config.toml:ro \
+    -v {{build_dir}}/output/test-vm:/output \
+    -v {{build_dir}}/rpmmd:/rpmmd \
+    -v {{build_dir}}/store:/store \
+    -v /var/lib/containers/storage:/var/lib/containers/storage \
+    quay.io/centos-bootc/bootc-image-builder:latest build \
+      --chown $(id -u):$(id -g) \
+      --output /output \
+      --rootfs xfs \
+      --rpmmd /rpmmd \
+      --store /store \
+      --type qcow2 \
+    localhost/hypervisor-test:latest
+
+  echo ""
+  echo "Test VM disk ready: {{build_dir}}/output/test-vm/qcow2/disk.qcow2"
+
+# Boot test VM interactively for debugging (graphics + no auto-teardown)
+test-vm-debug memory="4096" vcpus="2":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  VMNAME="workload-test-debug"
+  DISK="{{build_dir}}/output/test-vm/qcow2/disk.qcow2"
+  if [ ! -f "$DISK" ]; then
+    echo "Test VM disk not found. Run: just test-vm-build"
+    exit 1
+  fi
+
+  DISK_PATH="/var/lib/libvirt/images/${VMNAME}.qcow2"
+
+  # Clean up any previous debug VM
+  sudo virsh destroy "$VMNAME" 2>/dev/null || true
+  sudo virsh undefine "$VMNAME" --nvram 2>/dev/null || true
+  sudo rm -f "$DISK_PATH"
+
+  sudo cp "$DISK" "$DISK_PATH"
+  sudo qemu-img resize "$DISK_PATH" 20G
+
+  echo "=== Creating debug VM '$VMNAME' ==="
+  sudo virt-install \
+    --name "$VMNAME" \
+    --memory {{memory}} \
+    --vcpus {{vcpus}} \
+    --disk "path=$DISK_PATH,format=qcow2" \
+    --import \
+    --os-variant fedora41 \
+    --network network=default \
+    --tpm backend.type=emulator,backend.version=2.0,model=tpm-tis \
+    --graphics spice,gl.enable=yes,listen=none \
+    --video virtio \
+    --noautoconsole
+
+  echo ""
+  echo "VM '$VMNAME' is running. Connect with:"
+  echo "  sudo virt-viewer $VMNAME"
+  echo ""
+  echo "When done:"
+  echo "  sudo virsh destroy $VMNAME"
+  echo "  sudo virsh undefine $VMNAME --nvram"
+  echo "  sudo rm /var/lib/libvirt/images/${VMNAME}.qcow2"
+
+# Run VM integration tests: boot a test VM with libvirt+SWTPM, run tests via SSH, tear down
+test-vm timeout="300" memory="4096" vcpus="2" console="false":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  VMNAME="workload-test-$$"
+  DISK="{{build_dir}}/output/test-vm/qcow2/disk.qcow2"
+  if [ ! -f "$DISK" ]; then
+    echo "Test VM disk not found. Run: just test-vm-build"
+    exit 1
+  fi
+
+  # Copy disk to libvirt storage (virt-install needs it accessible to qemu user)
+  DISK_PATH="/var/lib/libvirt/images/${VMNAME}.qcow2"
+  CONSOLE_LOG="/tmp/${VMNAME}-console.log"
+
+  cleanup() {
+    echo "Cleaning up..."
+    [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null || true
+    sudo virsh destroy "$VMNAME" 2>/dev/null || true
+    sudo virsh undefine "$VMNAME" --nvram 2>/dev/null || true
+    sudo rm -f "$DISK_PATH"
+    sudo rm -f "$CONSOLE_LOG"
+  }
+  trap cleanup EXIT
+
+  echo "=== Preparing test VM disk ==="
+  sudo cp "$DISK" "$DISK_PATH"
+  sudo qemu-img resize "$DISK_PATH" 20G
+
+  echo "=== Creating test VM '$VMNAME' ==="
+  sudo virt-install \
+    --name "$VMNAME" \
+    --memory {{memory}} \
+    --vcpus {{vcpus}} \
+    --disk "path=$DISK_PATH,format=qcow2" \
+    --import \
+    --os-variant fedora41 \
+    --network network=default \
+    --tpm backend.type=emulator,backend.version=2.0,model=tpm-tis \
+    --serial file,path="$CONSOLE_LOG" \
+    --graphics spice,gl.enable=yes,listen=none \
+    --video virtio \
+    --noautoconsole
+
+  # Tail serial console in background (libvirt creates the file)
+  if [ "{{console}}" = "true" ]; then
+    sudo tail -f "$CONSOLE_LOG" 2>/dev/null &
+    TAIL_PID=$!
+  fi
+
+  # Wait for VM to get an IP address
+  echo "Waiting for VM IP..."
+  elapsed=0
+  ip_addr=""
+  while [ $elapsed -lt {{timeout}} ]; do
+    ip_addr=$(sudo virsh domifaddr "$VMNAME" 2>/dev/null \
+      | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
+    if [ -n "$ip_addr" ]; then
+      break
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+    echo -n "."
+  done
+  echo ""
+
+  if [ -z "$ip_addr" ]; then
+    echo "FAIL: VM did not get an IP after {{timeout}}s"
+    echo ""
+    echo "Console log: $CONSOLE_LOG"
+    echo "Debug with:  sudo virt-viewer $VMNAME"
+    echo "Cleanup:     sudo virsh destroy $VMNAME && sudo virsh undefine $VMNAME --nvram"
+    [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null || true
+    trap - EXIT  # Don't auto-cleanup so user can debug
+    exit 1
+  fi
+
+  echo "VM IP: $ip_addr"
+
+  # Wait for SSH to become available (password from config.toml)
+  SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+  if command -v sshpass &>/dev/null; then
+    SSH="sshpass -p password123 ssh $SSH_OPTS ben@$ip_addr"
+  else
+    echo "WARNING: sshpass not installed. Install with: sudo dnf install sshpass"
+    echo "Falling back to key-based auth"
+    SSH="ssh $SSH_OPTS ben@$ip_addr"
+  fi
+
+  echo "Waiting for SSH..."
+  while [ $elapsed -lt {{timeout}} ]; do
+    if $SSH true 2>/dev/null; then
+      break
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+    echo -n "."
+  done
+  echo ""
+
+  if [ $elapsed -ge {{timeout}} ]; then
+    echo "FAIL: SSH not available after {{timeout}}s"
+    echo ""
+    echo "Console log: $CONSOLE_LOG"
+    echo "Debug with:  sudo virt-viewer $VMNAME"
+    echo "Cleanup:     sudo virsh destroy $VMNAME && sudo virsh undefine $VMNAME --nvram"
+    [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null || true
+    trap - EXIT
+    exit 1
+  fi
+
+  echo "SSH available after ${elapsed}s"
+  sleep 2
+
+  # Run the test script inside the VM
+  echo ""
+  echo "=== Running VM tests ==="
+  if $SSH "sudo /usr/local/bin/run-vm-tests"; then
+    echo ""
+    echo "=== VM tests PASSED ==="
+    RC=0
+  else
+    echo ""
+    echo "=== VM tests FAILED ==="
+    RC=1
+  fi
+
+  # Shut down VM (cleanup trap handles destroy + undefine)
+  echo "Shutting down VM..."
+  $SSH "sudo poweroff" 2>/dev/null || true
+  sleep 3
+
+  exit $RC
 
 build-all-isos rootfs="xfs":
   just build-iso-base {{rootfs}}

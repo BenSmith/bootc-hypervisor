@@ -1,0 +1,62 @@
+# VPN SOCKS5 Proxy - SOCKS5 proxy tunneled through WireGuard VPN
+#
+# Runs a SOCKS5 proxy (microsocks) inside the container's own network namespace.
+# All proxy traffic exits via WireGuard VPN. Host traffic is unaffected.
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/socks5-vpn && sudo ./build.sh
+#
+#   2. Copy WireGuard config and enable:
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/socks5-vpn/wg0.conf
+#        sudo workload-ctl enable socks5-vpn
+#
+#   3. Use the proxy (binds to 127.0.0.1:1080 on the host):
+#        curl --socks5 127.0.0.1:1080 https://ipinfo.io/ip
+#        export https_proxy=socks5h://127.0.0.1:1080
+
+[workload]
+name = "socks5-vpn"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./wg0.conf", hint = "WireGuard client config from your VPN provider" },
+]
+
+[container]
+image = "localhost/socks5-vpn:latest"
+pull = "never"
+
+[container.health]
+cmd = "wg show wg0 > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "15s"
+on_failure = "kill"
+
+[container.environment]
+WG_INTERFACE = "wg0"
+SOCKS_PORT = "1080"
+
+[storage]
+volumes = [
+    "./wg0.conf:/etc/wireguard/wg0.conf:ro",
+]
+
+[network]
+# pasta: container has its own network namespace, CAP_NET_ADMIN works for WireGuard.
+# Port bound to 127.0.0.1 only — proxy is for local use. Change to 0.0.0.0:1080:1080
+# to expose on the network (add firewall rules accordingly).
+mode = "pasta"
+ports = ["127.0.0.1:1080:1080"]
+
+[security]
+# userns=host: wg-quick requires root inside the container.
+# Container UID 0 maps to the workload user on the host — no actual host root access.
+userns = "host"
+capabilities = ["NET_ADMIN"]
+
+[resources]
+memory_max = "128M"
+memory_high = "96M"
+cpu_quota = "20%"

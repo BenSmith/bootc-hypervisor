@@ -1,0 +1,15 @@
+FROM docker.io/pihole/pihole:latest
+
+LABEL org.opencontainers.image.title="Pi-hole with VPN DNS"
+LABEL org.opencontainers.image.description="Pi-hole ad blocker with upstream DNS queries routed through WireGuard VPN"
+
+RUN apk add --no-cache wireguard-tools iproute2
+
+# wireguard-tools creates /etc/wireguard with mode 700; placeholder ensures
+# podman bind-mounts wg0.conf as a file rather than creating a directory.
+RUN touch /etc/wireguard/wg0.conf
+
+COPY --link entrypoint.sh /vpn-entrypoint.sh
+RUN chmod +x /vpn-entrypoint.sh
+
+ENTRYPOINT ["/vpn-entrypoint.sh"]

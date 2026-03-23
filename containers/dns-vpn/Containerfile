@@ -1,0 +1,19 @@
+FROM registry.fedoraproject.org/fedora:43
+
+LABEL org.opencontainers.image.title="DNS-over-VPN Proxy"
+LABEL org.opencontainers.image.description="DNS proxy forwarding queries through WireGuard VPN"
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    wireguard-tools \
+    iproute \
+    dnsmasq \
+    && dnf clean all
+
+# wireguard-tools creates /etc/wireguard with mode 700; placeholder ensures
+# podman bind-mounts wg0.conf as a file rather than creating a directory.
+RUN touch /etc/wireguard/wg0.conf
+
+COPY --link entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

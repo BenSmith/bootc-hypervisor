@@ -1,0 +1,43 @@
+# Test workload: Prometheus server (scrapes node-exporter, evaluates alert rules)
+[workload]
+name = "prometheus-server"
+enabled = true
+
+[setup]
+required_files = [
+    { path = "./prometheus.yml", hint = "Prometheus scrape config" },
+]
+
+[container]
+image = "192.168.0.64:5000/prometheus/prometheus:latest"
+pull = "missing"
+command = [
+    "--config.file=/etc/prometheus/prometheus.yml",
+    "--storage.tsdb.path=/prometheus",
+    "--storage.tsdb.retention.time=1d",
+    "--web.enable-lifecycle",
+]
+
+[container.health]
+cmd = "wget -qO- http://localhost:9090/-/ready > /dev/null || exit 1"
+interval = "15s"
+start_period = "30s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+    "./rules:/etc/prometheus/rules:ro",
+    "./data:/prometheus",
+]
+
+[security]
+userns = "keep-id:uid=65534,gid=65534"
+
+[network]
+mode = "host"
+
+[resources]
+memory_max = "512M"
+memory_high = "384M"
+cpu_quota = "50%"

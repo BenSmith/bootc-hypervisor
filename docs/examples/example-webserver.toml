@@ -1,0 +1,21 @@
+# Simple test workload - nginx web server (rootless-compatible)
+# No GPU or special hardware needed
+
+[workload]
+name = "example-webserver"
+enabled = false
+
+[container]
+# Use nginx-unprivileged image designed for rootless containers
+# This image runs nginx on port 8080 internally (not 80)
+image = "docker.io/nginxinc/nginx-unprivileged:alpine"
+
+[network]
+# Network modes:
+#   "pasta"      - Default, isolated with port forwarding (recommended)
+#   "host"       - Share host network (no isolation, maximum performance)
+#   "none"       - No networking
+#   "mynetwork"  - Custom network (create first: podman network create mynetwork)
+mode = "pasta"  # Default mode, can be omitted
+# nginx-unprivileged listens on port 8080 internally - ipv4 only
+ports = ["8080:8080"]

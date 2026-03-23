@@ -1,0 +1,27 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 30,
+    "modules-left": ["custom/launcher", "wlr/taskbar"],
+    "modules-right": ["cpu", "memory", "clock"],
+    "custom/launcher": {
+        "format": " Apps",
+        "on-click": "fuzzel"
+    },
+    "wlr/taskbar": {
+        "format": "{title}",
+        "on-click": "activate"
+    },
+    "cpu": {
+        "format": "CPU {usage}%",
+        "interval": 5
+    },
+    "memory": {
+        "format": "RAM {percentage}%",
+        "interval": 5
+    },
+    "clock": {
+        "format": "{:%H:%M}",
+        "format-alt": "{:%Y-%m-%d %H:%M}"
+    }
+}

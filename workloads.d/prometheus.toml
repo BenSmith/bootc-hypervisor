@@ -1,0 +1,72 @@
+# Prometheus Node Exporter - System metrics collector
+# Exposes hardware and OS metrics for Prometheus monitoring
+# Access metrics at http://<host-ip>:9100/metrics
+#
+# Setup:
+#   1. Enable the workload:
+#        sudo workload-ctl enable prometheus
+#
+#   2. Configure firewall to allow metrics port:
+#        sudo firewall-cmd --add-port=9100/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only (more secure):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="9100" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+#   3. Test metrics endpoint:
+#        curl http://localhost:9100/metrics
+#
+#   4. Configure Prometheus server to scrape this exporter:
+#        scrape_configs:
+#          - job_name: 'node'
+#            static_configs:
+#              - targets: ['<host>:9100']
+
+[workload]
+name = "prometheus"
+enabled = false
+
+[container]
+# Official Prometheus node-exporter image
+image = "quay.io/prometheus/node-exporter:latest"
+
+# Node exporter command with standard collector flags + textfile collector
+# for workload metrics written by workload-metrics timer
+command = [
+    "--path.rootfs=/host",
+    "--path.procfs=/host/proc",
+    "--path.sysfs=/host/sys",
+    "--collector.textfile.directory=/textfile"
+]
+
+[container.health]
+cmd = "wget -qO- http://localhost:9100/metrics > /dev/null || exit 1"
+interval = "30s"
+start_period = "10s"
+on_failure = "kill"
+
+[storage]
+# Mount host filesystem as read-only for metric collection
+# Textfile directory receives workload metrics from host timer
+volumes = [
+    "/:/host:ro,rslave",
+    "/proc:/host/proc:ro,rslave",
+    "/sys:/host/sys:ro,rslave",
+    "/var/lib/prometheus/node-exporter:/textfile:ro",
+]
+
+[network]
+# Use pasta mode for network isolation with port forwarding
+mode = "pasta"
+# Expose metrics endpoint on port 9100
+ports = ["9100:9100"]
+
+[resources]
+# Node exporter is lightweight — keep it from competing with workloads it monitors.
+# These are soft limits; the process will be throttled rather than killed.
+memory_max = "128M"
+memory_high = "96M"
+cpu_quota = "20%"
+# Disable swap to keep the exporter's footprint minimal
+memory_swap_max = "0"

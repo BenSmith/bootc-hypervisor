@@ -224,7 +224,6 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 - `firewalld` - Firewall
 - `incus.socket` - Incus system container management
 - `libvirtd` - Virtualization (KVM/QEMU)
-- `prometheus-node-exporter` - Metrics (port 9100)
 - `nvidia-persistenced` - NVIDIA variants only
 - `sshd` - Remote access
 - `tuned` - Performance tuning

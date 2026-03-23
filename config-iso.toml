@@ -1,0 +1,4 @@
+# Interactive Anaconda installer — empty kickstart forces GUI mode.
+# User accounts, partitioning, and network are configured during install.
+[customizations.installer.kickstart]
+contents = ""
