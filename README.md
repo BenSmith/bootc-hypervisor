@@ -1,8 +1,30 @@
-# Bootc Hypervisor Images
+# Bootc Hypervisor
 
-Bootable container images for running VMs (KVM/QEMU), system containers (Incus/LXC), and application containers (Podman)
+This is a homelab container/VM manager, inspired by Proxmox and Kubernetes based on an immutable OS, Fedora [bootc](https://bootc-dev.github.io/).
 
-[bootc](https://bootc-dev.github.io/) allows for atomic system upgrades with quick rollback
+This allows for atomic OS upgrades with quick and easy rollbacks, and a read-only root filesystem.
+
+Bootc-based systems can be installed from an ISO/USB image or a running bootc container, updates are pulled from container registries. Bootc images can also run as containers, and can be derived from base images in a Dockerfile/Containerfile like any other container.
+
+## Why
+
+I made this because I wanted a simple way to run local services like pihole, vpn-proxied services, container registry, git host, home assistant, etc along with GPU-acceleration experiments. And I liked the bootc/immutable approach because I've broken my entire system with hypervisor upgrades gone wrong.  
+
+I hit on a pretty simple way to manage the various services as .toml config files that can use public images fairly easily, or use locally-customized container images. 
+
+With podman shenanigans, a workload uses rootless podman with a very locked-down single-purpose user that is only able to write to its own, self-owned storage. Since the OS is bootc and most of it is mounted read-only, it is exceedingly difficult to break into the system or interfere with other running workloads. 
+
+In addition, Linux gaming has really taken off and the same hardware can be used for locally-hosted AI workloads. 
+
+I wanted to be able to stream games from my heavy server to a lighter system, or spin up a local llm/ai container for trying out untrusted agentic tooling in a sandbox that couldn't easily gain access to sensitive info.
+
+Some of this is still a work in progress, but what I've made so far I find intriguing. It's entirely possible to run a rootless headless desktop environment in a container, as a workload, with GPU acceleration. 
+
+It's possible but not yet simple. 
+
+This could run a complete dev environment with inference and all the right libraries, or it could run Sunshine for high-performace game streaming to moonlight clients. Instead of having a dev computer that has rust dev, a zillion python virtual envs, 12 versions of Boost, 4 IDEs, and 5 versions of node, make a workload desktop environment per variant turn 'em off and on, and enjoy your OP homelab mainframe.
+
+I do not yet know whether rootless containerized desktops can run flatpacked applications due to their containerization, and the same goes for Steam games.
 
 ## Images
 
@@ -52,8 +74,6 @@ Images are pushed to `ghcr.io/bensmith/` with datetime tags.
 fedora-bootc-minimal:43-YYYYMMDD-HHMM    # Timestamped build
 fedora-bootc-minimal:43                  # Latest for version 43
 fedora-bootc-minimal:latest              # Latest stable (43)
-fedora-bootc-minimal:rawhide-YYYYMMDD-HHMM
-fedora-bootc-minimal:rawhide
 
 hypervisor-bootc:YYYYMMDD-HHMM
 hypervisor-bootc:latest
