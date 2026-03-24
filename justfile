@@ -138,7 +138,7 @@ build-nvidia-rpmfusion-local: build-base-local
     --network=host \
     --from localhost/hypervisor-bootc:latest \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-local \
+    -t localhost/hypervisor-nvidia:rpmfusion-latest \
     -f hypervisor-nvidia-rpmfusion.Containerfile .
 
 build-nvidia-negativo17-local: build-base-local
@@ -147,7 +147,7 @@ build-nvidia-negativo17-local: build-base-local
     --network=host \
     --from localhost/hypervisor-bootc:latest \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:negativo17-local \
+    -t localhost/hypervisor-nvidia:negativo17-latest \
     -f hypervisor-nvidia-negativo17.Containerfile .
 
 build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
