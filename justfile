@@ -153,6 +153,24 @@ build-nvidia-negativo17-local: build-base-local
 build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd
 build-all-local: build-base-local build-amd-local build-nvidia-rpmfusion-local build-nvidia-negativo17-local
 
+# Tag and push all locally-built images to a registry
+# Usage: just local_registry=registry.local:5000 push-all
+push-all:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  images=(
+    hypervisor-bootc:latest
+    hypervisor-amd:latest
+    hypervisor-nvidia:rpmfusion-latest
+    hypervisor-nvidia:negativo17-latest
+  )
+  for img in "${images[@]}"; do
+    echo "Tagging and pushing ${img}..."
+    podman tag "localhost/${img}" "{{local_registry}}/${img}"
+    podman push "{{local_registry}}/${img}"
+  done
+  echo "All images pushed to {{local_registry}}"
+
 # === Disk image builds (ISO / qcow2) ========================================
 
 # Internal: build an anaconda ISO from a bootc image
@@ -188,6 +206,9 @@ _build-iso image subdir label iso_name rootfs:
 build-iso-minimal rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/fedora-bootc-minimal:latest minimal BOOTC-MIN fedora-bootc-minimal {{rootfs}}
 
+build-iso-minimal-local rootfs="xfs":
+  @just _build-iso {{local_registry}}/fedora-bootc-minimal:latest minimal BOOTC-MIN fedora-bootc-minimal {{rootfs}}
+
 build-iso-base rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-bootc:latest base HV-BASE hypervisor-bootc {{rootfs}}
 
@@ -197,8 +218,14 @@ build-iso-base-local rootfs="xfs":
 build-iso-nvidia-rpmfusion rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-nvidia:rpmfusion nvidia-rpmfusion HV-NV-RPMFUSION hypervisor-nvidia-rpmfusion {{rootfs}}
 
+build-iso-nvidia-rpmfusion-local rootfs="xfs":
+  @just _build-iso {{local_registry}}/hypervisor-nvidia:rpmfusion-latest nvidia-rpmfusion HV-NV-RPMFUSION hypervisor-nvidia-rpmfusion {{rootfs}}
+
 build-iso-nvidia-negativo17 rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-nvidia:negativo17 nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
+
+build-iso-nvidia-negativo17-local rootfs="xfs":
+  @just _build-iso {{local_registry}}/hypervisor-nvidia:negativo17-latest nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
 
 build-iso-amd rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-amd:latest amd HV-AMD hypervisor-amd {{rootfs}}
@@ -207,10 +234,18 @@ build-iso-amd-local rootfs="xfs":
   @just _build-iso {{local_registry}}/hypervisor-amd:latest amd HV-AMD hypervisor-amd {{rootfs}}
 
 build-all-isos rootfs="xfs":
+  just build-iso-minimal {{rootfs}}
   just build-iso-base {{rootfs}}
   just build-iso-nvidia-rpmfusion {{rootfs}}
   just build-iso-nvidia-negativo17 {{rootfs}}
   just build-iso-amd {{rootfs}}
+
+build-all-isos-local rootfs="xfs":
+  just build-iso-minimal-local {{rootfs}}
+  just build-iso-base-local {{rootfs}}
+  just build-iso-nvidia-rpmfusion-local {{rootfs}}
+  just build-iso-nvidia-negativo17-local {{rootfs}}
+  just build-iso-amd-local {{rootfs}}
 
 # Internal: build a qcow2 disk image from a bootc image
 _build-qcow2 image rootfs size="":
