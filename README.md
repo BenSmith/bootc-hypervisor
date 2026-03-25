@@ -32,12 +32,12 @@ I do not yet know whether rootless containerized desktops can run flatpacked app
 
 - **`fedora-bootc-minimal`** - Minimal Fedora bootc base (kernel, systemd, bootc only)
   - Built from [Fedora bootc base-images](https://gitlab.com/fedora/bootc/base-images)
-  - Podman 4 compatible fork (see `fedora-bootc-minimal.Containerfile`)
+  - Build with Podman 4 for github ci/cd (see `fedora-bootc-minimal.Containerfile`)
   - Weekly builds with rechunking for efficient updates
 
 - **`hypervisor-bootc`** - Full hypervisor stack
   - Based on `fedora-bootc-minimal:43`
-  - Includes: libvirt, QEMU/KVM, Incus, Podman, Cockpit, monitoring tools
+  - Includes: libvirt, QEMU/KVM, Incus, Podman, monitoring tools
   - Headless (no X/Wayland)
   - If you're not doing GPU things, this is the image to use
 
@@ -92,26 +92,25 @@ hypervisor-amd:latest
 Using [just](https://github.com/casey/just):
 
 ```bash
+# Build fedora bootc minimal
+just build-minimal 43 
+
 # Build base hypervisor
-just build-base
+just build-base-local
 
 # Build GPU variants
-just build-nvidia-rpmfusion
-just build-nvidia-negativo17
-just build-amd
+just build-nvidia-rpmfusion-local
+just build-nvidia-negativo17-local
+just build-amd-local
 
 # Build everything
-just build-all
+just build-all-local
 
-# Build ISOs (requires bootc-image-builder)
-just build-iso-base
-just build-iso-nvidia-rpmfusion
-just build-all-isos
+# Build ISOs (this will podman pull bootc-image-builder)
+just build-iso-base-local
+just build-iso-nvidia-rpmfusion-local
+just build-all-isos-local
 
-# Build ISOs with custom filesystem (default: xfs)
-just build-iso-base btrfs
-just build-iso-amd ext4
-just build-all-isos btrfs
 ```
 
 Datetime tags are automatically generated (YYYYMMDD-HHMM).
@@ -231,8 +230,8 @@ Signatures are stored in Sigstore's public transparency log and tied to GitHub A
 ## Architecture
 
 ```
-fedora-bootc-minimal (upstream fork, podman 4 compatible)
-  └── hypervisor-bootc (libvirt, qemu, cockpit, monitoring)
+fedora-bootc-minimal
+  └── hypervisor-bootc (libvirt, qemu, podman, incus, workload system, cosy)
       ├── hypervisor-nvidia:rpmfusion (RPMFusion drivers)
       ├── hypervisor-nvidia:negativo17 (negativo17 drivers)
       └── hypervisor-amd (ROCm, Mesa)
@@ -240,7 +239,6 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 
 ## Enabled Services
 
-- `cockpit.socket` - Web management UI
 - `firewalld` - Firewall
 - `incus.socket` - Incus system container management
 - `libvirtd` - Virtualization (KVM/QEMU)
@@ -248,33 +246,13 @@ fedora-bootc-minimal (upstream fork, podman 4 compatible)
 - `sshd` - Remote access
 - `tuned` - Performance tuning
 
-### Using Cockpit Web UI
-
-Cockpit is installed but not exposed to the network by default for security.
-
-**Access via SSH tunnel (recommended):**
-```bash
-# On your local machine
-ssh -L 9090:localhost:9090 user@hypervisor
-
-# Browse to http://localhost:9090
-```
-
-**Or open firewall for network access:**
-```bash
-sudo firewall-cmd --add-service=cockpit --permanent
-sudo firewall-cmd --reload
-
-# Browse to http://hypervisor-ip:9090
-```
-
 ## Virtualization & Containers
 
 The hypervisor provides multiple options for different workload types:
 
 - **KVM/QEMU** (via libvirt) - Full VMs for any OS, hardware emulation
 - **Incus** - Lightweight Linux system containers, VM-like but more efficient
-- **Podman** - Application containers, stateless microservices
+- **Podman 5** - Application containers, stateless microservices
 
 Choose the right tool for your workload: VMs for Windows/isolation, Incus for lightweight Linux instances, Podman for applications.
 
