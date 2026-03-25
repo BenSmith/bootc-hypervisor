@@ -5,6 +5,24 @@ build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 local_registry := 'registry.local:5000'
 tag := `date +%Y%m%d-%H%M`
 
+# Rechunk an image in user storage (copies to root, rechunks, copies back)
+_rechunk image:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo "Rechunking {{image}}..."
+  podman save {{image}} | sudo podman load
+  sudo podman run --rm --privileged \
+    -v /var/lib/containers:/var/lib/containers \
+    quay.io/fedora/fedora-bootc:rawhide \
+    /usr/libexec/bootc-base-imagectl rechunk \
+    {{image}} \
+    {{image}}-rechunked
+  sudo podman save {{image}}-rechunked | podman load
+  podman tag {{image}}-rechunked {{image}}
+  podman rmi {{image}}-rechunked
+  sudo podman rmi {{image}} {{image}}-rechunked || true
+  echo "Rechunked {{image}}"
+
 # === Container image builds =================================================
 
 build-minimal version="43" rechunk="false":
@@ -16,23 +34,19 @@ build-minimal version="43" rechunk="false":
   fi
   cp policy-local.json manifests/policy.json
   echo "Building fedora-bootc-minimal:{{version}}..."
-  http_proxy={{proxy}} https_proxy={{proxy}} \
-  sudo podman build \
-    --network=host \
-    --security-opt=label=disable \
-    --cap-add=all \
-    --device /dev/fuse \
-    --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -f fedora-bootc-minimal.Containerfile \
-    --build-arg MANIFEST=minimal \
-    --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:{{version}} \
-    --build-arg REPOS_IMAGE=quay.io/fedora/fedora:{{version}} \
-    -t localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
-    -t localhost/fedora-bootc-minimal:{{version}} \
-    -t localhost/fedora-bootc-minimal:latest \
-    -t ghcr.io/bensmith/fedora-bootc-minimal:{{version}} \
-    -t ghcr.io/bensmith/fedora-bootc-minimal:latest \
-    manifests
+  cd manifests
+  FEDORA_VERSION={{version}} TIER=minimal BUILDER="sudo podman" \
+    BUILDER_EXTRA="--network=host --env=http_proxy={{proxy}} --env=https_proxy={{proxy}}" \
+    http_proxy={{proxy}} https_proxy={{proxy}} \
+    just build
+  cd ..
+  # Upstream tags as localhost/fedora-bootc:minimal — add our tags
+  sudo podman tag localhost/fedora-bootc:minimal \
+    localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
+    localhost/fedora-bootc-minimal:{{version}} \
+    localhost/fedora-bootc-minimal:latest \
+    ghcr.io/bensmith/fedora-bootc-minimal:{{version}} \
+    ghcr.io/bensmith/fedora-bootc-minimal:latest
   if [ "{{rechunk}}" == "true" ]; then
     echo "Rechunking image..."
     sudo podman run --rm --privileged \
@@ -234,18 +248,24 @@ build-iso-amd-local rootfs="xfs":
   @just _build-iso {{local_registry}}/hypervisor-amd:latest amd HV-AMD hypervisor-amd {{rootfs}}
 
 build-all-isos rootfs="xfs":
-  just build-iso-minimal {{rootfs}}
-  just build-iso-base {{rootfs}}
-  just build-iso-nvidia-rpmfusion {{rootfs}}
-  just build-iso-nvidia-negativo17 {{rootfs}}
-  just build-iso-amd {{rootfs}}
+  #!/usr/bin/env bash
+  rc=0
+  just build-iso-minimal {{rootfs}} || rc=1
+  just build-iso-base {{rootfs}} || rc=1
+  just build-iso-nvidia-rpmfusion {{rootfs}} || rc=1
+  just build-iso-nvidia-negativo17 {{rootfs}} || rc=1
+  just build-iso-amd {{rootfs}} || rc=1
+  exit $rc
 
 build-all-isos-local rootfs="xfs":
-  just build-iso-minimal-local {{rootfs}}
-  just build-iso-base-local {{rootfs}}
-  just build-iso-nvidia-rpmfusion-local {{rootfs}}
-  just build-iso-nvidia-negativo17-local {{rootfs}}
-  just build-iso-amd-local {{rootfs}}
+  #!/usr/bin/env bash
+  rc=0
+  just build-iso-minimal-local {{rootfs}} || rc=1
+  just build-iso-base-local {{rootfs}} || rc=1
+  just build-iso-nvidia-rpmfusion-local {{rootfs}} || rc=1
+  just build-iso-nvidia-negativo17-local {{rootfs}} || rc=1
+  just build-iso-amd-local {{rootfs}} || rc=1
+  exit $rc
 
 # Internal: build a qcow2 disk image from a bootc image
 _build-qcow2 image rootfs size="":
