@@ -263,3 +263,4 @@ Start here when unsure what to work on:
 - Scheduled image updates: systemd timer that runs `workload-ctl update --all` periodically.
   Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
   Could add configurable schedule, notification on updates, and update log.
+- Workloads get LVM provisioned to cap or flex storage

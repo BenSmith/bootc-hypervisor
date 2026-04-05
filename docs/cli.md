@@ -33,6 +33,8 @@ workload-ctl create <name> --image IMAGE [OPTIONS]
 | `--input` | Enable input devices (`/dev/input` + `/dev/uinput`) |
 | `--audio` | Enable audio (`/dev/snd` + auto-mount PulseAudio/PipeWire sockets) |
 | `--virtualization` | Enable KVM (`/dev/kvm` + vhost devices) |
+| `--systemd {always,true,false}` | Systemd container mode (skips `--init`, adds `KillSignal`) |
+| `--shm-size SIZE` | Shared memory size (e.g., `256m`, `2g`; default: `64m`) |
 | `--cpu-quota PERCENT` | CPU quota (e.g., `50%`, `200%` for 2 cores) |
 | `--cpu-weight WEIGHT` | CPU scheduling weight (1–10000, default 100) |
 | `--memory-max SIZE` | Hard memory limit (e.g., `512M`, `2G`) |
@@ -233,8 +235,10 @@ workload-ctl uid-map <workload>
 Open an interactive shell inside the running workload container.
 
 ```
-workload-ctl shell <workload>
+sudo workload-ctl shell <workload>
 ```
+
+If the workload config defines `CONTAINER_USER` or `CONTAINER_UID` in `[container.environment]`, the shell runs as that user in their home directory. Otherwise it enters as root.
 
 ### `exec`
 

@@ -367,16 +367,36 @@ def generate_system_service(config, user_name, uid):
     if gpu_type == "nvidia":
         lines.append("After=nvidia-cdi-generator.service")
 
+    # container.systemd: "always", "true", "false", or unset
+    systemd_mode = config.get("container", {}).get("systemd", None)
+    if systemd_mode is not None:
+        systemd_mode = str(systemd_mode).lower()
+        valid_systemd = ("always", "true", "false")
+        if systemd_mode not in valid_systemd:
+            log_msg(f"ERROR: Invalid container.systemd='{systemd_mode}' for {name}. "
+                    f"Valid values: {', '.join(valid_systemd)}.", level="err")
+            return None
+
     container_name_quoted = dq(container_name)
     podman_args = [
         "/usr/bin/podman run",
         f"--name {container_name_quoted}",
         "--rm",
-        "--init",
+    ]
+
+    # --init provides a minimal init process (tini) for signal handling.
+    # Skip when container.systemd is set — the container either runs systemd
+    # as PID 1 or has its own init/entrypoint.
+    if systemd_mode is None:
+        podman_args.append("--init")
+    else:
+        podman_args.append(f"--systemd={systemd_mode}")
+
+    podman_args.extend([
         "--sdnotify=conmon",
         f"--pull={pull_policy}",
         "--log-driver=journald",
-    ]
+    ])
 
     userns_mode = config.get("security", {}).get("userns", "keep-id")
     if not _valid_userns(userns_mode):
@@ -389,7 +409,40 @@ def generate_system_service(config, user_name, uid):
         log_msg(f"WARNING: {name} uses userns=host. Container root maps to workload user. "
                 f"Container escape grants workload user privileges.", level="warning")
 
-    podman_args.append(f"--userns={userns_mode}")
+    # Extra UID/GID maps for keep-id userns.
+    # When extra_groups or explicit maps are present, we emit +N:@N:1 flags
+    # which imply keep-id behavior.
+    # Podman 5.x treats --userns and --uidmap/--gidmap as mutually exclusive,
+    # so we must omit --userns when + prefixed maps are used.
+    security_config = config.get("security", {})
+    extra_uidmaps = security_config.get("extra_uidmaps", [])
+    extra_gidmaps = security_config.get("extra_gidmaps", [])
+    needs_auto_maps = (
+        userns_mode.startswith("keep-id")
+        and (extra_groups or extra_uidmaps or extra_gidmaps)
+    )
+    if needs_auto_maps:
+        # GID == UID for workload users (sysusers convention)
+        gid = uid
+        # Auto-map the workload user's own UID and GID (+ prefix implies keep-id)
+        podman_args.append(f"--uidmap +{uid}:@{uid}:1")
+        podman_args.append(f"--gidmap +{gid}:@{gid}:1")
+        # Auto-map GIDs from extra_groups
+        mapped_gids = {gid}
+        for group in extra_groups:
+            group_gid = get_group_gid(group)
+            if group_gid is not None and group_gid not in mapped_gids:
+                podman_args.append(f"--gidmap +{group_gid}:@{group_gid}:1")
+                mapped_gids.add(group_gid)
+        # Explicit maps from TOML (with {UID}/{GID} placeholder substitution)
+        for m in extra_uidmaps:
+            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
+            podman_args.append(f"--uidmap {m}")
+        for m in extra_gidmaps:
+            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
+            podman_args.append(f"--gidmap {m}")
+    else:
+        podman_args.append(f"--userns={userns_mode}")
 
     # Override the container image's USER directive if specified
     container_user = config.get("container", {}).get("user", "")
@@ -414,14 +467,12 @@ def generate_system_service(config, user_name, uid):
                 f"Consider using specific capabilities for better security.", level="warning")
         podman_args.append("--privileged")
 
-    # Add explicit group GIDs for device access (host GIDs, not container GIDs)
-    # This allows the container to access host devices with these group permissions
-    for group in extra_groups:
-        group_gid = get_group_gid(group)
-        if group_gid is not None:
-            podman_args.append(f"--group-add={group_gid}")
-        else:
-            log_msg(f"WARNING: Group '{group}' not found, skipping", level="warning")
+    # Pass host supplementary groups into the container.
+    # keep-groups preserves all supplementary groups from the host process and
+    # is required for @GID userns delegation in --gidmap +GID:@GID:1.
+    # The workload user is added to extra_groups via sysusers 'm' directive.
+    if extra_groups:
+        podman_args.append("--group-add=keep-groups")
 
     # GPU devices (convenience flag)
     if gpu_type == "amd":
@@ -466,6 +517,16 @@ def generate_system_service(config, user_name, uid):
             "--device /dev/vhost-net",
             "--device /dev/vhost-vsock",
         ])
+
+    # Shared memory size
+    shm_size = config.get("resources", {}).get("shm_size", "")
+    if shm_size:
+        podman_args.append(f"--shm-size={shm_size}")
+
+    # Container PID limit (podman default is 2048, independent of systemd TasksMax)
+    tasks_max = config.get("resources", {}).get("tasks_max", 0)
+    if tasks_max:
+        podman_args.append(f"--pids-limit={tasks_max}")
 
     # Network configuration
     network_config = config.get("network", {})
@@ -581,6 +642,10 @@ def generate_system_service(config, user_name, uid):
     # NotifyAccess only needed for Type=notify
     if service_type == "notify":
         lines.append("NotifyAccess=all")
+
+    # systemd containers need SIGRTMIN+3 for clean shutdown
+    if systemd_mode in ("always", "true"):
+        lines.append("KillSignal=SIGRTMIN+3")
 
     lines.extend([
         f"User={user_name}",
@@ -699,6 +764,9 @@ def main():
 
             # Main service: Requires+After setup service so User= is resolvable
             service_content = generate_system_service(config, user_name, uid)
+            if service_content is None:
+                log_msg(f"  Skipping {name} due to config errors", level="err")
+                continue
             service_file = SERVICES_DIR / f"workload-{name}.service"
             service_file.write_text(service_content)
             log_msg(f"  Created system service at {service_file}")

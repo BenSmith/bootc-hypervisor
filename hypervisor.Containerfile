@@ -106,6 +106,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     policycoreutils-python-utils \
     polkit \
     powertop \
+    python3 \
+    python3-pip \
     qemu-img \
     qemu-kvm \
     rasdaemon \
@@ -114,6 +116,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     rsync \
     samba-client \
     seatd \
+    selinux-policy-devel \
     shim \
     skopeo \
     smartmontools \

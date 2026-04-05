@@ -153,9 +153,11 @@ _workload_ctl_completion() {
         create)
             # Complete with flags for create command
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--image --enable --network --ports --volumes --device --gpu --input --audio --virtualization --groups --cpu-quota --cpu-weight --memory-max --memory-high --memory-swap-max --io-weight --tasks-max" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--image --enable --network --ports --volumes --device --gpu --input --audio --virtualization --groups --systemd --shm-size --cpu-quota --cpu-weight --memory-max --memory-high --memory-swap-max --io-weight --tasks-max" -- "$cur") )
             elif [[ "$prev" == "--gpu" ]]; then
                 COMPREPLY=( $(compgen -W "amd nvidia none" -- "$cur") )
+            elif [[ "$prev" == "--systemd" ]]; then
+                COMPREPLY=( $(compgen -W "always true false" -- "$cur") )
             elif [[ "$prev" == "--network" ]]; then
                 COMPREPLY=( $(compgen -W "host pasta none" -- "$cur") )
             elif [[ "$prev" == "--volume" ]]; then
