@@ -1,4 +1,18 @@
-FROM ghcr.io/bensmith/fedora-bootc-minimal:latest
+# Stage 1: Build workloadctl RPM (matches target python(abi))
+ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
+FROM ${BASE_IMAGE} AS workloadctl-builder
+RUN dnf install -y rpm-build python3 python3-rpm-macros systemd-rpm-macros && dnf clean all
+COPY workloadctl/ /src/
+RUN cd /src && \
+    mkdir -p rpmbuild/{BUILD,RPMS,SRPMS,SPECS} && \
+    rpmbuild -bb \
+      --define "_topdir $(pwd)/rpmbuild" \
+      --define "_sourcedir $(pwd)" \
+      --define "_builddir $(pwd)/rpmbuild/BUILD" \
+      rpm/workloadctl.spec
+
+# Stage 2: Hypervisor image
+FROM ${BASE_IMAGE}
 
 # Build argument for local development (enables passwordless sudo)
 ARG ENABLE_PASSWORDLESS_SUDO=false
@@ -184,8 +198,8 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system from local RPM
-COPY workloadctl/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/
+# Install workload provisioning system from builder stage
+COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/
 RUN dnf install -y /tmp/workloadctl-*.rpm && rm -f /tmp/workloadctl-*.rpm && dnf clean all
 
 # Bootc-specific: emergency access, cosy

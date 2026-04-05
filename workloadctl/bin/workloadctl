@@ -3075,7 +3075,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="workloadctl",
         description="Manage rootless system workloads",
-        epilog="For more information, see /usr/share/doc/workloads/"
+        epilog="For more information, see /usr/share/doc/workloadctl/"
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")

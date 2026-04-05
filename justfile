@@ -79,7 +79,7 @@ sync-cosy:
     curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
   fi
 
-build-base: sync-cosy workload-rpm
+build-base: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json
@@ -93,7 +93,7 @@ build-base: sync-cosy workload-rpm
     -t ghcr.io/bensmith/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
 
-build-base-local: sync-cosy workload-rpm
+build-base-local: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json

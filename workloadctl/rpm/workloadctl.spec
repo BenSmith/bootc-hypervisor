@@ -1,3 +1,5 @@
+%{!?python3_sitelib: %global python3_sitelib %(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")}
+
 Name:           workloadctl
 Version:        1.0.0
 Release:        1%{?dist}
@@ -72,6 +74,7 @@ install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
     %{buildroot}%{_docdir}/workloadctl/workloads.md
 
 # container build recipes (examples)
+install -dm 0755 %{buildroot}%{_datadir}/workloadctl
 cp -a %{_sourcedir}/containers %{buildroot}%{_datadir}/workloadctl/containers
 find %{buildroot}%{_datadir}/workloadctl/containers -name 'build.sh' -exec chmod 0755 {} \;
 find %{buildroot}%{_datadir}/workloadctl/containers -name 'entrypoint.sh' -exec chmod 0755 {} \;
@@ -80,6 +83,9 @@ find %{buildroot}%{_datadir}/workloadctl/containers -name 'entrypoint.sh' -exec 
 install -dm 0755 %{buildroot}%{_docdir}/workloadctl/examples
 install -pm 0644 %{_sourcedir}/workloads.d/*.toml \
     %{buildroot}%{_docdir}/workloadctl/examples/
+
+# license
+install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
 
 # config directory
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
@@ -95,9 +101,10 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %systemd_postun_with_restart workload-metrics.timer
 
 %files
-%license LICENSE
+%{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
 %{python3_sitelib}/workload_lib.py
+%{python3_sitelib}/__pycache__/workload_lib.*
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
 %{_libexecdir}/workloadctl/workload-generate
@@ -114,7 +121,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %dir %{_sysconfdir}/workloads.d
 
 %changelog
-* Sat Apr 05 2026 Ben Smith <ben@bensmith.dev> - 1.0.0-1
+* Sun Apr 05 2026 Ben Smith <ben@bensmith.dev> - 1.0.0-1
 - Initial package: extracted workload system from bootc-hypervisor
 - FHS-compliant paths: /usr/libexec/workloadctl/, /usr/share/workloadctl/
 - Renamed CLI from workload-ctl to workloadctl
