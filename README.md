@@ -227,11 +227,15 @@ cosign verify \
 
 Signatures are stored in Sigstore's public transparency log and tied to GitHub Actions OIDC tokens.
 
+## Workload System
+
+The workload provisioning system (`workloadctl`) is available as a standalone RPM for any Fedora/RHEL system with systemd and podman. It does not require bootc. See `workloadctl/` for details.
+
 ## Architecture
 
 ```
 fedora-bootc-minimal
-  └── hypervisor-bootc (libvirt, qemu, podman, incus, workload system, cosy)
+  └── hypervisor-bootc (libvirt, qemu, podman, incus, workloadctl, cosy)
       ├── hypervisor-nvidia:rpmfusion (RPMFusion drivers)
       ├── hypervisor-nvidia:negativo17 (negativo17 drivers)
       └── hypervisor-amd (ROCm, Mesa)

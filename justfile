@@ -79,7 +79,7 @@ sync-cosy:
     curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
   fi
 
-build-base: sync-cosy
+build-base: sync-cosy workload-rpm
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json
@@ -93,7 +93,7 @@ build-base: sync-cosy
     -t ghcr.io/bensmith/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
 
-build-base-local: sync-cosy
+build-base-local: sync-cosy workload-rpm
   #!/usr/bin/env bash
   set -euo pipefail
   cp policy-local.json policy.json
@@ -428,13 +428,17 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
 # === Tests ==================================================================
 
 test:
-  PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v
+  cd workloadctl && just test
 
 test-unit:
-  PYTHONPATH=lib python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env -v
+  cd workloadctl && just test-unit
 
 test-integration:
-  PYTHONPATH=lib python3 -m unittest tests.test_integration -v
+  cd workloadctl && just test-integration
+
+# Build workloadctl RPM
+workload-rpm:
+  cd workloadctl && just rpm-build
 
 # --- VM integration tests (requires sudo, QEMU, swtpm) ---------------------
 

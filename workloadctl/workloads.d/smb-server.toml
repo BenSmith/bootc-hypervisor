@@ -1,0 +1,90 @@
+# SMB/CIFS File Server - Samba running rootless
+#
+# Guest-only simple share: all file access runs as the workload user.
+# No per-client UID mapping; suitable for shared storage where ownership
+# doesn't need to reflect individual client users.
+#
+# Port 445 (SMB) is a privileged port. Rootless containers cannot bind to it
+# directly even with CAP_NET_BIND_SERVICE (the kernel checks the host network
+# namespace's user namespace, which is always init_user_ns). Choose one:
+#
+#   Option A — Direct port binding (default below):
+#      The system image ships net.ipv4.ip_unprivileged_port_start = 0, so
+#      smbd can bind to port 445 directly. No extra configuration needed.
+#
+#   Option B — Firewall redirect (no system-wide sysctl):
+#      Set "smb ports = 4445" in smb.conf and skip step 5 below, replacing
+#      it with:
+#        sudo firewall-cmd --add-forward-port=port=445:proto=tcp:toport=4445 --permanent
+#        sudo firewall-cmd --reload
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/smb-server && sudo ./build.sh
+#
+#   2. Run enable once to create the workload home and volume directories:
+#        sudo workloadctl enable smb-server
+#      (This will fail with a missing smb.conf error — that's expected.)
+#
+#   3. Copy the config template and edit as needed:
+#        sudo cp /usr/share/workloadctl/containers/smb-server/smb.conf \
+#                 /var/lib/workloads/smb-server/smb.conf
+#        sudo nano /var/lib/workloads/smb-server/smb.conf
+#
+#   4. Enable again (now that smb.conf is in place):
+#        sudo workloadctl enable smb-server
+#
+#   5. Configure firewall:
+#      Option A (direct port 445):
+#        sudo firewall-cmd --add-service=samba --permanent
+#        sudo firewall-cmd --reload
+#
+#      Option B (redirect 445→4445):
+#        sudo firewall-cmd --add-forward-port=port=445:proto=tcp:toport=4445 --permanent
+#        sudo firewall-cmd --add-port=4445/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only (recommended):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="samba" accept'
+#        sudo firewall-cmd --reload
+#
+#   6. Mount from a client (uid/gid required for non-root writes):
+#        sudo mount -t cifs //<host>/exports /mnt/share \
+#            -o guest,uid=$(id -u),gid=$(id -g),file_mode=0664,dir_mode=0775
+#
+#   After editing smb.conf, restart to apply:
+#        sudo workloadctl restart smb-server
+
+[workload]
+name = "smb-server"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./smb.conf", hint = "/usr/share/workloadctl/containers/smb-server/smb.conf" },
+]
+
+[container]
+image = "localhost/smb-server:latest"
+pull = "never"
+
+[container.health]
+cmd = "smbclient -N -L 127.0.0.1 > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "10s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./exports:/exports",
+    "./samba-state:/var/lib/samba",
+    "./samba-run:/run/samba",
+    "./samba-logs:/var/log/samba",
+    "./smb.conf:/etc/samba/smb.conf:ro",
+    "/run/systemd/journal/socket:/run/systemd/journal/socket",
+]
+
+[network]
+# Host networking required: pasta's pivot_root() sandboxing fails under
+# ProtectSystem=strict, and SMB clients connect to the real host IP anyway.
+mode = "host"

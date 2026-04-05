@@ -1,0 +1,322 @@
+#!/usr/bin/python3
+"""
+Ensure a single workload user is fully configured for rootless podman.
+
+Called as ExecStartPre=+ (root) in each workload service, and by
+workloadctl enable.  Idempotent — safe to run on every service start.
+
+Usage: workload-ensure-user <workload-name>
+"""
+
+import fcntl
+import grp
+import os
+import pwd
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+from workload_lib import (
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
+)
+
+SUBID_LOCK = Path("/run/lock/workload-subid.lock")
+
+
+def log(msg):
+    """Print to stdout (captured by systemd journal)."""
+    print(msg, flush=True)
+
+
+def load_config(name):
+    """Load and return the TOML config for a workload."""
+    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    with open(config_path, "rb") as f:
+        return tomllib.load(f)
+
+
+def setup_selinux_policy():
+    """Ensure SELinux fcontext policy exists for workload directories.
+
+    Idempotent — checks before adding.  Creates a persistent policy
+    that survives system relabels.
+    """
+    try:
+        result = subprocess.run(
+            ["semanage", "fcontext", "-l"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            log(f"  WARNING: semanage fcontext -l failed: {result.stderr.strip()}")
+            return
+
+        if re.search(re.escape(str(WORKLOADS_BASE)) + r'\(', result.stdout):
+            return  # Already exists
+
+        log(f"  Creating SELinux fcontext policy for {WORKLOADS_BASE}")
+        result = subprocess.run(
+            ["semanage", "fcontext", "-a", "-t", "container_file_t",
+             f"{WORKLOADS_BASE}(/.*)?"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            log("  SELinux policy created successfully")
+        else:
+            log(f"  WARNING: Failed to create SELinux policy: {result.stderr}")
+    except Exception as e:
+        log(f"  WARNING: Failed to set up SELinux policy: {e}")
+
+
+def configure_subuid_subgid(pw, config):
+    """Configure subordinate UID/GID ranges for rootless containers.
+
+    Sets up the main subuid/subgid range for the user namespace, plus
+    individual entries for extra_groups GIDs so that --gidmap +GID:@GID:1
+    can delegate those host GIDs into the container's user namespace.
+
+    Uses flock for parallel safety — multiple workload services may
+    start concurrently, each running this script via ExecStartPre.
+    """
+    uid = pw.pw_uid
+    username = pw.pw_name
+
+    base_uid = 10000
+    if uid < base_uid:
+        raise ValueError(f"UID {uid} is below minimum workload UID {base_uid}")
+    uid_offset = uid - base_uid
+    subid_start = 100000 + (uid_offset * 100000)
+    count = 65536
+
+    # Verify ranges fit within uint32 (max 4,294,967,295)
+    if subid_start + count - 1 > 4294967295:
+        raise ValueError(
+            f"Subuid range for UID {uid} would overflow uint32 "
+            f"({subid_start}+{count}-1 > 4294967295). "
+            f"UID must be in range 10000-52948."
+        )
+
+    # Build the set of required entries: main range + extra group GIDs
+    main_entry = f"{username}:{subid_start}:{count}"
+    required_entries = {main_entry}
+
+    extra_groups = config.get("security", {}).get("extra_groups", [])
+    for group_name in extra_groups:
+        try:
+            gid = grp.getgrnam(group_name).gr_gid
+        except KeyError:
+            log(f"  WARNING: Group '{group_name}' not found, skipping subid entry")
+            continue
+        # Delegate the group GID in both subuid and subgid so podman can
+        # map it into the user namespace via --gidmap +GID:@GID:1
+        required_entries.add(f"{username}:{gid}:1")
+
+    # Lock around check-then-write to handle parallel ExecStartPre
+    SUBID_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(SUBID_LOCK, "w") as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+
+        changed = False
+        for path in ["/etc/subuid", "/etc/subgid"]:
+            try:
+                with open(path, "r") as f:
+                    existing = f.read()
+            except FileNotFoundError:
+                existing = ""
+
+            missing = []
+            for entry in required_entries:
+                if entry not in existing:
+                    missing.append(entry)
+
+            if missing:
+                with open(path, "a") as f:
+                    for entry in missing:
+                        f.write(entry + "\n")
+                        log(f"  Configured {Path(path).name} entry: {entry}")
+                changed = True
+
+    # Migrate podman storage to use new subuid/subgid mappings
+    if changed:
+        try:
+            result = subprocess.run(
+                ["runuser", "-u", username, "--",
+                 "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                 "podman", "system", "migrate"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                log(f"  Migrated podman storage for {username}")
+            else:
+                log(f"  Note: podman system migrate returned {result.returncode} for {username}")
+        except subprocess.TimeoutExpired:
+            log(f"  WARNING: podman system migrate timed out for {username}")
+        except Exception as e:
+            log(f"  WARNING: Failed to migrate podman storage for {username}: {e}")
+
+
+def setup_home_directory(pw):
+    """Create and configure the workload home directory."""
+    home_path = Path(pw.pw_dir)
+
+    if not home_path.exists():
+        log(f"  Creating home directory {home_path}")
+        home_path.mkdir(parents=True, exist_ok=True)
+    os.chown(home_path, pw.pw_uid, pw.pw_gid)
+    os.chmod(home_path, 0o700)
+
+
+def setup_volume_directories(pw, config):
+    """Ensure volume mount directories under the workload home exist
+    and are owned by the workload user.
+
+    Always chowns matching dirs (even pre-existing ones) so that dirs
+    created by root during preflight get fixed up.
+    Paths outside the home directory are skipped (admin must create them).
+    """
+    home_path = Path(pw.pw_dir)
+
+    for volume_spec in config.get("storage", {}).get("volumes", []):
+        expanded = expand_volume_path(volume_spec, str(home_path))
+        host_path_str = expanded.split(":", 2)[0]
+        if not host_path_str:
+            continue
+
+        host_path = Path(host_path_str)
+
+        # Resolve symlinks before checking containment to prevent symlink traversal
+        try:
+            host_path.resolve().relative_to(home_path.resolve())
+        except ValueError:
+            continue  # Outside home directory — admin must create
+
+        if not host_path.exists():
+            log(f"  Creating volume directory {host_path}")
+            host_path.mkdir(parents=True, exist_ok=True)
+
+        os.chown(host_path, pw.pw_uid, pw.pw_gid)
+        os.chmod(host_path, 0o755)
+
+
+def restore_selinux_labels(pw):
+    """Restore SELinux labels on the workload home directory."""
+    result = subprocess.run(
+        ["restorecon", "-R", pw.pw_dir],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log(f"  WARNING: restorecon failed for {pw.pw_dir}: {result.stderr}")
+
+
+def write_environment_file(name, pw, config):
+    """Write UID-dependent environment variables for the systemd service.
+
+    The generated service uses EnvironmentFile= to pick up XDG_RUNTIME_DIR
+    (which depends on the UID). This allows the generator to create service
+    files before the user exists.
+    """
+    env_dir = Path("/run/workload-env")
+    env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    lines = [f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}"]
+
+    env_file = env_dir / f"workload-{name}.env"
+    env_file.write_text("\n".join(lines) + "\n")
+    log(f"  Wrote environment file {env_file}")
+
+
+def enable_linger(pw):
+    """Enable lingering for the workload user.
+
+    Creates persistent systemd user manager (user@UID.service) that
+    maintains /run/user/<uid> and provides D-Bus session for podman.
+    """
+    uid_str = str(pw.pw_uid)
+
+    check = subprocess.run(
+        ["loginctl", "show-user", uid_str, "--property=Linger", "--value"],
+        capture_output=True, text=True
+    )
+    if check.returncode == 0 and check.stdout.strip() == "yes":
+        return  # Already enabled
+
+    result = subprocess.run(
+        ["loginctl", "enable-linger", uid_str],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
+    else:
+        raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <workload-name>", file=sys.stderr)
+        return 1
+
+    name = sys.argv[1]
+    username = workload_username(name)
+
+    log(f"Ensuring user setup for workload: {name}")
+
+    # Look up user once — all functions receive the pwd struct
+    try:
+        pw = pwd.getpwnam(username)
+    except KeyError:
+        log(f"ERROR: User {username} does not exist")
+        return 1
+
+    # Ensure base directory exists
+    WORKLOADS_BASE.mkdir(parents=True, exist_ok=True)
+
+    # Load config once — needed by volume setup and environment file
+    try:
+        config = load_config(name)
+    except Exception as e:
+        log(f"ERROR: Failed to load config for {name}: {e}")
+        return 1
+
+    # Each step runs independently so a failure in one doesn't skip the rest
+    try:
+        setup_selinux_policy()
+    except Exception as e:
+        log(f"  WARNING: Failed to set up SELinux policy: {e}")
+
+    try:
+        configure_subuid_subgid(pw, config)
+    except Exception as e:
+        log(f"  WARNING: Failed to configure subuid/subgid for {username}: {e}")
+
+    try:
+        setup_home_directory(pw)
+    except Exception as e:
+        log(f"  WARNING: Failed to set up home directory for {username}: {e}")
+
+    try:
+        setup_volume_directories(pw, config)
+    except Exception as e:
+        log(f"  WARNING: Failed to create volume directories for {username}: {e}")
+
+    try:
+        write_environment_file(name, pw, config)
+    except Exception as e:
+        log(f"  WARNING: Failed to write environment file for {name}: {e}")
+
+    try:
+        restore_selinux_labels(pw)
+    except Exception as e:
+        log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
+
+    try:
+        enable_linger(pw)
+    except Exception as e:
+        log(f"  WARNING: Failed to enable linger for {username}: {e}")
+
+    log(f"User setup complete for {name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

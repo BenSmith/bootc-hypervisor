@@ -1,0 +1,65 @@
+# Squid Caching Proxy - HTTP/HTTPS proxy and cache
+# Caches packages, container images, and web content
+# Access at http://<host>:3128
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/squid && sudo ./build.sh
+#
+#   2. Run enable once to create the workload home and volume directories:
+#        sudo workloadctl enable squid
+#      (This will fail with a missing squid.conf error — that's expected.)
+#
+#   3. Copy the config template and edit as needed:
+#        sudo cp /usr/share/workloadctl/containers/squid/squid.conf \
+#                 /var/lib/workloads/squid/squid.conf
+#        sudo nano /var/lib/workloads/squid/squid.conf
+#
+#   4. Enable again (now that squid.conf is in place):
+#        sudo workloadctl enable squid
+#
+#   5. Configure firewall to allow proxy access:
+#        sudo firewall-cmd --add-port=3128/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only (recommended for proxy):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="3128" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+# Configure clients to use proxy:
+#   export HTTP_PROXY=http://<host>:3128
+#   export HTTPS_PROXY=http://<host>:3128
+#
+# Or in /etc/dnf/dnf.conf:
+#   proxy=http://<host>:3128
+
+[workload]
+name = "squid"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./squid.conf", hint = "/usr/share/workloadctl/containers/squid/squid.conf" },
+]
+
+[container]
+# Custom squid proxy image
+image = "localhost/squid:latest"
+pull = "missing"
+
+[container.health]
+cmd = "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "10s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./squid.conf:/etc/squid/squid.conf:ro",
+    "./cache:/var/spool/squid",
+]
+
+[network]
+mode = "pasta"
+ports = ["3128:3128"]
+

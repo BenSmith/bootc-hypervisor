@@ -1,0 +1,7 @@
+[Unit]
+Description=Collect workload metrics for Prometheus
+Documentation=man:workload-metrics
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/workloadctl/workload-metrics

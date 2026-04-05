@@ -24,8 +24,8 @@ EOF
     fi
 
     # Copy alert rules if available on the host image
-    if [ -d /usr/share/workload-containers/prometheus-server/rules ] && [ ! -d "$home/rules" ]; then
-        cp -r /usr/share/workload-containers/prometheus-server/rules "$home/rules"
+    if [ -d /usr/share/workloadctl/containers/prometheus-server/rules ] && [ ! -d "$home/rules" ]; then
+        cp -r /usr/share/workloadctl/containers/prometheus-server/rules "$home/rules"
         chown -R _wl-prometheus-server: "$home/rules"
     fi
     # Ensure rules dir exists even if no rules shipped

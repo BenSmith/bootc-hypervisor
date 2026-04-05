@@ -19,7 +19,7 @@ A complete virtualization and containerization platform delivered as immutable b
 - GPU support (AMD ROCm, NVIDIA CUDA)
 - TPM2-backed secrets management (systemd-creds)
 - Declarative TOML configuration for workloads
-- Docker/kubectl-like CLI (`workload-ctl`)
+- Docker/kubectl-like CLI (`workloadctl`)
 - Automated weekly builds with rechunking
 - Cryptographic signing with cosign (keyless OIDC)
 
@@ -27,48 +27,44 @@ A complete virtualization and containerization platform delivered as immutable b
 
 ```
 hypervisor/
-├── bin/                              # Management tools
-│   ├── workload-ctl                  # Main CLI (~68KB, Python-like interface)
-│   └── test-workload-ctl.sh          # Integration tests
+├── workloadctl/                      # Standalone workload system (RPM-packaged)
+│   ├── bin/workloadctl               # Main CLI (Docker/kubectl-like interface)
+│   ├── generators/                   # systemd generators
+│   │   ├── workload-generator-wrapper  # Shell wrapper (installed as system generator)
+│   │   └── workload-generate         # Python generator (creates service files)
+│   ├── libexec/                      # Internal helpers
+│   │   ├── workload-ensure-user      # Per-workload user/subuid/home setup
+│   │   ├── workload-write-env        # Write EnvironmentFile for secrets
+│   │   └── workload-metrics          # Prometheus metrics collector
+│   ├── lib/workload_lib.py           # Shared Python library
+│   ├── containers/                   # Example container build recipes
+│   ├── docs/                         # workloadctl documentation
+│   ├── completions/                  # Bash completion
+│   ├── systemd/                      # Unit files and tmpfiles.d
+│   ├── tests/                        # Unit and integration tests
+│   ├── rpm/workloadctl.spec          # Fedora RPM spec
+│   └── justfile                      # Test/lint/rpm-build targets
 │
-├── generators/                       # systemd generators
-│   └── workload-generator            # Converts TOML → systemd units (~23KB)
-│
-├── libexec/                          # Helper scripts
-│   └── workload-ensure-user          # Per-workload user/subuid/home setup
-│
-├── containers/                       # Workload container images
-│   └── sunshine-game-streaming/      # Headless desktop + game streaming
-│       ├── Containerfile             # labwc, Sunshine, Steam, input bridge
-│       ├── build.sh                  # Image build script
-│       ├── setup.sh                  # Host setup (uinput, udev, SELinux)
-│       └── sunshine-devices.te       # SELinux policy module
-│
-├── workloads.d/                      # Example workload configs
+├── workloads.d/                      # Hypervisor-specific workload configs
 │   ├── schema-reference.toml         # Complete schema documentation
-│   ├── sunshine-game-streaming.toml  # Sunshine game streaming workload
-│   ├── example-webserver.toml        # Minimal web server example
-│   ├── example-with-secrets.toml     # Secrets management example
-│   └── example-groups-test.toml      # Device access groups example
+│   ├── sunshine-game-streaming.toml  # Game streaming workload
+│   └── ...                           # pihole, prometheus, grafana, etc.
 │
-├── docs/                             # Documentation
-│   ├── workloads.md                  # Complete guide with TOC and quick reference tables
-│   ├── secrets.md                    # Secrets management deep dive
-│   ├── MULTI-CONTAINER-PLAN.md       # Future multi-container design
-│   └── ideas.md                      # Development notes
+├── docs/                             # Hypervisor documentation
+│   ├── TROUBLESHOOTING.md            # Troubleshooting guide
+│   └── ...                           # Architecture docs, recovery, etc.
 │
-├── Containerfiles                    # Image definitions (~423 lines total)
-│   ├── fedora-bootc-minimal.Containerfile      # Minimal base (kernel, systemd, bootc)
-│   ├── hypervisor.Containerfile                # Base hypervisor stack
-│   ├── hypervisor-amd.Containerfile            # AMD GPU variant (ROCm)
-│   ├── hypervisor-nvidia-rpmfusion.Containerfile    # NVIDIA (RPMFusion)
-│   └── hypervisor-nvidia-negativo17.Containerfile   # NVIDIA (negativo17)
+├── Containerfiles                    # Bootc image definitions
+│   ├── hypervisor.Containerfile      # Base hypervisor (installs workloadctl RPM)
+│   ├── fedora-bootc-minimal.Containerfile
+│   ├── hypervisor-amd.Containerfile
+│   └── hypervisor-nvidia-*.Containerfile
 │
-├── completions/                      # Shell completions for workload-ctl
-├── config.toml                       # bootc-image-builder config
-├── Justfile                          # Build automation
-├── policy.json, registries.conf      # Container registry config
-└── README.md                         # Quick start guide
+├── systemd/                          # Bootc-specific systemd configs
+├── security/                         # SELinux, pwquality configs
+├── bin/cosy                          # Container session manager
+├── justfile                          # Bootc build automation
+└── README.md
 ```
 
 ## Core Concepts
@@ -225,63 +221,63 @@ tasks_max = 100           # Max processes + threads
 
 ## Main Components
 
-### workload-ctl CLI
+### workloadctl CLI
 
 Docker/kubectl-like interface for managing workloads.
 
 **Container Lifecycle:**
 ```bash
-workload-ctl create NAME --image IMAGE [OPTIONS]   # Create workload
-workload-ctl enable NAME                            # Enable and start
-workload-ctl disable NAME [--purge]                 # Stop and disable
-workload-ctl cleanup [--apply]                      # Remove orphaned users/dirs
-workload-ctl restart NAME                           # Restart service
-workload-ctl update NAME [--force] [--all]          # Update images
+workloadctl create NAME --image IMAGE [OPTIONS]   # Create workload
+workloadctl enable NAME                            # Enable and start
+workloadctl disable NAME [--purge]                 # Stop and disable
+workloadctl cleanup [--apply]                      # Remove orphaned users/dirs
+workloadctl restart NAME                           # Restart service
+workloadctl update NAME [--force] [--all]          # Update images
 ```
 
 **Inspection:**
 ```bash
-workload-ctl list                                   # List all workloads
-workload-ctl status NAME                            # Service status
-workload-ctl info NAME                              # Detailed information
-workload-ctl validate NAME [--all]                  # Check config
-workload-ctl ports NAME                             # Show port info
+workloadctl list                                   # List all workloads
+workloadctl status NAME                            # Service status
+workloadctl info NAME                              # Detailed information
+workloadctl validate NAME [--all]                  # Check config
+workloadctl ports NAME                             # Show port info
 ```
 
 **Container Operations:**
 ```bash
-workload-ctl shell NAME                             # Interactive shell (as container user if configured)
-workload-ctl exec NAME COMMAND                      # Execute command
-workload-ctl logs [-f] [-n N] NAME                  # View logs
-workload-ctl attach NAME                            # Attach to main process
-workload-ctl cp SRC DST                             # Copy files
+workloadctl shell NAME                             # Interactive shell (as container user if configured)
+workloadctl exec NAME COMMAND                      # Execute command
+workloadctl logs [-f] [-n N] NAME                  # View logs
+workloadctl attach NAME                            # Attach to main process
+workloadctl cp SRC DST                             # Copy files
 ```
 
 **Monitoring:**
 ```bash
-workload-ctl ps                                     # List running containers
-workload-ctl stats [-f] [NAME]                      # Resource usage
-workload-ctl health NAME                            # Health check
+workloadctl ps                                     # List running containers
+workloadctl stats [-f] [NAME]                      # Resource usage
+workloadctl health NAME                            # Health check
 ```
 
 **Secrets Management:**
 ```bash
-workload-ctl secret create NAME [--file PATH]       # Create encrypted secret
-workload-ctl secret list                            # List all secrets
-workload-ctl secret show NAME                       # Decrypt and show
-workload-ctl secret rotate NAME                     # Update and restart
-workload-ctl secret delete NAME                     # Remove secret
+workloadctl secret create NAME [--file PATH]       # Create encrypted secret
+workloadctl secret list                            # List all secrets
+workloadctl secret show NAME                       # Decrypt and show
+workloadctl secret rotate NAME                     # Update and restart
+workloadctl secret delete NAME                     # Remove secret
 ```
 
 **Image Management:**
 ```bash
-workload-ctl images list                            # Show images
-workload-ctl images prune                           # Remove unused
+workloadctl images list                            # Show images
+workloadctl images prune                           # Remove unused
 ```
 
 **Configuration:**
 ```bash
-workload-ctl edit NAME                              # Edit config (validates, shows diff)
+workloadctl edit NAME                              # Edit config (validates, shows diff)
 ```
 
 ### workload-generator
@@ -461,9 +457,9 @@ sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
 
 ### Creating a Workload
 
-**Quick start (using workload-ctl):**
+**Quick start (using workloadctl):**
 ```bash
-sudo workload-ctl create webserver \
+sudo workloadctl create webserver \
   --image docker.io/nginxinc/nginx-unprivileged:alpine \
   --ports 8080:8080 \
   --enable
@@ -489,17 +485,17 @@ ports = ["8080:8080"]
 
 ```bash
 # Enable and start
-sudo workload-ctl enable webserver
+sudo workloadctl enable webserver
 
 # Check status
-workload-ctl status webserver
+workloadctl status webserver
 curl http://localhost:8080
 ```
 
 ### GPU Workload Example
 
 ```bash
-sudo workload-ctl create gaming \
+sudo workloadctl create gaming \
   --image myapp:latest \
   --gpu amd \
   --input \
@@ -513,7 +509,7 @@ sudo workload-ctl create gaming \
 
 ```bash
 # 1. Create encrypted secret
-sudo workload-ctl secret create jellyfin-api-key
+sudo workloadctl secret create jellyfin-api-key
 # (type secret, press Ctrl+D)
 
 # 2. Reference in config
@@ -530,14 +526,14 @@ credentials = ["jellyfin-api-key"]  # Auto-detected
 
 ```bash
 # 3. Enable workload
-sudo workload-ctl enable jellyfin
+sudo workloadctl enable jellyfin
 ```
 
 ### Device Passthrough Example
 
 ```bash
 # Home Assistant with Zigbee USB stick
-sudo workload-ctl create homeassistant \
+sudo workloadctl create homeassistant \
   --image ghcr.io/home-assistant/home-assistant:stable \
   --device /dev/ttyACM0 \
   --groups dialout \
@@ -662,7 +658,7 @@ sudo workload-ctl create homeassistant \
 **No Automatic Cleanup:**
 - Disabled workloads leave users/homes/subuid ranges
 - Safety feature: prevents accidental data loss
-- Use `workload-ctl cleanup --apply` for bulk removal of orphaned users/dirs
+- Use `workloadctl cleanup --apply` for bulk removal of orphaned users/dirs
 
 ## Development Status
 
@@ -672,7 +668,7 @@ sudo workload-ctl create homeassistant \
 - ✅ GPU support (AMD, NVIDIA)
 - ✅ Secrets management (TPM2)
 - ✅ Resource limits (CPU, memory, I/O)
-- ✅ workload-ctl CLI (comprehensive Docker/kubectl-like interface)
+- ✅ workloadctl CLI (comprehensive Docker/kubectl-like interface)
 - ✅ Device passthrough (generic + convenience flags)
 - ✅ Network modes (pasta, host, none, custom)
 - ✅ Comprehensive documentation with quick reference tables

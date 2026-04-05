@@ -3,7 +3,7 @@
 The workload generator was originally a Python script installed directly as a systemd generator at `/usr/lib/systemd/system-generators/workload-generator`. It was rewritten into a two-stage architecture:
 
 1. **Shell wrapper** (`generators/workload-generator-wrapper`) — installed as the systemd generator, creates a oneshot service
-2. **Python script** (`generators/workload-generate`) — installed at `/usr/libexec/workload-generate`, runs as a normal service
+2. **Python script** (`generators/workload-generate`) — installed at `/usr/libexec/workloadctl/workload-generate`, runs as a normal service
 
 This document records every obstacle encountered during the rewrite.
 
@@ -37,7 +37,7 @@ This document records every obstacle encountered during the rewrite.
 
 **Problem:** After creating `workload-generate` alongside the original `workload-generator` in the `generators/` directory, the Containerfile initially installed both to `/usr/lib/systemd/system-generators/`. systemd ran both as generators.
 
-**Solution:** Install only the shell wrapper as a generator. The Python script goes to `/usr/libexec/workload-generate` and is invoked by the oneshot service.
+**Solution:** Install only the shell wrapper as a generator. The Python script goes to `/usr/libexec/workloadctl/workload-generate` and is invoked by the oneshot service.
 
 ## 6. User= chicken-and-egg
 
