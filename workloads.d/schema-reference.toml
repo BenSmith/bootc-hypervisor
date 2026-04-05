@@ -77,19 +77,37 @@ image = "ghcr.io/example/workload:latest"
 #   "never"   - Never pull, use only local images (fails if not present)
 # pull = "missing"
 
+# Optional: systemd container mode
+# Type: string
+# Default: (unset — podman auto-detects, --init is used for zombie reaping)
+# Options:
+#   "always" - Force --systemd=always, skip --init, add KillSignal=SIGRTMIN+3
+#   "true"   - Force --systemd=true, skip --init, add KillSignal=SIGRTMIN+3
+#   "false"  - Force --systemd=false, skip --init (container has its own init)
+#
+# When unset, containers get --init (catatonit as PID 1) for zombie reaping
+# and signal forwarding. Set this when the container runs systemd as PID 1
+# or has its own init process that handles zombie reaping.
+#
+# Use "always" for containers with systemd as PID 1 (e.g. desktop containers).
+# Use "true" for containers where podman should auto-detect systemd entrypoints.
+# Use "false" when you have a custom init but don't want --init or --systemd.
+#
+# Any value of systemd (including "false") skips --init.
+# Invalid values cause the workload to be skipped with an error.
+# systemd = "always"
+
 # ============================================================================
 # ZOMBIE PROCESS REAPING
 # ============================================================================
-# All workload containers run with --init, which injects podman's built-in
-# init process (catatonit) as PID 1. This:
+# By default, workload containers run with --init, which injects podman's
+# built-in init process (catatonit) as PID 1. This:
 #
 # - Reaps zombie (defunct) processes that accumulate when child processes exit
 # - Forwards signals (SIGTERM, SIGINT) to the container's main process
-# - Is a no-op for containers that already handle PID 1 properly (e.g. systemd)
 #
-# This is always enabled and not configurable per-workload. Without it,
-# containers running shell entrypoints as PID 1 would leak zombie processes
-# over time, especially multi-process workloads (desktop environments, etc.).
+# When container.systemd is set, --init is skipped — systemd or the
+# container's own init process handles PID 1 duties instead.
 # ============================================================================
 
 # ============================================================================
@@ -375,6 +393,27 @@ virtualization = true
 # Example for virtualization: ["kvm"]
 extra_groups = ["video", "render", "input", "dialout", "audio"]
 
+# Optional: Extra UID maps for the container user namespace
+# Type: array of strings
+# Default: [] (auto-populated from workload user UID)
+# Format: podman --uidmap syntax, e.g. "+N:@N:1"
+#
+# When extra_groups is set with a keep-id userns, the generator auto-populates
+# uidmaps and gidmaps to bring the workload user's UID/GID and all extra_groups
+# GIDs into the user namespace. Use these fields only if you need additional
+# mappings beyond the auto-generated ones.
+#
+# Placeholders: {UID} and {GID} are replaced with the workload user's UID/GID.
+#
+# These are deferred to the EnvironmentFile (resolved at service start, not
+# generator time) since the workload user may not exist when the generator runs.
+#
+# Example:
+#   extra_uidmaps = ["+1000:@1000:1"]
+#   extra_gidmaps = ["+1000:@1000:1"]
+# extra_uidmaps = []
+# extra_gidmaps = []
+
 # Optional: Run container in privileged mode
 # Type: boolean
 # Default: false
@@ -440,6 +479,27 @@ mode = "pasta"
 # Note: Rootless containers cannot bind to ports < 1024 without special config
 ports = ["8080:80", "8443:443"]
 
+[host]
+# Optional: Host setup script, run during workload-ctl enable/disable.
+# Type: string (path relative to the container directory)
+# Default: (none)
+#
+# When set, workload-ctl enable runs `<script> enable` and workload-ctl
+# disable runs `<script> disable`. The script is expected to be idempotent
+# in both directions.
+#
+# Container directory: /usr/share/workload-containers/{name}/
+#
+# Use for host-level prerequisites that can't be handled by the container
+# itself, such as:
+#   - Kernel module loading (/etc/modules-load.d/)
+#   - udev rules (/etc/udev/rules.d/)
+#   - SELinux policy modules (semodule -i)
+#   - Host sysctl settings
+#
+# The script runs as root (workload-ctl requires root for enable/disable).
+# setup = "setup.sh"
+
 [resources]
 # Optional: Resource limits and constraints
 # Type: Various (see individual options)
@@ -451,6 +511,18 @@ ports = ["8080:80", "8443:443"]
 #
 # All resource limits use systemd cgroup v2 controls applied at the service level.
 # This works seamlessly with rootless podman and provides comprehensive isolation.
+
+# Optional: Shared memory size (/dev/shm)
+# Type: string (size with unit)
+# Default: "64m" (podman default)
+# Format: "N" (bytes), "Nk" (kilobytes), "Nm" (megabytes), "Ng" (gigabytes)
+# Examples:
+#   "256m" - 256 megabytes
+#   "2g"   - 2 gigabytes
+# Use case: Applications that use shared memory (Firefox, GPU-accelerated apps,
+#           databases, multiprocessing). Firefox and Chrome commonly need >64MB.
+# Podman flag: --shm-size
+# shm_size = "2g"
 
 # ============================================================================
 # CPU LIMITS - Control processor usage
@@ -1003,7 +1075,7 @@ ports = ["8080:80", "8443:443"]
 # - Host groups passed to container (--group-add for extra_groups)
 # - Linger enabled (systemd user session starts at boot)
 # - Subuid/subgid ranges: Auto-configured in /etc/subuid and /etc/subgid
-# - --init (catatonit) as PID 1 for zombie reaping and signal forwarding
+# - --init (catatonit) as PID 1 for zombie reaping (skipped when container.systemd is set)
 #
 # File Locations:
 # - Workload configs: /etc/workloads.d/*.toml

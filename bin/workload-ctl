@@ -260,6 +260,9 @@ def cmd_create(args, manager: WorkloadManager):
         f"image = {toml_string(image)}",
     ])
 
+    if args.systemd:
+        config_lines.append(f"systemd = {toml_string(args.systemd)}")
+
     # Add optional sections
     if args.groups:
         groups_list = ", ".join([toml_string(g) for g in args.groups])
@@ -317,11 +320,14 @@ def cmd_create(args, manager: WorkloadManager):
 
     has_resources = any([
         args.cpu_quota, args.cpu_weight, args.memory_max, args.memory_high,
-        args.memory_swap_max, args.io_weight, args.tasks_max
+        args.memory_swap_max, args.io_weight, args.tasks_max, args.shm_size
     ])
 
     if has_resources:
         config_lines.extend(["", "[resources]"])
+
+        if args.shm_size:
+            config_lines.append(f"shm_size = {toml_string(args.shm_size)}")
 
         if args.cpu_quota:
             config_lines.append(f"cpu_quota = {toml_string(args.cpu_quota)}")
@@ -741,6 +747,35 @@ def _activate_service(config: WorkloadConfig):
     subprocess.run(["systemctl", "start", "--no-block", config.service_name], check=True)
 
 
+def _run_host_setup(config: WorkloadConfig, action: str):
+    """Run host setup script if configured in [host] section.
+
+    The setup script receives 'enable' or 'disable' as its first argument.
+    It is expected to be idempotent in both directions.
+    """
+    setup_script = config.config.get("host", {}).get("setup", "")
+    if not setup_script:
+        return
+
+    container_dir = Path(f"/usr/share/workload-containers/{config.name}")
+    script_path = container_dir / setup_script
+
+    if not script_path.exists():
+        print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)
+        return
+
+    print(f"  Running host setup script ({action})...")
+    result = subprocess.run(
+        [str(script_path), action],
+        capture_output=False,
+    )
+    if result.returncode != 0:
+        print(f"  Error: Host setup script exited with code {result.returncode}",
+              file=sys.stderr)
+        if action == "enable":
+            sys.exit(1)
+
+
 def cmd_enable(args, manager: WorkloadManager):
     """Enable and start a workload"""
     require_root()
@@ -782,6 +817,9 @@ def cmd_enable(args, manager: WorkloadManager):
         subprocess.run(["systemctl", "daemon-reload"], check=False)
         sys.exit(1)
 
+    # Run host setup script if configured
+    _run_host_setup(config, "enable")
+
     print()
     _provision_user(config)
     _transfer_image(config, manager)
@@ -806,6 +844,9 @@ def cmd_disable(args, manager: WorkloadManager):
 
     print(f"  Stopping {config.service_name}...")
     subprocess.run(["systemctl", "stop", config.service_name], check=False)
+
+    # Run host setup teardown if configured
+    _run_host_setup(config, "disable")
 
     config_path = WORKLOAD_DIR / f"{args.workload}.toml"
     content = config_path.read_text()
@@ -979,14 +1020,26 @@ def cmd_shell(args, manager: WorkloadManager):
         print("Is the workload enabled and running?", file=sys.stderr)
         sys.exit(1)
 
+    # Determine container user from environment, fall back to root
+    env = config.config.get("container", {}).get("environment", {})
+    container_user = env.get("CONTAINER_USER")
+    container_uid = env.get("CONTAINER_UID")
+
+    exec_opts = ["-it"]
+    if container_user:
+        home = f"/home/{container_user}"
+        exec_opts.extend(["--user", container_user, "--workdir", home,
+                          "--env", f"HOME={home}"])
+    elif container_uid:
+        exec_opts.extend(["--user", container_uid])
+
     print(f"Opening shell in {config.container_name}...")
-    print("(Try /bin/sh if /bin/bash is not available)")
     print()
 
     # Try bash first, fall back to sh
-    result = manager.run_podman(config, "exec", "-it", config.container_name, "/bin/bash")
+    result = manager.run_podman(config, "exec", *exec_opts, config.container_name, "/bin/bash")
     if result.returncode != 0:
-        manager.run_podman(config, "exec", "-it", config.container_name, "/bin/sh", check=True)
+        manager.run_podman(config, "exec", *exec_opts, config.container_name, "/bin/sh", check=True)
 
 
 def cmd_exec(args, manager: WorkloadManager):
@@ -3046,6 +3099,9 @@ def main():
     create_parser.add_argument("--input", action="store_true", help="Enable input devices (/dev/input + /dev/uinput) - convenience flag")
     create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
     create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
+    create_parser.add_argument("--systemd", metavar="MODE", choices=["always", "true", "false"],
+                               help="Systemd container mode: 'always', 'true', or 'false' (skips --init, adds KillSignal)")
+    create_parser.add_argument("--shm-size", metavar="SIZE", help="Shared memory size (e.g., 256m, 2g; default: 64m)")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
 
     # Resource limit flags

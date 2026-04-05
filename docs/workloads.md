@@ -9,6 +9,9 @@
 - [Core Concepts](#core-concepts)
 - [Configuration Guide](#configuration-guide)
   - [Basic Configuration](#basic-configuration)
+  - [Systemd Containers](#systemd-containers)
+  - [Host Setup Scripts](#host-setup-scripts)
+  - [Extra UID/GID Maps](#extra-uidgid-maps)
   - [Resource Constraints](#resource-constraints)
   - [Secrets Management](#secrets-management)
 - [Managing Workloads](#managing-workloads)
@@ -118,7 +121,7 @@ Workloads with `enabled = true` will be provisioned automatically on first boot.
 | **Cleanup orphans** | `sudo workload-ctl cleanup [--apply]` |
 | **View status** | `workload-ctl status NAME` |
 | **View logs** | `workload-ctl logs [-f] NAME` |
-| **Shell access** | `workload-ctl shell NAME` |
+| **Shell access** | `sudo workload-ctl shell NAME` |
 | **Execute command** | `workload-ctl exec NAME COMMAND` |
 | **Update image** | `sudo workload-ctl update NAME` |
 | **Rollback image** | `sudo workload-ctl rollback NAME` |
@@ -244,6 +247,96 @@ Or use `workload-ctl`:
 sudo workload-ctl edit NAME    # Edit with validation
 sudo workload-ctl restart NAME # Apply changes
 ```
+
+---
+
+### Systemd Containers
+
+Containers that run systemd as PID 1 (e.g., desktop environments, multi-service containers) need special handling. Set `container.systemd` to control this:
+
+```toml
+[container]
+systemd = "always"  # or "true", "false"
+```
+
+| Value | Behavior |
+|-------|----------|
+| (unset) | Default: `--init` for zombie reaping, podman auto-detects systemd |
+| `"always"` | Force `--systemd=always`, skip `--init`, add `KillSignal=SIGRTMIN+3` |
+| `"true"` | Force `--systemd=true`, skip `--init`, add `KillSignal=SIGRTMIN+3` |
+| `"false"` | Force `--systemd=false`, skip `--init` (container has its own init) |
+
+Use `"always"` for containers with systemd as PID 1. Any value skips `--init` — if you set this field, you're opting out of podman's default init process.
+
+The shared memory size can also be configured for containers that need more than the 64MB default (common for Firefox, GPU apps, databases):
+
+```toml
+[resources]
+shm_size = "2g"
+```
+
+---
+
+### Host Setup Scripts
+
+Some workloads need host-level configuration (kernel modules, udev rules, SELinux policies) that can't be handled from inside the container. The `[host]` section lets you declare a setup script:
+
+```toml
+[host]
+setup = "setup.sh"  # relative to /usr/share/workload-containers/{name}/
+```
+
+- `workload-ctl enable` runs `setup.sh enable`
+- `workload-ctl disable` runs `setup.sh disable`
+- The script runs as root and should be idempotent in both directions
+
+Example setup script pattern:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+enable() {
+    # Load kernel module, add udev rules, install SELinux policy...
+}
+
+disable() {
+    # Reverse the above
+}
+
+case "${1:-}" in
+    enable)  enable ;;
+    disable) disable ;;
+    *)       echo "Usage: $0 {enable|disable}" >&2; exit 1 ;;
+esac
+```
+
+---
+
+### Extra UID/GID Maps
+
+When using `userns = "keep-id"` with `extra_groups`, the generator automatically maps the workload user's UID/GID and all extra group GIDs into the container's user namespace. This is needed for containers that run systemd (which needs valid UIDs/GIDs inside the namespace) while still using keep-id for host device access.
+
+The maps are deferred — computed at service start by `workload-ensure-user` rather than at generator time, since the workload user may not exist yet on first boot.
+
+For most workloads, auto-population from `extra_groups` is sufficient:
+
+```toml
+[security]
+userns = "keep-id"
+extra_groups = ["video", "render", "input"]
+# uidmaps/gidmaps auto-generated from workload user + these groups
+```
+
+For advanced cases, you can add explicit maps:
+
+```toml
+[security]
+extra_uidmaps = ["+1000:@1000:1"]
+extra_gidmaps = ["+1000:@1000:1"]
+```
+
+If a group from `extra_groups` doesn't exist on the host, the generator warns and skips that gidmap.
 
 ---
 

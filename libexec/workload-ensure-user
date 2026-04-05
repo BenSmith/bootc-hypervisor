@@ -9,6 +9,7 @@ Usage: workload-ensure-user <workload-name>
 """
 
 import fcntl
+import grp
 import os
 import pwd
 import re
@@ -68,8 +69,12 @@ def setup_selinux_policy():
         log(f"  WARNING: Failed to set up SELinux policy: {e}")
 
 
-def configure_subuid_subgid(pw):
+def configure_subuid_subgid(pw, config):
     """Configure subordinate UID/GID ranges for rootless containers.
+
+    Sets up the main subuid/subgid range for the user namespace, plus
+    individual entries for extra_groups GIDs so that --gidmap +GID:@GID:1
+    can delegate those host GIDs into the container's user namespace.
 
     Uses flock for parallel safety — multiple workload services may
     start concurrently, each running this script via ExecStartPre.
@@ -92,7 +97,20 @@ def configure_subuid_subgid(pw):
             f"UID must be in range 10000-52948."
         )
 
-    subid_entry = f"{username}:{subid_start}:{count}\n"
+    # Build the set of required entries: main range + extra group GIDs
+    main_entry = f"{username}:{subid_start}:{count}"
+    required_entries = {main_entry}
+
+    extra_groups = config.get("security", {}).get("extra_groups", [])
+    for group_name in extra_groups:
+        try:
+            gid = grp.getgrnam(group_name).gr_gid
+        except KeyError:
+            log(f"  WARNING: Group '{group_name}' not found, skipping subid entry")
+            continue
+        # Delegate the group GID in both subuid and subgid so podman can
+        # map it into the user namespace via --gidmap +GID:@GID:1
+        required_entries.add(f"{username}:{gid}:1")
 
     # Lock around check-then-write to handle parallel ExecStartPre
     SUBID_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -101,18 +119,22 @@ def configure_subuid_subgid(pw):
 
         changed = False
         for path in ["/etc/subuid", "/etc/subgid"]:
-            exists = False
             try:
                 with open(path, "r") as f:
-                    if any(line.startswith(f"{username}:") for line in f):
-                        exists = True
+                    existing = f.read()
             except FileNotFoundError:
-                pass
+                existing = ""
 
-            if not exists:
+            missing = []
+            for entry in required_entries:
+                if entry not in existing:
+                    missing.append(entry)
+
+            if missing:
                 with open(path, "a") as f:
-                    f.write(subid_entry)
-                log(f"  Configured {Path(path).name} range for {username}: {subid_start}:{count}")
+                    for entry in missing:
+                        f.write(entry + "\n")
+                        log(f"  Configured {Path(path).name} entry: {entry}")
                 changed = True
 
     # Migrate podman storage to use new subuid/subgid mappings
@@ -187,7 +209,7 @@ def restore_selinux_labels(pw):
         log(f"  WARNING: restorecon failed for {pw.pw_dir}: {result.stderr}")
 
 
-def write_environment_file(name, pw):
+def write_environment_file(name, pw, config):
     """Write UID-dependent environment variables for the systemd service.
 
     The generated service uses EnvironmentFile= to pick up XDG_RUNTIME_DIR
@@ -195,10 +217,12 @@ def write_environment_file(name, pw):
     files before the user exists.
     """
     env_dir = Path("/run/workload-env")
-    env_dir.mkdir(parents=True, exist_ok=True)
+    env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    lines = [f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}"]
 
     env_file = env_dir / f"workload-{name}.env"
-    env_file.write_text(f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}\n")
+    env_file.write_text("\n".join(lines) + "\n")
     log(f"  Wrote environment file {env_file}")
 
 
@@ -247,6 +271,13 @@ def main():
     # Ensure base directory exists
     WORKLOADS_BASE.mkdir(parents=True, exist_ok=True)
 
+    # Load config once — needed by volume setup and environment file
+    try:
+        config = load_config(name)
+    except Exception as e:
+        log(f"ERROR: Failed to load config for {name}: {e}")
+        return 1
+
     # Each step runs independently so a failure in one doesn't skip the rest
     try:
         setup_selinux_policy()
@@ -254,7 +285,7 @@ def main():
         log(f"  WARNING: Failed to set up SELinux policy: {e}")
 
     try:
-        configure_subuid_subgid(pw)
+        configure_subuid_subgid(pw, config)
     except Exception as e:
         log(f"  WARNING: Failed to configure subuid/subgid for {username}: {e}")
 
@@ -264,13 +295,12 @@ def main():
         log(f"  WARNING: Failed to set up home directory for {username}: {e}")
 
     try:
-        config = load_config(name)
         setup_volume_directories(pw, config)
     except Exception as e:
         log(f"  WARNING: Failed to create volume directories for {username}: {e}")
 
     try:
-        write_environment_file(name, pw)
+        write_environment_file(name, pw, config)
     except Exception as e:
         log(f"  WARNING: Failed to write environment file for {name}: {e}")
 

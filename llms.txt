@@ -37,8 +37,16 @@ hypervisor/
 ├── libexec/                          # Helper scripts
 │   └── workload-ensure-user          # Per-workload user/subuid/home setup
 │
+├── containers/                       # Workload container images
+│   └── sunshine-game-streaming/      # Headless desktop + game streaming
+│       ├── Containerfile             # labwc, Sunshine, Steam, input bridge
+│       ├── build.sh                  # Image build script
+│       ├── setup.sh                  # Host setup (uinput, udev, SELinux)
+│       └── sunshine-devices.te       # SELinux policy module
+│
 ├── workloads.d/                      # Example workload configs
 │   ├── schema-reference.toml         # Complete schema documentation
+│   ├── sunshine-game-streaming.toml  # Sunshine game streaming workload
 │   ├── example-webserver.toml        # Minimal web server example
 │   ├── example-with-secrets.toml     # Secrets management example
 │   └── example-groups-test.toml      # Device access groups example
@@ -242,7 +250,7 @@ workload-ctl ports NAME                             # Show port info
 
 **Container Operations:**
 ```bash
-workload-ctl shell NAME                             # Interactive shell
+workload-ctl shell NAME                             # Interactive shell (as container user if configured)
 workload-ctl exec NAME COMMAND                      # Execute command
 workload-ctl logs [-f] [-n N] NAME                  # View logs
 workload-ctl attach NAME                            # Attach to main process
@@ -302,7 +310,7 @@ Per-workload setup script (runs as `ExecStartPre=+` in each workload service):
 - Creates and chowns home directory at `/var/lib/workloads/{name}`
 - Creates and chowns volume directories under the home directory
 - Sets SELinux fcontext policy and restores labels (`container_file_t`)
-- Writes EnvironmentFile (`/run/workload-env/workload-{name}.env`) with `XDG_RUNTIME_DIR`
+- Writes EnvironmentFile (`/run/workload-env/workload-{name}.env`) with `XDG_RUNTIME_DIR`, `EXTRA_UIDMAPS`, `EXTRA_GIDMAPS`
 - Enables systemd-logind linger for rootless podman
 
 ## Image Variants
@@ -549,6 +557,7 @@ sudo workload-ctl create homeassistant \
 - `image` (string, required): Container image reference
 - `command` (array): Override CMD/ENTRYPOINT
 - `pull` (string): Pull policy (missing/always/newer/never)
+- `systemd` (string): Systemd container mode (always/true/false). Skips --init, adds KillSignal=SIGRTMIN+3 for always/true
 
 **[container.environment]** - Environment variables
 - Key-value pairs
@@ -570,6 +579,11 @@ sudo workload-ctl create homeassistant \
 
 **[security]** - Security configuration
 - `extra_groups` (array): Additional system groups
+- `extra_uidmaps` (array): Extra --uidmap flags (auto-populated from workload user + extra_groups)
+- `extra_gidmaps` (array): Extra --gidmap flags (auto-populated from workload user + extra_groups)
+
+**[host]** - Host prerequisites
+- `setup` (string): Setup script path relative to container dir, called with enable/disable arg
 
 **[network]** - Network configuration
 - `mode` (string): pasta (default), host, none, or custom network name
@@ -580,6 +594,7 @@ sudo workload-ctl create homeassistant \
 - `volumes` (array): Volume mounts ("host:container:options")
 
 **[resources]** - Resource limits (systemd cgroup v2)
+- Shared memory: `shm_size` (e.g., "2g", default: "64m")
 - CPU: `cpu_quota`, `cpu_weight`
 - Memory: `memory_max`, `memory_high`, `memory_swap_max`
 - I/O: `io_weight`, `io_read_bandwidth_max`, `io_write_bandwidth_max`
