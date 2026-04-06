@@ -757,8 +757,11 @@ def _run_host_setup(config: WorkloadConfig, action: str):
     if not setup_script:
         return
 
-    container_dir = Path(f"/usr/share/workloadctl/containers/{config.name}")
-    script_path = container_dir / setup_script
+    if setup_script.startswith("/"):
+        script_path = Path(setup_script)
+    else:
+        container_dir = Path(f"/usr/share/workloadctl/containers/{config.name}")
+        script_path = container_dir / setup_script
 
     if not script_path.exists():
         print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)

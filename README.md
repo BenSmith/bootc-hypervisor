@@ -208,8 +208,17 @@ sudo workloadctl enable my-service
 
 `workloadctl` has **no bootc dependency** — it works on any Linux system with
 systemd and podman 5.3+. It is available as a standalone RPM; see
-[`workloadctl/README.md`](workloadctl/README.md) for install instructions and
-full documentation.
+[`workloadctl/README.md`](workloadctl/README.md) for install instructions.
+
+**Documentation:**
+
+- [Workload guide](workloadctl/docs/workloads.md) — configuration, host setup, customization
+- [CLI reference](workloadctl/docs/cli.md) — all commands and options
+- [Secrets management](workloadctl/docs/secrets.md) — TPM2-encrypted credentials
+- [Schema reference](workloadctl/docs/schema-reference.toml) — annotated TOML schema
+- [Example configs](workloadctl/workloads.d/) — real-world workload definitions
+- [Emergency recovery](docs/emergency-recovery.md) — boot recovery procedures
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — common issues and fixes
 
 ## Architecture
 

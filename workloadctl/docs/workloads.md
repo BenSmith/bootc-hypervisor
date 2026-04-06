@@ -289,6 +289,27 @@ setup = "setup.sh"  # relative to /usr/share/workloadctl/containers/{name}/
 - `workloadctl enable` runs `setup.sh enable`
 - `workloadctl disable` runs `setup.sh disable`
 - The script runs as root and should be idempotent in both directions
+- Absolute paths are supported: `setup = "/home/myuser/my-setup.sh"`
+
+#### Customizing container build scripts and setup scripts
+
+The bundled scripts in `/usr/share/workloadctl/containers/` are read-only on immutable (bootc/ostree) systems. To customize them, copy the entire container directory to a writable location and make your changes there:
+
+```bash
+cp -r /usr/share/workloadctl/containers/sunshine-game-streaming ~/sunshine-custom
+cd ~/sunshine-custom
+# edit Containerfile, setup.sh, etc.
+sudo ./build.sh
+```
+
+All bundled scripts use `dirname "$0"` to locate sibling files (Containerfiles, SELinux policies, configs), so they work correctly from any directory.
+
+To use a custom setup script with `workloadctl enable`, set an absolute path in your workload config:
+
+```toml
+[host]
+setup = "/home/myuser/sunshine-custom/setup.sh"
+```
 
 Example setup script pattern:
 

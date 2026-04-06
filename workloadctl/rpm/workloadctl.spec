@@ -76,8 +76,7 @@ install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
 # container build recipes (examples)
 install -dm 0755 %{buildroot}%{_datadir}/workloadctl
 cp -a %{_sourcedir}/containers %{buildroot}%{_datadir}/workloadctl/containers
-find %{buildroot}%{_datadir}/workloadctl/containers -name 'build.sh' -exec chmod 0755 {} \;
-find %{buildroot}%{_datadir}/workloadctl/containers -name 'entrypoint.sh' -exec chmod 0755 {} \;
+find %{buildroot}%{_datadir}/workloadctl/containers -name '*.sh' -exec chmod 0755 {} \;
 
 # example workload configs
 install -dm 0755 %{buildroot}%{_docdir}/workloadctl/examples
