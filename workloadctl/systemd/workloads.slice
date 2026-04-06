@@ -1,0 +1,20 @@
+[Unit]
+Description=Workload Containers
+Documentation=man:systemd.slice(5)
+Before=slices.target
+
+[Slice]
+# Aggregate resource limits for all workloads.
+# The host (system.slice, user.slice) is protected from workload exhaustion.
+# Individual workload [resources] further subdivide within these limits.
+
+# CPU: lower weight than system.slice (default 100) under contention
+CPUWeight=80
+
+# Memory: cap all workloads to 90% of system RAM
+MemoryMax=90%
+# Throttle before hitting the hard limit
+MemoryHigh=85%
+
+# I/O: lower priority than system services under contention
+IOWeight=80

@@ -512,6 +512,14 @@ ports = ["8080:80", "8443:443"]
 # All resource limits use systemd cgroup v2 controls applied at the service level.
 # This works seamlessly with rootless podman and provides comprehensive isolation.
 
+# Optional: systemd slice for cgroup grouping
+# Type: string (systemd slice unit name)
+# Default: "workloads.slice"
+# The default workloads.slice sets aggregate limits (90% memory, lower CPU/IO
+# weight) so workloads can never starve the host. Override to place a workload
+# in a different slice, or "system.slice" to use the system default.
+# slice = "workloads.slice"
+
 # Optional: Shared memory size (/dev/shm)
 # Type: string (size with unit)
 # Default: "64m" (podman default)

@@ -365,7 +365,30 @@ If a group from `extra_groups` doesn't exist on the host, the generator warns an
 
 Control CPU, memory, I/O, and process limits for workloads using systemd cgroup v2 controls. Resource limits prevent workloads from consuming excessive system resources and allow you to prioritize critical workloads.
 
-**Workloads have no resource limits by default.** A misbehaving or compromised container can consume all available CPU and memory on the host. It's good practice to set at least `memory_max` on every production workload, even a generous one, to provide a safety ceiling:
+#### Workloads Slice (aggregate protection)
+
+All workloads run inside `workloads.slice` by default, which provides aggregate resource limits that protect the host even if individual workloads have no limits set:
+
+| Resource | Slice Default | Effect |
+|----------|--------------|--------|
+| `CPUWeight` | 80 | Workloads yield CPU to system services under contention |
+| `MemoryMax` | 90% | All workloads combined can never exceed 90% of system RAM |
+| `MemoryHigh` | 85% | Throttling begins at 85% to avoid hitting the hard limit |
+| `IOWeight` | 80 | System I/O gets priority under contention |
+
+To override the slice for a specific workload:
+
+```toml
+[resources]
+slice = "gpu-workloads.slice"  # Use a different slice
+# slice = "system.slice"       # Or opt out of workloads.slice entirely
+```
+
+The default `workloads.slice` is shipped with workloadctl and can be customized via a systemd drop-in (e.g., `/etc/systemd/system/workloads.slice.d/override.conf`).
+
+#### Per-workload limits
+
+Individual workloads have no per-workload limits by default (they share the slice budget). It's good practice to set at least `memory_max` on production workloads to provide a per-workload ceiling within the slice:
 
 ```toml
 [resources]
@@ -510,12 +533,16 @@ systemctl status workload-{name}.service
 systemd-cgtop
 
 # Check memory limits
-cat /sys/fs/cgroup/system.slice/workload-{name}.service/memory.max
-cat /sys/fs/cgroup/system.slice/workload-{name}.service/memory.current
+cat /sys/fs/cgroup/workloads.slice/workload-{name}.service/memory.max
+cat /sys/fs/cgroup/workloads.slice/workload-{name}.service/memory.current
 
 # Check CPU limits
 systemctl show workload-{name}.service -p CPUQuota
 systemctl show workload-{name}.service -p CPUWeight
+
+# Check slice aggregate usage
+systemctl status workloads.slice
+systemd-cgtop /workloads.slice
 ```
 
 For complete resource documentation with detailed examples, see `workloads.d/schema-reference.toml`.

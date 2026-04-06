@@ -56,6 +56,8 @@ install -Dpm 0644 %{_sourcedir}/systemd/workload-metrics.service \
     %{buildroot}%{_unitdir}/workload-metrics.service
 install -Dpm 0644 %{_sourcedir}/systemd/workload-metrics.timer \
     %{buildroot}%{_unitdir}/workload-metrics.timer
+install -Dpm 0644 %{_sourcedir}/systemd/workloads.slice \
+    %{buildroot}%{_unitdir}/workloads.slice
 
 # tmpfiles.d
 install -Dpm 0644 %{_sourcedir}/systemd/workloads-dirs.conf \
@@ -112,6 +114,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_libexecdir}/workloadctl/workload-metrics
 %{_unitdir}/workload-metrics.service
 %{_unitdir}/workload-metrics.timer
+%{_unitdir}/workloads.slice
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 %{_datadir}/containers/seccomp-workload-baseline.json
 %{_datadir}/bash-completion/completions/workloadctl

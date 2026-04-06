@@ -78,6 +78,7 @@ class TestGeneratorBasic(unittest.TestCase):
         self.assertIn("--publish 8080:80", service)
         self.assertIn("User=_wl-web", service)
         self.assertIn("--network=", service)
+        self.assertIn("Slice=workloads.slice", service)
 
         sysusers = self.read_sysusers("web")
         self.assertIn("u _wl-web", sysusers)
@@ -367,6 +368,67 @@ class TestGeneratorResources(unittest.TestCase):
         self.assertIn("CPUQuota=200%", service)
         self.assertIn("MemoryMax=4G", service)
         self.assertIn("TasksMax=100", service)
+
+
+class TestGeneratorSlice(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def test_default_slice(self):
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+
+            [container]
+            image = "myapp"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-app.service").read_text()
+        self.assertIn("Slice=workloads.slice", service)
+
+    def test_custom_slice(self):
+        write_config(self.config_dir, "gpu", """\
+            [workload]
+            name = "gpu"
+            enabled = true
+
+            [container]
+            image = "gpu-app"
+
+            [resources]
+            slice = "gpu-workloads.slice"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-gpu.service").read_text()
+        self.assertIn("Slice=gpu-workloads.slice", service)
+        self.assertNotIn("Slice=workloads.slice", service)
+
+    def test_system_slice_override(self):
+        write_config(self.config_dir, "sys", """\
+            [workload]
+            name = "sys"
+            enabled = true
+
+            [container]
+            image = "sysapp"
+
+            [resources]
+            slice = "system.slice"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-sys.service").read_text()
+        self.assertIn("Slice=system.slice", service)
 
 
 class TestGeneratorUserns(unittest.TestCase):
