@@ -28,9 +28,13 @@
           }
         }
       ],
-      "ghcr.io": [{"type": "insecureAcceptAnything"}],
-      "docker.io": [{"type": "insecureAcceptAnything"}]
+      "registry.fedoraproject.org": [{"type": "insecureAcceptAnything"}],
+      "docker.io": [{"type": "insecureAcceptAnything"}],
+      "quay.io": [{"type": "insecureAcceptAnything"}],
+      "codeberg.org": [{"type": "insecureAcceptAnything"}]
     },
+    "containers-storage:": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-archive:": {"": [{"type": "insecureAcceptAnything"}]},
     "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
   }
 }

@@ -392,7 +392,7 @@ else
 fi
 
 # Run workload-metrics manually to ensure output is fresh
-if /usr/libexec/workload-metrics 2>/dev/null; then
+if /usr/libexec/workloadctl/workload-metrics 2>/dev/null; then
     pass "workload-metrics ran successfully"
 else
     fail "workload-metrics exited with error"
@@ -470,9 +470,9 @@ for test_file in /etc/workloads.d/*.test.sh; do
 done
 
 # ---------------------------------------------------------------------------
-# Test: workload-ctl secret subcommands
+# Test: workloadctl secret subcommands
 # ---------------------------------------------------------------------------
-section "workload-ctl secret commands"
+section "workloadctl secret commands"
 
 # Use a dedicated test credential name to avoid interfering with workload secrets
 _secret_name="vm-test-secret"
@@ -484,7 +484,7 @@ rm -f "/etc/credstore.encrypted/${_secret_name}"
 # --- create (from file) ---
 _secret_file=$(mktemp /tmp/secret-input-XXXXXX)
 echo -n "$_secret_value" > "$_secret_file"
-if workload-ctl secret create "$_secret_name" --file "$_secret_file" 2>&1; then
+if workloadctl secret create "$_secret_name" --file "$_secret_file" 2>&1; then
     pass "secret create: succeeded"
 else
     fail "secret create: command failed"
@@ -504,7 +504,7 @@ else
 fi
 
 # --- list ---
-list_output=$(workload-ctl secret list 2>&1)
+list_output=$(workloadctl secret list 2>&1)
 if echo "$list_output" | grep -q "$_secret_name"; then
     pass "secret list: shows ${_secret_name}"
 else
@@ -512,7 +512,7 @@ else
 fi
 
 # --- show ---
-show_output=$(workload-ctl secret show "$_secret_name" 2>&1)
+show_output=$(workloadctl secret show "$_secret_name" 2>&1)
 if echo "$show_output" | grep -q "$_secret_value"; then
     pass "secret show: decrypted value matches"
 else
@@ -523,14 +523,14 @@ fi
 _new_value="rotated-value-99"
 _secret_file=$(mktemp /tmp/secret-input-XXXXXX)
 echo -n "$_new_value" > "$_secret_file"
-if workload-ctl secret create "$_secret_name" --force --file "$_secret_file" 2>&1; then
+if workloadctl secret create "$_secret_name" --force --file "$_secret_file" 2>&1; then
     pass "secret create --force: succeeded"
 else
     fail "secret create --force: command failed"
 fi
 rm -f "$_secret_file"
 
-show_output=$(workload-ctl secret show "$_secret_name" 2>&1)
+show_output=$(workloadctl secret show "$_secret_name" 2>&1)
 if echo "$show_output" | grep -q "$_new_value"; then
     pass "secret create --force: new value stored"
 else
@@ -569,7 +569,7 @@ else
 fi
 
 # Verify roundtrip preserved the value
-show_output=$(workload-ctl secret show "$_secret_name" 2>&1)
+show_output=$(workloadctl secret show "$_secret_name" 2>&1)
 if echo "$show_output" | grep -q "$_new_value"; then
     pass "secret export/import roundtrip: value preserved"
 else
@@ -586,7 +586,7 @@ fi
 rm -f "$_export_file" "$_pass_file"
 
 # --- delete ---
-if workload-ctl secret delete "$_secret_name" --force 2>&1; then
+if workloadctl secret delete "$_secret_name" --force 2>&1; then
     pass "secret delete: succeeded"
 else
     fail "secret delete: command failed"
@@ -601,7 +601,7 @@ fi
 # --- create rejects bad names ---
 _secret_file=$(mktemp /tmp/secret-input-XXXXXX)
 echo -n "dummy" > "$_secret_file"
-if workload-ctl secret create "bad name!" --file "$_secret_file" 2>&1; then
+if workloadctl secret create "bad name!" --file "$_secret_file" 2>&1; then
     fail "secret create: should reject invalid name"
 else
     pass "secret create: rejects invalid name"
@@ -612,8 +612,8 @@ rm -f "$_secret_file"
 # Re-create the credential, then try again without --force
 _secret_file=$(mktemp /tmp/secret-input-XXXXXX)
 echo -n "value1" > "$_secret_file"
-workload-ctl secret create "$_secret_name" --file "$_secret_file" 2>/dev/null || true
-if workload-ctl secret create "$_secret_name" --file "$_secret_file" 2>&1; then
+workloadctl secret create "$_secret_name" --file "$_secret_file" 2>/dev/null || true
+if workloadctl secret create "$_secret_name" --file "$_secret_file" 2>&1; then
     fail "secret create: should refuse overwrite without --force"
 else
     pass "secret create: refuses overwrite without --force"
@@ -622,7 +622,7 @@ rm -f "$_secret_file"
 
 # --- path consistency: credential path matches generator's LoadCredentialEncrypted ---
 # The generator emits: LoadCredentialEncrypted=NAME:/etc/credstore.encrypted/NAME
-# Verify the file workload-ctl created is at exactly that path
+# Verify the file workloadctl created is at exactly that path
 _expected_path="/etc/credstore.encrypted/${_secret_name}"
 if [ -f "$_expected_path" ]; then
     pass "path consistency: credential at generator-expected path"
@@ -631,13 +631,13 @@ else
 fi
 
 # Final cleanup
-workload-ctl secret delete "$_secret_name" --force 2>/dev/null || true
+workloadctl secret delete "$_secret_name" --force 2>/dev/null || true
 unset _secret_name _secret_value _new_value
 
 # ---------------------------------------------------------------------------
-# Test: workload-ctl update and rollback
+# Test: workloadctl update and rollback
 # ---------------------------------------------------------------------------
-section "workload-ctl update and rollback"
+section "workloadctl update and rollback"
 
 # Use registry (has health check) for update/rollback test
 _update_wl="registry"
@@ -659,7 +659,7 @@ if [ -n "$_update_uid" ]; then
     fi
 
     # Run update --force (same image, but --force ensures restart + rollback tag)
-    if workload-ctl update "$_update_wl" --force 2>&1; then
+    if workloadctl update "$_update_wl" --force 2>&1; then
         pass "update --force: command succeeded"
     else
         fail "update --force: command failed"
@@ -684,7 +684,7 @@ if [ -n "$_update_uid" ]; then
     fi
 
     # Test rollback command
-    if workload-ctl rollback "$_update_wl" 2>&1; then
+    if workloadctl rollback "$_update_wl" 2>&1; then
         pass "rollback: command succeeded"
     else
         # "Already running the rollback image" is also success (same image)
@@ -699,7 +699,7 @@ if [ -n "$_update_uid" ]; then
     fi
 
     # Test update without --force (should be "already up to date", no restart)
-    if workload-ctl update "$_update_wl" 2>&1; then
+    if workloadctl update "$_update_wl" 2>&1; then
         pass "update (no change): command succeeded"
     else
         fail "update (no change): command failed"
@@ -720,7 +720,7 @@ for _toml in /etc/workloads.d/*.toml; do
 done
 
 if [ -n "$_pull_never_wl" ]; then
-    if workload-ctl update "$_pull_never_wl" 2>&1; then
+    if workloadctl update "$_pull_never_wl" 2>&1; then
         fail "update pull=never: should have failed"
     else
         pass "update pull=never: correctly rejected"

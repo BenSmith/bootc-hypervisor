@@ -115,27 +115,9 @@ just build-all-isos-local
 
 Datetime tags are automatically generated (YYYYMMDD-HHMM).
 
+The images are signed with cosign using keyless signing (OIDC).
+
 ISO builds support custom root filesystems via the `rootfs` parameter (xfs, btrfs, ext4). Defaults to xfs if not specified.
-
-### Proxy Configuration
-
-If you're building the images yourself and you have a caching proxy configured appropriately for handling package mirroring (2+ GB of cache, packages can be a little over 100 MB) - set `HTTP_PROXY` environment variable
-
-```bash
-HTTP_PROXY=http://proxy:3128 just build-base
-```
-
-## Podman 4 Compatibility
-
-Upstream (https://gitlab.com/fedora/bootc/base-images) fedora-bootc is built using podman 5.x.
-
-The `fedora-bootc-minimal.Containerfile` in this repo is a backported version for GitHub Actions (podman 4.9.3):
-
-- **No heredoc syntax** - uses inline `sh -c` instead
-- **COPY instead of bind mount** - rpm-ostree needs writable `/repos`
-- **No explicit `rw` on cache mount** - avoids duplicate option bug
-
-These workarounds are temporary until GitHub Actions upgrades to podman 5.x.
 
 ## Using the Images
 
@@ -207,31 +189,42 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
 sudo systemctl reboot
 ```
 
-### Verify image signatures
+## Workload System
 
-The `fedora-bootc-minimal` base images are signed with cosign using keyless signing (OIDC).
-
-Verify signatures before use:
+The workload provisioning system ([`workloadctl`](workloadctl/)) manages rootless
+podman containers as declarative TOML configs. Each workload gets a dedicated
+locked-down system user, its own UID/subuid namespace, systemd service, and
+automatic volume management.
 
 ```bash
-# Install cosign
-curl -LO https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
-sudo install cosign-linux-amd64 /usr/local/bin/cosign
+# Create and start a workload
+sudo workloadctl create webserver \
+  --image docker.io/nginxinc/nginx-unprivileged:alpine \
+  --ports 8080:8080 --enable
 
-# Verify image signature
-cosign verify \
-  --certificate-identity-regexp "https://github.com/.*/bootc-hypervisor" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/bensmith/fedora-bootc-minimal:latest
+# Or write a TOML config and enable it
+sudo workloadctl enable my-service
 ```
 
-Signatures are stored in Sigstore's public transparency log and tied to GitHub Actions OIDC tokens.
+`workloadctl` has **no bootc dependency** — it works on any Linux system with
+systemd and podman 5.3+. It is available as a standalone RPM; see
+[`workloadctl/README.md`](workloadctl/README.md) for install instructions.
+
+**Documentation:**
+
+- [Workload guide](workloadctl/docs/workloads.md) — configuration, host setup, customization
+- [CLI reference](workloadctl/docs/cli.md) — all commands and options
+- [Secrets management](workloadctl/docs/secrets.md) — TPM2-encrypted credentials
+- [Schema reference](workloadctl/docs/schema-reference.toml) — annotated TOML schema
+- [Example configs](workloadctl/workloads.d/) — real-world workload definitions
+- [Emergency recovery](docs/emergency-recovery.md) — boot recovery procedures
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — common issues and fixes
 
 ## Architecture
 
 ```
 fedora-bootc-minimal
-  └── hypervisor-bootc (libvirt, qemu, podman, incus, workload system, cosy)
+  └── hypervisor-bootc (libvirt, qemu, podman, incus, workloadctl, cosy)
       ├── hypervisor-nvidia:rpmfusion (RPMFusion drivers)
       ├── hypervisor-nvidia:negativo17 (negativo17 drivers)
       └── hypervisor-amd (ROCm, Mesa)
@@ -256,59 +249,13 @@ The hypervisor provides multiple options for different workload types:
 
 Choose the right tool for your workload: VMs for Windows/isolation, Incus for lightweight Linux instances, Podman for applications.
 
-## GitHub Actions Workflows
+## Podman 4 Pipeline Build
 
-### Build Flow
+Upstream (https://gitlab.com/fedora/bootc/base-images) fedora-bootc is built using podman 5.x.
 
-All images follow this standardized build pipeline:
+The `fedora-bootc-minimal.Containerfile` in this repo is a backported version for GitHub Actions (podman 4.9.3):
 
-```
-1. Build          → Create container image with podman (in root storage)
-2. Rechunk        → Optimize with bootc-base-imagectl rechunk (official bootc method)
-3. Retag          → Update tags to point to rechunked image
-4. Push           → Upload to ghcr.io
-5. Cleanup        → Free disk space for next variant
-6. Sign           → Cryptographically sign with cosign (keyless)
-```
-
-### `build-minimal-bootc.yml`
-
-Builds Fedora minimal bootc base images.
-
-**Flow:**
-1. Build with three tags: `{version}-{timestamp}`, `{version}`, `latest`
-2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
-3. Retag version and latest to rechunked image
-4. Push all tags to ghcr.io
-5. Sign all tags with cosign
-
-**Matrix builds:** Fedora 43 (rawhide builds disabled in matrix but available via manual dispatch)
-
-### `build-hypervisor.yml`
-
-Builds base hypervisor and GPU variants.
-
-**Flow (per variant):**
-1. Build with two tags: `{timestamp}`, `latest` (or variant name)
-2. Rechunk with bootc-base-imagectl (official bootc rechunking tool)
-3. Retag latest/variant to rechunked image
-4. Push both tags to ghcr.io
-5. Cleanup to free space for the next variant
-6. Sign all pushed images (batched at end)
-
-**Variants:**
-- `base` - Base hypervisor (always built)
-- `nvidia-rpmfusion` - NVIDIA via RPMFusion
-- `nvidia-negativo17` - NVIDIA via negativo17
-- `amd` - AMD GPU support
-
-**Triggers:**
-- **Auto**: Runs after a minimal build completes successfully
-- Weekly on Sundays at 3am UTC (backup)
-- Manual dispatch with variant selection
-- Push to the main branch, affecting Containerfiles or workflow
-
-**Build dependency:** Won't start if the minimal build is running or failed. This ensures hypervisor always uses a freshly built minimal base.
+These workarounds are temporary until GitHub Actions upgrades to podman 5.x.
 
 ## License
 

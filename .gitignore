@@ -8,6 +8,7 @@ store/
 base-images/
 bootc-src
 rpm/rpm-output/
+workloadctl/rpmbuild/
 __pycache__/
 bin/cosy
 man/cosy.1

@@ -1,4 +1,18 @@
-FROM ghcr.io/bensmith/fedora-bootc-minimal:latest
+# Stage 1: Build workloadctl RPM (matches target python(abi))
+ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
+FROM ${BASE_IMAGE} AS workloadctl-builder
+RUN dnf install -y rpm-build python3 python3-rpm-macros systemd-rpm-macros && dnf clean all
+COPY workloadctl/ /src/
+RUN cd /src && \
+    mkdir -p rpmbuild/{BUILD,RPMS,SRPMS,SPECS} && \
+    rpmbuild -bb \
+      --define "_topdir $(pwd)/rpmbuild" \
+      --define "_sourcedir $(pwd)" \
+      --define "_builddir $(pwd)/rpmbuild/BUILD" \
+      rpm/workloadctl.spec
+
+# Stage 2: Hypervisor image
+FROM ${BASE_IMAGE}
 
 # Build argument for local development (enables passwordless sudo)
 ARG ENABLE_PASSWORDLESS_SUDO=false
@@ -184,54 +198,17 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system
-COPY lib/workload_lib.py /tmp/workload_lib.py
-RUN mkdir -p "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" && \
-    install -m 0644 /tmp/workload_lib.py \
-        "$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"/workload_lib.py && \
-    rm /tmp/workload_lib.py
-COPY generators/workload-generator-wrapper /usr/lib/systemd/system-generators/workload-generator
-COPY generators/workload-generate /usr/libexec/
-COPY systemd/workloads-dirs.conf /usr/lib/tmpfiles.d/workloads-dirs.conf
+# Install workload provisioning system from builder stage
+COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/
+RUN dnf install -y /tmp/workloadctl-*.rpm && rm -f /tmp/workloadctl-*.rpm && dnf clean all
+
+# Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
-COPY libexec/workload-ensure-user /usr/libexec/
-COPY libexec/workload-write-env /usr/libexec/
-COPY libexec/workload-metrics /usr/libexec/
-COPY systemd/workload-metrics.service /usr/lib/systemd/system/
-COPY systemd/workload-metrics.timer /usr/lib/systemd/system/
-COPY bin/workload-ctl /usr/bin/
 COPY bin/cosy /usr/bin/
 COPY man/cosy.1 /usr/share/man/man1/cosy.1
-COPY completions/workload-ctl-completion.bash /usr/share/bash-completion/completions/workload-ctl
-COPY docs/workloads.md /usr/share/doc/workload-ctl/
-COPY workloads.d/schema-reference.toml /usr/share/doc/workload-ctl/
-COPY containers/ /usr/share/workload-containers/
-COPY seccomp-workload-baseline.json /usr/share/containers/
-
-RUN chmod 0755 /usr/lib/systemd/system-generators/workload-generator && \
-    chmod 0755 /usr/libexec/workload-generate && \
-    chmod 0755 /usr/libexec/workload-ensure-user && \
-    chmod 0755 /usr/libexec/workload-write-env && \
-    chmod 0755 /usr/libexec/workload-metrics && \
-    chmod 0644 /usr/lib/systemd/system/workload-metrics.service && \
-    chmod 0644 /usr/lib/systemd/system/workload-metrics.timer && \
-    chmod 0755 /usr/bin/workload-ctl && \
-    chmod 0755 /usr/bin/cosy && \
+RUN chmod 0755 /usr/bin/cosy && \
     chmod 0644 /usr/share/man/man1/cosy.1 && \
-    chmod 0644 /usr/lib/tmpfiles.d/workloads-dirs.conf && \
-    chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf && \
-    chmod 0644 /usr/share/bash-completion/completions/workload-ctl && \
-    chmod 0644 /usr/share/doc/workload-ctl/*.md && \
-    chmod 0644 /usr/share/doc/workload-ctl/*.toml && \
-    chmod 0644 /usr/share/containers/seccomp-workload-baseline.json && \
-    find /usr/share/workload-containers -name 'build.sh' -exec chmod 0755 {} \; && \
-    find /usr/share/workload-containers -name 'entrypoint.sh' -exec chmod 0755 {} \; && \
-    mkdir -p /var/lib/workloads /etc/workloads.d && \
-    chmod 0755 /var/lib/workloads && \
-    systemctl enable workload-metrics.timer
-
-# Copy workload configurations - disabled by default
-COPY workloads.d/ /etc/workloads.d/
+    chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1

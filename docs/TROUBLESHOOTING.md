@@ -7,13 +7,13 @@ This guide covers common issues when working with the workload system and how to
 ### Check workload health
 ```bash
 # Verify all aspects of workload setup
-sudo workload-ctl verify <workload>
+sudo workloadctl verify <workload>
 
 # Check service status
-sudo workload-ctl status <workload>
+sudo workloadctl status <workload>
 
 # View recent logs
-sudo workload-ctl logs -n 50 <workload>
+sudo workloadctl logs -n 50 <workload>
 ```
 
 ### Common failure pattern
@@ -22,7 +22,7 @@ When a workload fails to start, you'll typically see:
 - Container exits immediately with code 125 or 126
 - Logs show cryptic error messages
 
-Run `workload-ctl verify` to diagnose the root cause.
+Run `workloadctl verify` to diagnose the root cause.
 
 ## Common Issues
 
@@ -41,10 +41,10 @@ Run `workload-ctl verify` to diagnose the root cause.
 **Fix:**
 ```bash
 # Check if subuid/subgid configured
-sudo workload-ctl verify <workload>
+sudo workloadctl verify <workload>
 
 # If missing, re-run user setup
-sudo /usr/libexec/workload-ensure-user <name>
+sudo /usr/libexec/workloadctl/workload-ensure-user <name>
 
 # For pull=never images, pull manually
 sudo -u _wl-<name> \
@@ -52,7 +52,7 @@ sudo -u _wl-<name> \
   podman pull registry.local:5000/<image>:latest
 
 # Then restart workload
-sudo workload-ctl restart <workload>
+sudo workloadctl recreate <workload>
 ```
 
 ### 2. Permission denied errors
@@ -69,13 +69,13 @@ sudo workload-ctl restart <workload>
 **Fix:**
 ```bash
 # Check volume paths exist
-sudo workload-ctl verify <workload>
+sudo workloadctl verify <workload>
 
 # Create missing directories
 sudo mkdir -p /var/lib/workloads/<name>/<subdir>
 
 # For userns=host: Check UID mapping
-sudo workload-ctl uid-map <workload>
+sudo workloadctl uid-map <workload>
 
 # Fix ownership using the mapped UID shown by uid-map command
 # Example: Container UID 1000 → Host UID (subuid_start + 999)
@@ -97,9 +97,9 @@ sudo chown -R <mapped-uid>:<mapped-gid> /var/lib/workloads/<name>/
 **Fix:**
 ```bash
 # Run full enable process
-sudo workload-ctl disable <workload>
+sudo workloadctl disable <workload>
 sudo systemctl daemon-reload
-sudo workload-ctl enable <workload>
+sudo workloadctl enable <workload>
 
 # Check if user exists
 id _wl-<name>
@@ -126,12 +126,12 @@ sudo loginctl enable-linger $(id -u _wl-<name>)
 ```bash
 # For most changes: reload and restart
 sudo systemctl daemon-reload
-sudo workload-ctl restart <workload>
+sudo workloadctl recreate <workload>
 
 # For structural changes (ID, name, network mode): disable/enable
-sudo workload-ctl disable <workload>
+sudo workloadctl disable <workload>
 sudo systemctl daemon-reload
-sudo workload-ctl enable <workload>
+sudo workloadctl enable <workload>
 ```
 
 ### 5. Network issues
@@ -149,7 +149,7 @@ sudo workload-ctl enable <workload>
 **Fix:**
 ```bash
 # Check what ports are configured
-sudo workload-ctl ports <workload>
+sudo workloadctl ports <workload>
 
 # Check if port is already in use
 sudo ss -tlnp | grep :<port>
@@ -175,7 +175,7 @@ With `userns=host`, container UIDs are shifted by the workload's subuid range:
 **Fix:**
 ```bash
 # Check UID mapping
-sudo workload-ctl uid-map <workload>
+sudo workloadctl uid-map <workload>
 
 # This will show the formula and example mappings
 # Follow the chown command shown in the output
@@ -195,7 +195,7 @@ sudo workload-ctl uid-map <workload>
 ```bash
 # For userns=host workloads with SSH:
 # 1. Calculate the mapped UID
-sudo workload-ctl uid-map <workload>
+sudo workloadctl uid-map <workload>
 
 # 2. Fix ownership of .ssh directory
 # Example: borgbackup with container UID 1000 → host UID shown by uid-map
@@ -231,9 +231,9 @@ capabilities = [
 
 Then regenerate and restart:
 ```bash
-sudo workload-ctl disable <workload>
+sudo workloadctl disable <workload>
 sudo systemctl daemon-reload
-sudo workload-ctl enable <workload>
+sudo workloadctl enable <workload>
 ```
 
 ### 9. Syscall blocked by seccomp profile
@@ -278,7 +278,7 @@ security_opt = ["seccomp=/etc/containers/my-custom-profile.json"]
 Then apply the change:
 ```bash
 sudo systemctl daemon-reload
-sudo workload-ctl restart <workload>
+sudo workloadctl recreate <workload>
 ```
 
 ### 10. Container exits immediately (code 125/126)
@@ -440,20 +440,20 @@ watch -n 1 'systemctl status workload-<name>.service'
 When enabling a new workload, expect this sequence:
 
 1. **Edit TOML config** - Set image, ports, volumes, etc.
-2. **Validate** - `workload-ctl validate <workload>`
-3. **Enable** - `workload-ctl enable <workload>`
+2. **Validate** - `workloadctl validate <workload>`
+3. **Enable** - `workloadctl enable <workload>`
    - Creates user via systemd-sysusers
    - Runs workload-ensure-user to configure subuid/subgid
    - Enables linger
    - Starts service
-4. **Verify** - `workload-ctl verify <workload>`
-5. **Monitor** - `workload-ctl logs -f <workload>`
+4. **Verify** - `workloadctl verify <workload>`
+5. **Monitor** - `workloadctl logs -f <workload>`
 
 If it fails:
 1. **Check logs** - `journalctl -u workload-<name>.service -n 50`
-2. **Verify setup** - `workload-ctl verify <workload>`
+2. **Verify setup** - `workloadctl verify <workload>`
 3. **Fix issues** - Follow suggestions from verify command
-4. **Restart** - `workload-ctl restart <workload>` (or disable/enable if needed)
+4. **Restart** - `workloadctl recreate <workload>` (or disable/enable if needed)
 
 ## Reference
 

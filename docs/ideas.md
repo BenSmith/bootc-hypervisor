@@ -72,7 +72,7 @@ Stream games from beefy computer to thin client in another room
 **Implementation:**
 - Design pod TOML schema (`type = "pod"`, `[[pod.containers]]`)
 - Update generator to create podman pods
-- Update workload-ctl for pod operations (shell, exec, logs per container)
+- Update workloadctl for pod operations (shell, exec, logs per container)
 - Test and document
 
 **Notes:**
@@ -145,7 +145,7 @@ Stream games from beefy computer to thin client in another room
 - **Interest:** Medium
 
 **What gets packaged:**
-- workload-ctl
+- workloadctl
 - workload-generator
 - workload-ensure-user
 - systemd integration files
@@ -260,7 +260,7 @@ Start here when unsure what to work on:
 - Workload migration tools (move between hosts)
 - Resource recommendations (suggest limits based on usage)
 - Generate seccomp profile instead of static, so it will handle changes in the distribution policies
-- Scheduled image updates: systemd timer that runs `workload-ctl update --all` periodically.
+- Scheduled image updates: systemd timer that runs `workloadctl update --all` periodically.
   Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
   Could add configurable schedule, notification on updates, and update log.
 - Workloads get LVM provisioned to cap or flex storage
