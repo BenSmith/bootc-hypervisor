@@ -77,7 +77,9 @@ service units automatically — no `systemctl daemon-reload` needed after reboot
 | `workloadctl disable` | Stop service, optionally purge user/data |
 | `workloadctl status` | Show workload status and resource usage |
 | `workloadctl logs` | View workload container logs |
-| `workloadctl update` | Pull new image and restart |
+| `workloadctl reboot` | Soft-reboot a systemd container (keeps overlay) |
+| `workloadctl recreate` | Recreate container from image (destroys overlay) |
+| `workloadctl update` | Pull new image and recreate |
 | `workloadctl list` | List all configured workloads |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |
 

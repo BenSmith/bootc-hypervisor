@@ -52,8 +52,8 @@
 #        sudo mount -t cifs //<host>/exports /mnt/share \
 #            -o guest,uid=$(id -u),gid=$(id -g),file_mode=0664,dir_mode=0775
 #
-#   After editing smb.conf, restart to apply:
-#        sudo workloadctl restart smb-server
+#   After editing smb.conf, recreate to apply:
+#        sudo workloadctl recreate smb-server
 
 [workload]
 name = "smb-server"

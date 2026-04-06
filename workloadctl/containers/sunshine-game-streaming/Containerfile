@@ -248,7 +248,7 @@ RUN mkdir -p /etc/xdg/labwc && \
 
   <outputs>
     <output name="HEADLESS-1">
-      <mode>1920x1080</mode>
+      <mode>2560x1080</mode>
     </output>
   </outputs>
 
@@ -264,6 +264,7 @@ RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
 font=Fira Code:size=14
+initial-window-size-chars=80x24
 INI
 
 # --- Autostart ---
@@ -275,6 +276,9 @@ INI
 RUN cat > /etc/xdg/labwc/autostart <<'SH'
 #!/bin/bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+# --- Display resolution ---
+wlr-randr --output HEADLESS-1 --custom-mode 2560x1080@60Hz
 
 # --- Audio ---
 alsa_card=""

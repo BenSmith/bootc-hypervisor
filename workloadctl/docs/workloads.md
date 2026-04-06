@@ -125,7 +125,7 @@ Workloads with `enabled = true` will be provisioned automatically on first boot.
 | **Execute command** | `workloadctl exec NAME COMMAND` |
 | **Update image** | `sudo workloadctl update NAME` |
 | **Rollback image** | `sudo workloadctl rollback NAME` |
-| **Restart** | `sudo workloadctl restart NAME` |
+| **Recreate** | `sudo workloadctl recreate NAME` |
 | **Show details** | `workloadctl info NAME` |
 | **Validate config** | `workloadctl validate NAME` |
 | **Edit config** | `sudo workloadctl edit NAME` |
@@ -245,7 +245,7 @@ sudo systemctl restart workload-{name}.service
 Or use `workloadctl`:
 ```bash
 sudo workloadctl edit NAME    # Edit with validation
-sudo workloadctl restart NAME # Apply changes
+sudo workloadctl recreate NAME # Apply changes
 ```
 
 ---
@@ -759,9 +759,9 @@ sudo workloadctl enable smb-server
 
 **Example:** for `smb-server`, the volumes `./exports`, `./samba-state`, `./samba-run`, and `./samba-logs` are auto-created on the first enable attempt; `./smb.conf` is listed in `required_files` so you must provide it before the second enable call completes.
 
-**Restart workload:**
+**Recreate workload (destroys overlay):**
 ```bash
-sudo workloadctl restart NAME
+sudo workloadctl recreate NAME
 ```
 
 **Check status:**
@@ -1039,7 +1039,7 @@ sudo workloadctl secret import api-key api-key.secret
 #   Encryption: tpm2
 #
 #   Restart affected workloads:
-#     sudo workloadctl restart myapp
+#     sudo workloadctl recreate myapp
 ```
 
 Import automatically scans workload configs to find which workloads reference the credential and suggests restart commands.
@@ -1096,7 +1096,7 @@ sudo workloadctl secret export pihole-webpassword -o /mnt/usb/pihole-webpassword
 # Target machine: restore workload + import credentials
 sudo workloadctl restore /mnt/usb/pihole-20260315-120000.tar.zst --enable
 sudo workloadctl secret import pihole-webpassword /mnt/usb/pihole-webpassword.secret --force
-sudo workloadctl restart pihole
+sudo workloadctl recreate pihole
 ```
 
 ---

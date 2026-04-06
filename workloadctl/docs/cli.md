@@ -83,12 +83,24 @@ sudo workloadctl disable [--purge] <workload>
 
 ---
 
-### `restart`
+### `reboot`
 
-Restart a running workload's systemd service.
+Soft-reboot a systemd container: re-executes systemd (PID 1) and restarts all services inside the container without destroying the overlay filesystem. Useful for picking up config changes made inside the container.
 
 ```
-sudo workloadctl restart <workload>
+sudo workloadctl reboot <workload>
+```
+
+Only works with systemd containers (`container.systemd` set). Requires systemd 254+ inside the container.
+
+---
+
+### `recreate`
+
+Recreate a workload container from its image. This **destroys the overlay** — any changes made inside the container are lost.
+
+```
+sudo workloadctl recreate <workload>
 ```
 
 ---

@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="attach backup cleanup cp create disable edit enable exec health images info list logs network ports ps restart restore rollback secret shell stats status update uid-map validate verify help"
+    local commands="attach backup cleanup cp create disable edit enable exec health images info list logs network ports ps reboot recreate restore rollback secret shell stats status update uid-map validate verify help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
 
@@ -45,7 +45,7 @@ _workload_ctl_completion() {
             COMPREPLY=( $(compgen -W "--apply" -- "$cur") )
             return 0
             ;;
-        attach|edit|restart|rollback|shell|uid-map|verify)
+        attach|edit|reboot|recreate|rollback|shell|uid-map|verify)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             return 0

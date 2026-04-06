@@ -231,7 +231,8 @@ workloadctl create NAME --image IMAGE [OPTIONS]   # Create workload
 workloadctl enable NAME                            # Enable and start
 workloadctl disable NAME [--purge]                 # Stop and disable
 workloadctl cleanup [--apply]                      # Remove orphaned users/dirs
-workloadctl restart NAME                           # Restart service
+workloadctl reboot NAME                            # Soft-reboot (keep overlay)
+workloadctl recreate NAME                          # Recreate from image (destroys overlay)
 workloadctl update NAME [--force] [--all]          # Update images
 ```
 

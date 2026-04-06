@@ -52,7 +52,7 @@ sudo -u _wl-<name> \
   podman pull registry.local:5000/<image>:latest
 
 # Then restart workload
-sudo workloadctl restart <workload>
+sudo workloadctl recreate <workload>
 ```
 
 ### 2. Permission denied errors
@@ -126,7 +126,7 @@ sudo loginctl enable-linger $(id -u _wl-<name>)
 ```bash
 # For most changes: reload and restart
 sudo systemctl daemon-reload
-sudo workloadctl restart <workload>
+sudo workloadctl recreate <workload>
 
 # For structural changes (ID, name, network mode): disable/enable
 sudo workloadctl disable <workload>
@@ -278,7 +278,7 @@ security_opt = ["seccomp=/etc/containers/my-custom-profile.json"]
 Then apply the change:
 ```bash
 sudo systemctl daemon-reload
-sudo workloadctl restart <workload>
+sudo workloadctl recreate <workload>
 ```
 
 ### 10. Container exits immediately (code 125/126)
@@ -453,7 +453,7 @@ If it fails:
 1. **Check logs** - `journalctl -u workload-<name>.service -n 50`
 2. **Verify setup** - `workloadctl verify <workload>`
 3. **Fix issues** - Follow suggestions from verify command
-4. **Restart** - `workloadctl restart <workload>` (or disable/enable if needed)
+4. **Restart** - `workloadctl recreate <workload>` (or disable/enable if needed)
 
 ## Reference
 

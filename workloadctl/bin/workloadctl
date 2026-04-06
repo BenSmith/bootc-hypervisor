@@ -1004,14 +1004,32 @@ def cmd_cleanup(args, manager: WorkloadManager):
     print("\nCleanup complete.")
 
 
-def cmd_restart(args, manager: WorkloadManager):
-    """Restart a workload"""
+def cmd_recreate(args, manager: WorkloadManager):
+    """Recreate a workload container from its image (destroys overlay)"""
     require_root()
     config = WorkloadConfig(args.workload)
 
-    print(f"Restarting workload: {args.workload}")
+    print(f"Recreating workload: {args.workload}")
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
-    print(f"✓ Workload '{args.workload}' restarted")
+    print(f"✓ Workload '{args.workload}' recreated")
+
+
+def cmd_reboot(args, manager: WorkloadManager):
+    """Soft-reboot a workload container (re-exec systemd, restart all services, keep overlay)"""
+    config = WorkloadConfig(args.workload)
+
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Is the workload enabled and running?", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Soft-rebooting workload: {args.workload}")
+    result = manager.run_podman(config, "exec", config.container_name,
+                                "systemctl", "soft-reboot")
+    if result.returncode != 0:
+        print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
+        sys.exit(1)
+    print(f"✓ Workload '{args.workload}' soft-rebooted (overlay preserved)")
 
 
 def cmd_shell(args, manager: WorkloadManager):
@@ -1030,11 +1048,16 @@ def cmd_shell(args, manager: WorkloadManager):
 
     exec_opts = ["-it"]
     if container_user:
+        uid = container_uid or "1000"
         home = f"/home/{container_user}"
         exec_opts.extend(["--user", container_user, "--workdir", home,
-                          "--env", f"HOME={home}"])
+                          "--env", f"HOME={home}",
+                          "--env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                          "--env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus"])
     elif container_uid:
-        exec_opts.extend(["--user", container_uid])
+        exec_opts.extend(["--user", container_uid,
+                          "--env", f"XDG_RUNTIME_DIR=/run/user/{container_uid}",
+                          "--env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{container_uid}/bus"])
 
     print(f"Opening shell in {config.container_name}...")
     print()
@@ -1526,7 +1549,7 @@ def cmd_info(args, manager: WorkloadManager):
     print("Quick commands:")
     print(f"  Shell:    workloadctl shell {config.filename}")
     print(f"  Logs:     workloadctl logs -f {config.filename}")
-    print(f"  Restart:  workloadctl restart {config.filename}")
+    print(f"  Recreate: workloadctl recreate {config.filename}")
 
 
 def cmd_validate(args, manager: WorkloadManager):
@@ -3071,7 +3094,7 @@ def cmd_secret(args, manager: WorkloadManager):
         if affected:
             print(f"\n  Restart affected workloads:")
             for wl_name in affected:
-                print(f"    sudo workloadctl restart {wl_name}")
+                print(f"    sudo workloadctl recreate {wl_name}")
 
 
 def main():
@@ -3178,8 +3201,11 @@ def main():
     ps_parser = subparsers.add_parser("ps", help="Show all running workload containers")
     ps_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    restart_parser = subparsers.add_parser("restart", help="Restart a running workload")
-    restart_parser.add_argument("workload", help="Workload name")
+    reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
+    reboot_parser.add_argument("workload", help="Workload name")
+
+    recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
+    recreate_parser.add_argument("workload", help="Workload name")
 
     restore_parser = subparsers.add_parser("restore", help="Restore a workload from backup")
     restore_parser.add_argument("archive", help="Path to backup archive (.tar.zst)")
@@ -3274,7 +3300,8 @@ def main():
         "network": cmd_network,
         "ports": cmd_ports,
         "ps": cmd_ps,
-        "restart": cmd_restart,
+        "reboot": cmd_reboot,
+        "recreate": cmd_recreate,
         "restore": cmd_restore,
         "secret": cmd_secret,
         "shell": cmd_shell,
