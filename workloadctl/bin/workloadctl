@@ -23,6 +23,7 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, '/usr/libexec/workloadctl')
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
     MAX_NAME_LENGTH, NAME_PATTERN, USERNAME_PREFIX,

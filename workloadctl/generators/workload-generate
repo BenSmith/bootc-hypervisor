@@ -50,6 +50,7 @@ try:
     import re
     from pathlib import Path
 
+    sys.path.insert(0, '/usr/libexec/workloadctl')
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
