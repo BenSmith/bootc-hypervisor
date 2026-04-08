@@ -1,0 +1,442 @@
+# Headless Wayfire Desktop (VNC)
+#
+# Wayfire runs headlessly (WLR_BACKENDS=headless). Access via wayvnc on
+# port 5900. No game streaming, no Steam — just a clean Wayland desktop.
+#
+# Build:
+#   sudo ./build.sh
+#
+# Run:
+#   workload-ctl enable desktop-wayfire
+
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    adwaita-cursor-theme \
+    adwaita-icon-theme \
+    alsa-utils \
+    bash-completion \
+    dbus-daemon \
+    fira-code-fonts \
+    firefox \
+    foot \
+    google-noto-sans-fonts \
+    grim \
+    hostname \
+    htop \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    mesa-libGL \
+    mesa-libgbm \
+    mesa-vulkan-drivers \
+    neovim \
+    pipewire \
+    pipewire-alsa \
+    pipewire-pulseaudio \
+    procps-ng \
+    slurp \
+    sudo \
+    systemd \
+    systemd-udev \
+    util-linux \
+    waybar \
+    wayfire \
+    wayvnc \
+    wireplumber \
+    wl-clipboard \
+    wlr-randr \
+    wlrctl \
+    wofi \
+    xdg-utils \
+    xorg-x11-server-Xwayland \
+    && dnf clean all
+
+# --- Firefox stability fix ---
+# Disable Wayland vsync: Firefox freezes under wlroots compositors without
+# mouse movement. Mozilla bug #1954343.
+
+RUN mkdir -p /usr/lib/firefox/browser/defaults/preferences && \
+    cat > /usr/lib/firefox/browser/defaults/preferences/99-container.js <<'JS'
+pref("widget.wayland.vsync.enabled", false);
+JS
+
+# --- GTK settings ---
+
+RUN mkdir -p /etc/gtk-3.0 /etc/gtk-4.0 && \
+    cat > /etc/gtk-3.0/settings.ini <<'INI' && cp /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini
+[Settings]
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-font-name=Noto Sans 11
+INI
+
+# --- Wayfire config ---
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/wayfire.ini <<'INI'
+[core]
+plugins = \
+  alpha \
+  animate \
+  autostart \
+  command \
+  cube \
+  decoration \
+  expo \
+  fast-switcher \
+  fisheye \
+  grid \
+  move \
+  oswitch \
+  place \
+  resize \
+  switcher \
+  vswitch \
+  window-rules \
+  wm-actions \
+  wobbly \
+  zoom
+
+[output:HEADLESS-1]
+mode = 1920x1080@60000
+
+[command]
+binding_terminal = <super> KEY_ENTER
+command_terminal = foot
+
+binding_launcher = <super> KEY_D
+command_launcher = wofi --show run
+
+binding_close = <super> KEY_Q
+command_close = wlrctl toplevel close
+
+[move]
+activate = <super> BTN_LEFT
+
+[resize]
+activate = <super> BTN_RIGHT
+
+[fast-switcher]
+activate = <alt> KEY_TAB
+
+[vswitch]
+binding_left = <super> KEY_LEFT
+binding_down = <super> KEY_DOWN
+binding_up = <super> KEY_UP
+binding_right = <super> KEY_RIGHT
+
+[wm-actions]
+toggle_fullscreen = <super> KEY_F
+
+[grid]
+slot_bl = <super> KEY_KP1
+slot_b = <super> KEY_KP2
+slot_br = <super> KEY_KP3
+slot_l = <super> KEY_KP4
+slot_c = <super> KEY_KP5
+slot_r = <super> KEY_KP6
+slot_tl = <super> KEY_KP7
+slot_t = <super> KEY_KP8
+slot_tr = <super> KEY_KP9
+
+[cube]
+activate = <ctrl> <alt> BTN_LEFT
+background = 0.1 0.1 0.1 1.0
+
+[animate]
+open_animation = zoom
+close_animation = zoom
+duration = 300
+
+[wobbly]
+friction = 3.0
+spring_k = 8.0
+
+[decoration]
+active_color = 0.3 0.3 0.9 1.0
+inactive_color = 0.2 0.2 0.2 1.0
+
+[autostart]
+panel = waybar
+audio = /etc/xdg/wayfire/start-audio.sh
+INI
+
+# --- Foot terminal config ---
+
+RUN mkdir -p /etc/xdg/foot && \
+    cat > /etc/xdg/foot/foot.ini <<'INI'
+[main]
+font=Fira Code:size=14
+initial-window-size-chars=80x24
+INI
+
+# --- Autostart: audio ---
+
+RUN mkdir -p /etc/xdg/wayfire && \
+    cat > /etc/xdg/wayfire/start-audio.sh <<'SH'
+#!/bin/bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+# --- Display resolution ---
+wlr-randr --output HEADLESS-1 --custom-mode 1920x1080@60Hz
+
+# --- Audio ---
+alsa_card=""
+card_num=""
+while IFS= read -r line; do
+    n=$(echo "$line" | sed -n 's/^card \([0-9]*\):.*/\1/p')
+    if [ -n "$n" ] && echo "$line" | grep -qi analog; then
+        card_num="$n"
+        alsa_card="hw:$card_num,0"
+        break
+    fi
+done < <(aplay -l 2>/dev/null)
+
+if [ -n "$alsa_card" ]; then
+    mkdir -p ~/.config/pipewire/pipewire.conf.d
+    cat > ~/.config/pipewire/pipewire.conf.d/10-alsa-sink.conf <<EOF
+context.objects = [
+    { factory = adapter
+        args = {
+            factory.name     = api.alsa.pcm.sink
+            node.name        = "alsa-sink"
+            node.description = "ALSA Analog Output"
+            media.class      = "Audio/Sink"
+            api.alsa.path    = "$alsa_card"
+        }
+    }
+]
+EOF
+    pipewire &
+    i=0
+    until [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do
+        sleep 0.1; i=$((i+1))
+        [ $i -ge 100 ] && break
+    done
+    wireplumber &
+    pipewire-pulse &
+    i=0
+    until wpctl status >/dev/null 2>&1; do
+        sleep 0.1; i=$((i+1))
+        [ $i -ge 100 ] && break
+    done
+    [ -n "$card_num" ] && amixer -c "$card_num" sset Master 74% unmute >/dev/null 2>&1
+fi
+SH
+
+# --- Waybar config ---
+
+RUN mkdir -p /etc/xdg/waybar && \
+    cat > /etc/xdg/waybar/config <<'JSON'
+{
+    "layer": "top",
+    "position": "bottom",
+    "height": 30,
+    "modules-left": ["custom/launcher", "wlr/taskbar"],
+    "modules-right": ["cpu", "memory", "clock"],
+    "custom/launcher": {
+        "format": " Apps",
+        "on-click": "wofi --show run"
+    },
+    "wlr/taskbar": {
+        "format": "{title}",
+        "on-click": "activate"
+    },
+    "cpu": {
+        "format": "CPU {usage}%",
+        "interval": 5
+    },
+    "memory": {
+        "format": "RAM {percentage}%",
+        "interval": 5
+    },
+    "clock": {
+        "format": "{:%H:%M}",
+        "format-alt": "{:%Y-%m-%d %H:%M}"
+    }
+}
+JSON
+
+# --- Wayfire systemd service ---
+
+RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
+[Unit]
+Description=Wayfire Wayland Compositor (headless)
+After=container-bootstrap.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+
+Environment=WLR_BACKENDS=headless
+Environment=LIBSEAT_BACKEND=noop
+Environment=WLR_RENDERER=gles2
+Environment=MOZ_ENABLE_WAYLAND=1
+Environment=XDG_CURRENT_DESKTOP=wlroots
+Environment=XCURSOR_THEME=Adwaita
+Environment=XCURSOR_SIZE=24
+
+ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Wayland ready gate ---
+
+RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
+#!/bin/sh
+RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+ENV_FILE="/run/wayland-display.env"
+
+while true; do
+    for sock in "$RUNTIME_DIR"/wayland-*; do
+        case "$sock" in *.lock) continue ;; esac
+        if [ -S "$sock" ]; then
+            DISPLAY_NAME="${sock##*/}"
+            echo "WAYLAND_DISPLAY=${DISPLAY_NAME}" > "$ENV_FILE"
+            exit 0
+        fi
+    done
+    sleep 0.5
+done
+SCRIPT
+
+RUN chmod +x /usr/local/bin/wait-for-wayland
+
+RUN cat > /usr/lib/systemd/system/wayfire-wayland-ready.service <<'UNIT'
+[Unit]
+Description=Wait for wayfire Wayland socket
+After=wayfire.service
+Requires=wayfire.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID
+ExecStart=/usr/local/bin/wait-for-wayland
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- wayvnc systemd service ---
+# Binds on all interfaces, port 5900. No auth by default.
+
+RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
+[Unit]
+Description=wayvnc VNC server
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && cd && exec /usr/bin/wayvnc 0.0.0.0 5900'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Bootstrap ---
+
+RUN cat > /usr/local/bin/container-bootstrap <<'SCRIPT'
+#!/bin/bash
+set -e
+: "${CONTAINER_USER:?must be set}"
+: "${CONTAINER_UID:?must be set}"
+: "${CONTAINER_GID:?must be set}"
+
+HOME_DIR="/home/$CONTAINER_USER"
+
+groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
+useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
+mkdir -p "$HOME_DIR/.local/state"
+chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/state"
+
+for grp in render video audio; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        usermod -aG "$grp" "$CONTAINER_USER" 2>/dev/null || true
+    fi
+done
+
+mkdir -p /etc/sudoers.d
+echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
+chown 0:0 /etc/sudoers.d/container-user
+chmod 0440 /etc/sudoers.d/container-user
+
+if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
+    cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+PROMPT
+    chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
+fi
+
+echo "Bootstrap complete."
+SCRIPT
+
+RUN cat > /usr/lib/systemd/system/container-bootstrap.service <<'UNIT'
+[Unit]
+Description=First-boot container bootstrap
+ConditionPathExists=!/etc/container-bootstrapped
+DefaultDependencies=no
+After=sysinit.target
+Before=wayfire.service
+
+[Service]
+Type=oneshot
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID
+ExecStart=/usr/local/bin/container-bootstrap
+ExecStartPost=/bin/touch /etc/container-bootstrapped
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN mkdir -p /etc/systemd/journald.conf.d && \
+    cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+SystemKeepFree=50M
+CONF
+
+RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
+    cat > /etc/systemd/system/systemd-journald.service.d/10-container.conf <<'DROPIN'
+[Service]
+CapabilityBoundingSet=
+IPAddressDeny=
+LockPersonality=no
+MemoryDenyWriteExecute=no
+NoNewPrivileges=no
+ProtectClock=no
+RestrictAddressFamilies=
+RestrictNamespaces=no
+RestrictRealtime=no
+RestrictSUIDSGID=no
+SystemCallArchitectures=
+SystemCallFilter=
+DROPIN
+
+RUN mkdir -p /etc/systemd/system && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    systemctl enable wayfire wayfire-wayland-ready wayvnc container-bootstrap && \
+    chmod +x /etc/xdg/wayfire/start-audio.sh /usr/local/bin/container-bootstrap
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]
