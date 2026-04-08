@@ -1,6 +1,6 @@
 Name:           workloadctl
-Version:        1.0.0
-Release:        1%{?dist}
+Version:        0.1.0
+Release:        %{?buildserial:0.%{buildserial}}%{!?buildserial:1}%{?dist}
 Summary:        Declarative rootless container workload manager
 
 License:        MIT
@@ -13,6 +13,9 @@ Requires:       podman >= 5.3
 Requires:       systemd
 Requires:       shadow-utils
 Suggests:       bash-completion
+Requires:       policycoreutils
+Suggests:       policycoreutils-python-utils
+Suggests:       checkpolicy
 
 %description
 workloadctl is a declarative workload provisioning system for rootless

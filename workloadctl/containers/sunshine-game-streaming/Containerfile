@@ -401,6 +401,26 @@ UNIT
 # need the display (sunshine, wayvnc, input-bridge) depend on this instead
 # of each polling independently.
 
+RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
+#!/bin/sh
+RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+ENV_FILE="/run/wayland-display.env"
+
+while true; do
+    for sock in "$RUNTIME_DIR"/wayland-*; do
+        case "$sock" in *.lock) continue ;; esac
+        if [ -S "$sock" ]; then
+            DISPLAY_NAME="${sock##*/}"
+            echo "WAYLAND_DISPLAY=${DISPLAY_NAME}" > "$ENV_FILE"
+            exit 0
+        fi
+    done
+    sleep 0.5
+done
+SCRIPT
+
+RUN chmod +x /usr/local/bin/wait-for-wayland
+
 RUN cat > /usr/lib/systemd/system/labwc-wayland-ready.service <<'UNIT'
 [Unit]
 Description=Wait for labwc Wayland socket
@@ -411,7 +431,7 @@ Requires=labwc.service
 Type=oneshot
 RemainAfterExit=yes
 PassEnvironment=CONTAINER_UID
-ExecStart=/bin/sh -c 'until [ -S /run/user/${CONTAINER_UID}/wayland-0 ]; do sleep 0.5; done'
+ExecStart=/usr/local/bin/wait-for-wayland
 
 [Install]
 WantedBy=multi-user.target
@@ -457,7 +477,7 @@ PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 ExecStartPre=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c 'export HOME=/home/${CONTAINER_USER} && exec /usr/local/bin/sunshine-csrf-setup'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY=wayland-0 && cd && exec /usr/bin/sunshine'
+    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && cd && exec /usr/bin/sunshine'
 
 [Install]
 WantedBy=multi-user.target
@@ -480,7 +500,7 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY=wayland-0 && cd && exec /usr/bin/wayvnc 0.0.0.0 5900'
+    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && cd && exec /usr/bin/wayvnc 0.0.0.0 5900'
 
 [Install]
 WantedBy=multi-user.target
@@ -891,7 +911,8 @@ def _setup_wayland(sock):
 
 def monitor():
     uid = os.getuid()
-    sock = f'/run/user/{uid}/wayland-0'
+    display = os.environ.get('WAYLAND_DISPLAY', 'wayland-0')
+    sock = f'/run/user/{uid}/{display}'
     print(f'Waiting for {sock} ...', flush=True)
     while not os.path.exists(sock):
         time.sleep(1)
@@ -935,7 +956,7 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY=wayland-0 && exec /usr/local/bin/sunshine-input-bridge'
+    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && exec /usr/local/bin/sunshine-input-bridge'
 
 [Install]
 WantedBy=multi-user.target
