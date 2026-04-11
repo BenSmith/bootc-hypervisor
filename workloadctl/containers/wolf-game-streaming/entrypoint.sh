@@ -50,6 +50,11 @@ for i in $(seq 1 30); do
     sleep 0.1
 done
 
+if ! pactl info >/dev/null 2>&1; then
+    echo "PulseAudio failed to become ready after 3s — refusing to start Wolf with broken PULSE_SERVER" >&2
+    exit 1
+fi
+
 export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
 
 mkdir -p "$HOST_APPS_STATE_FOLDER"
