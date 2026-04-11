@@ -6,7 +6,6 @@ WOLF_CFG_FOLDER="${WOLF_CFG_FOLDER:-/etc/wolf}"
 WOLF_RENDER_NODE="${WOLF_RENDER_NODE:-/dev/dri/renderD128}"
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/sockets}"
-export HOME=/home/steam
 
 # ── Create runtime directories ──
 mkdir -p "$XDG_RUNTIME_DIR"
@@ -22,7 +21,6 @@ export WOLF_CFG_FILE="$WOLF_CFG_FOLDER/config.toml"
 export WOLF_PRIVATE_KEY_FILE="$WOLF_CFG_FOLDER/key.pem"
 export WOLF_PRIVATE_CERT_FILE="$WOLF_CFG_FOLDER/cert.pem"
 export WOLF_RENDER_NODE
-export WOLF_DOCKER_FAKE_UDEV_PATH="$WOLF_HOME/bin"
 export WOLF_STOP_CONTAINER_ON_EXIT=TRUE
 export WOLF_LOG_LEVEL="${WOLF_LOG_LEVEL:-INFO}"
 export GST_DEBUG="${GST_DEBUG:-1}"

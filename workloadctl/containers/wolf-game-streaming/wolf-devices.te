@@ -1,8 +1,9 @@
-module wolf-devices 1.1;
+module wolf-devices 1.2;
 
 # SELinux policy for the wolf-game-streaming workload container.
 #
-# Allows container_t/container_init_t processes to access:
+# Wolf is non-systemd, so all its processes — including Steam and bwrap —
+# run as container_t (no container_init_t in this container). Allows:
 #   /dev/uinput      — create virtual input devices (Wolf input forwarding)
 #   /dev/input/*     — read evdev events (Wolf input handling)
 #   /run/udev        — device property lookups (libdrm, mesa, ALSA)
@@ -12,7 +13,6 @@ module wolf-devices 1.1;
 
 require {
     type container_t;
-    type container_init_t;
     type event_device_t;
     type udev_var_run_t;
     type user_tmp_t;
@@ -38,8 +38,6 @@ require {
 # mouse/keyboard/gamepad events from Moonlight clients.
 allow container_t event_device_t:chr_file { open read write ioctl getattr };
 allow container_t event_device_t:dir { open read search getattr };
-allow container_init_t event_device_t:chr_file { open read write ioctl getattr };
-allow container_init_t event_device_t:dir { open read search getattr };
 
 # ── Udev database ──
 # libdrm, mesa, and ALSA query device properties from the udev runtime database.
@@ -47,43 +45,24 @@ allow container_t udev_var_run_t:dir { open read search getattr };
 allow container_t udev_var_run_t:file { open read getattr };
 allow container_t udev_var_run_t:sock_file getattr;
 allow container_t udev_var_run_t:lnk_file { read getattr };
-allow container_init_t udev_var_run_t:dir { open read search getattr };
-allow container_init_t udev_var_run_t:file { open read getattr };
-allow container_init_t udev_var_run_t:sock_file getattr;
-allow container_init_t udev_var_run_t:lnk_file { read getattr };
 
 # ── Steam bwrap sandbox (srt-bwrap / pressure-vessel) ──
-# Wolf is non-systemd, so its processes run as container_t (not
-# container_init_t). Sunshine — which runs systemd-in-container — only needs
-# the container_init_t rules; wolf needs both, since Steam and bwrap inherit
-# the wolf entrypoint's container_t label.
-#
 # Remounts cgroup/pstore/bpf/tmpfs filesystems as part of sandbox setup.
 allow container_t cgroup_t:filesystem remount;
 allow container_t pstore_t:filesystem remount;
 allow container_t bpf_t:filesystem remount;
 allow container_t tmpfs_t:filesystem remount;
-allow container_init_t cgroup_t:filesystem remount;
-allow container_init_t pstore_t:filesystem remount;
-allow container_init_t bpf_t:filesystem remount;
-allow container_init_t tmpfs_t:filesystem remount;
 # Mounts a new devpts inside the sandbox.
 allow container_t devpts_t:filesystem mount;
-allow container_init_t devpts_t:filesystem mount;
 # Bind-mounts over PulseAudio and other sockets during sandbox setup.
 allow container_t container_file_t:sock_file mounton;
 allow container_t user_tmp_t:sock_file mounton;
-allow container_init_t container_file_t:sock_file mounton;
-allow container_init_t user_tmp_t:sock_file mounton;
 
 # ── Steam IPC ──
 # Steam uses /tmp for IPC sockets and temp files (labeled user_tmp_t).
 allow container_t user_tmp_t:dir { open read write search getattr add_name remove_name ioctl lock };
 allow container_t user_tmp_t:sock_file { create write getattr setattr unlink };
 allow container_t user_tmp_t:file { open read write create getattr unlink lock map };
-allow container_init_t user_tmp_t:dir { open read write search getattr add_name remove_name ioctl lock };
-allow container_init_t user_tmp_t:sock_file { create write getattr setattr unlink };
-allow container_init_t user_tmp_t:file { open read write create getattr unlink lock map };
 
 # ── Wine/Proton ──
 # Wine's PE loader needs executable heap for Windows binary compatibility.
@@ -92,6 +71,3 @@ allow container_init_t user_tmp_t:file { open read write create getattr unlink l
 allow container_t self:process execheap;
 allow container_t self:memprotect mmap_zero;
 allow container_t container_file_t:file execmod;
-allow container_init_t self:process execheap;
-allow container_init_t self:memprotect mmap_zero;
-allow container_init_t container_file_t:file execmod;

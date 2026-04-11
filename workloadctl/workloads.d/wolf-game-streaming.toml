@@ -28,7 +28,7 @@ capabilities = [
     "SETFCAP", "SETPCAP",
     "SYS_CHROOT", "SYS_NICE",
 ]
-extra_groups = ["video", "render", "input", "audio"]
+extra_groups = ["video", "render", "input"]
 
 [storage]
 volumes = [
