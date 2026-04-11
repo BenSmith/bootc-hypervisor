@@ -29,6 +29,7 @@ echo "[steam-launcher] gamescope ${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRE
 # starts steam's runtime.
 exec setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
     gamescope \
+        --backend wayland \
         -W "${STREAM_WIDTH}" \
         -H "${STREAM_HEIGHT}" \
         -r "${STREAM_REFRESH}" \
