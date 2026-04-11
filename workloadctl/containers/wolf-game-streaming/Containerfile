@@ -4,10 +4,14 @@
 # Build: GPU_TYPE=amd sudo ./build.sh
 
 # ─── Stage 1: Build GStreamer and gst-interpipe ────────────────────────────
-FROM fedora:43 AS gstreamer-builder
+FROM registry.fedoraproject.org/fedora@sha256:00d5fd230bf7ef5bb73ebc4fa9e4a29d4e10bf49647670fba5a82aab118e0863 AS gstreamer-builder
 
 ARG GSTREAMER_VERSION=1.24
 ARG GSTREAMER_INSTALL_PREFIX=/gstreamer
+# Pinned commits — bump deliberately, not drift
+ARG GST_INTERPIPE_COMMIT=21efccf81bf01f8f2131f55b33ecbde3699744b5
+ARG GST_WAYLAND_DISPLAY_COMMIT=bc021a40e5b69d2e3d63e08d69608b2d44ee1825
+ARG WOLF_COMMIT=7675f0f225b5ffae75806af91e608cff2a8dd59e
 ENV HOME=/root \
     GSTREAMER_INSTALL_PREFIX=$GSTREAMER_INSTALL_PREFIX \
     PKG_CONFIG_PATH="${GSTREAMER_INSTALL_PREFIX}/lib64/pkgconfig"
@@ -118,7 +122,8 @@ RUN meson setup \
 
 # ── Build gst-interpipe ──
 WORKDIR /tmp
-RUN git clone https://github.com/RidgeRun/gst-interpipe.git
+RUN git clone https://github.com/RidgeRun/gst-interpipe.git && \
+    cd gst-interpipe && git checkout ${GST_INTERPIPE_COMMIT}
 WORKDIR /tmp/gst-interpipe
 RUN meson setup build --prefix=$GSTREAMER_INSTALL_PREFIX \
     -Denable-gtk-doc=false && \
@@ -141,7 +146,8 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN git clone https://github.com/games-on-whales/gst-wayland-display
+RUN git clone https://github.com/games-on-whales/gst-wayland-display && \
+    cd gst-wayland-display && git checkout ${GST_WAYLAND_DISPLAY_COMMIT}
 WORKDIR /tmp/gst-wayland-display
 RUN cargo install cargo-c && \
     cargo cinstall -p c-bindings \
@@ -170,15 +176,19 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     python3-devel && \
     dnf clean all
 
-RUN git clone --branch=stable https://github.com/games-on-whales/wolf.git
+RUN git clone https://github.com/games-on-whales/wolf.git && \
+    cd wolf && git checkout ${WOLF_COMMIT}
 WORKDIR /tmp/wolf
 
 # Force TLS 1.2 max — TLS 1.3 post-handshake client cert auth is broken with
 # Moonlight-qt's Qt SSL stack (handshake completes but CertificateRequest is
 # never answered, causing Wolf to timeout/cancel the connection).
+# Patch is pinned against WOLF_COMMIT — bump the pin and re-verify the sed
+# targets still match if upstream moves this line.
 RUN sed -i '/context(asio::ssl::context::tls)/a\\n  SSL_CTX_set_max_proto_version(context.native_handle(), TLS1_2_VERSION);' \
     src/moonlight-server/rest/custom-https.cpp && \
-    sed -i '1i #include <openssl/ssl.h>' src/moonlight-server/rest/custom-https.cpp
+    sed -i '1i #include <openssl/ssl.h>' src/moonlight-server/rest/custom-https.cpp && \
+    grep -q "SSL_CTX_set_max_proto_version" src/moonlight-server/rest/custom-https.cpp
 
 RUN --mount=type=cache,target=/cache/ccache \
     CXXFLAGS="-I${GSTREAMER_INSTALL_PREFIX}/include $CXXFLAGS" cmake \
@@ -200,7 +210,7 @@ RUN cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /root/wolf && \
 
 
 # ─── Stage 4: Runtime image ────────────────────────────────────────────────
-FROM fedora:43
+FROM registry.fedoraproject.org/fedora@sha256:00d5fd230bf7ef5bb73ebc4fa9e4a29d4e10bf49647670fba5a82aab118e0863
 
 ARG GPU_TYPE=amd
 
