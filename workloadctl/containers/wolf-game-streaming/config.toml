@@ -23,10 +23,11 @@ start_audio_server = true
 
 [profiles.apps.runner]
 type = "process"
-# steam-launcher starts Xwayland on Wolf's wayland socket, then exec's steam
-# with all capabilities dropped. Steam needs both: an X11 display (its main
-# client and the steamwebhelper UI are X11-native) and an empty cap set (its
-# bubblewrap refuses to run otherwise). See steam-launcher.sh for details.
+# steam-launcher runs Steam under gamescope, which nests as a wayland client
+# on Wolf's compositor and provides its own XWayland (Wolf's gst-wayland-
+# display intentionally has none). It also drops ambient/inheritable caps
+# before exec — bwrap (Steam's pressure-vessel) refuses to run with any
+# permitted caps. See steam-launcher.sh for the full rationale.
 run_cmd = "/opt/wolf/bin/steam-launcher"
 
 ######################
