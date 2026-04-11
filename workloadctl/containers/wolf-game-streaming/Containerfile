@@ -1,0 +1,294 @@
+# Wolf game streaming container
+# Multi-stage build: GStreamer 1.24 + gst-interpipe + gst-wayland-display + Wolf
+#
+# Build: GPU_TYPE=amd sudo ./build.sh
+
+# ─── Stage 1: Build GStreamer and gst-interpipe ────────────────────────────
+FROM fedora:43 AS gstreamer-builder
+
+ARG GSTREAMER_VERSION=1.24
+ARG GSTREAMER_INSTALL_PREFIX=/gstreamer
+ENV HOME=/root \
+    GSTREAMER_INSTALL_PREFIX=$GSTREAMER_INSTALL_PREFIX \
+    PKG_CONFIG_PATH="${GSTREAMER_INSTALL_PREFIX}/lib64/pkgconfig"
+
+WORKDIR /tmp
+
+# ── Enable RPMFusion for x264/x265 codec libraries ──
+RUN dnf install -y \
+    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm \
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm
+
+# ── GStreamer build dependencies ──
+RUN dnf install -y --setopt=install_weak_deps=False \
+    alsa-lib-devel \
+    bison \
+    cairo-gobject-devel \
+    ccache \
+    cmake \
+    elfutils-devel \
+    fdk-aac-free-devel \
+    flac-devel \
+    flex \
+    gcc \
+    gcc-c++ \
+    gettext-devel \
+    git \
+    glib2-devel \
+    glibc-devel \
+    gmp-devel \
+    graphene-devel \
+    gsl-devel \
+    iso-codes-devel \
+    json-glib-devel \
+    libaom-devel \
+    libdrm-devel \
+    libgudev-devel \
+    libjpeg-turbo-devel \
+    libnice-devel \
+    libogg-devel \
+    libpng-devel \
+    libtheora-devel \
+    libunwind-devel \
+    libv4l-devel \
+    libva-devel \
+    libvisual-devel \
+    libvorbis-devel \
+    libvpx-devel \
+    libXdamage-devel \
+    libXfixes-devel \
+    libxkbcommon-x11-devel \
+    libXtst-devel \
+    libXv-devel \
+    meson \
+    nasm \
+    nettle-devel \
+    ninja-build \
+    openh264-devel \
+    openjpeg-devel \
+    opus-devel \
+    pulseaudio-libs-devel \
+    speex-devel \
+    systemd-devel \
+    vulkan-loader-devel \
+    wayland-protocols-devel \
+    x264-devel \
+    x265-devel && \
+    dnf clean all
+
+# ── Build GStreamer from source ──
+RUN git clone --depth=1 --branch=${GSTREAMER_VERSION} \
+    https://gitlab.freedesktop.org/gstreamer/gstreamer.git
+
+WORKDIR /tmp/gstreamer
+
+RUN meson setup \
+    --prefix=$GSTREAMER_INSTALL_PREFIX \
+    --buildtype=release \
+    --strip \
+    -Dgst-full-libraries=app,video \
+    -Dorc=disabled \
+    -Dgpl=enabled \
+    -Dbase=enabled \
+    -Dgood=enabled \
+    -Dugly=enabled \
+    -Drs=disabled \
+    -Dtls=disabled \
+    -Dgst-examples=disabled \
+    -Dlibav=disabled \
+    -Dtests=disabled \
+    -Dexamples=disabled \
+    -Ddoc=disabled \
+    -Dpython=disabled \
+    -Drtsp_server=disabled \
+    -Dqt5=disabled \
+    -Dbad=enabled \
+    -Dgst-plugins-good:soup=disabled \
+    -Dgst-plugins-good:ximagesrc=enabled \
+    -Dgst-plugins-good:pulse=enabled \
+    -Dgst-plugins-bad:x265=enabled \
+    -Dgst-plugins-bad:openh264=enabled \
+    -Dgst-plugins-ugly:x264=enabled \
+    -Dgst-plugins-bad:qsv=enabled \
+    -Dgst-plugins-bad:aom=enabled \
+    -Dvaapi=enabled \
+    build && \
+    meson compile -C build && \
+    meson install -C build
+
+# ── Build gst-interpipe ──
+WORKDIR /tmp
+RUN git clone https://github.com/RidgeRun/gst-interpipe.git
+WORKDIR /tmp/gst-interpipe
+RUN meson setup build --prefix=$GSTREAMER_INSTALL_PREFIX \
+    -Denable-gtk-doc=false && \
+    meson install -C build
+
+
+# ─── Stage 2: Build gst-wayland-display (parallel) ─────────────────────────
+FROM gstreamer-builder AS wayland-display-builder
+
+WORKDIR /tmp
+RUN dnf install -y --setopt=install_weak_deps=False \
+    clang-libs \
+    libinput-devel \
+    libxkbcommon-devel \
+    mesa-libgbm-devel \
+    openssl-devel \
+    wayland-devel && \
+    dnf clean all
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN git clone https://github.com/games-on-whales/gst-wayland-display
+WORKDIR /tmp/gst-wayland-display
+RUN cargo install cargo-c && \
+    cargo cinstall -p c-bindings \
+    --prefix=$GSTREAMER_INSTALL_PREFIX \
+    --libdir="${GSTREAMER_INSTALL_PREFIX}/lib64/" && \
+    cargo build --release -p gst-plugin-wayland-display && \
+    cp target/release/libgstwaylanddisplaysrc.so \
+    ${GSTREAMER_INSTALL_PREFIX}/lib64/gstreamer-1.0/
+
+
+# ─── Stage 3: Build Wolf (parallel — only needs GStreamer headers) ──────────
+FROM gstreamer-builder AS wolf-builder
+
+ARG CMAKE_BUILD_DIR=/cache/cmake-build
+
+WORKDIR /tmp
+RUN dnf install -y --setopt=install_weak_deps=False \
+    boost-devel \
+    boost-static \
+    gc-devel \
+    glibc-static \
+    libcurl-devel \
+    libevdev-devel \
+    libstdc++-static \
+    pciutils-devel \
+    python3-devel && \
+    dnf clean all
+
+RUN git clone --branch=stable https://github.com/games-on-whales/wolf.git
+WORKDIR /tmp/wolf
+
+# Force TLS 1.2 max — TLS 1.3 post-handshake client cert auth is broken with
+# Moonlight-qt's Qt SSL stack (handshake completes but CertificateRequest is
+# never answered, causing Wolf to timeout/cancel the connection).
+RUN sed -i '/context(asio::ssl::context::tls)/a\\n  SSL_CTX_set_max_proto_version(context.native_handle(), TLS1_2_VERSION);' \
+    src/moonlight-server/rest/custom-https.cpp && \
+    sed -i '1i #include <openssl/ssl.h>' src/moonlight-server/rest/custom-https.cpp
+
+RUN --mount=type=cache,target=/cache/ccache \
+    CXXFLAGS="-I${GSTREAMER_INSTALL_PREFIX}/include $CXXFLAGS" cmake \
+    -B$CMAKE_BUILD_DIR \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_CXX_STANDARD=17 \
+    -DCMAKE_CXX_EXTENSIONS=OFF \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DBoost_USE_STATIC_LIBS=ON \
+    -DBUILD_FAKE_UDEV_CLI=ON \
+    -DBUILD_TESTING=OFF \
+    -Wno-dev \
+    -G Ninja && \
+    ninja -C $CMAKE_BUILD_DIR wolf && \
+    ninja -C $CMAKE_BUILD_DIR fake-udev
+
+RUN cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /root/wolf && \
+    cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /root/fake-udev
+
+
+# ─── Stage 4: Runtime image ────────────────────────────────────────────────
+FROM fedora:43
+
+ARG GPU_TYPE=amd
+
+ENV WOLF_HOME=/opt/wolf \
+    XDG_RUNTIME_DIR=/tmp/sockets
+
+# ── Enable RPMFusion for mesa freeworld drivers and Steam ──
+RUN dnf install -y \
+    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm \
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm
+
+# ── GPU-specific driver packages ──
+RUN if [ "$GPU_TYPE" = "amd" ]; then \
+        dnf install -y --setopt=install_weak_deps=False \
+            mesa-va-drivers-freeworld \
+            mesa-vulkan-drivers \
+            vulkan-loader \
+            libva-utils; \
+    fi && \
+    dnf clean all
+
+# ── Common runtime dependencies ──
+# gamescope is the compositor we run Steam under — Wolf's gst-wayland-display
+# intentionally doesn't support XWayland, so per Wolf's own docs the expected
+# pattern is to nest gamescope as a wayland client and let IT provide XWayland
+# + scale-to-output to Steam. gamescope pulls Xwayland in as a dependency.
+RUN dnf install -y --setopt=install_weak_deps=False \
+    ca-certificates \
+    diffutils \
+    gamescope \
+    glibc-langpack-en \
+    libcurl \
+    libdrm \
+    libevdev \
+    libinput \
+    libunwind \
+    libva \
+    libwayland-server \
+    libxkbcommon \
+    openssl \
+    pciutils \
+    procps-ng \
+    pulseaudio \
+    pulseaudio-utils \
+    steam \
+    util-linux \
+    which \
+    xdg-user-dirs && \
+    dnf clean all
+
+# ── X11 socket directory ──
+# gamescope's nested Xwayland refuses to create /tmp/.X11-unix as non-root,
+# so it has to exist already with the standard sticky-world-writable perms.
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# ── Static steam user at uid 1000 ──
+# The workload runs with userns=keep-id:uid=1000,gid=1000, which remaps the
+# host workload user to container uid 1000. Steam refuses to run as root, so
+# we need a real non-root user; uid 1000 lines up with the upstream Wolf image
+# convention. Bind-mounted /home/steam is chowned on the host to the workload
+# user, so it appears as uid 1000 inside the container.
+RUN useradd --uid 1000 --create-home --shell /bin/bash steam
+
+# ── Install Wolf and GStreamer from builders ──
+COPY --from=wayland-display-builder /gstreamer ${WOLF_HOME}/gstreamer
+COPY --from=wolf-builder /root/wolf ${WOLF_HOME}/bin/wolf
+COPY --from=wolf-builder /root/fake-udev ${WOLF_HOME}/bin/fake-udev
+RUN chmod 0755 ${WOLF_HOME}/bin/wolf ${WOLF_HOME}/bin/fake-udev
+
+# ── Install config, entrypoint, and steam launcher ──
+COPY config.toml ${WOLF_HOME}/default-config.toml
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 steam-launcher.sh ${WOLF_HOME}/bin/steam-launcher
+
+ENV PATH="${WOLF_HOME}/bin:${PATH}" \
+    LD_LIBRARY_PATH="${WOLF_HOME}/gstreamer/lib64" \
+    GST_PLUGIN_PATH="${WOLF_HOME}/gstreamer/lib64/gstreamer-1.0" \
+    PKG_CONFIG_PATH="${WOLF_HOME}/gstreamer/lib64/pkgconfig"
+
+# Wolf ports: HTTPS, HTTP, Control, RTSP, Video (10 users), Audio (10 users)
+EXPOSE 47984/tcp 47989/tcp 47999/udp 48010/tcp
+EXPOSE 48100-48110/udp
+EXPOSE 48200-48210/udp
+
+# Run as the steam user (uid 1000). Required because raw --uidmap flags
+# (emitted by the workloadctl generator when extra_groups is set) don't
+# auto-set --user the way --userns=keep-id would, and Steam refuses to
+# run as root.
+USER steam
+
+ENTRYPOINT ["/entrypoint.sh"]
