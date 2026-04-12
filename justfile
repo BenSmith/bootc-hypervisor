@@ -115,7 +115,7 @@ build-nvidia-rpmfusion:
     -t localhost/hypervisor-nvidia:rpmfusion \
     -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion \
-    -t registry.local:5000/hypervisor-nvidia:rpmfusion \
+    -t {{local_registry}}/hypervisor-nvidia:rpmfusion \
     -f hypervisor-nvidia-rpmfusion.Containerfile .
 
 build-nvidia-negativo17:
@@ -126,7 +126,7 @@ build-nvidia-negativo17:
     -t localhost/hypervisor-nvidia:negativo17 \
     -t ghcr.io/bensmith/hypervisor-nvidia:negativo17-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:negativo17 \
-    -t registry.local:5000/hypervisor-nvidia:negativo17 \
+    -t {{local_registry}}/hypervisor-nvidia:negativo17 \
     -f hypervisor-nvidia-negativo17.Containerfile .
 
 build-amd:
@@ -134,6 +134,7 @@ build-amd:
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-amd:{{tag}} \
+    -t {{local_registry}}/hypervisor-amd:{{tag}} \
     -t localhost/hypervisor-amd:latest \
     -f hypervisor-amd.Containerfile .
 
@@ -177,8 +178,8 @@ push-all:
   images=(
     hypervisor-bootc:latest
     hypervisor-amd:latest
-    hypervisor-nvidia:rpmfusion-latest
-    hypervisor-nvidia:negativo17-latest
+    hypervisor-nvidia:rpmfusion
+    hypervisor-nvidia:negativo17
   )
   for img in "${images[@]}"; do
     echo "Tagging and pushing ${img}..."
