@@ -180,15 +180,16 @@ RUN git clone https://github.com/games-on-whales/wolf.git && \
     cd wolf && git checkout ${WOLF_COMMIT}
 WORKDIR /tmp/wolf
 
-# Force TLS 1.2 max — TLS 1.3 post-handshake client cert auth is broken with
-# Moonlight-qt's Qt SSL stack (handshake completes but CertificateRequest is
-# never answered, causing Wolf to timeout/cancel the connection).
-# Patch is pinned against WOLF_COMMIT — bump the pin and re-verify the sed
-# targets still match if upstream moves this line.
-RUN sed -i '/context(asio::ssl::context::tls)/a\\n  SSL_CTX_set_max_proto_version(context.native_handle(), TLS1_2_VERSION);' \
-    src/moonlight-server/rest/custom-https.cpp && \
-    sed -i '1i #include <openssl/ssl.h>' src/moonlight-server/rest/custom-https.cpp && \
-    grep -q "SSL_CTX_set_max_proto_version" src/moonlight-server/rest/custom-https.cpp
+# Enable session_id_context on Wolf's HTTPS server. The flag defaults to false
+# in rest.hpp, leaving the after_bind() SSL_CTX_set_session_id_context() call
+# as dead code. Without it, OpenSSL refuses any session-resumption-capable
+# client cert handshake with "session id context uninitialized", which breaks
+# every HTTPS request after the first (e.g. Moonlight's applist fetch).
+# Patch is pinned against WOLF_COMMIT — bump the pin and re-verify the grep
+# target if upstream changes the default.
+RUN sed -i 's/bool set_session_id_context = false;/bool set_session_id_context = true;/' \
+    src/moonlight-server/rest/rest.hpp && \
+    grep -q "bool set_session_id_context = true;" src/moonlight-server/rest/rest.hpp
 
 RUN --mount=type=cache,target=/cache/ccache \
     CXXFLAGS="-I${GSTREAMER_INSTALL_PREFIX}/include $CXXFLAGS" cmake \
@@ -235,7 +236,7 @@ RUN if [ "$GPU_TYPE" = "amd" ]; then \
 # ── Common runtime dependencies ──
 # gamescope is the compositor we run Steam under — Wolf's gst-wayland-display
 # intentionally doesn't support XWayland, so per Wolf's own docs the expected
-# pattern is to nest gamescope as a wayland client and let IT provide XWayland
+# pattern is to nest gamescope as a wayland client and let it provide XWayland
 # + scale-to-output to Steam. gamescope pulls Xwayland in as a dependency.
 RUN dnf install -y --setopt=install_weak_deps=False \
     ca-certificates \
