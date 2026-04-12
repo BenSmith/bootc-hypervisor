@@ -7,9 +7,14 @@ Reads workload configs from /etc/workloads.d/*.toml and generates:
 - systemd-sysusers configs for user creation
 - systemd service files for rootless podman execution
 
-NOT a systemd generator — runs as a regular service to avoid the generator
-sandbox timeout on systemd 258+ (systemd/systemd#39354). A minimal shell
-generator (workload-generator) creates the oneshot service that calls this.
+NOT a systemd generator — runs as a regular early-boot oneshot service.
+Generators are expected to be fast and minimal (see systemd.generator(7));
+this script does nontrivial work (TOML parsing, validation, unit file
+emission) that does not fit that contract. Python import overhead alone
+can exceed the execution budget systemd 258+ enforces on generators
+(discussed in systemd/systemd#39354). The tiny shell generator
+`workload-generator` emits a oneshot service (workload-generate.service)
+that calls this script during early boot.
 
 Read-only: does not create users or access /var.
 User creation deferred to ExecStartPre (systemd-sysusers + workload-ensure-user).
@@ -21,7 +26,7 @@ def _early_log(msg):
     """Log to kmsg before imports complete"""
     try:
         with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<6>workload-generator[EARLY]: {msg}\n")
+            kmsg.write(f"<6>workload-generate[EARLY]: {msg}\n")
     except OSError:
         pass  # Silently fail if kmsg unavailable
 
@@ -37,9 +42,12 @@ try:
     import os
 
     # Prevent nss-systemd from contacting systemd-userdbd via D-Bus.
-    # Generators run before userdbd is available; without this, pwd.getpwnam()
-    # triggers a 45-second NSS timeout that cascades into a fatal boot freeze
-    # on systemd 258+.
+    # This script runs very early in boot (before basic.target), before
+    # systemd-userdbd is up. Without this bypass, pwd.getpwnam() goes
+    # through nss-systemd and blocks for ~45 seconds waiting for userdbd
+    # that will never answer, which in turn delays the rest of boot until
+    # this oneshot completes. The bypass skips the D-Bus call entirely
+    # and resolves from /etc/passwd directly, which is what we want here.
     os.environ['SYSTEMD_NSS_BYPASS_BUS'] = '1'
 
     import tomllib
@@ -96,10 +104,10 @@ def log_msg(msg, level="info"):
 
     try:
         with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<{priority}>workload-generator: {msg}\n")
+            kmsg.write(f"<{priority}>workload-generate: {msg}\n")
     except Exception:
         # Fallback to stderr if kmsg unavailable (e.g., testing)
-        print(f"workload-generator: {msg}", file=sys.stderr, flush=True)
+        print(f"workload-generate: {msg}", file=sys.stderr, flush=True)
 
 
 UID_MIN = 10000

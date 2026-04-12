@@ -14,7 +14,7 @@ workloadctl is a Python CLI tool and systemd integration that turns TOML config 
 
 The system has four main components:
 
-1. **Generator** (`generators/workload-generator`): A systemd generator that reads `/etc/workloads.d/*.toml` at boot and produces systemd-sysusers configs and service unit files. Generators are SELinux-sandboxed and must not access `/var`. Always exits 0 to avoid blocking boot.
+1. **Generator + early-boot oneshot**: A tiny shell systemd generator (`generators/workload-generator`) emits a single oneshot service unit, `workload-generate.service`. That service runs the Python script `generators/workload-generate` during early boot (ordered `After=sysinit.target Before=basic.target`), which reads `/etc/workloads.d/*.toml` and produces systemd-sysusers configs and per-workload service unit files in `/run/systemd/system/`. The Python work is *not* run as a systemd generator because generators are expected to be fast and minimal (see `systemd.generator(7)`); Python import overhead alone can exceed the generator execution budget systemd 258+ enforces. Both the shell generator and the Python script always exit 0 so a failure never blocks boot. The Python script is still read-only with respect to `/var` — all `/var` work is deferred to `workload-ensure-user` at service start.
 2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
 3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman.
 4. **CLI** (`bin/workloadctl`): Docker/kubectl-like CLI (~2500 lines, argparse) for creating, enabling, disabling, updating, and inspecting workloads.
@@ -22,9 +22,12 @@ The system has four main components:
 ### Boot Flow
 
 ```
-systemd-generators → workload-generator creates sysusers configs and service files
-systemd-sysusers.service → creates workload users with group memberships
-ExecStartPre=+workload-ensure-user → configures subuid/subgid, home dir, EnvironmentFile, linger
+systemd-generators → workload-generator (shell) emits workload-generate.service
+workload-generate.service → runs Python workload-generate script, which writes
+                            sysusers configs + per-workload unit files into
+                            /run/systemd/system/ (After=sysinit Before=basic.target)
+workload-{name}-setup.service → systemd-sysusers creates user; workload-ensure-user
+                                configures subuid/subgid, home dir, EnvironmentFile, linger
 workload-{name}.service → individual containers start via podman run
 ```
 
@@ -99,7 +102,8 @@ Workloads are defined in `/etc/workloads.d/<name>.toml`. Key sections:
 
 ```
 bin/workloadctl                    # Main CLI tool
-generators/workload-generator      # systemd generator (boot-time)
+generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
+generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
 libexec/workload-metrics           # Prometheus metrics exporter
 lib/workload_lib.py                # Shared library (config parsing, UID allocation)

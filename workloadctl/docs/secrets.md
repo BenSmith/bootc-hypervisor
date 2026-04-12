@@ -213,7 +213,7 @@ files = [
 
 ### Generator Integration
 
-The systemd generator (`workload-generator`) runs during `daemon-reload` and processes the configuration:
+The `workload-generate` script (run as an early-boot oneshot service; see `docs/workloads.md` for why it isn't itself a systemd generator) processes credential configuration when it emits per-workload unit files:
 
 1. **Auto-detects** needed credentials by scanning:
    - Environment variables for `${SECRET:name}` references
@@ -250,7 +250,7 @@ When the workload service starts:
    - Plain environment variables (no knowledge of systemd credentials)
    - Credential files as regular files in the filesystem
 
-**Note:** The generator runs during `daemon-reload`, not at service start time. It generates the service file with shell command substitution syntax that gets expanded when the service actually starts.
+**Note:** `workload-generate` runs once at early boot (via `workload-generate.service`), not at each workload service start. It emits the per-workload unit file with shell command substitution syntax in the `ExecStart=` line, and that substitution is expanded by the shell when the workload service actually starts — at which point systemd has already decrypted the credentials into `/run/credentials/{service}/`.
 
 When the workload service stops:
 
@@ -522,7 +522,7 @@ sudo cat /run/credentials/workload-jellyfin.service/jellyfin-api-key
 sudo journalctl -u workload-jellyfin.service | grep -i credential
 
 # Verify the service file has LoadCredentialEncrypted
-sudo grep LoadCredential /run/systemd/generator/workload-jellyfin.service
+sudo grep LoadCredential /run/systemd/system/workload-jellyfin.service
 # Expected: LoadCredentialEncrypted=jellyfin-api-key:/etc/credstore.encrypted/jellyfin-api-key
 
 # Test manual decryption
