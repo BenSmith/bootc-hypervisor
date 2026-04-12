@@ -1,4 +1,5 @@
 policy.json
+config.toml
 .idea/
 .claude/
 manifests/

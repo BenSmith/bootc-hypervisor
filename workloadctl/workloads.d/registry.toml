@@ -65,3 +65,6 @@ ports = ["5000:5000"]
 [resources]
 # Registry doesn't send systemd ready notifications, use simple type
 service_type = "simple"
+memory_max = "256M"
+memory_high = "192M"
+cpu_quota = "50%"

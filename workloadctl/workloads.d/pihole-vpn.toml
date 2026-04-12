@@ -48,7 +48,7 @@ start_period = "60s"
 on_failure = "kill"
 
 [container.environment]
-TZ = "America/Los_Angeles"
+# TZ = "America/Los_Angeles"  # Uncomment and set to your timezone
 WG_INTERFACE = "wg0"
 
 # Leave empty to disable web interface authentication, or use a secret:

@@ -25,7 +25,6 @@ RUN mkdir -p /var/spool/squid
 # Ship default config as a template users can copy out as a starting point.
 COPY --link squid.conf /usr/share/proxy-stack/squid.conf
 
-COPY --link entrypoint.sh /vpn-entrypoint.sh
-RUN chmod +x /vpn-entrypoint.sh
+COPY --link --chmod=0755 entrypoint.sh /vpn-entrypoint.sh
 
 ENTRYPOINT ["/vpn-entrypoint.sh"]

@@ -269,8 +269,45 @@ build-all-isos-local rootfs="xfs":
   just build-iso-amd-local {{rootfs}} || rc=1
   exit $rc
 
+# Generate config.toml for bootc-image-builder (VM user credentials)
+# Reads from env vars: VM_USER (default: current user), VM_PASSWORD (default: random),
+# VM_SSH_KEY (default: first key in ~/.ssh/)
+_generate-vm-config:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [ -f config.toml ]; then
+    exit 0
+  fi
+  user="${VM_USER:-$(whoami)}"
+  password="${VM_PASSWORD:-}"
+  ssh_key="${VM_SSH_KEY:-}"
+  if [ -z "$ssh_key" ]; then
+    for f in ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub ~/.ssh/id_ecdsa.pub; do
+      if [ -f "$f" ]; then
+        ssh_key=$(cat "$f")
+        echo "Using SSH key from $f"
+        break
+      fi
+    done
+  fi
+  if [ -z "$password" ]; then
+    echo "Error: VM_PASSWORD must be set (no config.toml found)"
+    echo "Usage: VM_PASSWORD=mypass just <recipe>"
+    exit 1
+  fi
+  {
+    echo '[[customizations.user]]'
+    echo "name = \"$user\""
+    echo "password = \"$password\""
+    echo 'groups = ["wheel"]'
+    if [ -n "$ssh_key" ]; then
+      echo "key = \"$ssh_key\""
+    fi
+  } > config.toml
+  echo "Generated config.toml for user '$user'"
+
 # Internal: build a qcow2 disk image from a bootc image
-_build-qcow2 image rootfs size="":
+_build-qcow2 image rootfs size="": _generate-vm-config
   #!/usr/bin/env bash
   set -euo pipefail
   mkdir -p {{build_dir}}/store {{build_dir}}/output/qcow2 {{build_dir}}/rpmmd
@@ -448,6 +485,15 @@ workload-rpm:
 test-vm-build:
   #!/usr/bin/env bash
   set -euo pipefail
+  # Generate ephemeral config with known test credentials (must match sshpass in test-vm)
+  TEST_CONFIG=$(mktemp)
+  trap "rm -f $TEST_CONFIG" EXIT
+  cat > "$TEST_CONFIG" <<'TOML'
+[[customizations.user]]
+name = "ben"
+password = "password123"
+groups = ["wheel"]
+TOML
   echo "=== Building base image (if needed) ==="
   if ! podman image exists localhost/hypervisor-bootc:latest; then
     echo "Base image not found. Building with: just build-base-local"
@@ -468,7 +514,7 @@ test-vm-build:
   sudo podman run \
     --privileged --pull=newer --rm \
     --security-opt label=type:unconfined_t \
-    -v $(pwd)/config.toml:/config.toml:ro \
+    -v "$TEST_CONFIG":/config.toml:ro \
     -v {{build_dir}}/output/test-vm:/output \
     -v {{build_dir}}/rpmmd:/rpmmd \
     -v {{build_dir}}/store:/store \

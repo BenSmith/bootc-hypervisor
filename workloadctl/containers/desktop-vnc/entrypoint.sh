@@ -22,18 +22,32 @@ LABWC_PID=$!
 
 # Wait for Wayland socket
 for i in {1..50}; do
-    LOCKFILE=$(ls "$XDG_RUNTIME_DIR"/wayland-*.lock 2>/dev/null | head -n1)
-    if [ -n "$LOCKFILE" ]; then
-        export WAYLAND_DISPLAY=$(basename "$LOCKFILE" .lock)
-        break
-    fi
+    for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+        [ -S "$sock" ] && export WAYLAND_DISPLAY=$(basename "$sock") && break 2
+    done
     sleep 0.1
 done
 
-if [ -z "$WAYLAND_DISPLAY" ]; then
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
     echo "ERROR: labwc did not create a Wayland socket"
     kill $LABWC_PID 2>/dev/null || true
     exit 1
+fi
+
+# Configure wayvnc authentication
+WAYVNC_ARGS=""
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    mkdir -p "$HOME/.config/wayvnc"
+    VNC_USER=$(whoami)
+    cat > "$HOME/.config/wayvnc/config" <<EOF
+enable_auth=true
+username=${VNC_USER}
+password=${VNC_PASSWORD}
+EOF
+    chmod 600 "$HOME/.config/wayvnc/config"
+    echo "VNC authentication enabled (username: ${VNC_USER})"
+else
+    echo "WARNING: VNC has no authentication — set VNC_PASSWORD to enable"
 fi
 
 # Start wayvnc

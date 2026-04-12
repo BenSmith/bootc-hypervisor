@@ -28,6 +28,14 @@ echo "Upstream DNS: $VPN_DNS (via VPN tunnel)"
 # Override Pi-hole's upstream DNS with the VPN DNS server(s)
 export PIHOLE_DNS_="$VPN_DNS"
 
+cleanup() {
+    echo "Shutting down..."
+    [ -n "${PIHOLE_PID:-}" ] && kill "$PIHOLE_PID" 2>/dev/null || true
+    wg-quick down "$WG_INTERFACE" 2>/dev/null || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT SIGQUIT
+
 echo "Bringing up WireGuard interface..."
 wg-quick up "$WG_INTERFACE"
 
@@ -41,4 +49,7 @@ if [ -n "$DEFAULT_IFACE" ]; then
 fi
 
 echo "Starting Pi-hole..."
-exec /usr/bin/start.sh
+/usr/bin/start.sh &
+PIHOLE_PID=$!
+wait "$PIHOLE_PID"
+cleanup

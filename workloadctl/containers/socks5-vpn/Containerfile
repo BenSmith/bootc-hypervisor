@@ -28,7 +28,6 @@ COPY --link --from=builder /build/microsocks/microsocks /usr/local/bin/microsock
 # podman bind-mounts wg0.conf as a file rather than creating a directory.
 RUN touch /etc/wireguard/wg0.conf
 
-COPY --link entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -9,7 +9,6 @@ RUN apk add --no-cache wireguard-tools iproute2
 # podman bind-mounts wg0.conf as a file rather than creating a directory.
 RUN touch /etc/wireguard/wg0.conf
 
-COPY --link entrypoint.sh /vpn-entrypoint.sh
-RUN chmod +x /vpn-entrypoint.sh
+COPY --link --chmod=0755 entrypoint.sh /vpn-entrypoint.sh
 
 ENTRYPOINT ["/vpn-entrypoint.sh"]
