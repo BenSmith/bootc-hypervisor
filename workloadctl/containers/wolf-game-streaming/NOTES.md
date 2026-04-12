@@ -10,6 +10,12 @@ designed to stream multiple game streams from a Linux host to a client
 device over a network connection. It is able to use the GPU of the host
 to both render the game and encode the stream, without an intermediate copy.
 
+### Wolf in workloadctl
+
+Unlike Wolf's typical operation, this implementation does not spawn multiple
+game streams. If multiple streams are desired, one can make multiple workload
+instances. I do not know how well this will share GPU resources.
+
 ## Architecture: why gamescope is nested under Wolf
 
 Wolf's compositor is `gst-wayland-display`, which **intentionally has no
