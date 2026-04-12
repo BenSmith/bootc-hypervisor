@@ -1,10 +1,17 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+HTTP_PROXY="${HTTP_PROXY:-}"
+HTTPS_PROXY="${HTTPS_PROXY:-}"
 
 echo "Building proxy-stack container..."
-podman build -t localhost/proxy-stack:latest .
+http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" \
+podman build \
+    --build-arg http_proxy="$HTTP_PROXY" \
+    --build-arg https_proxy="$HTTPS_PROXY" \
+    -t localhost/proxy-stack:latest "$SCRIPT_DIR"
 
 echo ""
 echo "Build complete! Image: localhost/proxy-stack:latest"

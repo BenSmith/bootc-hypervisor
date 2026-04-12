@@ -1,10 +1,17 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+HTTP_PROXY="${HTTP_PROXY:-}"
+HTTPS_PROXY="${HTTPS_PROXY:-}"
 
 echo "Building VPN SOCKS5 proxy container..."
-podman build -t localhost/socks5-vpn:latest .
+http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" \
+podman build \
+    --build-arg http_proxy="$HTTP_PROXY" \
+    --build-arg https_proxy="$HTTPS_PROXY" \
+    -t localhost/socks5-vpn:latest "$SCRIPT_DIR"
 
 echo ""
 echo "Build complete! Image: localhost/socks5-vpn:latest"
