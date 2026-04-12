@@ -59,7 +59,15 @@ volumes = [
     "./cache:/var/spool/squid",
 ]
 
+[security]
+userns = "keep-id"
+
 [network]
 mode = "pasta"
 ports = ["3128:3128"]
+
+[resources]
+memory_max = "512M"
+memory_high = "384M"
+cpu_quota = "50%"
 

@@ -10,7 +10,7 @@ pull = "never"
 WOLF_RENDER_NODE = "/dev/dri/renderD128"
 
 [container.health]
-cmd = "pgrep -x wolf > /dev/null"
+cmd = "pgrep -x wolf > /dev/null || exit 1"
 interval = "30s"
 start_period = "30s"
 on_failure = "kill"

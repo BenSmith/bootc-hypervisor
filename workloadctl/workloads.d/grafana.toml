@@ -75,6 +75,9 @@ volumes = [
     "./data:/usr/share/grafana/data",
 ]
 
+[security]
+userns = "keep-id"
+
 [network]
 # Host networking: Grafana needs to reach Prometheus on localhost:9090
 mode = "host"

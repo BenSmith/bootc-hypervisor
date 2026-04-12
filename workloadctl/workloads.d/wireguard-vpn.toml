@@ -39,7 +39,7 @@ WG_INTERFACE = "wg0"
 
 [storage]
 volumes = [
-    "./wg0.conf:/etc/wireguard/wg0.conf:ro,z",
+    "./wg0.conf:/etc/wireguard/wg0.conf:ro",
 ]
 
 [security]

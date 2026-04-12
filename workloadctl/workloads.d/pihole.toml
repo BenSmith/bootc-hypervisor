@@ -61,7 +61,7 @@ start_period = "60s"
 on_failure = "kill"
 
 [container.environment]
-TZ = "America/Los_Angeles"
+# TZ = "America/Los_Angeles"  # Uncomment and set to your timezone
 
 # Leave empty to disable web interface authentication, or use a secret:
 WEBPASSWORD = ""
@@ -81,3 +81,8 @@ userns = "host"
 
 [network]
 mode = "host"
+
+[resources]
+memory_max = "256M"
+memory_high = "192M"
+cpu_quota = "25%"

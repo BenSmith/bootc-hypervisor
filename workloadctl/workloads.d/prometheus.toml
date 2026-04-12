@@ -56,6 +56,9 @@ volumes = [
     "/var/lib/prometheus/node-exporter:/textfile:ro",
 ]
 
+[security]
+userns = "keep-id"
+
 [network]
 # Use pasta mode for network isolation with port forwarding
 mode = "pasta"

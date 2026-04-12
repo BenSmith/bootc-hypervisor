@@ -45,6 +45,13 @@ enabled = false
 image = "localhost/desktop-vnc:latest"
 pull = "never"
 
+[container.environment]
+# Set a VNC password (recommended). Without this, VNC has no authentication.
+# Username is the workload user (e.g. _wl-desktop-vnc).
+# VNC_PASSWORD = "changeme"
+# Or use an encrypted secret:
+# VNC_PASSWORD = "${SECRET:desktop-vnc-password}"
+
 [container.health]
 cmd = "pgrep -x wayvnc > /dev/null || exit 1"
 interval = "30s"
