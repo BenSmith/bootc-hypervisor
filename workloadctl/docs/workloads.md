@@ -160,18 +160,26 @@ The workload provisioning system allows you to declaratively define long-running
 
 **Boot Flow:**
 ```
-1. systemd-generators → workload-generator creates sysusers configs and service files
-2. systemd-sysusers.service → creates workload users with group memberships
-3. ExecStartPre=+workload-ensure-user → configures subuid/subgid, home directory, EnvironmentFile, linger
+1. systemd-generators → workload-generator (tiny shell generator)
+   emits workload-generate.service into /run/systemd/generator/
+2. workload-generate.service (early-boot oneshot, After=sysinit.target
+   Before=basic.target) runs the Python workload-generate script, which
+   writes sysusers configs and per-workload unit files into /run/systemd/system/
+3. workload-{name}-setup.service (per-workload oneshot) runs systemd-sysusers
+   and workload-ensure-user to create the user, subuid/subgid, home directory,
+   EnvironmentFile, and linger
 4. workload-{name}.service → individual containers start
 ```
 
 ### Components
 
-- **Generator** (`/usr/lib/systemd/system-generators/workload-generator`): Reads TOML configs from `/etc/workloads.d/` and generates systemd-sysusers configs and systemd services
-- **User Setup** (`/usr/libexec/workloadctl/workload-ensure-user`): Runs as `ExecStartPre` in each workload service to configure subordinate UID/GID ranges, create home and volume directories, write the EnvironmentFile, and enable linger
+- **Shell generator** (`/usr/lib/systemd/system-generators/workload-generator`, source: `generators/workload-generator`): A minimal shell generator that emits a single oneshot service unit (`workload-generate.service`). Does not read workload configs; its only job is to schedule the Python script as an early-boot service. Kept tiny so it fits comfortably inside the generator execution budget systemd enforces.
+- **Workload generator script** (`/usr/libexec/workloadctl/workload-generate`): The Python script that actually reads `/etc/workloads.d/*.toml` and emits per-workload unit files + sysusers configs into `/run/systemd/system/`. Runs as an early-boot oneshot service (not as a systemd generator — see "Why the split?" below).
+- **User Setup** (`/usr/libexec/workloadctl/workload-ensure-user`): Runs as `ExecStartPre` in each workload service to configure subordinate UID/GID ranges, create home and volume directories, write the EnvironmentFile, and enable linger. Handles all `/var` work, which must not happen from generator or early-boot-oneshot context.
 - **Workload Services**: Per-workload systemd services that run `podman run` as dedicated users
 - **Management Tool** (`workloadctl`): Docker/kubectl-like CLI for managing workloads
+
+**Why the split?** systemd expects generators to be fast, minimal, and side-effect-free (see `systemd.generator(7)`). A Python script that parses TOML, validates configs, and emits hundreds of lines of unit files does not fit that contract — Python import overhead alone can exceed the execution budget systemd 258+ enforces on generators. So we keep the real generator tiny (shell, emits one unit) and move the actual generation work into an early-boot oneshot service that runs after the generator phase but before `basic.target`.
 
 ### User Management
 
@@ -1339,7 +1347,7 @@ workloadctl ports NAME
 **Symptom:** Generator logs error about username length.
 
 ```
-workload-generator: ERROR processing /etc/workloads.d/my-workload.toml:
+workload-generate: ERROR processing /etc/workloads.d/my-workload.toml:
 Username '_wl-my-very-long-workload-name' is 33 chars (max 32)
 ```
 
@@ -1496,13 +1504,16 @@ workloadctl exec NAME ls -la /path/in/container
 
 **Generator debugging:**
 ```bash
-# View generator logs (appears in early boot)
-dmesg | grep workload-generator
+# View workload-generate script logs (kmsg, written during early boot)
+dmesg | grep workload-generate
 
-# Manually run generator for testing
-sudo WORKLOAD_CONFIG_DIR=/etc/workloads.d \
-  /usr/lib/systemd/system-generators/workload-generator \
-  /tmp/test-output /tmp/test-early /tmp/test-late
+# View the oneshot service that runs the script
+systemctl status workload-generate.service
+journalctl -u workload-generate.service -b
+
+# Manually run the script for testing (writes to a tmp dir instead of
+# /run/systemd/system — safe to run on a live system)
+sudo /usr/libexec/workloadctl/workload-generate /tmp/test-output
 
 # Check generated configs
 systemd-sysusers --cat-config | grep workload
@@ -1791,7 +1802,8 @@ The systemd credentials system provides strong security:
 - **Configuration schema:** `workloads.d/schema-reference.toml`
 - **Example workloads:** `workloads.d/example-*.toml`
 - **Secrets management:** `docs/secrets.md`
-- **Generator source:** `generators/workload-generator`
+- **Shell generator source:** `generators/workload-generator` (emits `workload-generate.service`)
+- **Python generator script source:** `generators/workload-generate` (runs as the oneshot)
 - **User setup script:** `libexec/workload-ensure-user`
 - **Management tool:** `bin/workloadctl`
 

@@ -38,8 +38,8 @@ install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadc
 install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
     %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
 
-# systemd generator (shell wrapper)
-install -Dpm 0755 %{_sourcedir}/generators/workload-generator-wrapper \
+# systemd generator (tiny shell script; emits workload-generate.service)
+install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
 # libexec helpers

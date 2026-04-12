@@ -751,10 +751,14 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
 
 
 def _activate_service(config: WorkloadConfig):
-    """Re-run the workload generator and start the service."""
-    # The generator is two-stage: a shell wrapper creates workload-generate.service,
-    # which runs the real Python generator. daemon-reload only re-runs stage 1.
-    # We need to explicitly run stage 2 so the service file exists.
+    """Re-run the workload-generate script and refresh systemd unit state."""
+    # Architecture: the real systemd generator (`workload-generator`, shell)
+    # only emits a single oneshot service (`workload-generate.service`) that
+    # runs the Python `workload-generate` script at early boot. daemon-reload
+    # re-runs generators, so it re-emits workload-generate.service — but it
+    # does not re-run that service, so the per-workload unit files aren't
+    # regenerated. For post-boot config changes we invoke the Python script
+    # directly here, then daemon-reload so systemd picks up the new units.
     print("  Generating service files...")
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],

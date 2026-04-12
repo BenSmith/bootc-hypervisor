@@ -82,12 +82,17 @@ Each workload gets:
 
 - A dedicated locked-down system user (`_wl-<name>`)
 - Its own UID/subuid namespace for rootless podman
-- A systemd service generated at boot by a systemd generator
+- A systemd service generated at boot from its TOML config
 - Automatic volume directory creation under `/var/lib/workloads/<name>/`
 - Optional TPM2-encrypted secrets via systemd credentials
 
-The systemd generator reads `/etc/workloads.d/*.toml` at boot and produces
-service units automatically — no `systemctl daemon-reload` needed after reboot.
+At boot, a tiny shell systemd generator emits an early-boot oneshot service
+(`workload-generate.service`) that runs the Python `workload-generate` script.
+The script reads `/etc/workloads.d/*.toml` and writes per-workload unit files
+into `/run/systemd/system/` before `basic.target` is reached. The Python work
+is kept out of generator context because systemd expects generators to be
+fast and minimal (see `systemd.generator(7)`) — see `docs/workloads.md` for
+the full architecture.
 
 ## Key commands
 

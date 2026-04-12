@@ -7,9 +7,14 @@ Reads workload configs from /etc/workloads.d/*.toml and generates:
 - systemd-sysusers configs for user creation
 - systemd service files for rootless podman execution
 
-NOT a systemd generator — runs as a regular service to avoid the generator
-sandbox timeout on systemd 258+ (systemd/systemd#39354). A minimal shell
-generator (workload-generator) creates the oneshot service that calls this.
+NOT a systemd generator — runs as a regular early-boot oneshot service.
+Generators are expected to be fast and minimal (see systemd.generator(7));
+this script does nontrivial work (TOML parsing, validation, unit file
+emission) that does not fit that contract. Python import overhead alone
+can exceed the execution budget systemd 258+ enforces on generators
+(discussed in systemd/systemd#39354). The tiny shell generator
+`workload-generator` emits a oneshot service (workload-generate.service)
+that calls this script during early boot.
 
 Read-only: does not create users or access /var.
 User creation deferred to ExecStartPre (systemd-sysusers + workload-ensure-user).
@@ -21,7 +26,7 @@ def _early_log(msg):
     """Log to kmsg before imports complete"""
     try:
         with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<6>workload-generator[EARLY]: {msg}\n")
+            kmsg.write(f"<6>workload-generate[EARLY]: {msg}\n")
     except OSError:
         pass  # Silently fail if kmsg unavailable
 
@@ -37,9 +42,12 @@ try:
     import os
 
     # Prevent nss-systemd from contacting systemd-userdbd via D-Bus.
-    # Generators run before userdbd is available; without this, pwd.getpwnam()
-    # triggers a 45-second NSS timeout that cascades into a fatal boot freeze
-    # on systemd 258+.
+    # This script runs very early in boot (before basic.target), before
+    # systemd-userdbd is up. Without this bypass, pwd.getpwnam() goes
+    # through nss-systemd and blocks for ~45 seconds waiting for userdbd
+    # that will never answer, which in turn delays the rest of boot until
+    # this oneshot completes. The bypass skips the D-Bus call entirely
+    # and resolves from /etc/passwd directly, which is what we want here.
     os.environ['SYSTEMD_NSS_BYPASS_BUS'] = '1'
 
     import tomllib
@@ -96,10 +104,10 @@ def log_msg(msg, level="info"):
 
     try:
         with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<{priority}>workload-generator: {msg}\n")
+            kmsg.write(f"<{priority}>workload-generate: {msg}\n")
     except Exception:
         # Fallback to stderr if kmsg unavailable (e.g., testing)
-        print(f"workload-generator: {msg}", file=sys.stderr, flush=True)
+        print(f"workload-generate: {msg}", file=sys.stderr, flush=True)
 
 
 UID_MIN = 10000
@@ -738,6 +746,11 @@ def main():
     # Ensure output directory exists
     SERVICES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Names of workloads whose unit files were successfully written this run.
+    # Used below to explicitly enqueue a start job for each — see the block
+    # at the end of main() for why the wants symlinks alone don't suffice.
+    written_workloads = []
+
     # Process each workload config
     config_files = list(WORKLOAD_CONFIG_DIR.glob("*.toml"))
     log_msg(f"Found {len(config_files)} config files")
@@ -800,11 +813,68 @@ def main():
             symlink_path.symlink_to(f"../workload-{name}.service")
             log_msg("  Enabled service for auto-start")
 
+            written_workloads.append(name)
+
         except Exception as e:
             # Log errors but don't fail the boot
             log_msg(f"ERROR processing {config_file}: {e}", level="err")
             log_msg(traceback.format_exc(), level="err")
             continue
+
+    # Explicitly enqueue a start job for each workload whose unit file we
+    # just wrote.
+    #
+    # Why this is necessary: the wants symlinks created above look like they
+    # should be enough, but they aren't. systemd builds the boot transaction
+    # for default.target (= multi-user.target) once at startup, resolving
+    # dependencies from the unit files it knows about AT THAT MOMENT. When
+    # this script runs (from workload-generate.service, After=sysinit.target
+    # Before=basic.target), multi-user.target's transaction has already been
+    # built — and it didn't include any workload services, because those
+    # unit files didn't exist yet. daemon-reload updates systemd's in-memory
+    # view of unit files, but target .wants/ directories are NOT re-scanned
+    # for already-enqueued targets. The symlinks are load-bearing for a
+    # subsequent boot cycle (cosmetic "enabled-runtime" in `systemctl is-
+    # enabled`, and semantically meaningful if the architecture ever changes)
+    # but do nothing for this boot. An explicit `systemctl start` creates
+    # a new job and merges it into systemd's running job queue regardless
+    # of target transaction state, which is exactly what we need.
+    #
+    # --no-block: enqueue the job and return immediately. We must not wait
+    # for container startup from inside an early-boot oneshot service —
+    # that would delay basic.target until every container is up, and would
+    # risk deadlock if any workload transitively depends on something
+    # downstream of basic.target. `systemctl start` on an already-active
+    # unit is a no-op, so re-runs of this script (post-boot config edits
+    # via `workloadctl enable` / edit / etc.) are safe: running workloads
+    # are not disturbed, newly-written ones are started from cold.
+    #
+    # Gated on SERVICES_DIR being the live systemd directory so test runs
+    # (which pass a tmp dir as argv[1]) never touch the host's systemd.
+    is_live = SERVICES_DIR == Path("/run/systemd/system")
+    if is_live and written_workloads:
+        import subprocess
+        try:
+            subprocess.run(
+                ["systemctl", "daemon-reload"],
+                check=False,
+                timeout=30,
+            )
+        except Exception as e:
+            log_msg(f"daemon-reload failed: {e}", level="warning")
+
+        for name in written_workloads:
+            try:
+                subprocess.run(
+                    ["systemctl", "start", "--no-block",
+                     f"workload-{name}.service"],
+                    check=False,
+                    timeout=30,
+                )
+                log_msg(f"  Enqueued start for workload-{name}.service")
+            except Exception as e:
+                log_msg(f"  Failed to enqueue start for workload-{name}: {e}",
+                        level="warning")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 """
 Shared constants and utilities for the workload provisioning system.
 
-Used by workload-generator, workload-ensure-user, and workloadctl.
-Installed to /usr/lib/workloads/workload_lib.py.
+Used by workload-generate (the early-boot oneshot Python script),
+workload-ensure-user, and workloadctl.
+Installed to /usr/libexec/workloadctl/workload_lib.py.
 """
 
 import os

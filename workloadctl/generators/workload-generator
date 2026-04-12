@@ -1,0 +1,38 @@
+#!/bin/bash
+# Minimal shell generator that emits a oneshot service to run the Python
+# workload-generate script. The real work is intentionally kept out of
+# generator context: systemd expects generators to be fast and minimal
+# (see systemd.generator(7)), and an ~800-line Python script doing TOML
+# parsing, validation, and unit file emission does not fit that contract
+# — Python import overhead alone can exceed the execution budget systemd
+# 258+ enforces (discussed in systemd/systemd#39354). Running the work as
+# an early-boot oneshot instead lets us do nontrivial work without
+# violating the generator contract.
+#
+# The emitted oneshot runs after sysinit.target (so /etc is writable)
+# and before basic.target (so it completes before any workload services
+# need to start).
+
+set -eu
+
+NORMAL_DIR="${1:-/tmp}"
+
+cat > "${NORMAL_DIR}/workload-generate.service" <<'UNIT'
+[Unit]
+Description=Generate workload service files
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/workloadctl/workload-generate /run/systemd/system
+# Note: daemon-reload + explicit `systemctl start --no-block` for each
+# workload is handled inside workload-generate itself. See the block at
+# the end of main() in that script for why wants symlinks alone don't
+# cause workloads to auto-start on the current boot.
+UNIT
+
+mkdir -p "${NORMAL_DIR}/basic.target.wants"
+ln -sf ../workload-generate.service "${NORMAL_DIR}/basic.target.wants/workload-generate.service"
