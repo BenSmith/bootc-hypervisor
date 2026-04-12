@@ -1,8 +1,6 @@
-%{!?python3_sitelib: %global python3_sitelib %(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")}
-
 Name:           workloadctl
-Version:        1.0.0
-Release:        1%{?dist}
+Version:        0.1.0
+Release:        %{?buildserial:0.%{buildserial}}%{!?buildserial:1}%{?dist}
 Summary:        Declarative rootless container workload manager
 
 License:        MIT
@@ -15,6 +13,9 @@ Requires:       podman >= 5.3
 Requires:       systemd
 Requires:       shadow-utils
 Suggests:       bash-completion
+Requires:       policycoreutils
+Suggests:       policycoreutils-python-utils
+Suggests:       checkpolicy
 
 %description
 workloadctl is a declarative workload provisioning system for rootless
@@ -33,9 +34,9 @@ UID/subuid namespace, home directory, and rootless podman instance.
 # Binary
 install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadctl
 
-# Python library
+# Python library (private — not in site-packages)
 install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
-    %{buildroot}%{python3_sitelib}/workload_lib.py
+    %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
 
 # systemd generator (shell wrapper)
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator-wrapper \
@@ -104,8 +105,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %files
 %{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
-%{python3_sitelib}/workload_lib.py
-%{python3_sitelib}/__pycache__/workload_lib.*
+%{_libexecdir}/workloadctl/workload_lib.py
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
 %{_libexecdir}/workloadctl/workload-generate

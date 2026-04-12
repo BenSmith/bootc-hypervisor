@@ -1,6 +1,6 @@
 #!/usr/bin/env just --justfile
 
-version := "1.0.0"
+version := "0.1.0"
 
 # Run all unit tests
 test:
@@ -27,12 +27,25 @@ lint:
 rpm-build:
   #!/usr/bin/env bash
   set -euo pipefail
+  serial="$(date +%Y%m%d%H%M%S)"
   mkdir -p rpmbuild/{BUILD,RPMS,SRPMS,SPECS}
-  # Use this directory as the SOURCES so the spec can reference files directly
   rpmbuild -bb \
     --define "_topdir $(pwd)/rpmbuild" \
     --define "_sourcedir $(pwd)" \
     --define "_builddir $(pwd)/rpmbuild/BUILD" \
+    --define "buildserial ${serial}" \
     rpm/workloadctl.spec
   echo "RPM built:"
-  find rpmbuild/RPMS -name '*.rpm'
+  find rpmbuild/RPMS -name '*.rpm' -newer rpmbuild/SPECS -o -name '*.rpm' -newer rpm/workloadctl.spec | head -1
+
+# Build and install RPM (upgrade if already installed)
+rpm-install: rpm-build
+  #!/usr/bin/env bash
+  set -euo pipefail
+  rpm=$(find rpmbuild/RPMS -name 'workloadctl-*.rpm' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)
+  echo "Installing ${rpm}"
+  sudo dnf install -y --allowerasing "$rpm"
+
+# Remove old build artifacts
+rpm-clean:
+  rm -rf rpmbuild

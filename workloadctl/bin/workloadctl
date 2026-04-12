@@ -23,6 +23,7 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, '/usr/libexec/workloadctl')
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
     MAX_NAME_LENGTH, NAME_PATTERN, USERNAME_PREFIX,
@@ -503,11 +504,30 @@ def cmd_status(args, manager: WorkloadManager):
     subprocess.run(["systemctl", "status", config.service_name])
 
 
+REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
+RECOMMENDED_EXECUTABLES = ["semanage", "checkmodule", "semodule_package"]
+
+
 def _preflight_checks(config: WorkloadConfig) -> bool:
     """Run pre-flight checks for a workload. Returns True if all checks pass."""
     print()
     print("Running pre-flight checks...")
     failed = False
+
+    # Check required executables are available
+    missing_required = [exe for exe in REQUIRED_EXECUTABLES if not shutil.which(exe)]
+    if missing_required:
+        print("  ✗ Missing required executables:")
+        for exe in missing_required:
+            print(f"    - {exe}")
+        failed = True
+
+    missing_recommended = [exe for exe in RECOMMENDED_EXECUTABLES if not shutil.which(exe)]
+    if missing_recommended:
+        print("  ! Missing recommended executables (SELinux policy management):")
+        for exe in missing_recommended:
+            print(f"    - {exe}")
+        print("    Install: dnf install policycoreutils-python-utils checkpolicy")
 
     # Check if image exists locally (for pull=never)
     pull_policy = config.config.get("container", {}).get("pull", "missing")

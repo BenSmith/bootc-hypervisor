@@ -50,6 +50,7 @@ try:
     import re
     from pathlib import Path
 
+    sys.path.insert(0, '/usr/libexec/workloadctl')
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
@@ -427,9 +428,23 @@ def generate_system_service(config, user_name, uid):
     if needs_auto_maps:
         # GID == UID for workload users (sysusers convention)
         gid = uid
+        # Honor the optional :uid=N,gid=N suffix on keep-id, which remaps the
+        # workload user to a different in-container uid/gid (e.g. for images
+        # that ship a fixed non-root user). Without this, +N:@N:1 hardcodes the
+        # in-container uid to the host workload uid, silently ignoring the
+        # suffix that the non-needs_auto_maps branch would have honored.
+        target_uid = uid
+        target_gid = gid
+        if userns_mode.startswith("keep-id:"):
+            for param in userns_mode[len("keep-id:"):].split(","):
+                key, _, value = param.partition("=")
+                if key == "uid":
+                    target_uid = int(value)
+                elif key == "gid":
+                    target_gid = int(value)
         # Auto-map the workload user's own UID and GID (+ prefix implies keep-id)
-        podman_args.append(f"--uidmap +{uid}:@{uid}:1")
-        podman_args.append(f"--gidmap +{gid}:@{gid}:1")
+        podman_args.append(f"--uidmap +{target_uid}:@{uid}:1")
+        podman_args.append(f"--gidmap +{target_gid}:@{gid}:1")
         # Auto-map GIDs from extra_groups
         mapped_gids = {gid}
         for group in extra_groups:

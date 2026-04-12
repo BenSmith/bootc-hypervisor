@@ -1,7 +1,7 @@
 # Stage 1: Build workloadctl RPM (matches target python(abi))
 ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 FROM ${BASE_IMAGE} AS workloadctl-builder
-RUN dnf install -y rpm-build python3 python3-rpm-macros systemd-rpm-macros && dnf clean all
+RUN dnf install -y rpm-build systemd-rpm-macros && dnf clean all
 COPY workloadctl/ /src/
 RUN cd /src && \
     mkdir -p rpmbuild/{BUILD,RPMS,SRPMS,SPECS} && \
@@ -199,8 +199,8 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
     fi
 
 # Install workload provisioning system from builder stage
-COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/
-RUN dnf install -y /tmp/workloadctl-*.rpm && rm -f /tmp/workloadctl-*.rpm && dnf clean all
+COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/workloadctl.rpm
+RUN dnf install -y /tmp/workloadctl.rpm && rm -f /tmp/workloadctl.rpm && dnf clean all
 
 # Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf

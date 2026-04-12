@@ -1,0 +1,144 @@
+# workloadctl
+
+> Declarative rootless container workload manager for Linux. Define workloads as TOML files, and workloadctl handles user creation, systemd service generation, volume management, secrets, and container lifecycle — all running as isolated unprivileged users with rootless podman.
+
+workloadctl is a Python CLI tool and systemd integration that turns TOML config files into fully isolated, rootless container workloads. Each workload gets a dedicated locked-down system user (`_wl-<name>`), its own UID/subuid namespace, a systemd service generated at boot, automatic volume directories, and optional TPM2-encrypted secrets via systemd credentials.
+
+## Requirements
+
+- Fedora 41+ (or any systemd + Podman 5.3+ Linux)
+- Python 3.11+
+- Works on standard Fedora or bootc/immutable OS images
+
+## Architecture
+
+The system has four main components:
+
+1. **Generator** (`generators/workload-generator`): A systemd generator that reads `/etc/workloads.d/*.toml` at boot and produces systemd-sysusers configs and service unit files. Generators are SELinux-sandboxed and must not access `/var`. Always exits 0 to avoid blocking boot.
+2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
+3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman.
+4. **CLI** (`bin/workloadctl`): Docker/kubectl-like CLI (~2500 lines, argparse) for creating, enabling, disabling, updating, and inspecting workloads.
+
+### Boot Flow
+
+```
+systemd-generators → workload-generator creates sysusers configs and service files
+systemd-sysusers.service → creates workload users with group memberships
+ExecStartPre=+workload-ensure-user → configures subuid/subgid, home dir, EnvironmentFile, linger
+workload-{name}.service → individual containers start via podman run
+```
+
+### User Management
+
+- Username: `_wl-{name}` (e.g., `_wl-webserver`)
+- UID range: 10000-52948 (42,949 max workloads)
+- Subuid formula: `100000 + (uid_offset * 100000)`, count=65536
+- Home directory: `/var/lib/workloads/{name}`
+- Shell: `/usr/sbin/nologin`
+
+### Network Modes
+
+- `pasta` (default): Isolated networking with port forwarding (Podman 5.3+)
+- `host`: Share host network namespace
+- `none`: No networking
+- Custom named networks for container-to-container communication
+
+### Secrets
+
+Uses systemd credentials (`systemd-creds`) for secret management:
+- Encryption at rest via AES256-GCM with TPM2 or host keys
+- Runtime decryption into RAM-only tmpfs
+- Per-workload isolation
+- `${SECRET:name}` syntax in environment variables for auto-detection
+- Portable export/import between machines
+
+## Key Commands
+
+| Command | Description |
+|---|---|
+| `workloadctl create` | Generate a workload TOML config |
+| `workloadctl enable` | Create user, transfer image, start service |
+| `workloadctl disable` | Stop service, optionally purge user/data |
+| `workloadctl update` | Pull new image and recreate (with automatic rollback on failure) |
+| `workloadctl rollback` | Roll back to previous image |
+| `workloadctl status` | Show workload status |
+| `workloadctl logs` | View workload container logs |
+| `workloadctl list` | List all configured workloads |
+| `workloadctl info` | Show detailed workload information |
+| `workloadctl shell` | Open interactive shell in container |
+| `workloadctl exec` | Execute command in container |
+| `workloadctl edit` | Edit config in $EDITOR with validation |
+| `workloadctl validate` | Validate TOML config |
+| `workloadctl verify` | Verify runtime setup (user, subuid, linger, image) |
+| `workloadctl stats` | Show live resource usage |
+| `workloadctl health` | Check container health status |
+| `workloadctl secret` | Manage TPM2-encrypted credentials |
+| `workloadctl backup` | Backup workload config, volumes, and image |
+| `workloadctl restore` | Restore workload from backup archive |
+| `workloadctl cleanup` | Find/remove orphaned workload users |
+
+Most mutating commands require `sudo`. Read-only commands work as any user.
+
+## Configuration (TOML)
+
+Workloads are defined in `/etc/workloads.d/<name>.toml`. Key sections:
+
+- `[workload]` — name, enabled flag
+- `[container]` — image, command, pull policy, systemd mode, user, environment, health checks
+- `[container.health]` — health check cmd, interval, timeout, retries, on_failure action
+- `[container.environment]` — env vars, supports `${SECRET:name}` syntax
+- `[setup]` — required_files that must exist before enable
+- `[secrets]` — file-mounted systemd credentials
+- `[devices]` — generic device passthrough, GPU (amd/nvidia), input, audio, virtualization flags
+- `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile
+- `[network]` — mode (pasta/host/none/custom), ports, DNS
+- `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size
+- `[volumes]` — host:container path mappings
+
+## File Structure
+
+```
+bin/workloadctl                    # Main CLI tool
+generators/workload-generator      # systemd generator (boot-time)
+libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
+libexec/workload-metrics           # Prometheus metrics exporter
+lib/workload_lib.py                # Shared library (config parsing, UID allocation)
+workloads.d/                       # Example workload TOML configs
+containers/                        # Container image definitions (Containerfiles + build scripts)
+docs/workloads.md                  # Full configuration guide
+docs/cli.md                        # Complete CLI reference
+docs/secrets.md                    # Secrets management guide
+docs/schema-reference.toml         # Annotated TOML schema with all options
+systemd/                           # systemd units (workloads.slice, metrics timer)
+completions/                       # Bash completions
+seccomp-workload-baseline.json     # Default seccomp profile
+tests/                             # Test suite
+```
+
+## Included Container Images
+
+Pre-built container definitions in `containers/`:
+
+- `smb-server` — Samba file sharing (guest shares, host networking)
+- `wireguard-vpn` — WireGuard VPN client
+- `socks5-vpn` — SOCKS5 proxy over WireGuard
+- `dns-vpn` — DNS resolver over WireGuard
+- `pihole-vpn` — Pi-hole DNS + WireGuard VPN
+- `proxy-stack` — Squid cache + Pi-hole + WireGuard (all-in-one)
+- `squid` — Squid caching proxy
+- `grafana` — Grafana dashboards for workload monitoring
+- `desktop-labwc-kms` — labwc Wayland desktop (KMS/DRM)
+- `desktop-wayfire-kms` — Wayfire Wayland desktop (KMS/DRM)
+- `desktop-vnc` — VNC-accessible Wayland desktop
+
+## Documentation
+
+- [Workload guide](docs/workloads.md) — full configuration reference with examples
+- [CLI reference](docs/cli.md) — complete command documentation
+- [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
+- [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
+- [Example configs](workloads.d/) — real-world workload definitions
+
+## License
+
+MIT

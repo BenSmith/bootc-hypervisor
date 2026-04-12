@@ -16,6 +16,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, '/usr/libexec/workloadctl')
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, workload_username, resolve_secret_env_vars,
     auto_detect_credentials, SECRET_PATTERN, validate_env_key,

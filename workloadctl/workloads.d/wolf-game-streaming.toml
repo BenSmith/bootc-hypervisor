@@ -1,0 +1,52 @@
+[workload]
+name = "wolf-game-streaming"
+enabled = false
+
+[container]
+image = "localhost/wolf-game-streaming:latest"
+pull = "never"
+
+[container.environment]
+WOLF_RENDER_NODE = "/dev/dri/renderD128"
+
+[container.health]
+cmd = "pgrep -x wolf > /dev/null"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[devices]
+gpu = "amd"
+devices = ["/dev/uinput"]
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL", "NET_BIND_SERVICE",
+    "SETFCAP", "SETPCAP",
+    "SYS_CHROOT", "SYS_NICE",
+]
+extra_groups = ["video", "render", "input"]
+
+[storage]
+volumes = [
+    "./config:/etc/wolf",
+    "./home:/home/steam",
+    "/run/udev:/run/udev:ro",
+    "/dev/input:/dev/input",
+]
+
+[network]
+mode = "host"
+
+[host]
+setup = "setup.sh"
+
+[resources]
+shm_size = "2g"
+memory_max = "8G"
+memory_high = "6G"
+cpu_quota = "400%"
+tasks_max = 16384

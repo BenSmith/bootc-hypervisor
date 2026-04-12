@@ -5,6 +5,27 @@ TOML files, and workloadctl handles user creation, systemd service generation,
 volume management, secrets, and container lifecycle — all running as isolated
 unprivileged users with rootless podman.
 
+## What's different about Quadlets?
+
+Podman Quadlets generate systemd units from container specs — workloadctl goes
+further by managing the full workload lifecycle:
+
+- **Declarative TOML configs** instead of systemd unit syntax and raw podman flags
+- **Automatic user isolation** — each workload gets a dedicated system user
+  (`_wl-<name>`) with its own UID, subuid/subgid ranges, and rootless podman instance.
+  Quadlets typically run all containers under a single user.
+- **Lifecycle management** — user creation, home/volume directory setup, image
+  transfer, update with automatic rollback, backup/restore, orphan cleanup
+- **Hardware shortcuts** — `--gpu amd`, `--audio`, `--input`, `--virtualization`
+  expand to the right devices, groups, and mounts
+- **TPM2-encrypted secrets** via systemd credentials, with portable export/import
+- **bootc-ready** — drop TOMLs into an image, encrypted secrets safe to commit,
+  everything self-provisions on first boot
+
+Quadlets solve "generate a systemd unit from a container spec." workloadctl
+solves "declare a workload and have everything from OS user to running container
+handled automatically."
+
 ## Requirements
 
 - Fedora 41+ (or any systemd + podman 5.3+ Linux)

@@ -1,19 +1,19 @@
-# Headless Desktop + Sunshine Streaming
+# Headless Desktop + Sunshine Streaming (Wayfire)
 #
-# labwc runs headlessly (WLR_BACKENDS=headless, no KMS/seatd/libinput).
+# Wayfire runs headlessly (WLR_BACKENDS=headless, no KMS/seatd/libinput).
 # Input from Moonlight clients is injected by an in-container bridge that reads
 # Sunshine's uinput passthrough devices and injects via Wayland virtual input
 # protocols (zwlr_virtual_pointer_manager_v1 / zwp_virtual_keyboard_manager_v1).
 # Sunshine captures the virtual display via wlr-screencopy, encodes with VAAPI
 # on the AMD render node, and streams to Moonlight clients.
-# Steam Big Picture is the default session; the full labwc desktop is always
+# Steam Big Picture is the default session; the full wayfire desktop is always
 # accessible by minimising/exiting Steam.
 #
 # Build:
 #   sudo ./build.sh
 #
 # Run:
-#   workload-ctl enable sunshine-game-streaming
+#   workload-ctl enable wayfire-game-streaming
 
 FROM registry.fedoraproject.org/fedora:43
 
@@ -28,14 +28,13 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     fira-code-fonts \
     firefox \
     foot \
-    fuzzel \
     google-noto-sans-fonts \
     grim \
     hostname \
     htop \
     pciutils \
     psmisc \
-    labwc \
+    wayfire \
     wayvnc \
     libevdev \
     libinput \
@@ -59,7 +58,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     python3-gobject \
     slurp \
     sudo \
-    swaybg \
     systemd \
     systemd-udev \
     util-linux \
@@ -67,6 +65,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wireplumber \
     wl-clipboard \
     wlr-randr \
+    wlrctl \
+    wofi \
     xdg-desktop-portal \
     xdg-desktop-portal-wlr \
     xdg-utils \
@@ -94,7 +94,7 @@ RUN dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \
     dnf clean all
 
 # --- Sunshine ---
-# Sunshine captures the labwc display via wlr-screencopy and encodes
+# Sunshine captures the wayfire display via wlr-screencopy and encodes
 # with VAAPI. Moonlight clients pair via the web UI at https://<host>:47990.
 # Pre-release RPM URL changes frequently — pass via build arg:
 #   podman build --build-arg SUNSHINE_RPM_URL=https://... .
@@ -105,7 +105,7 @@ RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
 
 # Sunshine system-wide defaults. The user can override in ~/.config/sunshine/.
 # adapter_name: AMD render node for VAAPI encoding.
-# output_name: labwc headless virtual output (set by wlr-randr in autostart).
+# output_name: wayfire headless virtual output (set by wlr-randr in autostart).
 RUN mkdir -p /etc/sunshine && \
     cat > /etc/sunshine/sunshine.conf <<'CONF'
 encoder=vaapi
@@ -119,7 +119,7 @@ CONF
 # --- Polkit stub ---
 # Required for Steam's logind D-Bus PowerOff call (Power menu → Turn Off).
 # polkitd cannot start in a rootless container (requires CAP_SYS_ADMIN for PID
-# namespace introspection). See gamescope-baremetal/NOTES.md for full details.
+# namespace introspection).
 
 RUN cat > /usr/local/bin/polkit-stub <<'SCRIPT'
 #!/usr/bin/python3
@@ -177,7 +177,7 @@ RUN cat > /usr/lib/systemd/system/polkit-stub.service <<'UNIT'
 [Unit]
 Description=Polkit stub (grants login1 actions only)
 After=dbus.socket
-Before=labwc.service
+Before=wayfire.service
 
 [Service]
 Type=simple
@@ -208,55 +208,100 @@ gtk-cursor-theme-size=24
 gtk-font-name=Noto Sans 11
 INI
 
-# --- labwc config ---
+# --- Wayfire config ---
 
-RUN mkdir -p /etc/xdg/labwc && \
-    cat > /etc/xdg/labwc/rc.xml <<'XML'
-<?xml version="1.0"?>
-<labwc_config>
-  <focus>
-    <followMouse>yes</followMouse>
-    <raiseOnFocus>no</raiseOnFocus>
-  </focus>
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/wayfire.ini <<'INI'
+[core]
+plugins = \
+  alpha \
+  animate \
+  autostart \
+  command \
+  cube \
+  decoration \
+  expo \
+  fast-switcher \
+  fisheye \
+  grid \
+  move \
+  oswitch \
+  place \
+  resize \
+  switcher \
+  vswitch \
+  window-rules \
+  wm-actions \
+  wobbly \
+  zoom
 
-  <theme>
-    <name>Adwaita</name>
-    <cornerRadius>8</cornerRadius>
-  </theme>
+[output:HEADLESS-1]
+mode = 2560x1080@60000
 
-  <keyboard>
-    <keybind key="W-Return">
-      <action name="Execute" command="foot" />
-    </keybind>
-    <keybind key="W-d">
-      <action name="Execute" command="fuzzel" />
-    </keybind>
-    <keybind key="W-q">
-      <action name="Close" />
-    </keybind>
-    <keybind key="W-f">
-      <action name="ToggleFullscreen" />
-    </keybind>
-    <keybind key="A-Tab">
-      <action name="NextWindow" />
-    </keybind>
-  </keyboard>
+[command]
+binding_terminal = <super> KEY_ENTER
+command_terminal = foot
 
-  <mouse>
-    <default />
-  </mouse>
+binding_launcher = <super> KEY_D
+command_launcher = wofi --show run
 
-  <outputs>
-    <output name="HEADLESS-1">
-      <mode>2560x1080</mode>
-    </output>
-  </outputs>
+binding_close = <super> KEY_Q
+command_close = wlrctl toplevel close
 
-  <placement>
-    <policy>center</policy>
-  </placement>
-</labwc_config>
-XML
+binding_menu = BTN_RIGHT
+command_menu = wofi --show run
+
+[move]
+activate = <super> BTN_LEFT
+
+[resize]
+activate = <super> BTN_MIDDLE
+
+[fast-switcher]
+activate = <alt> KEY_TAB
+
+[vswitch]
+binding_left = <super> KEY_LEFT
+binding_down = <super> KEY_DOWN
+binding_up = <super> KEY_UP
+binding_right = <super> KEY_RIGHT
+
+[wm-actions]
+toggle_fullscreen = <super> KEY_F
+
+[grid]
+slot_bl = <super> KEY_KP1
+slot_b = <super> KEY_KP2
+slot_br = <super> KEY_KP3
+slot_l = <super> KEY_KP4
+slot_c = <super> KEY_KP5
+slot_r = <super> KEY_KP6
+slot_tl = <super> KEY_KP7
+slot_t = <super> KEY_KP8
+slot_tr = <super> KEY_KP9
+
+[cube]
+activate = <ctrl> <alt> BTN_LEFT
+background = 0.1 0.1 0.1 1.0
+
+[animate]
+open_animation = zoom
+close_animation = zoom
+duration = 300
+
+[wobbly]
+friction = 3.0
+spring_k = 8.0
+
+[decoration]
+active_color = 0.3 0.3 0.9 1.0
+inactive_color = 0.2 0.2 0.2 1.0
+
+[autostart]
+panel = waybar
+audio = /etc/xdg/wayfire/start-audio.sh
+steam = /etc/xdg/wayfire/start-steam.sh
+INI
 
 # --- Foot terminal config ---
 
@@ -267,13 +312,12 @@ font=Fira Code:size=14
 initial-window-size-chars=80x24
 INI
 
-# --- Autostart ---
-# Order: audio → virtual display resolution → waybar → sunshine → steam BPM
-# Sunshine must start after labwc has created the Wayland socket.
-# Steam runs in Big Picture (tenfoot) mode; the labwc desktop is always
-# accessible by exiting or minimising Steam.
+# --- Autostart scripts ---
+# Wayfire runs autostart commands from its config. Split into separate scripts
+# for audio and steam so each concern is isolated.
 
-RUN cat > /etc/xdg/labwc/autostart <<'SH'
+RUN mkdir -p /etc/xdg/wayfire && \
+    cat > /etc/xdg/wayfire/start-audio.sh <<'SH'
 #!/bin/bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 
@@ -322,16 +366,16 @@ EOF
     done
     [ -n "$card_num" ] && amixer -c "$card_num" sset Master 74% unmute >/dev/null 2>&1
 fi
+SH
 
-# --- Desktop chrome ---
-swaybg -c '#2e3440' &
-waybar &
-
-# --- Steam Big Picture ---
+RUN cat > /etc/xdg/wayfire/start-steam.sh <<'SH'
+#!/bin/bash
+# Steam Big Picture — launched from wayfire autostart.
 # STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
 #   nest inside the container's user namespace.
-STEAM_DISABLE_BROWSER_SANDBOX=1 \
-steam -tenfoot &
+export STEAM_DISABLE_BROWSER_SANDBOX=1
+export DISPLAY=:0
+exec steam -tenfoot
 SH
 
 # --- Waybar config ---
@@ -346,7 +390,7 @@ RUN mkdir -p /etc/xdg/waybar && \
     "modules-right": ["cpu", "memory", "clock"],
     "custom/launcher": {
         "format": " Apps",
-        "on-click": "fuzzel"
+        "on-click": "wofi --show run"
     },
     "wlr/taskbar": {
         "format": "{title}",
@@ -367,11 +411,39 @@ RUN mkdir -p /etc/xdg/waybar && \
 }
 JSON
 
-# --- labwc systemd service ---
+RUN cat > /etc/xdg/waybar/style.css <<'CSS'
+* {
+    font-family: "Noto Sans", sans-serif;
+    font-size: 14px;
+}
+window#waybar {
+    background-color: rgba(30, 30, 40, 0.9);
+    color: #e0e0e0;
+}
+#custom-launcher {
+    padding: 0 12px;
+    color: #88c0d0;
+    font-weight: bold;
+}
+#custom-launcher:hover {
+    background-color: rgba(136, 192, 208, 0.2);
+}
+#taskbar button {
+    padding: 0 8px;
+}
+#taskbar button.active {
+    background-color: rgba(136, 192, 208, 0.3);
+}
+#cpu, #memory, #clock {
+    padding: 0 10px;
+}
+CSS
 
-RUN cat > /usr/lib/systemd/system/labwc.service <<'UNIT'
+# --- Wayfire systemd service ---
+
+RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
 [Unit]
-Description=Labwc Wayland Compositor (headless)
+Description=Wayfire Wayland Compositor (headless)
 After=container-bootstrap.service polkit-stub.service
 
 [Service]
@@ -390,19 +462,21 @@ Environment=XCURSOR_SIZE=24
 
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && cd && exec /usr/bin/dbus-run-session /usr/bin/labwc'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus && dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 # --- Wayland ready gate ---
-# Oneshot that blocks until labwc's Wayland socket exists. Services that
+# Oneshot that blocks until wayfire's Wayland socket exists. Services that
 # need the display (sunshine, wayvnc, input-bridge) depend on this instead
 # of each polling independently.
 
 RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
 #!/bin/sh
+# Wait for any wayland-N socket to appear, then write WAYLAND_DISPLAY to an
+# environment file that downstream services can source.
 RUNTIME_DIR="/run/user/${CONTAINER_UID}"
 ENV_FILE="/run/wayland-display.env"
 
@@ -421,11 +495,11 @@ SCRIPT
 
 RUN chmod +x /usr/local/bin/wait-for-wayland
 
-RUN cat > /usr/lib/systemd/system/labwc-wayland-ready.service <<'UNIT'
+RUN cat > /usr/lib/systemd/system/wayfire-wayland-ready.service <<'UNIT'
 [Unit]
-Description=Wait for labwc Wayland socket
-After=labwc.service
-Requires=labwc.service
+Description=Wait for wayfire Wayland socket
+After=wayfire.service
+Requires=wayfire.service
 
 [Service]
 Type=oneshot
@@ -438,7 +512,7 @@ WantedBy=multi-user.target
 UNIT
 
 # --- Sunshine systemd service ---
-# Runs as the container user after labwc has created the Wayland socket.
+# Runs as the container user after wayfire has created the Wayland socket.
 # Restart=on-failure ensures it recovers from network drops and crashes.
 
 # --- Sunshine CSRF setup script ---
@@ -465,8 +539,8 @@ SCRIPT
 RUN cat > /usr/lib/systemd/system/sunshine.service <<'UNIT'
 [Unit]
 Description=Sunshine GameStream host
-After=labwc-wayland-ready.service
-Requires=labwc-wayland-ready.service
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
 
 [Service]
 Type=simple
@@ -490,8 +564,8 @@ UNIT
 RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
 [Unit]
 Description=wayvnc VNC server
-After=labwc-wayland-ready.service
-Requires=labwc-wayland-ready.service
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
 
 [Service]
 Type=simple
@@ -508,9 +582,9 @@ UNIT
 
 # --- Input bridge ---
 # Sunshine creates virtual uinput devices when a Moonlight client connects.
-# Since WLR_BACKENDS=headless (no libinput), labwc has no input system.
+# Since WLR_BACKENDS=headless (no libinput), wayfire has no input system.
 # This bridge polls /dev/input/ for Sunshine's uinput devices and injects
-# events into labwc via Wayland virtual input protocols:
+# events into wayfire via Wayland virtual input protocols:
 #   zwlr_virtual_pointer_manager_v1  — mouse movement, buttons, scroll
 #   zwp_virtual_keyboard_manager_v1  — key press/release
 #
@@ -522,7 +596,7 @@ RUN cat > /usr/local/bin/sunshine-input-bridge <<'SCRIPT'
 """In-container Wayland virtual input bridge for Sunshine.
 
 Polls /proc/bus/input/devices for Sunshine's uinput virtual input devices,
-then reads their evdev events and injects them into labwc via:
+then reads their evdev events and injects them into wayfire via:
   zwlr_virtual_pointer_manager_v1  — mouse motion, buttons, scroll
   zwp_virtual_keyboard_manager_v1  — key press / release
 """
@@ -946,8 +1020,8 @@ RUN chmod +x /usr/local/bin/sunshine-input-bridge
 RUN cat > /usr/lib/systemd/system/sunshine-input-bridge.service <<'UNIT'
 [Unit]
 Description=Sunshine in-container Wayland input bridge
-After=labwc-wayland-ready.service
-Requires=labwc-wayland-ready.service
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
 
 [Service]
 Type=simple
@@ -1001,7 +1075,7 @@ chmod 0440 /etc/sudoers.d/container-user
 if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
     cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
 if [ "$PS1" ]; then
-    PS1='\[\033[01;35m\][sunshine]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+    PS1='\[\033[01;35m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
 fi
 PROMPT
     chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
@@ -1016,7 +1090,7 @@ Description=First-boot container bootstrap
 ConditionPathExists=!/etc/container-bootstrapped
 DefaultDependencies=no
 After=sysinit.target
-Before=labwc.service
+Before=wayfire.service
 
 [Service]
 Type=oneshot
@@ -1059,8 +1133,9 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
     ln -sf /dev/null /etc/systemd/system/polkit.service && \
-    systemctl enable labwc labwc-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub && \
-    chmod +x /etc/xdg/labwc/autostart /usr/local/bin/container-bootstrap \
+    systemctl enable wayfire wayfire-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub && \
+    chmod +x /etc/xdg/wayfire/start-audio.sh /etc/xdg/wayfire/start-steam.sh \
+             /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-csrf-setup
 
 STOPSIGNAL SIGRTMIN+3

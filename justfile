@@ -115,6 +115,7 @@ build-nvidia-rpmfusion:
     -t localhost/hypervisor-nvidia:rpmfusion \
     -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion \
+    -t registry.local:5000/hypervisor-nvidia:rpmfusion \
     -f hypervisor-nvidia-rpmfusion.Containerfile .
 
 build-nvidia-negativo17:
@@ -125,6 +126,7 @@ build-nvidia-negativo17:
     -t localhost/hypervisor-nvidia:negativo17 \
     -t ghcr.io/bensmith/hypervisor-nvidia:negativo17-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:negativo17 \
+    -t registry.local:5000/hypervisor-nvidia:negativo17 \
     -f hypervisor-nvidia-negativo17.Containerfile .
 
 build-amd:

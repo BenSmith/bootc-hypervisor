@@ -1,0 +1,49 @@
+[workload]
+name = "desktop-wayfire"
+enabled = false
+
+[container]
+image = "localhost/desktop-wayfire:latest"
+pull = "never"
+systemd = "always"
+
+[container.environment]
+CONTAINER_USER = "desktop"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
+
+[container.health]
+cmd = "pgrep -x wayfire > /dev/null || exit 1"
+interval = "30s"
+start_period = "15s"
+on_failure = "kill"
+
+[devices]
+gpu = "amd"
+devices = ["/dev/snd"]
+
+[security]
+userns = "keep-id"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL",
+]
+extra_groups = ["video", "render", "audio"]
+
+[storage]
+volumes = [
+    "./home:/home/desktop",
+    "/run/systemd/journal/socket:/run/systemd/journal/socket",
+    "/run/udev:/run/udev:ro",
+]
+
+[network]
+mode = "host"
+
+[resources]
+shm_size = "512m"
+memory_max = "4G"
+memory_high = "3G"
+cpu_quota = "200%"
+tasks_max = 4096
