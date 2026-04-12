@@ -442,9 +442,16 @@ def cmd_list(args, manager: WorkloadManager):
         print("  No workload configs found")
         return
 
+    # Size the NAME column to fit the longest name, within sensible bounds.
+    # Names longer than the cap are elided with an ellipsis.
+    NAME_MIN = 18
+    NAME_MAX = 28
+    longest = max((len(c.name) for c in configs), default=0)
+    name_w = max(NAME_MIN, min(longest, NAME_MAX))
+
     # Print header
-    print(f"  {'NAME':<18} {'STATUS':<10} {'STATE':<12} {'IMAGE_ID':<14} {'PORTS':<20} {'IMAGE':<30}")
-    print(f"  {'-'*18} {'-'*10} {'-'*12} {'-'*14} {'-'*20} {'-'*30}")
+    print(f"  {'NAME':<{name_w}} {'STATUS':<10} {'STATE':<12} {'IMAGE_ID':<14} {'PORTS':<20} {'IMAGE':<30}")
+    print(f"  {'-'*name_w} {'-'*10} {'-'*12} {'-'*14} {'-'*20} {'-'*30}")
 
     for config in configs:
         status = "enabled" if config.enabled else "disabled"
@@ -490,7 +497,12 @@ def cmd_list(args, manager: WorkloadManager):
         if len(image) > 30:
             image = image[:27] + "..."
 
-        print(f"  {config.name:<18} {status:<10} {state:<12} {image_id:<14} {ports_str:<20} {image:<30}")
+        # Elide long workload names so the column never overflows
+        name = config.name
+        if len(name) > name_w:
+            name = name[:name_w - 3] + "..."
+
+        print(f"  {name:<{name_w}} {status:<10} {state:<12} {image_id:<14} {ports_str:<20} {image:<30}")
 
 
 def cmd_status(args, manager: WorkloadManager):
