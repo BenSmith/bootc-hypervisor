@@ -488,12 +488,7 @@ test-vm-build:
   # Generate ephemeral config with known test credentials (must match sshpass in test-vm)
   TEST_CONFIG=$(mktemp)
   trap "rm -f $TEST_CONFIG" EXIT
-  cat > "$TEST_CONFIG" <<'TOML'
-[[customizations.user]]
-name = "ben"
-password = "password123"
-groups = ["wheel"]
-TOML
+  printf '%s\n' '[[customizations.user]]' 'name = "ben"' 'password = "password123"' 'groups = ["wheel"]' > "$TEST_CONFIG"
   echo "=== Building base image (if needed) ==="
   if ! podman image exists localhost/hypervisor-bootc:latest; then
     echo "Base image not found. Building with: just build-base-local"
