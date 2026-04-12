@@ -291,9 +291,9 @@ _generate-vm-config:
     done
   fi
   if [ -z "$password" ]; then
-    password=$(openssl rand -base64 12)
-    echo "Generated VM password: $password"
-    echo "(Set VM_PASSWORD to use a fixed password)"
+    echo "Error: VM_PASSWORD must be set (no config.toml found)"
+    echo "Usage: VM_PASSWORD=mypass just <recipe>"
+    exit 1
   fi
   {
     echo '[[customizations.user]]'
