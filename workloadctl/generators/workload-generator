@@ -28,7 +28,10 @@ Before=basic.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/workloadctl/workload-generate /run/systemd/system
-ExecStartPost=-/usr/bin/systemctl daemon-reload
+# Note: daemon-reload + explicit `systemctl start --no-block` for each
+# workload is handled inside workload-generate itself. See the block at
+# the end of main() in that script for why wants symlinks alone don't
+# cause workloads to auto-start on the current boot.
 UNIT
 
 mkdir -p "${NORMAL_DIR}/basic.target.wants"
