@@ -1,264 +1,218 @@
 # Bootc Hypervisor
 
-This is a homelab container/VM manager, inspired by Proxmox and Kubernetes based on an immutable OS, Fedora [bootc](https://bootc-dev.github.io/).
+Homelab virtualization platform delivered as immutable [Fedora bootc](https://bootc-dev.github.io/) images with rootless
+container workloads, KVM/QEMU VMs, and Incus system containers.
 
-This allows for atomic OS upgrades with quick and easy rollbacks, and a read-only root filesystem.
+Atomic OS upgrades with instant rollback, declarative workload management via TOML configs, GPU passthrough 
+(AMD/NVIDIA), and TPM2-backed secrets. No cloud dependencies.
 
-Bootc-based systems can be installed from an ISO/USB image or a running bootc container, updates are pulled from container registries. Bootc images can also run as containers, and can be derived from base images in a Dockerfile/Containerfile like any other container.
+Run local services like Pi-hole, VPN proxies, container registry, GPU-accelerated game streaming, AI workloads on an 
+immutable OS that can't be broken by bad upgrades. Each service runs as a locked-down rootless container under its own
+system user. Updates are pulled from a container registry and applied atomically.
 
 ## Why
+I was no longer willing to struggle with what happens when I update the base OS on my home server. Invariably one or 
+more things would break, sometimes in complex entagled ways. This system gives instant rollback for the base system, 
+and the workloadctl package allows for independent isolation for various services and workloads. 
 
-I made this because I wanted a simple way to run local services like pihole, vpn-proxied services, container registry, git host, home assistant, etc along with GPU-acceleration experiments. And I liked the bootc/immutable approach because I've broken my entire system with hypervisor upgrades gone wrong.  
+## Quick Start
 
-I hit on a pretty simple way to manage the various services as .toml config files that can use public images fairly easily, or use locally-customized container images. 
-
-With podman shenanigans, a workload uses rootless podman with a very locked-down single-purpose user that is only able to write to its own, self-owned storage. Since the OS is bootc and most of it is mounted read-only, it is exceedingly difficult to break into the system or interfere with other running workloads. 
-
-In addition, Linux gaming has really taken off and the same hardware can be used for locally-hosted AI workloads. 
-
-I wanted to be able to stream games from my heavy server to a lighter system, or spin up a local llm/ai container for trying out untrusted agentic tooling in a sandbox that couldn't easily gain access to sensitive info.
-
-Some of this is still a work in progress, but what I've made so far I find intriguing. It's entirely possible to run a rootless headless desktop environment in a container, as a workload, with GPU acceleration. 
-
-It's possible but not yet simple. 
-
-This could run a complete dev environment with inference and all the right libraries, or it could run Sunshine for high-performace game streaming to moonlight clients. Instead of having a dev computer that has rust dev, a zillion python virtual envs, 12 versions of Boost, 4 IDEs, and 5 versions of node, make a workload desktop environment per variant turn 'em off and on, and enjoy your OP homelab mainframe.
-
-I do not yet know whether rootless containerized desktops can run flatpacked applications due to their containerization, and the same goes for Steam games.
-
-## Images
-
-### Base Images
-
-- **`fedora-bootc-minimal`** - Minimal Fedora bootc base (kernel, systemd, bootc only)
-  - Built from [Fedora bootc base-images](https://gitlab.com/fedora/bootc/base-images)
-  - Build with Podman 4 for github ci/cd (see `fedora-bootc-minimal.Containerfile`)
-  - Weekly builds with rechunking for efficient updates
-
-- **`hypervisor-bootc`** - Full hypervisor stack
-  - Based on `fedora-bootc-minimal:43`
-  - Includes: libvirt, QEMU/KVM, Incus, Podman, monitoring tools
-  - Headless (no X/Wayland)
-  - If you're not doing GPU things, this is the image to use
-
-### GPU Variants
-
-These include the appropriate kernel GPU drivers but not all user-space tools.
-
-All variants inherit from `hypervisor-bootc`:
-
-- **`hypervisor-nvidia:rpmfusion`** - NVIDIA drivers via RPMFusion
-  - Driver: akmod-nvidia
-  - Includes CUDA libraries, nvidia-container-toolkit
-
-- **`hypervisor-nvidia:negativo17`** - NVIDIA drivers via negativo17 repo
-  - Driver: nvidia-driver-cuda
-  - More granular nvidia package structure, can update earlier
-
-- **`hypervisor-amd`** - AMD GPU support
-  - ROCm for compute (HIP, OpenCL)
-  - Mesa drivers for graphics/video
-
-## Build Schedule
-
-Automated weekly builds via GitHub Actions:
-
-- **Saturday 2am UTC**: `fedora-bootc-minimal` (Fedora 43 + rawhide)
-- **Sunday 3am UTC**: Hypervisor images (all variants)
-
-Images are pushed to `ghcr.io/bensmith/` with datetime tags.
-
-## Image Tags
-
-```
-fedora-bootc-minimal:43-YYYYMMDD-HHMM    # Timestamped build
-fedora-bootc-minimal:43                  # Latest for version 43
-fedora-bootc-minimal:latest              # Latest stable (43)
-
-hypervisor-bootc:YYYYMMDD-HHMM
-hypervisor-bootc:latest
-
-hypervisor-nvidia:rpmfusion-YYYYMMDD-HHMM
-hypervisor-nvidia:rpmfusion
-hypervisor-nvidia:negativo17-YYYYMMDD-HHMM
-hypervisor-nvidia:negativo17
-
-hypervisor-amd:YYYYMMDD-HHMM
-hypervisor-amd:latest
-```
-
-## Local Builds
-
-Using [just](https://github.com/casey/just):
-
+**Already running a bootc system:**
 ```bash
-# Build fedora bootc minimal
-just build-minimal 43 
-
-# Build base hypervisor
-just build-base-local
-
-# Build GPU variants
-just build-nvidia-rpmfusion-local
-just build-nvidia-negativo17-local
-just build-amd-local
-
-# Build everything
-just build-all-local
-
-# Build ISOs (this will podman pull bootc-image-builder)
-just build-iso-base-local
-just build-iso-nvidia-rpmfusion-local
-just build-all-isos-local
-
-```
-
-Datetime tags are automatically generated (YYYYMMDD-HHMM).
-
-The images are signed with cosign using keyless signing (OIDC).
-
-ISO builds support custom root filesystems via the `rootfs` parameter (xfs, btrfs, ext4). Defaults to xfs if not specified.
-
-## Using the Images
-
-### Install to bare metal
-
-#### Existing bootc system:
-```bash
-# Download and install if you're already running a bootc system
 sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
 sudo systemctl reboot
 ```
 
-#### Make an installer ISO from a container image:
+**Install from ISO:**
 ```bash
-# make an installer iso from one of these images:
-mkdir -p store && mkdir -p output && mkdir -p rpmmd
-sudo podman pull ghcr.io/bensmith/hypervisor-bootc
-sudo podman run \
-  --privileged \
-  --pull=newer \
-  --rm \
-  --security-opt label=type:unconfined_t \
-  -v $(pwd)/config.toml:/config.toml:ro \
-  -v $(pwd)/output:/output \
-  -v $(pwd)/rpmmd:/rpmmd \
-  -v $(pwd)/store:/store \
-  -v /var/lib/containers/storage:/var/lib/containers/storage \
-  quay.io/centos-bootc/bootc-image-builder:latest build \
-    --chown $(id -u):$(id -g) \
-    --output /output \
-    --rootfs xfs \
-    --rpmmd /rpmmd \
-    --store /store \
-    --type anaconda-iso \
-  ghcr.io/bensmith/hypervisor-bootc
+just build-iso-base
+sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
+# Boot from USB and install
+```
 
-# write it to a usb drive and boot/install
+**Create a workload:**
+```bash
+sudo workloadctl create webserver \
+  --image docker.io/nginxinc/nginx-unprivileged:alpine \
+  --ports 8080:8080 \
+  --enable
+
+workloadctl status webserver
+curl http://localhost:8080
+```
+
+## Images
+
+```
+fedora-bootc-minimal              Minimal Fedora bootc (kernel, systemd, bootc) - built from Fedora's bootc project
+  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Incus, Podman 5
+      ├── hypervisor-nvidia:rpmfusion   NVIDIA via RPMFusion (akmod-nvidia, CUDA)
+      ├── hypervisor-nvidia:negativo17  NVIDIA via negativo17 (nvidia-driver-cuda)
+      └── hypervisor-amd                AMD ROCm + Mesa
+```
+
+All images published to `ghcr.io/bensmith/` with datetime tags, signed with cosign (keyless OIDC).
+
+### What's in hypervisor-bootc
+
+The base image is headless and includes:
+
+- **Virtualization**: libvirt, QEMU/KVM, virt-install
+- **System containers**: Incus (LXC)
+- **Application containers**: Podman 5, podman-compose, crun, skopeo
+- **Workload management**: [workloadctl](#workload-system-workloadctl)
+- **Networking**: firewalld, NetworkManager, bridge-utils, wireguard-tools, dnsmasq
+- **Storage**: btrfs-progs, xfsprogs, lvm2, mdadm, cifs-utils, NVMe tools
+- **Monitoring**: btop, htop, iotop, sysstat, smartmontools, lm_sensors
+- **Security**: fail2ban, SELinux, audit, seatd
+- **Utilities**: tmux, neovim, just, jq, distrobox, fwupd
+
+### GPU Variants
+
+Each inherits from hypervisor-bootc and adds kernel GPU drivers:
+
+| Variant | Driver | Includes |
+|---|---|---|
+| `hypervisor-nvidia:rpmfusion` | akmod-nvidia | CUDA libs, nvidia-container-toolkit, CDI |
+| `hypervisor-nvidia:negativo17` | nvidia-driver-cuda | More granular packaging, earlier updates |
+| `hypervisor-amd` | ROCm + Mesa | HIP, OpenCL, rocm-smi, VA-API |
+
+### Image Tags
+
+```
+hypervisor-bootc:YYYYMMDD-HHMM        # Timestamped
+hypervisor-bootc:latest                # Latest build
+hypervisor-nvidia:rpmfusion            # Latest NVIDIA (RPMFusion)
+hypervisor-nvidia:negativo17           # Latest NVIDIA (negativo17)
+hypervisor-amd:latest                  # Latest AMD
+fedora-bootc-minimal:43               # Latest for Fedora 43
+```
+
+## Workload System (workloadctl)
+
+[`workloadctl`](workloadctl/) is a standalone tool (RPM-packaged, **no bootc dependency**) that manages rootless podman
+containers as declarative TOML configs. It should work on systemd Linuxes with Podman 5.3+.
+
+Each workload gets:
+
+- A dedicated system user (`_wl-<name>`) with its own UID/subuid namespace
+- A systemd service generated at boot
+- Automatic volume directory creation
+- Optional TPM2-encrypted secrets via systemd credentials
+
+```bash
+# Create and start
+sudo workloadctl create pihole \
+  --image pihole/pihole:latest \
+  --ports 53:53 80:80 \
+  --enable
+
+# Manage
+workloadctl list                    # List all workloads
+workloadctl status pihole           # Service status
+workloadctl logs -f pihole          # Follow logs
+sudo workloadctl update pihole      # Pull new image, auto-rollback on failure
+sudo workloadctl shell pihole       # Interactive shell
+
+# Secrets
+echo -n "my-key" | sudo workloadctl secret create api-key
+sudo workloadctl secret list
+```
+
+Or write a TOML config directly:
+
+```toml
+# /etc/workloads.d/webserver.toml
+[workload]
+name = "webserver"
+
+[container]
+image = "docker.io/nginxinc/nginx-unprivileged:alpine"
+
+[network]
+ports = ["8080:8080"]
+```
+
+See the [workloadctl README](workloadctl/README.md) for install instructions and the full feature set.
+
+## Installation and Updates
+
+### Install
+
+**From a bootc system:**
+```bash
+sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
+sudo systemctl reboot
+```
+
+**From installer ISO** (build locally or download from releases):
+```bash
+just build-iso-base              # Or: just build-iso-nvidia-rpmfusion
 sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
 ```
 
 ### Update
-If you're running an install from an ISO of a locally built image, you'll need to switch to the "unverified" image first, for live updates:
-```bash
-sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest
-sudo reboot
-```
 
-To update to a signed image from an unverified:
 ```bash
-sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:latest --enforce-container-sigpolicy
-sudo reboot
-```
-
-Regular updates:
-```bash
-# Check for updates
-bootc upgrade --check
-
-# Apply updates
-sudo bootc upgrade
+bootc upgrade --check            # Check for updates
+sudo bootc upgrade               # Apply atomically
 sudo systemctl reboot
 ```
 
-### Switch variants
+### Switch Variants
 
 ```bash
-# Switch to NVIDIA variant
 sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
 sudo systemctl reboot
 ```
 
-## Workload System
+## Building Locally
 
-The workload provisioning system ([`workloadctl`](workloadctl/)) manages rootless
-podman containers as declarative TOML configs. Each workload gets a dedicated
-locked-down system user, its own UID/subuid namespace, systemd service, and
-automatic volume management.
+Requires [just](https://github.com/casey/just) and podman.
 
 ```bash
-# Create and start a workload
-sudo workloadctl create webserver \
-  --image docker.io/nginxinc/nginx-unprivileged:alpine \
-  --ports 8080:8080 --enable
+# Container images
+just build-base-local                    # Base hypervisor (from local minimal)
+just build-amd-local                     # AMD GPU variant
+just build-nvidia-rpmfusion-local        # NVIDIA variant
+just build-all-local                     # Everything
 
-# Or write a TOML config and enable it
-sudo workloadctl enable my-service
+# ISOs (rootfs: xfs, btrfs, or ext4)
+just build-iso-base                      # Base hypervisor ISO
+just build-all-isos                      # All variant ISOs
+
+# Development: build, create qcow2, deploy to libvirt VM
+just aio-local
+
+# Tests
+just test                                # workloadctl unit tests
+just test-vm-build && just test-vm       # Full VM integration tests (libvirt + SWTPM)
+
+# Push to local registry
+just push-all
 ```
 
-`workloadctl` has **no bootc dependency** — it works on any Linux system with
-systemd and podman 5.3+. It is available as a standalone RPM; see
-[`workloadctl/README.md`](workloadctl/README.md) for install instructions.
+Weekly automated builds via GitHub Actions: `fedora-bootc-minimal` on Saturdays, all hypervisor variants on Sundays.
 
-**Documentation:**
+## Design
 
-- [Workload guide](workloadctl/docs/workloads.md) — configuration, host setup, customization
-- [CLI reference](workloadctl/docs/cli.md) — all commands and options
+- **Bootc for immutability** — `/usr` is read-only, `/etc` is mutable config, `/var` is persistent data. Atomic updates with instant rollback.
+- **Rootless containers via dedicated users** — Each workload gets a unique `_wl-{name}` user with its own UID namespace. No privileged containers.
+- **systemd-native** — Generators for boot-time provisioning, credentials for secrets, cgroup v2 for resource limits, journal for logging.
+- **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to images.
+- **Explicit hardware opt-in** — No device access by default; convenience flags (`--gpu`, `--audio`, `--input`, `--virtualization`) for common scenarios.
+
+## Documentation
+
+- [workloadctl README](workloadctl/README.md) — Workload system overview
+- [Workload guide](workloadctl/docs/workloads.md) — Full configuration reference
+- [CLI reference](workloadctl/docs/cli.md) — All commands and options
 - [Secrets management](workloadctl/docs/secrets.md) — TPM2-encrypted credentials
-- [Schema reference](workloadctl/docs/schema-reference.toml) — annotated TOML schema
-- [Example configs](workloadctl/workloads.d/) — real-world workload definitions
-- [Emergency recovery](docs/emergency-recovery.md) — boot recovery procedures
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — common issues and fixes
-
-## Architecture
-
-```
-fedora-bootc-minimal
-  └── hypervisor-bootc (libvirt, qemu, podman, incus, workloadctl, cosy)
-      ├── hypervisor-nvidia:rpmfusion (RPMFusion drivers)
-      ├── hypervisor-nvidia:negativo17 (negativo17 drivers)
-      └── hypervisor-amd (ROCm, Mesa)
-```
-
-## Enabled Services
-
-- `firewalld` - Firewall
-- `incus.socket` - Incus system container management
-- `libvirtd` - Virtualization (KVM/QEMU)
-- `nvidia-persistenced` - NVIDIA variants only
-- `sshd` - Remote access
-- `tuned` - Performance tuning
-
-## Virtualization & Containers
-
-The hypervisor provides multiple options for different workload types:
-
-- **KVM/QEMU** (via libvirt) - Full VMs for any OS, hardware emulation
-- **Incus** - Lightweight Linux system containers, VM-like but more efficient
-- **Podman 5** - Application containers, stateless microservices
-
-Choose the right tool for your workload: VMs for Windows/isolation, Incus for lightweight Linux instances, Podman for applications.
-
-## Podman 4 Pipeline Build
-
-Upstream (https://gitlab.com/fedora/bootc/base-images) fedora-bootc is built using podman 5.x.
-
-The `fedora-bootc-minimal.Containerfile` in this repo is a backported version for GitHub Actions (podman 4.9.3):
-
-These workarounds are temporary until GitHub Actions upgrades to podman 5.x.
+- [Schema reference](workloadctl/docs/schema-reference.toml) — Annotated TOML schema
+- [Example configs](workloadctl/workloads.d/) — Real-world workload definitions
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — Common issues and fixes
+- [Emergency recovery](docs/emergency-recovery.md) — Boot recovery procedures
 
 ## License
 
-Containerfiles and configurations: MIT
-
-Fedora packages and upstream components: Their respective licenses
+MIT (Containerfiles, configs, tooling). Fedora packages and upstream components under their respective licenses.

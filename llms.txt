@@ -1,442 +1,131 @@
-# Bootc Hypervisor Images
+# Bootc Hypervisor
 
-> Bootable container images for running VMs (KVM/QEMU), system containers (Incus/LXC), and application containers (Podman) with rootless workload provisioning.
+> Homelab virtualization platform delivered as immutable Fedora bootc images with rootless container workloads, KVM/QEMU VMs, and Incus system containers.
 
-A complete virtualization and containerization platform delivered as immutable bootc images, featuring declarative workload management, hardware passthrough, and TPM2-backed secrets management. Includes comprehensive documentation with quick reference tables and troubleshooting guides.
+A complete virtualization and containerization platform built on Fedora bootc (atomic OS updates with rollback). Declarative workload management via TOML configs, GPU passthrough (AMD/NVIDIA), and TPM2-backed secrets. Designed for homelabs, edge deployments, and GPU compute — no cloud dependencies.
 
-## Project Overview
+## Motivation
 
-**Base Technology:** Fedora bootc (atomic OS updates with rollback)
-**Container Runtime:** Podman 5.x (rootless)
-**Virtualization:** KVM/QEMU, Incus/LXC
-**Management:** systemd generators + custom tooling
-**Target Platform:** x86_64 Linux with UEFI
-**License:** MIT (containerfiles/configs), respective licenses for packages
+Run local services (Pi-hole, VPN proxies, game streaming, AI workloads) on an immutable OS that can't be broken by bad upgrades. Each service runs as a locked-down rootless container under its own system user. The bootc model means the OS is image-based — updates are pulled from a container registry and applied atomically.
 
-### Key Features
-- Immutable OS with atomic updates via bootc
-- Rootless workload provisioning with dedicated system users
-- GPU support (AMD ROCm, NVIDIA CUDA)
-- TPM2-backed secrets management (systemd-creds)
-- Declarative TOML configuration for workloads
-- Docker/kubectl-like CLI (`workloadctl`)
-- Automated weekly builds with rechunking
-- Cryptographic signing with cosign (keyless OIDC)
+## Image Hierarchy
+
+```
+fedora-bootc-minimal              Minimal Fedora bootc (kernel, systemd, bootc)
+  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Incus, Podman 5
+      ├── hypervisor-nvidia:rpmfusion   NVIDIA via RPMFusion (akmod-nvidia, CUDA)
+      ├── hypervisor-nvidia:negativo17  NVIDIA via negativo17 (nvidia-driver-cuda)
+      └── hypervisor-amd                AMD ROCm + Mesa
+```
+
+All images published to `ghcr.io/bensmith/` with datetime tags, signed with cosign (keyless OIDC).
+
+### What's in hypervisor-bootc
+
+The base hypervisor image (`hypervisor.Containerfile`) is headless and includes:
+
+- **Virtualization**: libvirt, QEMU/KVM, virt-install
+- **System containers**: Incus (LXC)
+- **Application containers**: Podman 5, podman-compose, crun, skopeo
+- **Workload management**: workloadctl (installed from RPM, built in a multi-stage Containerfile)
+- **Networking**: firewalld, NetworkManager, bridge-utils, wireguard-tools, dnsmasq
+- **Storage**: btrfs-progs, xfsprogs, lvm2, mdadm, cifs-utils, NVMe tools
+- **Monitoring**: btop, htop, iotop, sysstat, smartmontools, lm_sensors
+- **Security**: fail2ban, SELinux policy, audit, seatd
+- **Utilities**: tmux, neovim, just, jq, distrobox, fwupd
+
+Enabled services: firewalld, libvirtd, incus.socket, seatd, sshd, tuned.
+
+### GPU Variants
+
+Each inherits from hypervisor-bootc and adds kernel GPU drivers:
+
+- **hypervisor-nvidia:rpmfusion** — `akmod-nvidia`, CUDA libs, nvidia-container-toolkit, CDI support
+- **hypervisor-nvidia:negativo17** — `nvidia-driver-cuda`, more granular packaging
+- **hypervisor-amd** — ROCm (HIP, OpenCL, rocm-smi), Mesa, udev rules for `/dev/kfd`
+
+## Workload System (workloadctl)
+
+The `workloadctl/` subdirectory is a standalone tool (RPM-packaged, no bootc dependency) that manages rootless podman containers as declarative TOML configs. Each workload gets a dedicated system user, subuid namespace, systemd service, volume management, and optional TPM2-encrypted secrets.
+
+See [workloadctl/llms.txt](workloadctl/llms.txt) for full detail on architecture, CLI commands, and configuration schema.
+
+Quick example:
+```bash
+sudo workloadctl create webserver \
+  --image docker.io/nginxinc/nginx-unprivileged:alpine \
+  --ports 8080:8080 --enable
+```
+
+## cosy
+
+`bin/cosy` is a separate project (podman wrapper for interactive container sessions). It is synced into this repo via `just sync-cosy` and installed into the bootc image. See the [cosy repository](https://github.com/BenSmith/cosy) for details.
 
 ## Repository Structure
 
 ```
-hypervisor/
-├── workloadctl/                      # Standalone workload system (RPM-packaged)
-│   ├── bin/workloadctl               # Main CLI (Docker/kubectl-like interface)
-│   ├── generators/                   # systemd generators
-│   │   ├── workload-generator-wrapper  # Shell wrapper (installed as system generator)
-│   │   └── workload-generate         # Python generator (creates service files)
-│   ├── libexec/                      # Internal helpers
-│   │   ├── workload-ensure-user      # Per-workload user/subuid/home setup
-│   │   ├── workload-write-env        # Write EnvironmentFile for secrets
-│   │   └── workload-metrics          # Prometheus metrics collector
-│   ├── lib/workload_lib.py           # Shared Python library
-│   ├── containers/                   # Example container build recipes
-│   ├── docs/                         # workloadctl documentation
-│   ├── completions/                  # Bash completion
-│   ├── systemd/                      # Unit files and tmpfiles.d
-│   ├── tests/                        # Unit and integration tests
-│   ├── rpm/workloadctl.spec          # Fedora RPM spec
-│   └── justfile                      # Test/lint/rpm-build targets
-│
-├── workloads.d/                      # Hypervisor-specific workload configs
-│   ├── schema-reference.toml         # Complete schema documentation
-│   ├── sunshine-game-streaming.toml  # Game streaming workload
-│   └── ...                           # pihole, prometheus, grafana, etc.
-│
-├── docs/                             # Hypervisor documentation
-│   ├── TROUBLESHOOTING.md            # Troubleshooting guide
-│   └── ...                           # Architecture docs, recovery, etc.
-│
-├── Containerfiles                    # Bootc image definitions
-│   ├── hypervisor.Containerfile      # Base hypervisor (installs workloadctl RPM)
-│   ├── fedora-bootc-minimal.Containerfile
-│   ├── hypervisor-amd.Containerfile
-│   └── hypervisor-nvidia-*.Containerfile
-│
-├── systemd/                          # Bootc-specific systemd configs
-├── security/                         # SELinux, pwquality configs
-├── bin/cosy                          # Container session manager
-├── justfile                          # Bootc build automation
-└── README.md
+hypervisor.Containerfile                  Base hypervisor image (multi-stage: builds workloadctl RPM)
+fedora-bootc-minimal.Containerfile        Minimal bootc base (Podman 4 compatible for GitHub CI)
+hypervisor-amd.Containerfile              AMD GPU variant
+hypervisor-nvidia-rpmfusion.Containerfile NVIDIA RPMFusion variant
+hypervisor-nvidia-negativo17.Containerfile NVIDIA negativo17 variant
+
+workloadctl/                              Workload management system (see workloadctl/llms.txt)
+
+bin/cosy                                  Interactive container session wrapper
+man/cosy.1                                cosy man page
+
+config.toml                               bootc-image-builder config (user setup for ISOs)
+config-iso.toml                           ISO-specific image builder config
+policy.json                               Container image signature policy
+policy-local.json                         Permissive policy for local builds
+policy-hypervisor.json.template           Policy template with registry allowlist
+policy-minimal.json.template              Minimal policy template
+
+security/
+  seatd_container.te                      SELinux module: allow containers to use seatd socket
+  pwquality-no-dictionary.conf            Disable dictionary check for password quality
+
+systemd/
+  emergency-access.conf                   Emergency shell drop-in
+  nvidia-cdi-generator.service            NVIDIA CDI device list generator
+
+docs/
+  emergency-recovery.md                   Boot recovery procedures
+  TROUBLESHOOTING.md                      Common issues and fixes
+  vm-tests.md                             VM integration test documentation
+
+.github/workflows/
+  build-minimal-bootc.yml                 Weekly build: fedora-bootc-minimal (Sat 2am UTC)
+  build-hypervisor.yml                    Weekly build: all hypervisor variants (Sun 3am UTC)
+
+justfile                                  Build automation (see Build System below)
+tests/                                    VM integration tests
 ```
 
-## Core Concepts
-
-### Bootc Architecture
-
-**Image Hierarchy:**
-```
-fedora-bootc-minimal (upstream fork, podman 4 compatible)
-  └── hypervisor-bootc (libvirt, qemu, cockpit, monitoring)
-      ├── hypervisor-nvidia:rpmfusion (RPMFusion drivers)
-      ├── hypervisor-nvidia:negativo17 (negativo17 drivers)
-      └── hypervisor-amd (ROCm, Mesa)
-```
-
-**Update Model:**
-- Atomic updates via `bootc upgrade`
-- Quick rollback to previous version
-- Weekly automated builds with rechunking
-- Efficient delta updates (ostree-based)
-
-### Workload Provisioning System
-
-**Design Philosophy:**
-- Declarative TOML configuration
-- Rootless containers with dedicated system users
-- Explicit opt-in for hardware access (GPU, audio, input devices)
-- systemd integration for boot-time provisioning
-- TPM2-backed secrets management
-
-**User Isolation:**
-- Each workload gets dedicated user: `_wl-{name}` (e.g., `_wl-webserver`)
-- UID: Auto-assigned from range 10000-52948, persisted in `/etc/passwd`
-- Subuid range: `100000 + (uid_offset * 100000)` with 65536 UIDs
-- Home directory: `/var/lib/workloads/{name}`
-- Shell: `/usr/sbin/nologin` (service user, no interactive login)
-
-**Boot Flow:**
-```
-1. systemd-generators → workload-generator creates sysusers configs and service files
-2. systemd-sysusers.service → creates workload users with group memberships
-3. ExecStartPre=+workload-ensure-user → configures subuid/subgid, home directory, EnvironmentFile, linger
-4. workload-{name}.service → individual containers start
-```
-
-### Hardware Access Model
-
-**Generic Device Passthrough (primary method):**
-```toml
-[devices]
-devices = ["/dev/ttyUSB0", "/dev/video0", "/dev/tpm0"]  # Works with any device
-```
-
-**Convenience Flags (for multi-device scenarios):**
-- `gpu = "amd"` → `/dev/kfd`, `/dev/dri` + groups: video, render
-- `gpu = "nvidia"` → `nvidia.com/gpu=all`, `/dev/dri` + groups: video
-- `input = true` → `/dev/input`, `/dev/uinput` + groups: input
-- `audio = true` → `/dev/snd` + auto-mounts PulseAudio/PipeWire + groups: audio
-- `virtualization = true` → `/dev/kvm`, `/dev/vhost-*` + groups: kvm
-
-**Device Access Groups (risk levels):**
-- `video`/`render`: GPU access (Medium - compute, video memory)
-- `input`: Keyboard/mouse read and injection (High - can capture passwords)
-- `audio`: Sound device access (Low - audio capture only)
-- `dialout`: Serial devices (Medium - USB serial, Zigbee/Z-Wave)
-- `kvm`: KVM virtualization (Medium - can run VMs)
-- `disk`: Block device access (CRITICAL - raw disk access!)
-- `tpm`: TPM device access (High - hardware security operations)
-
-### Secrets Management
-
-**Technology:** systemd credentials (`systemd-creds`)
-- Encryption at rest: AES256-GCM with TPM2 or host keys
-- Runtime decryption: tmpfs (RAM-only, never touches disk unencrypted)
-- Per-workload isolation: each service gets own credentials directory
-- Automatic cleanup: credentials removed when service stops
-
-**Security Properties:**
-- TPM2-backed encryption (hardware security module)
-- Machine-specific (can't decrypt on different hardware)
-- PCR policies: bind decryption to boot state (Secure Boot, kernel cmdline)
-- Safe for git: encrypted .cred files can be committed
-- Bootc-friendly: bake encrypted secrets into immutable images
-
-**Usage Pattern:**
-```toml
-[container.environment]
-API_KEY = "${SECRET:api-key}"              # Secret reference
-PUBLIC_URL = "https://example.com"         # Plain value
-
-[secrets]
-credentials = ["api-key"]                  # Auto-detected from ${SECRET:...}
-files = [
-    { credential = "tls-cert", path = "/etc/ssl/cert.pem" }
-]
-```
-
-**Secret Lifecycle:**
-```
-1. Create: echo -n "secret" | sudo systemd-creds encrypt --with-key=tpm2 --name=api-key - /etc/credstore.encrypted/api-key
-2. Reference: In TOML config: ${SECRET:api-key}
-3. Decrypt: systemd auto-decrypts to /run/credentials/{service}/api-key at boot
-4. Inject: Generator expands to --env API_KEY=$(<${CREDENTIALS_DIRECTORY}/api-key)
-5. Cleanup: systemd removes /run/credentials/{service}/ on service stop
-```
-
-### Network Modes
-
-**Default:** `pasta` (isolated namespace with port forwarding)
-- Network isolation with internet access via NAT
-- Port forwarding for external access
-- Works reliably in Podman 5.3+
-
-**Alternatives:**
-- `host`: Share host network namespace (no isolation, max performance, no port mapping)
-- `none`: Completely disabled network (full isolation)
-- `<custom-network>`: User-defined network for container-to-container communication
-
-**When to use host mode:**
-- Network discovery (mDNS, UPnP, DLNA): Plex, Home Assistant
-- Maximum performance needed
-- Apps dynamically binding many ports
-
-### Resource Management
-
-**CPU Limits:**
-```toml
-[resources]
-cpu_quota = "200%"        # 2 CPU cores (hard limit)
-cpu_weight = 500          # Higher priority when CPUs saturated (1-10000)
-```
-
-**Memory Limits:**
-```toml
-[resources]
-memory_max = "4G"         # Hard limit (OOM kill if exceeded)
-memory_high = "3G"        # Soft limit (throttle threshold)
-memory_swap_max = "0"     # Disable swap
-```
-
-**I/O Limits:**
-```toml
-[resources]
-io_weight = 500                                    # I/O priority (1-10000)
-io_read_bandwidth_max = ["/dev/sda 100M"]          # Limit reads to 100 MB/s
-io_write_bandwidth_max = ["/dev/sda 50M"]          # Limit writes to 50 MB/s
-```
-
-**Process Limits:**
-```toml
-[resources]
-tasks_max = 100           # Max processes + threads
-```
-
-## Main Components
-
-### workloadctl CLI
-
-Docker/kubectl-like interface for managing workloads.
-
-**Container Lifecycle:**
-```bash
-workloadctl create NAME --image IMAGE [OPTIONS]   # Create workload
-workloadctl enable NAME                            # Enable and start
-workloadctl disable NAME [--purge]                 # Stop and disable
-workloadctl cleanup [--apply]                      # Remove orphaned users/dirs
-workloadctl reboot NAME                            # Soft-reboot (keep overlay)
-workloadctl recreate NAME                          # Recreate from image (destroys overlay)
-workloadctl update NAME [--force] [--all]          # Update images
-```
-
-**Inspection:**
-```bash
-workloadctl list                                   # List all workloads
-workloadctl status NAME                            # Service status
-workloadctl info NAME                              # Detailed information
-workloadctl validate NAME [--all]                  # Check config
-workloadctl ports NAME                             # Show port info
-```
-
-**Container Operations:**
-```bash
-workloadctl shell NAME                             # Interactive shell (as container user if configured)
-workloadctl exec NAME COMMAND                      # Execute command
-workloadctl logs [-f] [-n N] NAME                  # View logs
-workloadctl attach NAME                            # Attach to main process
-workloadctl cp SRC DST                             # Copy files
-```
-
-**Monitoring:**
-```bash
-workloadctl ps                                     # List running containers
-workloadctl stats [-f] [NAME]                      # Resource usage
-workloadctl health NAME                            # Health check
-```
-
-**Secrets Management:**
-```bash
-workloadctl secret create NAME [--file PATH]       # Create encrypted secret
-workloadctl secret list                            # List all secrets
-workloadctl secret show NAME                       # Decrypt and show
-workloadctl secret rotate NAME                     # Update and restart
-workloadctl secret delete NAME                     # Remove secret
-```
-
-**Image Management:**
-```bash
-workloadctl images list                            # Show images
-workloadctl images prune                           # Remove unused
-```
-
-**Configuration:**
-```bash
-workloadctl edit NAME                              # Edit config (validates, shows diff)
-```
-
-### workload-generator
-
-systemd generator (runs during `daemon-reload` and at boot):
-1. Reads TOML configs from `/etc/workloads.d/`
-2. Auto-detects credentials from `${SECRET:...}` env vars and file mounts
-3. Generates systemd-sysusers configs for workload users (pins UID if user exists, range syntax otherwise)
-4. Generates systemd service files with:
-   - `EnvironmentFile=/run/workload-env/workload-{name}.env` for UID-dependent values
-   - `LoadCredentialEncrypted=` directives for secrets
-   - Environment variable expansion: `$(<${CREDENTIALS_DIRECTORY}/secret)`
-   - Podman run commands with all flags
-   - Volume mounts for credential files
-5. Validates configuration (username length, required fields)
-6. Always generates service files even if the user doesn't exist yet (UID-dependent values deferred to EnvironmentFile)
-
-**Output:**
-- `/run/systemd/generator/workload-{name}.service`
-- `/run/sysusers.d/workload-{name}.conf`
-
-### workload-ensure-user
-
-Per-workload setup script (runs as `ExecStartPre=+` in each workload service):
-- Configures subordinate UID/GID ranges in `/etc/subuid` and `/etc/subgid`
-- Creates and chowns home directory at `/var/lib/workloads/{name}`
-- Creates and chowns volume directories under the home directory
-- Sets SELinux fcontext policy and restores labels (`container_file_t`)
-- Writes EnvironmentFile (`/run/workload-env/workload-{name}.env`) with `XDG_RUNTIME_DIR`, `EXTRA_UIDMAPS`, `EXTRA_GIDMAPS`
-- Enables systemd-logind linger for rootless podman
-
-## Image Variants
-
-### fedora-bootc-minimal
-
-Minimal Fedora bootc base image:
-- Kernel, systemd, bootc only
-- Forked from Fedora bootc base-images
-- Podman 4 compatible (GitHub Actions workaround)
-- Weekly builds with rechunking
-- Signed with cosign (keyless OIDC)
-
-**Tags:**
-- `43-YYYYMMDD-HHMM` (timestamped)
-- `43` (latest for Fedora 43)
-- `latest` (latest stable)
-- `rawhide-YYYYMMDD-HHMM` (development)
-
-### hypervisor-bootc
-
-Base hypervisor stack (headless):
-- libvirt, QEMU/KVM
-- Incus (LXC system containers)
-- Podman 5.x (rootless)
-- Cockpit (web management UI)
-- prometheus-node-exporter (metrics)
-- Workload provisioning system
-- Monitoring tools (htop, iotop, etc.)
-
-**Enabled Services:**
-- `cockpit.socket`, `firewalld`, `incus.socket`
-- `libvirtd`, `sshd`, `tuned`
-- `prometheus-node-exporter` (port 9100)
-- `workload-generator` (systemd generator, runs at boot/daemon-reload)
-
-### hypervisor-nvidia:rpmfusion
-
-NVIDIA GPU support via RPMFusion:
-- Driver: `akmod-nvidia` (kernel module)
-- CUDA libraries
-- nvidia-container-toolkit
-- CDI (Container Device Interface) support
-
-### hypervisor-nvidia:negativo17
-
-NVIDIA GPU support via negativo17 repo:
-- Driver: `nvidia-driver-cuda`
-- More granular package structure
-- Can update earlier than RPMFusion
-
-### hypervisor-amd
-
-AMD GPU support:
-- ROCm for compute (HIP, OpenCL)
-- Mesa drivers for graphics/video
-- Video acceleration (VA-API, VDPAU)
-
-## Build System
-
-### Justfile Commands
-
-**Minimal base:**
-```bash
-just build-minimal [version] [rechunk]              # Build fedora-bootc-minimal
-```
-
-**Hypervisor images:**
-```bash
-just build-base                                     # Build base hypervisor
-just build-base-local                               # Use local minimal image
-just build-nvidia-rpmfusion                         # NVIDIA (RPMFusion)
-just build-nvidia-negativo17                        # NVIDIA (negativo17)
-just build-amd                                      # AMD GPU
-just build-all                                      # All variants
-```
-
-**ISO creation:**
-```bash
-just build-iso-base [rootfs]                        # Base hypervisor ISO
-just build-iso-nvidia-rpmfusion [rootfs]            # NVIDIA ISO
-just build-all-isos [rootfs]                        # All ISOs
-```
-
-Supported rootfs: `xfs` (default), `btrfs`, `ext4`
-
-### GitHub Actions Workflows
-
-**build-minimal-bootc.yml**
-- Schedule: Saturday 2am UTC (weekly)
-- Matrix builds: Fedora 43, rawhide (manual dispatch)
-- Flow: Build → Rechunk → Retag → Push → Sign
-- Tags: `{version}-{timestamp}`, `{version}`, `latest`
-- Rechunking: bootc-base-imagectl (official tool)
-- Signing: cosign keyless (GitHub OIDC)
-
-**build-hypervisor.yml**
-- Schedule: Sunday 3am UTC (weekly)
-- Dependency: Won't run if minimal build is running/failed
-- Variants: base, nvidia-rpmfusion, nvidia-negativo17, amd
-- Flow (per variant): Build → Rechunk → Retag → Push → Cleanup → Sign
-- Cleanup between variants to free disk space
-
-**Triggers:**
-- Scheduled (weekly)
-- Manual dispatch (with variant selection)
-- Push to main (affecting Containerfiles/workflows)
-- Workflow dispatch after minimal build completes
-
-### Image Registry
-
-**Location:** `ghcr.io/bensmith/`
-
-**Verification:**
-```bash
-# Install cosign
-curl -LO https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
-sudo install cosign-linux-amd64 /usr/local/bin/cosign
-
-# Verify signature
-cosign verify \
-  --certificate-identity-regexp "https://github.com/.*/bootc-hypervisor" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/bensmith/fedora-bootc-minimal:latest
-```
-
-## Usage Workflows
-
-### Installing to Bare Metal
+## Build System (justfile)
+
+All builds use [just](https://github.com/casey/just). Key targets:
+
+**Container images:**
+- `just build-minimal [version]` — Build fedora-bootc-minimal
+- `just build-base` / `just build-base-local` — Base hypervisor
+- `just build-nvidia-rpmfusion` / `just build-amd` — GPU variants
+- `just build-all` / `just build-all-local` — Everything
+
+**ISO and disk images:**
+- `just build-iso-base [rootfs]` — Anaconda installer ISO (rootfs: xfs/btrfs/ext4)
+- `just build-qcow2-base-local [rootfs] [size]` — QCOW2 for libvirt VMs
+- `just build-all-isos [rootfs]` — All variant ISOs
+
+**Development:**
+- `just aio-local` — Build image, create QCOW2, deploy to libvirt VM (all-in-one)
+- `just test` — Run workloadctl unit tests
+- `just test-vm-build` — Build VM integration test image
+- `just test-vm` — Boot test VM with SWTPM, run tests via SSH, tear down
+- `just push-all` — Tag and push all images to local registry
+
+## Installation
 
 **From existing bootc system:**
 ```bash
@@ -446,276 +135,40 @@ sudo systemctl reboot
 
 **From installer ISO:**
 ```bash
-# Build ISO locally
 just build-iso-base
-
-# Or download from release
-# Write to USB
 sudo dd if=output/bootiso/install.iso of=/dev/sdX bs=4M status=progress
-
-# Boot and install
 ```
 
-### Creating a Workload
-
-**Quick start (using workloadctl):**
+**Updates:**
 ```bash
-sudo workloadctl create webserver \
-  --image docker.io/nginxinc/nginx-unprivileged:alpine \
-  --ports 8080:8080 \
-  --enable
+sudo bootc upgrade    # Atomic update
+sudo systemctl reboot
 ```
 
-**Manual TOML configuration:**
+**Switching variants:**
 ```bash
-# Create /etc/workloads.d/webserver.toml
-sudo nano /etc/workloads.d/webserver.toml
+sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
+sudo systemctl reboot
 ```
-
-```toml
-[workload]
-name = "webserver"
-enabled = true
-
-[container]
-image = "docker.io/nginxinc/nginx-unprivileged:alpine"
-
-[network]
-ports = ["8080:8080"]
-```
-
-```bash
-# Enable and start
-sudo workloadctl enable webserver
-
-# Check status
-workloadctl status webserver
-curl http://localhost:8080
-```
-
-### GPU Workload Example
-
-```bash
-sudo workloadctl create gaming \
-  --image myapp:latest \
-  --gpu amd \
-  --input \
-  --audio \
-  --groups video render input audio \
-  --network host \
-  --enable
-```
-
-### Using Secrets
-
-```bash
-# 1. Create encrypted secret
-sudo workloadctl secret create jellyfin-api-key
-# (type secret, press Ctrl+D)
-
-# 2. Reference in config
-sudo nano /etc/workloads.d/jellyfin.toml
-```
-
-```toml
-[container.environment]
-JELLYFIN_API_KEY = "${SECRET:jellyfin-api-key}"
-
-[secrets]
-credentials = ["jellyfin-api-key"]  # Auto-detected
-```
-
-```bash
-# 3. Enable workload
-sudo workloadctl enable jellyfin
-```
-
-### Device Passthrough Example
-
-```bash
-# Home Assistant with Zigbee USB stick
-sudo workloadctl create homeassistant \
-  --image ghcr.io/home-assistant/home-assistant:stable \
-  --device /dev/ttyACM0 \
-  --groups dialout \
-  --network host \
-  --enable
-```
-
-## Configuration Reference
-
-### TOML Schema Sections
-
-**[workload]** - Basic metadata
-- `name` (string, required): Workload name (max ~27 chars due to 32-char username limit)
-- `enabled` (boolean, default: true): Enable/disable
-
-**[container]** - Container configuration
-- `image` (string, required): Container image reference
-- `command` (array): Override CMD/ENTRYPOINT
-- `pull` (string): Pull policy (missing/always/newer/never)
-- `systemd` (string): Systemd container mode (always/true/false). Skips --init, adds KillSignal=SIGRTMIN+3 for always/true
-
-**[container.environment]** - Environment variables
-- Key-value pairs
-- Supports `${SECRET:name}` references
-
-**[secrets]** - Secrets management
-- `credentials` (array): List of credential names (auto-detected)
-- `files` (array of tables): Mount secrets as files
-  - `credential` (string): Credential name
-  - `path` (string): Container path
-  - `mode` (string, default: "ro"): Mount mode (ro/rw)
-
-**[devices]** - Hardware access
-- `devices` (array): Generic device paths or CDI names
-- `gpu` (string): Convenience flag (amd/nvidia/none)
-- `input` (boolean): Input devices
-- `audio` (boolean): Audio devices + socket auto-detection
-- `virtualization` (boolean): KVM devices
-
-**[security]** - Security configuration
-- `extra_groups` (array): Additional system groups
-- `extra_uidmaps` (array): Extra --uidmap flags (auto-populated from workload user + extra_groups)
-- `extra_gidmaps` (array): Extra --gidmap flags (auto-populated from workload user + extra_groups)
-
-**[host]** - Host prerequisites
-- `setup` (string): Setup script path relative to container dir, called with enable/disable arg
-
-**[network]** - Network configuration
-- `mode` (string): pasta (default), host, none, or custom network name
-- `ports` (array): Port mappings ("host:container")
-
-**[storage]** - Volume management
-- `home` (string): Custom home directory path
-- `volumes` (array): Volume mounts ("host:container:options")
-
-**[resources]** - Resource limits (systemd cgroup v2)
-- Shared memory: `shm_size` (e.g., "2g", default: "64m")
-- CPU: `cpu_quota`, `cpu_weight`
-- Memory: `memory_max`, `memory_high`, `memory_swap_max`
-- I/O: `io_weight`, `io_read_bandwidth_max`, `io_write_bandwidth_max`
-- Processes: `tasks_max`
-- Timeouts: `timeout_start_sec`, `timeout_stop_sec`
-- Custom: `custom_directives` (table, escape hatch for advanced systemd settings)
 
 ## Key Design Decisions
 
-### 1. Bootc for Immutability
-- Atomic OS updates with rollback
-- Image-based delivery
-- /etc is mutable layer (config persistence)
-- /usr is immutable (OS binaries)
+1. **Bootc for immutability** — `/usr` is read-only, `/etc` is mutable config, `/var` is persistent data. Atomic updates with instant rollback.
+2. **Rootless containers via dedicated users** — Each workload gets a unique `_wl-{name}` user with its own UID namespace. No privileged containers.
+3. **systemd-native** — Generators for boot-time provisioning, credentials for secrets, cgroup v2 for resource limits, journal for logging.
+4. **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to git/images.
+5. **Explicit hardware opt-in** — No device access by default; convenience flags for GPU, audio, input, KVM.
+6. **fuse-overlayfs hardlink workaround** — Containerfiles break ostree rpmdb hardlinks before `dnf install` to avoid database corruption (see hypervisor.Containerfile).
 
-### 2. Rootless Containers via Dedicated Users
-- Each workload gets unique UID (10000 + id)
-- User namespaces for UID/GID isolation
-- SELinux enforcement (container_t domain)
-- No privileged containers ever
+## Documentation
 
-### 3. systemd Integration
-- Generators for declarative config
-- Credentials for secrets management
-- Service supervision and logging
-- Cgroup v2 resource limits
+- [workloadctl/README.md](workloadctl/README.md) — Workload system overview and quick start
+- [workloadctl/docs/workloads.md](workloadctl/docs/workloads.md) — Full configuration guide
+- [workloadctl/docs/cli.md](workloadctl/docs/cli.md) — CLI reference
+- [workloadctl/docs/secrets.md](workloadctl/docs/secrets.md) — Secrets management
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — Common issues and fixes
+- [docs/emergency-recovery.md](docs/emergency-recovery.md) — Boot recovery
 
-### 4. TPM2-Backed Secrets
-- Hardware security module encryption
-- Machine-specific (can't decrypt elsewhere)
-- Safe for git/bootc images (encrypted at rest)
-- Tmpfs runtime (RAM-only, never on disk)
+## License
 
-### 5. Explicit Hardware Opt-In
-- No devices by default
-- Convenience flags for complex scenarios
-- Generic passthrough for flexibility
-- Group-based access control
-
-### 6. Rechunking for Efficiency
-- bootc-base-imagectl rechunk
-- Optimizes ostree layer distribution
-- Reduces update bandwidth
-- Official bootc method
-
-## Known Limitations
-
-**Network Modes:**
-- pasta: Isolated networking (recommended, works in Podman 5.3+)
-- host: No isolation but maximum performance
-- Custom networks must be created manually
-
-**Username Length:**
-- Max 32 characters (Linux LOGIN_NAME_MAX)
-- Workload names limited to ~27 chars (32 - 4 for `_wl-` prefix - 1)
-
-**Groups in Containers:**
-- Host GIDs shown as numbers (not names)
-- Cosmetic issue, device access works correctly
-
-**Bootc Immutable Groups:**
-- Device groups (video, render, input) copied to /etc/group at build
-- Adding new groups requires image rebuild
-
-**No Automatic Cleanup:**
-- Disabled workloads leave users/homes/subuid ranges
-- Safety feature: prevents accidental data loss
-- Use `workloadctl cleanup --apply` for bulk removal of orphaned users/dirs
-
-## Development Status
-
-**Complete:**
-- ✅ Bootc image builds and automation
-- ✅ Workload provisioning system
-- ✅ GPU support (AMD, NVIDIA)
-- ✅ Secrets management (TPM2)
-- ✅ Resource limits (CPU, memory, I/O)
-- ✅ workloadctl CLI (comprehensive Docker/kubectl-like interface)
-- ✅ Device passthrough (generic + convenience flags)
-- ✅ Network modes (pasta, host, none, custom)
-- ✅ Comprehensive documentation with quick reference tables
-
-**In Progress:**
-- ⏳ Network lifecycle management (custom networks)
-- ⏳ Storage management (named volumes)
-
-**Future Enhancements:**
-- Multi-container workloads (pods)
-- Health checks with auto-restart
-- Backup/restore functionality
-- Web UI (Cockpit integration)
-- Template system
-
-## Project Origins
-
-Created to provide a complete virtualization platform as an immutable bootc image with:
-- Declarative workload management (no manual podman commands)
-- Security-first design (rootless, TPM2, explicit opt-in)
-- Homelab/edge focus (offline-first, no cloud dependencies)
-- Developer experience (Docker/kubectl-like CLI)
-
-Built with assistance from Claude Code for rapid prototyping of the workload provisioning system.
-
-## Documentation Features
-
-The project includes comprehensive, well-structured documentation:
-- **Table of contents** with anchor links for easy navigation
-- **Quick reference tables** for common commands, resource limits, and device flags
-- **Consolidated sections** eliminating redundancy while preserving detail
-- **Troubleshooting guide** with common issues and solutions
-- **Security considerations** with risk levels for each device access group
-- **Complete examples** for common use cases
-
-Main documentation: `docs/workloads.md` (~1,400 lines, 33% shorter than original while preserving all information)
-
-## Target Use Cases
-
-- Homelab virtualization servers
-- Edge computing deployments
-- GPU compute workloads (AI/ML)
-- Media servers (Plex, Jellyfin)
-- Game streaming (Sunshine, Moonlight)
-- Home automation (Home Assistant)
-- Development environments
-- Self-hosted services
-- Offline/air-gapped systems
-- TPM2-backed secret storage
+MIT (Containerfiles, configs, tooling). Fedora packages and upstream components under their respective licenses.
