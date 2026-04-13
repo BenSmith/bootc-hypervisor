@@ -4,7 +4,7 @@
 > 
 > Review periodically and pick what sounds interesting.
 
-**Last Updated:** 2026-03-16
+**Last Updated:** 2026-04-12
 
 ---
 
@@ -165,3 +165,4 @@ Start here when unsure what to work on:
   Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
   Could add configurable schedule, notification on updates, and update log.
 - Workloads get LVM provisioned to cap or flex storage
+- consider python3-tomlkit for toml edits that preserve comments
