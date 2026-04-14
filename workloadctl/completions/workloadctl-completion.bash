@@ -18,7 +18,7 @@ _workload_ctl_completion() {
     # Get list of credential names (without path)
     local credentials=""
     if [[ -d "$credstore_dir" ]]; then
-        credentials=$(cd "$credstore_dir" 2>/dev/null && ls -1 2>/dev/null | xargs -n1 basename)
+        credentials=$(cd "$credstore_dir" 2>/dev/null && ls -1 2>/dev/null)
     fi
 
     # First argument: complete commands
@@ -136,18 +136,9 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        ps)
-            # Complete with --json
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
-            fi
-            return 0
-            ;;
-        list)
+        ps|list)
             # Complete with --json flag
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
-            fi
+            COMPREPLY=( $(compgen -W "--json" -- "$cur") )
             return 0
             ;;
         create)
@@ -160,8 +151,6 @@ _workload_ctl_completion() {
                 COMPREPLY=( $(compgen -W "always true false" -- "$cur") )
             elif [[ "$prev" == "--network" ]]; then
                 COMPREPLY=( $(compgen -W "host pasta none" -- "$cur") )
-            elif [[ "$prev" == "--volume" ]]; then
-                _filedir
             fi
             return 0
             ;;
@@ -258,12 +247,6 @@ _workload_ctl_completion() {
             return 0
             ;;
     esac
-
-    # Third argument for disable: workload name after --purge
-    if [[ $cword -eq 3 && "${words[1]}" == "disable" && "${words[2]}" == "--purge" ]]; then
-        COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
-        return 0
-    fi
 }
 
 complete -F _workload_ctl_completion workloadctl
