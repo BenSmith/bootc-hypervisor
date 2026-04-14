@@ -208,7 +208,9 @@ COPY bin/cosy /usr/bin/
 COPY man/cosy.1 /usr/share/man/man1/cosy.1
 RUN chmod 0755 /usr/bin/cosy && \
     chmod 0644 /usr/share/man/man1/cosy.1 && \
-    chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
+    chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf && \
+    /usr/bin/cosy completion bash > /usr/share/bash-completion/completions/cosy && \
+    chmod 0644 /usr/share/bash-completion/completions/cosy
 
 # Define required labels for this bootc image to be recognized as such
 LABEL containers.bootc 1

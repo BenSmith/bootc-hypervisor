@@ -22,6 +22,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-icon-theme \
     alsa-utils \
     bash-completion \
+    cliphist \
     dbus-daemon \
     diffutils \
     glibc-langpack-en \
@@ -32,9 +33,12 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     grim \
     hostname \
     htop \
+    imv \
+    mako \
     pciutils \
     psmisc \
     wayfire \
+    wayfire-config-manager \
     wayvnc \
     libevdev \
     libinput \
@@ -58,10 +62,13 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     python3-gobject \
     slurp \
     sudo \
+    swappy \
     systemd \
     systemd-udev \
     util-linux \
-    waybar \
+    wdisplays \
+    wf-recorder \
+    wf-shell \
     wireplumber \
     wl-clipboard \
     wlr-randr \
@@ -298,9 +305,13 @@ active_color = 0.3 0.3 0.9 1.0
 inactive_color = 0.2 0.2 0.2 1.0
 
 [autostart]
-panel = waybar
+panel = wf-panel-pf
+background = wf-background
+dock = wf-dock
 audio = /etc/xdg/wayfire/start-audio.sh
 steam = /etc/xdg/wayfire/start-steam.sh
+notifications = mako
+clipboard = wl-paste --watch cliphist store
 INI
 
 # --- Foot terminal config ---
@@ -308,8 +319,16 @@ INI
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=14
-initial-window-size-chars=80x24
+font=Fira Code:size=12
+initial-window-size-chars=100x30
+pad=8x8
+shell=/bin/bash -l
+
+[cursor]
+style=beam
+
+[colors]
+alpha=0.95
 INI
 
 # --- Autostart scripts ---
@@ -378,67 +397,6 @@ export DISPLAY=:0
 exec steam -tenfoot
 SH
 
-# --- Waybar config ---
-
-RUN mkdir -p /etc/xdg/waybar && \
-    cat > /etc/xdg/waybar/config <<'JSON'
-{
-    "layer": "top",
-    "position": "bottom",
-    "height": 30,
-    "modules-left": ["custom/launcher", "wlr/taskbar"],
-    "modules-right": ["cpu", "memory", "clock"],
-    "custom/launcher": {
-        "format": " Apps",
-        "on-click": "wofi --show run"
-    },
-    "wlr/taskbar": {
-        "format": "{title}",
-        "on-click": "activate"
-    },
-    "cpu": {
-        "format": "CPU {usage}%",
-        "interval": 5
-    },
-    "memory": {
-        "format": "RAM {percentage}%",
-        "interval": 5
-    },
-    "clock": {
-        "format": "{:%H:%M}",
-        "format-alt": "{:%Y-%m-%d %H:%M}"
-    }
-}
-JSON
-
-RUN cat > /etc/xdg/waybar/style.css <<'CSS'
-* {
-    font-family: "Noto Sans", sans-serif;
-    font-size: 14px;
-}
-window#waybar {
-    background-color: rgba(30, 30, 40, 0.9);
-    color: #e0e0e0;
-}
-#custom-launcher {
-    padding: 0 12px;
-    color: #88c0d0;
-    font-weight: bold;
-}
-#custom-launcher:hover {
-    background-color: rgba(136, 192, 208, 0.2);
-}
-#taskbar button {
-    padding: 0 8px;
-}
-#taskbar button.active {
-    background-color: rgba(136, 192, 208, 0.3);
-}
-#cpu, #memory, #clock {
-    padding: 0 10px;
-}
-CSS
-
 # --- Wayfire systemd service ---
 
 RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
@@ -448,6 +406,7 @@ After=container-bootstrap.service polkit-stub.service
 
 [Service]
 Type=simple
+TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
@@ -462,7 +421,7 @@ Environment=XCURSOR_SIZE=24
 
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus && dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && echo "@include /etc/xdg/wayfire.ini" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target

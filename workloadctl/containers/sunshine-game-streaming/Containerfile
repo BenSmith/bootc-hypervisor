@@ -27,12 +27,15 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     glibc-langpack-en \
     fira-code-fonts \
     firefox \
+    cliphist \
     foot \
     fuzzel \
     google-noto-sans-fonts \
     grim \
     hostname \
     htop \
+    imv \
+    mako \
     pciutils \
     psmisc \
     labwc \
@@ -59,11 +62,14 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     python3-gobject \
     slurp \
     sudo \
+    swappy \
     swaybg \
     systemd \
     systemd-udev \
     util-linux \
     waybar \
+    wdisplays \
+    wf-recorder \
     wireplumber \
     wl-clipboard \
     wlr-randr \
@@ -263,8 +269,16 @@ XML
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=14
-initial-window-size-chars=80x24
+font=Fira Code:size=12
+initial-window-size-chars=100x30
+pad=8x8
+shell=/bin/bash -l
+
+[cursor]
+style=beam
+
+[colors]
+alpha=0.95
 INI
 
 # --- Autostart ---
@@ -326,6 +340,8 @@ fi
 # --- Desktop chrome ---
 swaybg -c '#2e3440' &
 waybar &
+mako &
+wl-paste --watch cliphist store &
 
 # --- Steam Big Picture ---
 # STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
@@ -376,6 +392,7 @@ After=container-bootstrap.service polkit-stub.service
 
 [Service]
 Type=simple
+TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER

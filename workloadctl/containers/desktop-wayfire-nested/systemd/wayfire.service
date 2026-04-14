@@ -1,17 +1,19 @@
 [Unit]
-Description=Wayfire Wayland Compositor
-ConditionPathExists=/run/seatd.sock
+Description=Wayfire Wayland Compositor (nested)
 
 [Service]
 Type=simple
 TasksMax=infinity
 
 EnvironmentFile=/etc/cosy-user.env
-Environment=LIBSEAT_BACKEND=seatd
-Environment=SEATD_SOCK=/run/seatd.sock
-Environment=WLR_BACKENDS=drm,libinput
-Environment=WLR_NO_HARDWARE_CURSORS=1
-Environment=WLR_DRM_NO_MODIFIERS=1
+Environment=WLR_BACKENDS=wayland
+Environment=WLR_WL_OUTPUTS=1
+# Don't force WLR_RENDERER: let wlroots pick gles2 if /dev/dri is present
+# (cosy create --gpu) or fall back to pixman SW rendering if not.
+Environment=LIBSEAT_BACKEND=noop
+Environment=XDG_CURRENT_DESKTOP=wlroots
+Environment=XCURSOR_THEME=Adwaita
+Environment=XCURSOR_SIZE=24
 
 ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- /bin/sh -c 'CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && echo "@include /etc/xdg/wayfire.ini" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
 

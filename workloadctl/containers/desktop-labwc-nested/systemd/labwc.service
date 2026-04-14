@@ -1,0 +1,21 @@
+[Unit]
+Description=Labwc Wayland Compositor (nested)
+
+[Service]
+Type=simple
+TasksMax=infinity
+
+EnvironmentFile=/etc/cosy-user.env
+Environment=WLR_BACKENDS=wayland
+Environment=WLR_WL_OUTPUTS=1
+# Don't force WLR_RENDERER: let wlroots pick gles2 if /dev/dri is present
+# (cosy create --gpu) or fall back to pixman SW rendering if not.
+Environment=LIBSEAT_BACKEND=noop
+Environment=XDG_CURRENT_DESKTOP=wlroots
+Environment=XCURSOR_THEME=Adwaita
+Environment=XCURSOR_SIZE=24
+
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- /bin/sh -c 'cd && exec /usr/bin/dbus-run-session /usr/bin/labwc'
+
+[Install]
+WantedBy=multi-user.target

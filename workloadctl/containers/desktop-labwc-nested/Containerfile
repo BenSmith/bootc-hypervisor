@@ -7,7 +7,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     cliphist \
     dbus-daemon \
     fira-code-fonts \
-    firefox \
     foot \
     fuzzel \
     grim \
@@ -18,6 +17,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
+    mesa-libgbm \
     mesa-vulkan-drivers \
     neovim \
     procps-ng \
@@ -25,30 +25,26 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     sudo \
     swappy \
     swaybg \
+    systemd \
+    util-linux \
     waybar \
-    wayvnc \
     wdisplays \
     wf-recorder \
     wl-clipboard \
     wlr-randr \
+    wlrctl \
     xorg-x11-server-Xwayland \
     && dnf clean all
 
-# Create desktop user with passwordless sudo
-RUN useradd -m -s /bin/bash -G wheel desktop && \
-    echo "desktop ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/desktop && \
-    chmod 0440 /etc/sudoers.d/desktop
-
-# Foot terminal config
-RUN mkdir -p /etc/xdg/foot
-COPY --link --chmod=0644 foot.ini /etc/xdg/foot/foot.ini
-
+# Labwc config
 COPY --link --chmod=0644 labwc-config/rc.xml /etc/xdg/labwc/rc.xml
 COPY --link --chmod=0755 labwc-config/autostart /etc/xdg/labwc/autostart
 COPY --link --chmod=0644 labwc-config/waybar-config /etc/xdg/waybar/config
-COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY --link --chmod=0644 foot.ini /etc/xdg/foot/foot.ini
 
-EXPOSE 5900
+# systemd services
+COPY --link --chmod=0644 systemd/labwc.service /usr/lib/systemd/system/labwc.service
+RUN systemctl enable labwc
 
-USER desktop
-CMD ["/entrypoint.sh"]
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

@@ -7,7 +7,7 @@
 
     "custom/launcher": {
         "format": " Apps",
-        "on-click": "wofi --show run"
+        "on-click": "fuzzel"
     },
     "wlr/taskbar": {
         "format": "{title}",
