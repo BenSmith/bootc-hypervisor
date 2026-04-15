@@ -22,7 +22,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-icon-theme \
     alsa-utils \
     bash-completion \
-    cliphist \
     dbus-daemon \
     diffutils \
     glibc-langpack-en \
@@ -311,7 +310,6 @@ dock = wf-dock
 audio = /etc/xdg/wayfire/start-audio.sh
 steam = /etc/xdg/wayfire/start-steam.sh
 notifications = mako
-clipboard = wl-paste --watch cliphist store
 INI
 
 # --- Foot terminal config ---

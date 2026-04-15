@@ -77,7 +77,7 @@ wayland backend doesn't do fractional scaling of the inner surface yet.
 ## Customization
 
 - **Labwc config:** `labwc-config/rc.xml` — keybindings, theme, window rules
-- **Labwc autostart:** `labwc-config/autostart` — background, waybar, mako, cliphist
+- **Labwc autostart:** `labwc-config/autostart` — background, waybar, mako
 - **Waybar:** `labwc-config/waybar-config` — status bar
 - **Foot:** `foot.ini` — terminal font, size, padding
 - **Outputs:** change `WLR_WL_OUTPUTS` in `systemd/labwc.service`

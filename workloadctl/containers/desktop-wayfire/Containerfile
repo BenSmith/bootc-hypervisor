@@ -170,7 +170,6 @@ background = wf-background
 dock = wf-dock
 audio = /etc/xdg/wayfire/start-audio.sh
 notifications = mako
-clipboard = wl-paste --watch cliphist store
 INI
 
 # --- Foot terminal config ---

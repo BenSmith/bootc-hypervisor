@@ -27,7 +27,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     glibc-langpack-en \
     fira-code-fonts \
     firefox \
-    cliphist \
     foot \
     fuzzel \
     google-noto-sans-fonts \
@@ -341,7 +340,6 @@ fi
 swaybg -c '#2e3440' &
 waybar &
 mako &
-wl-paste --watch cliphist store &
 
 # --- Steam Big Picture ---
 # STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't

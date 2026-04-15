@@ -25,6 +25,7 @@ else
     echo ""
     echo "Build failed. If the Sunshine RPM URL is outdated, override it with:"
     echo "  sudo SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v.../Sunshine-...-1.fc43.x86_64.rpm ./build.sh"
+    echo "  Find the latest at https://github.com/LizardByte/Sunshine/releases/"
     echo ""
     echo "For a local RPM file:"
     echo "  sudo SUNSHINE_RPM_URL=/path/to/Sunshine.rpm ./build.sh"

@@ -5,7 +5,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-icon-theme \
     alsa-utils \
     bash-completion \
-    cliphist \
     dbus-daemon \
     foot \
     fuzzel \

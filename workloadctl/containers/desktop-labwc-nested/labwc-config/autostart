@@ -2,4 +2,3 @@
 swaybg -c '#2e3440' &
 waybar &
 mako &
-wl-paste --watch cliphist store &

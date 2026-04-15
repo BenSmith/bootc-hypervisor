@@ -2,7 +2,6 @@
 swaybg -c '#2e3440' &
 waybar &
 mako &
-wl-paste --watch cliphist store &
 
 # Audio — start PipeWire stack under labwc's D-Bus session
 # SPA's udev-based ALSA enumeration fails in containers (podman's /dev tmpfs
