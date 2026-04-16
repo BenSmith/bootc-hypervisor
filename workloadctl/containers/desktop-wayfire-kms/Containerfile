@@ -50,16 +50,71 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 COPY --link --chmod=0644 wayfire.ini /etc/xdg/wayfire.ini
 COPY --link --chmod=0644 foot.ini /etc/xdg/foot/foot.ini
 
-# Audio startup script and PipeWire ALSA sink config
-COPY --link --chmod=0755 start-audio.sh /etc/xdg/wayfire/start-audio.sh
-
 # systemd services
 COPY --link --chmod=0644 systemd/wayfire.service /usr/lib/systemd/system/wayfire.service
+
+# --- PipeWire systemd services ---
+
+RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
+[Unit]
+Description=PipeWire Multimedia Service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=/etc/cosy-user.env
+
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- \
+    /bin/sh -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) && exec /usr/bin/pipewire'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/wireplumber.service <<'UNIT'
+[Unit]
+Description=WirePlumber Session Manager
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=/etc/cosy-user.env
+
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- \
+    /bin/sh -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) && exec /usr/bin/wireplumber'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/pipewire-pulse.service <<'UNIT'
+[Unit]
+Description=PipeWire PulseAudio Compatibility
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=/etc/cosy-user.env
+
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- \
+    /bin/sh -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) && exec /usr/bin/pipewire-pulse'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
-    systemctl enable wayfire
+    systemctl enable wayfire pipewire wireplumber pipewire-pulse
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

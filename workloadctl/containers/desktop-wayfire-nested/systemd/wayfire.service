@@ -15,7 +15,7 @@ Environment=XDG_CURRENT_DESKTOP=wlroots
 Environment=XCURSOR_THEME=Adwaita
 Environment=XCURSOR_SIZE=24
 
-ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- /bin/sh -c 'CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && echo "@include /etc/xdg/wayfire.ini" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
+ExecStart=/usr/bin/setpriv --reuid=${COSY_UID} --regid=${COSY_GID} --keep-groups -- /bin/sh -c 'CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
