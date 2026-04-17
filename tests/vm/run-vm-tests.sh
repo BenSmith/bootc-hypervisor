@@ -650,7 +650,7 @@ if [ -n "$_update_uid" ]; then
     # Record current image ID
     _old_id=$(cd "$_update_home" && runuser -u "$_update_user" -- \
         env XDG_RUNTIME_DIR="/run/user/${_update_uid}" \
-        podman images --format '{{.ID}}' "192.168.0.64:5000/library/registry:2" 2>/dev/null | head -1)
+        podman images --format '{{.ID}}' "registry.local:5000/library/registry:2" 2>/dev/null | head -1)
 
     if [ -n "$_old_id" ]; then
         pass "update: current image ID recorded (${_old_id:0:12})"
