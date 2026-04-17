@@ -134,7 +134,7 @@ build-amd:
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-amd:{{tag}} \
-    -t {{local_registry}}/hypervisor-amd:{{tag}} \
+    -t {{local_registry}}/hypervisor-amd:latest \
     -t localhost/hypervisor-amd:latest \
     -f hypervisor-amd.Containerfile .
 

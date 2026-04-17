@@ -251,6 +251,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     libva \
     libwayland-server \
     libxkbcommon \
+    nano \
     openssl \
     pciutils \
     procps-ng \
@@ -259,8 +260,8 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     steam \
     util-linux \
     which \
-    xdg-user-dirs && \
-    dnf clean all
+    xdg-user-dirs \
+    && dnf clean all
 
 # ── X11 socket directory ──
 # gamescope's nested Xwayland refuses to create /tmp/.X11-unix as non-root,

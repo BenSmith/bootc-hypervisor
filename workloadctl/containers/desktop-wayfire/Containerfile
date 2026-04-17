@@ -24,11 +24,14 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     grim \
     hostname \
     htop \
+    imv \
+    mako \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    nano \
     neovim \
     pipewire \
     pipewire-alsa \
@@ -36,12 +39,16 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     procps-ng \
     slurp \
     sudo \
+    swappy \
     systemd \
     systemd-udev \
     util-linux \
-    waybar \
     wayfire \
+    wayfire-config-manager \
     wayvnc \
+    wdisplays \
+    wf-recorder \
+    wf-shell \
     wireplumber \
     wl-clipboard \
     wlr-randr \
@@ -158,9 +165,6 @@ spring_k = 8.0
 active_color = 0.3 0.3 0.9 1.0
 inactive_color = 0.2 0.2 0.2 1.0
 
-[autostart]
-panel = waybar
-audio = /etc/xdg/wayfire/start-audio.sh
 INI
 
 # --- Foot terminal config ---
@@ -172,92 +176,64 @@ font=Fira Code:size=14
 initial-window-size-chars=80x24
 INI
 
-# --- Autostart: audio ---
+# --- PipeWire systemd services ---
 
-RUN mkdir -p /etc/xdg/wayfire && \
-    cat > /etc/xdg/wayfire/start-audio.sh <<'SH'
-#!/bin/bash
-export XDG_RUNTIME_DIR=/run/user/$(id -u)
+RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
+[Unit]
+Description=PipeWire Multimedia Service
+After=container-bootstrap.service
+Requires=container-bootstrap.service
 
-# --- Display resolution ---
-wlr-randr --output HEADLESS-1 --custom-mode 1920x1080@60Hz
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
-# --- Audio ---
-alsa_card=""
-card_num=""
-while IFS= read -r line; do
-    n=$(echo "$line" | sed -n 's/^card \([0-9]*\):.*/\1/p')
-    if [ -n "$n" ] && echo "$line" | grep -qi analog; then
-        card_num="$n"
-        alsa_card="hw:$card_num,0"
-        break
-    fi
-done < <(aplay -l 2>/dev/null)
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire'
 
-if [ -n "$alsa_card" ]; then
-    mkdir -p ~/.config/pipewire/pipewire.conf.d
-    cat > ~/.config/pipewire/pipewire.conf.d/10-alsa-sink.conf <<EOF
-context.objects = [
-    { factory = adapter
-        args = {
-            factory.name     = api.alsa.pcm.sink
-            node.name        = "alsa-sink"
-            node.description = "ALSA Analog Output"
-            media.class      = "Audio/Sink"
-            api.alsa.path    = "$alsa_card"
-        }
-    }
-]
-EOF
-    pipewire &
-    i=0
-    until [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    wireplumber &
-    pipewire-pulse &
-    i=0
-    until wpctl status >/dev/null 2>&1; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    [ -n "$card_num" ] && amixer -c "$card_num" sset Master 74% unmute >/dev/null 2>&1
-fi
-SH
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-# --- Waybar config ---
+RUN cat > /usr/lib/systemd/system/wireplumber.service <<'UNIT'
+[Unit]
+Description=WirePlumber Session Manager
+After=pipewire.service
+Requires=pipewire.service
 
-RUN mkdir -p /etc/xdg/waybar && \
-    cat > /etc/xdg/waybar/config <<'JSON'
-{
-    "layer": "top",
-    "position": "bottom",
-    "height": 30,
-    "modules-left": ["custom/launcher", "wlr/taskbar"],
-    "modules-right": ["cpu", "memory", "clock"],
-    "custom/launcher": {
-        "format": " Apps",
-        "on-click": "wofi --show run"
-    },
-    "wlr/taskbar": {
-        "format": "{title}",
-        "on-click": "activate"
-    },
-    "cpu": {
-        "format": "CPU {usage}%",
-        "interval": 5
-    },
-    "memory": {
-        "format": "RAM {percentage}%",
-        "interval": 5
-    },
-    "clock": {
-        "format": "{:%H:%M}",
-        "format-alt": "{:%Y-%m-%d %H:%M}"
-    }
-}
-JSON
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/wireplumber'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/pipewire-pulse.service <<'UNIT'
+[Unit]
+Description=PipeWire PulseAudio Compatibility
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire-pulse'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 
 # --- Wayfire systemd service ---
 
@@ -268,6 +244,7 @@ After=container-bootstrap.service
 
 [Service]
 Type=simple
+TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
@@ -282,7 +259,7 @@ Environment=XCURSOR_SIZE=24
 
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID}; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\nresolution = wlr-randr --output HEADLESS-1 --custom-mode 1920x1080@60Hz\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
@@ -435,8 +412,8 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
-    systemctl enable wayfire wayfire-wayland-ready wayvnc container-bootstrap && \
-    chmod +x /etc/xdg/wayfire/start-audio.sh /usr/local/bin/container-bootstrap
+    systemctl enable wayfire wayfire-wayland-ready wayvnc container-bootstrap pipewire wireplumber pipewire-pulse && \
+    chmod +x /usr/local/bin/container-bootstrap
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

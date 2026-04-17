@@ -10,15 +10,18 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     fuzzel \
     grim \
     htop \
+    imv \
     labwc \
     libevdev \
     libinput \
     libseat \
+    mako \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    nano \
     neovim \
     pipewire \
     pipewire-alsa \
@@ -26,13 +29,17 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     procps-ng \
     slurp \
     sudo \
+    swappy \
     swaybg \
     systemd \
     systemd-udev \
     util-linux \
     waybar \
+    wdisplays \
+    wf-recorder \
     wireplumber \
     wl-clipboard \
+    wlr-randr \
     xorg-x11-server-Xwayland \
     && dnf clean all
 
@@ -40,6 +47,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
 COPY --link --chmod=0644 labwc-config/rc.xml /etc/xdg/labwc/rc.xml
 COPY --link --chmod=0755 labwc-config/autostart /etc/xdg/labwc/autostart
 COPY --link --chmod=0644 labwc-config/waybar-config /etc/xdg/waybar/config
+COPY --link --chmod=0644 foot.ini /etc/xdg/foot/foot.ini
 
 # systemd services
 COPY --link --chmod=0644 systemd/labwc.service /usr/lib/systemd/system/labwc.service

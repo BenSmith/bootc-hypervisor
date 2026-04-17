@@ -4,6 +4,7 @@ ConditionPathExists=/run/seatd.sock
 
 [Service]
 Type=simple
+TasksMax=infinity
 
 EnvironmentFile=/etc/cosy-user.env
 Environment=LIBSEAT_BACKEND=seatd

@@ -478,18 +478,18 @@ If it fails:
 
 ### File locations
 
-| Path | Purpose |
-|------|---------|
-| `/etc/workloads.d/*.toml` | Workload configs |
-| `/run/systemd/generator/workload-*.service` | Generated service files (temporary) |
-| `/run/sysusers.d/workload-*.conf` | Generated sysusers configs |
-| `/var/lib/workloads/<name>/` | Default home directory |
-| `/run/workload-env/workload-*.env` | EnvironmentFiles with XDG_RUNTIME_DIR |
-| `/run/user/<uid>/` | Runtime directory (requires linger) |
-| `/etc/subuid` `/etc/subgid` | UID/GID mapping ranges |
-| `/var/lib/systemd/linger/<user>` | Linger enabled marker |
+| Path                                                   | Purpose |
+|--------------------------------------------------------|---------|
+| `/etc/workloads.d/*.toml`                              | Workload configs |
+| `/run/systemd/generator/workload-*.service`            | Generated service files (temporary) |
+| `/run/systemd/system/workload-*.conf`                  | Generated sysusers configs |
+| `/var/lib/workloads/<name>/`                           | Default home directory |
+| `/run/workload-env/workload-*.env`                     | EnvironmentFiles with XDG_RUNTIME_DIR |
+| `/run/user/<uid>/`                                     | Runtime directory (requires linger) |
+| `/etc/subuid` `/etc/subgid`                            | UID/GID mapping ranges |
+| `/var/lib/systemd/linger/<user>`                       | Linger enabled marker |
 | `/usr/share/containers/seccomp-workload-baseline.json` | Hardened seccomp profile (applied by default) |
-| `/usr/share/containers/seccomp.json` | Podman default seccomp profile (less strict) |
+| `/usr/share/containers/seccomp.json`                   | Podman default seccomp profile (less strict) |
 
 ### Useful commands
 

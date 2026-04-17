@@ -24,46 +24,52 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     bash-completion \
     dbus-daemon \
     diffutils \
-    glibc-langpack-en \
+    egl-utils \
     fira-code-fonts \
     firefox \
     foot \
     fuzzel \
+    glibc-langpack-en \
+    glx-utils \
     google-noto-sans-fonts \
     grim \
     hostname \
     htop \
-    pciutils \
-    psmisc \
+    imv \
     labwc \
-    wayvnc \
     libevdev \
     libinput \
     lsb_release \
-    egl-utils \
-    glx-utils \
+    mako \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
     mesa-va-drivers \
     mesa-vulkan-drivers \
-    vulkan-loader \
-    vulkan-tools \
+    nano \
     neovim \
+    pciutils \
     pipewire \
     pipewire-alsa \
     pipewire-jack-audio-connection-kit \
     pipewire-pulseaudio \
     procps-ng \
+    psmisc \
     python3-gobject \
     slurp \
     sudo \
+    swappy \
     swaybg \
     systemd \
     systemd-udev \
     util-linux \
+    vulkan-loader \
+    vulkan-tools \
     waybar \
+    wayvnc \
+    wdisplays \
+    wf-recorder \
     wireplumber \
     wl-clipboard \
     wlr-randr \
@@ -263,8 +269,16 @@ XML
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=14
-initial-window-size-chars=80x24
+font=Fira Code:size=12
+initial-window-size-chars=100x30
+pad=8x8
+shell=/bin/bash -l
+
+[cursor]
+style=beam
+
+[colors]
+alpha=0.95
 INI
 
 # --- Autostart ---
@@ -326,6 +340,7 @@ fi
 # --- Desktop chrome ---
 swaybg -c '#2e3440' &
 waybar &
+mako &
 
 # --- Steam Big Picture ---
 # STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
@@ -376,6 +391,7 @@ After=container-bootstrap.service polkit-stub.service
 
 [Service]
 Type=simple
+TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER

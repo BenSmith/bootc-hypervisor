@@ -24,44 +24,51 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     bash-completion \
     dbus-daemon \
     diffutils \
-    glibc-langpack-en \
+    egl-utils \
     fira-code-fonts \
     firefox \
     foot \
+    glibc-langpack-en \
+    glx-utils \
     google-noto-sans-fonts \
     grim \
     hostname \
     htop \
-    pciutils \
-    psmisc \
-    wayfire \
-    wayvnc \
+    imv \
     libevdev \
     libinput \
     lsb_release \
-    egl-utils \
-    glx-utils \
+    mako \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
     mesa-va-drivers \
     mesa-vulkan-drivers \
-    vulkan-loader \
-    vulkan-tools \
+    nano \
     neovim \
+    pciutils \
     pipewire \
     pipewire-alsa \
     pipewire-jack-audio-connection-kit \
     pipewire-pulseaudio \
     procps-ng \
+    psmisc \
     python3-gobject \
     slurp \
     sudo \
+    swappy \
     systemd \
     systemd-udev \
     util-linux \
-    waybar \
+    vulkan-loader \
+    vulkan-tools \
+    wayfire \
+    wayfire-config-manager \
+    wayvnc \
+    wdisplays \
+    wf-recorder \
+    wf-shell \
     wireplumber \
     wl-clipboard \
     wlr-randr \
@@ -297,10 +304,6 @@ spring_k = 8.0
 active_color = 0.3 0.3 0.9 1.0
 inactive_color = 0.2 0.2 0.2 1.0
 
-[autostart]
-panel = waybar
-audio = /etc/xdg/wayfire/start-audio.sh
-steam = /etc/xdg/wayfire/start-steam.sh
 INI
 
 # --- Foot terminal config ---
@@ -308,136 +311,79 @@ INI
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=14
-initial-window-size-chars=80x24
+font=Fira Code:size=12
+initial-window-size-chars=100x30
+pad=8x8
+shell=/bin/bash -l
+
+[cursor]
+style=beam
+
+[colors]
+alpha=0.95
 INI
 
-# --- Autostart scripts ---
-# Wayfire runs autostart commands from its config. Split into separate scripts
-# for audio and steam so each concern is isolated.
+# --- PipeWire systemd services ---
+# PipeWire, WirePlumber, and PipeWire-Pulse run as the container user.
+# WirePlumber auto-detects ALSA devices from /dev/snd — no manual config needed.
 
-RUN mkdir -p /etc/xdg/wayfire && \
-    cat > /etc/xdg/wayfire/start-audio.sh <<'SH'
-#!/bin/bash
-export XDG_RUNTIME_DIR=/run/user/$(id -u)
+RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
+[Unit]
+Description=PipeWire Multimedia Service
+After=container-bootstrap.service
+Requires=container-bootstrap.service
 
-# --- Display resolution ---
-wlr-randr --output HEADLESS-1 --custom-mode 2560x1080@60Hz
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
-# --- Audio ---
-alsa_card=""
-card_num=""
-while IFS= read -r line; do
-    n=$(echo "$line" | sed -n 's/^card \([0-9]*\):.*/\1/p')
-    if [ -n "$n" ] && echo "$line" | grep -qi analog; then
-        card_num="$n"
-        alsa_card="hw:$card_num,0"
-        break
-    fi
-done < <(aplay -l 2>/dev/null)
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire'
 
-if [ -n "$alsa_card" ]; then
-    mkdir -p ~/.config/pipewire/pipewire.conf.d
-    cat > ~/.config/pipewire/pipewire.conf.d/10-alsa-sink.conf <<EOF
-context.objects = [
-    { factory = adapter
-        args = {
-            factory.name     = api.alsa.pcm.sink
-            node.name        = "alsa-sink"
-            node.description = "ALSA Analog Output"
-            media.class      = "Audio/Sink"
-            api.alsa.path    = "$alsa_card"
-        }
-    }
-]
-EOF
-    pipewire &
-    i=0
-    until [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    wireplumber &
-    pipewire-pulse &
-    i=0
-    until wpctl status >/dev/null 2>&1; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    [ -n "$card_num" ] && amixer -c "$card_num" sset Master 74% unmute >/dev/null 2>&1
-fi
-SH
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-RUN cat > /etc/xdg/wayfire/start-steam.sh <<'SH'
-#!/bin/bash
-# Steam Big Picture — launched from wayfire autostart.
-# STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
-#   nest inside the container's user namespace.
-export STEAM_DISABLE_BROWSER_SANDBOX=1
-export DISPLAY=:0
-exec steam -tenfoot
-SH
+RUN cat > /usr/lib/systemd/system/wireplumber.service <<'UNIT'
+[Unit]
+Description=WirePlumber Session Manager
+After=pipewire.service
+Requires=pipewire.service
 
-# --- Waybar config ---
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
-RUN mkdir -p /etc/xdg/waybar && \
-    cat > /etc/xdg/waybar/config <<'JSON'
-{
-    "layer": "top",
-    "position": "bottom",
-    "height": 30,
-    "modules-left": ["custom/launcher", "wlr/taskbar"],
-    "modules-right": ["cpu", "memory", "clock"],
-    "custom/launcher": {
-        "format": " Apps",
-        "on-click": "wofi --show run"
-    },
-    "wlr/taskbar": {
-        "format": "{title}",
-        "on-click": "activate"
-    },
-    "cpu": {
-        "format": "CPU {usage}%",
-        "interval": 5
-    },
-    "memory": {
-        "format": "RAM {percentage}%",
-        "interval": 5
-    },
-    "clock": {
-        "format": "{:%H:%M}",
-        "format-alt": "{:%Y-%m-%d %H:%M}"
-    }
-}
-JSON
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/wireplumber'
 
-RUN cat > /etc/xdg/waybar/style.css <<'CSS'
-* {
-    font-family: "Noto Sans", sans-serif;
-    font-size: 14px;
-}
-window#waybar {
-    background-color: rgba(30, 30, 40, 0.9);
-    color: #e0e0e0;
-}
-#custom-launcher {
-    padding: 0 12px;
-    color: #88c0d0;
-    font-weight: bold;
-}
-#custom-launcher:hover {
-    background-color: rgba(136, 192, 208, 0.2);
-}
-#taskbar button {
-    padding: 0 8px;
-}
-#taskbar button.active {
-    background-color: rgba(136, 192, 208, 0.3);
-}
-#cpu, #memory, #clock {
-    padding: 0 10px;
-}
-CSS
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/pipewire-pulse.service <<'UNIT'
+[Unit]
+Description=PipeWire PulseAudio Compatibility
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire-pulse'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 
 # --- Wayfire systemd service ---
 
@@ -448,6 +394,7 @@ After=container-bootstrap.service polkit-stub.service
 
 [Service]
 Type=simple
+TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
@@ -462,7 +409,7 @@ Environment=XCURSOR_SIZE=24
 
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus && dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode 2560x1080@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
@@ -1050,7 +997,6 @@ HOME_DIR="/home/$CONTAINER_USER"
 groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
 useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
 mkdir -p "$HOME_DIR/.local/state"
-chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/state"
 
 # Add the desktop user to render/input/video groups inside the container.
 # These groups already exist in the Fedora base image. The hypervisor's
@@ -1063,9 +1009,13 @@ for grp in render input video audio; do
     fi
 done
 
-# Ensure Sunshine user config directory exists with correct ownership.
+# Ensure Sunshine user config directory exists.
 mkdir -p "$HOME_DIR/.config/sunshine"
-chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.config/sunshine"
+
+# Chown the entire home so anything created as root during bootstrap
+# (including .config and .config/sunshine above) is owned by the desktop
+# user. Cheap because the home is empty on first boot.
+chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
 
 mkdir -p /etc/sudoers.d
 echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
@@ -1133,9 +1083,8 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
     ln -sf /dev/null /etc/systemd/system/polkit.service && \
-    systemctl enable wayfire wayfire-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub && \
-    chmod +x /etc/xdg/wayfire/start-audio.sh /etc/xdg/wayfire/start-steam.sh \
-             /usr/local/bin/container-bootstrap \
+    systemctl enable wayfire wayfire-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub pipewire wireplumber pipewire-pulse && \
+    chmod +x /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-csrf-setup
 
 STOPSIGNAL SIGRTMIN+3
