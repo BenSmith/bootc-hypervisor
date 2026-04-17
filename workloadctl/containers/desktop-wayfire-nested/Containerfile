@@ -16,6 +16,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    nano \
     neovim \
     procps-ng \
     slurp \
@@ -26,8 +27,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wayfire \
     wayfire-config-manager \
     wdisplays \
-    wf-shell \
     wf-recorder \
+    wf-shell \
     wl-clipboard \
     wlr-randr \
     wlrctl \

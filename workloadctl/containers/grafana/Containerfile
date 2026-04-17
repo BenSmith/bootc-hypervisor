@@ -2,6 +2,7 @@ FROM registry.fedoraproject.org/fedora:43
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     grafana \
+    nano \
     && dnf clean all
 
 # Auto-provision Prometheus data source and workload dashboard

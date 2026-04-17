@@ -4,9 +4,10 @@ LABEL org.opencontainers.image.title="DNS-over-VPN Proxy"
 LABEL org.opencontainers.image.description="DNS proxy forwarding queries through WireGuard VPN"
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
-    wireguard-tools \
-    iproute \
     dnsmasq \
+    iproute \
+    nano \
+    wireguard-tools \
     && dnf clean all
 
 # wireguard-tools creates /etc/wireguard with mode 700; placeholder ensures

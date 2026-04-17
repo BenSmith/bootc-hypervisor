@@ -31,6 +31,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    nano \
     neovim \
     pipewire \
     pipewire-alsa \

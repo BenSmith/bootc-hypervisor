@@ -24,40 +24,38 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     bash-completion \
     dbus-daemon \
     diffutils \
-    glibc-langpack-en \
+    egl-utils \
     fira-code-fonts \
     firefox \
     foot \
     fuzzel \
+    glibc-langpack-en \
+    glx-utils \
     google-noto-sans-fonts \
     grim \
     hostname \
     htop \
     imv \
-    mako \
-    pciutils \
-    psmisc \
     labwc \
-    wayvnc \
     libevdev \
     libinput \
     lsb_release \
-    egl-utils \
-    glx-utils \
+    mako \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
     mesa-va-drivers \
     mesa-vulkan-drivers \
-    vulkan-loader \
-    vulkan-tools \
+    nano \
     neovim \
+    pciutils \
     pipewire \
     pipewire-alsa \
     pipewire-jack-audio-connection-kit \
     pipewire-pulseaudio \
     procps-ng \
+    psmisc \
     python3-gobject \
     slurp \
     sudo \
@@ -66,7 +64,10 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     systemd \
     systemd-udev \
     util-linux \
+    vulkan-loader \
+    vulkan-tools \
     waybar \
+    wayvnc \
     wdisplays \
     wf-recorder \
     wireplumber \
