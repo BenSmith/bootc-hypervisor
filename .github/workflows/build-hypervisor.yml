@@ -42,19 +42,9 @@ jobs:
 
       - name: Generate policy.json from template
         run: |
-          # owner needs to be lowercase, but workflow ref needs to preserve case
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          REPO_NAME="${{ github.event.repository.name }}"
-
-          # Generate the minimal workflow ref (predictable pattern)
-          MINIMAL_WORKFLOW_REF="${{ github.repository }}/.github/workflows/build-minimal-bootc.yml@${{ github.ref }}"
-
-          # Use the current workflow ref for hypervisor
-          HYPERVISOR_WORKFLOW_REF="${{ github.workflow_ref }}"
 
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
-              -e "s|__MINIMAL_WORKFLOW_REF__|${MINIMAL_WORKFLOW_REF}|g" \
-              -e "s|__HYPERVISOR_WORKFLOW_REF__|${HYPERVISOR_WORKFLOW_REF}|g" \
               policy-hypervisor.json.template > policy.json
 
           echo "Generated policy.json:"
@@ -98,6 +88,11 @@ jobs:
         if: steps.should_build.outputs.run == 'true'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Login to GitHub Container Registry for cosign
+        if: steps.should_build.outputs.run == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Determine variants to build
         if: steps.should_build.outputs.run == 'true'
@@ -189,18 +184,15 @@ jobs:
           echo "Remaining localhost images:"
           sudo podman images | grep hypervisor-bootc
 
-      - name: Login to GitHub Container Registry for cosign
-        if: steps.should_build.outputs.run == 'true'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-
       - name: Sign base hypervisor images
         id: base_complete
         if: steps.should_build.outputs.run == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-bootc:latest
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-bootc:latest
 
       - name: Build AMD variant
         continue-on-error: true
@@ -260,10 +252,12 @@ jobs:
       - name: Sign AMD images
         continue-on-error: true
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-amd:latest
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-amd:latest
 
       - name: Build NVIDIA negativo17 variant
         continue-on-error: true
@@ -322,10 +316,12 @@ jobs:
       - name: Sign NVIDIA negativo17 images
         continue-on-error: true
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
 
       - name: Build NVIDIA RPMFusion variant
         continue-on-error: true
@@ -387,10 +383,12 @@ jobs:
       - name: Sign NVIDIA RPMFusion images
         continue-on-error: true
         if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          cosign sign --yes ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
 
       - name: Summary
         if: steps.should_build.outputs.run == 'true'

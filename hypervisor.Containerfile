@@ -21,6 +21,7 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/lxc/libvirt/QEMU/KVM"
 
 COPY policy.json /etc/containers/policy.json
+COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during

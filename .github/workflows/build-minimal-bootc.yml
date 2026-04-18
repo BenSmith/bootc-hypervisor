@@ -68,13 +68,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate /etc/containers/policy.json for github keyless signing
-        # owner needs to be lowercase, but workflow ref needs to preserve case
+      - name: Generate /etc/containers/policy.json
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
-              -e "s|__MINIMAL_WORKFLOW_REF__|${{ github.workflow_ref }}|g" \
               policy-minimal.json.template > policy.json
 
           echo "Generated policy.json for minimal:"
@@ -92,10 +90,11 @@ jobs:
           git log -1
           echo "Using local podman 4-compatible Containerfile with upstream manifests"
 
-      - name: Copy policy.json into build context
+      - name: Copy policy.json and cosign.pub into build context
         run: |
           cp policy.json manifests/policy.json
-          echo "Copied policy.json to manifests/ directory"
+          cp cosign.pub manifests/cosign.pub
+          echo "Copied policy.json and cosign.pub to manifests/ directory"
 
       - name: Build minimal bootc container
         run: |
@@ -177,15 +176,17 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Sign images with cosign
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-          cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
 
-          cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
 
           if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            cosign sign --yes ghcr.io/${OWNER}/fedora-bootc-minimal:latest
+            cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:latest
           fi
 
       - name: Cleanup local images
