@@ -1,7 +1,6 @@
 name: Build Fedora Minimal Bootc
 
 on:
-  # Manual trigger with version selection
   workflow_dispatch:
     inputs:
       fedora_version:
@@ -13,90 +12,83 @@ on:
           - '43'
           - '44'
           - 'rawhide'
-      rechunk:
-        description: 'Rechunk the image for better efficiency'
-        required: false
-        default: true
-        type: boolean
 
-  # Weekly build (Saturdays at 2am UTC)
   schedule:
     - cron: '0 2 * * 6'
 
-  # Build on pushes to main that touch these files
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'fedora-bootc-minimal.Containerfile'
+      - 'policy-minimal.json.template'
+      - 'cosign.pub'
       - '.github/workflows/build-minimal-bootc.yml'
 
+concurrency:
+  group: build-minimal-bootc-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  STABLE_FEDORA_VERSION: '43'
+  IMAGE_NAME: fedora-bootc-minimal
+
 jobs:
-  build-minimal-bootc:
-    runs-on: ubuntu-24.04  # Required by rechunk action for advanced podman features
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
       id-token: write
 
-    strategy:
-      matrix:
-        # Build for multiple Fedora versions
-        fedora_version:
-          - '43'
-
     steps:
-      - name: Setup podman
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        id: params
+        env:
+          INPUT_VERSION: ${{ inputs.fedora_version }}
+          OWNER_RAW: ${{ github.repository_owner }}
+        run: |
+          VERSION="${INPUT_VERSION:-${STABLE_FEDORA_VERSION}}"
+          OWNER=$(echo "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
+          TAG=$(date +%Y%m%d-%H%M)
+          {
+            echo "version=${VERSION}"
+            echo "owner=${OWNER}"
+            echo "tag=${TAG}"
+            echo "image_base=ghcr.io/${OWNER}/${IMAGE_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Install podman
         run: |
           sudo apt-get update
           sudo apt-get install -y podman
           podman --version
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Set Fedora version
-        id: set_version
+      - name: Render policy.json
+        env:
+          OWNER: ${{ steps.params.outputs.owner }}
         run: |
-          # Use manual input if provided, otherwise use matrix version
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "version=${{ inputs.fedora_version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${{ matrix.fedora_version }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Generate /etc/containers/policy.json
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
               policy-minimal.json.template > policy.json
-
-          echo "Generated policy.json for minimal:"
           cat policy.json
-
-      - name: Set build timestamp
-        id: timestamp
-        run: |
-          echo "tag=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
       - name: Clone Fedora bootc manifests
         run: |
           git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
-          cd manifests
-          git log -1
-          echo "Using local podman 4-compatible Containerfile with upstream manifests"
-
-      - name: Copy policy.json and cosign.pub into build context
-        run: |
+          git -C manifests log -1
           cp policy.json manifests/policy.json
           cp cosign.pub manifests/cosign.pub
-          echo "Copied policy.json and cosign.pub to manifests/ directory"
 
-      - name: Build minimal bootc container
+      - name: Build minimal bootc image
+        env:
+          VERSION: ${{ steps.params.outputs.version }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
           sudo podman build \
             --security-opt=label=disable \
@@ -104,109 +96,70 @@ jobs:
             --device /dev/fuse \
             -f fedora-bootc-minimal.Containerfile \
             --build-arg MANIFEST=minimal \
-            --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
-            --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${{ steps.set_version.outputs.version }} \
-            -t localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
+            --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${VERSION} \
+            --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${VERSION} \
+            -t localhost/${IMAGE_NAME}:build \
             manifests
+          sudo podman inspect localhost/${IMAGE_NAME}:build > /dev/null
 
-      - name: Test built image
+      - name: Rechunk image
+        env:
+          VERSION: ${{ steps.params.outputs.version }}
         run: |
-          sudo podman images | grep fedora-bootc-minimal
-          sudo podman inspect localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-
-      - name: Rechunk image with bootc-base-imagectl
-        run: |
-          # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:${{ steps.set_version.outputs.version }} \
+            quay.io/fedora/fedora-bootc:${VERSION} \
             /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
-            localhost/fedora-bootc-minimal:rechunked
+            localhost/${IMAGE_NAME}:build \
+            localhost/${IMAGE_NAME}:rechunked
 
-          # List all images to verify rechunk created the image
-          echo "All images after rechunk:"
-          sudo podman images
-
-      - name: Tag rechunked image
+      - name: Login to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
-          # Apply all the tags we need to the rechunked image
-          sudo podman tag localhost/fedora-bootc-minimal:rechunked \
-            localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-          sudo podman tag localhost/fedora-bootc-minimal:rechunked \
-            localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-          sudo podman tag localhost/fedora-bootc-minimal:rechunked \
-            localhost/fedora-bootc-minimal:latest
+          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
+          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
 
-          # Clean up the temporary rechunked tag
-          sudo podman rmi localhost/fedora-bootc-minimal:rechunked
-
-      - name: Login to GitHub Container Registry
+      - name: Tag and push
+        id: push
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          VERSION: ${{ steps.params.outputs.version }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Push to GitHub Container Registry
-        run: |
-          # Lowercase repository owner for ghcr.io compatibility
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          # Tag with timestamp and version
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} \
-            ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-
-          sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
-            ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-
-          # Also tag 'latest' for the stable version
-          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman tag localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} \
-              ghcr.io/${OWNER}/fedora-bootc-minimal:latest
+          TAGS=("${VERSION}-${TAG}" "${VERSION}")
+          if [ "${VERSION}" = "${STABLE_FEDORA_VERSION}" ]; then
+            TAGS+=("latest")
           fi
 
-          # Push all tags
-          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-          sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
+          for t in "${TAGS[@]}"; do
+            sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${t}"
+            sudo podman push "${IMAGE_BASE}:${t}"
+          done
 
-          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman push ghcr.io/${OWNER}/fedora-bootc-minimal:latest
-          fi
+          printf 'tags<<EOF\n%s\nEOF\n' "${TAGS[*]}" >> "$GITHUB_OUTPUT"
 
-      - name: Login to GitHub Container Registry for cosign
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Sign images with cosign
+      - name: Sign images
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          TAGS: ${{ steps.push.outputs.tags }}
         run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          for t in $TAGS; do
+            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}:${t}"
+          done
 
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }}
-
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}
-
-          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/fedora-bootc-minimal:latest
-          fi
-
-      - name: Cleanup local images
+      - name: Summary
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          TAGS: ${{ steps.push.outputs.tags }}
         run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          # Remove all local tags from root storage
-          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
-          sudo podman rmi localhost/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
-          sudo podman rmi localhost/fedora-bootc-minimal:latest || true
-          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }}-${{ steps.timestamp.outputs.tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:${{ steps.set_version.outputs.version }} || true
-
-          # Also clean up :latest tag if it was pushed
-          if [ "${{ steps.set_version.outputs.version }}" == "43" ]; then
-            sudo podman rmi ghcr.io/${OWNER}/fedora-bootc-minimal:latest || true
-          fi
-
-          # Prune root storage to remove dangling layers
-          sudo podman system prune -af --volumes
-
-          # Show final disk usage
-          df -h
+          {
+            echo "## Minimal bootc build complete"
+            echo ""
+            echo "Pushed and signed:"
+            for t in $TAGS; do
+              echo "- \`${IMAGE_BASE}:${t}\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

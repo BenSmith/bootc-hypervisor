@@ -1,141 +1,110 @@
 name: Build Hypervisor Bootc Images
 
 on:
-  # Trigger after minimal build completes successfully
   workflow_run:
     workflows: ["Build Fedora Minimal Bootc"]
-    types:
-      - completed
-    branches:
-      - main
+    types: [completed]
+    branches: [main]
 
-  # Manual trigger
   workflow_dispatch:
     inputs:
       variants:
-        description: 'Which variants to build'
+        description: 'Variants to build (besides base)'
         required: true
-        default: 'base'
+        default: 'all'
         type: choice
         options:
-          - 'base'
           - 'all'
-          - 'base,nvidia-rpmfusion'
-          - 'base,nvidia-negativo17'
-          - 'base,amd'
+          - 'none'
+          - 'amd'
+          - 'nvidia'
+          - 'nvidia-negativo17'
+          - 'nvidia-rpmfusion'
+
+concurrency:
+  group: build-hypervisor-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RECHUNKER_IMAGE: quay.io/fedora/fedora-bootc:43
 
 jobs:
-  build-hypervisor:
-    runs-on: ubuntu-24.04  # Required by rechunk action for advanced podman features
-    # Only run if:
-    # 1. workflow_run: minimal build succeeded
-    # 2. Other events: allow (manual, schedule, push)
+  build-base:
+    # Skip if upstream minimal build failed; allow all other triggers.
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
       id-token: write
+    outputs:
+      tag: ${{ steps.params.outputs.tag }}
+      owner: ${{ steps.params.outputs.owner }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate policy.json from template
+      - name: Resolve build parameters
+        id: params
+        env:
+          OWNER_RAW: ${{ github.repository_owner }}
         run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER=$(echo "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
+          TAG=$(date +%Y%m%d-%H%M)
+          {
+            echo "owner=${OWNER}"
+            echo "tag=${TAG}"
+            echo "image_base=ghcr.io/${OWNER}/hypervisor-bootc"
+          } >> "$GITHUB_OUTPUT"
 
-          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
-              policy-hypervisor.json.template > policy.json
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
-          echo "Generated policy.json:"
-          cat policy.json
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
 
-      - name: Check if should skip build
-        id: should_build
-        run: |
-          # For push events, skip if minimal Containerfile changed (will trigger via workflow_run)
-          if [ "${{ github.event_name }}" == "push" ]; then
-            FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
-            echo "Changed files:"
-            echo "$FILES"
-
-            if echo "$FILES" | grep -q "fedora-bootc-minimal.Containerfile"; then
-              echo "run=false" >> $GITHUB_OUTPUT
-              echo "⚠️  Minimal Containerfile changed - skipping push trigger"
-              echo "   Hypervisor will build automatically after minimal completes"
-            else
-              echo "run=true" >> $GITHUB_OUTPUT
-              echo "✅ Proceeding with build"
-            fi
-          else
-            # For non-push events (workflow_run, manual, schedule), always run
-            echo "run=true" >> $GITHUB_OUTPUT
-            echo "✅ Event: ${{ github.event_name }} - proceeding with build"
-          fi
-
-      - name: Setup podman
-        if: steps.should_build.outputs.run == 'true'
+      - name: Install podman
         run: |
           sudo apt-get update
           sudo apt-get install -y podman
           podman --version
 
-      - name: Install cosign
-        if: steps.should_build.outputs.run == 'true'
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Login to GitHub Container Registry
-        if: steps.should_build.outputs.run == 'true'
+      - name: Render policy.json
+        env:
+          OWNER: ${{ steps.params.outputs.owner }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Login to GitHub Container Registry for cosign
-        if: steps.should_build.outputs.run == 'true'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Determine variants to build
-        if: steps.should_build.outputs.run == 'true'
-        id: variants
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            VARIANTS="${{ inputs.variants }}"
-          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
-            VARIANTS="all"
-          else
-            VARIANTS="base"
-          fi
-          echo "variants=${VARIANTS}" >> $GITHUB_OUTPUT
-
-      - name: Free up disk space
-        if: steps.should_build.outputs.run == 'true'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          # Remove all unnecessary software (~31 GB freed in ~3 min)
-          tool-cache: true      # ~5.9 GB - Remove Node, Python, Ruby caches (not needed for container builds)
-          android: true         # ~14 GB - Remove Android libraries
-          dotnet: true          # ~2.7 GB - Remove .NET runtime
-          haskell: true         # Remove Haskell runtime (GHC)
-          large-packages: true  # ~5.3 GB - Remove Azure CLI, Google Cloud SDK, etc.
-          docker-images: true   # Remove cached Docker images (doesn't affect podman)
-          swap-storage: true    # ~4 GB - Remove swap file
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              policy-hypervisor.json.template > policy.json
+          cat policy.json
 
       - name: Fetch cosy
-        if: steps.should_build.outputs.run == 'true'
         run: |
           mkdir -p bin man
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
-      - name: Build base hypervisor
-        if: steps.should_build.outputs.run == 'true'
+      - name: Login to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
-          TAG=$(date +%Y%m%d-%H%M)
-          echo "base_tag=${TAG}" >> $GITHUB_ENV
+          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
+          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
 
-          # Build in root storage (rechunk action accesses root storage)
-          # --pull=always ensures we get the latest minimal base from GHCR
-          # Security options needed for dracut/bootc operations
+      - name: Build base hypervisor
+        env:
+          TAG: ${{ steps.params.outputs.tag }}
+        run: |
           sudo podman build \
             --pull=always \
             --security-opt=label=disable \
@@ -143,262 +112,227 @@ jobs:
             --cap-add=all \
             --ipc=host \
             -f hypervisor.Containerfile \
-            -t localhost/hypervisor-bootc:${TAG} \
-            -t localhost/hypervisor-bootc:latest \
+            -t localhost/hypervisor-bootc:build \
             .
 
-      - name: Rechunk base hypervisor image
-        if: steps.should_build.outputs.run == 'true'
+      - name: Rechunk base image
         run: |
-          # Use bootc-base-imagectl rechunk (official bootc method)
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:rawhide \
+            "${RECHUNKER_IMAGE}" \
             /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-bootc:${{ env.base_tag }} \
+            localhost/hypervisor-bootc:build \
             localhost/hypervisor-bootc:rechunked
 
-      - name: Tag rechunked base image
-        if: steps.should_build.outputs.run == 'true'
+      - name: Tag and push base
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
-          # Apply all needed tags to rechunked image
-          sudo podman tag localhost/hypervisor-bootc:rechunked localhost/hypervisor-bootc:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-bootc:rechunked localhost/hypervisor-bootc:latest
-          sudo podman rmi localhost/hypervisor-bootc:rechunked
+          for t in "${TAG}" latest; do
+            sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${t}"
+            sudo podman push "${IMAGE_BASE}:${t}"
+          done
 
-      - name: Push base hypervisor to GHCR
-        if: steps.should_build.outputs.run == 'true'
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          sudo podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-bootc:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-bootc:latest
-
-          sudo podman push ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-bootc:latest
-
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-bootc:latest || true
-
-          # Verify localhost tags still exist for variant builds
-          echo "Remaining localhost images:"
-          sudo podman images | grep hypervisor-bootc
-
-      - name: Sign base hypervisor images
-        id: base_complete
-        if: steps.should_build.outputs.run == 'true'
+      - name: Sign base
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-bootc:latest
-
-      - name: Build AMD variant
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Build in root storage with only timestamped tag
-          sudo podman build \
-            --pull=always \
-            --security-opt=label=disable \
-            --security-opt=seccomp=unconfined \
-            --cap-add=all \
-            --ipc=host \
-            -f hypervisor-amd.Containerfile \
-            -t localhost/hypervisor-amd:${{ env.base_tag }} \
-            .
-
-      - name: Rechunk AMD variant image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Use bootc-base-imagectl rechunk (official bootc method)
-          sudo podman run --rm --privileged \
-            -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:rawhide \
-            /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-amd:${{ env.base_tag }} \
-            localhost/hypervisor-amd:rechunked
-
-      - name: Tag rechunked AMD image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Apply tags to rechunked image
-          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-amd:rechunked localhost/hypervisor-amd:latest
-          sudo podman rmi localhost/hypervisor-amd:rechunked
-
-      - name: Push AMD variant to GHCR
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-amd:${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-amd:latest
-
-          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-amd:latest
-
-          sudo podman rmi localhost/hypervisor-amd:${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-amd:latest || true
-
-          # Only prune dangling images (no -a flag) to preserve base image for next variant
-          sudo podman system prune -f --volumes
-
-      - name: Sign AMD images
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'amd') || contains(steps.variants.outputs.variants, 'all'))
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-amd:${{ env.base_tag }}
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-amd:latest
-
-      - name: Build NVIDIA negativo17 variant
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Build in root storage with only timestamped tag
-          sudo podman build \
-            --pull=always \
-            --security-opt=label=disable \
-            --security-opt=seccomp=unconfined \
-            --cap-add=all \
-            --ipc=host \
-            -f hypervisor-nvidia-negativo17.Containerfile \
-            -t localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
-            .
-
-      - name: Rechunk NVIDIA negativo17 variant image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Use bootc-base-imagectl rechunk (official bootc method)
-          sudo podman run --rm --privileged \
-            -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:rawhide \
-            /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} \
-            localhost/hypervisor-nvidia:rechunked
-
-      - name: Tag rechunked NVIDIA negativo17 image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Apply tag to rechunked image
-          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          sudo podman rmi localhost/hypervisor-nvidia:rechunked
-
-      - name: Push NVIDIA negativo17 variant to GHCR
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          sudo podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
-
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
-
-          sudo podman rmi localhost/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:negativo17 || true
-
-          # Only prune dangling images (no -a flag) to preserve base image for next variant
-          sudo podman system prune -f --volumes
-
-      - name: Sign NVIDIA negativo17 images
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-negativo17') || contains(steps.variants.outputs.variants, 'all'))
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:negativo17-${{ env.base_tag }}
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:negativo17
-
-      - name: Build NVIDIA RPMFusion variant
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Build in root storage with only timestamped tag
-          sudo podman build \
-            --pull=always \
-            --security-opt=label=disable \
-            --security-opt=seccomp=unconfined \
-            --cap-add=all \
-            --ipc=host \
-            -f hypervisor-nvidia-rpmfusion.Containerfile \
-            -t localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
-            .
-
-      - name: Rechunk NVIDIA RPMFusion variant image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Use bootc-base-imagectl rechunk (official bootc method)
-          sudo podman run --rm --privileged \
-            -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:rawhide \
-            /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} \
-            localhost/hypervisor-nvidia:rechunked
-
-      - name: Tag rechunked NVIDIA RPMFusion image
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          # Apply tag to rechunked image
-          sudo podman tag localhost/hypervisor-nvidia:rechunked localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman rmi localhost/hypervisor-nvidia:rechunked
-
-      - name: Push NVIDIA RPMFusion variant to GHCR
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-
-          # Tag for GHCR
-          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman tag localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
-
-          # Push to GHCR
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          sudo podman push ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
-
-          # Clean up all local tags from root storage
-          sudo podman rmi localhost/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }} || true
-          sudo podman rmi ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion || true
-
-          # Final prune can be aggressive since all variants are done
-          sudo podman system prune -af --volumes
-
-      - name: Sign NVIDIA RPMFusion images
-        continue-on-error: true
-        if: steps.should_build.outputs.run == 'true' && steps.base_complete.outcome == 'success' && (contains(steps.variants.outputs.variants, 'nvidia-rpmfusion') || contains(steps.variants.outputs.variants, 'all'))
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion-${{ env.base_tag }}
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ghcr.io/${OWNER}/hypervisor-nvidia:rpmfusion
+          for t in "${TAG}" latest; do
+            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}:${t}"
+          done
 
       - name: Summary
-        if: steps.should_build.outputs.run == 'true'
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
-          echo "## Build Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Built variants: ${{ steps.variants.outputs.variants }}" >> $GITHUB_STEP_SUMMARY
-          echo "Tag: ${{ env.base_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Images:" >> $GITHUB_STEP_SUMMARY
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:${{ env.base_tag }}\` ✅ Signed" >> $GITHUB_STEP_SUMMARY
-          echo "- \`ghcr.io/${OWNER}/hypervisor-bootc:latest\` ✅ Signed" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Base hypervisor build complete"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${TAG}\`"
+            echo "- \`${IMAGE_BASE}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-variant:
+    needs: build-base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: amd
+            image: hypervisor-amd
+            containerfile: hypervisor-amd.Containerfile
+            versioned_tag_prefix: ''
+            floating_tag: latest
+          - name: nvidia-negativo17
+            image: hypervisor-nvidia
+            containerfile: hypervisor-nvidia-negativo17.Containerfile
+            versioned_tag_prefix: 'negativo17-'
+            floating_tag: negativo17
+          - name: nvidia-rpmfusion
+            image: hypervisor-nvidia
+            containerfile: hypervisor-nvidia-rpmfusion.Containerfile
+            versioned_tag_prefix: 'rpmfusion-'
+            floating_tag: rpmfusion
+
+    steps:
+      - name: Decide whether to build this variant
+        id: gate
+        env:
+          SELECTION: ${{ inputs.variants }}
+          EVENT: ${{ github.event_name }}
+          NAME: ${{ matrix.variant.name }}
+        run: |
+          # workflow_run and schedule always build all variants.
+          # workflow_dispatch respects the user's selection.
+          if [ "$EVENT" != "workflow_dispatch" ] || [ "$SELECTION" = "all" ]; then
+            BUILD=true
+          elif [ "$SELECTION" = "none" ]; then
+            BUILD=false
+          elif [ "$SELECTION" = "nvidia" ] && [[ "$NAME" == nvidia-* ]]; then
+            BUILD=true
+          elif [ "$SELECTION" = "$NAME" ]; then
+            BUILD=true
+          else
+            BUILD=false
+          fi
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/checkout@v4
+
+      - name: Render policy.json
+        if: steps.gate.outputs.build == 'true'
+        env:
+          OWNER: ${{ needs.build-base.outputs.owner }}
+        run: |
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              policy-hypervisor.json.template > policy.json
+
+      - name: Free disk space
+        if: steps.gate.outputs.build == 'true'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install podman and cosign
+        if: steps.gate.outputs.build == 'true'
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Install podman
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman --version
+
+      - name: Fetch cosy
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
+      - name: Login to GHCR
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
+          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Build variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          CONTAINERFILE: ${{ matrix.variant.containerfile }}
+        run: |
+          sudo podman build \
+            --pull=always \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            -f "${CONTAINERFILE}" \
+            -t "localhost/${IMAGE}:build" \
+            .
+
+      - name: Rechunk variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+        run: |
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            "${RECHUNKER_IMAGE}" \
+            /usr/libexec/bootc-base-imagectl rechunk \
+            "localhost/${IMAGE}:build" \
+            "localhost/${IMAGE}:rechunked"
+
+      - name: Tag and push variant
+        if: steps.gate.outputs.build == 'true'
+        id: push
+        env:
+          OWNER: ${{ needs.build-base.outputs.owner }}
+          BASE_TAG: ${{ needs.build-base.outputs.tag }}
+          IMAGE: ${{ matrix.variant.image }}
+          PREFIX: ${{ matrix.variant.versioned_tag_prefix }}
+          FLOATING: ${{ matrix.variant.floating_tag }}
+        run: |
+          IMAGE_BASE="ghcr.io/${OWNER}/${IMAGE}"
+          VERSIONED_TAG="${PREFIX}${BASE_TAG}"
+
+          for t in "${VERSIONED_TAG}" "${FLOATING}"; do
+            sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${t}"
+            sudo podman push "${IMAGE_BASE}:${t}"
+          done
+
+          {
+            echo "image_base=${IMAGE_BASE}"
+            echo "versioned_tag=${VERSIONED_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+          FLOATING: ${{ matrix.variant.floating_tag }}
+        run: |
+          for t in "${VERSIONED_TAG}" "${FLOATING}"; do
+            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}:${t}"
+          done
+
+      - name: Summary
+        if: steps.gate.outputs.build == 'true'
+        env:
+          NAME: ${{ matrix.variant.name }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+          FLOATING: ${{ matrix.variant.floating_tag }}
+        run: |
+          {
+            echo "## Variant ${NAME} complete"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${VERSIONED_TAG}\`"
+            echo "- \`${IMAGE_BASE}:${FLOATING}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
