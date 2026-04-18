@@ -31,15 +31,5 @@ RUN mkdir -p /etc/cdi && \
 # rocm-smi tries to use libdrm_amdgpu.so, this is a workaround to provide it
 RUN ln -s /usr/lib64/libdrm_amdgpu.so.1 /usr/lib64/libdrm_amdgpu.so
 
-# Define required labels for this bootc image to be recognized as such
-LABEL containers.bootc 1
-LABEL ostree.bootable 1
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image - AMD GPU"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with AMD GPU support (ROCm)"
-
-# https://pagure.io/fedora-kiwi-descriptions/pull-request/52
-ENV container=oci
-
-# Optional labels that only apply when running this image as a container. These keep the default entry point running under systemd.
-STOPSIGNAL SIGRTMIN+3
-CMD ["/usr/sbin/init"]

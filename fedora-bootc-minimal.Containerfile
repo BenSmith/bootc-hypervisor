@@ -34,7 +34,13 @@ COPY policy.json /etc/containers/policy.json
 
 # Bootc labels and metadata
 LABEL containers.bootc 1
+LABEL ostree.bootable 1
 LABEL bootc.diskimage-builder quay.io/centos-bootc/bootc-image-builder
+
+LABEL org.opencontainers.image.title="Minimal Fedora bootc Image"
+LABEL org.opencontainers.image.description="Build of Fedora bootc minimal"
+
 ENV container=oci
+
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

@@ -26,15 +26,5 @@ RUN mkdir -p /etc/cdi && \
     systemctl enable nvidia-cdi-generator.service && \
     bootc container lint
 
-# Define required labels for this bootc image to be recognized as such
-LABEL containers.bootc 1
-LABEL ostree.bootable 1
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image - NVIDIA (negativo17)"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with NVIDIA GPU support via negativo17 repository"
-
-# https://pagure.io/fedora-kiwi-descriptions/pull-request/52
-ENV container=oci
-
-# Optional labels that only apply when running this image as a container. These keep the default entry point running under systemd.
-STOPSIGNAL SIGRTMIN+3
-CMD ["/usr/sbin/init"]
