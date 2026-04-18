@@ -125,24 +125,24 @@ jobs:
             localhost/hypervisor-bootc:rechunked
 
       - name: Tag and push base
+        id: push_base
         env:
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
           TAG: ${{ steps.params.outputs.tag }}
         run: |
-          for t in "${TAG}" latest; do
-            sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${t}"
-            sudo podman push "${IMAGE_BASE}:${t}"
-          done
+          sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${TAG}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${TAG}"
+          sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:latest"
+          sudo podman push "${IMAGE_BASE}:latest"
+          echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Sign base
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          TAG: ${{ steps.params.outputs.tag }}
+          DIGEST: ${{ steps.push_base.outputs.digest }}
         run: |
-          for t in "${TAG}" latest; do
-            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}:${t}"
-          done
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         env:
@@ -300,14 +300,15 @@ jobs:
           IMAGE_BASE="ghcr.io/${OWNER}/${IMAGE}"
           VERSIONED_TAG="${PREFIX}${BASE_TAG}"
 
-          for t in "${VERSIONED_TAG}" "${FLOATING}"; do
-            sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${t}"
-            sudo podman push "${IMAGE_BASE}:${t}"
-          done
+          sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${VERSIONED_TAG}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED_TAG}"
+          sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${FLOATING}"
+          sudo podman push "${IMAGE_BASE}:${FLOATING}"
 
           {
             echo "image_base=${IMAGE_BASE}"
             echo "versioned_tag=${VERSIONED_TAG}"
+            echo "digest=$(cat /tmp/digest.txt)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign variant
@@ -315,12 +316,9 @@ jobs:
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
           IMAGE_BASE: ${{ steps.push.outputs.image_base }}
-          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
-          FLOATING: ${{ matrix.variant.floating_tag }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          for t in "${VERSIONED_TAG}" "${FLOATING}"; do
-            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}:${t}"
-          done
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         if: steps.gate.outputs.build == 'true'
