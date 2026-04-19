@@ -21,6 +21,7 @@ LABEL org.opencontainers.image.title="Hypervisor Bootc Image"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/lxc/libvirt/QEMU/KVM"
 
 COPY policy.json /etc/containers/policy.json
+COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
@@ -212,13 +213,5 @@ RUN chmod 0755 /usr/bin/cosy && \
     /usr/bin/cosy completion bash > /usr/share/bash-completion/completions/cosy && \
     chmod 0644 /usr/share/bash-completion/completions/cosy
 
-# Define required labels for this bootc image to be recognized as such
-LABEL containers.bootc 1
-LABEL ostree.bootable 1
-
-# https://pagure.io/fedora-kiwi-descriptions/pull-request/52
-ENV container=oci
-
-# Optional labels that only apply when running this image as a container. These keep the default entry point running under systemd.
-STOPSIGNAL SIGRTMIN+3
-CMD ["/usr/sbin/init"]
+LABEL org.opencontainers.image.title="Hypervisor bootc Image"
+LABEL org.opencontainers.image.description="generic bootc-based hypervisor"
