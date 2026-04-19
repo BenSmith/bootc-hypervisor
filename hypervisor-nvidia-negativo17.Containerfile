@@ -12,6 +12,8 @@ RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-co
 RUN dnf install --setopt=install_weak_deps=False -y \
     nvidia-container-toolkit \
     nvidia-driver \
+    nvidia-driver-cuda \
+    nvidia-driver-cuda-libs \
     nvidia-gpu-firmware \
     nvidia-modprobe \
     nvidia-persistenced && \
