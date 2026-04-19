@@ -9,6 +9,12 @@ RUN apk add --no-cache wireguard-tools iproute2
 # podman bind-mounts wg0.conf as a file rather than creating a directory.
 RUN touch /etc/wireguard/wg0.conf
 
+# Redirect Pi-hole logs to stdout for capture by --log-driver=journald.
+# pihole-FTL may recreate its log file at startup rather than opening the
+# existing symlink, in which case the FTL symlink silently breaks.
+RUN ln -sf /dev/stdout /var/log/pihole.log && \
+    ln -sf /dev/stdout /var/log/pihole-FTL.log
+
 COPY --link --chmod=0755 entrypoint.sh /vpn-entrypoint.sh
 
 ENTRYPOINT ["/vpn-entrypoint.sh"]

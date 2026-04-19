@@ -1047,9 +1047,8 @@ UNIT
 RUN mkdir -p /etc/systemd/journald.conf.d && \
     cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
 [Journal]
-Storage=persistent
-SystemMaxUse=200M
-SystemKeepFree=50M
+Storage=volatile
+ForwardToSocket=/run/host-systemd/journal/socket
 CONF
 
 RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
