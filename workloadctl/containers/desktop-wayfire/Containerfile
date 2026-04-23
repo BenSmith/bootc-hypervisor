@@ -1,7 +1,7 @@
 # Headless Wayfire Desktop (VNC)
 #
 # Wayfire runs headlessly (WLR_BACKENDS=headless). Access via wayvnc on
-# port 5900. No game streaming, no Steam — just a clean Wayland desktop.
+# port 5900.
 #
 # Build:
 #   sudo ./build.sh
@@ -16,7 +16,10 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-icon-theme \
     alsa-utils \
     bash-completion \
+    clinfo \
     dbus-daemon \
+    drm_info \
+    eglinfo \
     fira-code-fonts \
     firefox \
     foot \
@@ -25,6 +28,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     hostname \
     htop \
     imv \
+    less \
+    librsvg2 \
     mako \
     mesa-dri-drivers \
     mesa-libEGL \
@@ -43,8 +48,11 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     systemd \
     systemd-udev \
     util-linux \
+    vainfo \
+    vulkan-tools \
     wayfire \
     wayfire-config-manager \
+    wayland-info \
     wayvnc \
     wdisplays \
     wf-recorder \
@@ -105,6 +113,7 @@ plugins = \
   expo \
   fast-switcher \
   fisheye \
+  foreign-toplevel \
   grid \
   move \
   oswitch \
@@ -112,6 +121,7 @@ plugins = \
   resize \
   switcher \
   vswitch \
+  wayfire-shell \
   window-rules \
   wm-actions \
   wobbly \
@@ -119,6 +129,12 @@ plugins = \
 
 [output:HEADLESS-1]
 mode = 1920x1080@60000
+
+[autostart]
+background = wf-background
+panel = wf-panel
+dock = wf-dock
+notifications = mako
 
 [command]
 binding_terminal = <super> KEY_ENTER
@@ -179,6 +195,26 @@ spring_k = 8.0
 active_color = 0.3 0.3 0.9 1.0
 inactive_color = 0.2 0.2 0.2 1.0
 
+INI
+
+# --- wf-shell config ---
+# Panel widgets that talk to system buses (volume, network, battery) fail in
+# this container with "Connection refused" because NetworkManager / UPower /
+# the PulseAudio system socket aren't present. Stick to self-contained widgets.
+
+RUN cat > /etc/xdg/wf-shell.ini <<'INI'
+[panel]
+widgets_left = menu
+widgets_center = window-list
+widgets_right = volume clock
+position = top
+minimal_height = 32
+
+[dock]
+position = bottom
+
+[background]
+color = \#1a1a1a
 INI
 
 # --- Foot terminal config ---
@@ -266,6 +302,7 @@ PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 Environment=WLR_BACKENDS=headless
 Environment=LIBSEAT_BACKEND=noop
 Environment=WLR_RENDERER=gles2
+Environment=LANG=C.UTF-8
 Environment=MOZ_ENABLE_WAYLAND=1
 Environment=XDG_CURRENT_DESKTOP=wlroots
 Environment=XCURSOR_THEME=Adwaita
@@ -273,7 +310,7 @@ Environment=XCURSOR_SIZE=24
 
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID}; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\nresolution = wlr-randr --output HEADLESS-1 --custom-mode 1920x1080@60Hz\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; cd && exec /usr/bin/dbus-run-session /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus WAYFIRE_CONFIG_FILE=/etc/xdg/wayfire.ini; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
