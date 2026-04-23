@@ -39,8 +39,8 @@ fi
 # steam-launcher creates the per-session null sink (whose name Wolf passes
 # in via $PULSE_SINK) on-demand before exec'ing steam.
 echo "Starting PulseAudio..."
-pulseaudio --daemonize --exit-idle-time=-1 \
-    --load="module-native-protocol-unix"
+pulseaudio --exit-idle-time=-1 \
+    --load="module-native-protocol-unix" &
 
 for i in $(seq 1 30); do
     if pactl info >/dev/null 2>&1; then

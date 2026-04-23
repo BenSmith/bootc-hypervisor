@@ -110,6 +110,7 @@ build-base-local: sync-cosy
 build-nvidia-rpmfusion:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+    --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-nvidia:rpmfusion-{{tag}} \
     -t localhost/hypervisor-nvidia:rpmfusion \
@@ -121,6 +122,7 @@ build-nvidia-rpmfusion:
 build-nvidia-negativo17:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+    --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-nvidia:negativo17-{{tag}} \
     -t localhost/hypervisor-nvidia:negativo17 \
@@ -132,6 +134,7 @@ build-nvidia-negativo17:
 build-amd:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
+    --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
     -t localhost/hypervisor-amd:{{tag}} \
     -t {{local_registry}}/hypervisor-amd:latest \

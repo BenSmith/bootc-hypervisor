@@ -87,6 +87,17 @@ gtk-cursor-theme-size=24
 gtk-font-name=Noto Sans 11
 INI
 
+# --- wf-shell config ---
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/wf-shell.ini <<'INI'
+[background]
+color = 0.067 0.067 0.086 1.0
+
+[panel]
+position = bottom
+INI
+
 # --- Wayfire config ---
 
 RUN mkdir -p /etc/xdg && \
@@ -135,11 +146,14 @@ command_launcher = wofi --show run
 binding_close = <super> KEY_Q
 command_close = wlrctl toplevel close
 
+binding_menu = BTN_RIGHT
+command_menu = wofi --show run
+
 [move]
 activate = <super> BTN_LEFT
 
 [resize]
-activate = <super> BTN_RIGHT
+activate = <super> BTN_MIDDLE
 
 [fast-switcher]
 activate = <alt> KEY_TAB
@@ -376,7 +390,7 @@ HOME_DIR="/home/$CONTAINER_USER"
 groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
 useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
 mkdir -p "$HOME_DIR/.local/state"
-chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/state"
+chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
 
 for grp in render video audio; do
     if getent group "$grp" >/dev/null 2>&1; then
@@ -422,9 +436,8 @@ UNIT
 RUN mkdir -p /etc/systemd/journald.conf.d && \
     cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
 [Journal]
-Storage=persistent
-SystemMaxUse=200M
-SystemKeepFree=50M
+Storage=volatile
+ForwardToSocket=/run/host-systemd/journal/socket
 CONF
 
 RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
