@@ -16,8 +16,8 @@
       "quay.io": [{"type": "insecureAcceptAnything"}],
       "codeberg.org": [{"type": "insecureAcceptAnything"}]
     },
-    "containers-storage:": {"": [{"type": "insecureAcceptAnything"}]},
-    "docker-archive:": {"": [{"type": "insecureAcceptAnything"}]},
+    "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},
     "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
   }
 }

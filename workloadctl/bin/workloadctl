@@ -1098,9 +1098,11 @@ def cmd_shell(args, manager: WorkloadManager):
     print(f"Opening shell in {config.container_name}...")
     print()
 
-    # Try bash first, fall back to sh
+    # Try bash first, fall back to sh only if bash isn't available in the image.
+    # 127 = command not found; any other non-zero is propagated from the user's
+    # last command (e.g. 130 after ^C), not a reason to relaunch.
     result = manager.run_podman(config, "exec", *exec_opts, config.container_name, "/bin/bash")
-    if result.returncode != 0:
+    if result.returncode == 127:
         manager.run_podman(config, "exec", *exec_opts, config.container_name, "/bin/sh", check=True)
 
 

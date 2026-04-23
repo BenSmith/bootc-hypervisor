@@ -5,8 +5,8 @@ LABEL org.opencontainers.image.description="WireGuard VPN client"
 
 # Install WireGuard tools and dependencies
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
-    wireguard-tools \
     iproute \
+    wireguard-tools \
     && dnf clean all
 
 # wireguard-tools creates /etc/wireguard with mode 700 (appropriate for private keys).

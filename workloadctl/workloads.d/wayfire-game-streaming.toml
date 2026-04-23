@@ -48,7 +48,7 @@ extra_gidmaps = ["+0:@{GID}:1"]
 [storage]
 volumes = [
     "./home:/home/desktop",
-    "/run/systemd/journal/socket:/run/systemd/journal/socket",
+    "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
     "/run/udev:/run/udev:ro",
     "/dev/input:/dev/input",
 ]

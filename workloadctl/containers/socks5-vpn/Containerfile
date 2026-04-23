@@ -17,9 +17,9 @@ LABEL org.opencontainers.image.title="VPN SOCKS5 Proxy"
 LABEL org.opencontainers.image.description="SOCKS5 proxy tunneled through WireGuard VPN"
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
-    wireguard-tools \
-    iproute \
     curl \
+    iproute \
+    wireguard-tools \
     && dnf clean all
 
 COPY --link --from=builder /build/microsocks/microsocks /usr/local/bin/microsocks
