@@ -37,9 +37,12 @@ RUN dnf install --setopt=install_weak_deps=False -y \
     nvidia-driver \
     nvidia-driver-cuda \
     nvidia-driver-cuda-libs \
+    nvidia-driver-selinux \
     nvidia-gpu-firmware \
     nvidia-modprobe \
-    nvidia-persistenced && \
+    nvidia-persistenced \
+    libnvidia-fbc \
+    libnvidia-ml && \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* /boot/*
 
@@ -52,13 +55,18 @@ RUN find /tmp/akmods -name '*.rpm' -exec rpm -ivh {} + && \
 RUN echo -e "blacklist nouveau\noptions nouveau modeset=0" \
     > /etc/modprobe.d/blacklist-nouveau.conf && \
     echo -e "options nvidia-drm modeset=1 fbdev=1\noptions nvidia NVreg_PreserveVideoMemoryAllocations=1" \
-    > /etc/modprobe.d/nvidia-kms.conf
+    > /etc/modprobe.d/nvidia-kms.conf && \
+    echo -e "nvidia\nnvidia_uvm\nnvidia_drm\nnvidia_modeset" \
+    > /etc/modules-load.d/nvidia.conf
 
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot
 COPY systemd/nvidia-cdi-generator.service /etc/systemd/system/nvidia-cdi-generator.service
 RUN mkdir -p /etc/cdi && \
+    printf '[Unit]\nDescription=Initialize NVIDIA UVM device nodes\nBefore=workloads.slice\nAfter=nvidia-persistenced.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-smi\n\n[Install]\nWantedBy=multi-user.target\n' \
+    > /etc/systemd/system/nvidia-init.service && \
     systemctl enable nvidia-persistenced && \
+    systemctl enable nvidia-init.service && \
     systemctl enable nvidia-cdi-generator.service && \
     bootc container lint
 

@@ -11,6 +11,7 @@ systemd = "always"
 CONTAINER_USER = "desktop"
 CONTAINER_UID = "1000"
 CONTAINER_GID = "1000"
+LANG="C.UTF-8"
 
 [container.health]
 cmd = "pgrep -x wayfire > /dev/null || exit 1"
@@ -23,13 +24,15 @@ gpu = "amd"
 devices = ["/dev/snd"]
 
 [security]
-userns = "keep-id"
+userns = "keep-id:uid=1000,gid=1000"
 capabilities = [
     "CHOWN", "DAC_OVERRIDE", "FOWNER",
     "SETUID", "SETGID", "FSETID",
     "KILL",
 ]
 extra_groups = ["video", "render", "audio"]
+extra_uidmaps = ["+0:@{UID}:1"]
+extra_gidmaps = ["+0:@{GID}:1"]
 
 [storage]
 volumes = [
@@ -41,9 +44,12 @@ volumes = [
 [network]
 mode = "host"
 
+[host]
+setup = "setup.sh"
+
 [resources]
-shm_size = "512m"
-memory_max = "4G"
-memory_high = "3G"
-cpu_quota = "200%"
-tasks_max = 4096
+shm_size = "2G"
+memory_max = "16G"
+memory_high = "12GG"
+cpu_quota = "600%"
+tasks_max = 16384
