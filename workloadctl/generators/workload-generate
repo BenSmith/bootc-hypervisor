@@ -512,6 +512,14 @@ def generate_system_service(config, user_name, uid):
             "--device=nvidia.com/gpu=all",
             "--device /dev/dri",
         ])
+    elif gpu_type == "vkms":
+        # Virtual KMS device — headless DRM with DMA-BUF support.
+        # Requires vkms kernel module loaded and /dev/dri/vkms{,-render} symlinks
+        # created by the workload's host setup script.
+        podman_args.extend([
+            "--device /dev/dri/vkms",
+            "--device /dev/dri/vkms-render",
+        ])
 
     # Generic device passthrough
     devices_config = config.get("devices", {})

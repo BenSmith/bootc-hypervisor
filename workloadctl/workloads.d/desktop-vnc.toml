@@ -64,17 +64,21 @@ volumes = [
 ]
 
 [devices]
-gpu = "amd"
+gpu = "vkms"
+
+[host]
+setup = "setup.sh"
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"
 extra_groups = ["video", "render"]
 
 [network]
-mode = "pasta"
-ports = ["5900:5900"]
+mode = "host"
 
 [resources]
+shm_size = "2G"
 memory_max = "4G"
 memory_high = "3G"
 cpu_quota = "200%"
+tasks_max = 16384

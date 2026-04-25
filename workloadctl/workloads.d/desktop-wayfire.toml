@@ -20,7 +20,7 @@ start_period = "15s"
 on_failure = "kill"
 
 [devices]
-gpu = "amd"
+gpu = "vkms"
 devices = ["/dev/snd"]
 
 [security]
@@ -50,6 +50,6 @@ setup = "setup.sh"
 [resources]
 shm_size = "2G"
 memory_max = "16G"
-memory_high = "12GG"
+memory_high = "12G"
 cpu_quota = "600%"
 tasks_max = 16384

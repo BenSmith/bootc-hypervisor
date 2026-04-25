@@ -12,9 +12,13 @@ export WLR_BACKENDS=headless
 export WLR_HEADLESS_OUTPUTS=1
 export WLR_LIBINPUT_NO_DEVICES=1
 
-if [ -c /dev/dri/renderD128 ]; then
-    export WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128
-fi
+for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
+    if [ -c "$_drm" ]; then
+        export WLR_RENDER_DRM_DEVICE="$_drm"
+        break
+    fi
+done
+unset _drm
 
 # Start labwc compositor under a D-Bus session (needed for waybar, clipboard, etc.)
 dbus-run-session labwc &

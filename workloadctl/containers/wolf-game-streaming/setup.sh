@@ -14,7 +14,25 @@ MODULES_LOAD="/etc/modules-load.d/uinput.conf"
 UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 
+VKMS_MODULES_LOAD="/etc/modules-load.d/vkms.conf"
+VKMS_UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
+
 enable() {
+    echo "  [host] Configuring vkms kernel module..."
+    echo "vkms" > "$VKMS_MODULES_LOAD"
+    cat > "$VKMS_UDEV_RULE" <<'RULES'
+SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="card*",    SYMLINK+="dri/vkms"
+SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="renderD*", SYMLINK+="dri/vkms-render"
+RULES
+    udevadm control --reload-rules
+    modprobe vkms
+    udevadm trigger --subsystem-match=drm --settle
+    if [ ! -e /dev/dri/vkms ] || [ ! -e /dev/dri/vkms-render ]; then
+        echo "  ERROR: /dev/dri/vkms symlinks not created after udev settle" >&2
+        return 1
+    fi
+    echo "  [host] vkms ready: /dev/dri/vkms, /dev/dri/vkms-render"
+
     echo "  [host] Configuring uinput kernel module..."
 
     # Load module now if not loaded
