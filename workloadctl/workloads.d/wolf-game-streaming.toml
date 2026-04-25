@@ -16,7 +16,7 @@ start_period = "30s"
 on_failure = "kill"
 
 [devices]
-gpu = "amd"
+gpu = "vkms"
 devices = ["/dev/uinput"]
 
 [security]

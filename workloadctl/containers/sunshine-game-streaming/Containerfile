@@ -110,12 +110,10 @@ RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
     dnf clean all
 
 # Sunshine system-wide defaults. The user can override in ~/.config/sunshine/.
-# adapter_name: AMD render node for VAAPI encoding.
 # output_name: labwc headless virtual output (set by wlr-randr in autostart).
 RUN mkdir -p /etc/sunshine && \
     cat > /etc/sunshine/sunshine.conf <<'CONF'
 encoder=vaapi
-adapter_name=/dev/dri/renderD128
 output_name=HEADLESS-1
 origin_web_ui_allowed=wan
 # Don't bake the cursor into the video frame; Moonlight renders it client-side.
@@ -458,9 +456,9 @@ UNIT
 # Restart=on-failure ensures it recovers from network drops and crashes.
 
 # --- Sunshine CSRF setup script ---
-# Runs as ExecStartPre in sunshine.service — network is up by this point,
-# so hostname -I returns real IPs (unlike the early-boot bootstrap).
-RUN cat > /usr/local/bin/sunshine-csrf-setup <<'SCRIPT'
+# Runs as ExecStartPre in sunshine.service — detects render node, sets CSRF
+# origins (network is up by this point so hostname -I returns real IPs).
+RUN cat > /usr/local/bin/sunshine-prestart <<'SCRIPT'
 #!/bin/bash
 set -e
 CONF="$HOME/.config/sunshine/sunshine.conf"
@@ -468,6 +466,16 @@ mkdir -p "$(dirname "$CONF")"
 
 # Always regenerate — IPs may change between restarts
 sed -i '/^csrf_allowed_origins=/d' "$CONF" 2>/dev/null || true
+
+# Detect render node and write adapter_name
+sed -i '/^adapter_name=/d' "$CONF" 2>/dev/null || true
+for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
+    if [ -c "$_drm" ]; then
+        echo "adapter_name=${_drm}" >> "$CONF"
+        break
+    fi
+done
+unset _drm
 
 ORIGINS=""
 for ip in $(hostname -I 2>/dev/null); do
@@ -491,7 +499,7 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
 ExecStartPre=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} && exec /usr/local/bin/sunshine-csrf-setup'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} && exec /usr/local/bin/sunshine-prestart'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && cd && exec /usr/bin/sunshine'
 
@@ -1076,7 +1084,7 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/polkit.service && \
     systemctl enable labwc labwc-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub && \
     chmod +x /etc/xdg/labwc/autostart /usr/local/bin/container-bootstrap \
-             /usr/local/bin/polkit-stub /usr/local/bin/sunshine-csrf-setup
+             /usr/local/bin/polkit-stub /usr/local/bin/sunshine-prestart
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

@@ -167,3 +167,4 @@ Start here when unsure what to work on:
 - Workloads get LVM provisioned to cap or flex storage
 - consider python3-tomlkit for toml edits that preserve comments
 - consider using podman api instead of podman cli to bypass all the quoting and escaping mess
+- auto-detect GPUs
