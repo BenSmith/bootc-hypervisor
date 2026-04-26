@@ -12,18 +12,24 @@
 #
 # Default RDP credentials are CONTAINER_USER / "changeme".
 # Override by setting KRDP_PASSWORD in the workload TOML's environment.
-#
-# Phases — add packages and services incrementally once each phase works:
-#   Phase 1 (this file): kwin + plasmashell + krdp — bare desktop via RDP
-#   Phase 2: xdg-desktop-portal + xdg-desktop-portal-kde
-#   Phase 3: pipewire-alsa, pipewire-pulseaudio (audio)
-#   Phase 4: apps (Firefox, Dolphin, Konsole, …)
 
 FROM registry.fedoraproject.org/fedora:43
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     bash-completion \
     dbus-daemon \
+    ark \
+    btop \
+    dolphin \
+    firefox \
+    gwenview \
+    kate \
+    kcalc \
+    kscreen \
+    konsole \
+    okular \
+    plasma-systemmonitor \
+    spectacle \
     kpipewire \
     krdp \
     less \
@@ -32,8 +38,11 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
+    nano \
     openssl \
     pipewire \
+    pipewire-alsa \
+    pipewire-pulseaudio \
     plasma-desktop \
     plasma-workspace \
     procps-ng \
@@ -141,9 +150,10 @@ set -e
 : "${CONTAINER_USER:?must be set}"
 : "${CONTAINER_UID:?must be set}"
 : "${CONTAINER_GID:?must be set}"
-printf 'CONTAINER_USER=%s\nKRDP_PASSWORD=%s\n' \
+printf 'CONTAINER_USER=%s\nKRDP_PASSWORD=%s\nDESKTOP_RESOLUTION=%s\n' \
     "${CONTAINER_USER}" \
     "${KRDP_PASSWORD:-changeme}" \
+    "${DESKTOP_RESOLUTION:-1920x1080}" \
     > /run/container.env
 chmod 600 /run/container.env
 chown "${CONTAINER_UID}:${CONTAINER_GID}" /run/container.env
@@ -182,7 +192,7 @@ Requires=container-bootstrap.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID KRDP_PASSWORD
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID KRDP_PASSWORD DESKTOP_RESOLUTION
 ExecStart=/usr/local/bin/container-env-export
 
 [Install]
@@ -207,6 +217,17 @@ set -e
 # Push the Wayland session environment into D-Bus and systemd --user so that
 # D-Bus-activated services (portals, kactivitymanagerd, etc.) inherit it.
 dbus-update-activation-environment --systemd --all
+
+# Set the virtual output resolution.  kscreen-doctor requires two steps:
+# first register the custom mode, then activate it.  The RDP client must
+# reconnect after this to pick up the new framebuffer size.
+[ -f /run/container.env ] && . /run/container.env
+RES="${DESKTOP_RESOLUTION:-1920x1080}"
+W="${RES%%x*}"
+H="${RES##*x}"
+kscreen-doctor "output.1.addCustomMode.${W}.${H}.60000.full" || true
+kscreen-doctor "output.1.mode.${RES}@60" || true
+
 exec plasmashell --no-respawn
 SCRIPT
 
@@ -385,6 +406,7 @@ RUN ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
         user@1000 && \
     systemctl --global enable \
         pipewire.socket \
+        pipewire-pulse.socket \
         wireplumber \
         plasma-kwin \
         plasma-wayland-ready \

@@ -56,6 +56,8 @@ RULES
     semodule -i "$WORK_DIR/${MODULE_NAME}.pp"
 
     echo "  [host] Host setup complete"
+    echo ""
+    echo "First-run needs some time before RDP is available."
 }
 
 disable() {

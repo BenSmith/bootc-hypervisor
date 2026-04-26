@@ -18,8 +18,9 @@ require {
     type xserver_misc_device_t;
     type xserver_t;
     class chr_file setattr;
+    class process execmem;
     class dir read;
-    class file { execute execute_no_trans getattr map open read };
+    class file { execute execute_no_trans execmod getattr map open read };
     class filesystem { mount remount };
     class sock_file { getattr mounton write };
     class unix_stream_socket connectto;
@@ -38,6 +39,12 @@ allow container_init_t user_tmp_t:sock_file mounton;
 # Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
 allow container_init_t udev_var_run_t:dir read;
 allow container_init_t udev_var_run_t:file { getattr open read };
+
+# QtQml and other JIT engines (Firefox SpiderMonkey, V4) write then execute
+# memfd-backed code pages.  execmod covers modified mapped files; execmem
+# covers anonymous writable+executable mappings (needed by Firefox).
+allow container_init_t container_file_t:file execmod;
+allow container_init_t self:process execmem;
 
 # KWin launches Xwayland on demand for X11 clients.
 allow container_init_t xserver_exec_t:file { execute execute_no_trans getattr map open read };
