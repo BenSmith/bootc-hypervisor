@@ -95,7 +95,6 @@ KDE_FULL_SESSION=true
 QT_QPA_PLATFORM=wayland
 XCURSOR_SIZE=24
 WAYLAND_DISPLAY=wayland-0
-LIBGL_ALWAYS_SOFTWARE=1
 ENV
 
 # --- Bootstrap script ---
@@ -254,6 +253,17 @@ RUN chmod +x /usr/local/bin/wait-for-wayland
 # Written to /etc/systemd/user/ so they apply to all users globally.
 # Enabled below via `systemctl --global enable`.
 
+# KWin launcher — uses hardware rendering if a DRI render node is present,
+# otherwise forces software rendering via llvmpipe.
+RUN cat > /usr/local/bin/kwin-start <<'SCRIPT'
+#!/bin/sh
+if ! ls /dev/dri/renderD* 2>/dev/null | grep -q .; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
+exec /usr/bin/kwin_wayland --virtual /usr/local/bin/plasma-session
+SCRIPT
+RUN chmod +x /usr/local/bin/kwin-start
+
 # KWin Wayland compositor — headless virtual backend
 RUN cat > /etc/systemd/user/plasma-kwin.service <<'UNIT'
 [Unit]
@@ -266,7 +276,7 @@ After=wireplumber.service
 Type=simple
 Restart=on-failure
 RestartSec=3
-ExecStart=/usr/bin/kwin_wayland --virtual /usr/local/bin/plasma-session
+ExecStart=/usr/local/bin/kwin-start
 
 [Install]
 WantedBy=default.target
