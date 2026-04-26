@@ -1,4 +1,4 @@
-module desktop-plasma-rdp 1.0;
+module desktop-kdeplasma-rdp 1.0;
 
 # SELinux policy for the desktop-kdeplasma-rdp workload container.
 #

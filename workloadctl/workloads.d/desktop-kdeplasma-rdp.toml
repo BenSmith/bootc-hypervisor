@@ -1,9 +1,9 @@
 [workload]
-name = "desktop-plasma2"
+name = "desktop-kdeplasma-rdp"
 enabled = false
 
 [container]
-image = "localhost/desktop-plasma2:latest"
+image = "localhost/desktop-kdeplasma-rdp:latest"
 pull = "never"
 systemd = "always"
 
