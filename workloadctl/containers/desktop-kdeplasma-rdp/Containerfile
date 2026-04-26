@@ -1,0 +1,428 @@
+# Headless KDE Plasma Desktop (RDP)
+#
+# Plasma runs under KWin's virtual Wayland backend (no real display).
+# Access via krdpserver on port 3389 with any RDP client (Remmina,
+# FreeRDP, Windows Remote Desktop, KRDC).
+#
+# Build:
+#   sudo ./build.sh
+#
+# Run:
+#   workloadctl enable desktop-kdeplasma-rdp
+#
+# Default RDP credentials are CONTAINER_USER / "changeme".
+# Override by setting KRDP_PASSWORD in the workload TOML's environment.
+
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    bash-completion \
+    dbus-daemon \
+    ark \
+    btop \
+    dolphin \
+    firefox \
+    gwenview \
+    kate \
+    kcalc \
+    kscreen \
+    konsole \
+    okular \
+    plasma-systemmonitor \
+    spectacle \
+    kpipewire \
+    krdp \
+    less \
+    kwin \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    mesa-libGL \
+    mesa-libgbm \
+    nano \
+    openssl \
+    pipewire \
+    pipewire-alsa \
+    pipewire-pulseaudio \
+    plasma-desktop \
+    plasma-workspace \
+    procps-ng \
+    qt6-qtwayland \
+    shadow-utils \
+    sudo \
+    systemd \
+    util-linux \
+    wireplumber \
+    xdg-desktop-portal \
+    xdg-desktop-portal-kde \
+    && dnf clean all
+
+# Strip file capabilities — several KDE/PipeWire binaries request caps that
+# fail with EPERM inside a rootless user namespace.
+RUN find /usr/bin /usr/libexec -type f 2>/dev/null \
+    | xargs -r -I{} sh -c 'getcap "{}" 2>/dev/null | grep -q "=" && setcap -r "{}" 2>/dev/null || true'
+
+# Disable screen auto-lock — pointless for a remote desktop and breaks krdp
+# capture if it fires before the user connects.
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/kscreenlockerrc <<'INI'
+[Daemon]
+Autolock=false
+LockOnResume=false
+INI
+
+# kactivitymanagerd is a headless D-Bus daemon with no UI.  It may be
+# activated before plasma-session calls dbus-update-activation-environment;
+# without QT_QPA_PLATFORM set it tries xcb/X11 and crashes.
+RUN f=/usr/share/dbus-1/services/org.kde.ActivityManager.service; \
+    [ -f "$f" ] && sed -i 's|^Exec=|Exec=/usr/bin/env QT_QPA_PLATFORM=offscreen |' "$f" || true
+
+# Pre-bake the linger file so logind starts user@1000.service at boot even
+# before any login session.  The bootstrap service still runs first (via the
+# user@1000.service.d drop-in) to create the actual user account.
+RUN mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/desktop
+
+# --- Session environment (read by systemd --user at session start) ---
+# WAYLAND_DISPLAY is fixed to wayland-0; kwin_wayland --virtual always
+# picks the first free slot, which in an isolated container is always 0.
+
+RUN mkdir -p /etc/environment.d && \
+    cat > /etc/environment.d/10-plasma.conf <<'ENV'
+LANG=C.UTF-8
+XDG_CURRENT_DESKTOP=KDE
+XDG_SESSION_TYPE=wayland
+XDG_SESSION_DESKTOP=KDE
+KDE_FULL_SESSION=true
+QT_QPA_PLATFORM=wayland
+XCURSOR_SIZE=24
+WAYLAND_DISPLAY=wayland-0
+ENV
+
+# --- Bootstrap script ---
+# Creates the container user, TLS cert, and home directory.
+
+RUN cat > /usr/local/bin/container-bootstrap <<'SCRIPT'
+#!/bin/bash
+set -e
+: "${CONTAINER_USER:?must be set}"
+: "${CONTAINER_UID:?must be set}"
+: "${CONTAINER_GID:?must be set}"
+
+HOME_DIR="/home/$CONTAINER_USER"
+
+groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
+useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
+mkdir -p "$HOME_DIR/.local/state" "$HOME_DIR/.config" "$HOME_DIR/.local/share/krdpserver"
+
+CERT="$HOME_DIR/.local/share/krdpserver/server.crt"
+KEY="$HOME_DIR/.local/share/krdpserver/server.key"
+if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+    openssl req -x509 -newkey rsa:4096 -nodes \
+        -keyout "$KEY" -out "$CERT" \
+        -days 3650 -subj "/CN=krdp-${CONTAINER_USER}"
+    chmod 600 "$KEY"
+fi
+
+chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+
+for grp in render video audio; do
+    getent group "$grp" >/dev/null 2>&1 && usermod -aG "$grp" "$CONTAINER_USER" 2>/dev/null || true
+done
+
+mkdir -p /etc/sudoers.d
+echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
+chown 0:0 /etc/sudoers.d/container-user
+chmod 0440 /etc/sudoers.d/container-user
+
+echo "Bootstrap complete."
+SCRIPT
+
+RUN chmod +x /usr/local/bin/container-bootstrap
+
+# --- Env-export script ---
+# CONTAINER_USER and KRDP_PASSWORD arrive as PID-1 env vars from the
+# container runtime.  systemd --user doesn't inherit them, so a system
+# service writes them to /run/container.env for user units to consume via
+# EnvironmentFile=.
+
+RUN cat > /usr/local/bin/container-env-export <<'SCRIPT'
+#!/bin/bash
+set -e
+: "${CONTAINER_USER:?must be set}"
+: "${CONTAINER_UID:?must be set}"
+: "${CONTAINER_GID:?must be set}"
+printf 'CONTAINER_USER=%s\nKRDP_PASSWORD=%s\nDESKTOP_RESOLUTION=%s\n' \
+    "${CONTAINER_USER}" \
+    "${KRDP_PASSWORD:-changeme}" \
+    "${DESKTOP_RESOLUTION:-1920x1080}" \
+    > /run/container.env
+chmod 600 /run/container.env
+chown "${CONTAINER_UID}:${CONTAINER_GID}" /run/container.env
+SCRIPT
+
+RUN chmod +x /usr/local/bin/container-env-export
+
+# --- System service: bootstrap ---
+
+RUN cat > /usr/lib/systemd/system/container-bootstrap.service <<'UNIT'
+[Unit]
+Description=First-boot container bootstrap
+ConditionPathExists=!/etc/container-bootstrapped
+DefaultDependencies=no
+After=sysinit.target
+Before=container-env.service
+
+[Service]
+Type=oneshot
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID
+ExecStart=/usr/local/bin/container-bootstrap
+ExecStartPost=/bin/touch /etc/container-bootstrapped
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- System service: export runtime env ---
+
+RUN cat > /usr/lib/systemd/system/container-env.service <<'UNIT'
+[Unit]
+Description=Export container runtime environment for user session
+After=container-bootstrap.service
+Requires=container-bootstrap.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID KRDP_PASSWORD DESKTOP_RESOLUTION
+ExecStart=/usr/local/bin/container-env-export
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Drop-in: order user@1000.service after bootstrap and env export ---
+# Hardcoded to UID 1000, matching CONTAINER_UID in the workload TOML.
+
+RUN mkdir -p /etc/systemd/system/user@1000.service.d && \
+    cat > /etc/systemd/system/user@1000.service.d/10-after-bootstrap.conf <<'DROPIN'
+[Unit]
+After=container-bootstrap.service container-env.service
+Requires=container-bootstrap.service container-env.service
+DROPIN
+
+# --- plasma-session (called by kwin_wayland as its startup command) ---
+
+RUN cat > /usr/local/bin/plasma-session <<'SCRIPT'
+#!/bin/bash
+set -e
+# Push the Wayland session environment into D-Bus and systemd --user so that
+# D-Bus-activated services (portals, kactivitymanagerd, etc.) inherit it.
+dbus-update-activation-environment --systemd --all
+
+# Set the virtual output resolution.  kscreen-doctor requires two steps:
+# first register the custom mode, then activate it.  The RDP client must
+# reconnect after this to pick up the new framebuffer size.
+[ -f /run/container.env ] && . /run/container.env
+RES="${DESKTOP_RESOLUTION:-1920x1080}"
+W="${RES%%x*}"
+H="${RES##*x}"
+kscreen-doctor "output.1.addCustomMode.${W}.${H}.60000.full" || true
+kscreen-doctor "output.1.mode.${RES}@60" || true
+
+exec plasmashell --no-respawn
+SCRIPT
+
+RUN chmod +x /usr/local/bin/plasma-session
+
+# --- wait-for-wayland ---
+
+RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
+#!/bin/sh
+while true; do
+    for sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
+        case "$sock" in *.lock) continue ;; esac
+        [ -S "$sock" ] || continue
+        exit 0
+    done
+    sleep 0.5
+done
+SCRIPT
+
+RUN chmod +x /usr/local/bin/wait-for-wayland
+
+# --- User units ---
+# Written to /etc/systemd/user/ so they apply to all users globally.
+# Enabled below via `systemctl --global enable`.
+
+# KWin launcher — uses hardware rendering if a DRI render node is present,
+# otherwise forces software rendering via llvmpipe.
+RUN cat > /usr/local/bin/kwin-start <<'SCRIPT'
+#!/bin/sh
+if ! ls /dev/dri/renderD* 2>/dev/null | grep -q .; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
+exec /usr/bin/kwin_wayland --virtual /usr/local/bin/plasma-session
+SCRIPT
+RUN chmod +x /usr/local/bin/kwin-start
+
+# KWin Wayland compositor — headless virtual backend
+RUN cat > /etc/systemd/user/plasma-kwin.service <<'UNIT'
+[Unit]
+Description=KDE KWin Wayland compositor (headless)
+ConditionUser=1000
+Wants=wireplumber.service
+After=wireplumber.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+ExecStart=/usr/local/bin/kwin-start
+
+[Install]
+WantedBy=default.target
+UNIT
+
+# Gate: wait for kwin to create its Wayland socket before starting krdp
+RUN cat > /etc/systemd/user/plasma-wayland-ready.service <<'UNIT'
+[Unit]
+Description=Wait for KWin Wayland socket
+ConditionUser=1000
+After=plasma-kwin.service
+Requires=plasma-kwin.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/wait-for-wayland
+
+[Install]
+WantedBy=default.target
+UNIT
+
+# Desktop file — required by xdg-desktop-portal to register krdp as a host
+# app.  Without it, portal registration fails ("App info not found for
+# 'org.kde.krdp-server'") and MegaAuth in xdg-desktop-portal-kde can't
+# associate permissions with the calling process.
+RUN cat > /usr/share/applications/org.kde.krdp-server.desktop <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=KRDP Server
+Exec=/usr/bin/krdpserver
+Icon=krdp
+NoDisplay=true
+DESKTOP
+
+# Pre-grant remote-desktop portal permission for krdp.  In a headless
+# container there's no user to click the "Share your screen?" dialog that
+# xdg-desktop-portal-kde would otherwise pop up, so the screencast request
+# stalls and the RDP client drops.  Setting "yes" up front skips the
+# dialog entirely.
+
+RUN cat > /usr/local/bin/portal-prepermit <<'SCRIPT'
+#!/bin/sh
+# xdg-desktop-portal-kde's MegaAuth stores all per-app portal permissions
+# in a single "kde-authorized" table, with the permission kind as the row
+# id (not the appId, despite what most other portal docs imply).  Verified
+# via dbus-monitor: MegaAuth issues Lookup("kde-authorized", "remote-desktop").
+exec /usr/bin/gdbus call --session \
+    --dest org.freedesktop.impl.portal.PermissionStore \
+    --object-path /org/freedesktop/impl/portal/PermissionStore \
+    --method org.freedesktop.impl.portal.PermissionStore.SetPermission \
+    kde-authorized true remote-desktop org.kde.krdp-server "['yes']"
+SCRIPT
+
+RUN chmod +x /usr/local/bin/portal-prepermit
+
+RUN cat > /etc/systemd/user/portal-prepermit.service <<'UNIT'
+[Unit]
+Description=Pre-grant remote-desktop portal permission for krdp
+ConditionUser=1000
+After=dbus.socket
+Before=krdp.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/portal-prepermit
+
+[Install]
+WantedBy=default.target
+UNIT
+
+# krdp remote desktop server
+RUN cat > /etc/systemd/user/krdp.service <<'UNIT'
+[Unit]
+Description=KDE Remote Desktop server
+ConditionUser=1000
+After=plasma-wayland-ready.service portal-prepermit.service
+Requires=plasma-wayland-ready.service
+Wants=portal-prepermit.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=/run/container.env
+
+Environment=QT_QPA_PLATFORM=wayland
+Environment=XDG_CURRENT_DESKTOP=KDE
+Environment=XDG_SESSION_TYPE=wayland
+
+ExecStart=/usr/bin/krdpserver \
+    --address 0.0.0.0 \
+    --port 3389 \
+    --username ${CONTAINER_USER} \
+    --password ${KRDP_PASSWORD} \
+    --certificate %h/.local/share/krdpserver/server.crt \
+    --certificate-key %h/.local/share/krdpserver/server.key
+
+[Install]
+WantedBy=default.target
+UNIT
+
+# --- Journal forwarding to host ---
+
+RUN mkdir -p /etc/systemd/journald.conf.d && \
+    cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
+[Journal]
+Storage=volatile
+ForwardToSocket=/run/host-systemd/journal/socket
+CONF
+
+RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
+    cat > /etc/systemd/system/systemd-journald.service.d/10-container.conf <<'DROPIN'
+[Service]
+CapabilityBoundingSet=
+IPAddressDeny=
+LockPersonality=no
+MemoryDenyWriteExecute=no
+NoNewPrivileges=no
+ProtectClock=no
+RestrictAddressFamilies=
+RestrictNamespaces=no
+RestrictRealtime=no
+RestrictSUIDSGID=no
+SystemCallArchitectures=
+SystemCallFilter=
+DROPIN
+
+RUN ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    ln -sf /dev/null /etc/systemd/system/polkit.service && \
+    systemctl enable \
+        container-bootstrap \
+        container-env \
+        user@1000 && \
+    systemctl --global enable \
+        pipewire.socket \
+        pipewire-pulse.socket \
+        wireplumber \
+        plasma-kwin \
+        plasma-wayland-ready \
+        portal-prepermit \
+        krdp
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]
