@@ -21,7 +21,6 @@ start_period = "90s"
 on_failure = "kill"
 
 [devices]
-gpu = "vkms"
 devices = ["/dev/snd"]
 
 [security]
@@ -31,7 +30,7 @@ capabilities = [
     "SETUID", "SETGID", "FSETID",
     "KILL",
 ]
-extra_groups = ["video", "render", "audio"]
+extra_groups = ["audio"]
 extra_uidmaps = ["+0:@{UID}:1"]
 extra_gidmaps = ["+0:@{GID}:1"]
 

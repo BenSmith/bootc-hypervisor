@@ -10,6 +10,7 @@ require {
     type container_file_t;
     type container_init_t;
     type devpts_t;
+    type sound_device_t;
     type tmpfs_t;
     type udev_var_run_t;
     type user_tmp_t;
@@ -17,7 +18,7 @@ require {
     type xserver_exec_t;
     type xserver_misc_device_t;
     type xserver_t;
-    class chr_file setattr;
+    class chr_file { getattr read setattr write };
     class process execmem;
     class dir read;
     class file { execute execute_no_trans execmod getattr map open read };
@@ -45,6 +46,9 @@ allow container_init_t udev_var_run_t:file { getattr open read };
 # covers anonymous writable+executable mappings (needed by Firefox).
 allow container_init_t container_file_t:file execmod;
 allow container_init_t self:process execmem;
+
+# Audio device access for the bind-mounted /dev/snd.
+allow container_init_t sound_device_t:chr_file { getattr read write };
 
 # KWin launches Xwayland on demand for X11 clients.
 allow container_init_t xserver_exec_t:file { execute execute_no_trans getattr map open read };
