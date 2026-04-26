@@ -15,17 +15,19 @@ enable() {
     echo "  [host] Configuring vkms kernel module..."
     echo "vkms" > "$MODULES_LOAD_CONF"
     cat > "$UDEV_RULE" <<'RULES'
-SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="card*",    SYMLINK+="dri/vkms"
-SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="renderD*", SYMLINK+="dri/vkms-render"
+SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="vkms", SYMLINK+="dri/vkms"
+SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="vkms", SYMLINK+="dri/vkms-render"
 RULES
     udevadm control --reload-rules
     modprobe vkms
-    udevadm trigger --subsystem-match=drm --settle
-    if [ ! -e /dev/dri/vkms ] || [ ! -e /dev/dri/vkms-render ]; then
-        echo "  ERROR: /dev/dri/vkms symlinks not created after udev settle" >&2
+    # Re-fire drm uevents so the rule applies to an already-loaded vkms too.
+    udevadm trigger --subsystem-match=drm
+    udevadm settle
+    if [ ! -e /dev/dri/vkms ]; then
+        echo "  ERROR: /dev/dri/vkms not created by udev" >&2
         return 1
     fi
-    echo "  [host] vkms ready: /dev/dri/vkms, /dev/dri/vkms-render"
+    echo "  [host] vkms ready: /dev/dri/vkms -> $(readlink /dev/dri/vkms)"
     echo "  [host] Host setup complete"
 }
 

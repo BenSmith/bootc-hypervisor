@@ -513,13 +513,26 @@ def generate_system_service(config, user_name, uid):
             "--device /dev/dri",
         ])
     elif gpu_type == "vkms":
-        # Virtual KMS device — headless DRM with DMA-BUF support.
-        # Requires vkms kernel module loaded and /dev/dri/vkms{,-render} symlinks
+        # Virtual KMS device for display output.
+        # Requires vkms kernel module loaded and /dev/dri/vkms symlink
         # created by the workload's host setup script.
-        podman_args.extend([
-            "--device /dev/dri/vkms",
-            "--device /dev/dri/vkms-render",
-        ])
+        # vkms has no render node of its own; pass one so the compositor can
+        # initialize EGL (required for OpenGL compositing and screencasting).
+        # Prefer /dev/dri/vkms-render if vkms gains one; otherwise use the
+        # first available host render node.
+        podman_args.append("--device /dev/dri/vkms")
+        if os.path.exists("/dev/dri/vkms-render"):
+            podman_args.append("--device /dev/dri/vkms-render")
+        else:
+            try:
+                render_nodes = sorted(
+                    (n for n in os.listdir("/dev/dri") if n.startswith("renderD")),
+                    key=lambda n: int(n[7:]),
+                )
+                if render_nodes:
+                    podman_args.append(f"--device /dev/dri/{render_nodes[0]}")
+            except OSError:
+                pass
 
     # Generic device passthrough
     devices_config = config.get("devices", {})
