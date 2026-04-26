@@ -17,21 +17,27 @@ UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 VKMS_MODULES_LOAD="/etc/modules-load.d/vkms.conf"
 VKMS_UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
 
+WORK_DIR=""
+cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
+trap cleanup EXIT
+
 enable() {
     echo "  [host] Configuring vkms kernel module..."
     echo "vkms" > "$VKMS_MODULES_LOAD"
     cat > "$VKMS_UDEV_RULE" <<'RULES'
-SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="card*",    SYMLINK+="dri/vkms"
-SUBSYSTEM=="drm", DEVPATH=="*/platform/vkms/*", KERNEL=="renderD*", SYMLINK+="dri/vkms-render"
+SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="vkms", SYMLINK+="dri/vkms"
+SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="vkms", SYMLINK+="dri/vkms-render"
 RULES
     udevadm control --reload-rules
     modprobe vkms
-    udevadm trigger --subsystem-match=drm --settle
-    if [ ! -e /dev/dri/vkms ] || [ ! -e /dev/dri/vkms-render ]; then
-        echo "  ERROR: /dev/dri/vkms symlinks not created after udev settle" >&2
+    # Re-fire drm uevents so the rule applies to an already-loaded vkms too.
+    udevadm trigger --subsystem-match=drm
+    udevadm settle
+    if [ ! -e /dev/dri/vkms ]; then
+        echo "  ERROR: /dev/dri/vkms not created by udev" >&2
         return 1
     fi
-    echo "  [host] vkms ready: /dev/dri/vkms, /dev/dri/vkms-render"
+    echo "  [host] vkms ready: /dev/dri/vkms -> $(readlink /dev/dri/vkms)"
 
     echo "  [host] Configuring uinput kernel module..."
 
@@ -61,7 +67,6 @@ RULES
         return 1
     fi
     WORK_DIR=$(mktemp -d)
-    trap 'rm -rf "$WORK_DIR"' EXIT
     cp "$TE_FILE" "$WORK_DIR/"
     checkmodule -M -m -o "$WORK_DIR/${MODULE_NAME}.mod" "$WORK_DIR/${MODULE_NAME}.te"
     semodule_package -o "$WORK_DIR/${MODULE_NAME}.pp" -m "$WORK_DIR/${MODULE_NAME}.mod"

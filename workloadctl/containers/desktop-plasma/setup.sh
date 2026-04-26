@@ -1,15 +1,15 @@
 #!/bin/bash
-# Host setup for the desktop-wayfire workload.
+# Host setup for the desktop-plasma workload.
 #
 # Usage:
-#   setup.sh enable   — install SELinux policy module
+#   setup.sh enable   — install SELinux policy module, load vkms
 #   setup.sh disable  — remove SELinux policy module
 #
 # Idempotent in both directions. Called by workloadctl enable/disable.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODULE_NAME="desktop-wayfire"
+MODULE_NAME="desktop-plasma"
 MODULES_LOAD_CONF="/etc/modules-load.d/vkms.conf"
 UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
 
@@ -18,12 +18,19 @@ cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 enable() {
+    # --- vkms virtual DRM device ---
     echo "  [host] Configuring vkms kernel module..."
+
+    # Persist across reboots
     echo "vkms" > "$MODULES_LOAD_CONF"
+
+    # Stable /dev/dri/vkms and /dev/dri/vkms-render symlinks, created by udev
+    # whenever the vkms platform device appears (including after modprobe).
     cat > "$UDEV_RULE" <<'RULES'
 SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="vkms", SYMLINK+="dri/vkms"
 SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="vkms", SYMLINK+="dri/vkms-render"
 RULES
+
     udevadm control --reload-rules
     modprobe vkms
     # Re-fire drm uevents so the rule applies to an already-loaded vkms too.
@@ -35,6 +42,7 @@ RULES
     fi
     echo "  [host] vkms ready: /dev/dri/vkms -> $(readlink /dev/dri/vkms)"
 
+    # --- SELinux policy ---
     echo "  [host] Installing SELinux policy module..."
     TE_FILE="${SCRIPT_DIR}/${MODULE_NAME}.te"
     if [ ! -f "$TE_FILE" ]; then
