@@ -1,0 +1,56 @@
+[workload]
+name = "desktop-plasma2"
+enabled = false
+
+[container]
+image = "localhost/desktop-plasma2:latest"
+pull = "never"
+systemd = "always"
+
+[container.environment]
+CONTAINER_USER = "desktop"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
+LANG = "C.UTF-8"
+KRDP_PASSWORD = "changeme"
+
+[container.health]
+cmd = "pgrep -x kwin_wayland > /dev/null || exit 1"
+interval = "30s"
+start_period = "90s"
+on_failure = "kill"
+
+[devices]
+gpu = "vkms"
+devices = ["/dev/snd"]
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL",
+]
+extra_groups = ["video", "render", "audio"]
+extra_uidmaps = ["+0:@{UID}:1"]
+extra_gidmaps = ["+0:@{GID}:1"]
+
+[storage]
+volumes = [
+    "./home:/home/desktop",
+    "/run/udev:/run/udev:ro",
+    "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
+]
+
+[network]
+mode = "host"
+
+[host]
+setup = "setup.sh"
+
+[resources]
+shm_size = "2G"
+memory_max = "16G"
+memory_high = "12G"
+cpu_quota = "600%"
+tasks_max = 16384
