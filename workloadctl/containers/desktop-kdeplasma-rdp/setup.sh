@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host setup for the desktop-plasma2 workload.
+# Host setup for the desktop-kdeplasma-rdp workload.
 #
 # Usage:
 #   setup.sh enable   — install SELinux policy module, load vkms
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODULE_NAME="desktop-plasma2"
+MODULE_NAME="desktop-kdeplasma-rdp"
 MODULES_LOAD_CONF="/etc/modules-load.d/vkms.conf"
 UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
 

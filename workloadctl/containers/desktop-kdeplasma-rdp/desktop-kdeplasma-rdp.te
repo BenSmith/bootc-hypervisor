@@ -1,11 +1,10 @@
-module desktop-plasma2 1.0;
+module desktop-plasma-rdp 1.0;
 
-# SELinux policy for the desktop-plasma2 workload container.
+# SELinux policy for the desktop-kdeplasma-rdp workload container.
 #
-# Mirrors the desktop-plasma policy: KDE applications also rely on bwrap
-# for sandboxed media decoders (Qt6 image loaders, kio-fuse helpers), the
-# bind-mounted /run/udev for device probing (mesa, libinput), and KWin
-# launches Xwayland on demand for legacy X11 clients.
+# KDE applications rely on bwrap for sandboxed media decoders (Qt6 image loaders, kio-fuse helpers), the
+# bind-mounted /run/udev for device probing (mesa, libinput), and KWin # launches Xwayland on demand for
+# legacy X11 clients.
 
 require {
     type container_file_t;

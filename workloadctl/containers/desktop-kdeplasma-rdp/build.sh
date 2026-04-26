@@ -6,12 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HTTP_PROXY="${HTTP_PROXY:-}"
 HTTPS_PROXY="${HTTPS_PROXY:-}"
 
-echo "Building desktop-plasma2 container image..."
+echo "Building desktop-kdeplasma-rdp container image..."
 http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" \
 podman build \
     --build-arg http_proxy="$HTTP_PROXY" \
     --build-arg https_proxy="$HTTPS_PROXY" \
-    -t localhost/desktop-plasma2:latest "$SCRIPT_DIR"
+    -t localhost/desktop-kdeplasma-rdp:latest "$SCRIPT_DIR"
 
 echo ""
-echo "Build complete! Image: localhost/desktop-plasma2:latest"
+echo "Build complete! Image: localhost/desktop-kdeplasma-rdp:latest"

@@ -1,19 +1,6 @@
-# Headless KDE Plasma Desktop (RDP) — systemd --user variant
+# Headless KDE Plasma Desktop (RDP)
 #
-# Identical goal to desktop-plasma but runs the KDE session under
-# systemd --user.  This is the key difference:
-#
-#   desktop-plasma:  KDE runs as system units with setpriv; D-Bus activation
-#                    via SystemdService= fails (no user manager), so
-#                    xdg-desktop-portal exits immediately, leaving krdp with
-#                    no screencasting path.
-#
-#   desktop-plasma2: systemd --user manages the user session natively.
-#                    SystemdService= in the portal .service files works, so
-#                    krdp can use the PortalSession path (--plasma flag) to
-#                    reach zkde_screencast_unstable_v1 through
-#                    xdg-desktop-portal-kde, which IS a privileged kwin client.
-#
+# Plasma runs under KWin's virtual Wayland backend (no real display).
 # Access via krdpserver on port 3389 with any RDP client (Remmina,
 # FreeRDP, Windows Remote Desktop, KRDC).
 #
@@ -21,10 +8,16 @@
 #   sudo ./build.sh
 #
 # Run:
-#   workloadctl enable desktop-plasma2
+#   workloadctl enable desktop-kdeplasma-rdp
 #
 # Default RDP credentials are CONTAINER_USER / "changeme".
 # Override by setting KRDP_PASSWORD in the workload TOML's environment.
+#
+# Phases — add packages and services incrementally once each phase works:
+#   Phase 1 (this file): kwin + plasmashell + krdp — bare desktop via RDP
+#   Phase 2: xdg-desktop-portal + xdg-desktop-portal-kde
+#   Phase 3: pipewire-alsa, pipewire-pulseaudio (audio)
+#   Phase 4: apps (Firefox, Dolphin, Konsole, …)
 
 FROM registry.fedoraproject.org/fedora:43
 
