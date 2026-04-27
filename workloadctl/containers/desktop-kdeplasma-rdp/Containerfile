@@ -16,38 +16,41 @@
 FROM registry.fedoraproject.org/fedora:43
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
-    bash-completion \
-    dbus-daemon \
     ark \
+    bash-completion \
     btop \
+    dbus-daemon \
     dolphin \
     firefox \
     gwenview \
+    intel-media-driver \
     kate \
     kcalc \
-    kscreen \
     konsole \
-    okular \
-    plasma-systemmonitor \
-    spectacle \
     kpipewire \
     krdp \
-    less \
+    kscreen \
     kwin \
+    less \
     mesa-dri-drivers \
     mesa-libEGL \
     mesa-libGL \
     mesa-libgbm \
+    mesa-va-drivers \
     nano \
+    neovim \
+    okular \
     openssl \
     pipewire \
     pipewire-alsa \
     pipewire-pulseaudio \
     plasma-desktop \
+    plasma-systemmonitor \
     plasma-workspace \
     procps-ng \
     qt6-qtwayland \
     shadow-utils \
+    spectacle \
     sudo \
     systemd \
     util-linux \

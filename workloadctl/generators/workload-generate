@@ -344,6 +344,19 @@ def generate_setup_service(config, user_name):
     return "\n".join(lines)
 
 
+def resolve_auto_gpu():
+    """Detect the primary GPU vendor from sysfs. Returns 'nvidia', 'amd', 'intel', or 'none'."""
+    vendor_map = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
+    try:
+        for vendor_path in sorted(Path("/sys/class/drm").glob("card*/device/vendor")):
+            vendor = vendor_path.read_text().strip().lower()
+            if vendor in vendor_map:
+                return vendor_map[vendor]
+    except OSError:
+        pass
+    return "none"
+
+
 def generate_system_service(config, user_name, uid):
     """Generate systemd system service for rootless podman execution.
 
@@ -357,6 +370,8 @@ def generate_system_service(config, user_name, uid):
     command = config["container"].get("command", None)
     pull_policy = config["container"].get("pull", "missing")  # missing, always, newer, never
     gpu_type = config.get("devices", {}).get("gpu", "none")
+    if gpu_type == "auto":
+        gpu_type = resolve_auto_gpu()
     extra_groups = config.get("security", {}).get("extra_groups", [])
     privileged = config.get("security", {}).get("privileged", False)
 
@@ -512,6 +527,8 @@ def generate_system_service(config, user_name, uid):
             "--device=nvidia.com/gpu=all",
             "--device /dev/dri",
         ])
+    elif gpu_type == "intel":
+        podman_args.append("--device /dev/dri")
     elif gpu_type == "vkms":
         # Virtual KMS device for display output.
         # Requires vkms kernel module loaded and /dev/dri/vkms symlink
