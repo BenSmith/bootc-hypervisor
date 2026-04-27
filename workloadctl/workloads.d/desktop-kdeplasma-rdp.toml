@@ -21,6 +21,7 @@ start_period = "90s"
 on_failure = "kill"
 
 [devices]
+gpu = "auto"
 devices = ["/dev/snd"]
 
 [security]
@@ -30,7 +31,7 @@ capabilities = [
     "SETUID", "SETGID", "FSETID",
     "KILL",
 ]
-extra_groups = ["audio"]
+extra_groups = ["audio", "render", "video"]
 extra_uidmaps = ["+0:@{UID}:1"]
 extra_gidmaps = ["+0:@{GID}:1"]
 

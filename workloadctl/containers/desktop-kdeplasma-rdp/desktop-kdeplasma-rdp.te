@@ -10,6 +10,7 @@ require {
     type container_file_t;
     type container_init_t;
     type devpts_t;
+    type dri_device_t;
     type sound_device_t;
     type tmpfs_t;
     type udev_var_run_t;
@@ -18,7 +19,7 @@ require {
     type xserver_exec_t;
     type xserver_misc_device_t;
     type xserver_t;
-    class chr_file { getattr read setattr write };
+    class chr_file { getattr ioctl read setattr write };
     class process execmem;
     class dir read;
     class file { execute execute_no_trans execmod getattr map open read };
@@ -49,6 +50,10 @@ allow container_init_t self:process execmem;
 
 # Audio device access for the bind-mounted /dev/snd.
 allow container_init_t sound_device_t:chr_file { getattr read write };
+
+# DRI render nodes for hardware OpenGL (KWin) and VAAPI encode (kpipewire).
+# /dev/dri/renderD* are char devices; ioctl is required by Mesa and VA-API drivers.
+allow container_init_t dri_device_t:chr_file { getattr ioctl read write };
 
 # KWin launches Xwayland on demand for X11 clients.
 allow container_init_t xserver_exec_t:file { execute execute_no_trans getattr map open read };
