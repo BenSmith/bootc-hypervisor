@@ -13,6 +13,7 @@ start_period = "30s"
 on_failure = "kill"
 
 [devices]
+# This configuration requires a render node (/dev/dri/renderD*)
 gpu = "auto"
 devices = ["/dev/uinput"]
 
