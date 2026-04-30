@@ -14,31 +14,11 @@ MODULES_LOAD="/etc/modules-load.d/uinput.conf"
 UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 
-VKMS_MODULES_LOAD="/etc/modules-load.d/vkms.conf"
-VKMS_UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
-
 WORK_DIR=""
 cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 enable() {
-    echo "  [host] Configuring vkms kernel module..."
-    echo "vkms" > "$VKMS_MODULES_LOAD"
-    cat > "$VKMS_UDEV_RULE" <<'RULES'
-SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="vkms", SYMLINK+="dri/vkms"
-SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="vkms", SYMLINK+="dri/vkms-render"
-RULES
-    udevadm control --reload-rules
-    modprobe vkms
-    # Re-fire drm uevents so the rule applies to an already-loaded vkms too.
-    udevadm trigger --subsystem-match=drm
-    udevadm settle
-    if [ ! -e /dev/dri/vkms ]; then
-        echo "  ERROR: /dev/dri/vkms not created by udev" >&2
-        return 1
-    fi
-    echo "  [host] vkms ready: /dev/dri/vkms -> $(readlink /dev/dri/vkms)"
-
     echo "  [host] Configuring uinput kernel module..."
 
     # Load module now if not loaded

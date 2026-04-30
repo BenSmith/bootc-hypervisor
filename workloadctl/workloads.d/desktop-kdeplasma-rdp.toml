@@ -21,8 +21,8 @@ start_period = "90s"
 on_failure = "kill"
 
 [devices]
+# This configuration requires a render node (/dev/dri/renderD*)
 gpu = "auto"
-devices = ["/dev/snd"]
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"

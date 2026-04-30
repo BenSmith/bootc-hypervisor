@@ -252,7 +252,7 @@ RUN mkdir -p /etc/xdg/labwc && \
 
   <outputs>
     <output name="HEADLESS-1">
-      <mode>2560x1080</mode>
+      <transform>normal</transform>
     </output>
   </outputs>
 
@@ -290,7 +290,7 @@ RUN cat > /etc/xdg/labwc/autostart <<'SH'
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 
 # --- Display resolution ---
-wlr-randr --output HEADLESS-1 --custom-mode 2560x1080@60Hz
+wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60Hz"
 
 # --- Audio ---
 alsa_card=""
@@ -392,16 +392,18 @@ Type=simple
 TasksMax=infinity
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 
-Environment=WLR_BACKENDS=headless
+Environment=DESKTOP_RESOLUTION=1920x1080
 Environment=LIBSEAT_BACKEND=noop
-Environment=WLR_RENDERER=gles2
 Environment=MOZ_ENABLE_WAYLAND=1
-Environment=XDG_CURRENT_DESKTOP=wlroots
-Environment=XCURSOR_THEME=Adwaita
+Environment=WLR_BACKENDS=headless
 Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_THEME=Adwaita
+Environment=XDG_CURRENT_DESKTOP=wlroots
+EnvironmentFile=-/run/wlr-renderer.env
 
+ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && cd && exec /usr/bin/dbus-run-session /usr/bin/labwc'
@@ -469,7 +471,7 @@ sed -i '/^csrf_allowed_origins=/d' "$CONF" 2>/dev/null || true
 
 # Detect render node and write adapter_name
 sed -i '/^adapter_name=/d' "$CONF" 2>/dev/null || true
-for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
+for _drm in /dev/dri/renderD*; do
     if [ -c "$_drm" ]; then
         echo "adapter_name=${_drm}" >> "$CONF"
         break

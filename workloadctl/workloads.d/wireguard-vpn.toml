@@ -34,7 +34,6 @@ start_period = "15s"
 on_failure = "kill"
 
 [container.environment]
-# WireGuard interface name
 WG_INTERFACE = "wg0"
 
 [storage]
@@ -52,7 +51,6 @@ userns = "host"
 capabilities = ["NET_ADMIN"]
 
 [resources]
-# WireGuard is very lightweight
 memory_max = "128M"
 memory_high = "96M"
 cpu_quota = "20%"

@@ -240,9 +240,6 @@ plugins = \
   wobbly \
   zoom
 
-[output:HEADLESS-1]
-mode = 2560x1080@60000
-
 [command]
 binding_terminal = <super> KEY_ENTER
 command_terminal = foot
@@ -395,19 +392,21 @@ Type=simple
 TasksMax=infinity
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 
+Environment=DESKTOP_RESOLUTION=1920x1080
 Environment=WLR_BACKENDS=headless
 Environment=LIBSEAT_BACKEND=noop
-Environment=WLR_RENDERER=gles2
 Environment=MOZ_ENABLE_WAYLAND=1
 Environment=XDG_CURRENT_DESKTOP=wlroots
 Environment=XCURSOR_THEME=Adwaita
 Environment=XCURSOR_SIZE=24
+EnvironmentFile=-/run/wlr-renderer.env
 
+ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode 2560x1080@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
@@ -474,7 +473,7 @@ sed -i '/^csrf_allowed_origins=/d' "$CONF" 2>/dev/null || true
 
 # Detect render node and write adapter_name
 sed -i '/^adapter_name=/d' "$CONF" 2>/dev/null || true
-for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
+for _drm in /dev/dri/renderD*; do
     if [ -c "$_drm" ]; then
         echo "adapter_name=${_drm}" >> "$CONF"
         break

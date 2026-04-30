@@ -392,6 +392,7 @@ def generate_system_service(config, user_name, uid):
     ]
 
     if gpu_type == "nvidia":
+        lines.append("Requires=nvidia-cdi-generator.service")
         lines.append("After=nvidia-cdi-generator.service")
 
     # container.systemd: "always", "true", "false", or unset
@@ -529,27 +530,6 @@ def generate_system_service(config, user_name, uid):
         ])
     elif gpu_type == "intel":
         podman_args.append("--device /dev/dri")
-    elif gpu_type == "vkms":
-        # Virtual KMS device for display output.
-        # Requires vkms kernel module loaded and /dev/dri/vkms symlink
-        # created by the workload's host setup script.
-        # vkms has no render node of its own; pass one so the compositor can
-        # initialize EGL (required for OpenGL compositing and screencasting).
-        # Prefer /dev/dri/vkms-render if vkms gains one; otherwise use the
-        # first available host render node.
-        podman_args.append("--device /dev/dri/vkms")
-        if os.path.exists("/dev/dri/vkms-render"):
-            podman_args.append("--device /dev/dri/vkms-render")
-        else:
-            try:
-                render_nodes = sorted(
-                    (n for n in os.listdir("/dev/dri") if n.startswith("renderD")),
-                    key=lambda n: int(n[7:]),
-                )
-                if render_nodes:
-                    podman_args.append(f"--device /dev/dri/{render_nodes[0]}")
-            except OSError:
-                pass
 
     # Generic device passthrough
     devices_config = config.get("devices", {})
@@ -735,6 +715,13 @@ def generate_system_service(config, user_name, uid):
 
     if has_secret_env_vars:
         lines.append(f"ExecStartPre=+/usr/libexec/workloadctl/workload-write-env {name}")
+
+    if gpu_type == "nvidia":
+        lines.append(
+            "ExecStartPre=/bin/bash -c "
+            "'test -s /etc/cdi/nvidia.yaml"
+            " || { echo \"NVIDIA CDI spec missing: check nvidia-cdi-generator.service\" >&2; exit 1; }'"
+        )
 
     lines.append("")
     lines.append(f"# Image pulling handled by podman run --pull={pull_policy}")

@@ -37,7 +37,7 @@ enable() {
 disable() {
     echo "  [host] Removing SELinux policy module..."
     if semodule -l 2>/dev/null | grep -q "^${MODULE_NAME}"; then
-        semodule -r "$MODULE_NAME"
+        semodule -r "$MODULE_NAME" || true
     else
         echo "  [host] SELinux module '${MODULE_NAME}' not installed"
     fi

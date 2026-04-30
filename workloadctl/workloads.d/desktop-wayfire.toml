@@ -20,8 +20,10 @@ start_period = "15s"
 on_failure = "kill"
 
 [devices]
-gpu = "vkms"
-devices = ["/dev/snd"]
+# This configuration doesn't require a render node but the
+# cool visual effects don't happen without
+# https://www.kernel.org/doc/html/latest/gpu/drm-uapi.html#render-nodes
+gpu = "none"
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"
