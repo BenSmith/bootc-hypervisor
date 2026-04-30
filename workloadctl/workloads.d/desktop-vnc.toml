@@ -51,6 +51,7 @@ pull = "never"
 # VNC_PASSWORD = "changeme"
 # Or use an encrypted secret:
 # VNC_PASSWORD = "${SECRET:desktop-vnc-password}"
+LANG="C.UTF-8"
 
 [container.health]
 cmd = "pgrep -x wayvnc > /dev/null || exit 1"
@@ -62,12 +63,6 @@ on_failure = "kill"
 volumes = [
     "./data:/home/desktop/data",
 ]
-
-[devices]
-gpu = "vkms"
-
-[host]
-setup = "setup.sh"
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"

@@ -19,7 +19,7 @@ start_period = "30s"
 on_failure = "kill"
 
 [devices]
-gpu = "vkms"
+gpu = "auto"
 # input = true is NOT used — it maps to --device /dev/input, which snapshots
 # device nodes at container start. Sunshine's uinput devices appear later, so
 # /dev/input must be a volume bind-mount (live view).

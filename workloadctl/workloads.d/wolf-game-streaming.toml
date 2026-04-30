@@ -6,9 +6,6 @@ enabled = false
 image = "localhost/wolf-game-streaming:latest"
 pull = "never"
 
-[container.environment]
-WOLF_RENDER_NODE = "/dev/dri/renderD128"
-
 [container.health]
 cmd = "pgrep -x wolf > /dev/null || exit 1"
 interval = "30s"
@@ -16,7 +13,7 @@ start_period = "30s"
 on_failure = "kill"
 
 [devices]
-gpu = "vkms"
+gpu = "auto"
 devices = ["/dev/uinput"]
 
 [security]

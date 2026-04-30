@@ -226,13 +226,34 @@ font=Fira Code:size=14
 initial-window-size-chars=80x24
 INI
 
+# --- XDG runtime dir service ---
+# container-bootstrap.service is gated by ConditionPathExists so it only runs
+# once, but /run is a fresh tmpfs on every container start. This service
+# creates /run/user/${CONTAINER_UID} unconditionally before any user service.
+
+RUN cat > /usr/lib/systemd/system/xdg-runtime-dir.service <<'UNIT'
+[Unit]
+Description=Create XDG_RUNTIME_DIR for container user
+After=container-bootstrap.service
+Requires=container-bootstrap.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID CONTAINER_GID
+ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 # --- PipeWire systemd services ---
 
 RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
 [Unit]
 Description=PipeWire Multimedia Service
-After=container-bootstrap.service
-Requires=container-bootstrap.service
+After=xdg-runtime-dir.service
+Requires=xdg-runtime-dir.service
 
 [Service]
 Type=simple
@@ -290,7 +311,8 @@ UNIT
 RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
 [Unit]
 Description=Wayfire Wayland Compositor (headless)
-After=container-bootstrap.service
+After=xdg-runtime-dir.service
+Requires=xdg-runtime-dir.service
 
 [Service]
 Type=simple
@@ -299,16 +321,15 @@ Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
-Environment=WLR_BACKENDS=headless
-Environment=LIBSEAT_BACKEND=noop
-Environment=WLR_RENDERER=gles2
 Environment=LANG=C.UTF-8
+Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
-Environment=XDG_CURRENT_DESKTOP=wlroots
-Environment=XCURSOR_THEME=Adwaita
+Environment=WLR_BACKENDS=headless
+Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_THEME=Adwaita
+Environment=XDG_CURRENT_DESKTOP=wlroots
 
-ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus WAYFIRE_CONFIG_FILE=/etc/xdg/wayfire.ini; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
@@ -354,14 +375,34 @@ ExecStart=/usr/local/bin/wait-for-wayland
 WantedBy=multi-user.target
 UNIT
 
+# --- set-resolution systemd service ---
+
+RUN cat > /usr/lib/systemd/system/set-resolution.service <<'UNIT'
+[Unit]
+Description=Set virtual output resolution
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c '. /run/wayland-display.env && export XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60"'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 # --- wayvnc systemd service ---
 # Binds on all interfaces, port 5900. No auth by default.
 
 RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
 [Unit]
 Description=wayvnc VNC server
-After=wayfire-wayland-ready.service
-Requires=wayfire-wayland-ready.service
+After=set-resolution.service
+Requires=set-resolution.service
 
 [Service]
 Type=simple
@@ -462,7 +503,7 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
-    systemctl enable wayfire wayfire-wayland-ready wayvnc container-bootstrap pipewire wireplumber pipewire-pulse && \
+    systemctl enable wayfire wayfire-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir pipewire wireplumber pipewire-pulse && \
     chmod +x /usr/local/bin/container-bootstrap
 
 STOPSIGNAL SIGRTMIN+3

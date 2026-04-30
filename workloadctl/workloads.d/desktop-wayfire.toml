@@ -19,10 +19,6 @@ interval = "30s"
 start_period = "15s"
 on_failure = "kill"
 
-[devices]
-gpu = "vkms"
-devices = ["/dev/snd"]
-
 [security]
 userns = "keep-id:uid=1000,gid=1000"
 capabilities = [

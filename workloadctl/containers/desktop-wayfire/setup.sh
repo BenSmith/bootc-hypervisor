@@ -10,31 +10,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULE_NAME="desktop-wayfire"
-MODULES_LOAD_CONF="/etc/modules-load.d/vkms.conf"
-UDEV_RULE="/etc/udev/rules.d/70-vkms.rules"
-
 WORK_DIR=""
 cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 enable() {
-    echo "  [host] Configuring vkms kernel module..."
-    echo "vkms" > "$MODULES_LOAD_CONF"
-    cat > "$UDEV_RULE" <<'RULES'
-SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="vkms", SYMLINK+="dri/vkms"
-SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="vkms", SYMLINK+="dri/vkms-render"
-RULES
-    udevadm control --reload-rules
-    modprobe vkms
-    # Re-fire drm uevents so the rule applies to an already-loaded vkms too.
-    udevadm trigger --subsystem-match=drm
-    udevadm settle
-    if [ ! -e /dev/dri/vkms ]; then
-        echo "  ERROR: /dev/dri/vkms not created by udev" >&2
-        return 1
-    fi
-    echo "  [host] vkms ready: /dev/dri/vkms -> $(readlink /dev/dri/vkms)"
-
     echo "  [host] Installing SELinux policy module..."
     TE_FILE="${SCRIPT_DIR}/${MODULE_NAME}.te"
     if [ ! -f "$TE_FILE" ]; then
@@ -53,7 +33,7 @@ RULES
 disable() {
     echo "  [host] Removing SELinux policy module..."
     if semodule -l 2>/dev/null | grep -q "^${MODULE_NAME}"; then
-        semodule -r "$MODULE_NAME"
+        semodule -r "$MODULE_NAME" || true
     else
         echo "  [host] SELinux module '${MODULE_NAME}' not installed"
     fi

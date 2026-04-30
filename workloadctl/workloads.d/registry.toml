@@ -38,7 +38,6 @@ name = "registry"
 enabled = false
 
 [container]
-# Official Docker Registry v2 image
 image = "docker.io/library/registry:2"
 
 [container.health]
@@ -58,7 +57,6 @@ volumes = [
 ]
 
 [network]
-# Serve registry on port 5000
 mode = "pasta"
 ports = ["5000:5000"]
 

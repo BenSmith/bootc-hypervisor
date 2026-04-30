@@ -4,12 +4,13 @@ set -euo pipefail
 WOLF_HOME="${WOLF_HOME:-/opt/wolf}"
 WOLF_CFG_FOLDER="${WOLF_CFG_FOLDER:-/etc/wolf}"
 if [ -z "${WOLF_RENDER_NODE:-}" ]; then
-    for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
+    for _drm in /dev/dri/renderD*; do
         [ -c "$_drm" ] && WOLF_RENDER_NODE="$_drm" && break
     done
     unset _drm
 fi
 WOLF_RENDER_NODE="${WOLF_RENDER_NODE:-}"
+[ -z "$WOLF_RENDER_NODE" ] && export LIBGL_ALWAYS_SOFTWARE=1
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/sockets}"
 

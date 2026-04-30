@@ -1,24 +1,17 @@
 #!/bin/bash
 set -e
 
-# Set up XDG_RUNTIME_DIR
+export LIBSEAT_BACKEND=noop
+export WLR_BACKENDS=headless
+export WLR_HEADLESS_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
 sudo mkdir -p "$XDG_RUNTIME_DIR"
 sudo chown "$(id -u):$(id -g)" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-# Configure wlroots headless backend
-export WLR_BACKENDS=headless
-export WLR_HEADLESS_OUTPUTS=1
-export WLR_LIBINPUT_NO_DEVICES=1
-
-for _drm in /dev/dri/renderD* /dev/dri/vkms-render; do
-    if [ -c "$_drm" ]; then
-        export WLR_RENDER_DRM_DEVICE="$_drm"
-        break
-    fi
-done
-unset _drm
+ls /dev/dri/renderD* 2>/dev/null | grep -q . || export LIBGL_ALWAYS_SOFTWARE=1
 
 # Start labwc compositor under a D-Bus session (needed for waybar, clipboard, etc.)
 dbus-run-session labwc &
@@ -53,6 +46,8 @@ EOF
 else
     echo "WARNING: VNC has no authentication — set VNC_PASSWORD to enable"
 fi
+
+wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60" || true
 
 # Start wayvnc
 wayvnc 0.0.0.0 5900 &

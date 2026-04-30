@@ -22,7 +22,6 @@ on_failure = "kill"
 
 [devices]
 gpu = "auto"
-devices = ["/dev/snd"]
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"

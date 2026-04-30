@@ -23,7 +23,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     dolphin \
     firefox \
     gwenview \
-    intel-media-driver \
     kate \
     kcalc \
     konsole \
@@ -37,6 +36,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libGL \
     mesa-libgbm \
     mesa-va-drivers \
+    mesa-vulkan-drivers \
     nano \
     neovim \
     okular \
@@ -66,8 +66,7 @@ RUN find /usr/bin /usr/libexec -type f 2>/dev/null \
 
 # Disable screen auto-lock — pointless for a remote desktop and breaks krdp
 # capture if it fires before the user connects.
-RUN mkdir -p /etc/xdg && \
-    cat > /etc/xdg/kscreenlockerrc <<'INI'
+RUN cat > /etc/xdg/kscreenlockerrc <<'INI'
 [Daemon]
 Autolock=false
 LockOnResume=false
@@ -79,25 +78,20 @@ INI
 RUN f=/usr/share/dbus-1/services/org.kde.ActivityManager.service; \
     [ -f "$f" ] && sed -i 's|^Exec=|Exec=/usr/bin/env QT_QPA_PLATFORM=offscreen |' "$f" || true
 
-# Pre-bake the linger file so logind starts user@1000.service at boot even
-# before any login session.  The bootstrap service still runs first (via the
-# user@1000.service.d drop-in) to create the actual user account.
-RUN mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/desktop
-
 # --- Session environment (read by systemd --user at session start) ---
 # WAYLAND_DISPLAY is fixed to wayland-0; kwin_wayland --virtual always
 # picks the first free slot, which in an isolated container is always 0.
 
 RUN mkdir -p /etc/environment.d && \
     cat > /etc/environment.d/10-plasma.conf <<'ENV'
-LANG=C.UTF-8
-XDG_CURRENT_DESKTOP=KDE
-XDG_SESSION_TYPE=wayland
-XDG_SESSION_DESKTOP=KDE
 KDE_FULL_SESSION=true
+LANG=C.UTF-8
 QT_QPA_PLATFORM=wayland
-XCURSOR_SIZE=24
 WAYLAND_DISPLAY=wayland-0
+XCURSOR_SIZE=24
+XDG_CURRENT_DESKTOP=KDE
+XDG_SESSION_DESKTOP=KDE
+XDG_SESSION_TYPE=wayland
 ENV
 
 # --- Bootstrap script ---
@@ -197,6 +191,26 @@ Type=oneshot
 RemainAfterExit=yes
 PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID KRDP_PASSWORD DESKTOP_RESOLUTION
 ExecStart=/usr/local/bin/container-env-export
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- System service: explicitly start user@1000.service ---
+# logind's linger-based trigger races with container-bootstrap (logind scans
+# /var/lib/systemd/linger/ at startup, before bootstrap creates the user).
+# Triggering user@1000 from a system unit ordered after bootstrap is reliable.
+
+RUN cat > /usr/lib/systemd/system/start-user-manager.service <<'UNIT'
+[Unit]
+Description=Start systemd user manager for UID 1000
+After=container-env.service
+Requires=container-env.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/systemctl start user@1000.service
 
 [Install]
 WantedBy=multi-user.target
@@ -417,7 +431,7 @@ RUN ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable \
         container-bootstrap \
         container-env \
-        user@1000 && \
+        start-user-manager && \
     systemctl --global enable \
         pipewire.socket \
         pipewire-pulse.socket \
