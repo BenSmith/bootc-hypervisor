@@ -80,13 +80,18 @@ Each inherits from hypervisor-bootc and adds kernel GPU drivers:
 ### Image Tags
 
 ```
-hypervisor-bootc:YYYYMMDD-HHMM        # Timestamped
-hypervisor-bootc:latest                # Latest build
-hypervisor-nvidia:rpmfusion            # Latest NVIDIA (RPMFusion)
-hypervisor-nvidia:negativo17           # Latest NVIDIA (negativo17)
-hypervisor-amd:latest                  # Latest AMD
-fedora-bootc-minimal:43               # Latest for Fedora 43
+hypervisor-bootc:44-YYYYMMDD-HHMM     # Versioned + timestamped
+hypervisor-bootc:44                    # Per-version floating (Fedora 44)
+hypervisor-bootc:latest                # Stable Fedora version
+hypervisor-nvidia:rpmfusion-44         # Per-version floating (RPMFusion)
+hypervisor-nvidia:rpmfusion            # Stable Fedora version (RPMFusion)
+hypervisor-nvidia:negativo17-44        # Per-version floating (negativo17)
+hypervisor-nvidia:negativo17           # Stable Fedora version (negativo17)
+hypervisor-amd:44                      # Per-version floating (AMD)
+hypervisor-amd:latest                  # Stable Fedora version (AMD)
 ```
+
+`:latest` / `:rpmfusion` / `:negativo17` always track the stable Fedora version. Pin to a specific version using the bare version number (`:43`, `:44`). Supported versions are defined in [`fedora-versions.yml`](fedora-versions.yml).
 
 ## Workload System (workloadctl)
 
@@ -162,9 +167,42 @@ sudo systemctl reboot
 ### Switch Variants
 
 ```bash
+# Switch to latest stable
 sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
 sudo systemctl reboot
+
+# Pin to a specific Fedora version
+sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:44
+sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-44
 ```
+
+## Promoting a New Fedora Release
+
+All version management is a one-file edit to [`fedora-versions.yml`](fedora-versions.yml).
+
+**1. Add a new version** (e.g. F45 ships, F44 stays stable):
+```yaml
+stable: 44
+supported: [44, 45]
+rechunker: 44
+```
+Open PR, merge. Next nightly produces `:44` + `:45` tags; `:latest` stays on 44.
+
+**2. Promote new stable** (once F45 is validated):
+```yaml
+stable: 45
+supported: [44, 45]
+rechunker: 45
+```
+Next build moves `:latest` / `:rpmfusion` / `:negativo17` to the F45 image.
+
+**3. Drop an EOL version** (e.g. F43 goes EOL):
+```yaml
+stable: 45
+supported: [45, 46]
+rechunker: 45
+```
+No new `:43` builds. Old `:43-YYYYMMDD` tags remain in GHCR as immutable history. To prune: `gh api -X DELETE /user/packages/container/hypervisor-bootc/versions/<id>`.
 
 ## Building Locally
 

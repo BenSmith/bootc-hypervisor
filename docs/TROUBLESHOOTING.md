@@ -2,6 +2,8 @@
 
 This guide covers common issues when working with the workload system and how to resolve them.
 
+> **Supported Fedora versions and the current stable release** are defined in [`fedora-versions.yml`](../fedora-versions.yml) at the repo root. That file is the single source of truth — edit it to add a new version, promote a new stable, or drop an EOL version.
+
 ## Quick Diagnostics
 
 ### Check workload health

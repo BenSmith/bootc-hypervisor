@@ -4,6 +4,7 @@ proxy := env_var_or_default('HTTP_PROXY', '')
 build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 local_registry := 'registry.local:5000'
 tag := `date +%Y%m%d-%H%M`
+fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml`)
 
 # Rechunk an image in user storage (copies to root, rechunks, copies back)
 _rechunk image:
@@ -25,7 +26,7 @@ _rechunk image:
 
 # === Container image builds =================================================
 
-build-minimal version="43" rechunk="false":
+build-minimal version=fedora_version rechunk="false":
   #!/usr/bin/env bash
   set -euo pipefail
   if [ ! -d "manifests" ]; then
@@ -86,10 +87,12 @@ build-base: sync-cosy
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-bootc:{{tag}} \
+    --build-arg BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:{{fedora_version}} \
+    -t localhost/hypervisor-bootc:{{fedora_version}}-{{tag}} \
+    -t localhost/hypervisor-bootc:{{fedora_version}} \
     -t localhost/hypervisor-bootc:latest \
     -t {{local_registry}}/hypervisor-bootc:latest \
-    -t ghcr.io/bensmith/hypervisor-bootc:{{tag}} \
+    -t ghcr.io/bensmith/hypervisor-bootc:{{fedora_version}}-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
 
@@ -100,9 +103,10 @@ build-base-local: sync-cosy
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --from localhost/fedora-bootc-minimal:latest \
+    --from localhost/fedora-bootc-minimal:{{fedora_version}} \
     --build-arg ENABLE_PASSWORDLESS_SUDO=true \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+    -t localhost/hypervisor-bootc:{{fedora_version}} \
     -t localhost/hypervisor-bootc:latest \
     -t {{local_registry}}/hypervisor-bootc:latest \
     -f hypervisor.Containerfile .
@@ -112,9 +116,11 @@ build-nvidia-rpmfusion:
   podman build \
     --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-{{tag}} \
+    --build-arg BASE=localhost/hypervisor-bootc:{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}}-{{tag}} \
+    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}} \
     -t localhost/hypervisor-nvidia:rpmfusion \
-    -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-{{tag}} \
+    -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-{{fedora_version}}-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:rpmfusion \
     -t {{local_registry}}/hypervisor-nvidia:rpmfusion \
     -f hypervisor-nvidia-rpmfusion.Containerfile .
@@ -124,9 +130,11 @@ build-nvidia-negativo17:
   podman build \
     --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:negativo17-{{tag}} \
+    --build-arg BASE=localhost/hypervisor-bootc:{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}}-{{tag}} \
+    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}} \
     -t localhost/hypervisor-nvidia:negativo17 \
-    -t ghcr.io/bensmith/hypervisor-nvidia:negativo17-{{tag}} \
+    -t ghcr.io/bensmith/hypervisor-nvidia:negativo17-{{fedora_version}}-{{tag}} \
     -t ghcr.io/bensmith/hypervisor-nvidia:negativo17 \
     -t {{local_registry}}/hypervisor-nvidia:negativo17 \
     -f hypervisor-nvidia-negativo17.Containerfile .
@@ -136,9 +144,11 @@ build-amd:
   podman build \
     --pull=never \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-amd:{{tag}} \
-    -t {{local_registry}}/hypervisor-amd:latest \
+    --build-arg BASE=localhost/hypervisor-bootc:{{fedora_version}} \
+    -t localhost/hypervisor-amd:{{fedora_version}}-{{tag}} \
+    -t localhost/hypervisor-amd:{{fedora_version}} \
     -t localhost/hypervisor-amd:latest \
+    -t {{local_registry}}/hypervisor-amd:latest \
     -f hypervisor-amd.Containerfile .
 
 # Local variants - build from locally-built base instead of GHCR
@@ -146,8 +156,9 @@ build-amd-local:
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --from localhost/hypervisor-bootc:latest \
+    --from localhost/hypervisor-bootc:{{fedora_version}} \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+    -t localhost/hypervisor-amd:{{fedora_version}} \
     -t localhost/hypervisor-amd:latest \
     -t {{local_registry}}/hypervisor-amd:latest \
     -f hypervisor-amd.Containerfile .
@@ -156,18 +167,20 @@ build-nvidia-rpmfusion-local: build-base-local
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --from localhost/hypervisor-bootc:latest \
+    --from localhost/hypervisor-bootc:{{fedora_version}} \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:rpmfusion-latest \
+    -t localhost/hypervisor-nvidia:rpmfusion-{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:rpmfusion \
     -f hypervisor-nvidia-rpmfusion.Containerfile .
 
 build-nvidia-negativo17-local: build-base-local
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --network=host \
-    --from localhost/hypervisor-bootc:latest \
+    --from localhost/hypervisor-bootc:{{fedora_version}} \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
-    -t localhost/hypervisor-nvidia:negativo17-latest \
+    -t localhost/hypervisor-nvidia:negativo17-{{fedora_version}} \
+    -t localhost/hypervisor-nvidia:negativo17 \
     -f hypervisor-nvidia-negativo17.Containerfile .
 
 build-all: build-base build-nvidia-rpmfusion build-nvidia-negativo17 build-amd

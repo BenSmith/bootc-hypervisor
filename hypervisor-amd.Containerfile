@@ -1,4 +1,7 @@
-FROM ghcr.io/bensmith/hypervisor-bootc:latest
+ARG BASE=ghcr.io/bensmith/hypervisor-bootc:latest
+ARG BASE_DIGEST=""
+
+FROM ${BASE}${BASE_DIGEST:+@${BASE_DIGEST}}
 
 # Install core dependencies that ROCm needs (missing from minimal base)
 RUN dnf install -y \
