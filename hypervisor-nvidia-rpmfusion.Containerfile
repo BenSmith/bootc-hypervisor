@@ -31,9 +31,8 @@ RUN dnf install -y \
 
 # Add NVIDIA official container toolkit repository
 RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
+    sed '/^sslcacert=/d' | \
     tee /etc/yum.repos.d/nvidia-container-toolkit.repo
-
-RUN update-ca-trust extract
 
 # Install NVIDIA drivers and tools, headless
 RUN dnf install --setopt=install_weak_deps=False -y \
