@@ -62,6 +62,8 @@ Uses systemd credentials (`systemd-creds`) for secret management:
 | `workloadctl create` | Generate a workload TOML config |
 | `workloadctl enable` | Create user, transfer image, start service |
 | `workloadctl disable` | Stop service, optionally purge user/data |
+| `workloadctl start` | Start workload service |
+| `workloadctl stop` | Stop workload service |
 | `workloadctl update` | Pull new image and recreate (with automatic rollback on failure) |
 | `workloadctl rollback` | Roll back to previous image |
 | `workloadctl status` | Show workload status |

@@ -935,6 +935,40 @@ def cmd_disable(args, manager: WorkloadManager):
         print(f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)")
 
 
+def cmd_start(args, manager: WorkloadManager):
+    """Start a workload service (does not change enabled state)"""
+    require_root()
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(args.workload)
+    print(f"Starting {config.service_name}...")
+    result = subprocess.run(["systemctl", "start", config.service_name])
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    print(f"✓ Workload '{args.workload}' started")
+
+
+def cmd_stop(args, manager: WorkloadManager):
+    """Stop a workload service (does not change enabled state)"""
+    require_root()
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(args.workload)
+    print(f"Stopping {config.service_name}...")
+    result = subprocess.run(["systemctl", "stop", config.service_name])
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    print(f"✓ Workload '{args.workload}' stopped")
+
+
 def cmd_cleanup(args, manager: WorkloadManager):
     """Find and remove orphaned workload users and directories"""
     require_root()
@@ -3295,6 +3329,12 @@ def main():
     status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
+    start_parser = subparsers.add_parser("start", help="Start a workload service")
+    start_parser.add_argument("workload", help="Workload name")
+
+    stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
+    stop_parser.add_argument("workload", help="Workload name")
+
     update_parser = subparsers.add_parser("update", help="Pull latest image and restart")
     update_parser.add_argument("workload", nargs="?", help="Workload name")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
@@ -3343,8 +3383,10 @@ def main():
         "restore": cmd_restore,
         "secret": cmd_secret,
         "shell": cmd_shell,
+        "start": cmd_start,
         "stats": cmd_stats,
         "status": cmd_status,
+        "stop": cmd_stop,
         "rollback": cmd_rollback,
         "uid-map": cmd_uid_map,
         "update": cmd_update,
