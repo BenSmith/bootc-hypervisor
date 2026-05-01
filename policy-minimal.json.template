@@ -13,6 +13,9 @@
       ],
       "ghcr.io": [{"type": "insecureAcceptAnything"}]
     },
+    "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},
+    "oci-archive": {"": [{"type": "insecureAcceptAnything"}]},
     "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
   }
 }
