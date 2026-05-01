@@ -20,6 +20,8 @@ fedora-bootc-minimal              Minimal Fedora bootc (kernel, systemd, bootc)
 
 All images published to `ghcr.io/bensmith/` with datetime tags, signed with cosign (keyless OIDC).
 
+Each image carries per-version floating tags using bare Fedora version numbers (e.g. `:43`, `:44`). The `:latest` tag (and `:rpmfusion` / `:negativo17` for nvidia variants) always points at the current stable Fedora version. Supported versions and the current stable are defined in `fedora-versions.yml` at the repo root.
+
 ### What's in hypervisor-bootc
 
 The base hypervisor image (`hypervisor.Containerfile`) is headless and includes:
@@ -147,8 +149,14 @@ sudo systemctl reboot
 
 **Switching variants:**
 ```bash
+# Switch to latest stable
 sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:negativo17
 sudo systemctl reboot
+
+# Pin to a specific Fedora version
+sudo bootc switch ghcr.io/bensmith/hypervisor-bootc:44
+sudo bootc switch ghcr.io/bensmith/hypervisor-nvidia:rpmfusion-44
+sudo bootc switch ghcr.io/bensmith/hypervisor-amd:44
 ```
 
 ## Key Design Decisions

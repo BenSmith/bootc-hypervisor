@@ -3,15 +3,11 @@ name: Build Fedora Minimal Bootc
 on:
   workflow_dispatch:
     inputs:
-      fedora_version:
-        description: 'Fedora version to build'
-        required: true
-        default: '43'
-        type: choice
-        options:
-          - '43'
-          - '44'
-          - 'rawhide'
+      versions_override:
+        description: 'JSON array of Fedora versions to build, e.g. [44] (empty = use fedora-versions.yml)'
+        required: false
+        default: ''
+        type: string
 
   schedule:
     - cron: '0 2 * * 6'
@@ -23,23 +19,50 @@ on:
       - 'policy-minimal.json.template'
       - 'cosign.pub'
       - '.github/workflows/build-minimal-bootc.yml'
+      - 'fedora-versions.yml'
 
 concurrency:
   group: build-minimal-bootc-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  STABLE_FEDORA_VERSION: '43'
   IMAGE_NAME: fedora-bootc-minimal
 
 jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.r.outputs.versions }}
+      stable: ${{ steps.r.outputs.stable }}
+      rechunker: ${{ steps.r.outputs.rechunker }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+          if [ -n "${{ inputs.versions_override }}" ]; then
+            echo "versions=${{ inputs.versions_override }}"
+          else
+            echo "versions=$(yq -o=json -I=0 '.supported' fedora-versions.yml)"
+          fi >> "$GITHUB_OUTPUT"
+          {
+            echo "stable=$(yq '.stable' fedora-versions.yml)"
+            echo "rechunker=$(yq '.rechunker' fedora-versions.yml)"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: setup
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
       packages: write
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ${{ fromJson(needs.setup.outputs.versions) }}
 
     steps:
       - name: Checkout repository
@@ -48,14 +71,11 @@ jobs:
       - name: Resolve build parameters
         id: params
         env:
-          INPUT_VERSION: ${{ inputs.fedora_version }}
           OWNER_RAW: ${{ github.repository_owner }}
         run: |
-          VERSION="${INPUT_VERSION:-${STABLE_FEDORA_VERSION}}"
           OWNER=$(echo "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
           TAG=$(date +%Y%m%d-%H%M)
           {
-            echo "version=${VERSION}"
             echo "owner=${OWNER}"
             echo "tag=${TAG}"
             echo "image_base=ghcr.io/${OWNER}/${IMAGE_NAME}"
@@ -87,7 +107,7 @@ jobs:
 
       - name: Build minimal bootc image
         env:
-          VERSION: ${{ steps.params.outputs.version }}
+          VERSION: ${{ matrix.fedora_version }}
           TAG: ${{ steps.params.outputs.tag }}
         run: |
           sudo podman build \
@@ -104,11 +124,11 @@ jobs:
 
       - name: Rechunk image
         env:
-          VERSION: ${{ steps.params.outputs.version }}
+          RECHUNKER: ${{ needs.setup.outputs.rechunker }}
         run: |
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
-            quay.io/fedora/fedora-bootc:${VERSION} \
+            quay.io/fedora/fedora-bootc:${RECHUNKER} \
             /usr/libexec/bootc-base-imagectl rechunk \
             localhost/${IMAGE_NAME}:build \
             localhost/${IMAGE_NAME}:rechunked
@@ -125,11 +145,12 @@ jobs:
         id: push
         env:
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          VERSION: ${{ steps.params.outputs.version }}
+          VERSION: ${{ matrix.fedora_version }}
           TAG: ${{ steps.params.outputs.tag }}
+          STABLE: ${{ needs.setup.outputs.stable }}
         run: |
           TAGS=("${VERSION}-${TAG}" "${VERSION}")
-          if [ "${VERSION}" = "${STABLE_FEDORA_VERSION}" ]; then
+          if [ "${VERSION}" = "${STABLE}" ]; then
             TAGS+=("latest")
           fi
 
@@ -164,7 +185,7 @@ jobs:
           TAGS: ${{ steps.push.outputs.tags }}
         run: |
           {
-            echo "## Minimal bootc build complete"
+            echo "## Minimal bootc build complete (F${{ matrix.fedora_version }})"
             echo ""
             echo "Pushed and signed:"
             for t in $TAGS; do
