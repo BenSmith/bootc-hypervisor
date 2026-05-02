@@ -172,9 +172,9 @@ jobs:
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
+          sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
-            skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
+            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
@@ -360,11 +360,11 @@ jobs:
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
+          sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
-            skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
+            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
 
           {
