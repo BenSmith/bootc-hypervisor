@@ -1,17 +1,9 @@
 {
   "default": [{"type": "insecureAcceptAnything"}],
   "transports": {
-    "docker-daemon": {
-      "": [{"type": "insecureAcceptAnything"}]
-    },
-    "docker": {
-      "": [{"type": "insecureAcceptAnything"}]
-    },
-    "oci-archive": {
-      "": [{"type": "insecureAcceptAnything"}]
-    },
-    "docker-archive": {
-      "": [{"type": "insecureAcceptAnything"}]
-    }
+    "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker": {"": [{"type": "insecureAcceptAnything"}]},
+    "oci-archive": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-archive": {"": [{"type": "insecureAcceptAnything"}]}
   }
 }

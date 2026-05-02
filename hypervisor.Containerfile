@@ -22,6 +22,7 @@ LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/l
 
 COPY policy.json /etc/containers/policy.json
 COPY cosign.pub /etc/pki/containers/cosign.pub
+COPY registries.d/ghcr.io.yaml /etc/containers/registries.d/ghcr.io.yaml
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
