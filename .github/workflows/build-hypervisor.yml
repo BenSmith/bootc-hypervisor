@@ -170,14 +170,14 @@ jobs:
 
           sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${FLOATING}"
-          sudo podman push "${IMAGE_BASE}:${FLOATING}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
-            sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:latest"
-            sudo podman push "${IMAGE_BASE}:latest"
+            skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
-          echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Sign base
         env:
@@ -358,13 +358,13 @@ jobs:
 
           sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${FLOATING_TAG}"
-          sudo podman push "${IMAGE_BASE}:${FLOATING_TAG}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
-            sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${STABLE_FLOATING}"
-            sudo podman push "${IMAGE_BASE}:${STABLE_FLOATING}"
+            skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
 
           {
