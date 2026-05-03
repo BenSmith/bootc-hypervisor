@@ -146,9 +146,6 @@ command_launcher = wofi --show run
 binding_close = <super> KEY_Q
 command_close = wlrctl toplevel close
 
-binding_menu = BTN_RIGHT
-command_menu = wofi --show run
-
 [move]
 activate = <super> BTN_LEFT
 

@@ -725,7 +725,7 @@ def generate_system_service(config, user_name, uid):
     if gpu_type == "nvidia":
         lines.append(
             "ExecStartPre=/bin/bash -c "
-            "'test -s /etc/cdi/nvidia.yaml"
+            "'test -s /run/cdi/nvidia.yaml"
             " || { echo \"NVIDIA CDI spec missing: check nvidia-cdi-generator.service\" >&2; exit 1; }'"
         )
 

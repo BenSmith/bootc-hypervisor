@@ -61,8 +61,7 @@ RUN echo -e "blacklist nouveau\noptions nouveau modeset=0" \
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot
 COPY systemd/nvidia-cdi-generator.service /etc/systemd/system/nvidia-cdi-generator.service
-RUN mkdir -p /etc/cdi && \
-    systemctl enable nvidia-persistenced && \
+RUN systemctl enable nvidia-persistenced && \
     systemctl enable nvidia-cdi-generator.service && \
     bootc container lint
 
