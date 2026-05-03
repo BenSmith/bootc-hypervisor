@@ -13,19 +13,14 @@
 #      Then set GF_SECURITY_ADMIN_PASSWORD = "${SECRET:grafana-admin-password}"
 #      in [container.environment] below.
 #
-#   3. Run enable once to create the workload home and volume directories:
+#   3. Enable the workload (copies grafana.ini template and starts Grafana):
 #        sudo workloadctl enable grafana
-#      (This will fail with a missing grafana.ini error — that's expected.)
 #
-#   4. Copy the config template and edit as needed:
-#        sudo cp /usr/share/workloadctl/containers/grafana/grafana.ini \
-#                 /var/lib/workloads/grafana/grafana.ini
+#   4. (Optional) Edit the config before or after enabling:
 #        sudo nano /var/lib/workloads/grafana/grafana.ini
+#        sudo workloadctl restart grafana
 #
-#   5. Enable again (now that grafana.ini is in place):
-#        sudo workloadctl enable grafana
-#
-#   6. Configure firewall to allow Grafana web interface:
+#   5. Configure firewall to allow Grafana web interface:
 #        sudo firewall-cmd --add-port=3000/tcp --permanent
 #        sudo firewall-cmd --reload
 #

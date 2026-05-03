@@ -12,20 +12,14 @@
 #   1. Enable the prometheus (node-exporter) workload first:
 #        sudo workloadctl enable prometheus
 #
-#   2. Enable prometheus-server (will fail — prometheus.yml doesn't exist yet):
+#   2. Enable prometheus-server (copies prometheus.yml template automatically):
 #        sudo workloadctl enable prometheus-server
 #
-#   3. Copy default config and alert rules:
-#        sudo cp /usr/share/workloadctl/containers/prometheus-server/prometheus.yml \
-#                 /var/lib/workloads/prometheus-server/prometheus.yml
+#   3. (Optional) Copy bundled alert rules:
 #        sudo cp -r /usr/share/workloadctl/containers/prometheus-server/rules \
 #                 /var/lib/workloads/prometheus-server/rules
-#        sudo chown -R _wl-prometheus-server: /var/lib/workloads/prometheus-server/
 #
-#   4. Enable again:
-#        sudo workloadctl enable prometheus-server
-#
-#   5. Configure firewall:
+#   4. Configure firewall:
 #        sudo firewall-cmd --add-port=9090/tcp --permanent
 #        sudo firewall-cmd --reload
 #

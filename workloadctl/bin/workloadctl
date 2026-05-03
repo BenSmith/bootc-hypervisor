@@ -564,18 +564,31 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     missing_required_files = [e for e in required_files if not Path(e["path"]).exists()]
 
     if missing_required_files:
-        print("  ✗ Missing required files:")
+        home_resolved = Path(config.home_dir).resolve()
+        still_missing = []
         for entry in missing_required_files:
-            print(f"    - {entry['path']}")
-        print()
-        print("  Create these files before enabling:")
-        for entry in missing_required_files:
-            if entry["hint"]:
-                print(f"    sudo cp {entry['hint']} \\")
-                print(f"             {entry['path']}")
+            dest = Path(entry["path"])
+            hint = entry.get("hint")
+            if hint and Path(hint).exists() and dest.resolve().is_relative_to(home_resolved):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(hint, dest)
+                print(f"  ✓ Copied config template: {dest}")
             else:
-                print(f"    # Create {entry['path']}")
-        failed = True
+                still_missing.append(entry)
+
+        if still_missing:
+            print("  ✗ Missing required files:")
+            for entry in still_missing:
+                print(f"    - {entry['path']}")
+            print()
+            print("  Create these files before enabling:")
+            for entry in still_missing:
+                if entry["hint"]:
+                    print(f"    sudo cp {entry['hint']} \\")
+                    print(f"             {entry['path']}")
+                else:
+                    print(f"    # Create {entry['path']}")
+            failed = True
 
     # Check volume paths exist
     # Paths in required_files are files the user must provide

@@ -6,19 +6,14 @@
 #   1. Build the container:
 #        cd containers/squid && sudo ./build.sh
 #
-#   2. Run enable once to create the workload home and volume directories:
+#   2. Enable the workload (copies squid.conf template and starts Squid):
 #        sudo workloadctl enable squid
-#      (This will fail with a missing squid.conf error — that's expected.)
 #
-#   3. Copy the config template and edit as needed:
-#        sudo cp /usr/share/workloadctl/containers/squid/squid.conf \
-#                 /var/lib/workloads/squid/squid.conf
+#   3. (Optional) Edit the config before or after enabling:
 #        sudo nano /var/lib/workloads/squid/squid.conf
+#        sudo workloadctl restart squid
 #
-#   4. Enable again (now that squid.conf is in place):
-#        sudo workloadctl enable squid
-#
-#   5. Configure firewall to allow proxy access:
+#   4. Configure firewall to allow proxy access:
 #        sudo firewall-cmd --add-port=3128/tcp --permanent
 #        sudo firewall-cmd --reload
 #
