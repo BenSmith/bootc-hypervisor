@@ -3,11 +3,11 @@ Description=Generate NVIDIA CDI specification
 Documentation=https://github.com/NVIDIA/nvidia-container-toolkit
 After=local-fs.target
 ConditionPathExists=/dev/nvidia0
-ConditionPathExists=!/etc/cdi/nvidia.yaml
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+RuntimeDirectory=cdi
+ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/run/cdi/nvidia.yaml
 StandardOutput=journal
 StandardError=journal
 RemainAfterExit=yes

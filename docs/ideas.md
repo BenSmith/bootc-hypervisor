@@ -4,20 +4,10 @@
 > 
 > Review periodically and pick what sounds interesting.
 
-**Last Updated:** 2026-04-12
+**Last Updated:** 2026-05-03
 
 ---
 
-## Active Consideration
-*Currently thinking about these*
-
----
-### Full Desktop Environments in Containers
-**Why:** lots of flexibility in desktop environments, easy to add/remove, and little hypervisor pollution 
-- **Complexity:** High (display server, session management, deep integration)
-- **Alternative:** Minimal compositor + individual apps might be sufficient
-
----
 
 ### Multi-Container Workload Support
 **Why:** Enable complex workloads (dev env + DB + cache, desktop + streaming)
@@ -38,7 +28,7 @@
 - Test and document
 
 **Notes:**
-**Decision:** Wait until actually blocked by specific use case (don't over-engineer)
+**Decision:** Wait until actually blocked by specific use case
 **Status:** Not started
 
 ---
@@ -159,12 +149,12 @@ Start here when unsure what to work on:
 - Workload dependency management (start B after A)
 - Secrets rotation automation (auto-rotate credentials periodically)
 - Workload migration tools (move between hosts)
-- Resource recommendations (suggest limits based on usage)
 - Generate seccomp profile instead of static, so it will handle changes in the distribution policies
 - Scheduled image updates: systemd timer that runs `workloadctl update --all` periodically.
   Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
   Could add configurable schedule, notification on updates, and update log.
 - Workloads get LVM provisioned to cap or flex storage
 - consider python3-tomlkit for toml edits that preserve comments
-- consider using podman api instead of podman cli to bypass all the quoting and escaping mess
-- auto-detect GPUs
+- make missing host setup script an error not a warning
+- Sway-based workload
+- sunshine-kdeplasma

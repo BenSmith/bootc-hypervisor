@@ -398,6 +398,11 @@ Encrypt a new credential and store it in `/etc/credstore.encrypted/`.
 sudo workloadctl secret create [--key-type {tpm2,host,host+tpm2}] [--file FILE] [--force] <name>
 ```
 
+Interactive prompt to create secret:
+```
+systemd-ask-password -n | sudo systemd-creds encrypt --with-key=host --name=KRDP_PASSWORD - /etc/credstore.encrypted/KRDP_PASSWORD
+```
+
 | Option | Description |
 |---|---|
 | `--key-type` | Encryption key type (default: `tpm2`) |

@@ -42,10 +42,10 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. ENCRYPTION (One-time setup)                                  │
-│                                                                  │
+│                                                                 │
 │  Plain secret → systemd-creds encrypt → Encrypted credential    │
-│  "my-api-key"                            (AES256-GCM)            │
-│                                                                  │
+│  "my-api-key"                            (AES256-GCM)           │
+│                                                                 │
 │  Stored in: /etc/credstore.encrypted/jellyfin-api-key           │
 │  Permissions: root:root 0600                                    │
 │  Format: Binary blob (not readable as text)                     │
@@ -53,29 +53,29 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
                            ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 2. BOOT TIME (Automatic decryption)                             │
-│                                                                  │
+│                                                                 │
 │  systemd reads service file:                                    │
 │    LoadCredentialEncrypted=api-key:/etc/credstore.encrypted/... │
-│                                                                  │
+│                                                                 │
 │  systemd decrypts using:                                        │
 │    - TPM2 chip (if available) OR                                │
 │    - Host key (/var/lib/systemd/credential.secret)              │
-│                                                                  │
+│                                                                 │
 │  Writes decrypted secret to:                                    │
-│    /run/credentials/workload-jellyfin.service/api-key         │
-│                                                                  │
-│  Permissions: _wl-jellyfin:root 0400 (read-only)              │
+│    /run/credentials/workload-jellyfin.service/api-key           │
+│                                                                 │
+│  Permissions: _wl-jellyfin:root 0400 (read-only)                │
 │  Location: tmpfs (RAM only, never hits disk)                    │
 └─────────────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. RUNTIME (Service access)                                     │
-│                                                                  │
+│                                                                 │
 │  Only the workload service can read its credentials:            │
-│    - Runs as user: _wl-jellyfin                               │
-│    - Sees: /run/credentials/workload-jellyfin.service/        │
+│    - Runs as user: _wl-jellyfin                                 │
+│    - Sees: /run/credentials/workload-jellyfin.service/          │
 │    - Cannot see other workload's credentials                    │
-│                                                                  │
+│                                                                 │
 │  Generator reads credential and:                                │
 │    - Injects into environment: JELLYFIN_API_KEY=<value>         │
 │    - OR mounts into container as file                           │
@@ -83,9 +83,9 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
                            ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 4. SHUTDOWN (Automatic cleanup)                                 │
-│                                                                  │
+│                                                                 │
 │  When service stops:                                            │
-│    - /run/credentials/workload-jellyfin.service/ deleted      │
+│    - /run/credentials/workload-jellyfin.service/ deleted        │
 │    - Memory cleared (tmpfs wiped)                               │
 │    - Encrypted credential remains safely on disk                │
 └─────────────────────────────────────────────────────────────────┘

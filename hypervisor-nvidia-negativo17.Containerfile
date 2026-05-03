@@ -63,8 +63,7 @@ RUN echo -e "blacklist nouveau\noptions nouveau modeset=0" \
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot
 COPY systemd/nvidia-cdi-generator.service /etc/systemd/system/nvidia-cdi-generator.service
-RUN mkdir -p /etc/cdi && \
-    printf '[Unit]\nDescription=Initialize NVIDIA UVM device nodes\nBefore=workloads.slice\nAfter=nvidia-persistenced.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-smi\n\n[Install]\nWantedBy=multi-user.target\n' \
+RUN printf '[Unit]\nDescription=Initialize NVIDIA UVM device nodes\nBefore=workloads.slice\nAfter=nvidia-persistenced.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-smi\n\n[Install]\nWantedBy=multi-user.target\n' \
     > /etc/systemd/system/nvidia-init.service && \
     systemctl enable nvidia-persistenced && \
     systemctl enable nvidia-init.service && \

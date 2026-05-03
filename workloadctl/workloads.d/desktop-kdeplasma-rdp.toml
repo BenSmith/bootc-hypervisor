@@ -22,6 +22,8 @@ on_failure = "kill"
 
 [devices]
 # This configuration requires a render node (/dev/dri/renderD*)
+# 2026-05-03: kpipewire can't get video buffers from nvidia's proprietary drivers v595, so
+# this workload doesn't work on nvidia and wayland at the moment.
 gpu = "auto"
 
 [security]
