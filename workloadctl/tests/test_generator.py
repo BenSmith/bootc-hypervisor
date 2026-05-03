@@ -576,6 +576,105 @@ class TestGeneratorUserns(unittest.TestCase):
         self.assertIn("--userns=keep-id", service)
 
 
+class TestGeneratorServiceType(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def run_gen(self):
+        return run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+
+    def read_service(self, name):
+        return (Path(self.services_dir) / f"workload-{name}.service").read_text()
+
+    def test_default_service_type_is_exec(self):
+        """No service_type set → Type=exec, --sdnotify=ignore."""
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+            enabled = true
+
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("plain")
+        self.assertIn("Type=exec", service)
+        self.assertIn("--sdnotify=ignore", service)
+        self.assertNotIn("Type=notify", service)
+        self.assertNotIn("--sdnotify=conmon", service)
+
+    def test_systemd_in_container_uses_exec_not_notify(self):
+        """container.systemd = "always" must not change the host service type.
+
+        These workloads run systemd as PID 1 inside the container, which is
+        controlled entirely by --systemd=always passed to podman. The host
+        service type must still be Type=exec so that systemd does not wait for
+        a READY notification that conmon would send from outside the service
+        cgroup (which systemd silently drops when linger is active).
+        """
+        write_config(self.config_dir, "sysd", """\
+            [workload]
+            name = "sysd"
+            enabled = true
+
+            [container]
+            image = "systemd-app"
+            systemd = "always"
+        """)
+        self.run_gen()
+        service = self.read_service("sysd")
+        self.assertIn("Type=exec", service)
+        self.assertIn("--sdnotify=ignore", service)
+        self.assertIn("--systemd=always", service)
+        self.assertNotIn("Type=notify", service)
+        self.assertNotIn("--sdnotify=conmon", service)
+
+    def test_explicit_notify_service_type(self):
+        """Explicit service_type = "notify" → Type=notify, --sdnotify=conmon."""
+        write_config(self.config_dir, "notifywl", """\
+            [workload]
+            name = "notifywl"
+            enabled = true
+
+            [container]
+            image = "alpine"
+
+            [resources]
+            service_type = "notify"
+        """)
+        self.run_gen()
+        service = self.read_service("notifywl")
+        self.assertIn("Type=notify", service)
+        self.assertIn("--sdnotify=conmon", service)
+        self.assertNotIn("Type=exec", service)
+        self.assertNotIn("--sdnotify=ignore", service)
+
+    def test_invalid_service_type_falls_back_to_exec(self):
+        """Invalid service_type value → warning emitted, falls back to Type=exec."""
+        write_config(self.config_dir, "badtype", """\
+            [workload]
+            name = "badtype"
+            enabled = true
+
+            [container]
+            image = "alpine"
+
+            [resources]
+            service_type = "turbo"
+        """)
+        result = self.run_gen()
+        service = self.read_service("badtype")
+        self.assertIn("Type=exec", service)
+        self.assertIn("WARNING", result.stdout + result.stderr)
+
+
 class TestGeneratorAlwaysExitsZero(unittest.TestCase):
     def test_empty_config_dir(self):
         with tempfile.TemporaryDirectory() as config_dir, \

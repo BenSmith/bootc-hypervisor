@@ -405,6 +405,19 @@ def generate_system_service(config, user_name, uid):
                     f"Valid values: {', '.join(valid_systemd)}.", level="err")
             return None
 
+    # service_type is read here (before podman_args) so --sdnotify can match.
+    # Default is "exec": activates once podman starts, no READY handshake needed.
+    # "notify" + --sdnotify=conmon is broken systemically when linger is active
+    # because conmon migrates into the user session cgroup and systemd rejects its
+    # READY=1 (NotifyAccess=all only accepts PIDs in the service's own cgroup tree).
+    service_type = config.get("resources", {}).get("service_type", "exec")
+    valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
+    if service_type not in valid_types:
+        log_msg(f"WARNING: Invalid service_type '{service_type}' for {name}. "
+                f"Valid types: {', '.join(valid_types)}. Defaulting to 'exec'.",
+                level="warning")
+        service_type = "exec"
+
     container_name_quoted = dq(container_name)
     podman_args = [
         "/usr/bin/podman run",
@@ -420,8 +433,10 @@ def generate_system_service(config, user_name, uid):
     else:
         podman_args.append(f"--systemd={systemd_mode}")
 
+    # Use sdnotify=conmon only when the unit type is notify; otherwise ignore.
+    sdnotify = "conmon" if service_type == "notify" else "ignore"
     podman_args.extend([
-        "--sdnotify=conmon",
+        f"--sdnotify={sdnotify}",
         f"--pull={pull_policy}",
         "--log-driver=journald",
     ])
@@ -667,15 +682,6 @@ def generate_system_service(config, user_name, uid):
             podman_args.append(dq(command))
 
     podman_cmd = " ".join(podman_args)
-
-    # Get service type from resources config
-    service_type = config.get("resources", {}).get("service_type", "notify")
-    valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
-    if service_type not in valid_types:
-        log_msg(f"WARNING: Invalid service_type '{service_type}' for {name}. "
-                f"Valid types: {', '.join(valid_types)}. Defaulting to 'notify'.",
-                level="warning")
-        service_type = "notify"
 
     lines.extend([
         "",

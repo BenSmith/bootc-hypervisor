@@ -333,11 +333,20 @@ class TestWorkloadGeneration(unittest.TestCase):
         """User namespace setting from config appears in podman args."""
         for filename, config in self.configs.items():
             name = config["workload"]["name"]
-            userns = config.get("security", {}).get("userns")
+            security = config.get("security", {})
+            userns = security.get("userns")
+            has_extra_maps = bool(
+                security.get("extra_groups")
+                or security.get("extra_uidmaps")
+                or security.get("extra_gidmaps")
+            )
             with self.subTest(workload=name):
                 service = self._read_service(name)
-                if userns is None:
-                    # Default is keep-id
+                if has_extra_maps:
+                    # extra_groups/uidmaps/gidmaps trigger --uidmap/--gidmap
+                    # (podman 5.x forbids mixing --userns with these flags)
+                    self.assertIn("--uidmap ", service)
+                elif userns is None:
                     self.assertIn("--userns=keep-id", service)
                 else:
                     self.assertIn(f"--userns={userns}", service)

@@ -667,24 +667,23 @@ ports = ["8080:80", "8443:443"]
 
 # Optional: Systemd service type
 # Type: string
-# Default: "notify"
+# Default: "exec"
 # Valid values: "simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"
 # Purpose: Controls how systemd tracks the service state
 #
 # Common values:
-#   "notify" (default) - Wait for readiness notification from container
-#                        Works best with containers that support sd-notify
-#                        Provides accurate "active" state
-#   "simple"           - Consider service started immediately after exec
-#                        Use for containers that don't send notifications
-#                        Example: registry, most simple HTTP servers
-#   "exec"             - Similar to simple but waits for initial process fork
-#
-# Use "simple" if the workload gets stuck in "activating (start)" state
-# despite the container running successfully.
+#   "exec" (default)   - Activates once podman has exec'd the container process.
+#                        Correct for all workloads. Does not require a READY
+#                        notification, which avoids a systemic issue where
+#                        conmon migrates into the user session cgroup when linger
+#                        is active, causing systemd to silently drop its READY=1.
+#   "notify"           - Waits for READY=1 from conmon (--sdnotify=conmon).
+#                        Only use this if linger is disabled for the workload user
+#                        and you need accurate readiness tracking.
+#   "simple"           - Consider service started immediately after fork.
 #
 # Systemd directive: Type=
-# service_type = "notify"
+# service_type = "exec"
 
 # Optional: Service startup timeout
 # Type: integer (seconds)

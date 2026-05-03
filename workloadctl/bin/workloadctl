@@ -31,8 +31,81 @@ from workload_lib import (
     workload_home_dir, expand_volume_path, validate_workload_name,
     auto_detect_credentials,
 )
+from podman import Podman, PodmanError
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
+
+
+def _format_size(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    f = float(n)
+    for u in units:
+        if f < 1024 or u == units[-1]:
+            return f"{f:.1f} {u}"
+        f /= 1024
+    return f"{n} B"
+
+
+def _format_created(ts: str | int | None) -> str:
+    """Render podman's image Created (Unix int or ISO string) as 'N days ago'."""
+    if ts is None or ts == "":
+        return "unknown"
+    try:
+        if isinstance(ts, (int, float)):
+            created = datetime.datetime.fromtimestamp(int(ts))
+        else:
+            s = str(ts).rstrip("Z").split(".")[0]
+            try:
+                created = datetime.datetime.fromisoformat(s)
+            except ValueError:
+                created = datetime.datetime.fromtimestamp(int(float(ts)))
+        delta = datetime.datetime.now() - created
+        days = delta.days
+        if days >= 1:
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        hours = delta.seconds // 3600
+        if hours >= 1:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        minutes = max(1, delta.seconds // 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    except Exception:
+        return "unknown"
+
+
+def _created_unix(ts) -> int | None:
+    """Convert podman Created field (int, ISO string, or float string) to Unix int."""
+    if ts is None or ts == "":
+        return None
+    try:
+        if isinstance(ts, (int, float)):
+            return int(ts)
+        s = str(ts).rstrip("Z").split(".")[0]
+        try:
+            return int(datetime.datetime.fromisoformat(s).timestamp())
+        except ValueError:
+            return int(float(ts))
+    except Exception:
+        return None
+
+
+def _parse_size_bytes(s) -> int:
+    """Parse podman size strings like '1.23 GB', '456B', '0 B' to bytes."""
+    if isinstance(s, int):
+        return s
+    s = str(s).strip()
+    sl = s.lower()
+    for suffix, mul in [("tib", 1024**4), ("gib", 1024**3), ("mib", 1024**2),
+                         ("kib", 1024), ("tb", 10**12), ("gb", 10**9),
+                         ("mb", 10**6), ("kb", 10**3), ("b", 1)]:
+        if sl.endswith(suffix):
+            try:
+                return int(float(s[:-len(suffix)].strip()) * mul)
+            except ValueError:
+                return 0
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
 
 
 class WorkloadMasked(Exception):
@@ -187,21 +260,22 @@ class WorkloadManager:
         return subprocess.run(cmd, capture_output=capture_output, text=True,
                               check=check, cwd=cwd)
 
-    def get_image_id(self, config: WorkloadConfig) -> str:
-        """Get current image ID (returns empty string on any error)"""
-        try:
-            result = self.run_podman(
-                config, "images", "--format", "{{.ID}}", config.image,
-                capture_output=True
+    def podman(self, config: WorkloadConfig) -> Podman:
+        """Return a memoized Podman wrapper for this workload's user."""
+        if not hasattr(self, "_podman_clients"):
+            self._podman_clients: dict[int, Podman] = {}
+        if config.uid not in self._podman_clients:
+            self._podman_clients[config.uid] = Podman.for_user(
+                config.username, config.uid, config.home_dir
             )
-            # Check if command succeeded (sudo might fail without permissions)
-            if result.returncode != 0:
-                return ""
-            lines = result.stdout.strip().split('\n')
-            return lines[0] if lines and lines[0] else ""
-        except Exception:
-            # Silently handle any errors (permission denied, user doesn't exist, etc.)
-            return ""
+        return self._podman_clients[config.uid]
+
+    def get_image_id(self, config: WorkloadConfig) -> str:
+        """Get current image ID. Returns '' if image not present.
+
+        Raises PodmanError on unexpected failures (sudo, malformed output, etc.)
+        """
+        return self.podman(config).image_id(config.image)
 
     def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
         """Get all workload configs"""
@@ -463,15 +537,6 @@ def cmd_list(args, manager: WorkloadManager):
                 capture_output=True, text=True
             )
             state = result.stdout.strip()
-            # Map systemd states to more readable names
-            state_map = {
-                "active": "running",
-                "inactive": "stopped",
-                "failed": "failed",
-                "activating": "starting",
-                "deactivating": "stopping"
-            }
-            state = state_map.get(state, state)
         else:
             state = "-"
 
@@ -507,12 +572,61 @@ def cmd_list(args, manager: WorkloadManager):
 
 def cmd_status(args, manager: WorkloadManager):
     """Show workload service status"""
-    # If no workload specified, show list of all workloads
     if not args.workload:
         cmd_list(args, manager)
         return
 
     config = WorkloadConfig(args.workload)
+
+    if args.json:
+        UINT64_MAX = 18446744073709551615
+        props_result = subprocess.run(
+            ["systemctl", "show", config.service_name,
+             "--property=ActiveState,UnitFileState,MainPID,MemoryCurrent,TasksCurrent,Result,ActiveEnterTimestamp",
+             "--timestamp=unix"],
+            capture_output=True, text=True
+        )
+        props = {}
+        for line in props_result.stdout.splitlines():
+            key, _, value = line.partition("=")
+            props[key] = value
+
+        def _int_or_null(v):
+            if not v or v == "[n/a]":
+                return None
+            try:
+                n = int(v)
+                return None if n == UINT64_MAX else n
+            except ValueError:
+                return None
+
+        def _ts_or_null(v):
+            if not v or v == "[n/a]":
+                return None
+            if v.startswith("@"):
+                try:
+                    return int(float(v[1:]))
+                except ValueError:
+                    return None
+            return None
+
+        enabled_result = subprocess.run(
+            ["systemctl", "is-enabled", config.service_name],
+            capture_output=True, text=True
+        )
+        print(json.dumps({
+            "workload": config.name,
+            "service": config.service_name,
+            "state": props.get("ActiveState") or None,
+            "enabled": enabled_result.returncode == 0,
+            "active_since": _ts_or_null(props.get("ActiveEnterTimestamp", "")),
+            "main_pid": _int_or_null(props.get("MainPID", "")),
+            "memory_current": _int_or_null(props.get("MemoryCurrent", "")),
+            "tasks_current": _int_or_null(props.get("TasksCurrent", "")),
+            "result": props.get("Result") or None
+        }, indent=2))
+        return
+
     subprocess.run(["systemctl", "status", config.service_name])
 
 
@@ -544,11 +658,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     # Check if image exists locally (for pull=never)
     pull_policy = config.config.get("container", {}).get("pull", "missing")
     if pull_policy == "never":
-        result = subprocess.run(
-            ["podman", "images", "--format", "{{.ID}}", config.image],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0 or not result.stdout.strip():
+        if not Podman.for_root().image_id(config.image):
             print(f"  ✗ Image '{config.image}' not found locally and pull=never")
             build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
             if build_script.exists():
@@ -696,13 +806,7 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
         return
 
     image_id = manager.get_image_id(config)
-
-    # Check root's store regardless - transfer if absent or if root has a newer build
-    root_check = subprocess.run(
-        ["podman", "images", "--format", "{{.ID}}", config.image],
-        capture_output=True, text=True
-    )
-    root_image_id = root_check.stdout.strip().split('\n')[0] if root_check.stdout.strip() else ""
+    root_image_id = Podman.for_root().image_id(config.image)
 
     need_transfer = root_image_id and root_image_id != image_id
 
@@ -711,45 +815,33 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
             print(f"  Root store has updated image (rebuild detected), re-transferring...")
         else:
             print(f"  Transferring image from root store to workload user store...")
-        # Write a permissive policy file for the transfer.
-        # Systems with "default": reject block both containers-storage: (save)
-        # and docker-archive: (load) transports.  Both are local-only operations
-        # so bypassing the transport policy here is safe.
-        permissive_policy = '{"default":[{"type":"insecureAcceptAnything"}]}'
-        fd, policy_path = tempfile.mkstemp(suffix='.json', dir='/tmp')
-        os.write(fd, permissive_policy.encode())
-        os.close(fd)
-        fd, tmp_path = tempfile.mkstemp(suffix='.tar', dir='/tmp')
-        os.close(fd)
-        try:
-            save_result = subprocess.run(
-                ["podman", "save", "--signature-policy", policy_path,
-                 "--format", "docker-archive", "-o", tmp_path, config.image],
-                capture_output=True, text=True
-            )
-            if save_result.returncode != 0:
-                print(f"Error: Failed to save image: {save_result.stderr}", file=sys.stderr)
-                sys.exit(1)
-            # Make temp files readable by the workload user (not world-readable)
-            os.chown(policy_path, config.uid, -1)
-            os.chown(tmp_path, config.uid, -1)
-            load_cmd = ["sudo", "-u", config.username,
-                        "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
-                        "-E", f"HOME={config.home_dir}",
-                        "podman", "load",
-                        "--signature-policy", policy_path,
-                        "-i", tmp_path]
-            load_proc = subprocess.run(load_cmd, capture_output=True, text=True, cwd="/tmp")
-            if load_proc.returncode != 0:
-                print(f"Error: Failed to transfer image: {load_proc.stderr}", file=sys.stderr)
-                sys.exit(1)
-            print(f"  Image transferred successfully")
-        finally:
-            for p in (tmp_path, policy_path):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
+
+        save = subprocess.Popen(
+            ["podman", "save", "--format", "docker-archive", config.image],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        load = subprocess.Popen(
+            ["sudo", "-n", "-u", config.username,
+             "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
+             "-E", f"HOME={config.home_dir}",
+             "podman", "load"],
+            stdin=save.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd="/tmp",
+        )
+        save.stdout.close()
+        load_out, load_err = load.communicate()
+        save_err = save.stderr.read() if save.stderr else b""
+        save.wait()
+
+        if save.returncode != 0:
+            print(f"Error: Failed to save image: {save_err.decode(errors='replace')}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if load.returncode != 0:
+            print(f"Error: Failed to transfer image: {load_err.decode(errors='replace')}",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"  Image transferred successfully")
     elif not image_id:
         print()
         print(f"Error: Image '{config.image}' not found locally and pull=never", file=sys.stderr)
@@ -1010,45 +1102,70 @@ def cmd_cleanup(args, manager: WorkloadManager):
             if expected_user not in existing_users:
                 orphaned_dirs.append(d)
 
+    if args.json and not apply:
+        print(json.dumps({
+            "dry_run": True,
+            "orphan_users": [e.pw_name for e in orphaned_users],
+            "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "removed_users": [],
+            "removed_dirs": []
+        }, indent=2))
+        return
+
     if not orphaned_users and not orphaned_dirs:
-        print("Nothing to clean up.")
+        if args.json:
+            print(json.dumps({
+                "dry_run": not apply,
+                "orphan_users": [],
+                "orphan_dirs": [],
+                "removed_users": [],
+                "removed_dirs": []
+            }, indent=2))
+        else:
+            print("Nothing to clean up.")
         return
 
-    # Report what was found
-    if orphaned_users:
-        print(f"Orphaned users ({len(orphaned_users)}):")
-        for entry in orphaned_users:
-            has_subid_entries = False
-            for f in ["/etc/subuid", "/etc/subgid"]:
-                if Path(f).exists() and any(
-                    line.startswith(f"{entry.pw_name}:")
-                    for line in Path(f).read_text().splitlines()
-                ):
-                    has_subid_entries = True
-                    break
-            extras = []
-            if Path(entry.pw_dir).exists():
-                extras.append("has home dir")
-            if has_subid_entries:
-                extras.append("has subuid/subgid")
-            extra_str = f"  ({', '.join(extras)})" if extras else ""
-            print(f"  {entry.pw_name} (UID {entry.pw_uid}){extra_str}")
+    if not args.json:
+        # Report what was found
+        if orphaned_users:
+            print(f"Orphaned users ({len(orphaned_users)}):")
+            for entry in orphaned_users:
+                has_subid_entries = False
+                for f in ["/etc/subuid", "/etc/subgid"]:
+                    if Path(f).exists() and any(
+                        line.startswith(f"{entry.pw_name}:")
+                        for line in Path(f).read_text().splitlines()
+                    ):
+                        has_subid_entries = True
+                        break
+                extras = []
+                if Path(entry.pw_dir).exists():
+                    extras.append("has home dir")
+                if has_subid_entries:
+                    extras.append("has subuid/subgid")
+                extra_str = f"  ({', '.join(extras)})" if extras else ""
+                print(f"  {entry.pw_name} (UID {entry.pw_uid}){extra_str}")
 
-    if orphaned_dirs:
-        print(f"\nOrphaned directories ({len(orphaned_dirs)}):")
-        for d in orphaned_dirs:
-            print(f"  {d}")
+        if orphaned_dirs:
+            print(f"\nOrphaned directories ({len(orphaned_dirs)}):")
+            for d in orphaned_dirs:
+                print(f"  {d}")
 
-    if not apply:
-        print("\nRun with --apply to remove the above.")
-        return
+        if not apply:
+            print("\nRun with --apply to remove the above.")
+            return
+
+    removed_users = []
+    removed_dirs = []
 
     # Remove orphaned users
-    print()
+    if not args.json:
+        print()
     for entry in orphaned_users:
         username = entry.pw_name
         uid = entry.pw_uid
-        print(f"Removing {username}...")
+        if not args.json:
+            print(f"Removing {username}...")
 
         subprocess.run(["loginctl", "terminate-user", str(uid)], check=False,
                        capture_output=True)
@@ -1063,15 +1180,29 @@ def cmd_cleanup(args, manager: WorkloadManager):
                 p.write_text("\n".join(lines) + ("\n" if lines else ""))
 
         subprocess.run(["userdel", "-r", username], check=False, capture_output=True)
-        print(f"  ✓ Removed {username}")
+        removed_users.append(username)
+        if not args.json:
+            print(f"  ✓ Removed {username}")
 
     # Remove orphaned directories
     for d in orphaned_dirs:
-        print(f"Removing directory {d}...")
+        if not args.json:
+            print(f"Removing directory {d}...")
         shutil.rmtree(d, ignore_errors=True)
-        print(f"  ✓ Removed {d}")
+        removed_dirs.append(str(d))
+        if not args.json:
+            print(f"  ✓ Removed {d}")
 
-    print("\nCleanup complete.")
+    if args.json:
+        print(json.dumps({
+            "dry_run": False,
+            "orphan_users": [e.pw_name for e in orphaned_users],
+            "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "removed_users": removed_users,
+            "removed_dirs": removed_dirs
+        }, indent=2))
+    else:
+        print("\nCleanup complete.")
 
 
 def cmd_recreate(args, manager: WorkloadManager):
@@ -1181,16 +1312,15 @@ def cmd_network(args, manager: WorkloadManager):
 
         print(f"Creating network '{network_name}' for user {config.username} (UID {config.uid})...")
 
-        result = manager.run_podman(config, "network", "create", network_name,
-                                    capture_output=True)
-        if result.returncode == 0:
-            print(f"✓ Network '{network_name}' created successfully")
-            print("\nTo use this network in a workload, add to your TOML config:")
-            print("  [network]")
-            print(f"  mode = \"{network_name}\"")
-        else:
-            print(f"Error creating network: {result.stderr}", file=sys.stderr)
+        try:
+            manager.podman(config).network_create(network_name)
+        except PodmanError as e:
+            print(f"Error creating network: {e.stderr}", file=sys.stderr)
             sys.exit(1)
+        print(f"✓ Network '{network_name}' created successfully")
+        print("\nTo use this network in a workload, add to your TOML config:")
+        print("  [network]")
+        print(f"  mode = \"{network_name}\"")
 
 
 def cmd_ps(args, manager: WorkloadManager):
@@ -1209,22 +1339,18 @@ def cmd_ps(args, manager: WorkloadManager):
         for username in users:
             try:
                 uid = pwd.getpwnam(username).pw_uid
-                result = manager.run_podman_for_user(
-                    username, uid,
-                    "--log-level=error", "ps", "--format", "json",
-                    capture_output=True
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    for container in json.loads(result.stdout):
-                        containers_data.append({
-                            "username": username,
-                            "uid": uid,
-                            "id": container.get("Id", ""),
-                            "name": container.get("Names", [""])[0] if container.get("Names") else "",
-                            "image": container.get("Image", ""),
-                            "status": container.get("Status", ""),
-                            "created": container.get("Created", ""),
-                        })
+                home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
+                rows = Podman.for_user(username, uid, home).list_containers(all=False)
+                for container in rows:
+                    containers_data.append({
+                        "username": username,
+                        "uid": uid,
+                        "id": container.get("Id", ""),
+                        "name": container.get("Names", [""])[0] if container.get("Names") else "",
+                        "image": container.get("Image", ""),
+                        "status": container.get("Status", ""),
+                        "created": container.get("Created", ""),
+                    })
             except Exception:
                 continue
 
@@ -1239,12 +1365,8 @@ def cmd_ps(args, manager: WorkloadManager):
     for username in users:
         try:
             uid = pwd.getpwnam(username).pw_uid
-            check = manager.run_podman_for_user(
-                username, uid,
-                "--log-level=error", "ps", "--format", "{{.Names}}",
-                capture_output=True
-            )
-            if check.returncode == 0 and check.stdout.strip():
+            home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
+            if Podman.for_user(username, uid, home).list_containers(all=False):
                 found = True
                 print(f"=== {username} (UID {uid}) ===")
                 manager.run_podman_for_user(username, uid, "--log-level=error", "ps")
@@ -1329,7 +1451,7 @@ def _health_wait_seconds(config: WorkloadConfig) -> int:
 def _do_rollback(config: WorkloadConfig, manager: WorkloadManager, old_id: str):
     """Roll back to the previous image."""
     tag = rollback_tag(config.name)
-    manager.run_podman(config, "tag", tag, config.image)
+    manager.podman(config).tag(tag, config.image)
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"  ✗ {config.name}: rolled back to previous image ({old_id[:12]})")
 
@@ -1350,9 +1472,10 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
 
     old_id = manager.get_image_id(config)
 
-    result = manager.run_podman(config, "pull", config.image)
-    if result.returncode != 0:
-        print(f"  ✗ Failed to pull image", file=sys.stderr)
+    try:
+        manager.podman(config).pull(config.image)
+    except PodmanError as e:
+        print(f"  ✗ Failed to pull image: {e.stderr}", file=sys.stderr)
         return None
 
     new_id = manager.get_image_id(config)
@@ -1364,7 +1487,7 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
     # Tag the old image for rollback before restarting
     if old_id:
         tag = rollback_tag(config.name)
-        manager.run_podman(config, "tag", old_id, tag)
+        manager.podman(config).tag(old_id, tag)
 
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
 
@@ -1400,11 +1523,7 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
     rolled_back = 0
     for config, old_id in updated:
         if config.has_health_check():
-            result = manager.run_podman(
-                config, "inspect", "--format", "{{.State.Health.Status}}",
-                config.container_name, capture_output=True
-            )
-            status = result.stdout.strip() if result.returncode == 0 else ""
+            status = manager.podman(config).container_health(config.container_name) or ""
 
             if status == "healthy":
                 print(f"  ✓ {config.name}: healthy")
@@ -1415,11 +1534,7 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                 )
                 print(f"  ⏳ {config.name}: still starting, waiting {interval}s more...", end="", flush=True)
                 time.sleep(interval)
-                result = manager.run_podman(
-                    config, "inspect", "--format", "{{.State.Health.Status}}",
-                    config.container_name, capture_output=True
-                )
-                status = result.stdout.strip() if result.returncode == 0 else ""
+                status = manager.podman(config).container_health(config.container_name) or ""
                 if status == "healthy":
                     print(" healthy")
                 else:
@@ -1461,10 +1576,7 @@ def cmd_rollback(args, manager: WorkloadManager):
     tag = rollback_tag(config.name)
 
     # Check if rollback image exists
-    result = manager.run_podman(
-        config, "images", "--format", "{{.ID}}", tag, capture_output=True
-    )
-    rollback_id = result.stdout.strip().split('\n')[0] if result.returncode == 0 else ""
+    rollback_id = manager.podman(config).image_id(tag)
     if not rollback_id:
         print(f"Error: No rollback image found for {config.name}", file=sys.stderr)
         print(f"  (rollback images are created automatically by 'workloadctl update')", file=sys.stderr)
@@ -1476,9 +1588,10 @@ def cmd_rollback(args, manager: WorkloadManager):
         return
 
     # Retag rollback image as the workload's image
-    result = manager.run_podman(config, "tag", tag, config.image)
-    if result.returncode != 0:
-        print(f"Error: Failed to retag rollback image", file=sys.stderr)
+    try:
+        manager.podman(config).tag(tag, config.image)
+    except PodmanError as e:
+        print(f"Error: Failed to retag rollback image: {e.stderr}", file=sys.stderr)
         sys.exit(1)
 
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
@@ -1488,9 +1601,60 @@ def cmd_rollback(args, manager: WorkloadManager):
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
     config = WorkloadConfig(args.workload)
-
-    # Collect data for JSON output
     user_exists = manager.user_exists(config)
+
+    # Container
+    image_id = manager.get_image_id(config) if user_exists else None
+
+    # User
+    uid = None
+    user_home = None
+    groups = None
+    if user_exists:
+        try:
+            uid = config.uid
+        except Exception:
+            pass
+        try:
+            pw = pwd.getpwnam(config.username)
+            user_home = pw.pw_dir
+            groups = [grp.getgrgid(gid).gr_name for gid in os.getgrouplist(config.username, pw.pw_gid)]
+        except (KeyError, OSError):
+            pass
+
+    # Storage
+    storage_home = None
+    storage_exists = None
+    storage_size = None
+    if user_exists:
+        home_path = config.home_dir
+        storage_home = str(home_path)
+        storage_exists = home_path.exists()
+        if storage_exists:
+            du = subprocess.run(["du", "-sh", str(home_path)], capture_output=True, text=True)
+            storage_size = du.stdout.split()[0] if du.returncode == 0 else None
+
+    # Service state + active_since in one call
+    show_result = subprocess.run(
+        ["systemctl", "show", config.service_name,
+         "--property=ActiveState,ActiveEnterTimestamp",
+         "--timestamp=unix"],
+        capture_output=True, text=True
+    )
+    svc_props = {}
+    for line in show_result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        svc_props[key] = value
+
+    service_state = svc_props.get("ActiveState", "") or "inactive"
+    ts_raw = svc_props.get("ActiveEnterTimestamp", "")
+    active_since = None
+    if ts_raw and ts_raw.startswith("@"):
+        try:
+            active_since = int(float(ts_raw[1:]))
+        except ValueError:
+            pass
+
     info_data = {
         "workload": {
             "name": config.name,
@@ -1500,67 +1664,31 @@ def cmd_info(args, manager: WorkloadManager):
         },
         "container": {
             "name": config.container_name,
-            "image": config.image
+            "image": config.image,
+            "image_id": image_id
         },
         "user": {
             "name": config.username,
-            "uid": config.uid if user_exists else None,
-            "exists": user_exists
+            "uid": uid,
+            "exists": user_exists,
+            "home": user_home,
+            "groups": groups
         },
         "network": {
             "mode": config.get_network_mode(),
             "ports": config.get_ports()
         },
-        "storage": {},
+        "storage": {
+            "home": storage_home,
+            "exists": storage_exists,
+            "size": storage_size
+        },
         "service": {
-            "name": config.service_name
+            "name": config.service_name,
+            "state": service_state,
+            "active_since": active_since
         }
     }
-
-    if user_exists:
-        image_id = manager.get_image_id(config)
-        if image_id:
-            info_data["container"]["image_id"] = image_id
-
-    if user_exists:
-        try:
-            pw = pwd.getpwnam(config.username)
-            info_data["user"]["home"] = pw.pw_dir
-            groups_list = [grp.getgrgid(gid).gr_name for gid in os.getgrouplist(config.username, pw.pw_gid)]
-            info_data["user"]["groups"] = groups_list
-        except (KeyError, OSError):
-            pass
-
-    if user_exists:
-        home_path = config.home_dir
-        info_data["storage"]["home"] = str(home_path)
-        if home_path.exists():
-            result = subprocess.run(
-                ["du", "-sh", str(home_path)],
-                capture_output=True, text=True
-            )
-            size = result.stdout.split()[0] if result.returncode == 0 else "unknown"
-            info_data["storage"]["size"] = size
-            info_data["storage"]["exists"] = True
-        else:
-            info_data["storage"]["exists"] = False
-
-    result = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        info_data["service"]["state"] = "active"
-        result = subprocess.run(
-            ["systemctl", "show", config.service_name,
-             "--property=ActiveEnterTimestamp", "--value"],
-            capture_output=True, text=True
-        )
-        active_since = result.stdout.strip()
-        info_data["service"]["active_since"] = active_since
-    else:
-        state = result.stdout.strip() or "inactive"
-        info_data["service"]["state"] = state
 
     if args.json:
         print(json.dumps(info_data, indent=2))
@@ -1575,47 +1703,44 @@ def cmd_info(args, manager: WorkloadManager):
     print("Container:")
     print(f"  Name:   {config.container_name}")
     print(f"  Image:  {config.image}")
-    if "image_id" in info_data["container"]:
-        print(f"  ID:     sha256:{info_data['container']['image_id'][:12]}...")
+    if image_id:
+        print(f"  ID:     sha256:{image_id[:12]}...")
     print()
 
     print("User:")
     print(f"  Name:   {config.username}")
     if user_exists:
-        print(f"  UID:    {config.uid}")
-        if "home" in info_data["user"]:
-            print(f"  Home:   {info_data['user']['home']}")
-        if "groups" in info_data["user"]:
-            print(f"  Groups: {','.join(info_data['user']['groups'])}")
+        if uid is not None:
+            print(f"  UID:    {uid}")
+        if user_home is not None:
+            print(f"  Home:   {user_home}")
+        if groups is not None:
+            print(f"  Groups: {','.join(groups)}")
     else:
         print("  (User not created - workload not enabled)")
     print()
 
     print("Network:")
-    network_mode = info_data["network"]["mode"]
-    print(f"  Mode:   {network_mode}")
+    print(f"  Mode:   {info_data['network']['mode']}")
     if info_data["network"]["ports"]:
         print(f"  Ports:  {', '.join(info_data['network']['ports'])}")
     print()
 
     print("Storage:")
-    if info_data["storage"]:
-        if "home" in info_data["storage"]:
-            home = info_data["storage"]["home"]
-            if info_data["storage"].get("exists"):
-                size = info_data["storage"].get("size", "unknown")
-                print(f"  Home:   {home} ({size} used)")
-            else:
-                print(f"  Home:   {home} (not created)")
+    if storage_home is not None:
+        if storage_exists:
+            print(f"  Home:   {storage_home} ({storage_size or 'unknown'} used)")
+        else:
+            print(f"  Home:   {storage_home} (not created)")
     print()
 
     print("Service:")
     print(f"  Name:   {config.service_name}")
-    if info_data["service"]["state"] == "active":
-        active_since = info_data["service"].get("active_since", "")
-        print(f"  Active: active (running) since {active_since}")
+    if service_state == "active" and active_since is not None:
+        since_str = datetime.datetime.fromtimestamp(active_since).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"  Active: active (running) since {since_str}")
     else:
-        print(f"  Active: {info_data['service']['state']}")
+        print(f"  Active: {service_state}")
     print()
 
     print("Quick commands:")
@@ -1662,6 +1787,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     checks.append({
         "check": "required_fields",
         "passed": True,
+        "severity": "ok",
         "message": f"Required fields present: name={config.name}"
     })
 
@@ -1670,6 +1796,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         checks.append({
             "check": "username_length",
             "passed": False,
+            "severity": "error",
             "message": f"Username too long: {config.username} ({username_len} chars, max 31)",
             "fix": "Use shorter workload name"
         })
@@ -1678,6 +1805,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         checks.append({
             "check": "username_length",
             "passed": True,
+            "severity": "ok",
             "message": f"Username length OK ({username_len} chars)"
         })
 
@@ -1688,6 +1816,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "uid_range",
                 "passed": False,
+                "severity": "error",
                 "message": f"UID out of range: {uid} (should be 10000-52948)"
             })
             errors += 1
@@ -1695,13 +1824,14 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "uid_range",
                 "passed": True,
+                "severity": "ok",
                 "message": f"UID in valid range: {uid} (10000-52948)"
             })
     except WorkloadUserNotFound:
-        # UID not assigned yet - this is OK, will be assigned on first enable
         checks.append({
             "check": "uid_assigned",
             "passed": True,
+            "severity": "ok",
             "message": "UID not yet assigned (will be assigned on first enable)"
         })
 
@@ -1713,6 +1843,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         checks.append({
             "check": "name_uniqueness",
             "passed": False,
+            "severity": "error",
             "message": f"Name conflict: '{config.name}' also used in {conflicts[0].filename}"
         })
         errors += 1
@@ -1720,6 +1851,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         checks.append({
             "check": "name_uniqueness",
             "passed": True,
+            "severity": "ok",
             "message": "Name is unique"
         })
 
@@ -1731,6 +1863,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "volume_path",
                 "passed": True,
+                "severity": "ok",
                 "message": f"Volume path exists: {host_path}",
                 "path": host_path
             })
@@ -1738,6 +1871,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "volume_path",
                 "passed": True,
+                "severity": "ok",
                 "message": f"Volume path listed in required_files (setup needed): {host_path}",
                 "path": host_path
             })
@@ -1745,6 +1879,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "volume_path",
                 "passed": False,
+                "severity": "error",
                 "message": f"Volume path does not exist: {host_path}",
                 "path": host_path,
                 "fix": f"mkdir -p {host_path}"
@@ -1757,6 +1892,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "group_exists",
                 "passed": True,
+                "severity": "ok",
                 "message": f"Group exists: {group}",
                 "group": group
             })
@@ -1764,6 +1900,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "group_exists",
                 "passed": False,
+                "severity": "error",
                 "message": f"Group does not exist: {group}",
                 "group": group
             })
@@ -1776,7 +1913,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             checks.append({
                 "check": "custom_directives_conflict",
                 "passed": True,
-                "warning": True,
+                "severity": "warning",
                 "message": f"custom_directives overrides '{directive}' which is managed by the generator — may have no effect or cause unexpected behaviour",
             })
             warnings += 1
@@ -1796,9 +1933,10 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         print()
 
         for check in checks:
-            if not check["passed"]:
+            severity = check.get("severity", "ok" if check["passed"] else "error")
+            if severity == "error":
                 symbol = "✗"
-            elif check.get("warning"):
+            elif severity == "warning":
                 symbol = "⚠"
             else:
                 symbol = "✓"
@@ -1824,36 +1962,32 @@ def cmd_verify(args, manager: WorkloadManager):
     require_root()
     config = WorkloadConfig(args.workload)
 
-    issues = []
-    checks_passed = 0
-    checks_total = 0
+    checks = []
 
-    print(f"Verifying workload: {config.name}")
-    print()
+    def _check(name, passed, message, fix=None):
+        entry = {"check": name, "passed": passed, "message": message}
+        if fix:
+            entry["fix"] = fix
+        checks.append(entry)
 
     # Check 1: User exists
-    checks_total += 1
     user_exists = manager.user_exists(config)
     if user_exists:
-        print(f"✓ User exists: {config.username} (UID {config.uid})")
-        checks_passed += 1
+        _check("user_exists", True, f"User exists: {config.username} (UID {config.uid})")
     else:
-        print(f"✗ User does not exist: {config.username}")
-        issues.append("User not created - run: sudo workloadctl enable")
+        _check("user_exists", False, f"User does not exist: {config.username}",
+               fix="sudo workloadctl enable " + config.name)
 
     # Check 2: Subuid/subgid configured
     if user_exists:
-        checks_total += 1
         subuid_exists = False
         subgid_exists = False
-
         try:
             with open("/etc/subuid", "r") as f:
                 if any(line.startswith(f"{config.username}:") for line in f):
                     subuid_exists = True
         except FileNotFoundError:
             pass
-
         try:
             with open("/etc/subgid", "r") as f:
                 if any(line.startswith(f"{config.username}:") for line in f):
@@ -1862,127 +1996,101 @@ def cmd_verify(args, manager: WorkloadManager):
             pass
 
         if subuid_exists and subgid_exists:
-            print(f"✓ Subuid/subgid configured")
-            checks_passed += 1
+            _check("subid_configured", True, "Subuid/subgid configured")
         else:
-            print(f"✗ Subuid/subgid not configured")
-            issues.append(f"Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+            _check("subid_configured", False, "Subuid/subgid not configured",
+                   fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
 
     # Check 3: Linger enabled
     if user_exists:
-        checks_total += 1
         linger_result = subprocess.run(
             ["loginctl", "show-user", str(config.uid), "--property=Linger", "--value"],
             capture_output=True, text=True
         )
         linger_enabled = linger_result.returncode == 0 and linger_result.stdout.strip() == "yes"
         if linger_enabled:
-            print(f"✓ Linger enabled")
-            checks_passed += 1
+            _check("linger_enabled", True, "Linger enabled")
         else:
-            print(f"✗ Linger not enabled")
-            issues.append(f"Run: sudo loginctl enable-linger {config.uid}")
+            _check("linger_enabled", False, "Linger not enabled",
+                   fix=f"sudo loginctl enable-linger {config.uid}")
 
     # Check 4: Runtime directory exists
     if user_exists:
-        checks_total += 1
         runtime_dir = Path(f"/run/user/{config.uid}")
         if runtime_dir.exists():
-            print(f"✓ Runtime directory exists: {runtime_dir}")
-            checks_passed += 1
+            _check("runtime_dir", True, f"Runtime directory exists: {runtime_dir}")
         else:
-            print(f"✗ Runtime directory missing: {runtime_dir}")
-            issues.append("Enable linger to create runtime directory")
+            _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
+                   fix="Enable linger to create runtime directory")
 
     # Check 5: Home directory exists
     if user_exists:
-        checks_total += 1
         home_dir = config.home_dir
         if home_dir.exists():
-            print(f"✓ Home directory exists: {home_dir}")
-            checks_passed += 1
+            _check("home_dir", True, f"Home directory exists: {home_dir}")
         else:
-            print(f"✗ Home directory missing: {home_dir}")
-            issues.append(f"Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+            _check("home_dir", False, f"Home directory missing: {home_dir}",
+                   fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
 
     # Check 6: Image exists locally
     if user_exists:
-        checks_total += 1
         image_id = manager.get_image_id(config)
         if image_id:
-            print(f"✓ Image available: {config.image} ({image_id[:12]})")
-            checks_passed += 1
+            _check("image_available", True, f"Image available: {config.image} ({image_id[:12]})")
         else:
-            print(f"✗ Image not available: {config.image}")
             pull_policy = config.config.get("container", {}).get("pull", "missing")
             if pull_policy == "never":
                 build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
-                if build_script.exists():
-                    issues.append(f"Image not built yet (pull=never). Build it: {build_script}")
-                else:
-                    issues.append(f"Image not found (pull=never). Build or provide: {config.image}")
+                fix = (f"Build it: {build_script}" if build_script.exists()
+                       else f"Build or provide: {config.image}")
             else:
-                issues.append("Image will be pulled on first start")
+                fix = "Image will be pulled on first start"
+            _check("image_available", False, f"Image not available: {config.image}", fix=fix)
 
     # Check 7: Service file exists
-    checks_total += 1
     service_file = Path(f"/run/systemd/system/{config.service_name}")
     if service_file.exists():
-        print(f"✓ Service file exists: {service_file}")
-        checks_passed += 1
+        _check("service_file", True, f"Service file exists: {service_file}")
     else:
-        print(f"✗ Service file missing: {service_file}")
-        issues.append("Run: sudo systemctl daemon-reload")
+        _check("service_file", False, f"Service file missing: {service_file}",
+               fix="sudo systemctl daemon-reload")
 
     # Check 8: Service enabled
-    checks_total += 1
     result = subprocess.run(
         ["systemctl", "is-enabled", config.service_name],
         capture_output=True, text=True
     )
     if result.returncode == 0:
-        print(f"✓ Service enabled")
-        checks_passed += 1
+        _check("service_enabled", True, "Service enabled")
     else:
-        print(f"✗ Service not enabled")
-        issues.append("Service should be auto-enabled via generator")
+        _check("service_enabled", False, "Service not enabled",
+               fix="Service should be auto-enabled via generator")
 
     # Check 9: Service active
-    checks_total += 1
     result = subprocess.run(
         ["systemctl", "is-active", config.service_name],
         capture_output=True, text=True
     )
     service_state = result.stdout.strip()
     if result.returncode == 0:
-        print(f"✓ Service active: {service_state}")
-        checks_passed += 1
+        _check("service_active", True, f"Service active: {service_state}")
     else:
-        print(f"✗ Service not active: {service_state}")
-        if config.enabled:
-            issues.append(f"Check logs: sudo journalctl -u {config.service_name} -n 50")
-        else:
-            issues.append("Workload is disabled in config")
+        fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"
+               if config.enabled else "Workload is disabled in config")
+        _check("service_active", False, f"Service not active: {service_state}", fix=fix)
 
     # Check 10: Container running
     if user_exists:
-        checks_total += 1
-        result = manager.run_podman(
-            config, "ps", "--filter", f"name={config.container_name}",
-            "--format", "{{.Status}}", capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            container_status = result.stdout.strip()
-            print(f"✓ Container running: {container_status}")
-            checks_passed += 1
+        container_status = manager.podman(config).container_status(config.container_name)
+        if container_status:
+            _check("container_running", True, f"Container running: {container_status}")
         else:
-            print(f"✗ Container not running")
-            issues.append(f"Check logs: sudo journalctl -u {config.service_name} -n 50")
+            _check("container_running", False, "Container not running",
+                   fix=f"Check logs: sudo journalctl -u {config.service_name} -n 50")
 
     # Check 11: Volume paths exist
     volumes = config.get_volumes()
     if volumes:
-        checks_total += 1
         missing_volumes = []
         for vol_spec in volumes:
             expanded_spec = expand_volume_path(vol_spec, str(config.home_dir))
@@ -1991,18 +2099,15 @@ def cmd_verify(args, manager: WorkloadManager):
                 missing_volumes.append(host_path)
 
         if not missing_volumes:
-            print(f"✓ All volume paths exist ({len(volumes)} volumes)")
-            checks_passed += 1
+            _check("volume_paths", True, f"All volume paths exist ({len(volumes)} volumes)")
         else:
-            print(f"✗ Missing volume paths:")
-            for path in missing_volumes:
-                print(f"  - {path}")
-            issues.append(f"Create missing directories: sudo mkdir -p " + " ".join(missing_volumes))
+            _check("volume_paths", False,
+                   f"Missing volume paths: {', '.join(missing_volumes)}",
+                   fix="sudo mkdir -p " + " ".join(missing_volumes))
 
     # Check 12: UID mapping (for userns=host)
     userns_mode = config.config.get("security", {}).get("userns", "keep-id")
     if userns_mode == "host" and user_exists:
-        checks_total += 1
         try:
             with open("/etc/subuid", "r") as f:
                 for line in f:
@@ -2012,26 +2117,47 @@ def cmd_verify(args, manager: WorkloadManager):
                             subuid_start = int(parts[1])
                             subuid_count = int(parts[2])
                             subuid_end = subuid_start + subuid_count - 1
-                            print(f"✓ UID mapping configured")
-                            print(f"  Range: Container UIDs 1-{subuid_count} → Host UIDs {subuid_start}-{subuid_end}")
-                            print(f"  Example: Container UID {config.uid} → Host UID {subuid_start + config.uid}")
-                            checks_passed += 1
+                            _check("uid_mapping", True,
+                                   f"UID mapping configured: container UIDs 1-{subuid_count} → host UIDs {subuid_start}-{subuid_end}")
                             break
                 else:
-                    print(f"✗ Cannot calculate UID mapping (subuid not found)")
-                    issues.append("Check /etc/subuid configuration")
+                    _check("uid_mapping", False, "Cannot calculate UID mapping (subuid not found)",
+                           fix="Check /etc/subuid configuration")
         except Exception as e:
-            print(f"✗ Error reading subuid: {e}")
+            _check("uid_mapping", False, f"Error reading subuid: {e}")
 
-    # Summary
+    checks_passed = sum(1 for c in checks if c["passed"])
+    checks_total = len(checks)
+    passed = all(c["passed"] for c in checks)
+
+    if args.json:
+        print(json.dumps({
+            "workload": config.name,
+            "passed": passed,
+            "checks_passed": checks_passed,
+            "checks_total": checks_total,
+            "checks": checks
+        }, indent=2))
+        sys.exit(0 if passed else 1)
+
+    print(f"Verifying workload: {config.name}")
+    print()
+    for c in checks:
+        symbol = "✓" if c["passed"] else "✗"
+        print(f"{symbol} {c['message']}")
+        if "fix" in c and not c["passed"]:
+            print(f"  Fix: {c['fix']}")
+
     print()
     print(f"Checks: {checks_passed}/{checks_total} passed")
     print()
 
-    if issues:
+    if not passed:
         print("Issues found:")
-        for i, issue in enumerate(issues, 1):
-            print(f"  {i}. {issue}")
+        for i, c in enumerate((c for c in checks if not c["passed"]), 1):
+            print(f"  {i}. {c['message']}")
+            if "fix" in c:
+                print(f"     {c['fix']}")
         print()
         sys.exit(1)
     else:
@@ -2115,8 +2241,41 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path.unlink()
 
 
+def _stats_parse_percent(v) -> float:
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip().rstrip("%"))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _stats_parse_io(s: str) -> tuple[int, int]:
+    parts = str(s).split(" / ")
+    if len(parts) == 2:
+        return _parse_size_bytes(parts[0]), _parse_size_bytes(parts[1])
+    return 0, 0
+
+
+def _stats_parse_mem(row: dict) -> tuple[int, int]:
+    """Return (mem_usage_bytes, mem_limit_bytes) from a podman stats row.
+
+    Handles both the combined 'X / Y' string format (older podman) and
+    separate numeric fields (newer podman).
+    """
+    raw = row.get("mem_usage") or row.get("MemUsage", "0")
+    if isinstance(raw, str) and " / " in raw:
+        return _stats_parse_io(raw)
+    return (_parse_size_bytes(raw),
+            _parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
+
+
 def cmd_stats(args, manager: WorkloadManager):
     """Show resource usage statistics"""
+    if args.json and args.follow:
+        print("Error: --json is incompatible with --follow", file=sys.stderr)
+        sys.exit(1)
+
     if args.workload:
         config = WorkloadConfig(args.workload)
 
@@ -2124,34 +2283,81 @@ def cmd_stats(args, manager: WorkloadManager):
             print("Error: Workload user not found. Is workload enabled?", file=sys.stderr)
             sys.exit(1)
 
+        if args.json:
+            result = manager.run_podman(config, "stats", "--no-stream", "--format", "json",
+                                        config.container_name, capture_output=True)
+            stats_list = []
+            if result.returncode == 0 and result.stdout.strip():
+                raw = json.loads(result.stdout)
+                for row in (raw if isinstance(raw, list) else [raw]):
+                    net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
+                    blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
+                    mem_u, mem_l = _stats_parse_mem(row)
+                    stats_list.append({
+                        "workload": config.name,
+                        "username": config.username,
+                        "container": row.get("name") or row.get("Name", config.container_name),
+                        "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
+                        "mem_usage": mem_u,
+                        "mem_limit": mem_l,
+                        "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
+                        "net_input": net_in,
+                        "net_output": net_out,
+                        "block_input": blk_in,
+                        "block_output": blk_out,
+                        "pids": int(row.get("pids") or row.get("PIDs", 0))
+                    })
+            print(json.dumps({"stats": stats_list}, indent=2))
+            return
+
         if args.follow:
             manager.run_podman(config, "stats", config.container_name, check=True)
         else:
             manager.run_podman(config, "stats", "--no-stream", config.container_name, check=True)
     else:
-        # All workloads - show stats for each enabled workload user separately
         configs = manager.get_all_configs(enabled_only=True)
-        found = False
-        for config in configs:
-            if not manager.user_exists(config):
-                continue
-            result = manager.run_podman(
-                config, "ps", "--filter", f"name={config.container_name}",
-                "--format", "{{.Names}}", capture_output=True
-            )
-            if result.returncode != 0 or not result.stdout.strip():
-                continue
-            found = True
+        running = [c for c in configs
+                   if manager.user_exists(c) and manager.podman(c).container_exists(c.container_name)]
+
+        if args.json:
+            stats_list = []
+            for config in running:
+                result = manager.run_podman(config, "stats", "--no-stream", "--format", "json",
+                                            config.container_name, capture_output=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    raw = json.loads(result.stdout)
+                    for row in (raw if isinstance(raw, list) else [raw]):
+                        net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
+                        blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
+                        mem_u, mem_l = _stats_parse_mem(row)
+                        stats_list.append({
+                            "workload": config.name,
+                            "username": config.username,
+                            "container": row.get("name") or row.get("Name", config.container_name),
+                            "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
+                            "mem_usage": mem_u,
+                            "mem_limit": mem_l,
+                            "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
+                            "net_input": net_in,
+                            "net_output": net_out,
+                            "block_input": blk_in,
+                            "block_output": blk_out,
+                            "pids": int(row.get("pids") or row.get("PIDs", 0))
+                        })
+            print(json.dumps({"stats": stats_list}, indent=2))
+            return
+
+        if not running:
+            print("No running workload containers found")
+            return
+
+        for config in running:
             if args.follow:
-                # Follow only works for a single workload; show a note and pick first
                 print(f"Note: --follow with multiple workloads shows only {config.name}")
                 manager.run_podman(config, "stats", config.container_name, check=True)
                 return
             manager.run_podman(config, "stats", "--no-stream", config.container_name)
             print()
-
-        if not found:
-            print("No running workload containers found")
 
 
 def cmd_cp(args, manager: WorkloadManager):
@@ -2220,9 +2426,9 @@ def cmd_ports(args, manager: WorkloadManager):
 
             for port_spec in ports:
                 port = port_spec.split(':')[-1].split('/')[0]
-                port_data["accessible_at"].append(f"localhost:{port}")
+                port_data["accessible_at"].append({"host": f"localhost:{port}", "container": None})
                 for ip in ips:
-                    port_data["accessible_at"].append(f"{ip}:{port}")
+                    port_data["accessible_at"].append({"host": f"{ip}:{port}", "container": None})
             port_data["note"] = "Host networking - container ports directly accessible on host"
         else:
             for port_spec in ports:
@@ -2236,7 +2442,7 @@ def cmd_ports(args, manager: WorkloadManager):
                     })
                 else:
                     port = parts[0].split('/')[0]
-                    port_data["accessible_at"].append(f"localhost:{port}")
+                    port_data["accessible_at"].append({"host": f"localhost:{port}", "container": None})
 
     if args.json:
         print(json.dumps(port_data, indent=2))
@@ -2316,24 +2522,15 @@ def cmd_images(args, manager: WorkloadManager):
             if not manager.user_exists(config):
                 continue
 
-            result = manager.run_podman(
-                config, "images", "--format", "{{.Size}}|{{.CreatedSince}}",
-                config.image, capture_output=True
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                if lines and lines[0]:
-                    parts = lines[0].split('|')
-                    size = parts[0] if len(parts) > 0 else "unknown"
-                    pulled = parts[1] if len(parts) > 1 else "unknown"
-
-                    images_data.append({
-                        "workload": config.filename,
-                        "image": config.image,
-                        "size": size,
-                        "pulled": pulled
-                    })
+            info = manager.podman(config).image_info(config.image)
+            if info:
+                size_bytes = info.get("Size") or 0
+                images_data.append({
+                    "workload": config.filename,
+                    "image": config.image,
+                    "size_bytes": size_bytes,
+                    "created": _created_unix(info.get("Created"))
+                })
 
         if args.json:
             print(json.dumps({"images": images_data, "total": len(images_data)}, indent=2))
@@ -2347,7 +2544,9 @@ def cmd_images(args, manager: WorkloadManager):
             image = img["image"]
             if len(image) > 50:
                 image = image[:47] + "..."
-            print(f"{img['workload']:<20} {image:<50} {img['size']:<10} {img['pulled']:<15}")
+            size_str = _format_size(img["size_bytes"]) if img["size_bytes"] else "unknown"
+            pulled_str = _format_created(img["created"])
+            print(f"{img['workload']:<20} {image:<50} {size_str:<10} {pulled_str:<15}")
 
         print()
         if len(images_data) == 0:
@@ -2415,13 +2614,10 @@ def cmd_health(args, manager: WorkloadManager):
     container_running = False
     container_status = "unknown"
     if user_exists:
-        result = manager.run_podman(
-            config, "ps", "--filter", f"name={config.container_name}",
-            "--format", "{{.Status}}", capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
+        ps_status = manager.podman(config).container_status(config.container_name)
+        if ps_status:
             container_running = True
-            container_status = result.stdout.strip()
+            container_status = ps_status
             health_data["checks"].append({
                 "check": "container_running",
                 "healthy": True,
@@ -2438,12 +2634,8 @@ def cmd_health(args, manager: WorkloadManager):
 
     # Check 4: Container health check (if configured and container running)
     if container_running and config.has_health_check():
-        result = manager.run_podman(
-            config, "inspect", "--format", "{{.State.Health.Status}}",
-            config.container_name, capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            health_status = result.stdout.strip()
+        health_status = manager.podman(config).container_health(config.container_name)
+        if health_status:
             is_healthy = health_status == "healthy"
             health_data["checks"].append({
                 "check": "container_health",
@@ -2526,8 +2718,8 @@ CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 BACKUP_DIR = WORKLOADS_BASE / "backups"
 
 
-def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool):
-    """Create a backup archive for a single workload.
+def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool = False) -> int:
+    """Create a backup archive for a single workload. Returns size in bytes.
 
     Archive layout:
         workload.toml           — the config file
@@ -2539,24 +2731,21 @@ def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool):
     config_path = WORKLOAD_DIR / f"{name}.toml"
     service_name = config.service_name
 
-    # Check if service is active
     service_was_active = subprocess.run(
         ["systemctl", "is-active", "--quiet", service_name],
     ).returncode == 0
 
-    # Stop service for consistent snapshot (unless --no-stop)
     if service_was_active and not no_stop:
-        print(f"  Stopping {service_name}...")
+        if not quiet:
+            print(f"  Stopping {service_name}...")
         subprocess.run(["systemctl", "stop", service_name], check=True)
 
     try:
         with tempfile.TemporaryDirectory() as staging:
             staging = Path(staging)
 
-            # 1. Config file
             shutil.copy2(config_path, staging / "workload.toml")
 
-            # 2. Credentials (only those referenced by this workload)
             creds = auto_detect_credentials(config.config)
             if creds:
                 cred_dir = staging / "credentials"
@@ -2565,17 +2754,15 @@ def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool):
                     cred_path = CREDSTORE_DIR / cred_name
                     if cred_path.exists():
                         shutil.copy2(cred_path, cred_dir / cred_path.name)
-                    else:
+                    elif not quiet:
                         print(f"  Warning: Credential '{cred_name}' not found, skipping")
 
-            # 3. Home directory
             if home_dir.is_dir():
                 shutil.copytree(home_dir, staging / "home",
                                 symlinks=True, dirs_exist_ok=False)
             else:
                 (staging / "home").mkdir()
 
-            # Create archive
             output.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 ["tar", "-C", str(staging), "-cf", str(output),
@@ -2583,21 +2770,23 @@ def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool):
                 check=True,
             )
     finally:
-        # Restart service if it was running
         if service_was_active and not no_stop:
-            print(f"  Starting {service_name}...")
+            if not quiet:
+                print(f"  Starting {service_name}...")
             subprocess.run(["systemctl", "start", service_name])
 
     size = output.stat().st_size
-    if size >= 1_000_000_000:
-        size_str = f"{size / 1_000_000_000:.1f}G"
-    elif size >= 1_000_000:
-        size_str = f"{size / 1_000_000:.1f}M"
-    elif size >= 1_000:
-        size_str = f"{size / 1_000:.1f}K"
-    else:
-        size_str = f"{size}B"
-    print(f"  Backup: {output} ({size_str})")
+    if not quiet:
+        if size >= 1_000_000_000:
+            size_str = f"{size / 1_000_000_000:.1f}G"
+        elif size >= 1_000_000:
+            size_str = f"{size / 1_000_000:.1f}M"
+        elif size >= 1_000:
+            size_str = f"{size / 1_000:.1f}K"
+        else:
+            size_str = f"{size}B"
+        print(f"  Backup: {output} ({size_str})")
+    return size
 
 
 def cmd_backup(args, manager: WorkloadManager):
@@ -2617,6 +2806,7 @@ def cmd_backup(args, manager: WorkloadManager):
             sys.exit(1)
         configs = [WorkloadConfig(args.workload)]
 
+    backups = []
     for config in configs:
         name = config.name
         if args.output:
@@ -2626,10 +2816,14 @@ def cmd_backup(args, manager: WorkloadManager):
         else:
             output = BACKUP_DIR / f"{name}-{timestamp}.tar.zst"
 
-        print(f"Backing up: {name}")
-        _backup_one(config, output, args.no_stop)
+        if not args.json:
+            print(f"Backing up: {name}")
+        size_bytes = _backup_one(config, output, args.no_stop, quiet=args.json)
+        backups.append({"workload": name, "archive": str(output), "size_bytes": size_bytes})
 
-    if args.all:
+    if args.json:
+        print(json.dumps({"backups": backups}, indent=2))
+    elif args.all:
         print(f"\nBacked up {len(configs)} workload(s)")
 
 
@@ -2741,12 +2935,10 @@ def cmd_uid_map(args, manager: WorkloadManager):
         print("Enable the workload first to create the user.", file=sys.stderr)
         sys.exit(1)
 
-    # Get user info (user_exists check above guarantees this succeeds)
     pw = pwd.getpwnam(config.username)
     uid = pw.pw_uid
     gid = pw.pw_gid
 
-    # Get subuid/subgid ranges
     subuid_start = None
     subuid_count = None
     subgid_start = None
@@ -2778,6 +2970,35 @@ def cmd_uid_map(args, manager: WorkloadManager):
 
     userns_mode = config.config.get("security", {}).get("userns", "keep-id")
 
+    # Compute mapped_uid/mapped_gid
+    if userns_mode.startswith("keep-id"):
+        mapped_uid = uid
+        mapped_gid = gid
+        if ":" in userns_mode:
+            for param in userns_mode.split(":", 1)[1].split(","):
+                key, _, value = param.partition("=")
+                if key == "uid":
+                    mapped_uid = int(value)
+                elif key == "gid":
+                    mapped_gid = int(value)
+    else:
+        mapped_uid = uid
+        mapped_gid = gid
+
+    if args.json:
+        print(json.dumps({
+            "workload": config.name,
+            "username": config.username,
+            "host_uid": uid,
+            "host_gid": gid,
+            "subuid": {"start": subuid_start, "count": subuid_count},
+            "subgid": {"start": subgid_start, "count": subgid_count},
+            "userns_mode": userns_mode,
+            "mapped_uid": mapped_uid,
+            "mapped_gid": mapped_gid
+        }, indent=2))
+        return
+
     print(f"Workload: {config.name}")
     print(f"User: {config.username}")
     print(f"Host UID: {uid}")
@@ -2801,17 +3022,6 @@ def cmd_uid_map(args, manager: WorkloadManager):
     print()
 
     if userns_mode.startswith("keep-id"):
-        # Parse optional uid/gid remapping (e.g. "keep-id:uid=1000,gid=1000")
-        mapped_uid = uid
-        mapped_gid = gid
-        if ":" in userns_mode:
-            for param in userns_mode.split(":", 1)[1].split(","):
-                key, _, value = param.partition("=")
-                if key == "uid":
-                    mapped_uid = int(value)
-                elif key == "gid":
-                    mapped_gid = int(value)
-
         print(f"UID/GID Mapping (keep-id mode):")
         if mapped_uid != uid:
             print(f"  Container UID {mapped_uid} → Host UID {uid} (workload user, remapped)")
@@ -2918,10 +3128,22 @@ def cmd_secret(args, manager: WorkloadManager):
 
     elif args.subcommand == "list":
         if not cred_dir.exists():
-            print("No credentials found (directory does not exist)")
+            if args.json:
+                print(json.dumps({"credentials": []}, indent=2))
+            else:
+                print("No credentials found (directory does not exist)")
             return
 
         creds = sorted(p for p in cred_dir.iterdir() if p.is_file())
+
+        if args.json:
+            print(json.dumps({
+                "credentials": [
+                    {"name": p.name, "size": p.stat().st_size, "modified": int(p.stat().st_mtime)}
+                    for p in creds
+                ]
+            }, indent=2))
+            return
 
         if not creds:
             print("No credentials found")
@@ -3218,10 +3440,12 @@ def main():
                                help="Output path (file or directory)")
     backup_parser.add_argument("--no-stop", action="store_true",
                                help="Don't stop the service (live backup, may be inconsistent)")
+    backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users and directories")
     cleanup_parser.add_argument("--apply", action="store_true",
                                 help="Actually remove orphaned users/dirs (default is dry run)")
+    cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload")
     disable_parser.add_argument("workload", help="Workload name")
@@ -3295,7 +3519,8 @@ def main():
     secret_create.add_argument("--file", help="Read secret from file instead of stdin")
     secret_create.add_argument("--force", action="store_true", help="Overwrite if exists")
 
-    secret_subparsers.add_parser("list", help="List all encrypted credentials")
+    secret_list = secret_subparsers.add_parser("list", help="List all encrypted credentials")
+    secret_list.add_argument("--json", action="store_true", help="Output in JSON format")
 
     secret_delete = secret_subparsers.add_parser("delete", help="Delete an encrypted credential")
     secret_delete.add_argument("name", help="Credential name")
@@ -3324,6 +3549,7 @@ def main():
     stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
     stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
     stats_parser.add_argument("-f", "--follow", action="store_true", help="Follow stats (live updating)")
+    stats_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     status_parser = subparsers.add_parser("status", help="Show workload service status")
     status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
@@ -3350,9 +3576,11 @@ def main():
 
     verify_parser = subparsers.add_parser("verify", help="Verify workload setup and diagnose issues")
     verify_parser.add_argument("workload", help="Workload name")
+    verify_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     uid_map_parser = subparsers.add_parser("uid-map", help="Show UID/GID mapping for a workload")
     uid_map_parser.add_argument("workload", help="Workload name")
+    uid_map_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
 
     args = parser.parse_args()

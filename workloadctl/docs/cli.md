@@ -161,8 +161,12 @@ workloadctl list [--json]
 Show the systemd service status for a workload.
 
 ```
-workloadctl status <workload>
+workloadctl status [--json] <workload>
 ```
+
+| Option | Description |
+|---|---|
+| `--json` | Output state, PID, memory, and timestamps as JSON |
 
 ### `info`
 
@@ -207,12 +211,13 @@ workloadctl ports [--json] <workload>
 Show live resource usage (CPU, memory, I/O) for a workload or all workloads.
 
 ```
-workloadctl stats [-f] [<workload>]
+workloadctl stats [--json] [-f] [<workload>]
 ```
 
 | Option | Description |
 |---|---|
-| `-f` / `--follow` | Keep updating (live view) |
+| `-f` / `--follow` | Keep updating (live view); incompatible with `--json` |
+| `--json` | Output raw numeric stats as JSON |
 
 ### `health`
 
@@ -235,8 +240,12 @@ workloadctl images [--json] [list|prune]
 Show the UID/GID mapping for a workload (host UID → container UID via user namespace).
 
 ```
-workloadctl uid-map <workload>
+workloadctl uid-map [--json] <workload>
 ```
+
+| Option | Description |
+|---|---|
+| `--json` | Output host UIDs, subuid ranges, and mapped container UIDs as JSON |
 
 ---
 
@@ -310,8 +319,12 @@ workloadctl validate [--all] [--json] [<workload>]
 Verify a workload's runtime setup: user exists, subuid configured, linger active, image present, service file generated.
 
 ```
-workloadctl verify <workload>
+workloadctl verify [--json] <workload>
 ```
+
+| Option | Description |
+|---|---|
+| `--json` | Output per-check results as JSON; exit non-zero if any check failed |
 
 Useful for diagnosing a workload that fails to start.
 
@@ -320,12 +333,40 @@ Useful for diagnosing a workload that fails to start.
 Find (and optionally remove) orphaned workload users and home directories — system users in the `_wl-*` range whose config file no longer exists.
 
 ```
-sudo workloadctl cleanup [--apply]
+sudo workloadctl cleanup [--apply] [--json]
 ```
 
 | Option | Description |
 |---|---|
 | `--apply` | Actually remove orphans (default is dry-run) |
+| `--json` | Output orphan lists and removal results as JSON |
+
+---
+
+## Data Management
+
+### `backup`
+
+Archive a workload's home directory and config to a compressed tarball (`.tar.zst`).
+
+```
+sudo workloadctl backup [--json] [--all] [--output PATH] [--no-stop] [<workload>]
+```
+
+| Option | Description |
+|---|---|
+| `--all` | Back up all enabled workloads |
+| `--output PATH` | Directory to write archive(s) to (default: current directory) |
+| `--no-stop` | Skip stopping the workload before archiving (may produce inconsistent data) |
+| `--json` | Output archive paths and sizes as JSON instead of printing progress |
+
+### `restore`
+
+Restore a workload from a backup archive created by `backup`.
+
+```
+sudo workloadctl restore <archive>
+```
 
 ---
 
@@ -375,8 +416,12 @@ echo -n "my-api-key" | sudo workloadctl secret create --key-type tpm2 myapp-api-
 List all credentials in `/etc/credstore.encrypted/`.
 
 ```
-workloadctl secret list
+workloadctl secret list [--json]
 ```
+
+| Option | Description |
+|---|---|
+| `--json` | Output credential names, sizes, and modification timestamps as JSON |
 
 ### `secret show`
 
