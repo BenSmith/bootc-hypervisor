@@ -30,9 +30,9 @@ _workload_ctl_completion() {
     # Second argument: depends on the command
     case "${words[1]}" in
         backup)
-            # Complete with --all, --output, --no-stop, or workload names
+            # Complete with --all, --output, --no-stop, --json, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--all --output --no-stop" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--all --output --no-stop --json" -- "$cur") )
             elif [[ "$prev" == "--output" || "$prev" == "-o" ]]; then
                 _filedir
             else
@@ -41,11 +41,20 @@ _workload_ctl_completion() {
             return 0
             ;;
         cleanup)
-            # Complete with --apply flag only
-            COMPREPLY=( $(compgen -W "--apply" -- "$cur") )
+            # Complete with --apply or --json
+            COMPREPLY=( $(compgen -W "--apply --json" -- "$cur") )
             return 0
             ;;
-        attach|edit|reboot|recreate|rollback|shell|uid-map|verify)
+        uid-map|verify)
+            # Complete with --json or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        attach|edit|reboot|recreate|rollback|shell)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             return 0
@@ -119,9 +128,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         stats)
-            # Complete with -f, --follow, or workload names
+            # Complete with -f, --follow, --json, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "-f --follow" -- "$cur") )
+                COMPREPLY=( $(compgen -W "-f --follow --json" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
@@ -202,7 +211,7 @@ _workload_ctl_completion() {
                         fi
                         ;;
                     list)
-                        # No completion needed
+                        COMPREPLY=( $(compgen -W "--json" -- "$cur") )
                         ;;
                     export)
                         # Complete with credential names or --output
