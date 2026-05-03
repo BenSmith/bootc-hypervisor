@@ -31,8 +31,45 @@ from workload_lib import (
     workload_home_dir, expand_volume_path, validate_workload_name,
     auto_detect_credentials,
 )
+from podman import Podman, PodmanError
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
+
+
+def _format_size(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    f = float(n)
+    for u in units:
+        if f < 1024 or u == units[-1]:
+            return f"{f:.1f} {u}"
+        f /= 1024
+    return f"{n} B"
+
+
+def _format_created(ts: str | int | None) -> str:
+    """Render podman's image Created (Unix int or ISO string) as 'N days ago'."""
+    if ts is None or ts == "":
+        return "unknown"
+    try:
+        if isinstance(ts, (int, float)):
+            created = datetime.datetime.fromtimestamp(int(ts))
+        else:
+            s = str(ts).rstrip("Z").split(".")[0]
+            try:
+                created = datetime.datetime.fromisoformat(s)
+            except ValueError:
+                created = datetime.datetime.fromtimestamp(int(float(ts)))
+        delta = datetime.datetime.now() - created
+        days = delta.days
+        if days >= 1:
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        hours = delta.seconds // 3600
+        if hours >= 1:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        minutes = max(1, delta.seconds // 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    except Exception:
+        return "unknown"
 
 
 class WorkloadMasked(Exception):
@@ -187,21 +224,22 @@ class WorkloadManager:
         return subprocess.run(cmd, capture_output=capture_output, text=True,
                               check=check, cwd=cwd)
 
-    def get_image_id(self, config: WorkloadConfig) -> str:
-        """Get current image ID (returns empty string on any error)"""
-        try:
-            result = self.run_podman(
-                config, "images", "--format", "{{.ID}}", config.image,
-                capture_output=True
+    def podman(self, config: WorkloadConfig) -> Podman:
+        """Return a memoized Podman wrapper for this workload's user."""
+        if not hasattr(self, "_podman_clients"):
+            self._podman_clients: dict[int, Podman] = {}
+        if config.uid not in self._podman_clients:
+            self._podman_clients[config.uid] = Podman.for_user(
+                config.username, config.uid, config.home_dir
             )
-            # Check if command succeeded (sudo might fail without permissions)
-            if result.returncode != 0:
-                return ""
-            lines = result.stdout.strip().split('\n')
-            return lines[0] if lines and lines[0] else ""
-        except Exception:
-            # Silently handle any errors (permission denied, user doesn't exist, etc.)
-            return ""
+        return self._podman_clients[config.uid]
+
+    def get_image_id(self, config: WorkloadConfig) -> str:
+        """Get current image ID. Returns '' if image not present.
+
+        Raises PodmanError on unexpected failures (sudo, malformed output, etc.)
+        """
+        return self.podman(config).image_id(config.image)
 
     def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
         """Get all workload configs"""
@@ -544,11 +582,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     # Check if image exists locally (for pull=never)
     pull_policy = config.config.get("container", {}).get("pull", "missing")
     if pull_policy == "never":
-        result = subprocess.run(
-            ["podman", "images", "--format", "{{.ID}}", config.image],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0 or not result.stdout.strip():
+        if not Podman.for_root().image_id(config.image):
             print(f"  ✗ Image '{config.image}' not found locally and pull=never")
             build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
             if build_script.exists():
@@ -696,13 +730,7 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
         return
 
     image_id = manager.get_image_id(config)
-
-    # Check root's store regardless - transfer if absent or if root has a newer build
-    root_check = subprocess.run(
-        ["podman", "images", "--format", "{{.ID}}", config.image],
-        capture_output=True, text=True
-    )
-    root_image_id = root_check.stdout.strip().split('\n')[0] if root_check.stdout.strip() else ""
+    root_image_id = Podman.for_root().image_id(config.image)
 
     need_transfer = root_image_id and root_image_id != image_id
 
@@ -711,45 +739,33 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
             print(f"  Root store has updated image (rebuild detected), re-transferring...")
         else:
             print(f"  Transferring image from root store to workload user store...")
-        # Write a permissive policy file for the transfer.
-        # Systems with "default": reject block both containers-storage: (save)
-        # and docker-archive: (load) transports.  Both are local-only operations
-        # so bypassing the transport policy here is safe.
-        permissive_policy = '{"default":[{"type":"insecureAcceptAnything"}]}'
-        fd, policy_path = tempfile.mkstemp(suffix='.json', dir='/tmp')
-        os.write(fd, permissive_policy.encode())
-        os.close(fd)
-        fd, tmp_path = tempfile.mkstemp(suffix='.tar', dir='/tmp')
-        os.close(fd)
-        try:
-            save_result = subprocess.run(
-                ["podman", "save", "--signature-policy", policy_path,
-                 "--format", "docker-archive", "-o", tmp_path, config.image],
-                capture_output=True, text=True
-            )
-            if save_result.returncode != 0:
-                print(f"Error: Failed to save image: {save_result.stderr}", file=sys.stderr)
-                sys.exit(1)
-            # Make temp files readable by the workload user (not world-readable)
-            os.chown(policy_path, config.uid, -1)
-            os.chown(tmp_path, config.uid, -1)
-            load_cmd = ["sudo", "-u", config.username,
-                        "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
-                        "-E", f"HOME={config.home_dir}",
-                        "podman", "load",
-                        "--signature-policy", policy_path,
-                        "-i", tmp_path]
-            load_proc = subprocess.run(load_cmd, capture_output=True, text=True, cwd="/tmp")
-            if load_proc.returncode != 0:
-                print(f"Error: Failed to transfer image: {load_proc.stderr}", file=sys.stderr)
-                sys.exit(1)
-            print(f"  Image transferred successfully")
-        finally:
-            for p in (tmp_path, policy_path):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
+
+        save = subprocess.Popen(
+            ["podman", "save", "--format", "docker-archive", config.image],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        load = subprocess.Popen(
+            ["sudo", "-n", "-u", config.username,
+             "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
+             "-E", f"HOME={config.home_dir}",
+             "podman", "load"],
+            stdin=save.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd="/tmp",
+        )
+        save.stdout.close()
+        load_out, load_err = load.communicate()
+        save_err = save.stderr.read() if save.stderr else b""
+        save.wait()
+
+        if save.returncode != 0:
+            print(f"Error: Failed to save image: {save_err.decode(errors='replace')}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if load.returncode != 0:
+            print(f"Error: Failed to transfer image: {load_err.decode(errors='replace')}",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"  Image transferred successfully")
     elif not image_id:
         print()
         print(f"Error: Image '{config.image}' not found locally and pull=never", file=sys.stderr)
@@ -1181,16 +1197,15 @@ def cmd_network(args, manager: WorkloadManager):
 
         print(f"Creating network '{network_name}' for user {config.username} (UID {config.uid})...")
 
-        result = manager.run_podman(config, "network", "create", network_name,
-                                    capture_output=True)
-        if result.returncode == 0:
-            print(f"✓ Network '{network_name}' created successfully")
-            print("\nTo use this network in a workload, add to your TOML config:")
-            print("  [network]")
-            print(f"  mode = \"{network_name}\"")
-        else:
-            print(f"Error creating network: {result.stderr}", file=sys.stderr)
+        try:
+            manager.podman(config).network_create(network_name)
+        except PodmanError as e:
+            print(f"Error creating network: {e.stderr}", file=sys.stderr)
             sys.exit(1)
+        print(f"✓ Network '{network_name}' created successfully")
+        print("\nTo use this network in a workload, add to your TOML config:")
+        print("  [network]")
+        print(f"  mode = \"{network_name}\"")
 
 
 def cmd_ps(args, manager: WorkloadManager):
@@ -1209,22 +1224,18 @@ def cmd_ps(args, manager: WorkloadManager):
         for username in users:
             try:
                 uid = pwd.getpwnam(username).pw_uid
-                result = manager.run_podman_for_user(
-                    username, uid,
-                    "--log-level=error", "ps", "--format", "json",
-                    capture_output=True
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    for container in json.loads(result.stdout):
-                        containers_data.append({
-                            "username": username,
-                            "uid": uid,
-                            "id": container.get("Id", ""),
-                            "name": container.get("Names", [""])[0] if container.get("Names") else "",
-                            "image": container.get("Image", ""),
-                            "status": container.get("Status", ""),
-                            "created": container.get("Created", ""),
-                        })
+                home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
+                rows = Podman.for_user(username, uid, home).list_containers(all=False)
+                for container in rows:
+                    containers_data.append({
+                        "username": username,
+                        "uid": uid,
+                        "id": container.get("Id", ""),
+                        "name": container.get("Names", [""])[0] if container.get("Names") else "",
+                        "image": container.get("Image", ""),
+                        "status": container.get("Status", ""),
+                        "created": container.get("Created", ""),
+                    })
             except Exception:
                 continue
 
@@ -1239,12 +1250,8 @@ def cmd_ps(args, manager: WorkloadManager):
     for username in users:
         try:
             uid = pwd.getpwnam(username).pw_uid
-            check = manager.run_podman_for_user(
-                username, uid,
-                "--log-level=error", "ps", "--format", "{{.Names}}",
-                capture_output=True
-            )
-            if check.returncode == 0 and check.stdout.strip():
+            home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
+            if Podman.for_user(username, uid, home).list_containers(all=False):
                 found = True
                 print(f"=== {username} (UID {uid}) ===")
                 manager.run_podman_for_user(username, uid, "--log-level=error", "ps")
@@ -1329,7 +1336,7 @@ def _health_wait_seconds(config: WorkloadConfig) -> int:
 def _do_rollback(config: WorkloadConfig, manager: WorkloadManager, old_id: str):
     """Roll back to the previous image."""
     tag = rollback_tag(config.name)
-    manager.run_podman(config, "tag", tag, config.image)
+    manager.podman(config).tag(tag, config.image)
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"  ✗ {config.name}: rolled back to previous image ({old_id[:12]})")
 
@@ -1350,9 +1357,10 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
 
     old_id = manager.get_image_id(config)
 
-    result = manager.run_podman(config, "pull", config.image)
-    if result.returncode != 0:
-        print(f"  ✗ Failed to pull image", file=sys.stderr)
+    try:
+        manager.podman(config).pull(config.image)
+    except PodmanError as e:
+        print(f"  ✗ Failed to pull image: {e.stderr}", file=sys.stderr)
         return None
 
     new_id = manager.get_image_id(config)
@@ -1364,7 +1372,7 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
     # Tag the old image for rollback before restarting
     if old_id:
         tag = rollback_tag(config.name)
-        manager.run_podman(config, "tag", old_id, tag)
+        manager.podman(config).tag(old_id, tag)
 
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
 
@@ -1400,11 +1408,7 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
     rolled_back = 0
     for config, old_id in updated:
         if config.has_health_check():
-            result = manager.run_podman(
-                config, "inspect", "--format", "{{.State.Health.Status}}",
-                config.container_name, capture_output=True
-            )
-            status = result.stdout.strip() if result.returncode == 0 else ""
+            status = manager.podman(config).container_health(config.container_name) or ""
 
             if status == "healthy":
                 print(f"  ✓ {config.name}: healthy")
@@ -1415,11 +1419,7 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                 )
                 print(f"  ⏳ {config.name}: still starting, waiting {interval}s more...", end="", flush=True)
                 time.sleep(interval)
-                result = manager.run_podman(
-                    config, "inspect", "--format", "{{.State.Health.Status}}",
-                    config.container_name, capture_output=True
-                )
-                status = result.stdout.strip() if result.returncode == 0 else ""
+                status = manager.podman(config).container_health(config.container_name) or ""
                 if status == "healthy":
                     print(" healthy")
                 else:
@@ -1461,10 +1461,7 @@ def cmd_rollback(args, manager: WorkloadManager):
     tag = rollback_tag(config.name)
 
     # Check if rollback image exists
-    result = manager.run_podman(
-        config, "images", "--format", "{{.ID}}", tag, capture_output=True
-    )
-    rollback_id = result.stdout.strip().split('\n')[0] if result.returncode == 0 else ""
+    rollback_id = manager.podman(config).image_id(tag)
     if not rollback_id:
         print(f"Error: No rollback image found for {config.name}", file=sys.stderr)
         print(f"  (rollback images are created automatically by 'workloadctl update')", file=sys.stderr)
@@ -1476,9 +1473,10 @@ def cmd_rollback(args, manager: WorkloadManager):
         return
 
     # Retag rollback image as the workload's image
-    result = manager.run_podman(config, "tag", tag, config.image)
-    if result.returncode != 0:
-        print(f"Error: Failed to retag rollback image", file=sys.stderr)
+    try:
+        manager.podman(config).tag(tag, config.image)
+    except PodmanError as e:
+        print(f"Error: Failed to retag rollback image: {e.stderr}", file=sys.stderr)
         sys.exit(1)
 
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
@@ -1967,12 +1965,8 @@ def cmd_verify(args, manager: WorkloadManager):
     # Check 10: Container running
     if user_exists:
         checks_total += 1
-        result = manager.run_podman(
-            config, "ps", "--filter", f"name={config.container_name}",
-            "--format", "{{.Status}}", capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            container_status = result.stdout.strip()
+        container_status = manager.podman(config).container_status(config.container_name)
+        if container_status:
             print(f"✓ Container running: {container_status}")
             checks_passed += 1
         else:
@@ -2135,11 +2129,7 @@ def cmd_stats(args, manager: WorkloadManager):
         for config in configs:
             if not manager.user_exists(config):
                 continue
-            result = manager.run_podman(
-                config, "ps", "--filter", f"name={config.container_name}",
-                "--format", "{{.Names}}", capture_output=True
-            )
-            if result.returncode != 0 or not result.stdout.strip():
+            if not manager.podman(config).container_exists(config.container_name):
                 continue
             found = True
             if args.follow:
@@ -2316,24 +2306,18 @@ def cmd_images(args, manager: WorkloadManager):
             if not manager.user_exists(config):
                 continue
 
-            result = manager.run_podman(
-                config, "images", "--format", "{{.Size}}|{{.CreatedSince}}",
-                config.image, capture_output=True
-            )
+            info = manager.podman(config).image_info(config.image)
+            if info:
+                size_bytes = info.get("Size") or 0
+                size = _format_size(size_bytes) if size_bytes else "unknown"
+                pulled = _format_created(info.get("Created"))
 
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                if lines and lines[0]:
-                    parts = lines[0].split('|')
-                    size = parts[0] if len(parts) > 0 else "unknown"
-                    pulled = parts[1] if len(parts) > 1 else "unknown"
-
-                    images_data.append({
-                        "workload": config.filename,
-                        "image": config.image,
-                        "size": size,
-                        "pulled": pulled
-                    })
+                images_data.append({
+                    "workload": config.filename,
+                    "image": config.image,
+                    "size": size,
+                    "pulled": pulled
+                })
 
         if args.json:
             print(json.dumps({"images": images_data, "total": len(images_data)}, indent=2))
@@ -2415,13 +2399,10 @@ def cmd_health(args, manager: WorkloadManager):
     container_running = False
     container_status = "unknown"
     if user_exists:
-        result = manager.run_podman(
-            config, "ps", "--filter", f"name={config.container_name}",
-            "--format", "{{.Status}}", capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
+        ps_status = manager.podman(config).container_status(config.container_name)
+        if ps_status:
             container_running = True
-            container_status = result.stdout.strip()
+            container_status = ps_status
             health_data["checks"].append({
                 "check": "container_running",
                 "healthy": True,
@@ -2438,12 +2419,8 @@ def cmd_health(args, manager: WorkloadManager):
 
     # Check 4: Container health check (if configured and container running)
     if container_running and config.has_health_check():
-        result = manager.run_podman(
-            config, "inspect", "--format", "{{.State.Health.Status}}",
-            config.container_name, capture_output=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            health_status = result.stdout.strip()
+        health_status = manager.podman(config).container_health(config.container_name)
+        if health_status:
             is_healthy = health_status == "healthy"
             health_data["checks"].append({
                 "check": "container_health",

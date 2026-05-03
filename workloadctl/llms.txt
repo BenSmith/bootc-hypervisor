@@ -16,8 +16,8 @@ The system has four main components:
 
 1. **Generator + early-boot oneshot**: A tiny shell systemd generator (`generators/workload-generator`) emits a single oneshot service unit, `workload-generate.service`. That service runs the Python script `generators/workload-generate` during early boot (ordered `After=sysinit.target Before=basic.target`), which reads `/etc/workloads.d/*.toml` and produces systemd-sysusers configs and per-workload service unit files in `/run/systemd/system/`. The Python work is *not* run as a systemd generator because generators are expected to be fast and minimal (see `systemd.generator(7)`); Python import overhead alone can exceed the generator execution budget systemd 258+ enforces. Both the shell generator and the Python script always exit 0 so a failure never blocks boot. The Python script is still read-only with respect to `/var` — all `/var` work is deferred to `workload-ensure-user` at service start.
 2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
-3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman.
-4. **CLI** (`bin/workloadctl`): Docker/kubectl-like CLI (~2500 lines, argparse) for creating, enabling, disabling, updating, and inspecting workloads.
+3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman. Default service type is `Type=exec` (activates when podman execs the container process). `Type=notify` with `--sdnotify=conmon` is available via `[resources] service_type = "notify"` but is broken systemically when linger is active — conmon migrates into the user session cgroup and systemd silently drops its `READY=1`.
+4. **CLI** (`bin/workloadctl`): Docker/kubectl-like CLI (~2500 lines, argparse) for creating, enabling, disabling, updating, and inspecting workloads. Uses `lib/podman.py` (typed Podman wrapper) for all podman interactions, which returns structured data from `podman inspect --format=json` rather than go-template strings.
 
 ### Boot Flow
 
@@ -97,7 +97,7 @@ Workloads are defined in `/etc/workloads.d/<name>.toml`. Key sections:
 - `[devices]` — generic device passthrough, GPU (amd/nvidia), input, audio, virtualization flags
 - `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile
 - `[network]` — mode (pasta/host/none/custom), ports, DNS
-- `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size
+- `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size, service_type (default: `exec`)
 - `[volumes]` — host:container path mappings
 
 ## File Structure
@@ -109,6 +109,7 @@ generators/workload-generate       # Python script run by workload-generate.serv
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
 libexec/workload-metrics           # Prometheus metrics exporter
 lib/workload_lib.py                # Shared library (config parsing, UID allocation)
+lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 workloads.d/                       # Example workload TOML configs
 containers/                        # Container image definitions (Containerfiles + build scripts)
 docs/workloads.md                  # Full configuration guide

@@ -37,6 +37,8 @@ install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadc
 # Python library (private — not in site-packages)
 install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
     %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
+install -Dpm 0644 %{_sourcedir}/lib/podman.py \
+    %{buildroot}%{_libexecdir}/workloadctl/podman.py
 
 # systemd generator (tiny shell script; emits workload-generate.service)
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
@@ -106,6 +108,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
 %{_libexecdir}/workloadctl/workload_lib.py
+%{_libexecdir}/workloadctl/podman.py
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
 %{_libexecdir}/workloadctl/workload-generate
@@ -123,7 +126,3 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %dir %{_sysconfdir}/workloads.d
 
 %changelog
-* Sun Apr 05 2026 Ben Smith <ben@bensmith.dev> - 1.0.0-1
-- Initial package: extracted workload system from bootc-hypervisor
-- FHS-compliant paths: /usr/libexec/workloadctl/, /usr/share/workloadctl/
-- Renamed CLI from workload-ctl to workloadctl

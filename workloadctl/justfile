@@ -17,6 +17,7 @@ test-integration:
 # Lint: check Python syntax
 lint:
   python3 -m py_compile lib/workload_lib.py
+  python3 -m py_compile lib/podman.py
   python3 -m py_compile generators/workload-generate
   python3 -m py_compile bin/workloadctl
   python3 -m py_compile libexec/workload-ensure-user

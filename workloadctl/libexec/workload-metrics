@@ -20,6 +20,9 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, '/usr/libexec/workloadctl')
+from podman import Podman
+
 
 WORKLOAD_CONFIG_DIR = Path(
     os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
@@ -92,10 +95,7 @@ def get_service_metrics(name):
         "ActiveEnterTimestampMonotonic",
         "ExecMainStatus",
     )
-    if not props:
-        return None
-
-    active_state = props.get("ActiveState", "unknown")
+    active_state = props.get("ActiveState", "inactive") if props else "inactive"
 
     metrics = {
         "active": 1 if active_state == "active" else 0,
@@ -131,21 +131,11 @@ def get_container_health(name):
         return None
 
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "-u", username,
-             "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-             "-E", f"HOME={pw.pw_dir}",
-             "podman", "inspect", "--format",
-             "{{.State.Health.Status}}", f"workload-{name}"],
-            capture_output=True, text=True, timeout=5, cwd="/tmp",
-        )
-        if result.returncode == 0:
-            status = result.stdout.strip()
-            if status:
-                return status
+        return Podman.for_user(
+            username, uid, pw.pw_dir, timeout=5
+        ).container_health(f"workload-{name}")
     except Exception:
-        pass
-    return None
+        return None
 
 
 def find_workload_cgroup(name):
