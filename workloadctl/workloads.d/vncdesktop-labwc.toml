@@ -77,6 +77,12 @@ extra_groups = ["video", "render"]
 [network]
 mode = "host"
 
+[host]
+# Installs an SELinux policy module on enable, removes it on disable.
+# Allows GTK4's glycin/bwrap image-loader sandbox to start inside the
+# container. Without this, GTK4 apps render with missing icons / images.
+setup = "setup.sh"
+
 [resources]
 shm_size = "2G"
 memory_max = "4G"
