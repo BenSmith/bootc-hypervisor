@@ -7,7 +7,7 @@
 #   sudo ./build.sh
 #
 # Run:
-#   workload-ctl enable desktop-wayfire
+#   workload-ctl enable vncdesktop-wayfire
 
 FROM registry.fedoraproject.org/fedora:43
 

@@ -1,9 +1,9 @@
 [workload]
-name = "desktop-wayfire"
+name = "vncdesktop-wayfire"
 enabled = false
 
 [container]
-image = "localhost/desktop-wayfire:latest"
+image = "localhost/vncdesktop-wayfire:latest"
 pull = "never"
 systemd = "always"
 

@@ -1,6 +1,6 @@
-module desktop-wayfire 1.0;
+module vncdesktop-wayfire 1.0;
 
-# SELinux policy for the desktop-wayfire workload container.
+# SELinux policy for the vncdesktop-wayfire workload container.
 #
 # GTK4's glycin image loaders run inside a bwrap sandbox to decode SVGs
 # (icon themes). Without these rules, bwrap fails during namespace setup

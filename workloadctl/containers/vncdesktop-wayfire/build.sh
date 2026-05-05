@@ -6,12 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HTTP_PROXY="${HTTP_PROXY:-}"
 HTTPS_PROXY="${HTTPS_PROXY:-}"
 
-echo "Building desktop-wayfire container image..."
+echo "Building vncdesktop-wayfire container image..."
 http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" \
 podman build \
     --build-arg http_proxy="$HTTP_PROXY" \
     --build-arg https_proxy="$HTTPS_PROXY" \
-    -t localhost/desktop-wayfire:latest "$SCRIPT_DIR"
+    -t localhost/vncdesktop-wayfire:latest "$SCRIPT_DIR"
 
 echo ""
-echo "Build complete! Image: localhost/desktop-wayfire:latest"
+echo "Build complete! Image: localhost/vncdesktop-wayfire:latest"
