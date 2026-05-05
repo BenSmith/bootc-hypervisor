@@ -1,0 +1,502 @@
+# Fedora 44 sway desktop served over VNC
+#
+# sway runs in headless wlroots mode (no host Wayland or KMS); wayvnc
+# attaches to the sway compositor and serves it on TCP 5900.
+#
+# Build:
+#   ./build.sh
+#
+# All user configuration is embedded via heredocs so this Containerfile is
+# fully self-contained — no external config files or COPY instructions needed.
+
+FROM fedora:44
+
+# Desktop session components:
+#   arc-theme             - GTK theme (clean dark style)
+#   btop                  - system monitor
+#   cliphist              - clipboard history; pairs with wl-paste and fuzzel (Ctrl+Alt+V)
+#   dbus-daemon           - per-session D-Bus (waybar, mako, clipboard need it)
+#   foot                  - terminal emulator (native Wayland, lightweight)
+#   fuzzel                - app launcher (native Wayland, keyboard-driven)
+#   geany                 - lightweight GUI text editor
+#   imv                   - image viewer (Wayland native)
+#   jetbrains-mono-fonts  - monospace font for the terminal
+#   mako                  - notification daemon (native Wayland)
+#   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
+#   mesa-libEGL           - EGL for wlroots / wayvnc
+#   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
+#   sway                  - i3-compatible Wayland tiling compositor (wlroots-based)
+#   thunar                - file manager
+#   tini                  - minimal init / subreaper for zombie reaping
+#   tmux                  - terminal multiplexer
+#   waybar                - status bar
+#   wayvnc                - VNC server attaching to the sway compositor
+#   wl-clipboard          - wl-copy / wl-paste for clipboard support
+#   wlr-randr             - sets the headless output resolution at runtime
+#   xdg-user-dirs         - creates ~/Documents, ~/Downloads etc. on first login
+RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
+    arc-theme \
+    btop \
+    cliphist \
+    dbus-daemon \
+    foot \
+    fuzzel \
+    geany \
+    git-core \
+    imv \
+    jetbrains-mono-fonts \
+    mako \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    papirus-icon-theme \
+    sway \
+    thunar \
+    tini \
+    tmux \
+    waybar \
+    wayvnc \
+    wl-clipboard \
+    wlr-randr \
+    xdg-user-dirs \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Create user with UID 1000 to match the workload's keep-id user mapping.
+# XDG_RUNTIME_DIR must exist and be owned by the user before sway starts.
+RUN useradd -m -u 1000 desktop \
+    && mkdir -p /run/user/1000 \
+    && chown desktop:desktop /run/user/1000 \
+    && chmod 700 /run/user/1000
+
+USER desktop
+WORKDIR /home/desktop
+
+# Headless wlroots backend — sway creates a virtual output instead of needing
+# a host Wayland socket or DRM/KMS device. wayvnc attaches to it.
+ENV \
+    GDK_BACKEND=wayland \
+    LIBSEAT_BACKEND=noop \
+    MOZ_ENABLE_WAYLAND=1 \
+    QT_QPA_PLATFORM=wayland \
+    WLR_BACKENDS=headless \
+    WLR_HEADLESS_OUTPUTS=1 \
+    WLR_LIBINPUT_NO_DEVICES=1 \
+    XDG_RUNTIME_DIR=/run/user/1000 \
+    XDG_SESSION_TYPE=wayland
+
+RUN <<'SETUP'
+#!/bin/sh
+set -e
+
+mkdir -p \
+    ~/.config/btop \
+    ~/.config/foot \
+    ~/.config/fuzzel \
+    ~/.config/gtk-3.0 \
+    ~/.config/gtk-4.0 \
+    ~/.config/mako \
+    ~/.config/sway \
+    ~/.config/waybar \
+    ~/.local/share/applications
+
+# --- .desktop overrides ---
+# Hide dependency entries that would clutter app launchers.
+for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do
+  printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' > ~/.local/share/applications/${f}.desktop
+done
+# btop is Terminal=true; wrap it in foot so it launches from fuzzel.
+cat > ~/.local/share/applications/btop.desktop << 'BTOPEOF'
+[Desktop Entry]
+Type=Application
+Name=btop++
+Icon=btop
+Exec=foot --window-size-chars=80x24 btop
+Categories=System;Monitor;
+BTOPEOF
+cat > ~/.local/share/applications/thunar.desktop << 'THUNAREOF'
+[Desktop Entry]
+Type=Application
+Name=Thunar File Manager
+Icon=org.xfce.thunar
+Exec=thunar
+Categories=Utility;FileManager;
+MimeType=inode/directory;
+THUNAREOF
+
+# --- sway/config ---
+# Ctrl+Alt is the primary modifier — chosen for parity with vncdesktop-labwc
+# and because Super is typically intercepted by the local DE before
+# reaching a VNC viewer. hjkl is used everywhere instead of arrow keys to
+# avoid Ctrl+Alt+arrow conflicts with KDE Plasma workspace switching.
+cat > ~/.config/sway/config << 'SWAY_CONF'
+### Mods and apps
+set $mod Mod1+Control
+set $term foot
+set $menu fuzzel
+
+### Output
+# HEADLESS-1 is the default name wlroots gives the first headless output.
+# Resolution is set at runtime by wlr-randr so DESKTOP_RESOLUTION can apply.
+output * bg #383c4a solid_color
+
+### Appearance
+font pango:Cantarell 10
+gaps inner 6
+default_border pixel 1
+default_floating_border pixel 1
+titlebar_padding 6 2
+focus_follows_mouse yes
+
+# Arc-Dark inspired colors
+# class                 border    background  text      indicator  child_border
+client.focused          #5294e2   #4b5162     #ffffff   #5294e2    #5294e2
+client.focused_inactive #404552   #383c4a     #d3dae3   #404552    #404552
+client.unfocused        #404552   #383c4a     #9da0a8   #404552    #404552
+client.urgent           #c0392b   #c0392b     #ffffff   #c0392b    #c0392b
+
+### Applications
+bindsym $mod+Return exec $term
+bindsym $mod+space  exec $menu
+bindsym $mod+v      exec sh -c 'cliphist list | fuzzel --dmenu | cliphist decode | wl-copy'
+
+### Window management
+bindsym $mod+q             kill
+bindsym $mod+f             fullscreen toggle
+bindsym $mod+Shift+space   floating toggle
+bindsym $mod+e             layout toggle split
+bindsym $mod+Shift+r       reload
+
+# Focus (hjkl — avoids Ctrl+Alt+arrows which KDE intercepts on host)
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+
+# Move window in tiling layout
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+
+# Window cycle (Alt+Tab is intercepted by host DE)
+bindsym $mod+Tab       focus next
+bindsym $mod+Shift+Tab focus prev
+
+### Workspaces (Ctrl+Alt+1-4 is safe on KDE — KDE uses Ctrl+F1-F4)
+bindsym $mod+1 workspace 1
+bindsym $mod+2 workspace 2
+bindsym $mod+3 workspace 3
+bindsym $mod+4 workspace 4
+bindsym $mod+Shift+1 move container to workspace 1; workspace 1
+bindsym $mod+Shift+2 move container to workspace 2; workspace 2
+bindsym $mod+Shift+3 move container to workspace 3; workspace 3
+bindsym $mod+Shift+4 move container to workspace 4; workspace 4
+
+### Resize mode
+mode "resize" {
+    bindsym h resize shrink width  20px
+    bindsym j resize grow   height 20px
+    bindsym k resize shrink height 20px
+    bindsym l resize grow   width  20px
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+}
+bindsym $mod+r mode "resize"
+
+### Autostart
+# Propagate WAYLAND_DISPLAY to the dbus activation environment so apps that
+# launch via dbus (xdg-portal, app-specific .desktop activation) inherit it.
+exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
+exec xdg-user-dirs-update
+exec wl-paste --watch cliphist store
+exec mako
+exec waybar
+SWAY_CONF
+
+# --- waybar/config.jsonc ---
+# Minimal stable config — avoids modules that crash in a container environment
+# (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
+# caused segfaults or runaway memory usage during testing).
+cat > ~/.config/waybar/config.jsonc << 'WAYBAR_CONF'
+{
+    "modules-left": ["sway/workspaces", "sway/mode"],
+    "modules-center": ["clock"],
+    "modules-right": ["cpu", "memory"],
+    "sway/workspaces": {
+        "disable-scroll": true,
+        "format": "{name}"
+    },
+    "sway/mode": {
+        "format": "<i>{}</i>"
+    },
+    "clock": {
+        "format": "{:%a %b %d  %H:%M}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    },
+    "cpu": {
+        "format": "cpu {usage}%",
+        "tooltip": false,
+        "interval": 2
+    },
+    "memory": {
+        "format": "mem {}%",
+        "interval": 5
+    }
+}
+WAYBAR_CONF
+
+# --- waybar/style.css ---
+cat > ~/.config/waybar/style.css << 'WAYBAR_CSS'
+* {
+    font-family: Cantarell, sans-serif;
+    font-size: 13px;
+}
+
+window#waybar {
+    background-color: #383c4a;
+    color: #d3dae3;
+    border-bottom: 2px solid #2b2e3b;
+}
+
+#workspaces button {
+    color: #9da0a8;
+    background-color: transparent;
+    border-bottom: 2px solid transparent;
+    padding: 0 8px;
+}
+
+#workspaces button.focused {
+    color: #ffffff;
+    background-color: #4b5162;
+    border-bottom: 2px solid #5294e2;
+}
+
+#workspaces button.urgent {
+    color: #ffffff;
+    background-color: #c0392b;
+}
+
+#mode {
+    color: #5294e2;
+    padding: 0 10px;
+}
+
+#clock {
+    color: #d3dae3;
+    padding: 0 12px;
+}
+
+#cpu,
+#memory {
+    color: #9da0a8;
+    padding: 0 10px;
+}
+
+#cpu:hover,
+#memory:hover {
+    color: #d3dae3;
+}
+
+#cpu.warning,
+#memory.warning {
+    color: #e67e22;
+}
+
+#cpu.critical,
+#memory.critical {
+    color: #e74c3c;
+}
+WAYBAR_CSS
+
+# --- foot/foot.ini ---
+cat > ~/.config/foot/foot.ini << 'FOOT_CONF'
+[main]
+font=JetBrains Mono:size=11
+pad=4x4
+initial-window-size-chars=80x25
+
+[scrollback]
+lines=10000
+
+[mouse]
+hide-when-typing=yes
+
+[colors-dark]
+alpha=1.0
+background=383c4a
+foreground=d3dae3
+
+regular0=1c2023
+regular1=c0392b
+regular2=4e9a06
+regular3=c4a000
+regular4=5294e2
+regular5=75507b
+regular6=06989a
+regular7=d3dae3
+
+bright0=555753
+bright1=ef2929
+bright2=8ae234
+bright3=fce94f
+bright4=729fcf
+bright5=ad7fa8
+bright6=34e2e2
+bright7=eeeeec
+FOOT_CONF
+
+# --- fuzzel/fuzzel.ini ---
+cat > ~/.config/fuzzel/fuzzel.ini << 'FUZZEL_CONF'
+[main]
+font=Cantarell:size=12
+width=35
+lines=12
+terminal=foot -e
+icons-enabled=yes
+icon-theme=Papirus-Dark
+
+[colors]
+background=383c4aff
+text=d3dae3ff
+match=5294e2ff
+selection=4b5162ff
+selection-text=ffffffff
+selection-match=5294e2ff
+border=5294e2ff
+
+[border]
+width=1
+radius=4
+
+[dmenu]
+exit-immediately-if-empty=yes
+FUZZEL_CONF
+
+# --- mako/config ---
+cat > ~/.config/mako/config << 'MAKO_CONF'
+background-color=#383c4a
+text-color=#d3dae3
+border-color=#5294e2
+border-size=1
+border-radius=4
+default-timeout=5000
+max-visible=5
+font=Cantarell 11
+width=320
+margin=10
+padding=10
+MAKO_CONF
+
+# --- gtk-3.0/settings.ini ---
+cat > ~/.config/gtk-3.0/settings.ini << 'GTK3_CONF'
+[Settings]
+gtk-theme-name=Arc-Dark
+gtk-icon-theme-name=Papirus-Dark
+gtk-font-name=Cantarell 11
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+gtk-button-images=0
+gtk-menu-images=0
+gtk-enable-event-sounds=0
+gtk-enable-input-feedback-sounds=0
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintmedium
+gtk-xft-rgba=rgb
+GTK3_CONF
+
+# --- gtk-4.0/settings.ini ---
+cat > ~/.config/gtk-4.0/settings.ini << 'GTK4_CONF'
+[Settings]
+gtk-theme-name=Arc-Dark
+gtk-icon-theme-name=Papirus-Dark
+gtk-font-name=Cantarell 11
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+GTK4_CONF
+
+# --- btop/btop.conf ---
+cat > ~/.config/btop/btop.conf << 'BTOP_CONF'
+rounded_corners = True
+terminal_sync = True
+vim_keys = True
+BTOP_CONF
+
+SETUP
+
+# --- Entrypoint script ---
+# Starts a per-session D-Bus, the sway compositor on the headless backend,
+# sizes the virtual output, then starts wayvnc on 0.0.0.0:5900.
+USER root
+RUN <<'ENTRYPOINT_INSTALL'
+#!/bin/sh
+set -e
+cat > /usr/local/bin/start-desktop.sh << 'STARTUP'
+#!/bin/sh
+set -e
+
+# Software fallback if no render node is exposed into the container.
+ls /dev/dri/renderD* >/dev/null 2>&1 || export LIBGL_ALWAYS_SOFTWARE=1
+
+# Configure wayvnc auth before the compositor starts (read at wayvnc spawn).
+mkdir -p "$HOME/.config/wayvnc"
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    cat > "$HOME/.config/wayvnc/config" <<CFG
+enable_auth=true
+username=${VNC_USERNAME:-desktop}
+password=${VNC_PASSWORD}
+CFG
+    chmod 600 "$HOME/.config/wayvnc/config"
+    echo "wayvnc: authentication enabled (username: ${VNC_USERNAME:-desktop})"
+else
+    echo "wayvnc: WARNING — no authentication. Set VNC_PASSWORD to enable."
+fi
+
+# Launch sway under a private D-Bus session (waybar/mako/clipboard need it).
+dbus-run-session sway &
+SWAY_PID=$!
+
+# Wait for the wayland socket to appear.
+for i in $(seq 1 50); do
+    for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+        if [ -S "$sock" ] && [ "${sock##*.}" != "lock" ]; then
+            export WAYLAND_DISPLAY="${sock##*/}"
+            break 2
+        fi
+    done
+    sleep 0.1
+done
+
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "ERROR: sway did not create a Wayland socket"
+    kill "$SWAY_PID" 2>/dev/null || true
+    exit 1
+fi
+
+# Set the headless output resolution (HEADLESS-1 is wlroots' default name).
+wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60" || true
+
+wayvnc 0.0.0.0 5900 &
+WAYVNC_PID=$!
+
+cleanup() {
+    kill "$WAYVNC_PID" 2>/dev/null || true
+    kill "$SWAY_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup TERM INT
+
+# Exit when either child dies — the other gets cleaned up.
+wait -n "$SWAY_PID" "$WAYVNC_PID"
+cleanup
+STARTUP
+chmod 0755 /usr/local/bin/start-desktop.sh
+ENTRYPOINT_INSTALL
+USER desktop
+
+EXPOSE 5900
+
+# tini -s: subreaper mode — reaps orphaned descendants without being PID 1
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+CMD ["/usr/local/bin/start-desktop.sh"]
