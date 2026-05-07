@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host setup for the desktop-wayfire workload.
+# Host setup for the vncdesktop-sway workload.
 #
 # Usage:
 #   setup.sh enable   — install SELinux policy module
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODULE_NAME="desktop-wayfire"
+MODULE_NAME="vncdesktop-sway"
 WORK_DIR=""
 cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
 trap cleanup EXIT

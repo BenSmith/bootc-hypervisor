@@ -1,0 +1,108 @@
+# vncdesktop-sway — sway Wayland desktop served over VNC
+#
+# sway runs in headless wlroots mode; wayvnc serves it on TCP 5900.
+# GPU acceleration via /dev/dri/renderD* if available, falls back to software.
+#
+# Keyboard shortcuts (Ctrl+Alt is the primary modifier — Super is typically
+# intercepted by the local DE before reaching the VNC server):
+#   Ctrl+Alt+Return         - Terminal (foot)
+#   Ctrl+Alt+Space          - App launcher (fuzzel)
+#   Ctrl+Alt+Q              - Close window
+#   Ctrl+Alt+F              - Toggle fullscreen
+#   Ctrl+Alt+Shift+Space    - Toggle floating
+#   Ctrl+Alt+E              - Toggle split direction
+#   Ctrl+Alt+H/J/K/L        - Focus left / down / up / right
+#   Ctrl+Alt+Shift+H/J/K/L  - Move tile
+#   Ctrl+Alt+Tab            - Focus next window
+#   Ctrl+Alt+1..4           - Switch workspace
+#   Ctrl+Alt+Shift+1..4     - Move container to workspace
+#   Ctrl+Alt+R              - Resize mode (then hjkl, Enter to exit)
+#   Ctrl+Alt+Shift+R        - Reload sway config
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/vncdesktop-sway && ./build.sh
+#
+#   2. Enable the workload:
+#        sudo workloadctl enable vncdesktop-sway
+#
+#   3. Configure firewall (port 5900):
+#        sudo firewall-cmd --add-port=5900/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only:
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="5900" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+#   4. Connect from any VNC client:
+#        vncviewer <host-ip>:5900
+#
+# Security note:
+#   VNC is unencrypted. For remote access over untrusted networks, tunnel
+#   over SSH:  ssh -L 5900:localhost:5900 user@hypervisor
+
+[workload]
+name = "vncdesktop-sway"
+enabled = false
+
+[container]
+image = "localhost/vncdesktop-sway:latest"
+pull = "never"
+systemd = "always"
+
+[container.environment]
+CONTAINER_USER = "desktop"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
+LANG = "C.UTF-8"
+# Set a VNC password (recommended). Without this, VNC has no authentication.
+# VNC_PASSWORD = "changeme"
+# Or use an encrypted secret:
+# VNC_PASSWORD = "${SECRET:vncdesktop-sway-password}"
+# VNC_USERNAME = "desktop"
+# DESKTOP_RESOLUTION = "1920x1080"
+
+[container.health]
+cmd = "pgrep -x wayvnc > /dev/null || exit 1"
+interval = "30s"
+start_period = "15s"
+on_failure = "kill"
+
+[devices]
+# Optional render node for GPU-accelerated rendering. Falls back to software
+# rendering automatically if no /dev/dri/renderD* is exposed.
+gpu = "auto"
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL",
+]
+extra_groups = ["video", "render"]
+extra_uidmaps = ["+0:@{UID}:1"]
+extra_gidmaps = ["+0:@{GID}:1"]
+
+[storage]
+volumes = [
+    "./home:/home/desktop",
+    "/run/udev:/run/udev:ro",
+    "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
+]
+
+[network]
+mode = "host"
+
+[host]
+# Installs an SELinux policy module on enable, removes it on disable.
+# Allows GTK4's glycin/bwrap image-loader sandbox to start inside the
+# container. Without this, GTK4 apps render with missing icons / images.
+setup = "setup.sh"
+
+[resources]
+shm_size = "2G"
+memory_max = "4G"
+memory_high = "3G"
+cpu_quota = "200%"
+tasks_max = 16384

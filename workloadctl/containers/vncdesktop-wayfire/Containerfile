@@ -7,14 +7,13 @@
 #   sudo ./build.sh
 #
 # Run:
-#   workload-ctl enable desktop-wayfire
+#   workload-ctl enable vncdesktop-wayfire
 
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
     adwaita-icon-theme \
-    alsa-utils \
     bash-completion \
     clinfo \
     dbus-daemon \
@@ -38,9 +37,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-vulkan-drivers \
     nano \
     neovim \
-    pipewire \
-    pipewire-alsa \
-    pipewire-pulseaudio \
     procps-ng \
     slurp \
     sudo \
@@ -57,7 +53,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wdisplays \
     wf-recorder \
     wf-shell \
-    wireplumber \
     wl-clipboard \
     wlr-randr \
     wlrctl \
@@ -85,17 +80,6 @@ gtk-icon-theme-name=Adwaita
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-font-name=Noto Sans 11
-INI
-
-# --- wf-shell config ---
-
-RUN mkdir -p /etc/xdg && \
-    cat > /etc/xdg/wf-shell.ini <<'INI'
-[background]
-color = 0.067 0.067 0.086 1.0
-
-[panel]
-position = bottom
 INI
 
 # --- Wayfire config ---
@@ -203,7 +187,7 @@ RUN cat > /etc/xdg/wf-shell.ini <<'INI'
 [panel]
 widgets_left = menu
 widgets_center = window-list
-widgets_right = volume clock
+widgets_right = clock
 position = top
 minimal_height = 32
 
@@ -239,65 +223,6 @@ Type=oneshot
 RemainAfterExit=yes
 PassEnvironment=CONTAINER_UID CONTAINER_GID
 ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-# --- PipeWire systemd services ---
-
-RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
-[Unit]
-Description=PipeWire Multimedia Service
-After=xdg-runtime-dir.service
-Requires=xdg-runtime-dir.service
-
-[Service]
-Type=simple
-Restart=on-failure
-RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
-
-ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire'
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-RUN cat > /usr/lib/systemd/system/wireplumber.service <<'UNIT'
-[Unit]
-Description=WirePlumber Session Manager
-After=pipewire.service
-Requires=pipewire.service
-
-[Service]
-Type=simple
-Restart=on-failure
-RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
-
-ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/wireplumber'
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-RUN cat > /usr/lib/systemd/system/pipewire-pulse.service <<'UNIT'
-[Unit]
-Description=PipeWire PulseAudio Compatibility
-After=pipewire.service
-Requires=pipewire.service
-
-[Service]
-Type=simple
-Restart=on-failure
-RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
-
-ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire-pulse'
 
 [Install]
 WantedBy=multi-user.target
@@ -392,8 +317,37 @@ ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --k
 WantedBy=multi-user.target
 UNIT
 
-# --- wayvnc systemd service ---
-# Binds on all interfaces, port 5900. No auth by default.
+# --- wayvnc launcher ---
+# Writes wayvnc auth config from VNC_PASSWORD/VNC_USERNAME (if set) before
+# spawning wayvnc. With no VNC_PASSWORD, wayvnc runs unauthenticated.
+
+RUN cat > /usr/local/bin/start-wayvnc <<'SCRIPT'
+#!/bin/sh
+set -e
+. /run/wayland-display.env
+export WAYLAND_DISPLAY
+export HOME="/home/${CONTAINER_USER}"
+export XDG_RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+
+mkdir -p "$HOME/.config/wayvnc"
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    cat > "$HOME/.config/wayvnc/config" <<CFG
+enable_auth=true
+username=${VNC_USERNAME:-desktop}
+password=${VNC_PASSWORD}
+CFG
+    chmod 600 "$HOME/.config/wayvnc/config"
+    echo "wayvnc: authentication enabled (username: ${VNC_USERNAME:-desktop})"
+else
+    rm -f "$HOME/.config/wayvnc/config"
+    echo "wayvnc: WARNING — no authentication. Set VNC_PASSWORD to enable."
+fi
+
+cd
+exec /usr/bin/wayvnc 0.0.0.0 5900
+SCRIPT
+
+RUN chmod +x /usr/local/bin/start-wayvnc
 
 RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
 [Unit]
@@ -405,10 +359,10 @@ Requires=set-resolution.service
 Type=simple
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && cd && exec /usr/bin/wayvnc 0.0.0.0 5900'
+    /usr/local/bin/start-wayvnc
 
 [Install]
 WantedBy=multi-user.target
@@ -430,7 +384,7 @@ useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "
 mkdir -p "$HOME_DIR/.local/state"
 chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
 
-for grp in render video audio; do
+for grp in render video; do
     if getent group "$grp" >/dev/null 2>&1; then
         usermod -aG "$grp" "$CONTAINER_USER" 2>/dev/null || true
     fi
@@ -500,7 +454,7 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
-    systemctl enable wayfire wayfire-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir pipewire wireplumber pipewire-pulse && \
+    systemctl enable wayfire wayfire-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir && \
     chmod +x /usr/local/bin/container-bootstrap
 
 STOPSIGNAL SIGRTMIN+3
