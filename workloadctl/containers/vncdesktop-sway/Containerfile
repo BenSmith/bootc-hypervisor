@@ -7,9 +7,9 @@
 #   sudo ./build.sh
 #
 # Run:
-#   workload-ctl enable vncdesktop-sway
+#   workloadctl enable vncdesktop-sway
 
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     abattis-cantarell-fonts \
@@ -17,10 +17,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     arc-theme \
     bash-completion \
     btop \
-    clinfo \
     dbus-daemon \
-    drm_info \
-    eglinfo \
     firefox \
     foot \
     fuzzel \
@@ -53,9 +50,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     thunar \
     tmux \
     util-linux \
-    vainfo \
-    vulkan-tools \
-    wayland-info \
     waybar \
     wayvnc \
     wdisplays \
@@ -428,6 +422,28 @@ Type=oneshot
 WantedBy=multi-user.target
 UNIT
 
+# --- Sway startup script ---
+
+RUN cat > /usr/local/bin/start-sway <<'SCRIPT'
+#!/bin/sh
+set -e
+export HOME="/home/${CONTAINER_USER}"
+export XDG_RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+
+ls /dev/dri/renderD* >/dev/null 2>&1 || {
+    export WLR_RENDERER=pixman
+    export LIBGL_ALWAYS_SOFTWARE=1
+}
+
+dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile &
+
+cd
+exec /usr/bin/sway -c /etc/sway/config
+SCRIPT
+
+RUN chmod +x /usr/local/bin/start-sway
+
 # --- Sway systemd service ---
 
 RUN cat > /usr/lib/systemd/system/sway.service <<'UNIT'
@@ -457,7 +473,7 @@ Environment=XDG_CURRENT_DESKTOP=sway
 Environment=XDG_SESSION_TYPE=wayland
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/sway -c /etc/sway/config'
+    /usr/local/bin/start-sway
 
 [Install]
 WantedBy=multi-user.target
@@ -621,13 +637,11 @@ RUN cat > /usr/lib/systemd/system/container-bootstrap.service <<'UNIT'
 [Unit]
 After=sysinit.target
 Before=sway.service
-ConditionPathExists=!/etc/container-bootstrapped
 DefaultDependencies=no
-Description=First-boot container bootstrap
+Description=Container bootstrap
 
 [Service]
 ExecStart=/usr/local/bin/container-bootstrap
-ExecStartPost=/bin/touch /etc/container-bootstrapped
 PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID
 Type=oneshot
 

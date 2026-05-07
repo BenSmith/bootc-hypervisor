@@ -63,7 +63,7 @@ LANG = "C.UTF-8"
 # DESKTOP_RESOLUTION = "1920x1080"
 
 [container.health]
-cmd = "pgrep -x sway > /dev/null || exit 1"
+cmd = "pgrep -x wayvnc > /dev/null || exit 1"
 interval = "30s"
 start_period = "15s"
 on_failure = "kill"

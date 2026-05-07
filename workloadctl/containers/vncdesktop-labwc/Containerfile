@@ -30,6 +30,7 @@ FROM fedora:44
 #   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
 #   procps-ng             - pkill, used by autostart to SIGHUP labwc after
 #                           regenerating the right-click menu
+#   sudo                  - passwordless sudo for the desktop user
 #   swaybg                - wallpaper setter
 #   thunar                - file manager
 #   tini                  - minimal init / subreaper for zombie reaping
@@ -60,6 +61,7 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     mesa-libEGL \
     papirus-icon-theme \
     procps-ng \
+    sudo \
     swaybg \
     thunar \
     tini \
@@ -78,7 +80,9 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
 RUN useradd -m -u 1000 desktop \
     && mkdir -p /run/user/1000 \
     && chown desktop:desktop /run/user/1000 \
-    && chmod 700 /run/user/1000
+    && chmod 700 /run/user/1000 \
+    && echo "desktop ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/desktop \
+    && chmod 0440 /etc/sudoers.d/desktop
 
 USER desktop
 WORKDIR /home/desktop
@@ -94,7 +98,9 @@ ENV GDK_BACKEND=wayland \
     XDG_RUNTIME_DIR=/run/user/1000 \
     XDG_SESSION_TYPE=wayland
 
-RUN <<'SETUP'
+# --- labwc compositor config ---
+
+RUN <<'LABWC_SETUP'
 #!/bin/sh
 set -e
 
@@ -110,22 +116,21 @@ mkdir -p \
     ~/.local/share/applications \
     ~/.local/share/themes/Arc-Labwc/openbox-3
 
-# --- .desktop overrides ---
 # Hide dependency entries that clutter the menu.
 for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do
   printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' > ~/.local/share/applications/${f}.desktop
 done
 # btop is Terminal=true; wrap it in foot so it launches from the menu.
-cat > ~/.local/share/applications/btop.desktop << 'BTOPEOF'
+cat > ~/.local/share/applications/btop.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
 Name=btop++
 Icon=btop
 Exec=foot --window-size-chars=80x24 btop
 Categories=System;Monitor;
-BTOPEOF
+EOF
 # Thunar ships with multiple categories causing it to appear twice; pin it to one.
-cat > ~/.local/share/applications/thunar.desktop << 'THUNAREOF'
+cat > ~/.local/share/applications/thunar.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
 Name=Thunar File Manager
@@ -133,10 +138,9 @@ Icon=org.xfce.thunar
 Exec=thunar
 Categories=Utility;FileManager;
 MimeType=inode/directory;
-THUNAREOF
+EOF
 
-# --- labwc/rc.xml ---
-cat > ~/.config/labwc/rc.xml << 'RCXML'
+cat > ~/.config/labwc/rc.xml << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <labwc_config>
 
@@ -257,29 +261,26 @@ cat > ~/.config/labwc/rc.xml << 'RCXML'
   </mouse>
 
 </labwc_config>
-RCXML
+EOF
 
-# --- labwc/environment ---
-cat > ~/.config/labwc/environment << 'ENVIRON'
+cat > ~/.config/labwc/environment << 'EOF'
 XCURSOR_THEME=Adwaita
 XCURSOR_SIZE=24
 GTK_THEME=Arc-Dark
 QT_QPA_PLATFORM=wayland
 LANG=C.UTF-8
 LC_ALL=C.UTF-8
-ENVIRON
+EOF
 
-# --- labwc/autostart ---
-cat > ~/.config/labwc/autostart << 'AUTOSTART'
+cat > ~/.config/labwc/autostart << 'EOF'
 ~/.config/labwc/menu-generate.sh && pkill -SIGHUP labwc
 xdg-user-dirs-update
 swaybg -c '#383c4a' &
 wl-paste --watch cliphist store &
 mako &
 sleep 0.5 && waybar &
-AUTOSTART
+EOF
 
-# --- labwc/menu-generate.sh ---
 # Regenerates the right-click menu from installed .desktop files at each startup.
 cat > ~/.config/labwc/menu-generate.sh << 'MENUSCRIPT'
 #!/bin/sh
@@ -296,12 +297,18 @@ cat >> "$MENU" << 'EOF'
 EOF
 MENUSCRIPT
 chmod +x ~/.config/labwc/menu-generate.sh
+LABWC_SETUP
 
-# --- waybar/config.jsonc ---
-# Minimal stable config — avoids modules that crash in a container environment
+# --- App tool configs: waybar, foot, fuzzel, mako, btop ---
+# Minimal waybar config — avoids modules that crash in a container environment
 # (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
 # caused segfaults or runaway memory usage during testing).
-cat > ~/.config/waybar/config.jsonc << 'WAYBAR_CONF'
+
+RUN <<'APP_CONFIGS'
+#!/bin/sh
+set -e
+
+cat > ~/.config/waybar/config.jsonc << 'EOF'
 {
     "modules-left": [],
     "modules-center": ["clock"],
@@ -320,10 +327,9 @@ cat > ~/.config/waybar/config.jsonc << 'WAYBAR_CONF'
         "interval": 5
     }
 }
-WAYBAR_CONF
+EOF
 
-# --- waybar/style.css ---
-cat > ~/.config/waybar/style.css << 'WAYBAR_CSS'
+cat > ~/.config/waybar/style.css << 'EOF'
 * {
     font-family: Cantarell, sans-serif;
     font-size: 13px;
@@ -360,10 +366,9 @@ window#waybar {
 #memory.critical {
     color: #e74c3c;
 }
-WAYBAR_CSS
+EOF
 
-# --- foot/foot.ini ---
-cat > ~/.config/foot/foot.ini << 'FOOT_CONF'
+cat > ~/.config/foot/foot.ini << 'EOF'
 [main]
 font=JetBrains Mono:size=11
 pad=4x4
@@ -397,10 +402,9 @@ bright4=729fcf
 bright5=ad7fa8
 bright6=34e2e2
 bright7=eeeeec
-FOOT_CONF
+EOF
 
-# --- fuzzel/fuzzel.ini ---
-cat > ~/.config/fuzzel/fuzzel.ini << 'FUZZEL_CONF'
+cat > ~/.config/fuzzel/fuzzel.ini << 'EOF'
 [main]
 font=Cantarell:size=12
 icon-theme=Papirus-Dark
@@ -424,10 +428,9 @@ radius=4
 
 [dmenu]
 exit-immediately-if-empty=yes
-FUZZEL_CONF
+EOF
 
-# --- mako/config ---
-cat > ~/.config/mako/config << 'MAKO_CONF'
+cat > ~/.config/mako/config << 'EOF'
 background-color=#383c4a
 border-color=#5294e2
 border-radius=4
@@ -439,10 +442,22 @@ max-visible=5
 padding=10
 text-color=#d3dae3
 width=320
-MAKO_CONF
+EOF
 
-# --- gtk-3.0/settings.ini ---
-cat > ~/.config/gtk-3.0/settings.ini << 'GTK3_CONF'
+cat > ~/.config/btop/btop.conf << 'EOF'
+rounded_corners = True
+terminal_sync = True
+vim_keys = True
+EOF
+APP_CONFIGS
+
+# --- Theme: GTK settings and Arc-Labwc window decorations ---
+
+RUN <<'THEME'
+#!/bin/sh
+set -e
+
+cat > ~/.config/gtk-3.0/settings.ini << 'EOF'
 [Settings]
 gtk-button-images=0
 gtk-cursor-theme-name=Adwaita
@@ -458,23 +473,19 @@ gtk-xft-antialias=1
 gtk-xft-hinting=1
 gtk-xft-hintstyle=hintmedium
 gtk-xft-rgba=rgb
-GTK3_CONF
+EOF
 
-# --- gtk-4.0/settings.ini ---
-cat > ~/.config/gtk-4.0/settings.ini << 'GTK4_CONF'
+cat > ~/.config/gtk-4.0/settings.ini << 'EOF'
 [Settings]
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-font-name=Cantarell 11
 gtk-icon-theme-name=Papirus-Dark
 gtk-theme-name=Arc-Dark
-GTK4_CONF
+EOF
 
-# --- Arc-Labwc window decoration theme ---
-cat > ~/.local/share/themes/Arc-Labwc/openbox-3/themerc << 'THEMERC'
-# Arc-Labwc window decoration theme
-# Based on Arc-Dark color palette
-
+# Arc-Labwc window decoration theme — based on Arc-Dark color palette
+cat > ~/.local/share/themes/Arc-Labwc/openbox-3/themerc << 'EOF'
 border.width: 1
 padding.height: 5
 window.client.padding.height: 0
@@ -541,16 +552,8 @@ osd.workspace-switcher.boxes.border.width: 1
 # Snapping overlay
 snapping.overlay.edge.bg.color: #5294e280
 snapping.overlay.region.bg.color: #5294e280
-THEMERC
-
-# --- btop/btop.conf ---
-cat > ~/.config/btop/btop.conf << 'BTOP_CONF'
-rounded_corners = True
-terminal_sync = True
-vim_keys = True
-BTOP_CONF
-
-SETUP
+EOF
+THEME
 
 # --- Entrypoint script ---
 # Starts a per-session D-Bus, the labwc compositor on the headless backend,
@@ -572,12 +575,10 @@ export HOME=/home/desktop
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-# wlroots defaults to GLES2/EGL which requires a real GPU context even in
-# headless mode. Force the pixman software renderer so labwc starts without
-# any DRI device. Mesa apps inside the session still use the render node if
-# one is present (LIBGL_ALWAYS_SOFTWARE only kicks in when there is none).
-export WLR_RENDERER=pixman
-ls /dev/dri/renderD* >/dev/null 2>&1 || export LIBGL_ALWAYS_SOFTWARE=1
+ls /dev/dri/renderD* >/dev/null 2>&1 || {
+    export WLR_RENDERER=pixman
+    export LIBGL_ALWAYS_SOFTWARE=1
+}
 
 # Configure wayvnc auth before the compositor starts (read at wayvnc spawn).
 mkdir -p "$HOME/.config/wayvnc"

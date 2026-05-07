@@ -15,3 +15,7 @@ podman build \
 
 echo ""
 echo "Build complete! Image: localhost/vncdesktop-sway:latest"
+echo ""
+echo "Next steps:"
+echo "  sudo workloadctl enable vncdesktop-sway"
+echo "  sudo firewall-cmd --add-port=5900/tcp --permanent && sudo firewall-cmd --reload"
