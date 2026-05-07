@@ -563,7 +563,7 @@ RUN <<'ENTRYPOINT_INSTALL'
 #!/bin/sh
 set -e
 cat > /usr/local/bin/start-desktop.sh << 'STARTUP'
-#!/bin/sh
+#!/bin/bash
 set -e
 
 # workloadctl sets HOME=/var/lib/workloads/<name> in the systemd unit so the
