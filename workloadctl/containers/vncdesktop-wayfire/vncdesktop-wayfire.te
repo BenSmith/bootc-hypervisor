@@ -8,6 +8,13 @@ module vncdesktop-wayfire 1.0;
 # zero-size layer surface and no visible bar.
 
 require {
+    class chr_file setattr;
+    class dir read;
+    class file { execute execute_no_trans getattr map open read };
+    class filesystem { mount remount };
+    class sock_file { getattr mounton write };
+    class unix_stream_socket connectto;
+
     type container_file_t;
     type container_init_t;
     type devpts_t;
@@ -18,12 +25,6 @@ require {
     type xserver_exec_t;
     type xserver_misc_device_t;
     type xserver_t;
-    class chr_file setattr;
-    class dir read;
-    class file { execute execute_no_trans getattr map open read };
-    class filesystem { mount remount };
-    class sock_file { getattr mounton write };
-    class unix_stream_socket connectto;
 }
 
 # bwrap mounts a tmpfs for the sandbox's /tmp-home and /tmp-run.

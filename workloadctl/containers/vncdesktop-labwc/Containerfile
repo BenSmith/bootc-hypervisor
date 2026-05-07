@@ -28,6 +28,8 @@ FROM fedora:44
 #   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
 #   mesa-libEGL           - EGL for wlroots / wayvnc
 #   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
+#   procps-ng             - pkill, used by autostart to SIGHUP labwc after
+#                           regenerating the right-click menu
 #   swaybg                - wallpaper setter
 #   thunar                - file manager
 #   tini                  - minimal init / subreaper for zombie reaping
@@ -37,6 +39,9 @@ FROM fedora:44
 #   wl-clipboard          - wl-copy / wl-paste for clipboard support
 #   wlr-randr             - sets the headless output resolution at runtime
 #   xdg-user-dirs         - creates ~/Documents, ~/Downloads etc. on first login
+#   xorg-x11-server-Xwayland - X11 compatibility; labwc aborts at startup
+#                              if its built-in xwayland support can't find
+#                              /usr/bin/Xwayland
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     arc-theme \
     btop \
@@ -54,6 +59,7 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     mesa-dri-drivers \
     mesa-libEGL \
     papirus-icon-theme \
+    procps-ng \
     swaybg \
     thunar \
     tini \
@@ -63,6 +69,7 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     wl-clipboard \
     wlr-randr \
     xdg-user-dirs \
+    xorg-x11-server-Xwayland \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -78,15 +85,14 @@ WORKDIR /home/desktop
 
 # Headless wlroots backend — labwc creates a virtual output instead of needing
 # a host Wayland socket or DRM/KMS device. wayvnc attaches to it.
-ENV \
-    GDK_BACKEND=wayland \
+ENV GDK_BACKEND=wayland \
     LIBSEAT_BACKEND=noop \
-    MOZ_ENABLE_WAYLAND=1
+    MOZ_ENABLE_WAYLAND=1 \
     QT_QPA_PLATFORM=wayland \
     WLR_BACKENDS=headless \
     WLR_LIBINPUT_NO_DEVICES=1 \
     XDG_RUNTIME_DIR=/run/user/1000 \
-    XDG_SESSION_TYPE=wayland \
+    XDG_SESSION_TYPE=wayland
 
 RUN <<'SETUP'
 #!/bin/sh
@@ -557,7 +563,20 @@ cat > /usr/local/bin/start-desktop.sh << 'STARTUP'
 #!/bin/sh
 set -e
 
-# Software fallback if no render node is exposed into the container.
+# workloadctl sets HOME=/var/lib/workloads/<name> in the systemd unit so the
+# workload user has a writable host-side home. Override it back to the
+# container user's actual home, where all configs are baked into the image.
+export HOME=/home/desktop
+
+# Ensure XDG_RUNTIME_DIR exists — /run may be a fresh tmpfs at container start.
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+# wlroots defaults to GLES2/EGL which requires a real GPU context even in
+# headless mode. Force the pixman software renderer so labwc starts without
+# any DRI device. Mesa apps inside the session still use the render node if
+# one is present (LIBGL_ALWAYS_SOFTWARE only kicks in when there is none).
+export WLR_RENDERER=pixman
 ls /dev/dri/renderD* >/dev/null 2>&1 || export LIBGL_ALWAYS_SOFTWARE=1
 
 # Configure wayvnc auth before the compositor starts (read at wayvnc spawn).

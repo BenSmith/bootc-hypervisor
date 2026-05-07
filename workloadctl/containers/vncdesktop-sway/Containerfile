@@ -1,119 +1,136 @@
-# Fedora 44 sway desktop served over VNC
+# Headless Sway Desktop (VNC)
 #
-# sway runs in headless wlroots mode (no host Wayland or KMS); wayvnc
-# attaches to the sway compositor and serves it on TCP 5900.
+# Sway runs headlessly (WLR_BACKENDS=headless). Access via wayvnc on
+# port 5900. Set VNC_PASSWORD to enable authentication.
 #
 # Build:
-#   ./build.sh
+#   sudo ./build.sh
 #
-# All user configuration is embedded via heredocs so this Containerfile is
-# fully self-contained — no external config files or COPY instructions needed.
+# Run:
+#   workload-ctl enable vncdesktop-sway
 
-FROM fedora:44
+FROM registry.fedoraproject.org/fedora:43
 
-# Desktop session components:
-#   arc-theme             - GTK theme (clean dark style)
-#   btop                  - system monitor
-#   cliphist              - clipboard history; pairs with wl-paste and fuzzel (Ctrl+Alt+V)
-#   dbus-daemon           - per-session D-Bus (waybar, mako, clipboard need it)
-#   foot                  - terminal emulator (native Wayland, lightweight)
-#   fuzzel                - app launcher (native Wayland, keyboard-driven)
-#   geany                 - lightweight GUI text editor
-#   imv                   - image viewer (Wayland native)
-#   jetbrains-mono-fonts  - monospace font for the terminal
-#   mako                  - notification daemon (native Wayland)
-#   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
-#   mesa-libEGL           - EGL for wlroots / wayvnc
-#   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
-#   sway                  - i3-compatible Wayland tiling compositor (wlroots-based)
-#   thunar                - file manager
-#   tini                  - minimal init / subreaper for zombie reaping
-#   tmux                  - terminal multiplexer
-#   waybar                - status bar
-#   wayvnc                - VNC server attaching to the sway compositor
-#   wl-clipboard          - wl-copy / wl-paste for clipboard support
-#   wlr-randr             - sets the headless output resolution at runtime
-#   xdg-user-dirs         - creates ~/Documents, ~/Downloads etc. on first login
-RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    abattis-cantarell-fonts \
+    adwaita-cursor-theme \
     arc-theme \
+    bash-completion \
     btop \
-    cliphist \
+    clinfo \
     dbus-daemon \
+    drm_info \
+    eglinfo \
+    firefox \
     foot \
     fuzzel \
     geany \
     git-core \
+    google-noto-sans-fonts \
+    grim \
+    hostname \
+    htop \
     imv \
     jetbrains-mono-fonts \
+    less \
+    librsvg2 \
     mako \
     mesa-dri-drivers \
     mesa-libEGL \
+    mesa-libGL \
+    mesa-libgbm \
+    mesa-vulkan-drivers \
+    nano \
+    neovim \
     papirus-icon-theme \
+    procps-ng \
+    slurp \
+    sudo \
     sway \
+    swappy \
+    systemd \
+    systemd-udev \
     thunar \
-    tini \
     tmux \
+    util-linux \
+    vainfo \
+    vulkan-tools \
+    wayland-info \
     waybar \
     wayvnc \
+    wdisplays \
+    wf-recorder \
     wl-clipboard \
     wlr-randr \
+    wlrctl \
     xdg-user-dirs \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
+    xdg-utils \
+    xorg-x11-server-Xwayland \
+    && dnf clean all
 
-# Create user with UID 1000 to match the workload's keep-id user mapping.
-# XDG_RUNTIME_DIR must exist and be owned by the user before sway starts.
-RUN useradd -m -u 1000 desktop \
-    && mkdir -p /run/user/1000 \
-    && chown desktop:desktop /run/user/1000 \
-    && chmod 700 /run/user/1000
+# Fedora ships /usr/bin/sway with cap_sys_nice+ep for realtime scheduling.
+# In a container with a reduced capability bounding set, execve() fails with
+# EPERM because the kernel can't grant the file's permitted caps. Strip them —
+# realtime scheduling is unnecessary for a headless VNC compositor.
+RUN setcap -r /usr/bin/sway
 
-USER desktop
-WORKDIR /home/desktop
+# --- Firefox stability fix ---
+# Disable Wayland vsync: Firefox freezes under wlroots compositors without
+# mouse movement. Mozilla bug #1954343.
 
-# Headless wlroots backend — sway creates a virtual output instead of needing
-# a host Wayland socket or DRM/KMS device. wayvnc attaches to it.
-ENV \
-    GDK_BACKEND=wayland \
-    LIBSEAT_BACKEND=noop \
-    MOZ_ENABLE_WAYLAND=1 \
-    QT_QPA_PLATFORM=wayland \
-    WLR_BACKENDS=headless \
-    WLR_HEADLESS_OUTPUTS=1 \
-    WLR_LIBINPUT_NO_DEVICES=1 \
-    XDG_RUNTIME_DIR=/run/user/1000 \
-    XDG_SESSION_TYPE=wayland
+RUN mkdir -p /usr/lib/firefox/browser/defaults/preferences && \
+    cat > /usr/lib/firefox/browser/defaults/preferences/99-container.js <<'JS'
+pref("widget.wayland.vsync.enabled", false);
+JS
 
-RUN <<'SETUP'
-#!/bin/sh
-set -e
+# --- GTK settings ---
 
-mkdir -p \
-    ~/.config/btop \
-    ~/.config/foot \
-    ~/.config/fuzzel \
-    ~/.config/gtk-3.0 \
-    ~/.config/gtk-4.0 \
-    ~/.config/mako \
-    ~/.config/sway \
-    ~/.config/waybar \
-    ~/.local/share/applications
+RUN mkdir -p /etc/gtk-3.0 /etc/gtk-4.0 && \
+    cat > /etc/gtk-3.0/settings.ini <<'INI'
+[Settings]
+gtk-button-images=0
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-enable-event-sounds=0
+gtk-enable-input-feedback-sounds=0
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-menu-images=0
+gtk-theme-name=Arc-Dark
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintmedium
+gtk-xft-rgba=rgb
+INI
+
+RUN cat > /etc/gtk-4.0/settings.ini <<'INI'
+[Settings]
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-theme-name=Arc-Dark
+INI
 
 # --- .desktop overrides ---
-# Hide dependency entries that would clutter app launchers.
-for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do
-  printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' > ~/.local/share/applications/${f}.desktop
-done
-# btop is Terminal=true; wrap it in foot so it launches from fuzzel.
-cat > ~/.local/share/applications/btop.desktop << 'BTOPEOF'
+# Hide dependency entries that would clutter the launcher.
+
+RUN mkdir -p /usr/local/share/applications && \
+    for f in foot-server footclient thunar-bulk-rename thunar-settings xterm; do \
+        printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' \
+            > /usr/local/share/applications/${f}.desktop ; \
+    done && \
+    cat > /usr/local/share/applications/btop.desktop <<'DESK'
 [Desktop Entry]
 Type=Application
 Name=btop++
 Icon=btop
 Exec=foot --window-size-chars=80x24 btop
 Categories=System;Monitor;
-BTOPEOF
-cat > ~/.local/share/applications/thunar.desktop << 'THUNAREOF'
+DESK
+
+RUN cat > /usr/local/share/applications/thunar.desktop <<'DESK'
 [Desktop Entry]
 Type=Application
 Name=Thunar File Manager
@@ -121,31 +138,32 @@ Icon=org.xfce.thunar
 Exec=thunar
 Categories=Utility;FileManager;
 MimeType=inode/directory;
-THUNAREOF
+DESK
 
-# --- sway/config ---
-# Ctrl+Alt is the primary modifier — chosen for parity with vncdesktop-labwc
-# and because Super is typically intercepted by the local DE before
-# reaching a VNC viewer. hjkl is used everywhere instead of arrow keys to
-# avoid Ctrl+Alt+arrow conflicts with KDE Plasma workspace switching.
-cat > ~/.config/sway/config << 'SWAY_CONF'
+# --- Sway config ---
+# Ctrl+Alt is the primary modifier — chosen because Super is typically
+# intercepted by the local DE before reaching a VNC viewer. hjkl is used
+# instead of arrow keys to avoid Ctrl+Alt+arrow conflicts with KDE Plasma
+# workspace switching.
+# Resolution is set at runtime by wlr-randr so DESKTOP_RESOLUTION can apply.
+
+RUN mkdir -p /etc/sway && \
+    cat > /etc/sway/config <<'SWAY'
 ### Mods and apps
 set $mod Mod1+Control
 set $term foot
 set $menu fuzzel
 
 ### Output
-# HEADLESS-1 is the default name wlroots gives the first headless output.
-# Resolution is set at runtime by wlr-randr so DESKTOP_RESOLUTION can apply.
 output * bg #383c4a solid_color
 
 ### Appearance
-font pango:Cantarell 10
-gaps inner 6
 default_border pixel 1
 default_floating_border pixel 1
-titlebar_padding 6 2
 focus_follows_mouse yes
+font pango:Cantarell 10
+gaps inner 6
+titlebar_padding 6 2
 
 # Arc-Dark inspired colors
 # class                 border    background  text      indicator  child_border
@@ -157,14 +175,13 @@ client.urgent           #c0392b   #c0392b     #ffffff   #c0392b    #c0392b
 ### Applications
 bindsym $mod+Return exec $term
 bindsym $mod+space  exec $menu
-bindsym $mod+v      exec sh -c 'cliphist list | fuzzel --dmenu | cliphist decode | wl-copy'
 
 ### Window management
-bindsym $mod+q             kill
-bindsym $mod+f             fullscreen toggle
+bindsym $mod+Shift+r       reload
 bindsym $mod+Shift+space   floating toggle
 bindsym $mod+e             layout toggle split
-bindsym $mod+Shift+r       reload
+bindsym $mod+f             fullscreen toggle
+bindsym $mod+q             kill
 
 # Focus (hjkl — avoids Ctrl+Alt+arrows which KDE intercepts on host)
 bindsym $mod+h focus left
@@ -179,8 +196,8 @@ bindsym $mod+Shift+k move up
 bindsym $mod+Shift+l move right
 
 # Window cycle (Alt+Tab is intercepted by host DE)
-bindsym $mod+Tab       focus next
 bindsym $mod+Shift+Tab focus prev
+bindsym $mod+Tab       focus next
 
 ### Workspaces (Ctrl+Alt+1-4 is safe on KDE — KDE uses Ctrl+F1-F4)
 bindsym $mod+1 workspace 1
@@ -204,20 +221,16 @@ mode "resize" {
 bindsym $mod+r mode "resize"
 
 ### Autostart
-# Propagate WAYLAND_DISPLAY to the dbus activation environment so apps that
-# launch via dbus (xdg-portal, app-specific .desktop activation) inherit it.
-exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
+exec dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
 exec xdg-user-dirs-update
-exec wl-paste --watch cliphist store
 exec mako
 exec waybar
-SWAY_CONF
+SWAY
 
-# --- waybar/config.jsonc ---
-# Minimal stable config — avoids modules that crash in a container environment
-# (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
-# caused segfaults or runaway memory usage during testing).
-cat > ~/.config/waybar/config.jsonc << 'WAYBAR_CONF'
+# --- waybar config ---
+
+RUN mkdir -p /etc/xdg/waybar && \
+    cat > /etc/xdg/waybar/config.jsonc <<'WAYBAR'
 {
     "modules-left": ["sway/workspaces", "sway/mode"],
     "modules-center": ["clock"],
@@ -243,10 +256,9 @@ cat > ~/.config/waybar/config.jsonc << 'WAYBAR_CONF'
         "interval": 5
     }
 }
-WAYBAR_CONF
+WAYBAR
 
-# --- waybar/style.css ---
-cat > ~/.config/waybar/style.css << 'WAYBAR_CSS'
+RUN cat > /etc/xdg/waybar/style.css <<'CSS'
 * {
     font-family: Cantarell, sans-serif;
     font-size: 13px;
@@ -254,26 +266,26 @@ cat > ~/.config/waybar/style.css << 'WAYBAR_CSS'
 
 window#waybar {
     background-color: #383c4a;
-    color: #d3dae3;
     border-bottom: 2px solid #2b2e3b;
+    color: #d3dae3;
 }
 
 #workspaces button {
-    color: #9da0a8;
     background-color: transparent;
     border-bottom: 2px solid transparent;
+    color: #9da0a8;
     padding: 0 8px;
 }
 
 #workspaces button.focused {
-    color: #ffffff;
     background-color: #4b5162;
     border-bottom: 2px solid #5294e2;
+    color: #ffffff;
 }
 
 #workspaces button.urgent {
-    color: #ffffff;
     background-color: #c0392b;
+    color: #ffffff;
 }
 
 #mode {
@@ -306,10 +318,12 @@ window#waybar {
 #memory.critical {
     color: #e74c3c;
 }
-WAYBAR_CSS
+CSS
 
-# --- foot/foot.ini ---
-cat > ~/.config/foot/foot.ini << 'FOOT_CONF'
+# --- Foot terminal config ---
+
+RUN mkdir -p /etc/xdg/foot && \
+    cat > /etc/xdg/foot/foot.ini <<'FOOT'
 [main]
 font=JetBrains Mono:size=11
 pad=4x4
@@ -323,7 +337,18 @@ hide-when-typing=yes
 
 [colors-dark]
 alpha=1.0
+
 background=383c4a
+
+bright0=555753
+bright1=ef2929
+bright2=8ae234
+bright3=fce94f
+bright4=729fcf
+bright5=ad7fa8
+bright6=34e2e2
+bright7=eeeeec
+
 foreground=d3dae3
 
 regular0=1c2023
@@ -334,112 +359,180 @@ regular4=5294e2
 regular5=75507b
 regular6=06989a
 regular7=d3dae3
+FOOT
 
-bright0=555753
-bright1=ef2929
-bright2=8ae234
-bright3=fce94f
-bright4=729fcf
-bright5=ad7fa8
-bright6=34e2e2
-bright7=eeeeec
-FOOT_CONF
+# --- Fuzzel launcher config ---
 
-# --- fuzzel/fuzzel.ini ---
-cat > ~/.config/fuzzel/fuzzel.ini << 'FUZZEL_CONF'
+RUN mkdir -p /etc/xdg/fuzzel && \
+    cat > /etc/xdg/fuzzel/fuzzel.ini <<'FUZZEL'
 [main]
 font=Cantarell:size=12
-width=35
+icon-theme=Papirus-Dark
+icons-enabled=yes
 lines=12
 terminal=foot -e
-icons-enabled=yes
-icon-theme=Papirus-Dark
+width=35
 
 [colors]
 background=383c4aff
-text=d3dae3ff
-match=5294e2ff
-selection=4b5162ff
-selection-text=ffffffff
-selection-match=5294e2ff
 border=5294e2ff
+match=5294e2ff
+selection-match=5294e2ff
+selection-text=ffffffff
+selection=4b5162ff
+text=d3dae3ff
 
 [border]
-width=1
 radius=4
+width=1
 
 [dmenu]
 exit-immediately-if-empty=yes
-FUZZEL_CONF
+FUZZEL
 
-# --- mako/config ---
-cat > ~/.config/mako/config << 'MAKO_CONF'
+# --- Mako notification config ---
+
+RUN mkdir -p /etc/xdg/mako && \
+    cat > /etc/xdg/mako/config <<'MAKO'
 background-color=#383c4a
-text-color=#d3dae3
 border-color=#5294e2
-border-size=1
 border-radius=4
+border-size=1
 default-timeout=5000
-max-visible=5
 font=Cantarell 11
-width=320
 margin=10
+max-visible=5
 padding=10
-MAKO_CONF
+text-color=#d3dae3
+width=320
+MAKO
 
-# --- gtk-3.0/settings.ini ---
-cat > ~/.config/gtk-3.0/settings.ini << 'GTK3_CONF'
-[Settings]
-gtk-theme-name=Arc-Dark
-gtk-icon-theme-name=Papirus-Dark
-gtk-font-name=Cantarell 11
-gtk-cursor-theme-name=Adwaita
-gtk-cursor-theme-size=24
-gtk-toolbar-style=GTK_TOOLBAR_ICONS
-gtk-button-images=0
-gtk-menu-images=0
-gtk-enable-event-sounds=0
-gtk-enable-input-feedback-sounds=0
-gtk-xft-antialias=1
-gtk-xft-hinting=1
-gtk-xft-hintstyle=hintmedium
-gtk-xft-rgba=rgb
-GTK3_CONF
+# --- XDG runtime dir service ---
+# container-bootstrap.service is gated by ConditionPathExists so it only runs
+# once, but /run is a fresh tmpfs on every container start. This service
+# creates /run/user/${CONTAINER_UID} unconditionally before any user service.
 
-# --- gtk-4.0/settings.ini ---
-cat > ~/.config/gtk-4.0/settings.ini << 'GTK4_CONF'
-[Settings]
-gtk-theme-name=Arc-Dark
-gtk-icon-theme-name=Papirus-Dark
-gtk-font-name=Cantarell 11
-gtk-cursor-theme-name=Adwaita
-gtk-cursor-theme-size=24
-GTK4_CONF
+RUN cat > /usr/lib/systemd/system/xdg-runtime-dir.service <<'UNIT'
+[Unit]
+After=container-bootstrap.service
+Description=Create XDG_RUNTIME_DIR for container user
+Requires=container-bootstrap.service
 
-# --- btop/btop.conf ---
-cat > ~/.config/btop/btop.conf << 'BTOP_CONF'
-rounded_corners = True
-terminal_sync = True
-vim_keys = True
-BTOP_CONF
+[Service]
+ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
+PassEnvironment=CONTAINER_UID CONTAINER_GID
+RemainAfterExit=yes
+Type=oneshot
 
-SETUP
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-# --- Entrypoint script ---
-# Starts a per-session D-Bus, the sway compositor on the headless backend,
-# sizes the virtual output, then starts wayvnc on 0.0.0.0:5900.
-USER root
-RUN <<'ENTRYPOINT_INSTALL'
+# --- Sway systemd service ---
+
+RUN cat > /usr/lib/systemd/system/sway.service <<'UNIT'
+[Unit]
+After=xdg-runtime-dir.service
+Description=Sway Wayland Compositor (headless)
+Requires=xdg-runtime-dir.service
+
+[Service]
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+Restart=on-failure
+RestartSec=3
+TasksMax=infinity
+Type=simple
+
+Environment=GDK_BACKEND=wayland
+Environment=LANG=C.UTF-8
+Environment=LIBSEAT_BACKEND=noop
+Environment=MOZ_ENABLE_WAYLAND=1
+Environment=QT_QPA_PLATFORM=wayland
+Environment=WLR_BACKENDS=headless
+Environment=WLR_HEADLESS_OUTPUTS=1
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_THEME=Adwaita
+Environment=XDG_CURRENT_DESKTOP=sway
+Environment=XDG_SESSION_TYPE=wayland
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/sway -c /etc/sway/config'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Wayland ready gate ---
+
+RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
+#!/bin/sh
+RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+ENV_FILE="/run/wayland-display.env"
+
+while true; do
+    for sock in "$RUNTIME_DIR"/wayland-*; do
+        case "$sock" in *.lock) continue ;; esac
+        if [ -S "$sock" ]; then
+            DISPLAY_NAME="${sock##*/}"
+            echo "WAYLAND_DISPLAY=${DISPLAY_NAME}" > "$ENV_FILE"
+            exit 0
+        fi
+    done
+    sleep 0.5
+done
+SCRIPT
+
+RUN chmod +x /usr/local/bin/wait-for-wayland
+
+RUN cat > /usr/lib/systemd/system/sway-wayland-ready.service <<'UNIT'
+[Unit]
+After=sway.service
+Description=Wait for sway Wayland socket
+Requires=sway.service
+
+[Service]
+ExecStart=/usr/local/bin/wait-for-wayland
+PassEnvironment=CONTAINER_UID
+RemainAfterExit=yes
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- set-resolution systemd service ---
+
+RUN cat > /usr/lib/systemd/system/set-resolution.service <<'UNIT'
+[Unit]
+After=sway-wayland-ready.service
+Description=Set virtual output resolution
+Requires=sway-wayland-ready.service
+
+[Service]
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c '. /run/wayland-display.env && export XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60"'
+
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
+RemainAfterExit=yes
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- wayvnc launcher ---
+# Writes wayvnc auth config from VNC_PASSWORD/VNC_USERNAME (if set) before
+# spawning wayvnc. With no VNC_PASSWORD, wayvnc runs unauthenticated.
+
+RUN cat > /usr/local/bin/start-wayvnc <<'SCRIPT'
 #!/bin/sh
 set -e
-cat > /usr/local/bin/start-desktop.sh << 'STARTUP'
-#!/bin/sh
-set -e
+. /run/wayland-display.env
+export WAYLAND_DISPLAY
+export HOME="/home/${CONTAINER_USER}"
+export XDG_RUNTIME_DIR="/run/user/${CONTAINER_UID}"
 
-# Software fallback if no render node is exposed into the container.
-ls /dev/dri/renderD* >/dev/null 2>&1 || export LIBGL_ALWAYS_SOFTWARE=1
-
-# Configure wayvnc auth before the compositor starts (read at wayvnc spawn).
 mkdir -p "$HOME/.config/wayvnc"
 if [ -n "${VNC_PASSWORD:-}" ]; then
     cat > "$HOME/.config/wayvnc/config" <<CFG
@@ -450,53 +543,129 @@ CFG
     chmod 600 "$HOME/.config/wayvnc/config"
     echo "wayvnc: authentication enabled (username: ${VNC_USERNAME:-desktop})"
 else
+    rm -f "$HOME/.config/wayvnc/config"
     echo "wayvnc: WARNING — no authentication. Set VNC_PASSWORD to enable."
 fi
 
-# Launch sway under a private D-Bus session (waybar/mako/clipboard need it).
-dbus-run-session sway &
-SWAY_PID=$!
+cd
+exec /usr/bin/wayvnc 0.0.0.0 5900
+SCRIPT
 
-# Wait for the wayland socket to appear.
-for i in $(seq 1 50); do
-    for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
-        if [ -S "$sock" ] && [ "${sock##*.}" != "lock" ]; then
-            export WAYLAND_DISPLAY="${sock##*/}"
-            break 2
-        fi
-    done
-    sleep 0.1
+RUN chmod +x /usr/local/bin/start-wayvnc
+
+RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
+[Unit]
+After=set-resolution.service
+Description=wayvnc VNC server
+Requires=set-resolution.service
+
+[Service]
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /usr/local/bin/start-wayvnc
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME
+Restart=on-failure
+RestartSec=3
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Bootstrap ---
+
+RUN cat > /usr/local/bin/container-bootstrap <<'SCRIPT'
+#!/bin/bash
+set -e
+: "${CONTAINER_USER:?must be set}"
+: "${CONTAINER_UID:?must be set}"
+: "${CONTAINER_GID:?must be set}"
+
+HOME_DIR="/home/$CONTAINER_USER"
+
+groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
+useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
+mkdir -p "$HOME_DIR/.local/state" "$HOME_DIR/.config/btop"
+
+cat > "$HOME_DIR/.config/btop/btop.conf" <<'BTOP'
+rounded_corners = True
+terminal_sync = True
+vim_keys = True
+BTOP
+
+chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+
+for grp in render video; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        usermod -aG "$grp" "$CONTAINER_USER" 2>/dev/null || true
+    fi
 done
 
-if [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "ERROR: sway did not create a Wayland socket"
-    kill "$SWAY_PID" 2>/dev/null || true
-    exit 1
+mkdir -p /etc/sudoers.d
+echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
+chown 0:0 /etc/sudoers.d/container-user
+chmod 0440 /etc/sudoers.d/container-user
+
+if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
+    cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][sway]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+PROMPT
+    chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
 fi
 
-# Set the headless output resolution (HEADLESS-1 is wlroots' default name).
-wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60" || true
+echo "Bootstrap complete."
+SCRIPT
 
-wayvnc 0.0.0.0 5900 &
-WAYVNC_PID=$!
+RUN cat > /usr/lib/systemd/system/container-bootstrap.service <<'UNIT'
+[Unit]
+After=sysinit.target
+Before=sway.service
+ConditionPathExists=!/etc/container-bootstrapped
+DefaultDependencies=no
+Description=First-boot container bootstrap
 
-cleanup() {
-    kill "$WAYVNC_PID" 2>/dev/null || true
-    kill "$SWAY_PID" 2>/dev/null || true
-    wait 2>/dev/null || true
-}
-trap cleanup TERM INT
+[Service]
+ExecStart=/usr/local/bin/container-bootstrap
+ExecStartPost=/bin/touch /etc/container-bootstrapped
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID
+Type=oneshot
 
-# Exit when either child dies — the other gets cleaned up.
-wait -n "$SWAY_PID" "$WAYVNC_PID"
-cleanup
-STARTUP
-chmod 0755 /usr/local/bin/start-desktop.sh
-ENTRYPOINT_INSTALL
-USER desktop
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-EXPOSE 5900
+RUN mkdir -p /etc/systemd/journald.conf.d && \
+    cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
+[Journal]
+Storage=volatile
+ForwardToSocket=/run/host-systemd/journal/socket
+CONF
 
-# tini -s: subreaper mode — reaps orphaned descendants without being PID 1
-ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
-CMD ["/usr/local/bin/start-desktop.sh"]
+RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
+    cat > /etc/systemd/system/systemd-journald.service.d/10-container.conf <<'DROPIN'
+[Service]
+CapabilityBoundingSet=
+IPAddressDeny=
+LockPersonality=no
+MemoryDenyWriteExecute=no
+NoNewPrivileges=no
+ProtectClock=no
+RestrictAddressFamilies=
+RestrictNamespaces=no
+RestrictRealtime=no
+RestrictSUIDSGID=no
+SystemCallArchitectures=
+SystemCallFilter=
+DROPIN
+
+RUN mkdir -p /etc/systemd/system && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    systemctl enable sway sway-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir && \
+    chmod +x /usr/local/bin/container-bootstrap
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]
