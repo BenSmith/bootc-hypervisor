@@ -1,10 +1,8 @@
 # Hypervisor & Workload System - Ideas & Directions
 
-> Idea capture and roadmap planning. No commitment.
-> 
-> Review periodically and pick what sounds interesting.
+> Idea capture and planning. No commitment.
 
-**Last Updated:** 2026-05-03
+**Last Updated:** 2026-05-07
 
 ---
 
@@ -71,8 +69,6 @@
 
 ---
 
-## Medium Interest
-
 ### Home Assistant
 **Why:** useful for home automation
 - **Effort:** Small (1-2 days)
@@ -125,16 +121,6 @@
 
 ---
 
-## Research/Validation Needed
-
-## Easy, High Value
-
-Start here when unsure what to work on:
-
-- [ ] **Simple dev container** (1 day, one language stack)
-
----
-
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*
@@ -143,7 +129,6 @@ Start here when unsure what to work on:
 - Workload health monitoring with alerts (email/webhook on failures)
 - CI/CD runner workload (GitLab/GitHub/Gitea runner)
 - Game server workloads (Valheim, Factorio, etc.)
-- Workload templates/scaffolding (generate from template)
 - Import docker-compose files to workload TOML (migration tool)
 - Ansible integration for provisioning (manage workloads as code)
 - Workload dependency management (start B after A)
@@ -156,5 +141,4 @@ Start here when unsure what to work on:
 - Workloads get LVM provisioned to cap or flex storage
 - consider python3-tomlkit for toml edits that preserve comments
 - make missing host setup script an error not a warning
-- Sway-based workload
-- sunshine-kdeplasma
+

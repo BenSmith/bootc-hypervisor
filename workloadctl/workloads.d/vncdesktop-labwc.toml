@@ -53,6 +53,7 @@ pull = "never"
 # VNC_USERNAME = "desktop"
 # DESKTOP_RESOLUTION = "1920x1080"
 LANG = "C.UTF-8"
+NO_AT_BRIDGE = "1"
 
 [container.health]
 cmd = "pgrep -x wayvnc > /dev/null || exit 1"
@@ -67,7 +68,7 @@ gpu = "auto"
 
 [storage]
 volumes = [
-    "./data:/home/desktop/data",
+    "./home:/home/desktop",
 ]
 
 [security]

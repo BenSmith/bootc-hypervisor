@@ -6,8 +6,11 @@
 # Build:
 #   ./build.sh
 #
-# All user configuration is embedded via heredocs so this Containerfile is
-# fully self-contained — no external config files or COPY instructions needed.
+# All desktop configuration lives in system-wide locations (/etc/xdg, /etc,
+# /usr/local/share). The container user's $HOME is provided at runtime by
+# a host bind mount (./home:/home/desktop), starting empty; XDG fallback
+# to /etc/xdg/* serves the defaults for every tool used here. Users
+# customize by dropping files into the host-side home directory.
 
 FROM fedora:44
 
@@ -28,8 +31,7 @@ FROM fedora:44
 #   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
 #   mesa-libEGL           - EGL for wlroots / wayvnc
 #   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
-#   procps-ng             - pkill, used by autostart to SIGHUP labwc after
-#                           regenerating the right-click menu
+#   procps-ng             - pkill, used by labwc autostart for housekeeping
 #   sudo                  - passwordless sudo for the desktop user
 #   swaybg                - wallpaper setter
 #   thunar                - file manager
@@ -45,6 +47,7 @@ FROM fedora:44
 #                              /usr/bin/Xwayland
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     arc-theme \
+    bash-completion \
     btop \
     cliphist \
     dbus-daemon \
@@ -75,17 +78,12 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Create user with UID 1000 to match the workload's keep-id user mapping.
-# XDG_RUNTIME_DIR must exist and be owned by the user before labwc starts.
-RUN useradd -m -u 1000 desktop \
-    && mkdir -p /run/user/1000 \
-    && chown desktop:desktop /run/user/1000 \
-    && chmod 700 /run/user/1000 \
+# UID 1000 matches the workload's keep-id user mapping. Use -M (no home)
+# because /home/desktop is provided at runtime by the workload's
+# ./home:/home/desktop bind mount; an in-image home would be shadowed anyway.
+RUN useradd -M -u 1000 -s /bin/bash desktop \
     && echo "desktop ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/desktop \
     && chmod 0440 /etc/sudoers.d/desktop
-
-USER desktop
-WORKDIR /home/desktop
 
 # Headless wlroots backend — labwc creates a virtual output instead of needing
 # a host Wayland socket or DRM/KMS device. wayvnc attaches to it.
@@ -98,49 +96,9 @@ ENV GDK_BACKEND=wayland \
     XDG_RUNTIME_DIR=/run/user/1000 \
     XDG_SESSION_TYPE=wayland
 
-# --- labwc compositor config ---
+# --- labwc compositor config (system-wide; user can override via ~/.config/labwc) ---
 
-RUN <<'LABWC_SETUP'
-#!/bin/sh
-set -e
-
-mkdir -p \
-    ~/.config/btop \
-    ~/.config/foot \
-    ~/.config/fuzzel \
-    ~/.config/gtk-3.0 \
-    ~/.config/gtk-4.0 \
-    ~/.config/labwc \
-    ~/.config/mako \
-    ~/.config/waybar \
-    ~/.local/share/applications \
-    ~/.local/share/themes/Arc-Labwc/openbox-3
-
-# Hide dependency entries that clutter the menu.
-for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do
-  printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' > ~/.local/share/applications/${f}.desktop
-done
-# btop is Terminal=true; wrap it in foot so it launches from the menu.
-cat > ~/.local/share/applications/btop.desktop << 'EOF'
-[Desktop Entry]
-Type=Application
-Name=btop++
-Icon=btop
-Exec=foot --window-size-chars=80x24 btop
-Categories=System;Monitor;
-EOF
-# Thunar ships with multiple categories causing it to appear twice; pin it to one.
-cat > ~/.local/share/applications/thunar.desktop << 'EOF'
-[Desktop Entry]
-Type=Application
-Name=Thunar File Manager
-Icon=org.xfce.thunar
-Exec=thunar
-Categories=Utility;FileManager;
-MimeType=inode/directory;
-EOF
-
-cat > ~/.config/labwc/rc.xml << 'EOF'
+RUN mkdir -p /etc/xdg/labwc && cat > /etc/xdg/labwc/rc.xml << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <labwc_config>
 
@@ -263,7 +221,7 @@ cat > ~/.config/labwc/rc.xml << 'EOF'
 </labwc_config>
 EOF
 
-cat > ~/.config/labwc/environment << 'EOF'
+RUN cat > /etc/xdg/labwc/environment << 'EOF'
 XCURSOR_THEME=Adwaita
 XCURSOR_SIZE=24
 GTK_THEME=Arc-Dark
@@ -272,8 +230,7 @@ LANG=C.UTF-8
 LC_ALL=C.UTF-8
 EOF
 
-cat > ~/.config/labwc/autostart << 'EOF'
-~/.config/labwc/menu-generate.sh && pkill -SIGHUP labwc
+RUN cat > /etc/xdg/labwc/autostart << 'EOF'
 xdg-user-dirs-update
 swaybg -c '#383c4a' &
 wl-paste --watch cliphist store &
@@ -281,34 +238,47 @@ mako &
 sleep 0.5 && waybar &
 EOF
 
-# Regenerates the right-click menu from installed .desktop files at each startup.
-cat > ~/.config/labwc/menu-generate.sh << 'MENUSCRIPT'
-#!/bin/sh
-MENU="$HOME/.config/labwc/menu.xml"
+# --- .desktop entries (system-wide overrides under /usr/local/share) ---
+# Hide dependency entries that clutter the menu, and tidy up Thunar / btop.
+# These must be in place BEFORE labwc-menu-generator runs below.
 
-labwc-menu-generator \
-  | grep -v '</openbox_menu>' \
-  | grep -v '</menu> <!-- root-menu -->' \
-  > "$MENU"
+RUN mkdir -p /usr/local/share/applications && \
+    for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do \
+        printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' \
+            > /usr/local/share/applications/${f}.desktop ; \
+    done
 
-cat >> "$MENU" << 'EOF'
-</menu> <!-- root-menu -->
-</openbox_menu>
+RUN cat > /usr/local/share/applications/btop.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=btop++
+Icon=btop
+Exec=foot --window-size-chars=80x24 btop
+Categories=System;Monitor;
 EOF
-MENUSCRIPT
-chmod +x ~/.config/labwc/menu-generate.sh
-LABWC_SETUP
 
-# --- App tool configs: waybar, foot, fuzzel, mako, btop ---
+RUN cat > /usr/local/share/applications/thunar.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Thunar File Manager
+Icon=org.xfce.thunar
+Exec=thunar
+Categories=Utility;FileManager;
+MimeType=inode/directory;
+EOF
+
+# Right-click menu generated at build time from installed .desktop files —
+# the app set is fixed by the image, so there's no need to regenerate at
+# session start. Users who install extra apps and want them in the menu
+# can drop their own ~/.config/labwc/menu.xml.
+RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
+
+# --- App tool configs in /etc/xdg (XDG fallback path) ---
 # Minimal waybar config — avoids modules that crash in a container environment
 # (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
 # caused segfaults or runaway memory usage during testing).
 
-RUN <<'APP_CONFIGS'
-#!/bin/sh
-set -e
-
-cat > ~/.config/waybar/config.jsonc << 'EOF'
+RUN mkdir -p /etc/xdg/waybar && cat > /etc/xdg/waybar/config.jsonc << 'EOF'
 {
     "modules-left": [],
     "modules-center": ["clock"],
@@ -329,7 +299,7 @@ cat > ~/.config/waybar/config.jsonc << 'EOF'
 }
 EOF
 
-cat > ~/.config/waybar/style.css << 'EOF'
+RUN cat > /etc/xdg/waybar/style.css << 'EOF'
 * {
     font-family: Cantarell, sans-serif;
     font-size: 13px;
@@ -368,7 +338,7 @@ window#waybar {
 }
 EOF
 
-cat > ~/.config/foot/foot.ini << 'EOF'
+RUN mkdir -p /etc/xdg/foot && cat > /etc/xdg/foot/foot.ini << 'EOF'
 [main]
 font=JetBrains Mono:size=11
 pad=4x4
@@ -404,7 +374,7 @@ bright6=34e2e2
 bright7=eeeeec
 EOF
 
-cat > ~/.config/fuzzel/fuzzel.ini << 'EOF'
+RUN mkdir -p /etc/xdg/fuzzel && cat > /etc/xdg/fuzzel/fuzzel.ini << 'EOF'
 [main]
 font=Cantarell:size=12
 icon-theme=Papirus-Dark
@@ -430,7 +400,7 @@ radius=4
 exit-immediately-if-empty=yes
 EOF
 
-cat > ~/.config/mako/config << 'EOF'
+RUN mkdir -p /etc/xdg/mako && cat > /etc/xdg/mako/config << 'EOF'
 background-color=#383c4a
 border-color=#5294e2
 border-radius=4
@@ -444,20 +414,9 @@ text-color=#d3dae3
 width=320
 EOF
 
-cat > ~/.config/btop/btop.conf << 'EOF'
-rounded_corners = True
-terminal_sync = True
-vim_keys = True
-EOF
-APP_CONFIGS
+# --- Theme: GTK settings (system-wide) and Arc-Labwc window decorations ---
 
-# --- Theme: GTK settings and Arc-Labwc window decorations ---
-
-RUN <<'THEME'
-#!/bin/sh
-set -e
-
-cat > ~/.config/gtk-3.0/settings.ini << 'EOF'
+RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini << 'EOF'
 [Settings]
 gtk-button-images=0
 gtk-cursor-theme-name=Adwaita
@@ -475,7 +434,7 @@ gtk-xft-hintstyle=hintmedium
 gtk-xft-rgba=rgb
 EOF
 
-cat > ~/.config/gtk-4.0/settings.ini << 'EOF'
+RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini << 'EOF'
 [Settings]
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
@@ -484,8 +443,10 @@ gtk-icon-theme-name=Papirus-Dark
 gtk-theme-name=Arc-Dark
 EOF
 
-# Arc-Labwc window decoration theme — based on Arc-Dark color palette
-cat > ~/.local/share/themes/Arc-Labwc/openbox-3/themerc << 'EOF'
+# Arc-Labwc window decoration theme — based on Arc-Dark color palette.
+# /usr/share/themes is searched by labwc.
+RUN mkdir -p /usr/share/themes/Arc-Labwc/openbox-3 && \
+    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc << 'EOF'
 border.width: 1
 padding.height: 5
 window.client.padding.height: 0
@@ -553,25 +514,24 @@ osd.workspace-switcher.boxes.border.width: 1
 snapping.overlay.edge.bg.color: #5294e280
 snapping.overlay.region.bg.color: #5294e280
 EOF
-THEME
+
+# --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
+
+RUN cat > /etc/profile.d/desktop-prompt.sh << 'EOF'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][labwc]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+EOF
 
 # --- Entrypoint script ---
 # Starts a per-session D-Bus, the labwc compositor on the headless backend,
 # sizes the virtual output, then starts wayvnc on 0.0.0.0:5900.
-USER root
-RUN <<'ENTRYPOINT_INSTALL'
-#!/bin/sh
-set -e
-cat > /usr/local/bin/start-desktop.sh << 'STARTUP'
+
+RUN cat > /usr/local/bin/start-desktop.sh << 'STARTUP' && chmod 0755 /usr/local/bin/start-desktop.sh
 #!/bin/bash
 set -e
 
-# workloadctl sets HOME=/var/lib/workloads/<name> in the systemd unit so the
-# workload user has a writable host-side home. Override it back to the
-# container user's actual home, where all configs are baked into the image.
-export HOME=/home/desktop
-
-# Ensure XDG_RUNTIME_DIR exists — /run may be a fresh tmpfs at container start.
+# Ensure XDG_RUNTIME_DIR exists — /run is a fresh tmpfs at container start.
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
@@ -632,9 +592,11 @@ trap cleanup TERM INT
 wait -n "$LABWC_PID" "$WAYVNC_PID"
 cleanup
 STARTUP
-chmod 0755 /usr/local/bin/start-desktop.sh
-ENTRYPOINT_INSTALL
+
+RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && chmod 700 /run/user/1000
+
 USER desktop
+WORKDIR /home/desktop
 
 EXPOSE 5900
 

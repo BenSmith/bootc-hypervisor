@@ -19,24 +19,29 @@ FROM registry.fedoraproject.org/fedora:43
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
-    adwaita-icon-theme \
     alsa-utils \
+    arc-theme \
     bash-completion \
+    btop \
+    cantarell-fonts \
+    cliphist \
     dbus-daemon \
     diffutils \
     egl-utils \
-    fira-code-fonts \
     firefox \
     foot \
     fuzzel \
+    geany \
+    git-core \
     glibc-langpack-en \
     glx-utils \
     google-noto-sans-fonts \
     grim \
     hostname \
-    htop \
     imv \
+    jetbrains-mono-fonts \
     labwc \
+    labwc-menu-generator \
     libevdev \
     libinput \
     lsb_release \
@@ -49,6 +54,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-vulkan-drivers \
     nano \
     neovim \
+    papirus-icon-theme \
     pciutils \
     pipewire \
     pipewire-alsa \
@@ -63,6 +69,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     swaybg \
     systemd \
     systemd-udev \
+    thunar \
+    tmux \
     util-linux \
     vulkan-loader \
     vulkan-tools \
@@ -75,6 +83,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wlr-randr \
     xdg-desktop-portal \
     xdg-desktop-portal-wlr \
+    xdg-user-dirs \
     xdg-utils \
     xdotool \
     xorg-x11-server-Xwayland \
@@ -202,63 +211,205 @@ CONF
 
 # --- GTK settings ---
 
-RUN mkdir -p /etc/gtk-3.0 /etc/gtk-4.0 && \
-    cat > /etc/gtk-3.0/settings.ini <<'INI' && cp /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini
+RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini <<'INI'
 [Settings]
-gtk-theme-name=Adwaita
-gtk-icon-theme-name=Adwaita
+gtk-button-images=0
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
-gtk-font-name=Noto Sans 11
+gtk-enable-event-sounds=0
+gtk-enable-input-feedback-sounds=0
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-menu-images=0
+gtk-theme-name=Arc-Dark
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintmedium
+gtk-xft-rgba=rgb
 INI
+
+RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini <<'INI'
+[Settings]
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-theme-name=Arc-Dark
+INI
+
+# --- Arc-Labwc window decoration theme ---
+
+RUN mkdir -p /usr/share/themes/Arc-Labwc/openbox-3 && \
+    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc <<'EOF'
+border.width: 1
+padding.height: 5
+window.client.padding.height: 0
+window.client.padding.width: 0
+window.handle.width: 0
+window.label.text.justify: center
+window.titlebar.padding.height: 2
+window.titlebar.padding.width: 5
+
+window.button.height: 20
+window.button.spacing: 0
+window.button.width: 28
+
+window.active.border.color:                 #5294e2
+window.active.button.hover.image.color:     #ffffff
+window.active.button.pressed.image.color:   #5294e2
+window.active.button.unpressed.image.color: #d3dae3
+window.active.label.text.color:             #ffffff
+window.active.title.bg.color:               #4b5162
+window.active.title.bg:                     Solid
+
+window.inactive.border.color:                 #404552
+window.inactive.button.unpressed.image.color: #676a72
+window.inactive.label.text.color:             #9da0a8
+window.inactive.title.bg.color:               #383c4a
+window.inactive.title.bg:                     Solid
+
+menu.border.color: #2b2e3b
+menu.border.width: 1
+menu.items.active.bg.color: #4b5162
+menu.items.active.text.color: #ffffff
+menu.items.bg.color: #383c4a
+menu.items.padding.x: 6
+menu.items.padding.y: 4
+menu.items.text.color: #d3dae3
+menu.overlap.x: -4
+menu.overlap.y: 0
+menu.separator.color: #5294e2
+menu.separator.padding.height: 3
+menu.separator.padding.width: 6
+menu.separator.width: 1
+menu.width.max: 300
+menu.width.min: 140
+
+osd.bg.color: #383c4a
+osd.label.text.color: #5294e2
+osd.border.width: 1
+osd.window-switcher.width: 600
+osd.window-switcher.padding: 8
+osd.window-switcher.item.padding.x: 12
+osd.window-switcher.item.padding.y: 12
+osd.window-switcher.item.active.border.width: 1
+osd.window-switcher.preview.border.width: 2
+osd.window-switcher.preview.border.color: #5294e2
+osd.workspace-switcher.boxes.width: 150
+osd.workspace-switcher.boxes.height: 40
+osd.workspace-switcher.boxes.border.width: 1
+
+snapping.overlay.edge.bg.color: #5294e280
+snapping.overlay.region.bg.color: #5294e280
+EOF
 
 # --- labwc config ---
 
 RUN mkdir -p /etc/xdg/labwc && \
     cat > /etc/xdg/labwc/rc.xml <<'XML'
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <labwc_config>
-  <focus>
-    <followMouse>yes</followMouse>
-    <raiseOnFocus>no</raiseOnFocus>
-  </focus>
+
+  <core>
+    <gap>6</gap>
+  </core>
 
   <theme>
-    <name>Adwaita</name>
-    <cornerRadius>8</cornerRadius>
+    <name>Arc-Labwc</name>
+    <cornerRadius>4</cornerRadius>
+    <font place="ActiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <slant>Normal</slant>
+      <weight>Bold</weight>
+    </font>
+    <font place="InactiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <slant>Normal</slant>
+      <weight>Normal</weight>
+    </font>
   </theme>
 
+  <desktops>
+    <popupTime>500</popupTime>
+    <names>
+      <name>1</name>
+      <name>2</name>
+      <name>3</name>
+      <name>4</name>
+    </names>
+  </desktops>
+
   <keyboard>
+    <default/>
+
     <keybind key="W-Return">
-      <action name="Execute" command="foot" />
+      <action name="Execute"><command>foot</command></action>
     </keybind>
     <keybind key="W-d">
-      <action name="Execute" command="fuzzel" />
+      <action name="Execute"><command>fuzzel</command></action>
     </keybind>
     <keybind key="W-q">
-      <action name="Close" />
+      <action name="Close"/>
     </keybind>
     <keybind key="W-f">
-      <action name="ToggleFullscreen" />
+      <action name="ToggleMaximize"/>
     </keybind>
-    <keybind key="A-Tab">
-      <action name="NextWindow" />
+    <keybind key="W-h">
+      <action name="SnapToEdge"><direction>left</direction></action>
+    </keybind>
+    <keybind key="W-l">
+      <action name="SnapToEdge"><direction>right</direction></action>
+    </keybind>
+    <keybind key="W-k">
+      <action name="SnapToEdge"><direction>up</direction></action>
+    </keybind>
+    <keybind key="W-j">
+      <action name="SnapToEdge"><direction>down</direction></action>
+    </keybind>
+    <keybind key="W-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+    <keybind key="W-S-Tab">
+      <action name="PreviousWindow"/>
+    </keybind>
+    <keybind key="W-1">
+      <action name="GoToDesktop"><to>1</to></action>
+    </keybind>
+    <keybind key="W-2">
+      <action name="GoToDesktop"><to>2</to></action>
+    </keybind>
+    <keybind key="W-3">
+      <action name="GoToDesktop"><to>3</to></action>
+    </keybind>
+    <keybind key="W-4">
+      <action name="GoToDesktop"><to>4</to></action>
+    </keybind>
+    <keybind key="W-S-1">
+      <action name="SendToDesktop"><to>1</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="W-S-2">
+      <action name="SendToDesktop"><to>2</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="W-S-3">
+      <action name="SendToDesktop"><to>3</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="W-S-4">
+      <action name="SendToDesktop"><to>4</to><follow>yes</follow></action>
     </keybind>
   </keyboard>
 
   <mouse>
-    <default />
+    <default/>
+    <context name="Root">
+      <mousebind button="Right" action="Press">
+        <action name="ShowMenu"><menu>root-menu</menu></action>
+      </mousebind>
+    </context>
   </mouse>
 
-  <outputs>
-    <output name="HEADLESS-1">
-      <transform>normal</transform>
-    </output>
-  </outputs>
-
-  <placement>
-    <policy>center</policy>
-  </placement>
 </labwc_config>
 XML
 
@@ -267,16 +418,85 @@ XML
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=12
-initial-window-size-chars=100x30
-pad=8x8
+font=JetBrains Mono:size=11
+pad=4x4
+initial-window-size-chars=80x25
 shell=/bin/bash -l
 
-[cursor]
-style=beam
+[scrollback]
+lines=10000
+
+[mouse]
+hide-when-typing=yes
+
+[colors-dark]
+alpha=1.0
+background=383c4a
+foreground=d3dae3
+
+regular0=1c2023
+regular1=c0392b
+regular2=4e9a06
+regular3=c4a000
+regular4=5294e2
+regular5=75507b
+regular6=06989a
+regular7=d3dae3
+
+bright0=555753
+bright1=ef2929
+bright2=8ae234
+bright3=fce94f
+bright4=729fcf
+bright5=ad7fa8
+bright6=34e2e2
+bright7=eeeeec
+INI
+
+# --- Fuzzel launcher config ---
+
+RUN mkdir -p /etc/xdg/fuzzel && \
+    cat > /etc/xdg/fuzzel/fuzzel.ini <<'INI'
+[main]
+font=Cantarell:size=12
+icon-theme=Papirus-Dark
+icons-enabled=yes
+lines=12
+terminal=foot -e
+width=35
 
 [colors]
-alpha=0.95
+background=383c4aff
+border=5294e2ff
+match=5294e2ff
+selection-match=5294e2ff
+selection-text=ffffffff
+selection=4b5162ff
+text=d3dae3ff
+
+[border]
+width=1
+radius=4
+
+[dmenu]
+exit-immediately-if-empty=yes
+INI
+
+# --- Mako notification config ---
+
+RUN mkdir -p /etc/xdg/mako && \
+    cat > /etc/xdg/mako/config <<'INI'
+background-color=#383c4a
+border-color=#5294e2
+border-radius=4
+border-size=1
+default-timeout=5000
+font=Cantarell 11
+margin=10
+max-visible=5
+padding=10
+text-color=#d3dae3
+width=320
 INI
 
 # --- Autostart ---
@@ -288,6 +508,9 @@ INI
 RUN cat > /etc/xdg/labwc/autostart <<'SH'
 #!/bin/bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
+
+# --- User dirs ---
+xdg-user-dirs-update
 
 # --- Display resolution ---
 wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60Hz"
@@ -336,9 +559,10 @@ EOF
 fi
 
 # --- Desktop chrome ---
-swaybg -c '#2e3440' &
-waybar &
+swaybg -c '#383c4a' &
+wl-paste --watch cliphist store &
 mako &
+sleep 0.5 && waybar &
 
 # --- Steam Big Picture ---
 # STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
@@ -347,38 +571,97 @@ STEAM_DISABLE_BROWSER_SANDBOX=1 \
 steam -tenfoot &
 SH
 
+# --- .desktop entry overrides and right-click menu ---
+
+RUN mkdir -p /usr/local/share/applications && \
+    for f in foot-server footclient thunar-bulk-rename thunar-settings; do \
+        printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' \
+            > /usr/local/share/applications/${f}.desktop ; \
+    done
+
+RUN cat > /usr/local/share/applications/btop.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=btop++
+Icon=btop
+Exec=foot --window-size-chars=80x24 btop
+Categories=System;Monitor;
+EOF
+
+RUN cat > /usr/local/share/applications/thunar.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Thunar File Manager
+Icon=org.xfce.thunar
+Exec=thunar
+Categories=Utility;FileManager;
+MimeType=inode/directory;
+EOF
+
+RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
+
 # --- Waybar config ---
 
 RUN mkdir -p /etc/xdg/waybar && \
-    cat > /etc/xdg/waybar/config <<'JSON'
+    cat > /etc/xdg/waybar/config.jsonc <<'JSON'
 {
-    "layer": "top",
-    "position": "bottom",
-    "height": 30,
-    "modules-left": ["custom/launcher", "wlr/taskbar"],
-    "modules-right": ["cpu", "memory", "clock"],
-    "custom/launcher": {
-        "format": " Apps",
-        "on-click": "fuzzel"
-    },
-    "wlr/taskbar": {
-        "format": "{title}",
-        "on-click": "activate"
+    "modules-left": [],
+    "modules-center": ["clock"],
+    "modules-right": ["cpu", "memory"],
+    "clock": {
+        "format": "{:%a %b %d  %H:%M}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
     },
     "cpu": {
-        "format": "CPU {usage}%",
-        "interval": 5
+        "format": "cpu {usage}%",
+        "tooltip": false,
+        "interval": 2
     },
     "memory": {
-        "format": "RAM {percentage}%",
+        "format": "mem {}%",
         "interval": 5
-    },
-    "clock": {
-        "format": "{:%H:%M}",
-        "format-alt": "{:%Y-%m-%d %H:%M}"
     }
 }
 JSON
+
+RUN cat > /etc/xdg/waybar/style.css <<'CSS'
+* {
+    font-family: Cantarell, sans-serif;
+    font-size: 13px;
+}
+
+window#waybar {
+    background-color: #383c4a;
+    color: #d3dae3;
+    border-bottom: 2px solid #2b2e3b;
+}
+
+#clock {
+    color: #d3dae3;
+    padding: 0 12px;
+}
+
+#cpu,
+#memory {
+    color: #9da0a8;
+    padding: 0 10px;
+}
+
+#cpu:hover,
+#memory:hover {
+    color: #d3dae3;
+}
+
+#cpu.warning,
+#memory.warning {
+    color: #e67e22;
+}
+
+#cpu.critical,
+#memory.critical {
+    color: #e74c3c;
+}
+CSS
 
 # --- labwc systemd service ---
 
@@ -395,12 +678,15 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 
 Environment=DESKTOP_RESOLUTION=1920x1080
+Environment=GDK_BACKEND=wayland
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
+Environment=QT_QPA_PLATFORM=wayland
 Environment=WLR_BACKENDS=headless
 Environment=XCURSOR_SIZE=24
 Environment=XCURSOR_THEME=Adwaita
 Environment=XDG_CURRENT_DESKTOP=wlroots
+Environment=XDG_SESSION_TYPE=wayland
 EnvironmentFile=-/run/wlr-renderer.env
 
 ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
