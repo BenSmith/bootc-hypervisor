@@ -55,6 +55,7 @@ CONTAINER_USER = "desktop"
 CONTAINER_UID = "1000"
 CONTAINER_GID = "1000"
 LANG = "C.UTF-8"
+NO_AT_BRIDGE = "1"
 # Set a VNC password (recommended). Without this, VNC has no authentication.
 # VNC_PASSWORD = "changeme"
 # Or use an encrypted secret:

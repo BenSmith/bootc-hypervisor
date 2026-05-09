@@ -41,6 +41,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     slurp \
     sudo \
     swappy \
+    swaybg \
     systemd \
     systemd-udev \
     util-linux \
@@ -80,6 +81,7 @@ gtk-icon-theme-name=Adwaita
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-font-name=Noto Sans 11
+gtk-application-prefer-dark-theme=1
 INI
 
 # --- Wayfire config ---
@@ -125,7 +127,7 @@ binding_terminal = <super> KEY_ENTER
 command_terminal = foot
 
 binding_launcher = <super> KEY_D
-command_launcher = wofi --show run
+command_launcher = wofi --show run --style /etc/xdg/wofi/style.css
 
 binding_close = <super> KEY_Q
 command_close = wlrctl toplevel close
@@ -161,7 +163,7 @@ slot_tr = <super> KEY_KP9
 
 [cube]
 activate = <ctrl> <alt> BTN_LEFT
-background = 0.1 0.1 0.1 1.0
+background = 0.051 0.082 0.125 1.0
 
 [animate]
 open_animation = zoom
@@ -173,8 +175,8 @@ friction = 3.0
 spring_k = 8.0
 
 [decoration]
-active_color = 0.3 0.3 0.9 1.0
-inactive_color = 0.2 0.2 0.2 1.0
+active_color = 0.0 0.831 1.0 1.0
+inactive_color = 0.118 0.176 0.251 1.0
 
 INI
 
@@ -193,9 +195,6 @@ minimal_height = 32
 
 [dock]
 position = bottom
-
-[background]
-color = \#1a1a1a
 INI
 
 # --- Foot terminal config ---
@@ -205,7 +204,90 @@ RUN mkdir -p /etc/xdg/foot && \
 [main]
 font=Fira Code:size=14
 initial-window-size-chars=80x24
+
+[colors-dark]
+background=0d1520
+foreground=c8dde8
+regular0=111d2e
+regular1=ff4d6d
+regular2=00c896
+regular3=f0c060
+regular4=4090d8
+regular5=8060c8
+regular6=00c8d8
+regular7=8899aa
+bright0=1e2d40
+bright1=ff6b85
+bright2=00e8aa
+bright3=f8d880
+bright4=60b0f0
+bright5=a080e8
+bright6=00e8f0
+bright7=c8dde8
 INI
+
+# --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
+
+RUN cat > /etc/profile.d/desktop-prompt.sh <<'SH'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+SH
+
+# --- Mako notification config ---
+
+RUN mkdir -p /etc/xdg/mako && \
+    cat > /etc/xdg/mako/config <<'INI'
+background-color=#111d2e
+text-color=#c8dde8
+border-color=#00d4ff
+border-radius=8
+border-size=2
+width=380
+padding=12
+margin=8
+font=Noto Sans 11
+INI
+
+# --- Wofi launcher style ---
+
+RUN mkdir -p /etc/xdg/wofi && \
+    cat > /etc/xdg/wofi/style.css <<'CSS'
+window {
+    background-color: #0d1520;
+    border: 2px solid #00d4ff;
+    border-radius: 10px;
+    color: #c8dde8;
+    font-family: "Noto Sans";
+    font-size: 13px;
+}
+#input {
+    background-color: #111d2e;
+    border: 1px solid #1e2d40;
+    border-radius: 6px;
+    color: #c8dde8;
+    padding: 8px 12px;
+    margin: 8px;
+    outline: none;
+}
+#outer-box {
+    padding: 6px;
+}
+#entry {
+    padding: 6px 12px;
+    border-radius: 5px;
+    margin: 2px 4px;
+}
+#entry:selected {
+    background-color: #1e3550;
+}
+#text {
+    color: #c8dde8;
+}
+#text:selected {
+    color: #00d4ff;
+}
+CSS
 
 # --- XDG runtime dir service ---
 # container-bootstrap.service is gated by ConditionPathExists so it only runs
@@ -241,9 +323,8 @@ Type=simple
 TasksMax=infinity
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE
 
-Environment=LANG=C.UTF-8
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
 Environment=WLR_BACKENDS=headless
@@ -381,8 +462,7 @@ HOME_DIR="/home/$CONTAINER_USER"
 
 groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
 useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
-mkdir -p "$HOME_DIR/.local/state"
-chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
 
 for grp in render video; do
     if getent group "$grp" >/dev/null 2>&1; then
@@ -394,15 +474,6 @@ mkdir -p /etc/sudoers.d
 echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
 chown 0:0 /etc/sudoers.d/container-user
 chmod 0440 /etc/sudoers.d/container-user
-
-if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
-    cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
-if [ "$PS1" ]; then
-    PS1='\[\033[01;36m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
-fi
-PROMPT
-    chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
-fi
 
 echo "Bootstrap complete."
 SCRIPT

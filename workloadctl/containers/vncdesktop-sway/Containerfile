@@ -384,6 +384,14 @@ width=1
 exit-immediately-if-empty=yes
 FUZZEL
 
+# --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
+
+RUN cat > /etc/profile.d/desktop-prompt.sh <<'SH'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][sway]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+SH
+
 # --- Mako notification config ---
 
 RUN mkdir -p /etc/xdg/mako && \
@@ -453,14 +461,13 @@ Description=Sway Wayland Compositor (headless)
 Requires=xdg-runtime-dir.service
 
 [Service]
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE
 Restart=on-failure
 RestartSec=3
 TasksMax=infinity
 Type=simple
 
 Environment=GDK_BACKEND=wayland
-Environment=LANG=C.UTF-8
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
 Environment=QT_QPA_PLATFORM=wayland
@@ -600,15 +607,7 @@ HOME_DIR="/home/$CONTAINER_USER"
 
 groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
 useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
-mkdir -p "$HOME_DIR/.local/state" "$HOME_DIR/.config/btop"
-
-cat > "$HOME_DIR/.config/btop/btop.conf" <<'BTOP'
-rounded_corners = True
-terminal_sync = True
-vim_keys = True
-BTOP
-
-chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
 
 for grp in render video; do
     if getent group "$grp" >/dev/null 2>&1; then
@@ -620,15 +619,6 @@ mkdir -p /etc/sudoers.d
 echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
 chown 0:0 /etc/sudoers.d/container-user
 chmod 0440 /etc/sudoers.d/container-user
-
-if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
-    cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
-if [ "$PS1" ]; then
-    PS1='\[\033[01;36m\][sway]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
-fi
-PROMPT
-    chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
-fi
 
 echo "Bootstrap complete."
 SCRIPT
