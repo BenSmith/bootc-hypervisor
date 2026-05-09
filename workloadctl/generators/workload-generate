@@ -422,6 +422,7 @@ def generate_system_service(config, user_name, uid):
     podman_args = [
         "/usr/bin/podman run",
         f"--name {container_name_quoted}",
+        f"--hostname {dq(name)}",
         "--rm",
     ]
 
