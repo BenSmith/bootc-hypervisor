@@ -11,55 +11,63 @@ module wayfire-devices 1.0;
 #   Steam IPC        — /tmp socket and file operations
 
 require {
-    type container_t;
-    type container_init_t;
-    type event_device_t;
-    type udev_var_run_t;
-    type user_tmp_t;
-    type cgroup_t;
-    type pstore_t;
-    type bpf_t;
-    type tmpfs_t;
-    type container_file_t;
-    type devpts_t;
-    class process { execheap };
-    class memprotect { mmap_zero };
     class chr_file { open read write ioctl getattr };
     class dir { open read write search getattr add_name remove_name ioctl lock };
     class file { open read write create getattr unlink lock map execmod };
-    class sock_file { create write getattr setattr unlink mounton };
-    class lnk_file { read getattr };
     class filesystem { mount remount };
+    class lnk_file { read getattr };
+    class memprotect { mmap_zero };
+    class process { execheap };
+    class sock_file { create write getattr setattr unlink mounton };
+
+    type bpf_t;
+    type cgroup_t;
+    type container_file_t;
+    type container_init_t;
+    type container_t;
+    type devpts_t;
+    type event_device_t;
+    type pstore_t;
+    type sound_device_t;
+    type sysfs_t;
+    type tmpfs_t;
+    type udev_var_run_t;
+    type user_tmp_t;
 }
 
 # ── Input devices ──
 # /dev/uinput + /dev/input/event*: both labeled event_device_t on Fedora.
 # Sunshine creates virtual input devices via ioctl on /dev/uinput.
 # The input bridge reads evdev events from /dev/input/eventX.
-allow container_t event_device_t:chr_file { open read write ioctl getattr };
-allow container_t event_device_t:dir { open read search getattr };
 allow container_init_t event_device_t:chr_file { open read write ioctl getattr };
 allow container_init_t event_device_t:dir { open read search getattr };
+allow container_t event_device_t:chr_file { open read write ioctl getattr };
+allow container_t event_device_t:dir { open read search getattr };
 
 # ── Udev database ──
 # libdrm, mesa, and ALSA query device properties from the udev runtime database.
-allow container_t udev_var_run_t:dir { open read search getattr };
-allow container_t udev_var_run_t:file { open read getattr };
-allow container_t udev_var_run_t:sock_file getattr;
-allow container_t udev_var_run_t:lnk_file { read getattr };
+allow container_init_t sound_device_t:chr_file { getattr read write };
 allow container_init_t udev_var_run_t:dir { open read search getattr };
 allow container_init_t udev_var_run_t:file { open read getattr };
-allow container_init_t udev_var_run_t:sock_file getattr;
 allow container_init_t udev_var_run_t:lnk_file { read getattr };
+allow container_init_t udev_var_run_t:sock_file getattr;
+
+allow container_t sysfs_t:file write;
+allow container_t udev_var_run_t:dir { open read search getattr };
+allow container_t udev_var_run_t:file { open read getattr };
+allow container_t udev_var_run_t:lnk_file { read getattr };
+allow container_t udev_var_run_t:sock_file getattr;
 
 # ── Steam bwrap sandbox (srt-bwrap / pressure-vessel) ──
 # Remounts cgroup/pstore/bpf/tmpfs filesystems as part of sandbox setup.
+allow container_init_t bpf_t:filesystem remount;
 allow container_init_t cgroup_t:filesystem remount;
 allow container_init_t pstore_t:filesystem remount;
-allow container_init_t bpf_t:filesystem remount;
 allow container_init_t tmpfs_t:filesystem remount;
+
 # Mounts a new devpts inside the sandbox.
 allow container_init_t devpts_t:filesystem mount;
+
 # Bind-mounts over PipeWire and other sockets during sandbox setup.
 allow container_init_t container_file_t:sock_file mounton;
 allow container_init_t user_tmp_t:sock_file mounton;
@@ -67,13 +75,13 @@ allow container_init_t user_tmp_t:sock_file mounton;
 # ── Steam IPC ──
 # Steam uses /tmp for IPC sockets and temp files (labeled user_tmp_t).
 allow container_init_t user_tmp_t:dir { open read write search getattr add_name remove_name ioctl lock };
-allow container_init_t user_tmp_t:sock_file { create write getattr setattr unlink };
 allow container_init_t user_tmp_t:file { open read write create getattr unlink lock map };
+allow container_init_t user_tmp_t:sock_file { create write getattr setattr unlink };
 
 # ── Wine/Proton ──
 # Wine's PE loader needs executable heap for Windows binary compatibility.
 # wine-preloader maps the zero page for Windows NULL-pointer region.
 # ntdll.dll requires text relocations (execmod).
-allow container_init_t self:process execheap;
-allow container_init_t self:memprotect mmap_zero;
 allow container_init_t container_file_t:file execmod;
+allow container_init_t self:memprotect mmap_zero;
+allow container_init_t self:process execheap;

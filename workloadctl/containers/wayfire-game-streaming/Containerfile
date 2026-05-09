@@ -15,7 +15,7 @@
 # Run:
 #   workload-ctl enable wayfire-game-streaming
 
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
@@ -58,6 +58,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     slurp \
     sudo \
     swappy \
+    swaybg \
     systemd \
     systemd-udev \
     util-linux \
@@ -211,6 +212,7 @@ gtk-icon-theme-name=Adwaita
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
 gtk-font-name=Noto Sans 11
+gtk-application-prefer-dark-theme=1
 INI
 
 # --- Wayfire config ---
@@ -228,6 +230,7 @@ plugins = \
   expo \
   fast-switcher \
   fisheye \
+  foreign-toplevel \
   grid \
   move \
   oswitch \
@@ -235,6 +238,7 @@ plugins = \
   resize \
   switcher \
   vswitch \
+  wayfire-shell \
   window-rules \
   wm-actions \
   wobbly \
@@ -245,13 +249,13 @@ binding_terminal = <super> KEY_ENTER
 command_terminal = foot
 
 binding_launcher = <super> KEY_D
-command_launcher = wofi --show run
+command_launcher = wofi --show run --style /etc/xdg/wofi/style.css
 
 binding_close = <super> KEY_Q
 command_close = wlrctl toplevel close
 
 binding_menu = BTN_RIGHT
-command_menu = wofi --show run
+command_menu = wofi --show run --style /etc/xdg/wofi/style.css
 
 [move]
 activate = <super> BTN_LEFT
@@ -284,7 +288,7 @@ slot_tr = <super> KEY_KP9
 
 [cube]
 activate = <ctrl> <alt> BTN_LEFT
-background = 0.1 0.1 0.1 1.0
+background = 0.051 0.082 0.125 1.0
 
 [animate]
 open_animation = zoom
@@ -296,9 +300,23 @@ friction = 3.0
 spring_k = 8.0
 
 [decoration]
-active_color = 0.3 0.3 0.9 1.0
-inactive_color = 0.2 0.2 0.2 1.0
+active_color = 0.0 0.831 1.0 1.0
+inactive_color = 0.118 0.176 0.251 1.0
 
+INI
+
+# --- wf-shell config ---
+
+RUN cat > /etc/xdg/wf-shell.ini <<'INI'
+[panel]
+widgets_left = menu
+widgets_center = window-list
+widgets_right = clock
+position = top
+minimal_height = 32
+
+[dock]
+position = bottom
 INI
 
 # --- Foot terminal config ---
@@ -306,17 +324,85 @@ INI
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=Fira Code:size=12
+font=Fira Code:size=14
 initial-window-size-chars=100x30
-pad=8x8
 shell=/bin/bash -l
 
-[cursor]
-style=beam
-
-[colors]
-alpha=0.95
+[colors-dark]
+background=0d1520
+foreground=c8dde8
+regular0=111d2e
+regular1=ff4d6d
+regular2=00c896
+regular3=f0c060
+regular4=4090d8
+regular5=8060c8
+regular6=00c8d8
+regular7=8899aa
+bright0=1e2d40
+bright1=ff6b85
+bright2=00e8aa
+bright3=f8d880
+bright4=60b0f0
+bright5=a080e8
+bright6=00e8f0
+bright7=c8dde8
 INI
+
+# --- Mako notification config ---
+
+RUN mkdir -p /etc/xdg/mako && \
+    cat > /etc/xdg/mako/config <<'INI'
+background-color=#111d2e
+text-color=#c8dde8
+border-color=#00d4ff
+border-radius=8
+border-size=2
+width=380
+padding=12
+margin=8
+font=Noto Sans 11
+INI
+
+# --- Wofi launcher style ---
+
+RUN mkdir -p /etc/xdg/wofi && \
+    cat > /etc/xdg/wofi/style.css <<'CSS'
+window {
+    background-color: #0d1520;
+    border: 2px solid #00d4ff;
+    border-radius: 10px;
+    color: #c8dde8;
+    font-family: "Noto Sans";
+    font-size: 13px;
+}
+#input {
+    background-color: #111d2e;
+    border: 1px solid #1e2d40;
+    border-radius: 6px;
+    color: #c8dde8;
+    padding: 8px 12px;
+    margin: 8px;
+    outline: none;
+}
+#outer-box {
+    padding: 6px;
+}
+#entry {
+    padding: 6px 12px;
+    border-radius: 5px;
+    margin: 2px 4px;
+}
+#entry:selected {
+    background-color: #1e3550;
+}
+#text {
+    color: #c8dde8;
+}
+#text:selected {
+    color: #00d4ff;
+}
+CSS
 
 # --- PipeWire systemd services ---
 # PipeWire, WirePlumber, and PipeWire-Pulse run as the container user.
@@ -395,18 +481,21 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 
 Environment=DESKTOP_RESOLUTION=1920x1080
-Environment=WLR_BACKENDS=headless
+Environment=GDK_BACKEND=wayland
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
-Environment=XDG_CURRENT_DESKTOP=wlroots
-Environment=XCURSOR_THEME=Adwaita
+Environment=QT_QPA_PLATFORM=wayland
+Environment=WLR_BACKENDS=headless
 Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_THEME=Adwaita
+Environment=XDG_CURRENT_DESKTOP=wlroots
+Environment=XDG_SESSION_TYPE=wayland
 EnvironmentFile=-/run/wlr-renderer.env
 
 ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
