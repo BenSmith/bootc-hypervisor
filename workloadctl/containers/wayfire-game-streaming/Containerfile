@@ -15,7 +15,7 @@
 # Run:
 #   workload-ctl enable wayfire-game-streaming
 
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
@@ -58,6 +58,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     slurp \
     sudo \
     swappy \
+    swaybg \
     systemd \
     systemd-udev \
     util-linux \
@@ -316,9 +317,6 @@ minimal_height = 32
 
 [dock]
 position = bottom
-
-[background]
-color = \#383c4a
 INI
 
 # --- Foot terminal config ---
@@ -330,7 +328,7 @@ font=Fira Code:size=14
 initial-window-size-chars=100x30
 shell=/bin/bash -l
 
-[colors]
+[colors-dark]
 background=0d1520
 foreground=c8dde8
 regular0=111d2e
@@ -497,7 +495,7 @@ EnvironmentFile=-/run/wlr-renderer.env
 ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; if [ ! -f "$CFG" ]; then mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; fi; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target

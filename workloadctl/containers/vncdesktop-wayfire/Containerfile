@@ -41,6 +41,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     slurp \
     sudo \
     swappy \
+    swaybg \
     systemd \
     systemd-udev \
     util-linux \
@@ -194,9 +195,6 @@ minimal_height = 32
 
 [dock]
 position = bottom
-
-[background]
-color = \#383c4a
 INI
 
 # --- Foot terminal config ---
@@ -207,7 +205,7 @@ RUN mkdir -p /etc/xdg/foot && \
 font=Fira Code:size=14
 initial-window-size-chars=80x24
 
-[colors]
+[colors-dark]
 background=0d1520
 foreground=c8dde8
 regular0=111d2e
