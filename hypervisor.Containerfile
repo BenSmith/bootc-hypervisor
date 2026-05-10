@@ -133,6 +133,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     samba-client \
     seatd \
     selinux-policy-devel \
+    setools-console \
     shim \
     skopeo \
     smartmontools \
