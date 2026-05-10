@@ -42,7 +42,7 @@ name = "forgejo"
 enabled = false
 
 [container]
-image = "codeberg.org/forgejo/forgejo:14-rootless"
+image = "codeberg.org/forgejo/forgejo:15-rootless"
 
 [container.health]
 cmd = "wget -qO- http://localhost:3000/api/healthz > /dev/null || exit 1"
