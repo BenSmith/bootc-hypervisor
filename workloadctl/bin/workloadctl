@@ -12,6 +12,7 @@ import fcntl
 import grp
 import json
 import os
+from pathlib import Path
 import pwd
 import re
 import shutil
@@ -21,20 +22,30 @@ import sys
 import tempfile
 import time
 import tomllib
-from pathlib import Path
 
 sys.path.insert(0, '/usr/libexec/workloadctl')
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
-    MAX_NAME_LENGTH, NAME_PATTERN, USERNAME_PREFIX,
-    workload_username, workload_service_name, workload_container_name,
-    workload_home_dir, expand_volume_path, validate_workload_name,
+    GENERATOR_OWNED_DIRECTIVES,
+    MAX_NAME_LENGTH,
+    NAME_PATTERN,
+    USERNAME_PREFIX,
+    WORKLOADS_BASE,
+    WORKLOAD_CONFIG_DIR,
     auto_detect_credentials,
+    expand_volume_path,
+    validate_workload_name,
+    workload_container_name,
+    workload_home_dir,
+    workload_service_name,
+    workload_username,
 )
 from podman import Podman, PodmanError
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
-
+# TODO: break this file into smaller units, perhaps per-command.
+# TODO: Consider whether it's useful to make HTTP API, which would need sudo to be useful for anything other
+#  than certain read-only options
+# TODO: There's a lot of non-optional print statemens here, consider making that optional or more flexible
 
 def _format_size(n: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -660,6 +671,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     if pull_policy == "never":
         if not Podman.for_root().image_id(config.image):
             print(f"  ✗ Image '{config.image}' not found locally and pull=never")
+            # TODO: remove hardcoded path
             build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
             if build_script.exists():
                 print(f"    Build the image first:")
