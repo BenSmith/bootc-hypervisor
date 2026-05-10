@@ -1,6 +1,6 @@
 # Forgejo - Lightweight self-hosted Git forge
 # Web interface: http://<host-ip>:3000
-# SSH clone: ssh://git@<host-ip>:222/<user>/<repo>.git
+# SSH clone: ssh://git@<host-ip>:2222/<user>/<repo>.git
 #
 # Uses the rootless image — runs as UID 1000 (git user) with no container root.
 # keep-id:uid=1000,gid=1000 maps the workload user to the container's git user,
@@ -17,12 +17,12 @@
 #
 #   3. Configure firewall:
 #        sudo firewall-cmd --add-port=3000/tcp --permanent
-#        sudo firewall-cmd --add-port=222/tcp --permanent
+#        sudo firewall-cmd --add-port=2222/tcp --permanent
 #        sudo firewall-cmd --reload
 #
 #      Or restrict to local network only:
 #        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="3000" protocol="tcp" accept'
-#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="222" protocol="tcp" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="2222" protocol="tcp" accept'
 #        sudo firewall-cmd --reload
 #
 #   4. Open http://<host-ip>:3000 to complete first-time setup.
@@ -30,7 +30,7 @@
 #      SQLite is the default database — no external database required.
 #
 # Git clone over SSH (after adding your SSH key in the web UI):
-#   git clone ssh://git@<host-ip>:222/<user>/<repo>.git
+#   git clone ssh://git@<host-ip>:2222/<user>/<repo>.git
 #
 # Configuration:
 #   Forgejo stores its config at /data/gitea/conf/app.ini inside the container.
@@ -52,7 +52,8 @@ on_failure = "kill"
 
 [storage]
 volumes = [
-    "./data:/data",
+    "./data:/var/lib/gitea",
+#    "./app.ini:/var/lib/gitea/custom/conf/app.ini"
 ]
 
 [security]
@@ -60,7 +61,7 @@ userns = "keep-id:uid=1000,gid=1000"
 
 [network]
 mode = "pasta"
-ports = ["3000:3000", "222:2222"]
+ports = ["3000:3000", "2222:2222"]
 
 [resources]
 memory_max = "512M"
