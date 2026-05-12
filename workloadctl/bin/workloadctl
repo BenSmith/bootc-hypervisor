@@ -3435,7 +3435,7 @@ def main():
     create_parser = subparsers.add_parser("create", help="Create a new workload configuration")
     create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens, max 27 chars)")
     create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
-    create_parser.add_argument("--gpu", choices=["amd", "nvidia", "none"], help="GPU type for hardware acceleration (convenience flag)")
+    create_parser.add_argument("--gpu", metavar="SPEC", help="GPU access (convenience flag): 'amd', 'nvidia', 'intel', 'none', 'auto', or 'nvidia:<index|UUID>' to pin one GPU (see `nvidia-ctk cdi list`)")
     create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input dialout audio kvm)")
     create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
     create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")

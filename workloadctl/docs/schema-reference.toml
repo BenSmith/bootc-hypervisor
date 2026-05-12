@@ -247,7 +247,7 @@ files = [
 #   ["/dev/tpm0"]                       - TPM device
 #   ["/dev/ttyUSB0"]                    - USB serial device (Zigbee/Z-Wave stick)
 #   ["/dev/video0", "/dev/video1"]      - Webcams or capture cards
-#   ["nvidia.com/gpu=0"]                - NVIDIA GPU via CDI (alternative to gpu.type)
+#   ["nvidia.com/gpu=0"]                - Raw NVIDIA CDI ref. Prefer gpu = "nvidia:<spec>" instead.
 # Note: Device paths must exist on the host and may change on reboot
 # Note: You must add appropriate groups (dialout, video, disk, tpm, etc.) to security.extra_groups
 devices = ["/dev/ttyUSB0", "/dev/video0"]
@@ -257,16 +257,29 @@ devices = ["/dev/ttyUSB0", "/dev/video0"]
 
 # Optional: GPU type for hardware acceleration
 # Type: string
-# Options: "amd", "nvidia", "none"
+# Options: "amd", "nvidia", "intel", "auto", "none", or "nvidia:<spec>"
 # Default: "none"
-# "amd"    - Expands to: --device /dev/kfd --device /dev/dri
-#            Requires: extra_groups = ["video", "render"]
-# "nvidia" - Expands to: --device=nvidia.com/gpu=all --device /dev/dri
-#            Requires: extra_groups = ["video"]
-# "none"   - No GPU access
-# Advanced: For specific NVIDIA GPU selection, use generic devices instead:
-#           devices = ["nvidia.com/gpu=0", "/dev/dri"]
+# "amd"             - Expands to: --device /dev/kfd --device /dev/dri
+#                     Requires: extra_groups = ["video", "render"]
+# "nvidia"          - Expands to: --device=nvidia.com/gpu=all --device /dev/dri
+#                     Requires: extra_groups = ["video"]
+# "intel"           - Expands to: --device /dev/dri
+# "auto"            - Detect vendor from sysfs (first GPU wins). Resolves to
+#                     "amd"/"nvidia"/"intel"/"none" — does NOT pin a card.
+# "none"            - No GPU access
+# "nvidia:<spec>"   - Pin one NVIDIA GPU. <spec> is any CDI device name from
+#                     `nvidia-ctk cdi list`: an enumeration index ("1") or a
+#                     stable GPU UUID ("GPU-b6297698-...").
+#                     Expands to: --device=nvidia.com/gpu=<spec>
+#                     The umbrella /dev/dri is intentionally NOT mounted —
+#                     the CDI hook injects only the matching card's
+#                     /dev/dri/cardN + /dev/dri/renderDN, so the other GPUs
+#                     are invisible inside the container.
+#                     Use a UUID for stable pinning (indices change if you
+#                     add, remove, or reseat a card).
 gpu = "amd"
+# gpu = "nvidia:GPU-<uuid>"   # pin by UUID
+# gpu = "nvidia:1"            # pin by index (brittle)
 
 # Optional: Enable input device access (/dev/input/*, /dev/uinput)
 # Type: boolean

@@ -372,6 +372,10 @@ def generate_system_service(config, user_name, uid):
     gpu_type = config.get("devices", {}).get("gpu", "none")
     if gpu_type == "auto":
         gpu_type = resolve_auto_gpu()
+    # "nvidia:<spec>" pins a specific GPU via the CDI device name (UUID or index).
+    # When a spec is set, only that GPU's DRM nodes are mounted — the umbrella
+    # /dev/dri is dropped so the other GPUs are invisible inside the container.
+    gpu_vendor, _, gpu_spec = gpu_type.partition(":")
     extra_groups = config.get("security", {}).get("extra_groups", [])
     privileged = config.get("security", {}).get("privileged", False)
 
@@ -391,7 +395,7 @@ def generate_system_service(config, user_name, uid):
         "StartLimitBurst=5",
     ]
 
-    if gpu_type == "nvidia":
+    if gpu_vendor == "nvidia":
         lines.append("Requires=nvidia-cdi-generator.service")
         lines.append("After=nvidia-cdi-generator.service")
 
@@ -533,18 +537,25 @@ def generate_system_service(config, user_name, uid):
         podman_args.append("--group-add=keep-groups")
 
     # GPU devices (convenience flag)
-    if gpu_type == "amd":
+    if gpu_vendor == "amd":
         podman_args.extend([
             "--device /dev/kfd",
             "--device /dev/dri",
         ])
-    elif gpu_type == "nvidia":
-        # Default to "all" GPUs; for specific GPU selection use devices = ["nvidia.com/gpu=0"]
-        podman_args.extend([
-            "--device=nvidia.com/gpu=all",
-            "--device /dev/dri",
-        ])
-    elif gpu_type == "intel":
+    elif gpu_vendor == "nvidia":
+        # gpu = "nvidia"           → all GPUs, all DRM nodes
+        # gpu = "nvidia:<spec>"    → one GPU; CDI injects only that card's DRM
+        #                            nodes, so the umbrella /dev/dri is omitted.
+        # <spec> is any CDI device name from `nvidia-ctk cdi list`: an index
+        # ("1") or a stable GPU UUID ("GPU-...").
+        if gpu_spec:
+            podman_args.append(f"--device=nvidia.com/gpu={gpu_spec}")
+        else:
+            podman_args.extend([
+                "--device=nvidia.com/gpu=all",
+                "--device /dev/dri",
+            ])
+    elif gpu_vendor == "intel":
         podman_args.append("--device /dev/dri")
 
     # Generic device passthrough
@@ -723,7 +734,7 @@ def generate_system_service(config, user_name, uid):
     if has_secret_env_vars:
         lines.append(f"ExecStartPre=+/usr/libexec/workloadctl/workload-write-env {name}")
 
-    if gpu_type == "nvidia":
+    if gpu_vendor == "nvidia":
         lines.append(
             "ExecStartPre=/bin/bash -c "
             "'test -s /run/cdi/nvidia.yaml"
