@@ -11,6 +11,7 @@ systemd = "always"
 CONTAINER_USER = "desktop"
 CONTAINER_UID = "1000"
 CONTAINER_GID = "1000"
+DESKTOP_RESOLUTION = "1920x1080"
 
 [container.health]
 cmd = "pgrep -x sunshine > /dev/null || exit 1"
