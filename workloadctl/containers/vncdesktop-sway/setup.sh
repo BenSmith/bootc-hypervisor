@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULE_NAME="vncdesktop-sway"
 WORK_DIR=""
-cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
+cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 enable() {

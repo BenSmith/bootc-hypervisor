@@ -15,7 +15,7 @@ UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 
 WORK_DIR=""
-cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
+cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 enable() {
