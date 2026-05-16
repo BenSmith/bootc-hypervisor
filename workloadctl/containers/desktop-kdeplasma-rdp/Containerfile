@@ -423,11 +423,13 @@ SystemCallArchitectures=
 SystemCallFilter=
 DROPIN
 
-RUN ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+RUN ln -sf /dev/null /etc/systemd/system/polkit.service && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
-    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
-    ln -sf /dev/null /etc/systemd/system/polkit.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable \
         container-bootstrap \
         container-env \

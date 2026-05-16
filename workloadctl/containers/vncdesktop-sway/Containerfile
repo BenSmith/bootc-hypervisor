@@ -665,6 +665,8 @@ DROPIN
 
 RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
