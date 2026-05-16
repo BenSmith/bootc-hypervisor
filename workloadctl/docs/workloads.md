@@ -220,6 +220,34 @@ mode = "pasta"  # Default - isolated network with port forwarding (recommended)
 ports = ["8080:8080"]  # Port forwarding for pasta and custom network modes
 ```
 
+### Privileged Ports (< 1024)
+
+Rootless workloads bind ports as the unprivileged `_wl-<name>` user, so by
+default they cannot use ports below 1024. The hypervisor image ships a
+sysctl drop-in (`/usr/lib/sysctl.d/50-privileged-ports.conf`) that sets:
+
+```
+net.ipv4.ip_unprivileged_port_start = 0
+```
+
+This lifts the restriction across the host, so workloads can bind 53, 80,
+443, etc. directly — no `setcap`, no DNAT redirects, no NET_BIND_SERVICE
+capability. This is what lets `smb-server` use 139/445, `pihole` answer DNS
+on 53, and reverse-proxy workloads bind 80/443 as ordinary users.
+
+If you are running outside the hypervisor image and need this behavior, add
+the same drop-in yourself:
+
+```bash
+echo 'net.ipv4.ip_unprivileged_port_start = 0' | sudo tee /etc/sysctl.d/50-privileged-ports.conf
+sudo sysctl --system
+```
+
+Tradeoff: any unprivileged user on the host (not just workload users) can
+bind low ports. On a single-purpose hypervisor with no interactive users
+this is fine; in shared environments, consider per-binary `setcap
+cap_net_bind_service=+ep` instead.
+
 ---
 
 ## Configuration Guide

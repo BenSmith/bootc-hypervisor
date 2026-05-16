@@ -1,0 +1,17 @@
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    caddy \
+    && dnf clean all
+
+# Pin Caddy's data/config dirs so its on-disk state lands on the bind-mounted
+# volumes from the workload home. Without these, Caddy picks
+# $HOME/.local/share/caddy at runtime, which is not persisted — its internal
+# CA and issued certs would be regenerated on every container restart,
+# breaking any client that previously trusted the root.
+ENV XDG_DATA_HOME=/var/lib/caddy \
+    XDG_CONFIG_HOME=/etc/caddy/config
+
+EXPOSE 80 443
+
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

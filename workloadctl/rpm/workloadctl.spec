@@ -13,8 +13,13 @@ Requires:       podman >= 5.3
 Requires:       systemd
 Requires:       shadow-utils
 Suggests:       bash-completion
+# SELinux: enable registers an fcontext rule for /var/lib/workloads so the
+# transferred image storage is labeled container_file_t. semanage
+# (policycoreutils-python-utils) is required for that — restorecon alone
+# would relabel the tree back to var_lib_t and break every container.
 Requires:       policycoreutils
-Suggests:       policycoreutils-python-utils
+Requires:       policycoreutils-python-utils
+# checkpolicy only compiles the optional per-workload .te policy modules.
 Suggests:       checkpolicy
 
 %description
