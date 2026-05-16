@@ -54,9 +54,11 @@ COPY --link --chmod=0644 systemd/labwc.service /usr/lib/systemd/system/labwc.ser
 
 # Mask udevd — conflicts with host /run/udev:ro mount (KMS)
 RUN mkdir -p /etc/systemd/system && \
-    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable labwc
 
 STOPSIGNAL SIGRTMIN+3
