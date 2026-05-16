@@ -298,8 +298,13 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = HTTPServer(("127.0.0.1", PORT), MetricsHandler)
-    print(f"workload-exporter: listening on 127.0.0.1:{PORT}", flush=True)
+    # Bind all interfaces. The alloy agent scrapes this exporter as
+    # host.containers.internal:9110; under pasta networking that name resolves
+    # to the host's routable interface, never loopback, so a 127.0.0.1 bind is
+    # unreachable by the very agent meant to scrape it. Port 9110 is kept out
+    # of the firewall, so 0.0.0.0 here is not a LAN exposure.
+    server = HTTPServer(("0.0.0.0", PORT), MetricsHandler)
+    print(f"workload-exporter: listening on 0.0.0.0:{PORT}", flush=True)
     server.serve_forever()
 
 
