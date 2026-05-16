@@ -1,0 +1,13 @@
+[Unit]
+Description=Workload metrics HTTP exporter
+Documentation=man:workload-exporter
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/workloadctl/workload-exporter
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,114 @@
+# Alloy - Per-host telemetry collector
+#
+# Collects host metrics, systemd journal logs, and OTLP traces, and forwards
+# everything to the central otel-lgtm backend. Run on every host.
+#
+# Networking: pasta. Alloy runs in its own network namespace, so its local
+# OTLP receiver (4317/4318 inside the container) never collides with anything
+# on the host -- including a co-located otel-lgtm, which also wants 4317/4318.
+# Whether that receiver is reachable from the host is controlled entirely by
+# the [network] ports list below -- see the two variants there.
+#
+# Setup:
+#   1. Edit the env vars below (CENTRAL_HOST, HOST_LABEL, ROLE_LABEL).
+#   2. Pick the right [network] ports variant (normal host vs. a host that
+#      also runs otel-lgtm).
+#   3. sudo workloadctl enable alloy
+#   4. To change collection later, edit
+#      /var/lib/workloads/alloy/alloy-config.alloy and
+#      `sudo workloadctl recreate alloy`.
+#
+
+[workload]
+name = "alloy"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./alloy-config.alloy", hint = "/usr/share/workloadctl/containers/alloy/alloy-config.alloy" },
+]
+
+[container]
+image = "docker.io/grafana/alloy:latest"
+# "newer" pulls only when a newer tag is available; falls back to local copy
+# if the registry is unreachable (e.g. boot before network is up).
+pull = "newer"
+
+[container.health]
+# The UI/metrics server (12345) is probed from inside the container, so this
+# works whether or not 12345 is published to the host.
+cmd = "bash -c 'exec 3<>/dev/tcp/localhost/12345' || exit 1"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[container.environment]
+# ---- Required: edit these for each host ----
+CENTRAL_HOST = "CHANGE_ME"   # otel-lgtm host. A LAN IP/hostname for a remote
+                             # backend; "host.containers.internal" if otel-lgtm
+                             # runs on THIS host (under pasta, 127.0.0.1 is the
+                             # container's own loopback, not the host).
+HOST_LABEL   = "CHANGE_ME"   # Short name for this machine (e.g. "gaming", "nas")
+ROLE_LABEL   = "CHANGE_ME"   # Role tag (gaming, ai, nas, networking, thin-client)
+
+[storage]
+volumes = [
+    # Alloy config (edit /var/lib/workloads/alloy/alloy-config.alloy)
+    "./alloy-config.alloy:/etc/alloy/config.alloy:ro",
+    # Journal access (read-only)
+    "/run/log/journal:/run/log/journal:ro",
+    "/var/log/journal:/var/log/journal:ro",
+    # Host rootfs (recursive, slave propagation) so node_exporter can read
+    # the real /host/proc, /host/sys, and stat host mount points. Matching
+    # procfs_path/sysfs_path/rootfs_path are set in alloy-config.alloy.
+    "/:/host:ro,rslave",
+]
+
+[security]
+# Map container UID 0 → host workload user so alloy (running as root in the
+# image) can read /var/lib/workloads/alloy/alloy-config.alloy that's owned by
+# the workload user on the host.
+userns = "host"
+extra_groups = ["systemd-journal"]
+# Reading the host journal (syslogd_var_run_t / var_log_t) is denied to
+# container_t under SELinux enforcing. Rather than disabling confinement
+# wholesale (label=disable), the [host] setup.sh below installs a targeted
+# SELinux policy module (containers/alloy/alloy.te) that grants container_t
+# read access to just the journal file types. alloy stays confined as
+# container_t.
+
+[network]
+# Pasta: alloy gets its own netns. node_exporter still reads host metrics via
+# the bind-mounted /host/proc; the host (otel-lgtm, workload-exporter) is
+# reached via host.containers.internal. The OTLP receiver inside the container
+# binds 0.0.0.0:4317/4318 (see alloy-config.alloy) -- publish those ports only
+# on hosts that need to ingest local OTLP traffic.
+mode = "pasta"
+#
+# Variant 1 -- normal host (alloy only). Publish the local OTLP receiver on
+# loopback so local apps (workloadctl CLI traces, etc.) can reach it. This is
+# the default; it is the common case.
+ports = [
+    "127.0.0.1:4317:4317",
+    "127.0.0.1:4318:4318",
+]
+#
+# Variant 2 -- a host that also runs otel-lgtm. otel-lgtm owns host 4317/4318,
+# so alloy must NOT publish them (the bind would collide). Local apps send OTLP
+# straight to otel-lgtm instead. Replace the list above with:
+#   ports = []
+#
+# The alloy UI/metrics endpoint (12345) is intentionally not published: alloy
+# binds it to 127.0.0.1 inside the container, which pasta-forwarded ports
+# cannot reach. To scrape alloy's own metrics from the host, set alloy's
+# --server.http.listen-addr to 0.0.0.0:12345 and add "127.0.0.1:12345:12345".
+
+[host]
+# Installs the SELinux policy module (containers/alloy/alloy.te) on enable so
+# the confined container can read the host journal; removes it on disable.
+setup = "setup.sh"
+
+[resources]
+memory_max = "512M"
+memory_high = "384M"
+cpu_quota = "50%"

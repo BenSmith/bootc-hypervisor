@@ -22,7 +22,7 @@ lint:
   python3 -m py_compile bin/workloadctl
   python3 -m py_compile libexec/workload-ensure-user
   python3 -m py_compile libexec/workload-write-env
-  python3 -m py_compile libexec/workload-metrics
+  python3 -m py_compile libexec/workload-exporter
 
 # Build RPM from local checkout (no tarball)
 rpm-build:

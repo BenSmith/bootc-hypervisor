@@ -32,82 +32,69 @@ Each workload runs as a dedicated locked-down system user with its own
 UID/subuid namespace, home directory, and rootless podman instance.
 
 %prep
-# No source tarball yet — installed directly from repo checkout
-# When building from tarball: %%autosetup -n workloadctl-%%{version}
+# Installed directly from a repo checkout; switch to %%autosetup once a
+# tarball Source is added.
 
 %install
-# Binary
 install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadctl
 
-# Python library (private — not in site-packages)
+# Private library — kept under %{_libexecdir} instead of %{python3_sitelib}
+# to avoid implying a public, importable Python API.
 install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
     %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
 install -Dpm 0644 %{_sourcedir}/lib/podman.py \
     %{buildroot}%{_libexecdir}/workloadctl/podman.py
 
-# systemd generator (tiny shell script; emits workload-generate.service)
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
-# libexec helpers
 install -Dpm 0755 %{_sourcedir}/generators/workload-generate \
     %{buildroot}%{_libexecdir}/workloadctl/workload-generate
 install -Dpm 0755 %{_sourcedir}/libexec/workload-ensure-user \
     %{buildroot}%{_libexecdir}/workloadctl/workload-ensure-user
 install -Dpm 0755 %{_sourcedir}/libexec/workload-write-env \
     %{buildroot}%{_libexecdir}/workloadctl/workload-write-env
-install -Dpm 0755 %{_sourcedir}/libexec/workload-metrics \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-metrics
+install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-exporter
 
-# systemd units
-install -Dpm 0644 %{_sourcedir}/systemd/workload-metrics.service \
-    %{buildroot}%{_unitdir}/workload-metrics.service
-install -Dpm 0644 %{_sourcedir}/systemd/workload-metrics.timer \
-    %{buildroot}%{_unitdir}/workload-metrics.timer
+install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
+    %{buildroot}%{_unitdir}/workload-exporter.service
 install -Dpm 0644 %{_sourcedir}/systemd/workloads.slice \
     %{buildroot}%{_unitdir}/workloads.slice
 
-# tmpfiles.d
 install -Dpm 0644 %{_sourcedir}/systemd/workloads-dirs.conf \
     %{buildroot}%{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 
-# seccomp profile
 install -Dpm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
     %{buildroot}%{_datadir}/containers/seccomp-workload-baseline.json
 
-# bash completion
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
 
-# documentation
 install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
     %{buildroot}%{_docdir}/workloadctl/workloads.md
 
-# container build recipes (examples)
 install -dm 0755 %{buildroot}%{_datadir}/workloadctl
 cp -a %{_sourcedir}/containers %{buildroot}%{_datadir}/workloadctl/containers
 find %{buildroot}%{_datadir}/workloadctl/containers -name '*.sh' -exec chmod 0755 {} \;
 
-# example workload configs
 install -dm 0755 %{buildroot}%{_docdir}/workloadctl/examples
 install -pm 0644 %{_sourcedir}/workloads.d/*.toml \
     %{buildroot}%{_docdir}/workloadctl/examples/
 
-# license
 install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
 
-# config directory
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
 %post
-%systemd_post workload-metrics.timer
+%systemd_post workload-exporter.service
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 
 %preun
-%systemd_preun workload-metrics.timer
+%systemd_preun workload-exporter.service
 
 %postun
-%systemd_postun_with_restart workload-metrics.timer
+%systemd_postun_with_restart workload-exporter.service
 
 %files
 %{_datadir}/licenses/workloadctl/LICENSE
@@ -119,9 +106,8 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_libexecdir}/workloadctl/workload-generate
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
-%{_libexecdir}/workloadctl/workload-metrics
-%{_unitdir}/workload-metrics.service
-%{_unitdir}/workload-metrics.timer
+%{_libexecdir}/workloadctl/workload-exporter
+%{_unitdir}/workload-exporter.service
 %{_unitdir}/workloads.slice
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 %{_datadir}/containers/seccomp-workload-baseline.json

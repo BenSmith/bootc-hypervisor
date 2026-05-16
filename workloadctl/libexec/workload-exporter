@@ -1,16 +1,16 @@
 #!/usr/bin/python3
 """
-Collect metrics for all enabled workloads and write a Prometheus textfile.
+Prometheus metrics HTTP server for workloadctl workloads.
 
-Reads /etc/workloads.d/*.toml, queries systemd service state and cgroup v2
-resource counters, then writes metrics in Prometheus exposition format to
-a .prom file that node-exporter's textfile collector picks up.
+Serves /metrics on port 9110. Collects per-workload systemd state,
+cgroup v2 resource usage, and podman health check status.
 
-Runs as a systemd timer (every 30s). Designed to be fast and safe — never
-blocks boot, never fails loudly.
+Designed to run as a long-lived systemd service (Type=simple).
+Safe to scrape concurrently — collection is synchronous per request,
+no shared mutable state.
 
-Usage: workload-metrics [output-dir]
-  output-dir: Directory for .prom file (default: /var/lib/prometheus/node-exporter)
+Usage: workload-exporter [port]
+  port: TCP port to listen on (default: 9110)
 """
 
 import os
@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, '/usr/libexec/workloadctl')
@@ -27,8 +28,8 @@ from podman import Podman
 WORKLOAD_CONFIG_DIR = Path(
     os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
 )
-DEFAULT_OUTPUT_DIR = Path("/var/lib/prometheus/node-exporter")
-OUTPUT_FILENAME = "workloads.prom"
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
 
 
 def get_enabled_workloads():
@@ -41,7 +42,6 @@ def get_enabled_workloads():
         return workloads
 
     for toml_path in sorted(WORKLOAD_CONFIG_DIR.glob("*.toml")):
-        # Skip masked workloads (symlink to /dev/null)
         try:
             if toml_path.resolve() == Path("/dev/null"):
                 continue
@@ -103,10 +103,8 @@ def get_service_metrics(name):
         "restarts_total": int(props.get("NRestarts", 0)),
     }
 
-    # Uptime: monotonic timestamp of when the service entered active state
     enter_mono = int(props.get("ActiveEnterTimestampMonotonic", 0))
     if enter_mono > 0 and active_state == "active":
-        # Read system monotonic clock
         try:
             now_mono = time.monotonic_ns() // 1000  # convert ns to µs
             metrics["uptime_seconds"] = max(0, (now_mono - enter_mono) / 1_000_000)
@@ -143,9 +141,6 @@ def find_workload_cgroup(name):
 
     Rootless podman containers live under:
     /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/libpod-*.scope
-
-    We find the user's slice via the workload username, then look for
-    libpod scopes under it.
     """
     username = f"_wl-{name}"
     try:
@@ -159,7 +154,6 @@ def find_workload_cgroup(name):
     if not user_slice.is_dir():
         return None
 
-    # Look for libpod container scopes
     for scope in user_slice.rglob("libpod-*.scope"):
         if scope.is_dir():
             return scope
@@ -220,12 +214,11 @@ def get_cgroup_metrics(name):
 def format_metrics(all_metrics):
     """Format metrics in Prometheus exposition format."""
     lines = [
-        "# Workload metrics collected by workload-metrics",
+        "# Workload metrics collected by workload-exporter",
         f"# Generated at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
         "",
     ]
 
-    # Define metric types
     type_defs = [
         ("workload_active", "gauge", "Whether the workload service is active (1) or not (0)"),
         ("workload_failed", "gauge", "Whether the workload service is in failed state (1) or not (0)"),
@@ -243,7 +236,6 @@ def format_metrics(all_metrics):
         lines.append(f"# TYPE {metric_name} {metric_type}")
 
         for workload_name, svc_metrics, cgroup_metrics in all_metrics:
-            # Check service metrics
             key = metric_name.replace("workload_", "")
             if key in svc_metrics:
                 value = svc_metrics[key]
@@ -251,7 +243,6 @@ def format_metrics(all_metrics):
                     lines.append(f'{metric_name}{{workload="{workload_name}"}} {value:.2f}')
                 else:
                     lines.append(f'{metric_name}{{workload="{workload_name}"}} {value}')
-            # Check cgroup metrics
             elif key in cgroup_metrics:
                 value = cgroup_metrics[key]
                 if isinstance(value, float):
@@ -261,7 +252,6 @@ def format_metrics(all_metrics):
 
         lines.append("")
 
-    # Meta-metrics
     lines.append("# HELP workload_enabled_total Total number of enabled workloads")
     lines.append("# TYPE workload_enabled_total gauge")
     lines.append(f"workload_enabled_total {len(all_metrics)}")
@@ -275,42 +265,43 @@ def format_metrics(all_metrics):
     return "\n".join(lines)
 
 
+class MetricsHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in ("/metrics", "/metrics/"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            workloads = get_enabled_workloads()
+            all_metrics = []
+            for name, has_health in workloads:
+                svc = get_service_metrics(name) or {}
+                cgroup = get_cgroup_metrics(name)
+                if has_health:
+                    health = get_container_health(name)
+                    if health is not None:
+                        svc["health"] = 1 if health == "healthy" else 0
+                all_metrics.append((name, svc, cgroup))
+            body = format_metrics(all_metrics).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            print(f"workload-exporter: collection error: {e}", file=sys.stderr)
+
+    def log_message(self, fmt, *args):
+        pass  # suppress per-request access logs
+
+
 def main():
-    output_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUTPUT_DIR
-    output_file = output_dir / OUTPUT_FILENAME
-
-    workloads = get_enabled_workloads()
-    if not workloads:
-        # Write empty metrics (clears stale data)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(
-            "# No enabled workloads\n"
-            "workload_enabled_total 0\n"
-        )
-        return
-
-    all_metrics = []
-    for name, has_health in workloads:
-        svc_metrics = get_service_metrics(name) or {}
-        cgroup_metrics = get_cgroup_metrics(name)
-        # Query container health if workload has a health check configured
-        if has_health:
-            health_status = get_container_health(name)
-            if health_status is not None:
-                svc_metrics["health"] = 1 if health_status == "healthy" else 0
-        all_metrics.append((name, svc_metrics, cgroup_metrics))
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Atomic write: write to temp file then rename
-    tmp_file = output_file.with_suffix(".tmp")
-    tmp_file.write_text(format_metrics(all_metrics))
-    tmp_file.rename(output_file)
+    server = HTTPServer(("127.0.0.1", PORT), MetricsHandler)
+    print(f"workload-exporter: listening on 127.0.0.1:{PORT}", flush=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"workload-metrics: {e}", file=sys.stderr)
-        sys.exit(0)  # Never fail — stale metrics are better than no metrics
+    main()

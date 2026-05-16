@@ -1024,6 +1024,11 @@ def cmd_disable(args, manager: WorkloadManager):
             subprocess.run(["loginctl", "terminate-user", str(uid)], check=False)
             subprocess.run(["loginctl", "disable-linger", str(uid)], check=False)
             time.sleep(1)
+            # Kill any straggler processes (rootless podman, conmon, etc.)
+            # so userdel doesn't print "user is currently used by process N".
+            subprocess.run(["pkill", "-KILL", "-u", str(uid)],
+                           check=False, capture_output=True)
+            time.sleep(0.5)
 
             print("  Removing subuid/subgid entries...")
             subid_lock = Path("/run/lock/workload-subid.lock")
@@ -1038,7 +1043,17 @@ def cmd_disable(args, manager: WorkloadManager):
                         p.write_text("\n".join(lines) + ("\n" if lines else ""))
 
             print(f"  Removing user {config.username}...")
-            subprocess.run(["userdel", "-f", config.username], check=False)
+            userdel = subprocess.run(["userdel", "-f", config.username],
+                                     check=False, capture_output=True, text=True)
+            # userdel -f succeeds even when warning "user currently used by
+            # process N"; only surface stderr if it actually failed or the
+            # user still exists.
+            if userdel.returncode != 0 or userdel.stderr.strip():
+                try:
+                    pwd.getpwnam(config.username)
+                    sys.stderr.write(userdel.stderr)
+                except KeyError:
+                    pass
 
             home_path = Path(home_dir)
             if home_path.exists():
