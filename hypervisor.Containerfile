@@ -154,6 +154,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wget \
     wireguard-tools \
     wpa_supplicant \
+    xdg-dbus-proxy \
     xfsprogs \
     zram-generator && \
     dnf clean all && \

@@ -86,48 +86,12 @@
 
 ---
 
-### Advanced Networking Features
-**Current state:** Basic networking works (pasta, host, none, custom networks)
-
-**Could add:**
-- Automatic network creation (currently manual with `podman network create`)
-- Network lifecycle management
-- DNS configuration (custom servers, search domains)
-- Network policies (firewall rules, traffic shaping)
-- Multiple networks per container
-- IPv6 support (untested)
-- Network inspection tools
-
-**Decision:** Wait until actually blocked
-**Status:** Low priority
-
----
-
-### Advanced Storage Features
-**Current state:** Basic volume mounts work
-
-**Could add:**
-- Named volumes (podman volume management)
-- Shared volumes (between multiple workloads)
-- tmpfs mounts (in-memory filesystems)
-- Bind mount options (more granular ro/rw/nosuid/noexec)
-- Storage quotas (limit container storage size)
-- Automatic cleanup (remove old images/volumes)
-- Volume drivers (different storage backends)
-- Data migration tools
-
-**Decision:** Wait until actually needed
-**Status:** Medium priority
-
----
-
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*
 
 - Web UI for workload management
 - Workload health monitoring with alerts (email/webhook on failures)
-- CI/CD runner workload (GitLab/GitHub/Gitea runner)
 - Game server workloads (Valheim, Factorio, etc.)
 - Import docker-compose files to workload TOML (migration tool)
 - Ansible integration for provisioning (manage workloads as code)
@@ -141,4 +105,6 @@
 - Workloads get LVM provisioned to cap or flex storage
 - consider python3-tomlkit for toml edits that preserve comments
 - make missing host setup script an error not a warning
+- investigate inputtino https://github.com/games-on-whales/inputtino to see if it can replace my sunshine input hacky python
+- put all control surfaces in wireguard/vpn 
 

@@ -1,0 +1,81 @@
+# Avahi - mDNS publisher for service-name aliases on this host
+# Publishes <name>.local A records pointing at this host's LAN IP, so other
+# devices on the LAN can resolve service names like zot.local, registry.local
+# without any central DNS. Pair with a per-host caddy workload that routes
+# those names by Host header to the right backend port.
+#
+# See containers/avahi/README.md for the full picture (architecture,
+# resolver-host setup, troubleshooting). The short version of setup on the
+# publishing host:
+#
+#   1. Build the container:
+#        cd containers/avahi && sudo ./build.sh
+#
+#   2. Mask any host-side avahi-daemon (only one mDNS responder per host can
+#      bind UDP 5353):
+#        sudo systemctl disable --now avahi-daemon.socket avahi-daemon.service
+#        sudo systemctl mask avahi-daemon.socket avahi-daemon.service
+#
+#   3. Turn OFF systemd-resolved's mDNS on the publishing host. Even in
+#      `resolve` mode, resolved keeps a global UDP 5353 socket open and
+#      causes "another mDNS stack" warnings + spurious Local-name-collision
+#      failures against avahi's own records. The publisher host needs:
+#        sudo sed -i 's/^#*MulticastDNS=.*/MulticastDNS=no/' /etc/systemd/resolved.conf
+#        sudo systemctl restart systemd-resolved
+#      (Other LAN hosts that just want to RESOLVE .local names install
+#      nss-mdns — see README.md.)
+#
+#   4. Edit ALIASES below, then:
+#        sudo workloadctl enable avahi
+#
+#   5. Open mDNS through the firewall (UDP 5353):
+#        sudo firewall-cmd --add-service=mdns --permanent
+#        sudo firewall-cmd --reload
+#
+# Notes:
+#   - mDNS only crosses one broadcast domain. Across VLANs you need a reflector.
+#   - Names are first-come-first-serve on the LAN; pick unique aliases per host.
+#   - HOST_IP is auto-detected from the default route. Override with
+#     HOST_IP = "192.168.1.50" in [container.environment] if needed.
+#   - Each alias becomes its own A record with no reverse PTR (the container
+#     uses `avahi-publish -a -R` internally). This is what lets N aliases
+#     coexist on a single IP — see README.md "How it works".
+
+[workload]
+name = "avahi"
+enabled = false
+
+[container]
+image = "localhost/avahi:latest"
+pull = "never"
+
+[container.environment]
+# Whitespace or comma separated, with or without the .local suffix.
+ALIASES = "zot registry"
+
+[container.health]
+cmd = "avahi-daemon --check"
+interval = "30s"
+timeout = "5s"
+retries = 3
+start_period = "10s"
+on_failure = "kill"
+
+[security]
+# Map the workload user to UID 0 inside the container so /run is writable
+# (avahi and dbus need to create their runtime dirs there) and so the
+# entrypoint can setuid into the `avahi` and `messagebus` users when the
+# daemons drop privileges. Still rootless on the host — the in-container
+# "root" is just _wl-avahi.
+userns = "keep-id:uid=0,gid=0"
+
+[network]
+# Required: mDNS uses LAN multicast on UDP 5353, which an isolated netns
+# (pasta) cannot see.
+mode = "host"
+
+[resources]
+service_type = "simple"
+memory_max = "64M"
+memory_high = "32M"
+cpu_quota = "50%"

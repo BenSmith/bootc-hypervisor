@@ -1,0 +1,189 @@
+// -----------------------------------------------------------------------
+// Host metrics: node_exporter integration
+// -----------------------------------------------------------------------
+
+prometheus.exporter.unix "host" {
+  // Point node_exporter at the host's procfs/sysfs/rootfs, which are
+  // bind-mounted under /host (see [storage].volumes in alloy.toml).
+  // Without these, the filesystem/hwmon/thermal_zone collectors would
+  // read the container's own namespace and produce wrong or empty data.
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host"
+
+  set_collectors = [
+    "cpu",
+    "diskstats",
+    "hwmon",
+    "loadavg",
+    "meminfo",
+    "netdev",
+    "pressure",
+    "stat",
+    "thermal_zone",
+    "time",
+    "uname",
+  ]
+  // Collectors intentionally not enabled:
+  //   "systemd"    - node_exporter's systemd collector uses /run/systemd/private
+  //                  (root-only socket, not the DBus system bus), and Alloy
+  //                  doesn't expose the upstream --collector.systemd.private=false
+  //                  flag. workload-exporter on :9110 already publishes
+  //                  per-workload restart counts, task counts, CPU/memory
+  //                  usage, and podman health — strictly more than the
+  //                  node_exporter systemd collector would give us anyway.
+  //   "filesystem" - reads /proc/1/mounts to enumerate host filesystems.
+  //                  That requires ptrace access to host PID 1, which a
+  //                  rootless container can't get (capabilities apply only
+  //                  inside the workload user's userns, not the host's).
+  //                  Disk I/O is still covered by "diskstats".
+
+  filesystem {
+    // Exclude common virtual/ephemeral filesystems.
+    fs_types_exclude    = "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$"
+    mount_points_exclude = "^/(dev|proc|run/credentials|run/user|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)"
+  }
+}
+
+prometheus.scrape "node_exporter" {
+  targets         = prometheus.exporter.unix.host.targets
+  forward_to      = [otelcol.receiver.prometheus.default.receiver]
+  scrape_interval = "30s"
+}
+
+// -----------------------------------------------------------------------
+// Workload exporter (workloadctl-specific metrics, plan 02)
+// -----------------------------------------------------------------------
+
+prometheus.scrape "workload_exporter" {
+  targets = [{
+    // workload-exporter runs on the host. Under pasta networking the host is
+    // not on the container's loopback, so it must be addressed as
+    // host.containers.internal (podman adds this to the container's /etc/hosts).
+    __address__ = "host.containers.internal:9110",
+    job         = "workload-exporter",
+  }]
+  forward_to      = [otelcol.receiver.prometheus.default.receiver]
+  scrape_interval = "30s"
+}
+
+// -----------------------------------------------------------------------
+// Convert scraped Prometheus metrics into OTLP metrics
+// -----------------------------------------------------------------------
+
+otelcol.receiver.prometheus "default" {
+  output {
+    metrics = [otelcol.processor.transform.add_host_info.input]
+  }
+}
+
+// -----------------------------------------------------------------------
+// Systemd journal → OTLP logs
+// -----------------------------------------------------------------------
+
+otelcol.receiver.loki "journal" {
+  output {
+    logs = [otelcol.processor.transform.add_host_info.input]
+  }
+}
+
+loki.source.journal "system" {
+  // Forward all journal entries. The transform processor adds host/role labels.
+  forward_to = [otelcol.receiver.loki.journal.receiver]
+  // Explicit path: sd_journal's default location keys off /etc/machine-id,
+  // which inside the container is the container's id, not the host's, so the
+  // reader would open /var/log/journal/<container-id>/ (empty) and silently
+  // read 0 lines. Pointing at the directory makes it scan every machine-id
+  // subdir beneath it.
+  path = "/var/log/journal"
+  labels = {
+    job = "systemd-journal",
+  }
+}
+
+// -----------------------------------------------------------------------
+// Local OTLP receiver (workloadctl traces, plan 03)
+// Binds 0.0.0.0 *inside the container's own netns* (pasta) — this is not a
+// LAN exposure. pasta forwards a published port to the container interface,
+// not its loopback, so a 127.0.0.1 bind here would be unreachable via the
+// ports published in alloy.toml. Host-facing exposure is controlled solely by
+// whether alloy.toml's [network] ports publishes 4317/4318 (loopback-only).
+// -----------------------------------------------------------------------
+
+otelcol.receiver.otlp "local" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces  = [otelcol.processor.transform.add_host_info.input]
+    metrics = [otelcol.processor.transform.add_host_info.input]
+    logs    = [otelcol.processor.transform.add_host_info.input]
+  }
+}
+
+// -----------------------------------------------------------------------
+// Add host and role as resource attributes on all signals
+// -----------------------------------------------------------------------
+
+otelcol.processor.transform "add_host_info" {
+  error_mode = "ignore"
+
+  metric_statements {
+    context = "resource"
+    statements = [
+      `set(attributes["host.name"], "` + env("HOST_LABEL") + `")`,
+      `set(attributes["host.role"], "` + env("ROLE_LABEL") + `")`,
+    ]
+  }
+
+  log_statements {
+    context = "resource"
+    statements = [
+      `set(attributes["host.name"], "` + env("HOST_LABEL") + `")`,
+      `set(attributes["host.role"], "` + env("ROLE_LABEL") + `")`,
+    ]
+  }
+
+  trace_statements {
+    context = "resource"
+    statements = [
+      `set(attributes["host.name"], "` + env("HOST_LABEL") + `")`,
+      `set(attributes["host.role"], "` + env("ROLE_LABEL") + `")`,
+    ]
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+// -----------------------------------------------------------------------
+// Batch before export (reduces connection overhead)
+// -----------------------------------------------------------------------
+
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.otlp.central.input]
+    logs    = [otelcol.exporter.otlp.central.input]
+    traces  = [otelcol.exporter.otlp.central.input]
+  }
+}
+
+// -----------------------------------------------------------------------
+// Export everything to the central otel-lgtm node via OTLP gRPC
+// -----------------------------------------------------------------------
+
+otelcol.exporter.otlp "central" {
+  client {
+    endpoint = env("CENTRAL_HOST") + ":4317"
+
+    tls {
+      insecure = true
+    }
+  }
+}

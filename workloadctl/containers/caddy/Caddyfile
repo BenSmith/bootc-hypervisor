@@ -1,0 +1,41 @@
+# Sample Caddyfile for a per-host workloadctl proxy.
+#
+# Each site block matches a Host header (the .local name published by the
+# avahi workload on this host) and reverse-proxies to the corresponding
+# backend on the host's loopback. Backend ports come from the workload's
+# [network] ports = [...] mapping (e.g., zot-registry maps 5050:5000, so
+# Caddy talks to 127.0.0.1:5050).
+#
+# host networking + ip_unprivileged_port_start=0 (set by hypervisor.Containerfile)
+# lets Caddy bind 80/443 directly as the rootless _wl-caddy user.
+
+# Named sites below are served over HTTPS with Caddy's internal CA, and Caddy
+# auto-installs an 80->443 redirect for each, so http://<name> reaches the
+# same place. Add `auto_https disable_redirects` here to keep plain HTTP
+# available without the redirect.
+{
+    # Local-only deployment: no public ACME, use Caddy's internal CA for HTTPS.
+    # Drop this block if you want to serve plain HTTP only.
+    local_certs
+}
+
+zot.local, registry.local {
+    reverse_proxy 127.0.0.1:5050
+}
+
+grafana.local {
+    reverse_proxy 127.0.0.1:3000
+}
+
+# Add one block per service this host fronts.
+
+# Catchall for port 80 — matches requests whose Host doesn't hit any named
+# block above. The per-host 80->443 redirects Caddy installs for the named
+# sites are more specific than this hostless :80 block, so a named site still
+# redirects to HTTPS while an unconfigured Host (or a request by raw IP) lands
+# here. Without this, an unknown Host gets Caddy's stock empty-200, which is
+# hard to distinguish from "site exists but backend is broken."
+:80 {
+    respond "no site configured for {host}" 404
+}
+

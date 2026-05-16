@@ -1,0 +1,79 @@
+# Caddy - per-host reverse proxy on 80/443
+# Routes incoming requests to local workloads by Host header, so clients
+# can address services by name (e.g., http://zot.local) without specifying
+# the backend port. Pair with the avahi workload that publishes those names
+# via mDNS.
+#
+# Setup:
+#   1. Build the container:
+#        cd containers/caddy && sudo ./build.sh
+#
+#   2. Drop a Caddyfile in place (see containers/caddy/Caddyfile for a sample):
+#        sudo cp containers/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
+#
+#   3. Enable:
+#        sudo workloadctl enable caddy
+#
+#   4. Open 80/443 through the firewall (the UDP/443 line enables HTTP/3,
+#      which Caddy serves automatically alongside TCP):
+#        sudo firewall-cmd --add-service=http --add-service=https --permanent
+#        sudo firewall-cmd --add-port=443/udp --permanent
+#        sudo firewall-cmd --reload
+#
+#   5. To change routes later:
+#        sudo nano /var/lib/workloads/caddy/Caddyfile
+#        sudo workloadctl recreate caddy
+#
+# Why host networking:
+#   - Caddy needs to bind 80/443 on the host. The hypervisor image sets
+#     net.ipv4.ip_unprivileged_port_start=0, so this works rootless.
+#   - Caddy reaches backend workloads via the host's loopback (127.0.0.1:<port>),
+#     which is the port pasta forwards from for each pasta-networked workload.
+#
+# Per-host conflicts:
+#   - Only one thing per host can hold 80/443. If another workload (e.g., a
+#     Pi-hole web UI) wants port 80, move it to a high port and front it via
+#     a Caddyfile site block.
+
+[workload]
+name = "caddy"
+enabled = false
+
+[setup]
+required_files = [
+    { path = "./Caddyfile", hint = "/usr/share/workloadctl/containers/caddy/Caddyfile" },
+]
+
+[container]
+image = "localhost/caddy:latest"
+pull = "never"
+
+[container.health]
+# Liveness only — we don't care WHAT Caddy answered, just that it answered.
+# Using -f would fail on 4xx (e.g. unmatched Host on the sample Caddyfile),
+# which would trip on_failure=kill and put us into a restart loop.
+cmd = "curl -sS --max-time 5 -o /dev/null http://localhost:80/"
+interval = "30s"
+timeout = "10s"
+retries = 3
+start_period = "15s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./Caddyfile:/etc/caddy/Caddyfile:ro",
+    "./data:/var/lib/caddy",
+    "./config:/etc/caddy/config",
+]
+
+[security]
+userns = "keep-id"
+
+[network]
+mode = "host"
+
+[resources]
+service_type = "simple"
+memory_max = "256M"
+memory_high = "128M"
+cpu_quota = "100%"

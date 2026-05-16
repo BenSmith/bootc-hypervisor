@@ -342,7 +342,12 @@ class TestWorkloadGeneration(unittest.TestCase):
             )
             with self.subTest(workload=name):
                 service = self._read_service(name)
-                if has_extra_maps:
+                if userns == "host":
+                    # userns=host has no namespace to remap: the generator
+                    # emits --userns=host and carries extra_groups via
+                    # --group-add=keep-groups, never --uidmap/--gidmap.
+                    self.assertIn("--userns=host", service)
+                elif has_extra_maps:
                     # extra_groups/uidmaps/gidmaps trigger --uidmap/--gidmap
                     # (podman 5.x forbids mixing --userns with these flags)
                     self.assertIn("--uidmap ", service)

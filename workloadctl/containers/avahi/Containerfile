@@ -1,0 +1,25 @@
+FROM registry.fedoraproject.org/fedora:43
+
+# avahi          - mDNS responder daemon
+# avahi-tools    - provides avahi-publish (we use `avahi-publish -a -R` so
+#                  each alias gets an A record without claiming the reverse
+#                  PTR; otherwise N aliases on one IP all fight over the
+#                  single PTR slot and only the lexicographically-smallest
+#                  one survives)
+# dbus-daemon    - avahi-publish talks to avahi-daemon over the system D-Bus
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    avahi avahi-tools dbus-daemon iproute \
+    && dnf clean all
+
+# enable-chroot=no: the container is already the sandbox, and chroot needs
+#                   CAP_SYS_CHROOT which rootless containers don't get.
+# publish-addresses=no: don't claim <hostname>.local for the container; we
+#                   publish only the aliases listed in ALIASES.
+RUN sed -i -e 's/^#*enable-chroot=.*/enable-chroot=no/' \
+           -e 's/^#*publish-addresses=.*/publish-addresses=no/' \
+        /etc/avahi/avahi-daemon.conf
+
+COPY --link entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

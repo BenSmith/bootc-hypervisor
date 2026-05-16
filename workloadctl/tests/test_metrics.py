@@ -1,54 +1,111 @@
 #!/usr/bin/env python3
-"""Integration tests for workload-metrics collector.
+"""Integration tests for the workload-exporter metrics server.
 
-Runs the actual workload-metrics script with overridden paths (temp dirs)
-and validates the Prometheus exposition format output. On a dev machine
-systemd and cgroup queries return empty, so we test:
+Spawns the actual workload-exporter HTTP server on a free port with an
+overridden config directory (WORKLOAD_CONFIG_DIR) and validates the
+Prometheus exposition served at /metrics. On a dev machine systemd and
+cgroup queries return empty/defaults, so we test:
 - Config discovery (enabled, disabled, masked workloads)
 - Output format (valid Prometheus exposition with correct TYPE/HELP)
-- Atomic write (output written to correct path)
 - Empty/no-config edge cases
 - Meta-metrics (workload_enabled_total, last_collect_timestamp)
-- Never-fail guarantee (script exits 0 even with bad configs)
+- Robustness (bad configs are skipped, the server keeps serving)
+- Live collection (each scrape re-reads configs)
 """
 
+import http.client
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
-METRICS_SCRIPT = os.path.join(
-    os.path.dirname(__file__), '..', 'libexec', 'workload-metrics')
+EXPORTER_SCRIPT = os.path.join(
+    os.path.dirname(__file__), '..', 'libexec', 'workload-exporter')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
 
-def run_metrics(config_dir, output_dir):
-    """Run workload-metrics and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["PYTHONPATH"] = LIB_DIR
-    return subprocess.run(
-        [sys.executable, METRICS_SCRIPT, str(output_dir)],
-        capture_output=True, text=True, env=env,
-    )
+def _free_port():
+    """Pick an unused TCP port on the loopback interface."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class ExporterProcess:
+    """Context manager: run workload-exporter on a free port.
+
+    Spawns the server against the given config dir, waits for it to accept
+    connections, and exposes get() to scrape it. Terminates the process on
+    exit.
+    """
+
+    def __init__(self, config_dir):
+        self.config_dir = config_dir
+        self.port = _free_port()
+        self.proc = None
+
+    def __enter__(self):
+        env = os.environ.copy()
+        env["WORKLOAD_CONFIG_DIR"] = str(self.config_dir)
+        env["PYTHONPATH"] = LIB_DIR
+        self.proc = subprocess.Popen(
+            [sys.executable, EXPORTER_SCRIPT, str(self.port)],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(
+                    f"exporter exited early (rc={self.proc.returncode})")
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), 0.2):
+                    return self
+            except OSError:
+                time.sleep(0.05)
+        raise RuntimeError("exporter did not start listening in time")
+
+    def __exit__(self, *exc):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+    def get(self, path="/metrics"):
+        """GET path from the running exporter; return (status, body)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode()
+        finally:
+            conn.close()
+
+
+def scrape(config_dir):
+    """Start the exporter against config_dir, GET /metrics once, return body.
+
+    Asserts a 200 response — the exposition text is returned for parsing.
+    """
+    with ExporterProcess(config_dir) as exp:
+        status, body = exp.get("/metrics")
+        if status != 200:
+            raise AssertionError(f"GET /metrics returned {status}")
+        return body
 
 
 def write_config(config_dir, name, toml_content):
     path = Path(config_dir) / f"{name}.toml"
     path.write_text(textwrap.dedent(toml_content))
     return path
-
-
-def read_prom(output_dir):
-    """Read the workloads.prom output file, return contents or None."""
-    prom = Path(output_dir) / "workloads.prom"
-    if prom.exists():
-        return prom.read_text()
-    return None
 
 
 def parse_metric_value(prom_text, metric_name, labels=None):
@@ -93,39 +150,20 @@ class TestMetricsNoWorkloads(unittest.TestCase):
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
-        self.output_dir = tempfile.mkdtemp()
 
     def tearDown(self):
-        for d in (self.config_dir, self.output_dir):
-            shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(self.config_dir, ignore_errors=True)
 
     def test_empty_config_dir(self):
         """No configs → minimal output with workload_enabled_total 0."""
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
-        self.assertIsNotNone(prom)
+        prom = scrape(self.config_dir)
         self.assertIn("workload_enabled_total 0", prom)
 
     def test_missing_config_dir(self):
-        """Non-existent config dir → exits 0, writes empty metrics."""
+        """Non-existent config dir → still serves empty metrics."""
         shutil.rmtree(self.config_dir)
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
-        self.assertIsNotNone(prom)
+        prom = scrape(self.config_dir)
         self.assertIn("workload_enabled_total 0", prom)
-
-    def test_creates_output_dir(self):
-        """Output dir is created if it doesn't exist."""
-        shutil.rmtree(self.output_dir)
-        nested = os.path.join(self.output_dir, "deep", "path")
-
-        result = run_metrics(self.config_dir, nested)
-        self.assertEqual(result.returncode, 0)
-        self.assertTrue(Path(nested, "workloads.prom").exists())
 
 
 class TestMetricsDiscovery(unittest.TestCase):
@@ -133,11 +171,9 @@ class TestMetricsDiscovery(unittest.TestCase):
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
-        self.output_dir = tempfile.mkdtemp()
 
     def tearDown(self):
-        for d in (self.config_dir, self.output_dir):
-            shutil.rmtree(d)
+        shutil.rmtree(self.config_dir)
 
     def test_enabled_workload_discovered(self):
         """An enabled workload appears in metrics."""
@@ -150,10 +186,7 @@ class TestMetricsDiscovery(unittest.TestCase):
             image = "nginx:latest"
         """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertIn('workload="web"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
 
@@ -168,10 +201,7 @@ class TestMetricsDiscovery(unittest.TestCase):
             image = "alpine:latest"
         """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertNotIn('workload="off"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "0")
 
@@ -188,10 +218,7 @@ class TestMetricsDiscovery(unittest.TestCase):
         masked_path = Path(self.config_dir) / "masked.toml"
         masked_path.symlink_to("/dev/null")
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertNotIn('workload="masked"', prom)
         self.assertIn('workload="real"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
@@ -208,10 +235,7 @@ class TestMetricsDiscovery(unittest.TestCase):
                 image = "alpine:latest"
             """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         for name in ("alpha", "bravo", "charlie"):
             self.assertIn(f'workload="{name}"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "3")
@@ -243,10 +267,7 @@ class TestMetricsDiscovery(unittest.TestCase):
             image = "alpine:latest"
         """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertIn('workload="on1"', prom)
         self.assertIn('workload="on2"', prom)
         self.assertNotIn('workload="off1"', prom)
@@ -262,10 +283,7 @@ class TestMetricsDiscovery(unittest.TestCase):
             image = "alpine:latest"
         """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertIn('workload="implicit"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
 
@@ -275,7 +293,6 @@ class TestMetricsFormat(unittest.TestCase):
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
-        self.output_dir = tempfile.mkdtemp()
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
@@ -284,12 +301,10 @@ class TestMetricsFormat(unittest.TestCase):
             [container]
             image = "myapp:latest"
         """)
-        run_metrics(self.config_dir, self.output_dir)
-        self.prom = read_prom(self.output_dir)
+        self.prom = scrape(self.config_dir)
 
     def tearDown(self):
-        for d in (self.config_dir, self.output_dir):
-            shutil.rmtree(d)
+        shutil.rmtree(self.config_dir)
 
     def test_has_type_declarations(self):
         """All expected metric types are declared."""
@@ -322,7 +337,6 @@ class TestMetricsFormat(unittest.TestCase):
 
     def test_timestamp_is_recent(self):
         """Last collect timestamp is a plausible Unix timestamp."""
-        import time
         ts = parse_metric_value(self.prom,
                                 "workload_metrics_last_collect_timestamp_seconds")
         self.assertIsNotNone(ts)
@@ -349,27 +363,39 @@ class TestMetricsFormat(unittest.TestCase):
                              f"Metric line starts with {{ (missing name): {line}")
 
     def test_service_metrics_present_for_workload(self):
-        """On a dev machine, systemctl returns data for unknown services.
-        The script should at least emit active/failed for discovered workloads.
-        Even if the service doesn't exist, systemctl show returns defaults."""
-        # workload_active with label workload="app" should be present
+        """The script emits active/failed for discovered workloads.
+
+        Even if the service doesn't exist, `systemctl show` returns defaults,
+        so workload_active should appear with the workload label."""
         active = parse_metric_value(self.prom, "workload_active",
                                     {"workload": "app"})
-        # May be 0 or 1 depending on system — just check it exists
+        # May be 0 or 1 depending on system — just check it exists and is valid
         if active is not None:
             self.assertIn(active, ("0", "1"))
 
+    def test_content_type_is_prometheus(self):
+        """/metrics is served with the Prometheus exposition content type."""
+        with ExporterProcess(self.config_dir) as exp:
+            conn = http.client.HTTPConnection("127.0.0.1", exp.port, timeout=5)
+            try:
+                conn.request("GET", "/metrics")
+                resp = conn.getresponse()
+                resp.read()
+                self.assertEqual(resp.status, 200)
+                self.assertIn("text/plain",
+                              resp.getheader("Content-Type", ""))
+            finally:
+                conn.close()
+
 
 class TestMetricsRobustness(unittest.TestCase):
-    """Test that the script never fails (exits 0)."""
+    """Test that bad input is tolerated and the server keeps serving."""
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
-        self.output_dir = tempfile.mkdtemp()
 
     def tearDown(self):
-        for d in (self.config_dir, self.output_dir):
-            shutil.rmtree(d)
+        shutil.rmtree(self.config_dir)
 
     def test_malformed_toml_skipped(self):
         """A broken TOML file is skipped; other workloads still collected."""
@@ -384,10 +410,7 @@ class TestMetricsRobustness(unittest.TestCase):
         # Write garbage TOML
         (Path(self.config_dir) / "bad.toml").write_text("not valid [[[ toml")
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertIn('workload="good"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
 
@@ -396,10 +419,7 @@ class TestMetricsRobustness(unittest.TestCase):
         (Path(self.config_dir) / "noname.toml").write_text(
             '[workload]\nenabled = true\n\n[container]\nimage = "x"\n')
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "0")
 
     def test_non_toml_files_ignored(self):
@@ -416,58 +436,37 @@ class TestMetricsRobustness(unittest.TestCase):
             image = "alpine:latest"
         """)
 
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        prom = read_prom(self.output_dir)
+        prom = scrape(self.config_dir)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
 
-    def test_exits_zero_on_catastrophic_error(self):
-        """Even if something goes very wrong, exit code is 0."""
-        # Pass a file (not dir) as output_dir — mkdir will fail
-        bad_output = os.path.join(self.output_dir, "workloads.prom")
-        Path(bad_output).write_text("block")
+    def test_unknown_path_returns_404(self):
+        """A request for anything other than /metrics returns 404."""
+        with ExporterProcess(self.config_dir) as exp:
+            status, _ = exp.get("/not-metrics")
+            self.assertEqual(status, 404)
 
-        # Try to write inside a file path (will fail)
-        nested = os.path.join(bad_output, "impossible")
-        result = run_metrics(self.config_dir, nested)
-        self.assertEqual(result.returncode, 0,
-                         f"Script should never fail, got rc={result.returncode}: "
-                         f"{result.stderr}")
+    def test_server_survives_bad_config(self):
+        """A malformed config doesn't 500 the endpoint or crash the server."""
+        (Path(self.config_dir) / "bad.toml").write_text("not valid [[[ toml")
+        with ExporterProcess(self.config_dir) as exp:
+            status, _ = exp.get("/metrics")
+            self.assertEqual(status, 200)
+            # Still alive and serving on a second request.
+            status2, _ = exp.get("/metrics")
+            self.assertEqual(status2, 200)
 
 
-class TestMetricsAtomicWrite(unittest.TestCase):
-    """Test that output is written atomically (no partial files)."""
+class TestMetricsLiveCollection(unittest.TestCase):
+    """Each scrape re-reads configs from disk (no cached snapshot)."""
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
-        self.output_dir = tempfile.mkdtemp()
 
     def tearDown(self):
-        for d in (self.config_dir, self.output_dir):
-            shutil.rmtree(d)
+        shutil.rmtree(self.config_dir)
 
-    def test_no_tmp_file_left_behind(self):
-        """After successful write, no .tmp file remains."""
-        write_config(self.config_dir, "app", """\
-            [workload]
-            name = "app"
-            enabled = true
-
-            [container]
-            image = "alpine:latest"
-        """)
-
-        result = run_metrics(self.config_dir, self.output_dir)
-        self.assertEqual(result.returncode, 0)
-
-        files = list(Path(self.output_dir).iterdir())
-        names = [f.name for f in files]
-        self.assertIn("workloads.prom", names)
-        self.assertNotIn("workloads.tmp", names)
-
-    def test_overwrites_previous_output(self):
-        """Running twice overwrites the previous file cleanly."""
+    def test_rescrape_reflects_config_change(self):
+        """A config change between two scrapes is reflected on the second."""
         write_config(self.config_dir, "v1", """\
             [workload]
             name = "v1"
@@ -477,25 +476,26 @@ class TestMetricsAtomicWrite(unittest.TestCase):
             image = "alpine:latest"
         """)
 
-        run_metrics(self.config_dir, self.output_dir)
-        prom1 = read_prom(self.output_dir)
-        self.assertIn('workload="v1"', prom1)
+        with ExporterProcess(self.config_dir) as exp:
+            status, prom1 = exp.get("/metrics")
+            self.assertEqual(status, 200)
+            self.assertIn('workload="v1"', prom1)
 
-        # Remove v1, add v2
-        (Path(self.config_dir) / "v1.toml").unlink()
-        write_config(self.config_dir, "v2", """\
-            [workload]
-            name = "v2"
-            enabled = true
+            # Remove v1, add v2 — same running server.
+            (Path(self.config_dir) / "v1.toml").unlink()
+            write_config(self.config_dir, "v2", """\
+                [workload]
+                name = "v2"
+                enabled = true
 
-            [container]
-            image = "alpine:latest"
-        """)
+                [container]
+                image = "alpine:latest"
+            """)
 
-        run_metrics(self.config_dir, self.output_dir)
-        prom2 = read_prom(self.output_dir)
-        self.assertIn('workload="v2"', prom2)
-        self.assertNotIn('workload="v1"', prom2)
+            status, prom2 = exp.get("/metrics")
+            self.assertEqual(status, 200)
+            self.assertIn('workload="v2"', prom2)
+            self.assertNotIn('workload="v1"', prom2)
 
 
 if __name__ == "__main__":
