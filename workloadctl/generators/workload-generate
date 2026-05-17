@@ -656,6 +656,10 @@ def generate_system_service(config, user_name, uid):
         podman_args.append(f"--volume {dq(source_path)}:{dq(container_path)}:{mode}")
         log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {mode})")
 
+    # HOST_IP is auto-detected by workload-ensure-user and written to the
+    # EnvironmentFile; pass it into the container so configs can use it.
+    podman_args.append("--env HOST_IP=${HOST_IP}")
+
     # Plain env vars go as --env args; secret env vars go via --env-file
     env_args = build_plain_env_args(config)
     podman_args.extend(env_args)
