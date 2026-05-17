@@ -53,10 +53,10 @@ prometheus.scrape "node_exporter" {
 
 prometheus.scrape "workload_exporter" {
   targets = [{
-    // HOST_IP is auto-detected (default-route interface IP) by workload-ensure-user
-    // at each service start. Override by setting HOST_IP in [container.environment]
-    // in alloy.toml if a different interface is needed.
-    __address__ = env("HOST_IP") + ":9110",
+    // host.containers.internal (169.254.1.2) is pasta's gateway address — the
+    // only way to reach host-side sockets (not pasta-forwarded container ports)
+    // from inside the container's network namespace.
+    __address__ = "host.containers.internal:9110",
     job         = "workload-exporter",
   }]
   forward_to      = [otelcol.receiver.prometheus.default.receiver]
