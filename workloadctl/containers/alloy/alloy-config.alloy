@@ -14,6 +14,7 @@ prometheus.exporter.unix "host" {
   set_collectors = [
     "cpu",
     "diskstats",
+    "filesystem",
     "hwmon",
     "loadavg",
     "meminfo",
@@ -25,18 +26,13 @@ prometheus.exporter.unix "host" {
     "uname",
   ]
   // Collectors intentionally not enabled:
-  //   "systemd"    - node_exporter's systemd collector uses /run/systemd/private
-  //                  (root-only socket, not the DBus system bus), and Alloy
-  //                  doesn't expose the upstream --collector.systemd.private=false
-  //                  flag. workload-exporter on :9110 already publishes
-  //                  per-workload restart counts, task counts, CPU/memory
-  //                  usage, and podman health — strictly more than the
-  //                  node_exporter systemd collector would give us anyway.
-  //   "filesystem" - reads /proc/1/mounts to enumerate host filesystems.
-  //                  That requires ptrace access to host PID 1, which a
-  //                  rootless container can't get (capabilities apply only
-  //                  inside the workload user's userns, not the host's).
-  //                  Disk I/O is still covered by "diskstats".
+  //   "systemd" - node_exporter's systemd collector uses /run/systemd/private
+  //               (root-only socket, not the DBus system bus), and Alloy
+  //               doesn't expose the upstream --collector.systemd.private=false
+  //               flag. workload-exporter on :9110 already publishes
+  //               per-workload restart counts, task counts, CPU/memory
+  //               usage, and podman health — strictly more than the
+  //               node_exporter systemd collector would give us anyway.
 
   filesystem {
     // Exclude common virtual/ephemeral filesystems.
