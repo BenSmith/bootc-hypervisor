@@ -210,6 +210,28 @@ def restore_selinux_labels(pw):
         log(f"  WARNING: restorecon failed for {pw.pw_dir}: {result.stderr}")
 
 
+def _detect_host_ip():
+    """Return the host's primary LAN IP via the default route, or empty string.
+
+    Uses the source address that would be chosen to reach 1.1.1.1, which
+    selects the default-route interface and ignores secondary addresses (e.g.
+    libvirt bridges, VPN tuns). Override by setting HOST_IP in the workload's
+    [container.environment] in its TOML — an explicit value there takes
+    precedence over the EnvironmentFile.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ip", "-4", "route", "get", "1.1.1.1"],
+            stderr=subprocess.DEVNULL, text=True
+        )
+        for token, nxt in zip(out.split(), out.split()[1:]):
+            if token == "src":
+                return nxt
+    except Exception:
+        pass
+    return ""
+
+
 def write_environment_file(name, pw, config):
     """Write UID-dependent environment variables for the systemd service.
 
@@ -220,7 +242,10 @@ def write_environment_file(name, pw, config):
     env_dir = Path("/run/workload-env")
     env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    lines = [f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}"]
+    lines = [
+        f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
+        f"HOST_IP={_detect_host_ip()}",
+    ]
 
     env_file = env_dir / f"workload-{name}.env"
     env_file.write_text("\n".join(lines) + "\n")
