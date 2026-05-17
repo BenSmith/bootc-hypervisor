@@ -27,7 +27,7 @@
 #
 #   3. Edit the config to set share paths, users, and other settings:
 #        sudo nano /var/lib/workloads/smb-server/smb.conf
-#        sudo workloadctl restart smb-server
+#        sudo workloadctl recreate smb-server
 #
 #   4. Configure firewall:
 #      Option A (direct port 445):

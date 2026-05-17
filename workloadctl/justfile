@@ -37,7 +37,7 @@ rpm-build:
     --define "buildserial ${serial}" \
     rpm/workloadctl.spec
   echo "RPM built:"
-  find rpmbuild/RPMS -name 'workloadctl-*.rpm' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2
+  find rpmbuild/RPMS -name "workloadctl-*${serial}*.rpm"
 
 # Build and install RPM (upgrade if already installed)
 rpm-install: rpm-build

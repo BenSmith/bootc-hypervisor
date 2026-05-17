@@ -13,7 +13,7 @@
 #
 #   3. (Optional) Edit the config before or after enabling:
 #        sudo nano /var/lib/workloads/zot-registry/config.json
-#        sudo workloadctl restart zot-registry
+#        sudo workloadctl recreate zot-registry
 #
 #   4. Configure firewall to allow registry access:
 #        sudo firewall-cmd --add-port=5050/tcp --permanent

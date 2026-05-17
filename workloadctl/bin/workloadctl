@@ -776,6 +776,19 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
         print("  These groups must exist on the system.")
         failed = True
 
+    # Check ip_unprivileged_port_start for host-mode workloads
+    if config.get_network_mode() == "host":
+        try:
+            sysctl_path = Path("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+            unpriv_start = int(sysctl_path.read_text().strip())
+            if unpriv_start > 0:
+                print(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
+                print(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
+                print(f"    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
+                      f"sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
+        except Exception:
+            pass
+
     if not failed:
         print("  ✓ Pre-flight checks passed")
 
@@ -867,6 +880,14 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
                   file=sys.stderr)
             sys.exit(1)
         print(f"  Image transferred successfully")
+        if image_id:
+            active = subprocess.run(
+                ["systemctl", "is-active", "--quiet", config.service_name],
+                check=False
+            )
+            if active.returncode == 0:
+                print(f"  Note: container is still running the old image.")
+                print(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
     elif not image_id:
         print()
         print(f"Error: Image '{config.image}' not found locally and pull=never", file=sys.stderr)
@@ -1251,6 +1272,12 @@ def cmd_recreate(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     print(f"Recreating workload: {args.workload}")
+    print("  Regenerating service files...")
+    subprocess.run(
+        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+        check=True,
+    )
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"✓ Workload '{args.workload}' recreated")
 
