@@ -1,9 +1,13 @@
 # Headless Desktop + Sunshine Streaming (Wayfire)
 #
-# Wayfire runs headlessly (WLR_BACKENDS=headless, no KMS/seatd/libinput).
-# Input from Moonlight clients is injected by an in-container bridge that reads
-# Sunshine's uinput passthrough devices and injects via Wayland virtual input
-# protocols (zwlr_virtual_pointer_manager_v1 / zwp_virtual_keyboard_manager_v1).
+# Wayfire runs headlessly (WLR_BACKENDS=headless,libinput; no KMS).
+# Input from Moonlight clients arrives as Sunshine uinput devices. Wayfire's
+# libinput backend picks them up natively via the host udev database (mounted
+# read-only at /run/udev by the workload); seatd provides the libseat session.
+# Host udev hotplug events don't reach the container's libudev (it drops them --
+# the host udevd's sender UID maps to "nobody" in the container's user
+# namespace), so a host-side relay installed by setup.sh re-broadcasts them with
+# a corrected UID for the devices Sunshine creates at runtime.
 # Sunshine captures the virtual display via wlr-screencopy, encodes with VAAPI
 # on the AMD render node, and streams to Moonlight clients.
 # Steam Big Picture is the default session; the full wayfire desktop is always
@@ -55,6 +59,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     procps-ng \
     psmisc \
     python3-gobject \
+    seatd \
     slurp \
     sudo \
     swappy \
@@ -110,7 +115,7 @@ RUN dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \
 # Pre-release RPM URL changes frequently — pass via build arg:
 #   podman build --build-arg SUNSHINE_RPM_URL=https://... .
 
-ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.403.124357/Sunshine-2026.403.124357-1.fc43.x86_64.rpm
+ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.517.140229/Sunshine-2026.517.140229-1.fc44.x86_64.rpm
 RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
     dnf clean all
 
@@ -474,7 +479,8 @@ UNIT
 RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
 [Unit]
 Description=Wayfire Wayland Compositor (headless)
-After=container-bootstrap.service polkit-stub.service
+After=container-bootstrap.service polkit-stub.service seatd.service
+Requires=seatd.service
 
 [Service]
 Type=simple
@@ -484,10 +490,11 @@ RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 
 Environment=GDK_BACKEND=wayland
-Environment=LIBSEAT_BACKEND=noop
+Environment=LIBSEAT_BACKEND=seatd
 Environment=MOZ_ENABLE_WAYLAND=1
 Environment=QT_QPA_PLATFORM=wayland
-Environment=WLR_BACKENDS=headless
+Environment=WLR_BACKENDS=headless,libinput
+Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=XCURSOR_SIZE=24
 Environment=XCURSOR_THEME=Adwaita
 Environment=XDG_CURRENT_DESKTOP=wlroots
@@ -496,6 +503,7 @@ EnvironmentFile=-/run/wlr-renderer.env
 
 ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LIBGL_ALWAYS_SOFTWARE=1 > /run/wlr-renderer.env'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
+ExecStartPre=/bin/sh -c 'while [ ! -S /run/seatd.sock ]; do sleep 0.1; done'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
@@ -505,7 +513,7 @@ UNIT
 
 # --- Wayland ready gate ---
 # Oneshot that blocks until wayfire's Wayland socket exists. Services that
-# need the display (sunshine, wayvnc, input-bridge) depend on this instead
+# need the display (sunshine, wayvnc) depend on this instead
 # of each polling independently.
 
 RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
@@ -644,457 +652,26 @@ ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --k
 WantedBy=multi-user.target
 UNIT
 
-# --- Input bridge ---
-# Sunshine creates virtual uinput devices when a Moonlight client connects.
-# Since WLR_BACKENDS=headless (no libinput), wayfire has no input system.
-# This bridge polls /dev/input/ for Sunshine's uinput devices and injects
-# events into wayfire via Wayland virtual input protocols:
-#   zwlr_virtual_pointer_manager_v1  — mouse movement, buttons, scroll
-#   zwp_virtual_keyboard_manager_v1  — key press/release
-#
-# Uses only Python stdlib + libxkbcommon. Runs as the container user so it
-# can open /dev/input/eventX (input group) and connect to wayland-0.
+# --- seatd ---
+# wayfire's libinput backend needs a libseat session to open input devices.
+# A container has no logind seat, so we run seatd. SEATD_VTBOUND=0 gives a
+# VT-less seat (the default VT-bound seat fails — no tty0 in a container).
+# seatd runs as root (no User=) so it can create /run/seatd.sock and inherits
+# PID 1's keep-groups, including `input`, to open /dev/input/event* devices.
+# -g input makes the socket reachable by wayfire running as the container user.
 
-RUN cat > /usr/local/bin/sunshine-input-bridge <<'SCRIPT'
-#!/usr/bin/env python3
-"""In-container Wayland virtual input bridge for Sunshine.
-
-Polls /proc/bus/input/devices for Sunshine's uinput virtual input devices,
-then reads their evdev events and injects them into wayfire via:
-  zwlr_virtual_pointer_manager_v1  — mouse motion, buttons, scroll
-  zwp_virtual_keyboard_manager_v1  — key press / release
-"""
-import array, ctypes, math, os, select, socket, struct, threading, time
-
-# ── Wayland wire protocol ─────────────────────────────────────────────────────
-
-def _u32(v):   return struct.pack('<I', v & 0xffffffff)
-def _fixed(v): return struct.pack('<i', int(round(v * 256)))
-def _wlstr(s):
-    b = (s + '\0').encode()
-    pad = (-len(b)) % 4
-    return _u32(len(b)) + b + bytes(pad)
-
-def _msg(obj_id, opcode, *args):
-    payload = b''.join(args)
-    return struct.pack('<IHH', obj_id, opcode, 8 + len(payload)) + payload
-
-
-class WlConn:
-    def __init__(self, path):
-        self._s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._s.connect(path)
-        self._buf = b''
-        self._next_id = 2
-        self._lock = threading.Lock()
-
-    def new_id(self):
-        with self._lock:
-            i = self._next_id; self._next_id += 1
-            return i
-
-    def send(self, *msgs):
-        with self._lock:
-            self._s.sendall(b''.join(msgs))
-
-    def send_with_fd(self, msg, fd):
-        with self._lock:
-            fds = array.array('i', [fd])
-            self._s.sendmsg([msg], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
-
-    def _fill_buf(self, timeout=1.0):
-        r, _, _ = select.select([self._s], [], [], timeout)
-        if r:
-            chunk = self._s.recv(65536)
-            if chunk:
-                self._buf += chunk
-
-    def _pop_event(self):
-        if len(self._buf) < 8: return None
-        obj_id, word = struct.unpack('<II', self._buf[:8])
-        size = word >> 16
-        if len(self._buf) < size: return None
-        data = self._buf[8:size]
-        self._buf = self._buf[size:]
-        return obj_id, word & 0xffff, data
-
-    def roundtrip(self):
-        cb_id = self.new_id()
-        self.send(_msg(1, 0, _u32(cb_id)))
-        events = []
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            self._fill_buf(0.1)
-            while True:
-                ev = self._pop_event()
-                if ev is None: break
-                if ev[0] == cb_id and ev[1] == 0: return events
-                events.append(ev)
-        raise TimeoutError('Wayland roundtrip timed out')
-
-    def drain(self):
-        self._fill_buf(0.0)
-        while self._pop_event(): pass
-
-    def get_globals(self):
-        reg_id = self.new_id()
-        self.send(_msg(1, 1, _u32(reg_id)))
-        globals_ = {}
-        for oid, op, data in self.roundtrip():
-            if oid == reg_id and op == 0:
-                n    = struct.unpack('<I', data[:4])[0]
-                slen = struct.unpack('<I', data[4:8])[0]
-                iface = data[8:8 + slen - 1].decode()
-                spad  = (slen + 3) & ~3
-                ver   = struct.unpack('<I', data[8 + spad:8 + spad + 4])[0]
-                globals_[iface] = (n, ver)
-        return reg_id, globals_
-
-    def bind(self, reg_id, name, interface, version):
-        obj_id = self.new_id()
-        self.send(_msg(reg_id, 0, _u32(name), _wlstr(interface),
-                       _u32(version), _u32(obj_id)))
-        return obj_id
-
-
-# ── Keymap ────────────────────────────────────────────────────────────────────
-
-def _init_xkb():
-    """Initialise libxkbcommon and return (lib, keymap, state)."""
-    xkb = ctypes.CDLL('libxkbcommon.so.0')
-    xkb.xkb_context_new.restype           = ctypes.c_void_p
-    xkb.xkb_context_new.argtypes          = [ctypes.c_int]
-    xkb.xkb_keymap_new_from_names.restype = ctypes.c_void_p
-    xkb.xkb_keymap_new_from_names.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                               ctypes.c_int]
-    xkb.xkb_keymap_get_as_string.restype  = ctypes.c_char_p
-    xkb.xkb_keymap_get_as_string.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    xkb.xkb_state_new.restype             = ctypes.c_void_p
-    xkb.xkb_state_new.argtypes            = [ctypes.c_void_p]
-    xkb.xkb_state_update_key.restype      = ctypes.c_int
-    xkb.xkb_state_update_key.argtypes     = [ctypes.c_void_p, ctypes.c_uint32,
-                                              ctypes.c_int]
-    xkb.xkb_state_serialize_mods.restype  = ctypes.c_uint32
-    xkb.xkb_state_serialize_mods.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    ctx = xkb.xkb_context_new(0)
-    km  = xkb.xkb_keymap_new_from_names(ctx, None, 0)
-    state = xkb.xkb_state_new(km)
-    return xkb, km, state
-
-def _send_keymap(conn, kb_id, km, xkb):
-    km_bytes = xkb.xkb_keymap_get_as_string(km, 1)
-    fd = os.memfd_create('xkb_keymap', 0)
-    try:
-        os.write(fd, km_bytes)
-        os.lseek(fd, 0, 0)
-        conn.send_with_fd(_msg(kb_id, 0, _u32(1), _u32(len(km_bytes))), fd)
-    finally:
-        os.close(fd)
-
-
-# ── evdev reading ─────────────────────────────────────────────────────────────
-
-EVENT_FMT  = 'llHHi'
-EVENT_SIZE = struct.calcsize(EVENT_FMT)
-EV_SYN, EV_KEY, EV_REL = 0, 1, 2
-REL_X, REL_Y, REL_WHEEL = 0, 1, 8
-
-def _ms(): return int(time.monotonic() * 1000) & 0xffffffff
-
-def read_events(path):
-    try:
-        f = open(path, 'rb', buffering=0)
-    except Exception as e:
-        print(f'Cannot open {path}: {e}', flush=True)
-        return
-    try:
-        while True:
-            r, _, _ = select.select([f], [], [], 1.0)
-            if not r: continue
-            raw = f.read(EVENT_SIZE)
-            if not raw or len(raw) < EVENT_SIZE: break
-            _, _, ev_type, ev_code, ev_value = struct.unpack(EVENT_FMT, raw)
-            yield ev_type, ev_code, ev_value
-    except Exception:
-        pass
-    finally:
-        f.close()
-
-
-# ── Pointer acceleration ─────────────────────────────────────────────────────
-#
-# Adaptive pointer acceleration profile ported from libinput filter-mouse.c
-#
-# Copyright © 2006-2009 Simon Thum
-# Copyright © 2012 Jonas Ådahl
-# Copyright © 2014-2015 Red Hat, Inc.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice (including the next
-# paragraph) shall be included in all copies or substantial portions of the
-# Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
-_MOTION_TIMEOUT_US = 1_000_000  # 1s — reset velocity after this gap
-
-class PointerAccel:
-    """Adaptive pointer acceleration (libinput's default profile)."""
-
-    def __init__(self, speed=0.0):
-        # Ring buffer: [(dx_accum, dy_accum, time_us), ...] — 2 trackers
-        self._trackers = [(0.0, 0.0, 0)] * 2
-        self._cur = 0
-        self._last_velocity = 0.0
-        self.set_speed(speed)
-
-    def set_speed(self, speed):
-        """speed in [-1.0, 1.0] — same as libinput speed adjustment."""
-        speed = max(-1.0, min(1.0, speed))
-        self._threshold = max(0.0002, (0.4 - 0.25 * speed) / 1000.0)
-        self._max_accel = 2.0 + speed * 1.5
-        self._incline = 1.1 + speed * 0.75
-
-    def _feed(self, dx, dy, time_us):
-        t = self._trackers
-        for i in range(len(t)):
-            ox, oy, ot = t[i]
-            t[i] = (ox + dx, oy + dy, ot)
-        self._cur = c = (self._cur + 1) % len(t)
-        t[c] = (0.0, 0.0, time_us)
-
-    def _velocity(self, time_us):
-        idx = (self._cur + len(self._trackers) - 1) % len(self._trackers)
-        tdx, tdy, ttime = self._trackers[idx]
-        dt = time_us - ttime + 1
-        if dt > _MOTION_TIMEOUT_US:
-            return math.hypot(tdx, tdy) / _MOTION_TIMEOUT_US
-        return math.hypot(tdx, tdy) / dt
-
-    def _profile(self, speed_us):
-        speed_ms = speed_us * 1000.0
-        if speed_ms < 0.07:
-            f = 10.0 * speed_ms + 0.3
-        elif speed_us < self._threshold:
-            f = 1.0
-        else:
-            f = self._incline * (speed_ms - self._threshold * 1000.0) + 1.0
-        return min(f, self._max_accel)
-
-    def apply(self, dx, dy, time_us):
-        """Return (accel_dx, accel_dy)."""
-        self._feed(dx, dy, time_us)
-        v = self._velocity(time_us)
-        vl = self._last_velocity
-        # Simpson's rule: smooth the factor across current and last velocity
-        factor = (self._profile(v) + self._profile(vl)
-                  + 4.0 * self._profile((v + vl) / 2.0)) / 6.0
-        self._last_velocity = v
-        return dx * factor, dy * factor
-
-
-# ── Event handlers ────────────────────────────────────────────────────────────
-
-def handle_mouse(conn, ptr_id, path):
-    speed = float(os.environ.get('MOUSE_SENSITIVITY', '0'))
-    accel = PointerAccel(speed)
-    dx = dy = 0
-    for ev_type, ev_code, ev_value in read_events(path):
-        try:
-            if ev_type == EV_REL:
-                if   ev_code == REL_X:     dx += ev_value
-                elif ev_code == REL_Y:     dy += ev_value
-                elif ev_code == REL_WHEEL:
-                    t = _ms()
-                    conn.send(
-                        _msg(ptr_id, 3, _u32(t), _u32(0), _fixed(-ev_value * 15.0)),
-                        _msg(ptr_id, 4))   # axis + frame
-            elif ev_type == EV_SYN:
-                if dx or dy:
-                    t_us = int(time.monotonic() * 1e6)
-                    adx, ady = accel.apply(dx, dy, t_us)
-                    t = _ms()
-                    conn.send(
-                        _msg(ptr_id, 0, _u32(t), _fixed(adx), _fixed(ady)),
-                        _msg(ptr_id, 4))   # motion + frame
-                    dx = dy = 0
-            elif ev_type == EV_KEY and ev_code in (0x110, 0x111, 0x112) \
-                    and ev_value in (0, 1):
-                t = _ms()
-                conn.send(
-                    _msg(ptr_id, 2, _u32(t), _u32(ev_code), _u32(ev_value)),
-                    _msg(ptr_id, 4))   # button + frame
-        except Exception:
-            pass
-
-def handle_keyboard(conn, kb_id, path, xkb_lib, xkb_state):
-    # xkb_state_update_key directions
-    XKB_KEY_UP   = 0
-    XKB_KEY_DOWN = 1
-    # xkb_state_serialize_mods components (xkb_state_component enum)
-    XKB_MOD_DEPRESSED    = 1    # 1 << 0
-    XKB_MOD_LATCHED      = 2    # 1 << 1
-    XKB_MOD_LOCKED       = 4    # 1 << 2
-    XKB_LAYOUT_EFFECTIVE = 128  # 1 << 7
-    prev_mods = (0, 0, 0, 0)
-    for ev_type, ev_code, ev_value in read_events(path):
-        if ev_type == EV_KEY and ev_value in (0, 1):
-            try:
-                t = _ms()
-                conn.send(_msg(kb_id, 1, _u32(t), _u32(ev_code), _u32(ev_value)))
-                # Update xkb state (evdev code + 8 = xkb keycode)
-                direction = XKB_KEY_DOWN if ev_value == 1 else XKB_KEY_UP
-                xkb_lib.xkb_state_update_key(xkb_state, ev_code + 8, direction)
-                mods = (
-                    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_DEPRESSED),
-                    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_LATCHED),
-                    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_LOCKED),
-                    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_LAYOUT_EFFECTIVE),
-                )
-                if mods != prev_mods:
-                    conn.send(_msg(kb_id, 2, _u32(mods[0]), _u32(mods[1]),
-                                   _u32(mods[2]), _u32(mods[3])))
-                    prev_mods = mods
-            except Exception:
-                pass
-
-
-# ── Device discovery ──────────────────────────────────────────────────────────
-
-def find_sunshine_devices():
-    """Return {path: name} for Sunshine's virtual input devices."""
-    result = {}
-    try:
-        content = open('/proc/bus/input/devices').read()
-    except Exception:
-        return result
-    name = handlers = None
-    for line in content.splitlines():
-        if line.startswith('N: Name='):
-            name = line[8:].strip().strip('"')
-        elif line.startswith('H: Handlers='):
-            handlers = line[12:].strip()
-        elif line == '' and name and handlers:
-            if 'sunshine' in name.lower() or 'passthrough' in name.lower():
-                for h in handlers.split():
-                    if h.startswith('event'):
-                        result[f'/dev/input/{h}'] = name
-            name = handlers = None
-    return result
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-active      = {}
-active_lock = threading.Lock()
-
-def _start_device(conn, ptr_id, kb_id, path, name, xkb_lib, xkb_state):
-    name_lower = name.lower()
-    if 'mouse' in name_lower and 'absolute' not in name_lower:
-        label, fn, args = 'mouse',    handle_mouse,    (conn, ptr_id, path)
-    elif 'keyboard' in name_lower or 'key' in name_lower:
-        label, fn, args = 'keyboard', handle_keyboard, (conn, kb_id, path, xkb_lib, xkb_state)
-    else:
-        return
-    print(f'Bridging {label}: {path} ({name})', flush=True)
-    t = threading.Thread(target=fn, args=args, daemon=True)
-    t.start()
-    with active_lock:
-        active[path] = t
-
-def _setup_wayland(sock):
-    conn = WlConn(sock)
-    reg_id, globals_ = conn.get_globals()
-    print('Globals:', [k for k in globals_ if 'virtual' in k or 'seat' in k],
-          flush=True)
-
-    seat_id = None
-    if 'wl_seat' in globals_:
-        n, v = globals_['wl_seat']
-        seat_id = conn.bind(reg_id, n, 'wl_seat', min(v, 7))
-
-    ptr_id = None
-    if 'zwlr_virtual_pointer_manager_v1' in globals_:
-        n, v = globals_['zwlr_virtual_pointer_manager_v1']
-        mgr   = conn.bind(reg_id, n, 'zwlr_virtual_pointer_manager_v1', min(v, 2))
-        ptr_id = conn.new_id()
-        conn.send(_msg(mgr, 0, _u32(0), _u32(ptr_id)))
-        print('Virtual pointer created.', flush=True)
-
-    kb_id = None
-    xkb_lib = xkb_state = None
-    if 'zwp_virtual_keyboard_manager_v1' in globals_ and seat_id:
-        n, v = globals_['zwp_virtual_keyboard_manager_v1']
-        mgr   = conn.bind(reg_id, n, 'zwp_virtual_keyboard_manager_v1', min(v, 1))
-        kb_id = conn.new_id()
-        conn.send(_msg(mgr, 0, _u32(seat_id), _u32(kb_id)))
-        xkb_lib, km, xkb_state = _init_xkb()
-        _send_keymap(conn, kb_id, km, xkb_lib)
-        print('Virtual keyboard created.', flush=True)
-
-    conn.roundtrip()
-    return conn, ptr_id, kb_id, xkb_lib, xkb_state
-
-def monitor():
-    uid = os.getuid()
-    display = os.environ.get('WAYLAND_DISPLAY', 'wayland-0')
-    sock = f'/run/user/{uid}/{display}'
-    print(f'Waiting for {sock} ...', flush=True)
-    while not os.path.exists(sock):
-        time.sleep(1)
-
-    conn, ptr_id, kb_id, xkb_lib, xkb_state = _setup_wayland(sock)
-    print('Monitoring for Sunshine input devices...', flush=True)
-    while True:
-        with active_lock:
-            dead = [p for p, t in active.items() if not t.is_alive()]
-        for p in dead:
-            print(f'Device gone: {p}', flush=True)
-            with active_lock:
-                del active[p]
-
-        for path, name in find_sunshine_devices().items():
-            with active_lock:
-                already = path in active
-            if already or not os.path.exists(path):
-                continue
-            _start_device(conn, ptr_id, kb_id, path, name, xkb_lib, xkb_state)
-
-        conn.drain()
-        time.sleep(2)
-
-if __name__ == '__main__':
-    monitor()
-SCRIPT
-
-RUN chmod +x /usr/local/bin/sunshine-input-bridge
-
-RUN cat > /usr/lib/systemd/system/sunshine-input-bridge.service <<'UNIT'
+RUN cat > /usr/lib/systemd/system/seatd.service <<'UNIT'
 [Unit]
-Description=Sunshine in-container Wayland input bridge
-After=wayfire-wayland-ready.service
-Requires=wayfire-wayland-ready.service
+Description=seatd seat management daemon (VT-less)
+After=container-bootstrap.service
+Before=wayfire.service
 
 [Service]
 Type=simple
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
-
-ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c '. /run/wayland-display.env && export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && exec /usr/local/bin/sunshine-input-bridge'
+Environment=SEATD_VTBOUND=0
+ExecStart=/usr/bin/seatd -g input
 
 [Install]
 WantedBy=multi-user.target
@@ -1114,6 +691,7 @@ HOME_DIR="/home/$CONTAINER_USER"
 groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
 useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
 mkdir -p "$HOME_DIR/.local/state"
+chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/state"
 
 # Add the desktop user to render/input/video groups inside the container.
 # These groups already exist in the Fedora base image. The hypervisor's
@@ -1126,13 +704,12 @@ for grp in render input video audio; do
     fi
 done
 
-# Ensure Sunshine user config directory exists.
+# Ensure Sunshine user config directory exists with correct ownership.
+# chown .config itself, not just .config/sunshine -- mkdir -p creates the
+# .config parent as root, leaving the desktop user unable to write its own
+# config (wayfire, gtk, Steam, ...) there.
 mkdir -p "$HOME_DIR/.config/sunshine"
-
-# Chown the entire home so anything created as root during bootstrap
-# (including .config and .config/sunshine above) is owned by the desktop
-# user. Cheap because the home is empty on first boot.
-chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.config"
 
 mkdir -p /etc/sudoers.d
 echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
@@ -1201,7 +778,7 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
-    systemctl enable wayfire wayfire-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub pipewire wireplumber pipewire-pulse && \
+    systemctl enable wayfire wayfire-wayland-ready sunshine seatd container-bootstrap systemd-logind polkit-stub pipewire wireplumber pipewire-pulse && \
     chmod +x /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-prestart
 

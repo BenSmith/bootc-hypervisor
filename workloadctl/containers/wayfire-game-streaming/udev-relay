@@ -1,0 +1,148 @@
+#!/usr/bin/python3
+"""Relay host udev input-hotplug events into the rootless workload container.
+
+The wayfire-game-streaming container runs wayfire's libinput backend, which
+learns about input devices from udev netlink hotplug events. Sunshine creates
+its uinput devices (mouse/keyboard/touch/pen/gamepad) only when a Moonlight
+client connects. The host udevd processes those devices and broadcasts the
+events on the udev netlink group -- but libudev inside the container drops
+them: it requires the sender UID to be 0, and the host udevd's UID 0 maps to
+an unprivileged ("nobody") UID inside the container's user namespace.
+
+The container cannot re-broadcast the events itself: with host networking the
+netlink socket lives in the host's network namespace, where a rootless
+container has no CAP_NET_ADMIN. So this runs on the host instead. It listens
+for the host udevd's input events and re-broadcasts them, declaring the sender
+UID (via an SCM_CREDENTIALS ancillary message) as the host UID that the
+container's UID 0 maps to. libudev inside the container then sees UID 0 and
+accepts the event. Host root has CAP_SETUID, so declaring that UID is allowed
+with no actual setuid.
+
+The container's user-namespace map is non-trivial (nested userns, plus
+group-passthrough sub-ids that shift the ranges), so the host UID for the
+container's UID 0 is read straight from the live container's
+/proc/<pid>/uid_map -- read from the host, its middle column is already in
+host (kernel) UID terms.
+
+Only virtual (uinput) input devices are relayed -- those are the ones Sunshine
+creates; real host input devices are left alone. Genuine udevd events arrive
+with UID 0; this relay's own re-broadcasts arrive with the mapped UID, so the
+UID filter also prevents a relay loop.
+
+Installed, started, and stopped by the workload's setup.sh host hook.
+"""
+
+import os
+import pwd
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+UEVENT_GROUP = 2
+NETLINK_KOBJECT_UEVENT = 15
+VIRTUAL_PREFIX = "/devices/virtual/input/"
+UCRED = "=iII"  # struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+
+
+def container_pid(user, container):
+    """Host PID of the workload container's init process, or None if not up."""
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-u", user, "XDG_RUNTIME_DIR=/run/user/%d" % uid,
+             "podman", "inspect", "--format", "{{.State.Pid}}", container],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pid = result.stdout.strip()
+    return int(pid) if pid.isdigit() and int(pid) > 0 else None
+
+
+def host_id_for_zero(pid, mapfile):
+    """Host (kernel) UID/GID that the container's id 0 maps to.
+
+    /proc/<pid>/{uid,gid}_map read from the host renders its middle column in
+    the reader's (host) namespace, so it is the kernel id directly.
+    """
+    with open("/proc/%d/%s" % (pid, mapfile)) as fh:
+        for line in fh:
+            inside, outside, count = (int(x) for x in line.split()[:3])
+            if inside <= 0 < inside + count:
+                return outside + (0 - inside)
+    return None
+
+
+def wait_for_container_ids(user, container):
+    """Block until the container is running; return (host_uid, host_gid)."""
+    while True:
+        pid = container_pid(user, container)
+        if pid:
+            try:
+                uid = host_id_for_zero(pid, "uid_map")
+                gid = host_id_for_zero(pid, "gid_map")
+                if uid is not None and gid is not None:
+                    return uid, gid
+            except OSError:
+                pass
+        time.sleep(2)
+
+
+def properties(msg):
+    """Property dict of a libudev monitor message, or {} if not one."""
+    if not msg.startswith(b"libudev\0") or len(msg) < 24:
+        return {}
+    props_off, props_len = struct.unpack_from("=II", msg, 16)
+    props = {}
+    for item in msg[props_off:props_off + props_len].split(b"\0"):
+        if b"=" in item:
+            key, val = item.split(b"=", 1)
+            props[key.decode(errors="replace")] = val.decode(errors="replace")
+    return props
+
+
+def main():
+    user = sys.argv[1] if len(sys.argv) > 1 else "_wl-wayfire-game-streaming"
+    container = "workload-" + user[len("_wl-"):]
+
+    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW,
+                         NETLINK_KOBJECT_UEVENT)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    sock.bind((0, UEVENT_GROUP))
+
+    print("waiting for container %s to come up..." % container, flush=True)
+    uid, gid = wait_for_container_ids(user, container)
+    print("relaying input hotplug events to %s as uid=%d gid=%d"
+          % (container, uid, gid), flush=True)
+    creds = struct.pack(UCRED, os.getpid(), uid, gid)
+
+    while True:
+        msg, anc, _, _ = sock.recvmsg(65536, socket.CMSG_SPACE(64))
+
+        sender_uid = None
+        for level, typ, cdata in anc:
+            if level == socket.SOL_SOCKET and typ == socket.SCM_CREDENTIALS:
+                sender_uid = struct.unpack_from(UCRED, cdata)[1]
+        # UID 0 == genuine host udevd; anything else is our own re-broadcast.
+        if sender_uid != 0:
+            continue
+
+        props = properties(msg)
+        if props.get("SUBSYSTEM") != "input":
+            continue
+        if VIRTUAL_PREFIX not in props.get("DEVPATH", ""):
+            continue
+
+        sock.sendmsg([msg],
+                     [(socket.SOL_SOCKET, socket.SCM_CREDENTIALS, creds)],
+                     0, (0, UEVENT_GROUP))
+        print("relayed %-6s %s" % (props.get("ACTION", "?"),
+                                   props.get("DEVPATH", "?")), flush=True)
+
+
+if __name__ == "__main__":
+    main()
