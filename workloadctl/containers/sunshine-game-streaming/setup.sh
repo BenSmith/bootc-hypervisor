@@ -13,6 +13,9 @@ MODULE_NAME="sunshine-devices"
 MODULES_LOAD="/etc/modules-load.d/uinput.conf"
 UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
+RELAY_SERVICE="sunshine-udev-relay.service"
+RELAY_UNIT="/etc/systemd/system/${RELAY_SERVICE}"
+WORKLOAD_USER="_wl-sunshine-game-streaming"
 
 WORK_DIR=""
 cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
@@ -52,6 +55,30 @@ enable() {
     semodule_package -o "$WORK_DIR/${MODULE_NAME}.pp" -m "$WORK_DIR/${MODULE_NAME}.mod"
     semodule -i "$WORK_DIR/${MODULE_NAME}.pp"
 
+    # Host-side udev relay. The container's libudev drops the host udevd's
+    # hotplug events (sender UID maps to "nobody" in the container user
+    # namespace), and a rootless host-networked container can't re-broadcast
+    # them itself (no CAP_NET_ADMIN over the host net namespace). This host
+    # service re-broadcasts input events with a corrected sender UID so
+    # labwc's libinput sees Sunshine's devices appear at runtime.
+    echo "  [host] Installing udev input-event relay..."
+    cat > "$RELAY_UNIT" <<UNIT
+[Unit]
+Description=Relay host udev input hotplug events into the sunshine-game-streaming container
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/udev-relay ${WORKLOAD_USER}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now "$RELAY_SERVICE"
+
     echo "  [host] Host setup complete"
     echo ""
     echo "  NOTE: Sunshine requires the following firewall ports:"
@@ -68,6 +95,13 @@ disable() {
     if [ -f "$UDEV_RULE" ]; then
         rm -f "$UDEV_RULE"
         udevadm control --reload-rules
+    fi
+
+    echo "  [host] Removing udev input-event relay..."
+    if [ -e "$RELAY_UNIT" ]; then
+        systemctl disable --now "$RELAY_SERVICE" 2>/dev/null || true
+        rm -f "$RELAY_UNIT"
+        systemctl daemon-reload
     fi
 
     echo "  [host] Removing SELinux policy module..."
