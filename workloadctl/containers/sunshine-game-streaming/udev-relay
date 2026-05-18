@@ -29,6 +29,15 @@ creates; real host input devices are left alone. Genuine udevd events arrive
 with UID 0; this relay's own re-broadcasts arrive with the mapped UID, so the
 UID filter also prevents a relay loop.
 
+The NETLINK_KOBJECT_UEVENT socket, the udev broadcast group 2, and the
+"libudev\0" monitor-message layout are libudev's own wire format. The trick of
+impersonating udevd on that group to fake hotplug into a container comes from
+the fake-udev tool in the Wolf game-streaming project (MIT-licensed,
+https://github.com/games-on-whales/wolf, src/fake-udev/), whose
+docs/modules/dev/pages/fake-udev.adoc writes up the technique. Wolf's fake-udev
+synthesizes events from scratch for its own containers; this relay instead
+re-broadcasts genuine host udevd events into a rootless one.
+
 Installed, started, and stopped by the workload's setup.sh host hook.
 """
 
