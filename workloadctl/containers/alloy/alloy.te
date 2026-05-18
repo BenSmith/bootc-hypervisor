@@ -1,4 +1,4 @@
-module alloy 1.1;
+module alloy 1.2;
 
 # SELinux policy for the alloy telemetry-collector workload container.
 #
@@ -18,6 +18,7 @@ require {
     type container_t;
     type syslogd_var_run_t;
     type var_log_t;
+    type init_t;
     class dir { open read search getattr watch };
     class file { open read getattr map };
 }
@@ -33,3 +34,10 @@ allow container_t syslogd_var_run_t:file { open read getattr map };
 # Persistent journal: /var/log/journal/* is labeled var_log_t.
 allow container_t var_log_t:dir { open read search getattr watch };
 allow container_t var_log_t:file { open read getattr map };
+
+# Filesystem collector: node_exporter opens /host/proc/1/mounts to enumerate
+# host mount points. /proc/1/ is labeled init_t; container_t needs dir:search
+# to traverse into it and file:read to read the mounts file.
+# Confirmed by AVC: denied { search } for comm="alloy" tcontext=init_t tclass=dir
+allow container_t init_t:dir { search getattr open read };
+allow container_t init_t:file { open read getattr };

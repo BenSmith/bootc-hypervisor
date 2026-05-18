@@ -14,6 +14,7 @@ prometheus.exporter.unix "host" {
   set_collectors = [
     "cpu",
     "diskstats",
+    "filesystem",
     "hwmon",
     "loadavg",
     "meminfo",
@@ -25,18 +26,13 @@ prometheus.exporter.unix "host" {
     "uname",
   ]
   // Collectors intentionally not enabled:
-  //   "systemd"    - node_exporter's systemd collector uses /run/systemd/private
-  //                  (root-only socket, not the DBus system bus), and Alloy
-  //                  doesn't expose the upstream --collector.systemd.private=false
-  //                  flag. workload-exporter on :9110 already publishes
-  //                  per-workload restart counts, task counts, CPU/memory
-  //                  usage, and podman health — strictly more than the
-  //                  node_exporter systemd collector would give us anyway.
-  //   "filesystem" - reads /proc/1/mounts to enumerate host filesystems.
-  //                  That requires ptrace access to host PID 1, which a
-  //                  rootless container can't get (capabilities apply only
-  //                  inside the workload user's userns, not the host's).
-  //                  Disk I/O is still covered by "diskstats".
+  //   "systemd" - node_exporter's systemd collector uses /run/systemd/private
+  //               (root-only socket, not the DBus system bus), and Alloy
+  //               doesn't expose the upstream --collector.systemd.private=false
+  //               flag. workload-exporter on :9110 already publishes
+  //               per-workload restart counts, task counts, CPU/memory
+  //               usage, and podman health — strictly more than the
+  //               node_exporter systemd collector would give us anyway.
 
   filesystem {
     // Exclude common virtual/ephemeral filesystems.
@@ -57,10 +53,10 @@ prometheus.scrape "node_exporter" {
 
 prometheus.scrape "workload_exporter" {
   targets = [{
-    // HOST_IP is auto-detected (default-route interface IP) by workload-ensure-user
-    // at each service start. Override by setting HOST_IP in [container.environment]
-    // in alloy.toml if a different interface is needed.
-    __address__ = env("HOST_IP") + ":9110",
+    // host.containers.internal (169.254.1.2) is pasta's gateway address — the
+    // only way to reach host-side sockets (not pasta-forwarded container ports)
+    // from inside the container's network namespace.
+    __address__ = "host.containers.internal:9110",
     job         = "workload-exporter",
   }]
   forward_to      = [otelcol.receiver.prometheus.default.receiver]

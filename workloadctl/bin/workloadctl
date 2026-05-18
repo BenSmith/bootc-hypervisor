@@ -580,6 +580,9 @@ def cmd_list(args, manager: WorkloadManager):
 
         print(f"  {name:<{name_w}} {status:<10} {state:<12} {image_id:<14} {ports_str:<20} {image:<30}")
 
+    print()
+    print(f"  Use 'workloadctl status <name>' for details on a specific workload.")
+
 
 def cmd_status(args, manager: WorkloadManager):
     """Show workload service status"""
@@ -776,6 +779,19 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
         print("  These groups must exist on the system.")
         failed = True
 
+    # Check ip_unprivileged_port_start for host-mode workloads
+    if config.get_network_mode() == "host":
+        try:
+            sysctl_path = Path("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+            unpriv_start = int(sysctl_path.read_text().strip())
+            if unpriv_start > 0:
+                print(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
+                print(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
+                print(f"    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
+                      f"sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
+        except Exception:
+            pass
+
     if not failed:
         print("  ✓ Pre-flight checks passed")
 
@@ -867,6 +883,14 @@ def _transfer_image(config: WorkloadConfig, manager: WorkloadManager):
                   file=sys.stderr)
             sys.exit(1)
         print(f"  Image transferred successfully")
+        if image_id:
+            active = subprocess.run(
+                ["systemctl", "is-active", "--quiet", config.service_name],
+                check=False
+            )
+            if active.returncode == 0:
+                print(f"  Note: container is still running the old image.")
+                print(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
     elif not image_id:
         print()
         print(f"Error: Image '{config.image}' not found locally and pull=never", file=sys.stderr)
@@ -963,6 +987,7 @@ def cmd_enable(args, manager: WorkloadManager):
         print()
         print("Pre-flight checks failed. Fix the issues above, then re-run enable.")
         print(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
+        print(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
         # Revert enabled = true since we haven't actually started anything
         content = config_path.read_text()
         if had_enabled_field:
@@ -981,9 +1006,17 @@ def cmd_enable(args, manager: WorkloadManager):
     _transfer_image(config, manager)
     _activate_service(config)
 
-    print(f"✓ Workload '{args.workload}' enabled and starting")
-    print(f"  Check status: workloadctl status {args.workload}")
-    print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+    already_running = subprocess.run(
+        ["systemctl", "is-active", "--quiet", config.service_name], check=False
+    ).returncode == 0
+
+    if already_running:
+        print(f"✓ Workload '{args.workload}' setup complete (already running)")
+        print(f"  To apply config changes to the live container: sudo workloadctl recreate {args.workload}")
+    else:
+        print(f"✓ Workload '{args.workload}' enabled and starting")
+        print(f"  Check status: workloadctl status {args.workload}")
+        print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
 def cmd_disable(args, manager: WorkloadManager):
@@ -1251,8 +1284,15 @@ def cmd_recreate(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     print(f"Recreating workload: {args.workload}")
+    print("  Regenerating service files...")
+    subprocess.run(
+        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+        check=True,
+    )
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"✓ Workload '{args.workload}' recreated")
+    print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
 def cmd_reboot(args, manager: WorkloadManager):
@@ -1334,6 +1374,8 @@ def cmd_logs(args, manager: WorkloadManager):
         cmd.append("-f")
     if args.lines:
         cmd.extend(["-n", str(args.lines)])
+    elif not args.follow and not args.since and not args.extra_args:
+        cmd.extend(["-n", "50"])
     if args.since:
         cmd.extend(["--since", args.since])
 
@@ -3487,7 +3529,7 @@ def main():
                                 help="Actually remove orphaned users/dirs (default is dry run)")
     cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload")
+    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)")
     disable_parser.add_argument("workload", help="Workload name")
     disable_parser.add_argument("--purge", action="store_true",
                                help="Also remove user, home, and subuid/subgid")
@@ -3521,7 +3563,7 @@ def main():
     logs_parser = subparsers.add_parser("logs", help="View workload logs (journalctl wrapper)")
     logs_parser.add_argument("workload", help="Workload name")
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
-    logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines")
+    logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines (default: 50)")
     logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
     logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
 

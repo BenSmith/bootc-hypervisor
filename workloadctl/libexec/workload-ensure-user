@@ -73,9 +73,14 @@ def setup_selinux_policy():
 def configure_subuid_subgid(pw, config):
     """Configure subordinate UID/GID ranges for rootless containers.
 
-    Sets up the main subuid/subgid range for the user namespace, plus
-    individual entries for extra_groups GIDs so that --gidmap +GID:@GID:1
-    can delegate those host GIDs into the container's user namespace.
+    Sets up the main subuid/subgid range for the user namespace.  For
+    non-host-userns workloads also adds per-GID subgid entries for
+    extra_groups so podman can map them via --gidmap +GID:@GID:1.
+
+    For userns=host the workload user IS the host user, so all host GIDs are
+    natively available — adding a non-contiguous subgid entry for an
+    extra_groups GID creates a spurious mapping that breaks rootless pasta on
+    newer podman/kernel versions.
 
     Uses flock for parallel safety — multiple workload services may
     start concurrently, each running this script via ExecStartPre.
@@ -98,20 +103,22 @@ def configure_subuid_subgid(pw, config):
             f"UID must be in range 10000-52948."
         )
 
-    # Build the set of required entries: main range + extra group GIDs
     main_entry = f"{username}:{subid_start}:{count}"
-    required_entries = {main_entry}
+    # subuid only needs the main range; group GIDs belong in subgid, not subuid
+    required_uid_entries = {main_entry}
+    required_gid_entries = {main_entry}
 
-    extra_groups = config.get("security", {}).get("extra_groups", [])
-    for group_name in extra_groups:
-        try:
-            gid = grp.getgrnam(group_name).gr_gid
-        except KeyError:
-            log(f"  WARNING: Group '{group_name}' not found, skipping subid entry")
-            continue
-        # Delegate the group GID in both subuid and subgid so podman can
-        # map it into the user namespace via --gidmap +GID:@GID:1
-        required_entries.add(f"{username}:{gid}:1")
+    # Extra-group subgid entries are only needed when the container runs in its
+    # own user namespace.  For userns=host the GIDs are natively available.
+    userns = config.get("security", {}).get("userns", "")
+    if userns != "host":
+        for group_name in config.get("security", {}).get("extra_groups", []):
+            try:
+                gid = grp.getgrnam(group_name).gr_gid
+            except KeyError:
+                log(f"  WARNING: Group '{group_name}' not found, skipping subgid entry")
+                continue
+            required_gid_entries.add(f"{username}:{gid}:1")
 
     # Lock around check-then-write to handle parallel ExecStartPre
     SUBID_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +126,8 @@ def configure_subuid_subgid(pw, config):
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
 
         changed = False
-        for path in ["/etc/subuid", "/etc/subgid"]:
+        for path, required_entries in [("/etc/subuid", required_uid_entries),
+                                        ("/etc/subgid", required_gid_entries)]:
             try:
                 with open(path, "r") as f:
                     existing = f.read()
@@ -175,8 +183,17 @@ def setup_volume_directories(pw, config):
     Always chowns matching dirs (even pre-existing ones) so that dirs
     created by root during preflight get fixed up.
     Paths outside the home directory are skipped (admin must create them).
+    Required-files paths are skipped — those must be supplied by the user
+    as files; auto-creating them as directories would break the bind mount.
     """
     home_path = Path(pw.pw_dir)
+
+    required_file_paths = set()
+    for entry in config.get("setup", {}).get("required_files", []):
+        path = entry.get("path", "")
+        if path.startswith("./"):
+            path = str(home_path) + "/" + path[2:]
+        required_file_paths.add(path)
 
     for volume_spec in config.get("storage", {}).get("volumes", []):
         expanded = expand_volume_path(volume_spec, str(home_path))
@@ -185,6 +202,11 @@ def setup_volume_directories(pw, config):
             continue
 
         host_path = Path(host_path_str)
+
+        # Skip required_files — these are user-supplied files, not directories.
+        # Attempting mkdir here would break the bind mount when the file is placed.
+        if str(host_path) in required_file_paths:
+            continue
 
         # Resolve symlinks before checking containment to prevent symlink traversal
         try:

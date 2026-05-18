@@ -11,7 +11,7 @@
 #
 #   3. (Optional) Edit the config before or after enabling:
 #        sudo nano /var/lib/workloads/squid/squid.conf
-#        sudo workloadctl restart squid
+#        sudo workloadctl recreate squid
 #
 #   4. Configure firewall to allow proxy access:
 #        sudo firewall-cmd --add-port=3128/tcp --permanent
