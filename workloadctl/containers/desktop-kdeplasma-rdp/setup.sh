@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULE_NAME="desktop-kdeplasma-rdp"
 
 WORK_DIR=""
-cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; }
+cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 enable() {

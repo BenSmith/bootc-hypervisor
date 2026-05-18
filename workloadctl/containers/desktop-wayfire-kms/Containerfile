@@ -112,9 +112,11 @@ WantedBy=multi-user.target
 UNIT
 
 RUN mkdir -p /etc/systemd/system && \
-    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable wayfire pipewire wireplumber pipewire-pulse
 
 STOPSIGNAL SIGRTMIN+3

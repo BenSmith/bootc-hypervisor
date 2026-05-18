@@ -1381,13 +1381,13 @@ SystemCallFilter=
 DROPIN
 
 RUN mkdir -p /etc/systemd/system && \
-    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
-    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
-    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/polkit.service && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
     ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
     ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
-    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
-    ln -sf /dev/null /etc/systemd/system/polkit.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable labwc labwc-wayland-ready sunshine sunshine-input-bridge container-bootstrap systemd-logind polkit-stub && \
     chmod +x /etc/xdg/labwc/autostart /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-prestart
