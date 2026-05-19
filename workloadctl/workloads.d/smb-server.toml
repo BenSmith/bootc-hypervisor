@@ -63,8 +63,10 @@ required_files = [
 image = "localhost/smb-server:latest"
 pull = "never"
 
+# The smb-server image ships only the `samba` package (server side); smbclient
+# is not available in-container. Probe the listening socket instead.
 [container.health]
-cmd = "smbclient -N -L 127.0.0.1 > /dev/null 2>&1 || exit 1"
+cmd = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'"
 interval = "30s"
 start_period = "10s"
 on_failure = "kill"

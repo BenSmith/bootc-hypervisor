@@ -345,13 +345,27 @@ def generate_setup_service(config, user_name):
 
 
 def resolve_auto_gpu():
-    """Detect the primary GPU vendor from sysfs. Returns 'nvidia', 'amd', 'intel', or 'none'."""
+    """Detect the primary GPU from sysfs.
+
+    Returns 'nvidia', 'nouveau', 'amd', 'intel', or 'none'. For NVIDIA cards
+    the bound driver is checked: the proprietary driver uses the CDI path,
+    but nouveau has no NVIDIA Container Toolkit support and must use the plain
+    DRM render node instead — so it is reported separately.
+    """
     vendor_map = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
     try:
         for vendor_path in sorted(Path("/sys/class/drm").glob("card*/device/vendor")):
             vendor = vendor_path.read_text().strip().lower()
-            if vendor in vendor_map:
-                return vendor_map[vendor]
+            if vendor not in vendor_map:
+                continue
+            result = vendor_map[vendor]
+            if result == "nvidia":
+                try:
+                    if (vendor_path.parent / "driver").resolve().name == "nouveau":
+                        return "nouveau"
+                except OSError:
+                    pass
+            return result
     except OSError:
         pass
     return "none"
@@ -555,7 +569,9 @@ def generate_system_service(config, user_name, uid):
                 "--device=nvidia.com/gpu=all",
                 "--device /dev/dri",
             ])
-    elif gpu_vendor == "intel":
+    elif gpu_vendor in ("intel", "nouveau"):
+        # nouveau (and Intel) expose the GPU through the standard DRM render
+        # node — no CDI / Container Toolkit involved.
         podman_args.append("--device /dev/dri")
 
     # Generic device passthrough
