@@ -1,0 +1,42 @@
+name: workloadctl tests
+
+on:
+  # Auto-triggers (push / pull_request) intentionally omitted until a
+  # native:host runner is connected. Run manually via workflow_dispatch.
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: native
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure build tooling
+        run: |
+          for pkg in just rpm-build python3; do
+            bin=${pkg/rpm-build/rpmbuild}
+            command -v "$bin" >/dev/null || sudo dnf install -y "$pkg"
+          done
+          python3 --version
+          just --version
+
+      - name: Lint (py_compile)
+        working-directory: workloadctl
+        run: just lint
+
+      - name: Unit tests
+        working-directory: workloadctl
+        run: just test
+
+      - name: Build RPM
+        working-directory: workloadctl
+        run: just rpm-build
+
+      - name: Upload RPM artifact
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: workloadctl-rpm
+          path: workloadctl/rpmbuild/RPMS/**/*.rpm
+          if-no-files-found: error

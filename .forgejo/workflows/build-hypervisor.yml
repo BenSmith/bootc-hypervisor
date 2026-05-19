@@ -30,10 +30,13 @@ concurrency:
   group: build-hypervisor-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Plain-HTTP registry shared with the justfile (registry.local:5000).
+  REGISTRY: registry.local:5000
+
 jobs:
   setup:
-    if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04
+    runs-on: native
     outputs:
       versions: ${{ steps.r.outputs.versions }}
       stable: ${{ steps.r.outputs.stable }}
@@ -42,8 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
-          curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+          command -v yq >/dev/null || sudo dnf install -y yq
           if [ -n "${{ inputs.versions_override }}" ]; then
             echo "versions=${{ inputs.versions_override }}"
           else
@@ -56,22 +58,16 @@ jobs:
 
   build-base:
     needs: setup
-    # Skip if upstream minimal build failed; allow all other triggers.
-    # Also skip entirely under Forgejo (handled by .forgejo/workflows/).
-    if: ${{ github.server_url == 'https://github.com' && (github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run') }}
-    runs-on: ubuntu-24.04
+    # Skip if the upstream minimal build failed; allow all other triggers.
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+    runs-on: native
     timeout-minutes: 120
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
         fedora_version: ${{ fromJson(needs.setup.outputs.versions) }}
     outputs:
       tag: ${{ steps.params.outputs.tag }}
-      owner: ${{ steps.params.outputs.owner }}
 
     steps:
       - name: Checkout repository
@@ -79,42 +75,26 @@ jobs:
 
       - name: Resolve build parameters
         id: params
-        env:
-          OWNER_RAW: ${{ github.repository_owner }}
         run: |
-          OWNER=$(echo "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
           TAG=$(date +%Y%m%d-%H%M)
           {
-            echo "owner=${OWNER}"
             echo "tag=${TAG}"
-            echo "image_base=ghcr.io/${OWNER}/hypervisor-bootc"
+            echo "image_base=${REGISTRY}/hypervisor-bootc"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Install podman
         run: |
-          sudo apt-get update
-          sudo apt-get install -y podman
-          podman --version
+          if ! command -v cosign >/dev/null; then
+            sudo curl -fsSL \
+              https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+              -o /usr/local/bin/cosign
+            sudo chmod +x /usr/local/bin/cosign
+          fi
+          cosign version
 
       - name: Render policy.json
-        env:
-          OWNER: ${{ steps.params.outputs.owner }}
         run: |
-          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
               policy-hypervisor.json.template > policy.json
           cat policy.json
 
@@ -124,26 +104,18 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
-      - name: Login to GHCR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
-          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
-
       - name: Build base hypervisor
         env:
           VERSION: ${{ matrix.fedora_version }}
-          OWNER: ${{ steps.params.outputs.owner }}
         run: |
           sudo podman build \
             --pull=always \
+            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --ipc=host \
-            --build-arg BASE_IMAGE=ghcr.io/${OWNER}/fedora-bootc-minimal:${VERSION} \
+            --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
             -f hypervisor.Containerfile \
             -t localhost/hypervisor-bootc:build \
             .
@@ -171,23 +143,38 @@ jobs:
           FLOATING="${VERSION}"
 
           sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --tls-verify=false \
+            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
+          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
-            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
+            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Sign base
+        # Best-effort: sign if a key is configured and cosign succeeds,
+        # but never fail the build over signing.
+        continue-on-error: true
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
           DIGEST: ${{ steps.push_base.outputs.digest }}
         run: |
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET not set — skipping image signing."
+            exit 0
+          fi
+          cosign sign -y \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --allow-http-registry \
+            --allow-insecure-registry \
+            "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         env:
@@ -208,13 +195,8 @@ jobs:
 
   build-variant:
     needs: [setup, build-base]
-    if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04
+    runs-on: native
     timeout-minutes: 120
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
 
     strategy:
       fail-fast: false
@@ -266,34 +248,20 @@ jobs:
 
       - name: Render policy.json
         if: steps.gate.outputs.build == 'true'
-        env:
-          OWNER: ${{ needs.build-base.outputs.owner }}
         run: |
-          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
               policy-hypervisor.json.template > policy.json
 
-      - name: Free disk space
-        if: steps.gate.outputs.build == 'true'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Install podman and cosign
-        if: steps.gate.outputs.build == 'true'
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Install podman
+      - name: Install cosign
         if: steps.gate.outputs.build == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y podman
-          podman --version
+          if ! command -v cosign >/dev/null; then
+            sudo curl -fsSL \
+              https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+              -o /usr/local/bin/cosign
+            sudo chmod +x /usr/local/bin/cosign
+          fi
+          cosign version
 
       - name: Fetch cosy
         if: steps.gate.outputs.build == 'true'
@@ -302,30 +270,21 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
-      - name: Login to GHCR
-        if: steps.gate.outputs.build == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
-          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
-
       - name: Build variant
         if: steps.gate.outputs.build == 'true'
         env:
           IMAGE: ${{ matrix.variant.image }}
           CONTAINERFILE: ${{ matrix.variant.containerfile }}
           VERSION: ${{ matrix.fedora_version }}
-          OWNER: ${{ needs.build-base.outputs.owner }}
         run: |
           sudo podman build \
             --pull=always \
+            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --ipc=host \
-            --build-arg BASE=ghcr.io/${OWNER}/hypervisor-bootc:${VERSION} \
+            --build-arg BASE=${REGISTRY}/hypervisor-bootc:${VERSION} \
             -f "${CONTAINERFILE}" \
             -t "localhost/${IMAGE}:build" \
             .
@@ -347,7 +306,6 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         id: push
         env:
-          OWNER: ${{ needs.build-base.outputs.owner }}
           BASE_TAG: ${{ needs.build-base.outputs.tag }}
           IMAGE: ${{ matrix.variant.image }}
           PREFIX: ${{ matrix.variant.prefix }}
@@ -355,36 +313,51 @@ jobs:
           VERSION: ${{ matrix.fedora_version }}
           STABLE: ${{ needs.setup.outputs.stable }}
         run: |
-          IMAGE_BASE="ghcr.io/${OWNER}/${IMAGE}"
+          IMAGE_BASE="${REGISTRY}/${IMAGE}"
           VERSIONED="${PREFIX}${VERSION}-${BASE_TAG}"
           FLOATING_TAG="${PREFIX}${VERSION}"
 
           sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --tls-verify=false \
+            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
+          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
-            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
+            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
 
           {
             echo "image_base=${IMAGE_BASE}"
             echo "versioned_tag=${VERSIONED}"
             echo "floating_tag=${FLOATING_TAG}"
-            echo "digest=$(cat /tmp/digest.txt)"
+            echo "digest=${DIGEST}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign variant
+        # Best-effort: sign if a key is configured and cosign succeeds,
+        # but never fail the build over signing.
         if: steps.gate.outputs.build == 'true'
+        continue-on-error: true
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
           IMAGE_BASE: ${{ steps.push.outputs.image_base }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET not set — skipping image signing."
+            exit 0
+          fi
+          cosign sign -y \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --allow-http-registry \
+            --allow-insecure-registry \
+            "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         if: steps.gate.outputs.build == 'true'
