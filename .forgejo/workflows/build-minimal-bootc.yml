@@ -9,17 +9,8 @@ on:
         default: ''
         type: string
 
-  schedule:
-    - cron: '0 2 * * 6'
-
-  push:
-    branches: [main]
-    paths:
-      - 'fedora-bootc-minimal.Containerfile'
-      - 'policy-minimal.json.template'
-      - 'cosign.pub'
-      - '.github/workflows/build-minimal-bootc.yml'
-      - 'fedora-versions.yml'
+  # Auto-triggers (push) intentionally omitted until a native:host runner is
+  # connected. Run manually via workflow_dispatch for now.
 
 concurrency:
   group: build-minimal-bootc-${{ github.ref }}
@@ -27,11 +18,12 @@ concurrency:
 
 env:
   IMAGE_NAME: fedora-bootc-minimal
+  # Plain-HTTP registry shared with the justfile (registry.local:5000).
+  REGISTRY: registry.local:5000
 
 jobs:
   setup:
-    if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04
+    runs-on: native
     outputs:
       versions: ${{ steps.r.outputs.versions }}
       stable: ${{ steps.r.outputs.stable }}
@@ -40,8 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
-          curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
-            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+          command -v yq >/dev/null || sudo dnf install -y yq
           if [ -n "${{ inputs.versions_override }}" ]; then
             echo "versions=${{ inputs.versions_override }}"
           else
@@ -54,13 +45,8 @@ jobs:
 
   build:
     needs: setup
-    if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04
+    runs-on: native
     timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -72,36 +58,35 @@ jobs:
 
       - name: Resolve build parameters
         id: params
-        env:
-          OWNER_RAW: ${{ github.repository_owner }}
         run: |
-          OWNER=$(echo "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
           TAG=$(date +%Y%m%d-%H%M)
           {
-            echo "owner=${OWNER}"
             echo "tag=${TAG}"
-            echo "image_base=ghcr.io/${OWNER}/${IMAGE_NAME}"
+            echo "image_base=${REGISTRY}/${IMAGE_NAME}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Install podman
         run: |
-          sudo apt-get update
-          sudo apt-get install -y podman
-          podman --version
+          if ! command -v cosign >/dev/null; then
+            sudo curl -fsSL \
+              https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+              -o /usr/local/bin/cosign
+            sudo chmod +x /usr/local/bin/cosign
+          fi
+          cosign version
 
       - name: Render policy.json
-        env:
-          OWNER: ${{ steps.params.outputs.owner }}
         run: |
-          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+          # The placeholder governs the trusted namespace baked into the image;
+          # registry.local images carry no namespace, so this stays as-is for
+          # any ghcr.io mirror and the registry.local rule is matched literally.
+          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
               policy-minimal.json.template > policy.json
           cat policy.json
 
       - name: Clone Fedora bootc manifests
         run: |
+          rm -rf manifests
           git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
           git -C manifests log -1
           cp policy.json manifests/policy.json
@@ -110,7 +95,6 @@ jobs:
       - name: Build minimal bootc image
         env:
           VERSION: ${{ matrix.fedora_version }}
-          TAG: ${{ steps.params.outputs.tag }}
         run: |
           sudo podman build \
             --security-opt=label=disable \
@@ -135,14 +119,6 @@ jobs:
             localhost/${IMAGE_NAME}:build \
             localhost/${IMAGE_NAME}:rechunked
 
-      - name: Login to GHCR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          echo "$GH_TOKEN" | sudo podman login ghcr.io -u "$ACTOR" --password-stdin
-          echo "$GH_TOKEN" | cosign login ghcr.io -u "$ACTOR" --password-stdin
-
       - name: Tag and push
         id: push
         env:
@@ -160,10 +136,11 @@ jobs:
           for t in "${TAGS[@]}"; do
             sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${t}"
             if [ "${FIRST}" = "true" ]; then
-              sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
+              sudo podman push --tls-verify=false \
+                --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
               FIRST=false
             else
-              sudo podman push "${IMAGE_BASE}:${t}"
+              sudo podman push --tls-verify=false "${IMAGE_BASE}:${t}"
             fi
           done
 
@@ -174,12 +151,24 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign images
+        # Best-effort: sign if a key is configured and cosign succeeds,
+        # but never fail the build over signing.
+        continue-on-error: true
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET not set — skipping image signing."
+            exit 0
+          fi
+          cosign sign -y \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --allow-http-registry \
+            --allow-insecure-registry \
+            "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         env:
