@@ -5,6 +5,8 @@ Runs the generator with temp directories and validates the output files.
 No root required — all paths are overridden via env vars and argv.
 """
 
+import importlib.machinery
+import importlib.util
 import os
 import subprocess
 import sys
@@ -12,9 +14,21 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+
+
+def _load_generator_module():
+    """Import workload-generate as a module (it has a __main__ guard)."""
+    if LIB_DIR not in sys.path:
+        sys.path.insert(0, LIB_DIR)
+    loader = importlib.machinery.SourceFileLoader("workload_generate", GENERATOR)
+    spec = importlib.util.spec_from_loader("workload_generate", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
@@ -696,6 +710,75 @@ class TestGeneratorAlwaysExitsZero(unittest.TestCase):
             (Path(config_dir) / "bad.toml").write_text("this is not valid toml {{{")
             result = run_generator(config_dir, services_dir, sysusers_dir)
             self.assertEqual(result.returncode, 0)
+
+
+class TestResolveAutoGpu(unittest.TestCase):
+    """Unit tests for resolve_auto_gpu() — vendor + NVIDIA driver detection."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wg = _load_generator_module()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.drm = Path(self.root) / "sys" / "class" / "drm"
+        self.drm.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.root)
+
+    def _add_card(self, name, vendor_id, driver=None):
+        """Create a fake /sys/class/drm/<name> with a vendor file and
+        optionally a 'driver' symlink whose basename is the driver name."""
+        device = self.drm / name / "device"
+        device.mkdir(parents=True)
+        (device / "vendor").write_text(vendor_id + "\n")
+        if driver is not None:
+            target = Path(self.root) / "_drivers" / driver
+            target.mkdir(parents=True, exist_ok=True)
+            (device / "driver").symlink_to(target)
+
+    def _resolve(self):
+        """Run resolve_auto_gpu() with /sys/class/drm redirected to the fake tree."""
+        real_path = self.wg.Path
+        drm = self.drm
+
+        def fake_path(arg):
+            if str(arg) == "/sys/class/drm":
+                return real_path(drm)
+            return real_path(arg)
+
+        with mock.patch.object(self.wg, "Path", side_effect=fake_path):
+            return self.wg.resolve_auto_gpu()
+
+    def test_amd(self):
+        self._add_card("card0", "0x1002")
+        self.assertEqual(self._resolve(), "amd")
+
+    def test_intel(self):
+        self._add_card("card0", "0x8086")
+        self.assertEqual(self._resolve(), "intel")
+
+    def test_nvidia_proprietary(self):
+        self._add_card("card0", "0x10de", driver="nvidia")
+        self.assertEqual(self._resolve(), "nvidia")
+
+    def test_nvidia_nouveau(self):
+        self._add_card("card0", "0x10de", driver="nouveau")
+        self.assertEqual(self._resolve(), "nouveau")
+
+    def test_nvidia_no_driver_symlink_falls_back_to_nvidia(self):
+        # No driver bound (e.g. modeset/driver not yet attached) → vendor only.
+        self._add_card("card0", "0x10de")
+        self.assertEqual(self._resolve(), "nvidia")
+
+    def test_no_gpu(self):
+        self.assertEqual(self._resolve(), "none")
+
+    def test_unknown_vendor_skipped(self):
+        self._add_card("card0", "0xbeef")
+        self.assertEqual(self._resolve(), "none")
 
 
 if __name__ == "__main__":

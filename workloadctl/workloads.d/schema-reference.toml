@@ -257,13 +257,20 @@ devices = ["/dev/ttyUSB0", "/dev/video0"]
 
 # Optional: GPU type for hardware acceleration
 # Type: string
-# Options: "amd", "nvidia", "none"
+# Options: "amd", "nvidia", "intel", "auto", "none"
 # Default: "none"
 # "amd"    - Expands to: --device /dev/kfd --device /dev/dri
 #            Requires: extra_groups = ["video", "render"]
 # "nvidia" - Expands to: --device=nvidia.com/gpu=all --device /dev/dri
 #            Requires: extra_groups = ["video"]
+# "intel"  - Expands to: --device /dev/dri
+# "auto"   - Detect the GPU vendor (and, for NVIDIA, the bound driver) from
+#            sysfs and use one of the above. Proprietary NVIDIA -> "nvidia"
+#            (CDI path); nouveau -> the /dev/dri path. Both work, but nouveau
+#            hardware encode is weak — for real transcoding on NVIDIA prefer
+#            the proprietary driver with an explicit gpu = "nvidia".
 # "none"   - No GPU access
+#
 # Advanced: For specific NVIDIA GPU selection, use generic devices instead:
 #           devices = ["nvidia.com/gpu=0", "/dev/dri"]
 gpu = "amd"
