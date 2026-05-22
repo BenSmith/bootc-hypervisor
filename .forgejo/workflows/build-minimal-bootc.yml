@@ -30,6 +30,20 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
+      - name: Reclaim runner disk space
+        # zot (registry.local) is the source of truth for built images;
+        # local podman storage is just cache and accumulates across runs.
+        # Preserve the floating :<N> and :latest tags of fedora-bootc-minimal
+        # so build-hypervisor doesn't have to re-pull from zot; prune the rest.
+        run: |
+          df -h /
+          KEEP_RE='^registry\.local/fedora-bootc-minimal:([0-9]+|latest)$'
+          sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+            | grep -Ev "$KEEP_RE" \
+            | grep -v '^<none>:<none>$' \
+            | xargs -rn1 sudo podman untag 2>/dev/null || true
+          sudo podman system prune -af --volumes || true
+          df -h /
       - uses: actions/checkout@v4
       - id: r
         run: |

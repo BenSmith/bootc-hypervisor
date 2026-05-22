@@ -10,6 +10,24 @@ jobs:
     runs-on: native
     timeout-minutes: 20
     steps:
+      - name: Reclaim runner disk space
+        # This workflow doesn't use podman, but it shares the runner VM with
+        # the bootc build workflows. Pruning at the start keeps the disk tidy
+        # for whichever workflow runs next. Preserves the floating :<N> and
+        # :latest tags of fedora-bootc-minimal so the bootc builds don't have
+        # to re-pull from zot.
+        run: |
+          df -h /
+          if command -v podman >/dev/null; then
+            KEEP_RE='^registry\.local/fedora-bootc-minimal:([0-9]+|latest)$'
+            sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+              | grep -Ev "$KEEP_RE" \
+              | grep -v '^<none>:<none>$' \
+              | xargs -rn1 sudo podman untag 2>/dev/null || true
+            sudo podman system prune -af --volumes || true
+          fi
+          df -h /
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
