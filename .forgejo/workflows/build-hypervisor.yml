@@ -31,8 +31,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Plain-HTTP registry shared with the justfile (registry.local:5000).
-  REGISTRY: registry.local:5000
+  # HTTPS registry fronted by Caddy on zamd (zot backend on :5050).
+  # Caddy's internal CA is trusted on the runner VM via cloud-init.
+  REGISTRY: registry.local
 
 jobs:
   setup:
@@ -110,7 +111,6 @@ jobs:
         run: |
           sudo podman build \
             --pull=always \
-            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -143,14 +143,13 @@ jobs:
           FLOATING="${VERSION}"
 
           sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --tls-verify=false \
-            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+          sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
-            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            sudo skopeo copy \
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
@@ -172,8 +171,6 @@ jobs:
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
-            --allow-http-registry \
-            --allow-insecure-registry \
             "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
@@ -279,7 +276,6 @@ jobs:
         run: |
           sudo podman build \
             --pull=always \
-            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -318,16 +314,15 @@ jobs:
           FLOATING_TAG="${PREFIX}${VERSION}"
 
           sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --tls-verify=false \
-            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+          sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
-            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            sudo skopeo copy \
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
 
@@ -355,8 +350,6 @@ jobs:
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
-            --allow-http-registry \
-            --allow-insecure-registry \
             "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
