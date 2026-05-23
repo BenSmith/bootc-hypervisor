@@ -24,8 +24,10 @@ GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workloa
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 WORKLOADS_DIR = Path(os.path.dirname(__file__), '..', 'workloads.d')
 
-# schema-reference.toml is documentation, not a real workload
-SKIP_FILES = {"schema-reference.toml"}
+# Multi-container workloads use [[containers]] arrays; the assertions in this
+# file assume the single-container top-level [container] shape. Multi-container
+# generation is covered by test_generator.py instead.
+SKIP_FILES = {"example-multi-container.toml", "webproxy-demo.toml"}
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):

@@ -46,6 +46,26 @@ workload-{name}.service → individual containers start via podman run
 - `none`: No networking
 - Custom named networks for container-to-container communication
 
+### Multi-Container Workloads
+
+A workload may run more than one container under the same `_wl-<name>` user, sharing home directory and lifecycle. `workload.mode` selects the topology:
+
+- `single` (default for `[container]`): one container, one service file at `workload-<name>.service`.
+- `pod` (default for `[[containers]]`): all containers share one network namespace via `podman pod create`; sibling containers talk on `localhost`; ports are published once at the workload level.
+- `bridge`: each container has its own netns on an auto-created `workload-<name>-net` bridge network; containers resolve each other by container short-name via the bridge's built-in DNS; ports are published per container.
+
+Generated unit layout for multi-container workloads:
+
+```
+workload-<name>.service              # oneshot umbrella, pulls in everything
+workload-<name>-setup.service        # sysusers + workload-ensure-user
+workload-<name>-pod.service          # pod mode only — podman pod create
+workload-<name>-net.service          # bridge mode only — podman network create
+workload-<name>-<container>.service  # one per [[containers]] entry
+```
+
+Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workload>/<container>` for container-targeted commands (`exec`, `shell`, `logs`, `health`); lifecycle and most introspection commands take a bare `<workload>`. The generator normalizes single- and multi-container shapes through `normalize_containers()` so single-container TOMLs produce byte-identical units to before. See `docs/workloads.md` and `docs/schema-reference.toml` for the full schema; `workloads.d/webproxy-demo.toml` is the smallest working bridge-mode example.
+
 ### Secrets
 
 Uses systemd credentials (`systemd-creds`) for secret management:

@@ -2,12 +2,22 @@
 """
 Write secret environment variables to a file for podman --env-file.
 
-Runs as ExecStartPre=+ (root) after workload-ensure-user.  Reads
-${SECRET:name} references from the workload TOML config, resolves them
-from $CREDENTIALS_DIRECTORY, and writes KEY=value lines to a file
-readable only by the workload user.
+Runs as ExecStartPre=+ (root) on a per-container service after
+workload-ensure-user. Reads ${SECRET:name} references from the workload
+TOML config, resolves them from $CREDENTIALS_DIRECTORY, and writes
+KEY=value lines to a file readable only by the workload user.
 
-Usage: workload-write-env <workload-name>
+Usage:
+    workload-write-env <workload-name>              # single-container workload
+    workload-write-env <workload-name> <container>  # one container in a [[containers]] workload
+
+Output file:
+    /run/workload-env/workload-<workload>.secrets               (single)
+    /run/workload-env/workload-<workload>-<container>.secrets   (multi)
+
+Each per-container service has its own CREDENTIALS_DIRECTORY (LoadCredentialEncrypted
+attaches to the unit that lists it), so per-container workloads write to a
+per-container file to avoid concurrent services clobbering each other's secrets.
 """
 
 import os
@@ -16,10 +26,23 @@ import sys
 import tomllib
 from pathlib import Path
 
-sys.path.insert(0, '/usr/libexec/workloadctl')
+# --- workloadctl lib bootstrap ---------------------------------------------
+# Keep this block byte-identical across bin/workloadctl, generators/workload-
+# generate, and libexec/workload-{ensure-user,write-env,exporter}. Locates
+# workload_lib.py (and its sibling podman.py) in: this script's own dir
+# (installed libexec scripts), <repo>/lib (dev checkout), or
+# /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match wins;
+# insert(0) keeps it ahead of any PyPI package of the same name. True
+# centralization needs a packaging change (sitelib install or .pth file).
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+# --- end bootstrap ---------------------------------------------------------
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, workload_username, resolve_secret_env_vars,
-    auto_detect_credentials, SECRET_PATTERN, validate_env_key,
+    SECRET_PATTERN, validate_env_key, normalize_containers,
 )
 
 
@@ -27,18 +50,44 @@ ENV_DIR = Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <workload-name>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print(f"Usage: {sys.argv[0]} <workload-name> [container-name]", file=sys.stderr)
         return 1
 
     name = sys.argv[1]
+    container = sys.argv[2] if len(sys.argv) == 3 else None
 
     config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
 
-    # Check if any env vars reference secrets
-    env_vars = config.get("container", {}).get("environment", {})
+    # Pick the right container's env vars. normalize_containers gives us the
+    # same shape for both single and multi (env lives under entry["container"]
+    # ["environment"]), so the rest of the logic is uniform.
+    containers = normalize_containers(config)
+    if container is None:
+        # Single-container workload: expect exactly one entry.
+        if len(containers) != 1:
+            print(
+                f"ERROR: workload '{name}' has multiple containers; "
+                f"call with <workload-name> <container-name>",
+                file=sys.stderr,
+            )
+            return 1
+        entry = containers[0]
+        out_basename = f"workload-{name}.secrets"
+    else:
+        match = [c for c in containers if c.get("name") == container]
+        if not match:
+            print(
+                f"ERROR: container '{container}' not in workload '{name}'",
+                file=sys.stderr,
+            )
+            return 1
+        entry = match[0]
+        out_basename = f"workload-{name}-{container}.secrets"
+
+    env_vars = entry.get("container", {}).get("environment", {})
     has_secret_env_vars = any(
         SECRET_PATTERN.search(str(v)) for v in env_vars.values()
     )
@@ -50,24 +99,24 @@ def main():
         print(f"ERROR: CREDENTIALS_DIRECTORY not set", file=sys.stderr)
         return 1
 
-    # Resolve secret references to actual values
+    # resolve_secret_env_vars expects config["container"]["environment"];
+    # entry["container"] already has that shape after normalization.
     try:
-        resolved = resolve_secret_env_vars(config, creds_dir)
+        resolved = resolve_secret_env_vars({"container": entry["container"]}, creds_dir)
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    # Write the env file
     ENV_DIR.mkdir(parents=True, exist_ok=True)
-    env_file = ENV_DIR / f"workload-{name}.secrets"
+    env_file = ENV_DIR / out_basename
 
     lines = []
     for key, value in resolved.items():
         if not validate_env_key(key):
             print(f"ERROR: Invalid env var key: {key!r}", file=sys.stderr)
             return 1
-        # Env-file format: KEY=VALUE (one per line, no quoting needed)
-        # Newlines in values would inject extra env vars — reject them
+        # Env-file format: KEY=VALUE (one per line, no quoting needed).
+        # Newlines in values would inject extra env vars — reject them.
         if '\n' in value:
             print(f"ERROR: Secret value for {key} contains newlines; "
                   f"use secrets.files[] instead of env var injection",

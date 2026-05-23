@@ -28,6 +28,11 @@ MAX_NAME_LENGTH = 27
 # Workload name pattern: lowercase letter, then lowercase letters/digits/hyphens
 NAME_PATTERN = re.compile(r'^[a-z][a-z0-9-]*$')
 
+# Container name pattern (same shape as workload name)
+CONTAINER_NAME_PATTERN = re.compile(r'^[a-z][a-z0-9-]*$')
+MAX_CONTAINER_NAME_LENGTH = 27
+VALID_WORKLOAD_MODES = ("single", "pod", "bridge")
+
 # Directives written by the generator — custom_directives should not override these
 GENERATOR_OWNED_DIRECTIVES = frozenset({
     "Type", "NotifyAccess", "User", "Group", "Environment", "EnvironmentFile",
@@ -60,7 +65,123 @@ def workload_home_dir(name: str) -> Path:
     return WORKLOADS_BASE / name
 
 
+# Per-container keys that may appear at *either* nesting depth in a
+# [[containers]] entry:
+#   [containers.container.environment] / [containers.container.health]   (nested)
+#   [containers.environment]           / [containers.health]              (sibling)
+# Single-mode TOMLs always nest these under [container], so we normalize the
+# multi-container form to match. The generator reads from container["container"]
+# only, so callers do not need to care which form the TOML used.
+_LIFTED_CONTAINER_KEYS = ("environment", "health")
+
+
+def normalize_containers(config: dict) -> list[dict]:
+    """Return a list of per-container config dicts in a single canonical shape.
+
+    Single-container TOMLs (top-level [container] block plus top-level
+    [security], [storage], [devices], [secrets], [resources]) become a
+    one-element list with all per-container fields gathered into it.
+
+    Multi-container TOMLs ([[containers]] arrays) keep their per-entry
+    structure, but sibling [containers.environment] / [containers.health]
+    are lifted into entry["container"]["environment"] / ["health"] so the
+    generator and helpers see the same shape regardless of which TOML form
+    the user wrote.
+    """
+    if "containers" in config:
+        result = []
+        for entry in config["containers"]:
+            normalized = dict(entry)
+            container = dict(normalized.get("container", {}))
+            for key in _LIFTED_CONTAINER_KEYS:
+                if key in normalized:
+                    container[key] = normalized.pop(key)
+            normalized["container"] = container
+            result.append(normalized)
+        return result
+
+    container = {
+        "name": config["workload"]["name"],
+        "container": dict(config.get("container", {})),
+        "security": dict(config.get("security", {})),
+        "storage":  {"volumes": list(config.get("storage", {}).get("volumes", []))},
+        "devices":  dict(config.get("devices", {})),
+        "secrets":  dict(config.get("secrets", {})),
+        "resources": dict(config.get("resources", {})),
+    }
+    return [container]
+
+
 # --- Validation ---
+
+def validate_container_name(name: str):
+    """Validate a per-container name. Raises ValueError on invalid names."""
+    if len(name) > MAX_CONTAINER_NAME_LENGTH:
+        raise ValueError(
+            f"Container name too long: {len(name)} (max {MAX_CONTAINER_NAME_LENGTH})"
+        )
+    if not CONTAINER_NAME_PATTERN.match(name):
+        raise ValueError(f"Invalid container name: {name!r}")
+
+
+def infer_workload_mode(config: dict) -> str:
+    """Return 'single', 'pod', or 'bridge'. Validates the value if explicit."""
+    mode = config.get("workload", {}).get("mode")
+    if mode is not None:
+        if mode not in VALID_WORKLOAD_MODES:
+            raise ValueError(
+                f"Invalid workload.mode {mode!r}; must be one of {VALID_WORKLOAD_MODES}"
+            )
+        return mode
+    return "pod" if "containers" in config else "single"
+
+
+def validate_workload_config(config: dict) -> list[str]:
+    """Run schema-level checks. Returns a list of error strings (empty = OK)."""
+    errors = []
+    has_container = "container" in config
+    has_containers = "containers" in config
+
+    if has_container and has_containers:
+        errors.append("config has both [container] and [[containers]]; use one or the other")
+
+    if has_containers:
+        ctrs = config["containers"]
+        if not isinstance(ctrs, list) or not ctrs:
+            errors.append("[[containers]] must be a non-empty array")
+        else:
+            seen = set()
+            for i, c in enumerate(ctrs):
+                if "name" not in c:
+                    errors.append(f"containers[{i}] missing required 'name' field")
+                    continue
+                try:
+                    validate_container_name(c["name"])
+                except ValueError as e:
+                    errors.append(f"containers[{i}]: {e}")
+                if c["name"] in seen:
+                    errors.append(f"duplicate container name: {c['name']!r}")
+                seen.add(c["name"])
+                if "container" not in c or "image" not in c.get("container", {}):
+                    errors.append(f"containers[{c['name']}].container.image is required")
+                # environment/health may live at either nesting depth, but not
+                # both — normalize_containers lifts the sibling form, and
+                # ambiguity would make precedence implementation-defined.
+                for key in _LIFTED_CONTAINER_KEYS:
+                    if key in c and key in c.get("container", {}):
+                        errors.append(
+                            f"containers[{c['name']}]: '{key}' set both as "
+                            f"[containers.{key}] and [containers.container.{key}]; "
+                            f"use one form"
+                        )
+
+    try:
+        infer_workload_mode(config)
+    except ValueError as e:
+        errors.append(str(e))
+
+    return errors
+
 
 def validate_workload_name(name: str):
     """Validate a workload name. Raises ValueError on invalid names."""
@@ -119,16 +240,34 @@ def auto_detect_credentials(config: dict) -> set[str]:
     """Auto-detect which credentials are needed by scanning a TOML config.
 
     Scans:
-    - Environment variables for ${SECRET:name} references
-    - secrets.files for credential field references
+    - Top-level [container.environment] (single-container TOMLs and the
+      per-container slices the generator passes in).
+    - [[containers]] entries, both sibling [containers.environment] and
+      nested [containers.container.environment], plus per-container
+      [containers.secrets].files.
+    - Top-level [secrets].files.
 
     Returns a set of credential names.
     """
     needed = set()
 
-    for value in config.get("container", {}).get("environment", {}).values():
-        for match in SECRET_PATTERN.finditer(str(value)):
-            needed.add(match.group(1))
+    def _scan_env(env: dict):
+        for value in env.values():
+            for match in SECRET_PATTERN.finditer(str(value)):
+                needed.add(match.group(1))
+
+    _scan_env(config.get("container", {}).get("environment", {}))
+
+    for entry in config.get("containers", []):
+        # Multi-container TOMLs may write env at either nesting depth;
+        # normalize_containers lifts the sibling form, but this helper is
+        # called on the raw config too (CLI commands, backup bundling), so
+        # check both.
+        _scan_env(entry.get("environment", {}))
+        _scan_env(entry.get("container", {}).get("environment", {}))
+        for file_spec in entry.get("secrets", {}).get("files", []):
+            if "credential" in file_spec:
+                needed.add(file_spec["credential"])
 
     for file_spec in config.get("secrets", {}).get("files", []):
         if "credential" in file_spec:

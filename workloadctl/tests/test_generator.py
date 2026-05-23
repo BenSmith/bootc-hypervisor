@@ -143,6 +143,243 @@ class TestGeneratorBasic(unittest.TestCase):
         self.assertEqual(os.readlink(wants), "../workload-svc.service")
 
 
+class TestGeneratorMultiContainer(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def run_gen(self):
+        return run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+
+    def test_bridge_mode_generates_net_and_per_container_units(self):
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.network]
+            ports = ["3000:3000"]
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        net = (Path(self.services_dir) / "workload-app-net.service").read_text()
+        self.assertIn("podman network create workload-app-net", net)
+        self.assertIn("PartOf=workload-app.service", net)
+
+        web = (Path(self.services_dir) / "workload-app-web.service").read_text()
+        self.assertIn("--network=", web)
+        self.assertIn("workload-app-net", web)
+        self.assertIn("--network-alias=\"web\"", web)
+        self.assertIn("--publish 3000:3000", web)
+        self.assertIn("BindsTo=workload-app-net.service", web)
+        self.assertIn("PartOf=workload-app.service", web)
+        self.assertNotIn("--pod=", web)
+
+        db = (Path(self.services_dir) / "workload-app-db.service").read_text()
+        self.assertIn("workload-app-net", db)
+        self.assertNotIn("--publish", db)
+
+        umbrella = (Path(self.services_dir) / "workload-app.service").read_text()
+        self.assertIn("workload-app-net.service", umbrella)
+        self.assertNotIn("workload-app-pod.service", umbrella)
+
+    def test_per_container_environment_sibling_form(self):
+        """[containers.environment] (sibling of [containers.container]) must
+        reach the per-container service as --env flags. This is the form the
+        shipped example TOMLs use."""
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.environment]
+            APP_ENV = "production"
+            APP_PORT = "8080"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        web = (Path(self.services_dir) / "workload-app-web.service").read_text()
+        self.assertIn("--env APP_ENV=production", web)
+        self.assertIn("--env APP_PORT=8080", web)
+
+    def test_per_container_environment_nested_form(self):
+        """[containers.container.environment] (nested under [containers.container])
+        is also accepted — it's the form the schema field-allocation block
+        documents."""
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.container.environment]
+            APP_ENV = "production"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        web = (Path(self.services_dir) / "workload-app-web.service").read_text()
+        self.assertIn("--env APP_ENV=production", web)
+
+    def test_per_container_environment_both_forms_rejected(self):
+        """Setting env at both [containers.environment] AND
+        [containers.container.environment] is ambiguous — generator should
+        skip the workload and log an error rather than pick a winner."""
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.environment]
+            FOO = "sibling"
+            [containers.container.environment]
+            FOO = "nested"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # Generator skips on validation error → no service file written
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-app-web.service").exists()
+        )
+        self.assertIn("environment", r.stdout + r.stderr)
+
+    def test_per_container_health_sibling_form(self):
+        """[containers.health] should render as --health-* flags on the
+        per-container service."""
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.health]
+            cmd = "curl -f http://localhost/ || exit 1"
+            interval = "10s"
+            start_period = "5s"
+            on_failure = "kill"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        web = (Path(self.services_dir) / "workload-app-web.service").read_text()
+        self.assertIn('--health-cmd "curl -f http://localhost/ || exit 1"', web)
+        self.assertIn("--health-interval=10s", web)
+        self.assertIn("--health-start-period=5s", web)
+        self.assertIn("--health-on-failure=kill", web)
+
+    def test_per_container_secret_env_var(self):
+        """${SECRET:name} inside a [containers.environment] block must trigger
+        LoadCredentialEncrypted, --env-file, and the workload-write-env
+        ExecStartPre with the per-container name. This regresses the original
+        Forgejo-example bug where secret env vars were silently dropped."""
+        write_config(self.config_dir, "stack", """\
+            [workload]
+            name = "stack"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+            [containers.environment]
+            POSTGRES_PASSWORD = "${SECRET:db-pw}"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        db = (Path(self.services_dir) / "workload-stack-db.service").read_text()
+        # Credential gets loaded onto this per-container unit
+        self.assertIn("LoadCredentialEncrypted=db-pw:", db)
+        # --env-file points at the per-container file, not the shared one
+        self.assertIn("--env-file", db)
+        self.assertIn("/run/workload-env/workload-stack-db.secrets", db)
+        self.assertNotIn("/run/workload-env/workload-stack.secrets", db)
+        # write-env invoked with the local container name
+        self.assertIn(
+            "ExecStartPre=+/usr/libexec/workloadctl/workload-write-env stack db",
+            db,
+        )
+        # Plain env var path is unchanged
+        self.assertNotIn("--env POSTGRES_PASSWORD=", db)
+
+    def test_pod_mode_generates_pod_and_per_container_units(self):
+        write_config(self.config_dir, "stack", """\
+            [workload]
+            name = "stack"
+            enabled = true
+
+            [network]
+            mode = "pasta"
+            ports = ["8080:80"]
+
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "img-a"
+
+            [[containers]]
+            name = "b"
+            [containers.container]
+            image = "img-b"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        pod = (Path(self.services_dir) / "workload-stack-pod.service").read_text()
+        self.assertIn("podman pod create --name=workload-stack", pod)
+        self.assertIn("--network=pasta", pod)
+        self.assertIn("--publish 8080:80", pod)
+        self.assertIn("PartOf=workload-stack.service", pod)
+
+        a = (Path(self.services_dir) / "workload-stack-a.service").read_text()
+        self.assertIn("--pod=", a)
+        self.assertIn("workload-stack", a)
+        self.assertIn("--name ", a)
+        self.assertIn("workload-stack-a", a)
+        self.assertNotIn("--publish", a)
+        self.assertIn("BindsTo=workload-stack-pod.service", a)
+        self.assertIn("PartOf=workload-stack.service", a)
+
+        umbrella = (Path(self.services_dir) / "workload-stack.service").read_text()
+        self.assertIn("Type=oneshot", umbrella)
+        # Requires= (not Wants=) so sub-service failures propagate to the umbrella —
+        # `systemctl is-active workload-<n>.service` then reflects container failures.
+        self.assertIn("Requires=workload-stack-a.service workload-stack-b.service", umbrella)
+
+
 class TestGeneratorPlainEnvVars(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
@@ -265,9 +502,46 @@ class TestGeneratorSecrets(unittest.TestCase):
         self.assertIn("--volume", service)
         self.assertIn("tls-cert", service)
         self.assertIn("/etc/ssl/cert.pem", service)
+        # Single-container: source path uses the workload-level service name.
+        self.assertIn("/run/credentials/workload-filemount.service/tls-cert", service)
         # No env-file needed (no secret env vars)
         self.assertNotIn("--env-file", service)
         self.assertNotIn("workload-write-env", service)
+
+    def test_secret_file_volume_mount_multi_container(self):
+        # Regression: in multi-container mode the credential is loaded onto the
+        # per-container service, so the bind-mount source must reference that
+        # unit's /run/credentials/ dir — not the umbrella's.
+        write_config(self.config_dir, "multi-creds", """\
+            [workload]
+            name = "multi-creds"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+            [containers.secrets]
+            files = [
+                { credential = "tls-cert", path = "/etc/ssl/cert.pem", mode = "ro" }
+            ]
+
+            [[containers]]
+            name = "sidecar"
+            [containers.container]
+            image = "mysidecar"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        app_service = (Path(self.services_dir) / "workload-multi-creds-app.service").read_text()
+
+        self.assertIn("LoadCredentialEncrypted=tls-cert:", app_service)
+        self.assertIn(
+            "/run/credentials/workload-multi-creds-app.service/tls-cert",
+            app_service,
+        )
+        self.assertNotIn("/run/credentials/workload-multi-creds.service/", app_service)
 
 
 class TestGeneratorVolumeExpansion(unittest.TestCase):

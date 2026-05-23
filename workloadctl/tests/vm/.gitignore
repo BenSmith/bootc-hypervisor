@@ -1,0 +1,2 @@
+# Runtime artifacts: cached base image, per-boot overlay, seed, ssh key, logs.
+run/
