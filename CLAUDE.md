@@ -85,4 +85,4 @@ systemd credentials (`systemd-creds`), AES256-GCM with TPM2 (or host key fallbac
 
 ## CI
 
-GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/workflows/`) build images on a weekly cadence (minimal Sat, variants Sun). `.forgejo/runner-vm/` holds the VM-based CI runner. Note (from project memory): Forgejo itself runs in a container, so container-in-container CI builds don't work there.
+GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/workflows/`) build images on a weekly cadence (minimal Sat, variants Sun). Note (from project memory): Forgejo itself runs in a container, so container-in-container CI builds don't work there.
