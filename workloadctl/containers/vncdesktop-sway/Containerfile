@@ -22,7 +22,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     foot \
     fuzzel \
     geany \
-    git-core \
+    git \
+    google-noto-color-emoji-fonts \
     google-noto-sans-fonts \
     grim \
     hostname \
