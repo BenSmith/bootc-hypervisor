@@ -58,11 +58,25 @@ try:
     import re
     from pathlib import Path
 
-    sys.path.insert(0, '/usr/libexec/workloadctl')
+    # --- workloadctl lib bootstrap -----------------------------------------
+    # Keep this block byte-identical across bin/workloadctl, generators/
+    # workload-generate, and libexec/workload-{ensure-user,write-env,exporter}.
+    # Locates workload_lib.py (and its sibling podman.py) in: this script's
+    # own dir (installed libexec scripts), <repo>/lib (dev checkout), or
+    # /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match
+    # wins; insert(0) keeps it ahead of any PyPI package of the same name.
+    # True centralization needs a packaging change (sitelib install or .pth).
+    _here = Path(__file__).resolve().parent
+    for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+        if (_libdir / "workload_lib.py").is_file():
+            sys.path.insert(0, str(_libdir))
+            break
+    # --- end bootstrap -----------------------------------------------------
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
         workload_username, workload_home_dir, expand_volume_path, dq,
+        normalize_containers, validate_workload_config, infer_workload_mode,
     )
     _early_log("Python imports complete")
 except Exception as e:
@@ -214,13 +228,83 @@ def _valid_userns(mode):
     return len(seen) > 0
 
 
-def build_plain_env_args(config):
+def build_userns_args(security, uid, extra_groups, name):
+    """Return podman --userns / --uidmap / --gidmap args for a security dict.
+
+    Used for single- and bridge-mode container services (per-container
+    [security]) and for the `podman pod create` command in pod mode, where
+    the user namespace is owned by the pod's infra container and is therefore
+    workload-level (read from the top-level [security] block).
+    """
+    args = []
+    userns_mode = security.get("userns", "keep-id")
+    if not _valid_userns(userns_mode):
+        log_msg(f"WARNING: Invalid userns mode '{userns_mode}' for {name}. "
+                f"Defaulting to 'keep-id'.",
+                level="warning")
+        userns_mode = "keep-id"
+
+    if userns_mode == "host":
+        log_msg(f"WARNING: {name} uses userns=host. Container root maps to workload user. "
+                f"Container escape grants workload user privileges.", level="warning")
+
+    # Extra UID/GID maps for keep-id userns.
+    # When extra_groups or explicit maps are present, we emit +N:@N:1 flags
+    # which imply keep-id behavior.
+    # Podman 5.x treats --userns and --uidmap/--gidmap as mutually exclusive,
+    # so we must omit --userns when + prefixed maps are used.
+    extra_uidmaps = security.get("extra_uidmaps", [])
+    extra_gidmaps = security.get("extra_gidmaps", [])
+    needs_auto_maps = (
+        userns_mode.startswith("keep-id")
+        and (extra_groups or extra_uidmaps or extra_gidmaps)
+    )
+    if needs_auto_maps:
+        # GID == UID for workload users (sysusers convention)
+        gid = uid
+        # Honor the optional :uid=N,gid=N suffix on keep-id, which remaps the
+        # workload user to a different in-container uid/gid (e.g. for images
+        # that ship a fixed non-root user). Without this, +N:@N:1 hardcodes the
+        # in-container uid to the host workload uid, silently ignoring the
+        # suffix that the non-needs_auto_maps branch would have honored.
+        target_uid = uid
+        target_gid = gid
+        if userns_mode.startswith("keep-id:"):
+            for param in userns_mode[len("keep-id:"):].split(","):
+                key, _, value = param.partition("=")
+                if key == "uid":
+                    target_uid = int(value)
+                elif key == "gid":
+                    target_gid = int(value)
+        # Auto-map the workload user's own UID and GID (+ prefix implies keep-id)
+        args.append(f"--uidmap +{target_uid}:@{uid}:1")
+        args.append(f"--gidmap +{target_gid}:@{gid}:1")
+        # Auto-map GIDs from extra_groups
+        mapped_gids = {gid}
+        for group in extra_groups:
+            group_gid = get_group_gid(group)
+            if group_gid is not None and group_gid not in mapped_gids:
+                args.append(f"--gidmap +{group_gid}:@{group_gid}:1")
+                mapped_gids.add(group_gid)
+        # Explicit maps from TOML (with {UID}/{GID} placeholder substitution)
+        for m in extra_uidmaps:
+            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
+            args.append(f"--uidmap {m}")
+        for m in extra_gidmaps:
+            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
+            args.append(f"--gidmap {m}")
+    else:
+        args.append(f"--userns={userns_mode}")
+    return args
+
+
+def build_plain_env_args(container):
     """Build --env arguments for non-secret environment variables.
 
     Env vars containing ${SECRET:name} references are omitted — those are
     resolved at runtime by workload-write-env and passed via --env-file.
     """
-    env_vars = config.get("container", {}).get("environment", {})
+    env_vars = container.get("container", {}).get("environment", {})
     env_args = []
 
     for key, value in env_vars.items():
@@ -235,14 +319,14 @@ def build_plain_env_args(config):
     return env_args
 
 
-def build_resource_directives(config):
+def build_resource_directives(container):
     """Build systemd resource control directives from [resources] config.
 
     Returns list of systemd directive lines to add to [Service] section.
     Supports both convenience options (cpu_quota, memory_max, etc.) and
     custom_directives escape hatch for advanced users.
     """
-    resources = config.get("resources", {})
+    resources = container.get("resources", {})
     if not resources:
         return []
 
@@ -371,19 +455,163 @@ def resolve_auto_gpu():
     return "none"
 
 
-def generate_system_service(config, user_name, uid):
+def generate_pod_service(workload, user_name, uid):
+    """Generate the workload-{name}-pod.service unit (pod mode only)."""
+    name = workload["workload"]["name"]
+    home_dir = str(WORKLOADS_BASE / name)
+    slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
+
+    network_config = workload.get("network", {})
+    network_mode = network_config.get("mode", "pasta")
+    pod_args = [f"--name=workload-{name}", f"--network={network_mode}"]
+    if network_mode not in ("host", "none"):
+        for port in network_config.get("ports", []):
+            pod_args.append(f"--publish {port}")
+    # The pod's infra container owns the user namespace shared by every member
+    # container, so userns is workload-level in pod mode: read from the
+    # top-level [security] block, not per-container [containers.*.security].
+    extra_groups = workload.get("security", {}).get("extra_groups", [])
+    pod_args.extend(
+        build_userns_args(workload.get("security", {}), uid, extra_groups, name)
+    )
+    pod_args_str = " ".join(pod_args)
+
+    return "\n".join([
+        f"# Pod-create service for {name}",
+        "# Generated by workload-generate",
+        "",
+        "[Unit]",
+        f"Description={name} pod",
+        f"Requires=workload-{name}-setup.service",
+        f"After=network.target workload-{name}-setup.service",
+        # PartOf the umbrella so `systemctl stop` (and workloadctl disable)
+        # tears the pod down too — otherwise this oneshot lingers
+        # active(exited) and a later re-enable never re-runs `pod create`.
+        f"PartOf=workload-{name}.service",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        f"Slice={slice_name}",
+        f"User={user_name}",
+        f"Group={user_name}",
+        f'Environment="HOME={home_dir}"',
+        f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
+        f"ExecStartPre=-/usr/bin/podman pod rm -f --ignore workload-{name}",
+        f"ExecStart=/usr/bin/podman pod create {pod_args_str}",
+        f"ExecStop=/usr/bin/podman pod rm -f --ignore workload-{name}",
+        "StandardOutput=journal",
+        "StandardError=journal",
+        "",
+        # No [Install]: this helper is pulled in by the umbrella's Requires=
+        # and never gets its own multi-user.target.wants symlink.
+    ])
+
+
+def generate_net_service(workload, user_name, uid):
+    """Generate the workload-{name}-net.service unit (bridge mode only).
+
+    Creates a per-workload podman bridge network. Member containers join it
+    via --network, which gives them DNS resolution of each other by name.
+    """
+    name = workload["workload"]["name"]
+    home_dir = str(WORKLOADS_BASE / name)
+    slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
+    net_name = f"workload-{name}-net"
+
+    return "\n".join([
+        f"# Bridge-network service for {name}",
+        "# Generated by workload-generate",
+        "",
+        "[Unit]",
+        f"Description={name} bridge network",
+        f"Requires=workload-{name}-setup.service",
+        f"After=network.target workload-{name}-setup.service",
+        # PartOf the umbrella so `systemctl stop` (and workloadctl disable)
+        # tears the network down too — otherwise this oneshot lingers
+        # active(exited) and a later re-enable never re-runs `network create`.
+        f"PartOf=workload-{name}.service",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        f"Slice={slice_name}",
+        f"User={user_name}",
+        f"Group={user_name}",
+        f'Environment="HOME={home_dir}"',
+        f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
+        f"ExecStartPre=-/usr/bin/podman network rm -f {net_name}",
+        f"ExecStart=/usr/bin/podman network create {net_name}",
+        f"ExecStop=/usr/bin/podman network rm -f {net_name}",
+        "StandardOutput=journal",
+        "StandardError=journal",
+        "",
+        # No [Install]: this helper is pulled in by the umbrella's Requires=
+        # and never gets its own multi-user.target.wants symlink.
+    ])
+
+
+def generate_umbrella_service(workload_name, container_names, slice_name, mode):
+    """Generate the workload-{name}.service umbrella oneshot.
+
+    'mode' is "pod" or "bridge". Determines whether the umbrella requires
+    the pod or the net service.
+
+    Requires= (not Wants=) is used for the per-container sub-services so that
+    `systemctl is-active workload-<name>.service` reflects sub-service failure:
+    if any container fails to start, the umbrella is failed too, which is what
+    external monitoring expects to alert on. The trade-off is that a single
+    bad container takes the whole workload down — a deliberate choice; users
+    who want one-container-failure-tolerance can split into separate workloads.
+    """
+    helper = "pod" if mode == "pod" else "net"
+    sub_services = " ".join(
+        f"workload-{workload_name}-{c}.service" for c in container_names
+    )
+    return "\n".join([
+        f"# Umbrella service for {workload_name}",
+        "# Generated by workload-generate",
+        "",
+        "[Unit]",
+        f"Description={workload_name} multi-container workload",
+        f"Requires=workload-{workload_name}-setup.service workload-{workload_name}-{helper}.service",
+        f"After=workload-{workload_name}-setup.service workload-{workload_name}-{helper}.service",
+        f"Requires={sub_services}",
+        f"After={sub_services}",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        f"Slice={slice_name}",
+        "ExecStart=/bin/true",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "",
+    ])
+
+
+def generate_system_service(workload, container, user_name, uid, mode="single"):
     """Generate systemd system service for rootless podman execution.
 
     Requires the setup service to have created the user first.
+
+    'workload' is the full parsed TOML (used for workload-level fields like
+    [network] and [setup]); 'container' is one element of
+    normalize_containers(workload). 'mode' is "single", "pod", or "bridge".
     """
-    name = config["workload"]["name"]
-    container_name = f"workload-{name}"
+    config = workload  # alias kept for the few remaining workload-level reads
+    name = workload["workload"]["name"]
+    if mode == "single":
+        container_name = f"workload-{name}"
+    else:
+        container_name = f"workload-{name}-{container['name']}"
     home_dir = str(WORKLOADS_BASE / name)
 
-    image = config["container"]["image"]
-    command = config["container"].get("command", None)
-    pull_policy = config["container"].get("pull", "missing")  # missing, always, newer, never
-    gpu_type = config.get("devices", {}).get("gpu", "none")
+    image = container["container"]["image"]
+    command = container["container"].get("command", None)
+    pull_policy = container["container"].get("pull", "missing")  # missing, always, newer, never
+    gpu_type = container.get("devices", {}).get("gpu", "none")
     if gpu_type == "auto":
         gpu_type = resolve_auto_gpu()
     # "nvidia:<spec>" pins a specific GPU via the CDI device name (UUID or index).
@@ -394,27 +622,49 @@ def generate_system_service(config, user_name, uid):
     privileged = config.get("security", {}).get("privileged", False)
 
     setup_service = f"workload-{name}-setup.service"
-    # Slice assignment (default: workloads.slice)
-    slice_name = config.get("resources", {}).get("slice", "workloads.slice")
+    pod_service = f"workload-{name}-pod.service"
+    net_service = f"workload-{name}-net.service"
+    umbrella_service = f"workload-{name}.service"
+    # Slice assignment (default: workloads.slice). In pod mode, slice is
+    # workload-level; in single mode it lives on the (only) container.
+    if mode == "single":
+        slice_name = container.get("resources", {}).get("slice", "workloads.slice")
+    else:
+        slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
+
+    if mode == "single":
+        unit_description = f"{name} rootless workload"
+    else:
+        unit_description = f"{name}/{container['name']} container"
 
     lines = [
-        f"# Rootless workload service for {name}",
+        f"# Rootless workload service for {name}" if mode == "single"
+        else f"# Container service for {name}/{container['name']}",
         "# Generated by workload-generate",
         "",
         "[Unit]",
-        f"Description={name} rootless workload",
-        f"Requires={setup_service}",
-        f"After=network.target {setup_service}",
-        "StartLimitIntervalSec=300",
-        "StartLimitBurst=5",
+        f"Description={unit_description}",
     ]
+    if mode == "single":
+        lines.append(f"Requires={setup_service}")
+        lines.append(f"After=network.target {setup_service}")
+    else:
+        # pod mode binds to the pod-create service; bridge mode to the
+        # network-create service.
+        dep_service = pod_service if mode == "pod" else net_service
+        lines.append(f"Requires={dep_service}")
+        lines.append(f"After={dep_service}")
+        lines.append(f"BindsTo={dep_service}")
+        lines.append(f"PartOf={umbrella_service}")
+    lines.append("StartLimitIntervalSec=300")
+    lines.append("StartLimitBurst=5")
 
     if gpu_vendor == "nvidia":
         lines.append("Requires=nvidia-cdi-generator.service")
         lines.append("After=nvidia-cdi-generator.service")
 
     # container.systemd: "always", "true", "false", or unset
-    systemd_mode = config.get("container", {}).get("systemd", None)
+    systemd_mode = container.get("container", {}).get("systemd", None)
     if systemd_mode is not None:
         systemd_mode = str(systemd_mode).lower()
         valid_systemd = ("always", "true", "false")
@@ -428,7 +678,7 @@ def generate_system_service(config, user_name, uid):
     # "notify" + --sdnotify=conmon is broken systemically when linger is active
     # because conmon migrates into the user session cgroup and systemd rejects its
     # READY=1 (NotifyAccess=all only accepts PIDs in the service's own cgroup tree).
-    service_type = config.get("resources", {}).get("service_type", "exec")
+    service_type = container.get("resources", {}).get("service_type", "exec")
     valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
     if service_type not in valid_types:
         log_msg(f"WARNING: Invalid service_type '{service_type}' for {name}. "
@@ -440,9 +690,13 @@ def generate_system_service(config, user_name, uid):
     podman_args = [
         "/usr/bin/podman run",
         f"--name {container_name_quoted}",
-        f"--hostname {dq(name)}",
-        "--rm",
     ]
+    # In pod mode the container joins the pod's UTS namespace, so it cannot
+    # set its own hostname (podman rejects it). Single and bridge mode each
+    # own their UTS namespace and take a hostname normally.
+    if mode != "pod":
+        podman_args.append(f"--hostname {dq(name)}")
+    podman_args.append("--rm")
 
     # --init provides a minimal init process (tini) for signal handling.
     # Skip when container.systemd is set — the container either runs systemd
@@ -460,76 +714,31 @@ def generate_system_service(config, user_name, uid):
         "--log-driver=journald",
     ])
 
-    userns_mode = config.get("security", {}).get("userns", "keep-id")
-    if not _valid_userns(userns_mode):
-        log_msg(f"WARNING: Invalid userns mode '{userns_mode}' for {name}. "
-                f"Defaulting to 'keep-id'.",
-                level="warning")
-        userns_mode = "keep-id"
-
-    if userns_mode == "host":
-        log_msg(f"WARNING: {name} uses userns=host. Container root maps to workload user. "
-                f"Container escape grants workload user privileges.", level="warning")
-
-    # Extra UID/GID maps for keep-id userns.
-    # When extra_groups or explicit maps are present, we emit +N:@N:1 flags
-    # which imply keep-id behavior.
-    # Podman 5.x treats --userns and --uidmap/--gidmap as mutually exclusive,
-    # so we must omit --userns when + prefixed maps are used.
-    security_config = config.get("security", {})
-    extra_uidmaps = security_config.get("extra_uidmaps", [])
-    extra_gidmaps = security_config.get("extra_gidmaps", [])
-    needs_auto_maps = (
-        userns_mode.startswith("keep-id")
-        and (extra_groups or extra_uidmaps or extra_gidmaps)
-    )
-    if needs_auto_maps:
-        # GID == UID for workload users (sysusers convention)
-        gid = uid
-        # Honor the optional :uid=N,gid=N suffix on keep-id, which remaps the
-        # workload user to a different in-container uid/gid (e.g. for images
-        # that ship a fixed non-root user). Without this, +N:@N:1 hardcodes the
-        # in-container uid to the host workload uid, silently ignoring the
-        # suffix that the non-needs_auto_maps branch would have honored.
-        target_uid = uid
-        target_gid = gid
-        if userns_mode.startswith("keep-id:"):
-            for param in userns_mode[len("keep-id:"):].split(","):
-                key, _, value = param.partition("=")
-                if key == "uid":
-                    target_uid = int(value)
-                elif key == "gid":
-                    target_gid = int(value)
-        # Auto-map the workload user's own UID and GID (+ prefix implies keep-id)
-        podman_args.append(f"--uidmap +{target_uid}:@{uid}:1")
-        podman_args.append(f"--gidmap +{target_gid}:@{gid}:1")
-        # Auto-map GIDs from extra_groups
-        mapped_gids = {gid}
-        for group in extra_groups:
-            group_gid = get_group_gid(group)
-            if group_gid is not None and group_gid not in mapped_gids:
-                podman_args.append(f"--gidmap +{group_gid}:@{group_gid}:1")
-                mapped_gids.add(group_gid)
-        # Explicit maps from TOML (with {UID}/{GID} placeholder substitution)
-        for m in extra_uidmaps:
-            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
-            podman_args.append(f"--uidmap {m}")
-        for m in extra_gidmaps:
-            m = m.replace("{UID}", str(uid)).replace("{GID}", str(gid))
-            podman_args.append(f"--gidmap {m}")
+    # User namespace / UID-GID maps.
+    # In pod mode the user namespace is owned by the pod's infra container and
+    # is set on `podman pod create` (see generate_pod_service); member
+    # containers cannot set their own and podman rejects the attempt. Single
+    # and bridge mode each own their userns and set it on the container.
+    if mode == "pod":
+        if container.get("security", {}).get("userns") is not None:
+            log_msg(f"WARNING: {name}/{container['name']} sets [security].userns; "
+                    f"ignored in pod mode (userns is workload-level — set it in "
+                    f"the top-level [security] block)", level="warning")
     else:
-        podman_args.append(f"--userns={userns_mode}")
+        podman_args.extend(
+            build_userns_args(container.get("security", {}), uid, extra_groups, name)
+        )
 
     # Override the container image's USER directive if specified
-    container_user = config.get("container", {}).get("user", "")
+    container_user = container.get("container", {}).get("user", "")
     if container_user:
         podman_args.append(f"--user={container_user}")
 
-    capabilities = config.get("security", {}).get("capabilities", [])
+    capabilities = container.get("security", {}).get("capabilities", [])
     for cap in capabilities:
         podman_args.append(f"--cap-add={cap}")
 
-    security_opts = config.get("security", {}).get("security_opt", [])
+    security_opts = container.get("security", {}).get("security_opt", [])
     for opt in security_opts:
         podman_args.append(f"--security-opt={opt}")
 
@@ -575,7 +784,7 @@ def generate_system_service(config, user_name, uid):
         podman_args.append("--device /dev/dri")
 
     # Generic device passthrough
-    devices_config = config.get("devices", {})
+    devices_config = container.get("devices", {})
     generic_devices = devices_config.get("devices", [])
     for device in generic_devices:
         podman_args.append(f"--device {device}")
@@ -606,25 +815,40 @@ def generate_system_service(config, user_name, uid):
         ])
 
     # Shared memory size
-    shm_size = config.get("resources", {}).get("shm_size", "")
+    shm_size = container.get("resources", {}).get("shm_size", "")
     if shm_size:
         podman_args.append(f"--shm-size={shm_size}")
 
     # Container PID limit (podman default is 2048, independent of systemd TasksMax)
-    tasks_max = config.get("resources", {}).get("tasks_max", 0)
+    tasks_max = container.get("resources", {}).get("tasks_max", 0)
     if tasks_max:
         podman_args.append(f"--pids-limit={tasks_max}")
 
-    # Network configuration
-    network_config = config.get("network", {})
-    network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
+    # Network configuration.
+    #  - single: workload-level [network] mode + ports.
+    #  - pod: the pod owns the netns; the container just joins it (no
+    #    --network/--publish — podman rejects them on a pod member).
+    #  - bridge: the container joins the per-workload bridge network and
+    #    publishes its own [containers.network].ports.
+    if mode == "single":
+        network_config = workload.get("network", {})
+        network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
 
-    podman_args.append(f"--network={dq(network_mode)}")
-    if network_mode not in ("host", "none"):
-        for port in network_config.get("ports", []):
+        podman_args.append(f"--network={dq(network_mode)}")
+        if network_mode not in ("host", "none"):
+            for port in network_config.get("ports", []):
+                podman_args.append(f"--publish {port}")
+    elif mode == "pod":
+        podman_args.append(f"--pod={dq(f'workload-{name}')}")
+    else:  # bridge
+        podman_args.append(f"--network={dq(f'workload-{name}-net')}")
+        # Publish the short container name as a DNS alias so siblings resolve
+        # each other by name (e.g. "db"); the --name is workload-{name}-{ctr}.
+        podman_args.append(f"--network-alias={dq(container['name'])}")
+        for port in container.get("network", {}).get("ports", []):
             podman_args.append(f"--publish {port}")
 
-    for volume in config.get("storage", {}).get("volumes", []):
+    for volume in container.get("storage", {}).get("volumes", []):
         expanded = expand_volume_path(volume, home_dir)
         if ':' in expanded:
             parts = expanded.split(':', 2)
@@ -642,9 +866,15 @@ def generate_system_service(config, user_name, uid):
             expanded = dq(expanded)
         podman_args.append(f"--volume {expanded}")
 
-    credentials = auto_detect_credentials(config)
-    service_name = f"workload-{name}.service"
-    secrets_config = config.get("secrets", {})
+    credentials = auto_detect_credentials({
+        "container": container.get("container", {}),
+        "secrets":   container.get("secrets", {}),
+    })
+    # In multi-container modes the credential is loaded onto the per-container
+    # service unit, so systemd decrypts it to /run/credentials/<container-unit>/.
+    # Using the umbrella name here would point the bind-mount at the wrong dir.
+    service_name = f"{container_name}.service"
+    secrets_config = container.get("secrets", {})
     secrets_files = secrets_config.get("files", [])
 
     for file_spec in secrets_files:
@@ -677,20 +907,23 @@ def generate_system_service(config, user_name, uid):
     podman_args.append("--env HOST_IP=${HOST_IP}")
 
     # Plain env vars go as --env args; secret env vars go via --env-file
-    env_args = build_plain_env_args(config)
+    env_args = build_plain_env_args(container)
     podman_args.extend(env_args)
 
     # Check if any env vars reference secrets (need --env-file from workload-write-env)
     has_secret_env_vars = any(
         SECRET_PATTERN.search(str(v))
-        for v in config.get("container", {}).get("environment", {}).values()
+        for v in container.get("container", {}).get("environment", {}).values()
     )
     if has_secret_env_vars:
-        secrets_env_file = f"/run/workload-env/workload-{name}.secrets"
+        # Per-container secrets file: each container has its own
+        # LoadCredentialEncrypted/CREDENTIALS_DIRECTORY, so a shared file
+        # would race when multiple containers in the same workload start.
+        secrets_env_file = f"/run/workload-env/{container_name}.secrets"
         podman_args.append(f"--env-file {dq(secrets_env_file)}")
 
     # Health checks
-    health = config.get("container", {}).get("health", {})
+    health = container.get("container", {}).get("health", {})
     health_cmd = health.get("cmd", "")
     if health_cmd:
         podman_args.append(f"--health-cmd {dq(health_cmd)}")
@@ -738,7 +971,7 @@ def generate_system_service(config, user_name, uid):
         "",
     ])
 
-    resource_directives = build_resource_directives(config)
+    resource_directives = build_resource_directives(container)
     if resource_directives:
         lines.append("# Resource limits and constraints")
         lines.extend(resource_directives)
@@ -752,7 +985,16 @@ def generate_system_service(config, user_name, uid):
         lines.append("")
 
     if has_secret_env_vars:
-        lines.append(f"ExecStartPre=+/usr/libexec/workloadctl/workload-write-env {name}")
+        # Multi-container: pass the local container name so workload-write-env
+        # resolves *that* container's env vars only and writes the matching
+        # per-container secrets file. Single-mode keeps the legacy one-arg form.
+        if mode == "single":
+            lines.append(f"ExecStartPre=+/usr/libexec/workloadctl/workload-write-env {name}")
+        else:
+            lines.append(
+                f"ExecStartPre=+/usr/libexec/workloadctl/workload-write-env "
+                f"{name} {container['name']}"
+            )
 
     if gpu_vendor == "nvidia":
         lines.append(
@@ -783,18 +1025,26 @@ def generate_system_service(config, user_name, uid):
         "PrivateTmp=yes",
     ])
 
-    resources = config.get("resources", {})
+    resources = container.get("resources", {})
     if "timeout_start_sec" not in resources:
         lines.append("TimeoutStartSec=300")
     if "timeout_stop_sec" not in resources:
         lines.append("TimeoutStopSec=30")
 
-    lines.extend([
-        "",
-        "[Install]",
-        "WantedBy=multi-user.target",
-        "",
-    ])
+    # [Install] only on the workload-level service: in single mode that's
+    # *this* unit (it gets the multi-user.target.wants symlink); in
+    # multi-container mode the per-container services are pulled in by the
+    # umbrella's Requires= and never get their own wants symlink, so an
+    # [Install] block here is dead text.
+    if mode == "single":
+        lines.extend([
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ])
+    else:
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -834,6 +1084,14 @@ def main():
                 continue
 
             name = config["workload"]["name"]
+
+            errors = validate_workload_config(config)
+            if errors:
+                for e in errors:
+                    log_msg(f"  ERROR: {name}: {e}", level="err")
+                continue
+
+            mode = infer_workload_mode(config)
             user_name = workload_username(name)
             log_msg(f"  Processing workload {name}")
 
@@ -858,13 +1116,44 @@ def main():
             log_msg(f"  Created setup service at {setup_file}")
 
             # Main service: Requires+After setup service so User= is resolvable
-            service_content = generate_system_service(config, user_name, uid)
-            if service_content is None:
-                log_msg(f"  Skipping {name} due to config errors", level="err")
-                continue
-            service_file = SERVICES_DIR / f"workload-{name}.service"
-            service_file.write_text(service_content)
-            log_msg(f"  Created system service at {service_file}")
+            containers = normalize_containers(config)
+
+            if mode == "single":
+                service_content = generate_system_service(config, containers[0], user_name, uid)
+                if service_content is None:
+                    log_msg(f"  Skipping {name} due to config errors", level="err")
+                    continue
+                service_file = SERVICES_DIR / f"workload-{name}.service"
+                service_file.write_text(service_content)
+                log_msg(f"  Created system service at {service_file}")
+            else:
+                # Network helper service: pod-create (pod mode) or
+                # network-create (bridge mode).
+                if mode == "pod":
+                    helper = generate_pod_service(config, user_name, uid)
+                    (SERVICES_DIR / f"workload-{name}-pod.service").write_text(helper)
+                else:  # bridge
+                    if config.get("network", {}).get("ports"):
+                        log_msg(f"  WARNING: {name}: workload-level [network].ports "
+                                f"is ignored in bridge mode; publish ports per "
+                                f"container under [containers.network]",
+                                level="warning")
+                    helper = generate_net_service(config, user_name, uid)
+                    (SERVICES_DIR / f"workload-{name}-net.service").write_text(helper)
+                # Per-container services
+                for c in containers:
+                    sc = generate_system_service(config, c, user_name, uid, mode=mode)
+                    if sc is None:
+                        log_msg(f"  Skipping container {c.get('name')} due to config errors", level="err")
+                        continue
+                    (SERVICES_DIR / f"workload-{name}-{c['name']}.service").write_text(sc)
+                # Umbrella
+                slice_name = config.get("resources", {}).get("slice", "workloads.slice")
+                umbrella = generate_umbrella_service(
+                    name, [c["name"] for c in containers], slice_name, mode=mode
+                )
+                (SERVICES_DIR / f"workload-{name}.service").write_text(umbrella)
+                log_msg(f"  Created {mode}-mode units for {name} ({len(containers)} containers)")
 
             # Create symlink for auto-start (equivalent to systemctl enable)
             wants_dir = SERVICES_DIR / "multi-user.target.wants"

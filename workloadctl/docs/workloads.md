@@ -14,6 +14,7 @@
   - [Extra UID/GID Maps](#extra-uidgid-maps)
   - [Resource Constraints](#resource-constraints)
   - [Secrets Management](#secrets-management)
+- [Multi-Container Workloads](#multi-container-workloads)
 - [Managing Workloads](#managing-workloads)
 - [Device Access](#device-access)
 - [Troubleshooting](#troubleshooting)
@@ -91,7 +92,7 @@ ports = ["8080:8080"]
 sudo workloadctl enable webserver
 ```
 
-See [workloads.d/schema-reference.toml](../workloads.d/schema-reference.toml) for all available config options.
+See [schema-reference.toml](schema-reference.toml) for all available config options.
 
 ---
 
@@ -254,7 +255,7 @@ cap_net_bind_service=+ep` instead.
 
 ### Basic Configuration
 
-Workload configurations are TOML files in `/etc/workloads.d/`. See `workloads.d/schema-reference.toml` for full documentation.
+Workload configurations are TOML files in `/etc/workloads.d/`. See [schema-reference.toml](schema-reference.toml) for full documentation.
 
 **Minimal Example:**
 
@@ -581,7 +582,7 @@ systemctl status workloads.slice
 systemd-cgtop /workloads.slice
 ```
 
-For complete resource documentation with detailed examples, see `workloads.d/schema-reference.toml`.
+For complete resource documentation with detailed examples, see [schema-reference.toml](schema-reference.toml).
 
 ---
 
@@ -674,7 +675,115 @@ sudo workloadctl secret create my-secret --key-type host+tpm2
 For comprehensive secrets management documentation, see:
 - [docs/secrets.md](secrets.md) - Complete guide
 - [workloads.d/example-with-secrets.toml](../workloads.d/example-with-secrets.toml) - Working example
-- [workloads.d/schema-reference.toml](../workloads.d/schema-reference.toml) - Full schema with secrets
+- [schema-reference.toml](schema-reference.toml) - Full schema with secrets
+
+---
+
+## Multi-Container Workloads
+
+A single workload can run **multiple containers** together under one workload
+user (`_wl-<name>`). This suits stacks where containers belong together — a
+reverse proxy in front of an app, a service plus its database — so they share
+a lifecycle, a home directory, and a single `systemctl`/`workloadctl` target.
+
+Instead of one top-level `[container]` block, a multi-container workload uses
+an array of `[[containers]]` tables, each with a unique `name`:
+
+```toml
+[workload]
+name = "myapp"
+enabled = true
+mode = "pod"          # or "bridge" — see below
+
+[[containers]]
+name = "web"
+[containers.container]
+image = "myapp:latest"
+
+[[containers]]
+name = "db"
+[containers.container]
+image = "postgres:16"
+```
+
+Single-container TOMLs are unchanged — keep using the top-level `[container]`
+block. The generator normalizes them internally, so their generated units stay
+byte-for-byte identical.
+
+### Pod mode vs. bridge mode
+
+`workload.mode` selects how the containers network. If omitted, a workload with
+`[[containers]]` defaults to `pod`.
+
+| | **pod** | **bridge** |
+|---|---|---|
+| Network namespace | One, shared by all containers | One per container |
+| Container-to-container | `localhost` | By container name (DNS) |
+| Port publishing | Once, workload-level `[network]` | Per container, `[containers.network]` |
+| User namespace | Workload-level (the pod's infra container owns it) | Per container |
+| Best for | Tightly coupled sidecars; one public port surface | Services that talk over a network and need name resolution (app + database) |
+
+**Pod mode** puts every container in one network namespace via `podman pod
+create`. Containers reach each other on `localhost`. Publish ports once in the
+top-level `[network]` block. Because the pod's infra container owns the shared
+user namespace, `userns` / `extra_uidmaps` / `extra_gidmaps` are **workload-level**
+(top-level `[security]`) in pod mode — a per-container value is warned and ignored.
+
+**Bridge mode** (`mode = "bridge"`) gives each container its own network
+namespace, all joined to an auto-created bridge network (`workload-<name>-net`).
+Containers resolve each other by container name. Publish ports per container in
+`[containers.network]`; the workload-level `[network].ports` is ignored.
+
+For the field-allocation breakdown (which sections are workload-level vs.
+per-container) and full pod/bridge examples, see the **MULTI-CONTAINER
+WORKLOADS** section in
+[schema-reference.toml](schema-reference.toml).
+
+### Generated units and naming
+
+| Object | Single-container | Multi-container |
+|---|---|---|
+| Workload user | `_wl-<name>` | `_wl-<name>` (one, shared) |
+| Top-level service | `workload-<name>.service` (the container) | `workload-<name>.service` (oneshot **umbrella**) |
+| Per-container service | — | `workload-<name>-<ctr>.service` |
+| Pod / network service | — | `workload-<name>-pod.service` (pod) or `workload-<name>-net.service` (bridge) |
+| Container name | `workload-<name>` | `workload-<name>-<ctr>` |
+
+`systemctl start workload-<name>.service` targets the umbrella, which pulls in
+the pod/network service and every container. Stopping it tears the whole
+workload down (`PartOf=`). Container names follow the same rules as workload
+names: `^[a-z][a-z0-9-]*$`, max 27 characters.
+
+### CLI usage with `NAME/CTR`
+
+`workloadctl` commands accept either the whole workload (`<name>`) or a single
+container (`<name>/<ctr>`):
+
+```bash
+workloadctl status myapp        # umbrella + pod/net + every container
+workloadctl logs myapp          # merged logs from all sub-services
+workloadctl logs myapp/web      # just the "web" container
+workloadctl exec myapp/db psql  # exec into a specific container
+workloadctl shell myapp/web     # shell in a specific container
+workloadctl health myapp        # per-container health table
+```
+
+Container-targeted commands (`exec`, `shell`) require the `NAME/CTR` form on a
+multi-container workload — a bare `NAME` errors and lists the available
+containers. Lifecycle commands (`enable`, `disable`, `start`, `stop`, `update`,
+`rollback`) always operate on the whole workload: `update` pulls every
+container's image and `rollback` reverts them all.
+
+Two example workloads ship in `workloads.d/` (both disabled by default):
+
+- [`webproxy-demo.toml`](../workloads.d/webproxy-demo.toml) — bridge mode,
+  Caddy reverse proxy + a `whoami` backend. No setup required; pulls only
+  public images. The smallest end-to-end demonstration of sibling DNS and a
+  single published front-end port.
+- [`example-multi-container.toml`](../workloads.d/example-multi-container.toml)
+  — bridge mode, Forgejo + PostgreSQL. Closer to a real stack: needs an
+  encrypted DB password and may need a registry-policy entry for the Forgejo
+  image. Use this as the template for production-shaped workloads.
 
 ---
 
@@ -1827,7 +1936,7 @@ The systemd credentials system provides strong security:
 
 ## Additional Resources
 
-- **Configuration schema:** `workloads.d/schema-reference.toml`
+- **Configuration schema:** [schema-reference.toml](schema-reference.toml)
 - **Example workloads:** `workloads.d/example-*.toml`
 - **Secrets management:** `docs/secrets.md`
 - **Shell generator source:** `generators/workload-generator` (emits `workload-generate.service`)

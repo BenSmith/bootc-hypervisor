@@ -16,7 +16,206 @@ from workload_lib import (
     workload_username, workload_service_name, workload_container_name,
     workload_home_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,
+    validate_workload_config, infer_workload_mode, normalize_containers,
 )
+
+
+class TestMultiContainerValidation(unittest.TestCase):
+    def test_rejects_both_container_blocks(self):
+        config = {
+            "workload": {"name": "x"},
+            "container": {"image": "a"},
+            "containers": [{"name": "c1", "container": {"image": "b"}}],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("both [container] and [[containers]]" in e for e in errs))
+
+    def test_requires_unique_container_names(self):
+        config = {
+            "workload": {"name": "x"},
+            "containers": [
+                {"name": "c1", "container": {"image": "a"}},
+                {"name": "c1", "container": {"image": "b"}},
+            ],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("duplicate container name" in e for e in errs))
+
+    def test_requires_image(self):
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{"name": "c1"}],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("image is required" in e for e in errs))
+
+    def test_infer_mode_default_pod_for_multi(self):
+        self.assertEqual(
+            infer_workload_mode({"workload": {"name": "x"}, "containers": [{}]}),
+            "pod",
+        )
+
+    def test_infer_mode_default_single(self):
+        self.assertEqual(
+            infer_workload_mode({"workload": {"name": "x"}, "container": {}}),
+            "single",
+        )
+
+    def test_infer_mode_rejects_invalid(self):
+        with self.assertRaises(ValueError):
+            infer_workload_mode({"workload": {"name": "x", "mode": "bogus"}})
+
+    def test_rejects_env_in_both_forms(self):
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "a",
+                "container": {"image": "i", "environment": {"K": "nested"}},
+                "environment": {"K": "sibling"},
+            }],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("'environment' set both" in e for e in errs))
+
+    def test_rejects_health_in_both_forms(self):
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "a",
+                "container": {"image": "i", "health": {"cmd": "nested"}},
+                "health": {"cmd": "sibling"},
+            }],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("'health' set both" in e for e in errs))
+
+
+class TestNormalizeContainers(unittest.TestCase):
+    def test_single_container_unchanged(self):
+        config = {
+            "workload": {"name": "myapp"},
+            "container": {"image": "img", "environment": {"K": "v"}},
+            "security": {"capabilities": ["NET_BIND_SERVICE"]},
+            "storage": {"volumes": ["./d:/d"]},
+        }
+        result = normalize_containers(config)
+        self.assertEqual(len(result), 1)
+        entry = result[0]
+        self.assertEqual(entry["name"], "myapp")
+        self.assertEqual(entry["container"]["image"], "img")
+        self.assertEqual(entry["container"]["environment"], {"K": "v"})
+        self.assertEqual(entry["security"]["capabilities"], ["NET_BIND_SERVICE"])
+        self.assertEqual(entry["storage"]["volumes"], ["./d:/d"])
+
+    def test_multi_lifts_sibling_environment(self):
+        """[containers.environment] (sibling) lifts into entry["container"]["environment"]
+        so the generator sees the same shape as a single-container TOML."""
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "db",
+                "container": {"image": "postgres"},
+                "environment": {"PGUSER": "alice"},
+            }],
+        }
+        result = normalize_containers(config)
+        self.assertEqual(result[0]["container"]["environment"], {"PGUSER": "alice"})
+        self.assertNotIn("environment", result[0])
+
+    def test_multi_lifts_sibling_health(self):
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "web",
+                "container": {"image": "nginx"},
+                "health": {"cmd": "wget localhost", "interval": "10s"},
+            }],
+        }
+        result = normalize_containers(config)
+        self.assertEqual(
+            result[0]["container"]["health"],
+            {"cmd": "wget localhost", "interval": "10s"},
+        )
+        self.assertNotIn("health", result[0])
+
+    def test_multi_preserves_nested_forms(self):
+        """Nested forms ([containers.container.environment]) pass through
+        unchanged."""
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "web",
+                "container": {
+                    "image": "nginx",
+                    "environment": {"K": "v"},
+                    "health": {"cmd": "ok"},
+                },
+            }],
+        }
+        result = normalize_containers(config)
+        self.assertEqual(result[0]["container"]["environment"], {"K": "v"})
+        self.assertEqual(result[0]["container"]["health"], {"cmd": "ok"})
+
+    def test_multi_preserves_sibling_security_storage(self):
+        """Fields that are *always* siblings (security, storage, etc.) stay
+        sibling-shaped after normalization — only environment/health move."""
+        config = {
+            "workload": {"name": "x"},
+            "containers": [{
+                "name": "web",
+                "container": {"image": "nginx"},
+                "security": {"capabilities": ["NET_ADMIN"]},
+                "storage": {"volumes": ["./d:/d"]},
+                "network": {"ports": ["8080:80"]},
+            }],
+        }
+        result = normalize_containers(config)
+        self.assertEqual(result[0]["security"], {"capabilities": ["NET_ADMIN"]})
+        self.assertEqual(result[0]["storage"], {"volumes": ["./d:/d"]})
+        self.assertEqual(result[0]["network"], {"ports": ["8080:80"]})
+
+
+class TestAutoDetectCredentialsMulti(unittest.TestCase):
+    def test_multi_container_sibling_env(self):
+        """${SECRET:} in [containers.environment] (sibling form) must be
+        detected. This is the form the shipped example TOMLs use."""
+        config = {
+            "containers": [
+                {"name": "db",
+                 "container": {"image": "postgres"},
+                 "environment": {"PW": "${SECRET:db-pw}"}},
+                {"name": "web",
+                 "container": {"image": "nginx"},
+                 "environment": {"K": "${SECRET:api-key}"}},
+            ]
+        }
+        self.assertEqual(
+            auto_detect_credentials(config), {"db-pw", "api-key"}
+        )
+
+    def test_multi_container_nested_env(self):
+        config = {
+            "containers": [{
+                "name": "web",
+                "container": {
+                    "image": "nginx",
+                    "environment": {"K": "${SECRET:k}"},
+                },
+            }]
+        }
+        self.assertEqual(auto_detect_credentials(config), {"k"})
+
+    def test_multi_container_per_container_secrets_files(self):
+        config = {
+            "containers": [{
+                "name": "web",
+                "container": {"image": "nginx"},
+                "secrets": {"files": [
+                    {"credential": "tls-cert", "path": "/etc/cert"}
+                ]},
+            }]
+        }
+        self.assertEqual(auto_detect_credentials(config), {"tls-cert"})
 
 
 class TestNaming(unittest.TestCase):

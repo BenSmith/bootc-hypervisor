@@ -25,6 +25,23 @@ name = "schema-reference"
 # Set to false to disable without deleting the config file
 enabled = false
 
+# Optional: Workload mode — how many containers and how they network.
+# Type: string
+# Default: inferred — "single" for a [container] block, "pod" for [[containers]].
+# Options:
+#   "single" - One container. Use a top-level [container] block (the classic
+#              form documented throughout this file).
+#   "pod"    - Multiple containers sharing one network namespace via a podman
+#              pod. Containers reach each other on localhost. Ports are
+#              published once, workload-level, on the pod (see [network]).
+#   "bridge" - Multiple containers, each with its own network namespace, all
+#              joined to an auto-created per-workload bridge network. Containers
+#              resolve each other by container name (DNS). Ports are published
+#              per container (see [containers.network] below).
+# Multi-container workloads use [[containers]] arrays instead of [container];
+# see the MULTI-CONTAINER WORKLOADS section below.
+# mode = "pod"
+
 [setup]
 # Optional: Files that must exist before the workload can be enabled.
 # workloadctl enable checks these before starting and prints copy instructions if missing.
@@ -42,6 +59,86 @@ enabled = false
 #
 # Note: Missing volume directories are checked separately (no setup entry needed for dirs).
 # required_files = []
+
+# ============================================================================
+# MULTI-CONTAINER WORKLOADS
+# ============================================================================
+# A workload can declare multiple containers that run together under one
+# workload user (_wl-{name}). Instead of a single top-level [container] block,
+# use an array of [[containers]] tables:
+#
+#   [[containers]]
+#   name = "web"
+#   [containers.container]
+#   image = "myapp:latest"
+#   [containers.network]
+#   ports = ["8080:80"]
+#
+#   [[containers]]
+#   name = "db"
+#   [containers.container]
+#   image = "postgres:16"
+#   [containers.security]
+#   capabilities = ["CHOWN"]
+#
+# Each [[containers]] entry requires a unique `name` (same rules as workload
+# names: ^[a-z][a-z0-9-]*$, max 27 chars) and a [containers.container] block
+# with an `image`. The [containers.foo] tables that follow attach to the most
+# recent [[containers]] entry.
+#
+# Per-workload service: workload-{name}.service is a oneshot "umbrella" that
+# pulls in every container. Per container: workload-{name}-{ctr}.service.
+# `workloadctl` commands take {name} (whole workload) or {name}/{ctr} (one
+# container) — e.g. `workloadctl logs stack/web`, `workloadctl exec stack/db sh`.
+#
+# --- Pod mode vs. bridge mode (workload.mode) -------------------------------
+#   pod    - All containers share one network namespace. Inter-container
+#            traffic is localhost. The pod publishes ports once; set them in
+#            the top-level [network] block. The pod's infra container owns the
+#            shared user namespace, so userns/extra_uidmaps/extra_gidmaps are
+#            workload-level (top-level [security]) in pod mode — a per-container
+#            [containers.security].userns is warned and ignored.
+#   bridge - Each container has its own network namespace; siblings resolve
+#            each other by container name over an auto-created bridge network
+#            (workload-{name}-net). Publish ports per container in
+#            [containers.network]. Workload-level [network].ports is ignored.
+#
+# --- Field allocation -------------------------------------------------------
+# Workload-level (declared once, at the top level):
+#   [workload]   name, enabled, mode
+#   [setup]      required_files
+#   [host]       setup
+#   [network]    mode, ports          (pod mode only; ignored in bridge mode)
+#   [security]   extra_groups; also userns + extra_uidmaps/extra_gidmaps
+#                in POD MODE (the pod owns the shared user namespace)
+#   [storage]    home
+#   [resources]  slice
+#
+# Per-container (each block is a sibling of [containers.container] under the
+# same [[containers]] entry; see Example 14 below):
+#   [containers.container]    image, command, pull, systemd, user
+#   [containers.environment]  KEY = "value" pairs (see [container.environment]
+#                             below for the single-container documentation —
+#                             same shape, same ${SECRET:name} support).
+#                             For back-compat, [containers.container.environment]
+#                             is also accepted; setting both forms on one
+#                             container is rejected as ambiguous.
+#   [containers.health]       cmd, interval, timeout, retries, start_period,
+#                             on_failure. Same accepted-at-either-depth rule
+#                             as environment.
+#   [containers.security]     capabilities, security_opt, privileged; also
+#                             userns + extra_uidmaps/extra_gidmaps EXCEPT in
+#                             pod mode (where they are workload-level)
+#   [containers.storage]      volumes
+#   [containers.devices]      all device options
+#   [containers.secrets]      files
+#   [containers.resources]    cpu/memory/io/tasks limits, service_type, timeouts
+#   [containers.network]      ports                (bridge mode only)
+#
+# Single-container TOMLs keep using the top-level blocks documented below;
+# they are normalized internally into a one-element container list, so their
+# generated units are byte-for-byte unchanged.
+# ============================================================================
 
 [container]
 # Required: Container image to run
@@ -1025,6 +1122,68 @@ ports = ["8080:80", "8443:443"]
 #
 # [storage]
 # volumes = ["/mnt/media:/media:ro"]
+
+# Example 13: Multi-container, pod mode (shared netns, localhost between
+#             containers, ports published once on the pod)
+# --------------------------------------------------------
+# [workload]
+# name = "proxy-stack"
+# enabled = true
+# mode = "pod"
+#
+# # Pod-level: ports are published once, on the pod's infra container.
+# [network]
+# mode = "pasta"
+# ports = ["8080:8080"]
+#
+# [[containers]]
+# name = "proxy"
+# [containers.container]
+# image = "caddy:latest"
+# # Reaches the app container at localhost:3000 (shared netns).
+#
+# [[containers]]
+# name = "app"
+# [containers.container]
+# image = "myapp:latest"
+# [containers.environment]
+# LISTEN_ADDR = "127.0.0.1:3000"
+
+# Example 14: Multi-container, bridge mode (per-container netns, DNS by name,
+#             ports published per container)
+# --------------------------------------------------------
+# [workload]
+# name = "forgejo-stack"
+# enabled = true
+# mode = "bridge"
+#
+# [[containers]]
+# name = "db"
+# [containers.container]
+# image = "docker.io/library/postgres:16"
+# [containers.environment]
+# POSTGRES_USER = "forgejo"
+# POSTGRES_DB = "forgejo"
+# POSTGRES_PASSWORD = "${SECRET:forgejo-db-password}"
+# [containers.storage]
+# volumes = ["./db:/var/lib/postgresql/data"]
+# # No [containers.network] — db is not published to the host. The web
+# # container reaches it at host "db" (the container name) over the bridge.
+#
+# [[containers]]
+# name = "web"
+# [containers.container]
+# image = "codeberg.org/forgejo/forgejo:15-rootless"
+# [containers.environment]
+# FORGEJO__database__DB_TYPE = "postgres"
+# FORGEJO__database__HOST = "db:5432"
+# FORGEJO__database__NAME = "forgejo"
+# FORGEJO__database__USER = "forgejo"
+# FORGEJO__database__PASSWD = "${SECRET:forgejo-db-password}"
+# [containers.storage]
+# volumes = ["./data:/var/lib/gitea"]
+# [containers.network]
+# ports = ["3000:3000"]
 
 # ============================================================================
 # SECRETS MANAGEMENT

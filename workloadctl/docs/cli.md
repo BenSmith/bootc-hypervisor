@@ -10,6 +10,24 @@ workloadctl [-h] <command> [options]
 
 ---
 
+## Targeting a Container in a Multi-Container Workload
+
+A workload may run more than one container (see [Multi-Container Workloads](workloads.md#multi-container-workloads)). Commands that operate on a container — `exec`, `shell`, `logs`, `health` — accept either the workload alone or a `<workload>/<container>` reference:
+
+```bash
+workloadctl logs   myapp           # merged logs from every container
+workloadctl logs   myapp/web       # just the "web" container
+workloadctl exec   myapp/db psql   # exec into a specific container
+workloadctl shell  myapp/proxy     # shell in a specific container
+workloadctl health myapp           # per-container health table
+```
+
+For multi-container workloads, `exec` and `shell` **require** the `<workload>/<container>` form — a bare `<workload>` errors and lists the available containers. `logs` and `health` accept both forms.
+
+Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload — `update` pulls every container's image and `rollback` reverts them all. `status`, `info`, `ps`, `ports`, `stats`, `attach`, `cp` likewise take a bare workload name.
+
+---
+
 ## Lifecycle Commands
 
 ### `create`
@@ -181,7 +199,7 @@ workloadctl info [--json] <workload>
 View workload logs via `journalctl`.
 
 ```
-workloadctl logs [-f] [-n N] [--since TIME] <workload> [extra journalctl args]
+workloadctl logs [-f] [-n N] [--since TIME] <workload>[/<container>] [extra journalctl args]
 ```
 
 | Option | Description |
@@ -224,7 +242,7 @@ workloadctl stats [--json] [-f] [<workload>]
 Check the health status of a workload container.
 
 ```
-workloadctl health [--json] <workload>
+workloadctl health [--json] <workload>[/<container>]
 ```
 
 ### `images`
@@ -256,22 +274,27 @@ workloadctl uid-map [--json] <workload>
 Open an interactive shell inside the running workload container.
 
 ```
-sudo workloadctl shell <workload>
+sudo workloadctl shell <workload>[/<container>]
 ```
 
 If the workload config defines `CONTAINER_USER` or `CONTAINER_UID` in `[container.environment]`, the shell runs as that user in their home directory. Otherwise it enters as root.
+
+For a multi-container workload, the `/<container>` suffix is required.
 
 ### `exec`
 
 Execute a command inside the running workload container.
 
 ```
-workloadctl exec <workload> <command> [args...]
+workloadctl exec <workload>[/<container>] <command> [args...]
 ```
 
-**Example:**
+For a multi-container workload, the `/<container>` suffix is required.
+
+**Examples:**
 ```bash
 workloadctl exec webserver nginx -t
+workloadctl exec myapp/db psql -U app
 ```
 
 ### `attach`

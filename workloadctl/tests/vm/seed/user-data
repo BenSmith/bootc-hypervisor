@@ -1,0 +1,17 @@
+#cloud-config
+# Provisioning for the throwaway workloadctl test VM.
+# __SSH_PUBKEY__ is substituted by vm.sh with the generated run/id_vm key.
+hostname: workloadctl-test
+users:
+  - name: ben
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    ssh_authorized_keys:
+      - __SSH_PUBKEY__
+ssh_pwauth: true
+chpasswd:
+  expire: false
+  users:
+    - {name: ben, password: workloadctl, type: text}

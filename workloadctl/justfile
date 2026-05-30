@@ -50,3 +50,25 @@ rpm-install: rpm-build
 # Remove old build artifacts
 rpm-clean:
   rm -rf rpmbuild
+
+# --- Manual test VM (throwaway Fedora VM for multi-container validation) ---
+
+# Boot the test VM (downloads the Fedora cloud image on first run)
+vm-up:
+  tests/vm/vm.sh up
+
+# Build the RPM and install it + test workloads into the running VM
+vm-deploy:
+  tests/vm/vm.sh deploy
+
+# SSH into the test VM (optionally run a command: just vm-ssh 'workloadctl list')
+vm-ssh *cmd:
+  tests/vm/vm.sh ssh {{cmd}}
+
+# Power off the test VM and drop the per-boot overlay
+vm-down:
+  tests/vm/vm.sh down
+
+# Show whether the test VM is running
+vm-status:
+  tests/vm/vm.sh status

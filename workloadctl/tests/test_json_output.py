@@ -25,6 +25,9 @@ _SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'bin', 'workloadctl')
 _loader = importlib.machinery.SourceFileLoader('workloadctl', _SCRIPT)
 _spec = importlib.util.spec_from_loader('workloadctl', _loader, origin=_SCRIPT)
 wctl = importlib.util.module_from_spec(_spec)
+# The script resolves its lib/ dir relative to __file__; module_from_spec does
+# not set it when origin is passed explicitly, so set it before exec.
+wctl.__file__ = _SCRIPT
 _spec.loader.exec_module(wctl)
 
 # ── shared helpers ────────────────────────────────────────────────────────────

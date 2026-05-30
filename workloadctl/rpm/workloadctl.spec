@@ -74,6 +74,9 @@ install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
 install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
     %{buildroot}%{_docdir}/workloadctl/workloads.md
 
+install -Dpm 0644 %{_sourcedir}/docs/schema-reference.toml \
+    %{buildroot}%{_docdir}/workloadctl/schema-reference.toml
+
 install -dm 0755 %{buildroot}%{_datadir}/workloadctl
 cp -a %{_sourcedir}/containers %{buildroot}%{_datadir}/workloadctl/containers
 find %{buildroot}%{_datadir}/workloadctl/containers -name '*.sh' -exec chmod 0755 {} \;

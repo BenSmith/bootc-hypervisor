@@ -18,7 +18,20 @@ import sys
 import tomllib
 from pathlib import Path
 
-sys.path.insert(0, '/usr/libexec/workloadctl')
+# --- workloadctl lib bootstrap ---------------------------------------------
+# Keep this block byte-identical across bin/workloadctl, generators/workload-
+# generate, and libexec/workload-{ensure-user,write-env,exporter}. Locates
+# workload_lib.py (and its sibling podman.py) in: this script's own dir
+# (installed libexec scripts), <repo>/lib (dev checkout), or
+# /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match wins;
+# insert(0) keeps it ahead of any PyPI package of the same name. True
+# centralization needs a packaging change (sitelib install or .pth file).
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+# --- end bootstrap ---------------------------------------------------------
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
 )
