@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # HTTPS registry fronted by Caddy on zamd (zot backend on :5050).
+  # HTTPS registry fronted by Caddy (zot backend on :5050).
   # Caddy's internal CA is trusted on the runner VM via cloud-init.
   REGISTRY: registry.local
 

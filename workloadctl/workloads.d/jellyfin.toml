@@ -44,7 +44,7 @@
 #     user, so /config and /cache stay writable without granting real root.
 #   - /media is mounted read-only — Jellyfin never modifies your library.
 #   - To serve from the local registry instead of Docker Hub, retag the image
-#     into zot (e.g. zamd:5050/jellyfin/jellyfin) and adjust [container].
+#     into zot (e.g. registry.local/jellyfin/jellyfin) and adjust [container].
 #
 # After editing this file, apply changes with:
 #   sudo workloadctl recreate jellyfin
