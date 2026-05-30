@@ -66,7 +66,7 @@ WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 # TODO: break this file into smaller units, perhaps per-command.
 # TODO: Consider whether it's useful to make HTTP API, which would need sudo to be useful for anything other
 #  than certain read-only options
-# TODO: There's a lot of non-optional print statemens here, consider making that optional or more flexible
+# TODO: There's a lot of non-optional print statements here, consider making that optional or more flexible
 
 def parse_workload_ref(ref: str) -> tuple[str, str | None]:
     """Parse 'workload[/container]' into (workload, container_or_None)."""
