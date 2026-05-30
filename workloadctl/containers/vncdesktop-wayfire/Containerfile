@@ -526,11 +526,20 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
     ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
     ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-resolved.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-resolved.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
     systemctl enable wayfire wayfire-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir && \
     chmod +x /usr/local/bin/container-bootstrap
+
+# --- DNS fix ---
+# Mask systemd-resolved (host networking means the host's resolver handles DNS;
+# a second resolved inside the container races on 127.0.0.53 and loses).
+# single-request serialises A/AAAA queries so an unreachable IPv6 upstream
+# can't stall every lookup for 15 s.
+RUN printf 'nameserver 127.0.0.53\noptions single-request ndots:1\n' > /etc/resolv.conf
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]
