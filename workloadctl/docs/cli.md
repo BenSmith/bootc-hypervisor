@@ -24,7 +24,7 @@ workloadctl health myapp           # per-container health table
 
 For multi-container workloads, `exec` and `shell` **require** the `<workload>/<container>` form — a bare `<workload>` errors and lists the available containers. `logs` and `health` accept both forms.
 
-Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload — `update` pulls every container's image and `rollback` reverts them all. `status`, `info`, `ps`, `ports`, `stats`, `attach`, `cp` likewise take a bare workload name.
+Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `ps`, `ports`, `stats`, `attach`, `cp` likewise take a bare workload name.
 
 ---
 
@@ -103,29 +103,41 @@ sudo workloadctl disable [--purge] <workload>
 
 ### `reboot`
 
-Soft-reboot a systemd container: re-executes systemd (PID 1) and restarts all services inside the container without destroying the overlay filesystem. Useful for picking up config changes made inside the container.
+Soft-reboot a workload: re-executes systemd (PID 1) and restarts all services inside the guest without destroying its disk. Useful for picking up config changes made inside the workload.
 
 ```
 sudo workloadctl reboot <workload>
 ```
 
-Only works with systemd containers (`container.systemd` set). Requires systemd 254+ inside the container.
+**Container workloads:** runs `systemctl soft-reboot` in the container (overlay preserved). Only works with systemd containers (`container.systemd` set).
+
+**VM workloads:** runs the same `systemctl soft-reboot` inside the guest over SSH (the disk is preserved). Requires the VM to be reachable (see `exec`/`shell` IP resolution).
+
+Requires systemd 254+ inside the guest.
 
 ---
 
 ### `recreate`
 
-Recreate a workload container from its image. This **destroys the overlay** — any changes made inside the container are lost.
+Apply a TOML edit (or rebuild a workload). This re-runs the per-workload unit generator, reloads systemd, and restarts the service.
 
 ```
 sudo workloadctl recreate <workload>
 ```
 
+**Container workloads:** this **destroys the container overlay**, so any state written inside the container is lost.
+
+**VM workloads:** this also restarts the setup oneshot (`workload-<name>-setup.service`) so the cloud-init seed is re-rendered from the current TOML — `[vm.cloud_init].template_vars`, volumes, etc. — before QEMU reboots onto the fresh ISO. The system disk and data disk are preserved. (Restarting only the main VM service would **not** rebuild the seed, because the setup oneshot is `RemainAfterExit=yes` and doesn't re-run on a plain restart.)
+
+Use this whenever you change a workload's TOML and want the change to take effect. A plain `systemctl daemon-reload && systemctl restart workload-NAME.service` is **not** equivalent — daemon-reload only re-runs the systemd shell-generator (which emits a oneshot that won't fire until next boot), so the unit file content keeps its previous values. Inlined fields like `[container.environment]`, `[security.extra_groups]`, resource limits, and image references all need `recreate` to take effect.
+
+Values that flow through `EnvironmentFile=` (`XDG_RUNTIME_DIR`, `HOST_IP`, decrypted `${SECRET:...}` env vars) are re-read on each service start, so for those a plain `systemctl restart` is sufficient.
+
 ---
 
 ### `update`
 
-Pull the latest image and restart the workload. After restarting, monitors health checks (or service liveness for workloads without health checks) and automatically rolls back on failure.
+Pull the latest image and restart the workload.
 
 ```
 sudo workloadctl update [--force] [--all] [<workload>]
@@ -134,21 +146,29 @@ sudo workloadctl update [--force] [--all] [<workload>]
 | Option | Description |
 |---|---|
 | `--force` | Restart even if the image hasn't changed |
-| `--all` | Update all enabled workloads (skips `pull=never`) |
+| `--all` | Update all enabled workloads (skips `pull=never` containers) |
 
-With `--all`, all workloads are pulled and restarted first, then verified in a single wait period. Workloads that fail verification are automatically rolled back.
+**Container workloads:** Pulls the latest image, restarts, then monitors health checks (or service liveness) and automatically rolls back on failure. With `--all`, all workloads are pulled and restarted first, then verified in a single wait period.
+
+**VM workloads:** Rebuilds `system.qcow2` from the configured image source, rotating the old disk to `system.qcow2.gen-N` for rollback. The VM is restarted after the new disk is ready. `--force` has no effect on VM workloads (disk is always rebuilt). `--all` includes VM workloads; a VM whose rebuild or restart fails is reported in the summary and makes the command exit nonzero (other workloads still run).
+
+For `cloud_image_url`, the downloaded image is cached at `.image-cache/<filename>` and keyed by `cloud_image_checksum`. `update` only re-downloads when the cached file fails its checksum or is missing — to pull a newer upstream image, update both `cloud_image_url` and `cloud_image_checksum` in the config first.
+
+> **No auto-rollback for VMs.** Unlike container updates, a VM update does not verify guest health after restart and does not auto-rollback on failure. If the new disk fails to boot, restore the previous generation manually with `sudo workloadctl rollback <name>`.
 
 ---
 
 ### `rollback`
 
-Roll back a workload to its previous image (saved during the last `update`).
+Roll back a workload to its previous image or disk generation.
 
 ```
 sudo workloadctl rollback <workload>
 ```
 
-The rollback image is tagged during `update` as `localhost/workload-rollback/<name>:latest`. If no rollback image exists, the command exits with an error.
+**Container workloads:** Restores the image saved during the last `update` (tagged as `localhost/workload-rollback/<name>:latest`) and restarts the service. Exits with an error if no rollback image exists.
+
+**VM workloads:** Restores the latest `system.qcow2.gen-N` saved during the last `update` and restarts the VM. `vm.rollback_keep` (default 2) is the number of *older* generations retained beyond the one created by the current update, so `rollback_keep + 1` generations are kept in total (default: 3). Exits with an error if no generation exists.
 
 ---
 
@@ -271,30 +291,33 @@ workloadctl uid-map [--json] <workload>
 
 ### `shell`
 
-Open an interactive shell inside the running workload container.
+Open an interactive shell inside the running workload.
 
 ```
-sudo workloadctl shell <workload>[/<container>]
+sudo workloadctl shell <workload>[/<container>] [--console]
 ```
 
-If the workload config defines `CONTAINER_USER` or `CONTAINER_UID` in `[container.environment]`, the shell runs as that user in their home directory. Otherwise it enters as root.
+**Container workloads:** Enters the running container. If `CONTAINER_USER` or `CONTAINER_UID` is set in `[container.environment]`, the shell runs as that user; otherwise it enters as root. For multi-container workloads, the `/<container>` suffix is required.
 
-For a multi-container workload, the `/<container>` suffix is required.
+**VM workloads:** Connects over SSH by default (same path as `exec`), so the guest tty inherits the host terminal's window size and signal handling. Falls back to the QEMU serial console via `socat` if the VM has no IP yet or SSH can't connect — press `Ctrl+]` to detach from the console. Pass `--console` to skip the SSH attempt and go straight to the serial console, which is the right tool when the VM is broken enough that the network is unreachable.
 
 ### `exec`
 
-Execute a command inside the running workload container.
+Execute a command inside the running workload.
 
 ```
 workloadctl exec <workload>[/<container>] <command> [args...]
 ```
 
-For a multi-container workload, the `/<container>` suffix is required.
+**Container workloads:** Runs the command inside the container. For multi-container workloads, the `/<container>` suffix is required.
+
+**VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/.ssh/id_ed25519`. The guest IP is resolved from the DHCP lease file. The guest user defaults to `vm.user` from the workload config (or `root`).
 
 **Examples:**
 ```bash
 workloadctl exec webserver nginx -t
 workloadctl exec myapp/db psql -U app
+workloadctl exec fedora-vm -- dnf upgrade -y
 ```
 
 ### `attach`

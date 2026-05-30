@@ -1,0 +1,405 @@
+#cloud-config
+# First-boot provisioning for the virtual-forgejo VM.
+#
+# Substitutions are performed by workloadctl (workload-ensure-user) at ISO
+# build time — see docs/workloads.md "Bootstrapping a VM with cloud-init"
+# for the full list of placeholder forms. Magic vars injected here:
+# WORKLOADCTL_SSH_KEY (workload's pubkey) and WORKLOADCTL_WORKLOAD_NAME.
+#
+# No idle-poweroff: Forgejo lives here too, so this VM is always-on.
+
+hostname: ${WORKLOADCTL_WORKLOAD_NAME}
+fqdn: ${FORGEJO_HOSTNAME}
+
+# Console fallback for diagnostics (`workloadctl exec` is the normal path).
+chpasswd:
+  list: |
+    root:dev
+  expire: false
+# Console-only password; SSH password auth disabled (key-based access is the norm).
+ssh_pwauth: false
+
+users:
+  - default
+  - name: fedora
+    groups: [wheel]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${WORKLOADCTL_SSH_KEY}
+
+write_files:
+  # Resolve the forge hostname to this VM itself: Caddy listens on :443/80,
+  # and the runner inside the VM talks to https://${FORGEJO_HOSTNAME} during register.
+  - path: /etc/hosts
+    append: true
+    content: |
+      127.0.0.1   ${FORGEJO_HOSTNAME}
+
+  - path: /etc/forgejo-runner/registration.env
+    permissions: '0600'
+    content: |
+      # ${SECRET?runner-token} resolves to "" if the credstore entry is
+      # absent — the bootstrap script gates registration on REGISTER_RUNNER
+      # being "true" AND the token being non-empty, so a blank value here
+      # is intentional and not an error.
+      RUNNER_TOKEN=${SECRET?runner-token}
+      FORGEJO_URL=${FORGEJO_URL}
+      RUNNER_VERSION=${RUNNER_VERSION}
+      REGISTER_RUNNER=${REGISTER_RUNNER}
+
+  - path: /etc/forgejo-runner/config.yml
+    content: |
+      log:
+        level: info
+        job_level: info
+      runner:
+        file: .runner
+        capacity: 1
+        envs: {}
+        timeout: 3h
+        shutdown_timeout: 3h
+        insecure: false
+        fetch_timeout: 5s
+        fetch_interval: 2s
+        report_interval: 1s
+        labels: []
+      cache:
+        enabled: true
+        dir: ""
+        host: ""
+        port: 0
+        external_server: ""
+      container:
+        network: ""
+        enable_ipv6: false
+        privileged: false
+        options:
+        workdir_parent:
+        valid_volumes: []
+        docker_host: "-"
+        force_pull: false
+        force_rebuild: false
+      host:
+        # Separate from the action cache dir to avoid double-nested path resolution.
+        workdir_parent: /var/lib/forgejo-runner/workspace
+
+  - path: /var/lib/workloads/caddy/Caddyfile
+    content: |
+      {
+          local_certs
+      }
+
+      ${FORGEJO_HOSTNAME} {
+          reverse_proxy 127.0.0.1:3000
+      }
+
+      :80 {
+          respond "no site configured for {host}" 404
+      }
+
+  - path: /var/lib/workloads/forgejo/app.ini
+    content: |
+      APP_NAME = Forgejo
+      RUN_USER = git
+      RUN_MODE = prod
+      WORK_PATH = /var/lib/gitea
+
+      [repository]
+      ROOT = /var/lib/gitea/git/repositories
+
+      [server]
+      APP_DATA_PATH = /var/lib/gitea
+      DOMAIN = ${FORGEJO_HOSTNAME}
+      SSH_DOMAIN = ${FORGEJO_HOSTNAME}
+      HTTP_PORT = 3000
+      ROOT_URL = https://${FORGEJO_HOSTNAME}/
+      DISABLE_SSH = false
+      START_SSH_SERVER = true
+      SSH_PORT = 2222
+      SSH_LISTEN_PORT = 2222
+      BUILTIN_SSH_SERVER_USER = git
+      LFS_START_SERVER = true
+      OFFLINE_MODE = true
+
+      [database]
+      PATH = /var/lib/gitea/data/gitea.db
+      DB_TYPE = sqlite3
+
+      [security]
+      INSTALL_LOCK = false
+
+      [service]
+      DISABLE_REGISTRATION = false
+
+  - path: /usr/local/bin/virtual-forgejo-bootstrap
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      exec >>/var/log/virtual-forgejo-bootstrap.log 2>&1
+
+      # 1. Packages. dnf5 fails the whole transaction on any unknown OR
+      # already-installed package; --skip-* tolerates both.
+      dnf install -y --skip-broken --skip-unavailable \
+        podman skopeo curl jq yq just git rpm-build \
+        python3 policycoreutils-python-utils checkpolicy avahi-tools \
+        qemu-guest-agent nss-mdns nodejs fuse3 \
+        dnf-utils
+
+      # 1a. Pull in any updates published since the cloud image was cut —
+      # primarily for CVE coverage on a long-lived always-on VM. If a new
+      # kernel lands, we reboot at the end of bootstrap so workload services
+      # (enabled below) come up on the patched kernel.
+      dnf upgrade --refresh -y
+
+      # qemu-guest-agent is bound to a virtio-serial channel we don't currently
+      # wire into the qemu cmdline; `--now` would block forever waiting for that
+      # device. Enable without starting so a future channel wiring just works.
+      systemctl enable qemu-guest-agent || true
+      systemctl enable --now systemd-timesyncd || true
+
+      # Enable mDNS resolution so subsequent steps can reach LAN hosts by name.
+      # We split publishing from resolving:
+      #   - Publishing: the containerized avahi workload (--network=host) owns
+      #     UDP/5353 as the sole mDNS responder in the VM netns. It publishes
+      #     the hostname plus any ALIASES configured in avahi.toml.
+      #   - Resolving: systemd-resolved with MulticastDNS=resolve sends mDNS
+      #     queries but does NOT bind 5353 as a responder, so it coexists
+      #     with the containerized avahi-daemon. nss-resolve in nsswitch
+      #     routes .local lookups through it.
+      # The native avahi-daemon would conflict with the container on 5353
+      # and trigger an avahi-publish NULL-name collision bug, so we keep it
+      # masked.
+      mkdir -p /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/10-mdns.conf <<'RESOLVED'
+      [Resolve]
+      MulticastDNS=resolve
+      RESOLVED
+      sed -i 's/^hosts:.*/hosts:      files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+      systemctl mask avahi-daemon.service avahi-daemon.socket || true
+      systemctl enable --now systemd-resolved
+      systemctl restart systemd-resolved
+
+      # 1b. Trust the registry host's Caddy internal CA so CI jobs can push/pull
+      # from registry.local over HTTPS. Fetched over plain HTTP (no prior trust
+      # needed). Skip silently if REGISTRY_CA_URL is empty or unreachable.
+      if [ -n "${REGISTRY_CA_URL}" ]; then
+        for _ in $(seq 1 10); do
+          if curl -fsSL --max-time 5 "${REGISTRY_CA_URL}" \
+              -o /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt 2>/dev/null; then
+            update-ca-trust
+            echo "Registry CA trusted from ${REGISTRY_CA_URL}."
+            break
+          fi
+          sleep 5
+        done
+        if [ ! -f /etc/pki/ca-trust/source/anchors/registry-caddy-root.crt ]; then
+          echo "WARNING: could not fetch registry CA from ${REGISTRY_CA_URL}; registry pushes may fail." \
+            | tee -a /var/log/virtual-forgejo-bootstrap.log
+        fi
+      fi
+
+      # 2. Install workloadctl from the RPM bundled in the cloud-init ISO.
+      # The ISO is labelled CIDATA; mount it, install, unmount.
+      CIDATA_DEV=$(blkid -L CIDATA 2>/dev/null || echo /dev/sr0)
+      CIDATA_MNT=$(mktemp -d)
+      mount -r "$CIDATA_DEV" "$CIDATA_MNT"
+      dnf install -y "$CIDATA_MNT/workloadctl.rpm"
+      umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
+
+      # 3. Sidecar container images for caddy + avahi. The avahi container is
+      # the sole mDNS responder in the VM netns (the native avahi-daemon is
+      # masked above); systemd-resolved handles host-side .local resolution.
+      bash /usr/share/workloadctl/containers/caddy/build.sh
+      bash /usr/share/workloadctl/containers/avahi/build.sh
+
+      # 4. Drop the in-VM workload TOMLs into the locations workloadctl expects.
+      # TOMLs are installed by the RPM under /usr/share/workloadctl/vms/.
+      install -d /etc/workloads.d
+      install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/forgejo.toml /etc/workloads.d/forgejo.toml
+      install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/caddy.toml   /etc/workloads.d/caddy.toml
+      install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/avahi.toml   /etc/workloads.d/avahi.toml
+
+      # Alloy is opt-in: provision it only if the operator has named a
+      # central otel-lgtm host. Substitution happens here (not at ISO build)
+      # because the TOML lives in /usr/share and is installed verbatim by
+      # the RPM. Empty ALLOY_CENTRAL_HOST → no alloy.toml shipped, no enable.
+      if [ -n "${ALLOY_CENTRAL_HOST}" ]; then
+        install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/alloy.toml /etc/workloads.d/alloy.toml
+        sed -i \
+          -e "s|__ALLOY_CENTRAL_HOST__|${ALLOY_CENTRAL_HOST}|g" \
+          -e "s|__ALLOY_HOST_LABEL__|${ALLOY_HOST_LABEL}|g" \
+          -e "s|__ALLOY_ROLE_LABEL__|${ALLOY_ROLE_LABEL}|g" \
+          /etc/workloads.d/alloy.toml
+      fi
+
+      # Caddyfile + app.ini are written by write_files (substituted at ISO build
+      # time), so they're already in place — just ensure the dirs exist for
+      # workloadctl's volume bind-mounts and the data disk mount points.
+      install -d /var/lib/workloads/caddy
+      install -d /var/lib/workloads/forgejo
+
+      # Per-workload data dirs under each workload's home (on the system
+      # disk btrfs for caddy/avahi; on data.qcow2 for forgejo via the
+      # cloud-init mounts entry above). Created here so they exist before
+      # `workloadctl enable` starts the containers. Pre-create
+      # forgejo/data/custom/conf and the empty app.ini target so the
+      # single-file bind mount works — without this, crun tries to mkdir
+      # the mount-point chain at container start as the container's root
+      # (a subuid that doesn't own the parent), and the bind needs the
+      # target file to exist as a regular file before mount() can shadow
+      # it. Ownership/labels get set after `workloadctl enable` creates
+      # the workload users.
+      install -d /var/lib/workloads/caddy/data /var/lib/workloads/caddy/config
+      install -d /var/lib/workloads/forgejo/data/custom/conf
+      : > /var/lib/workloads/forgejo/data/custom/conf/app.ini
+
+      # 5. Allow containers to bind privileged ports (< 1024) so Caddy can
+      # serve :80/:443. Persist via sysctl.d so this survives reboots.
+      echo 'net.ipv4.ip_unprivileged_port_start = 0' \
+        | tee /etc/sysctl.d/50-privileged-ports.conf
+      sysctl -w net.ipv4.ip_unprivileged_port_start=0
+
+      # 6. Enable in dependency order: avahi (mDNS responder, name
+      # announcement), then caddy (TLS terminator), then forgejo (the
+      # upstream). Alloy is independent and gated on the operator naming
+      # a central otel-lgtm host above.
+      workloadctl enable avahi
+      workloadctl enable caddy
+      workloadctl enable forgejo
+      if [ -n "${ALLOY_CENTRAL_HOST}" ]; then
+        workloadctl enable alloy
+      fi
+
+      # Chown the per-workload data subdirs so the rootless services can
+      # write to them. `install -d` above created them as root; the
+      # services run as _wl-caddy/_wl-forgejo. Done after `workloadctl
+      # enable` so the sysusers have been created. For forgejo this also
+      # claims the data.qcow2 root (mounted at .../forgejo/data) which
+      # comes up owned root:root from the fresh mkfs.
+      chown -R _wl-caddy:_wl-caddy     /var/lib/workloads/caddy/data /var/lib/workloads/caddy/config
+      chown -R _wl-forgejo:_wl-forgejo /var/lib/workloads/forgejo/data
+
+      # Relabel forgejo's data dir. Caddy's data dir is on btrfs root
+      # inside the workload's home and inherits container_file_t from the
+      # parent (workloadctl-sysusers labels the workload home), so no
+      # explicit chcon is needed there. Forgejo's data dir is on a fresh
+      # ext4 (data.qcow2) whose root inode is labeled unlabeled_t after
+      # mkfs, so we relabel explicitly. ext4 stores labels per-inode via
+      # the seclabel xattr, so chcon persists.
+      chcon -R -t container_file_t /var/lib/workloads/forgejo/data
+
+      # 7. Trust Caddy's internal CA so the runner verifies ${FORGEJO_HOSTNAME}.
+      # Caddy generates the root on first start; wait up to ~3 minutes.
+      CADDY_ROOT=/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt
+      for i in $(seq 1 90); do
+        if [ -f "$CADDY_ROOT" ]; then
+          install -m 0644 "$CADDY_ROOT" /etc/pki/ca-trust/source/anchors/caddy-root.crt
+          update-ca-trust extract
+          echo "Caddy root CA trusted after $${i} probes."
+          break
+        fi
+        sleep 2
+      done
+      if [ ! -f /etc/pki/ca-trust/source/anchors/caddy-root.crt ]; then
+        echo "WARNING: Caddy root CA not found after 3 minutes; runner TLS verify will fail."
+      fi
+
+      # 8. Install the native forgejo-runner binary + unit unconditionally
+      # — registration is the gated step. Putting the binary on disk now
+      # means an operator who later sets REGISTER_RUNNER=true (or runs
+      # `forgejo-runner register` by hand) doesn't have to re-bootstrap.
+      mkdir -p /var/lib/forgejo-runner
+      curl -fsSL -o /usr/local/bin/forgejo-runner \
+        "https://code.forgejo.org/forgejo/runner/releases/download/v${RUNNER_VERSION}/forgejo-runner-${RUNNER_VERSION}-linux-amd64"
+      chmod +x /usr/local/bin/forgejo-runner
+
+      install -m 0644 \
+        /usr/share/workloadctl/vms/virtual-forgejo/forgejo-runner.service \
+        /etc/systemd/system/forgejo-runner.service
+      systemctl daemon-reload
+
+      # 9. Register + enable the runner, but only if both knobs say so.
+      # Chicken-and-egg: when this VM hosts Forgejo itself, no admin has
+      # logged in yet, so no registration token exists on first boot. We
+      # default REGISTER_RUNNER=false and let the operator opt in after
+      # they've gone through Forgejo's web installer and minted a token.
+      . /etc/forgejo-runner/registration.env
+      # $${RUNNER_TOKEN} escapes the template substitution so the shell
+      # var (sourced from the env file) is what's used at runtime. Keeps
+      # the decrypted token off the world-readable script path and
+      # confined to /etc/forgejo-runner/registration.env (mode 0600).
+      if [ "${REGISTER_RUNNER}" = "true" ] && [ -n "$${RUNNER_TOKEN}" ]; then
+        # Wait for Forgejo's API. The runner token is single-use; a
+        # failure here means re-issuing one.
+        for _ in $(seq 1 60); do
+          if curl -sf "${FORGEJO_URL}/api/healthz" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 5
+        done
+
+        cd /var/lib/forgejo-runner
+        /usr/local/bin/forgejo-runner register \
+          --no-interactive \
+          --instance "${FORGEJO_URL}" \
+          --token "$${RUNNER_TOKEN}" \
+          --name "${WORKLOADCTL_WORKLOAD_NAME}-runner" \
+          --labels native:host
+
+        systemctl enable --now forgejo-runner.service
+      else
+        echo "Skipping forgejo-runner registration (REGISTER_RUNNER=${REGISTER_RUNNER}, token $([ -n "$${RUNNER_TOKEN}" ] && echo present || echo absent))." \
+          | tee /var/log/virtual-forgejo-runner-skipped.log
+      fi
+
+      # 10. Snapshot state for post-mortem.
+      sleep 5
+      workloadctl status > /var/log/virtual-forgejo-status.log 2>&1 || true
+      systemctl list-units 'workload-*' --no-pager > /var/log/virtual-forgejo-units.log 2>&1 || true
+
+      # 11. If the upgrade in step 1a brought in a new kernel (or other
+      # services flagged as needing restart), reboot now so workloads run
+      # on the patched bits. needs-restarting -r exits 1 when reboot is
+      # needed, 0 otherwise.
+      if command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; then
+        systemctl reboot
+      fi
+
+# /dev/vdb is the per-VM data disk (data.qcow2, sized via [vm].data_disk_size
+# in the workload TOML). cloud-init formats it ext4 directly on the raw
+# block device (no partition table) on first boot, then mounts it at
+# /var/lib/workloads/forgejo/data — the forgejo workload's data subdir,
+# so its persistent state (gitea db, repos) survives system disk rebuilds.
+# Caddy and avahi keep their state on the system disk under their own home
+# dirs; only forgejo gets qcow2-backed persistence.
+#
+# We don't lay down a partition table: cloud-init's disk_setup module
+# (on the cloud-init that ships in Fedora 44) fails on a blank disk
+# because its layout-check runs `sfdisk -l -J` which returns non-zero
+# when no table exists, and disk_setup treats that as a hard error
+# instead of "nothing to check, please create one." Raw ext4 on the
+# whole device works fine for our purposes.
+fs_setup:
+  - device: /dev/vdb
+    filesystem: ext4
+    label: workloaddata
+    overwrite: false
+
+mounts:
+  # nofail so local-fs.target doesn't block on the label device on first
+  # boot — cloud-init's fs_setup runs after local-fs.target, so the label
+  # doesn't exist yet on the very first boot. cloud-init's mounts module
+  # runs `mount -a` after fs_setup, so the mount is up before our runcmd
+  # bootstrap. cloud-init also mkdir -p's the mount point (and parents)
+  # before mounting, so /var/lib/workloads/forgejo and its data subdir
+  # are created here even though workloadctl-sysusers hasn't run yet.
+  - [LABEL=workloaddata, /var/lib/workloads/forgejo/data, ext4, "defaults,nofail", 0, 2]
+
+runcmd:
+  - [/usr/local/bin/virtual-forgejo-bootstrap]
+
+package_update: false
+package_upgrade: false
+final_message: "virtual-forgejo cloud-init complete after $$UPTIME seconds"

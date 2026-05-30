@@ -1,0 +1,36 @@
+# In-VM Avahi — announces ${FORGEJO_HOSTNAME} on the LAN. Installed into the
+# guest's /etc/workloads.d/ by the cloud-init bootstrap.
+
+[workload]
+name = "avahi"
+enabled = true
+
+[container]
+image = "localhost/avahi:latest"
+pull = "never"
+
+[container.environment]
+# Publish virtual-forgejo.local on the LAN. "forgejo" alone collides with
+# any pre-existing Forgejo on the network; keep this matched to
+# FORGEJO_HOSTNAME in the parent VM's workload TOML.
+ALIASES = "virtual-forgejo"
+
+[container.health]
+cmd = "avahi-daemon --check"
+interval = "30s"
+timeout = "5s"
+retries = 3
+start_period = "10s"
+on_failure = "kill"
+
+[security]
+userns = "keep-id:uid=0,gid=0"
+
+[network]
+mode = "host"
+
+[resources]
+service_type = "simple"
+memory_max = "64M"
+memory_high = "32M"
+cpu_quota = "50%"

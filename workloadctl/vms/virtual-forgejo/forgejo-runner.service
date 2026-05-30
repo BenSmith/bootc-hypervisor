@@ -1,0 +1,13 @@
+[Unit]
+Description=Forgejo Actions runner (native)
+After=network-online.target workload-forgejo.service workload-caddy.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/var/lib/forgejo-runner
+ExecStart=/usr/local/bin/forgejo-runner daemon --config /etc/forgejo-runner/config.yml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

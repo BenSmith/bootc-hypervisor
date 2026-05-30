@@ -82,6 +82,15 @@ mode = "host"
 ports = ["8080"]
 """
 
+VM_TOML = """\
+[workload]
+name = "test-vm"
+enabled = false
+
+[vm]
+image = "example.com/guest:latest"
+"""
+
 
 class _WorkloadDir:
     """Temp WORKLOAD_DIR with one TOML, WORKLOAD_DIR patched on the module."""
@@ -865,6 +874,41 @@ class TestBackupJson(unittest.TestCase):
         archive = data['backups'][0]['archive']
         self.assertTrue(archive.startswith(out_tmp))
         self.assertIn('test-wl', archive)
+
+    def test_vm_no_stop_single_refused(self):
+        # --no-stop on a VM risks a corrupt live qcow2 → hard refuse, no backup.
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(VM_TOML, 'test-vm'):
+                args = _args(workload='test-vm', json=False, all=False,
+                             output=out_tmp, no_stop=True)
+                mock_backup = MagicMock(return_value=0)
+                with patch.object(wctl, 'require_root'):
+                    with patch.object(wctl, '_backup_one', mock_backup):
+                        with patch('sys.stderr', io.StringIO()):
+                            with self.assertRaises(SystemExit) as cm:
+                                wctl.cmd_backup(args, wctl.WorkloadManager())
+        self.assertEqual(cm.exception.code, 1)
+        mock_backup.assert_not_called()
+
+    def test_vm_no_stop_all_skips_vm_keeps_container(self):
+        # --no-stop --all: skip the VM (with a skipped[] entry) but still back up containers.
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=out_tmp, no_stop=True)
+                mock_backup = MagicMock(return_value=4096)
+                with patch.object(wctl, 'require_root'):
+                    with patch.object(wctl, '_backup_one', mock_backup):
+                        with patch('sys.stderr', io.StringIO()):
+                            data = _capture_json(
+                                lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+
+        backed_up = {b['workload'] for b in data['backups']}
+        self.assertIn('test-wl', backed_up)
+        self.assertNotIn('test-vm', backed_up)
+        self.assertEqual(data.get('skipped'), ['test-vm'])
+        self.assertEqual(mock_backup.call_count, 1)
 
 
 if __name__ == '__main__':

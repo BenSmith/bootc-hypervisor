@@ -21,6 +21,11 @@ Requires:       policycoreutils
 Requires:       policycoreutils-python-utils
 # checkpolicy only compiles the optional per-workload .te policy modules.
 Suggests:       checkpolicy
+# VM workloads require the bridge networking stack and a hypervisor.
+Requires:       dnsmasq
+Requires:       nftables
+Suggests:       qemu-kvm
+Suggests:       virtiofsd
 
 %description
 workloadctl is a declarative workload provisioning system for rootless
@@ -56,6 +61,12 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-write-env \
     %{buildroot}%{_libexecdir}/workloadctl/workload-write-env
 install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-exporter
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-build-disk
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
 
 install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
     %{buildroot}%{_unitdir}/workload-exporter.service
@@ -85,7 +96,27 @@ install -dm 0755 %{buildroot}%{_docdir}/workloadctl/examples
 install -pm 0644 %{_sourcedir}/workloads.d/*.toml \
     %{buildroot}%{_docdir}/workloadctl/examples/
 
+# VM support trees (cloud-init user-data, in-VM workload TOMLs, helper
+# systemd units, etc.). Mirrors the containers/ layout: one subdir per
+# VM workload, installed to /usr/share/workloadctl/vms/<name>/.
+# [vm.cloud_init].user_data_file in the workload TOMLs references files
+# under this path, so it must be a real on-disk location (not docdir).
+install -dm 0755 %{buildroot}%{_datadir}/workloadctl/vms
+cp -a %{_sourcedir}/vms/. %{buildroot}%{_datadir}/workloadctl/vms/
+
 install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
+
+# Bundle the full source tree so workload-ensure-user can rebuild this RPM
+# for inclusion in VM cloud-init ISOs (enables offline in-VM installation).
+install -dm 0755 %{buildroot}%{_datadir}/workloadctl/src
+for d in bin lib libexec generators rpm systemd completions docs containers vms workloads.d; do
+    [ -d %{_sourcedir}/$d ] && \
+        cp -a %{_sourcedir}/$d %{buildroot}%{_datadir}/workloadctl/src/$d || true
+done
+install -pm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
+    %{buildroot}%{_datadir}/workloadctl/src/
+install -pm 0644 %{_sourcedir}/LICENSE \
+    %{buildroot}%{_datadir}/workloadctl/src/
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
@@ -110,6 +141,9 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
 %{_libexecdir}/workloadctl/workload-exporter
+%{_libexecdir}/workloadctl/workload-vm-build-disk
+%{_libexecdir}/workloadctl/workload-vm-notify
+%{_libexecdir}/workloadctl/workload-vm-qmp
 %{_unitdir}/workload-exporter.service
 %{_unitdir}/workloads.slice
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf

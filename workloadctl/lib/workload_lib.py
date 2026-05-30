@@ -6,8 +6,12 @@ workload-ensure-user, and workloadctl.
 Installed to /usr/libexec/workloadctl/workload_lib.py.
 """
 
+import hashlib
+import json
 import os
 import re
+import socket
+import time
 from pathlib import Path
 
 
@@ -41,6 +45,232 @@ GENERATOR_OWNED_DIRECTIVES = frozenset({
     "Restart", "RestartSec",
     "ProtectSystem", "ReadWritePaths", "PrivateTmp",
 })
+
+# --- VM constants ---
+
+# Runtime socket directory for VM workloads: /run/workload-vm/{name}/
+VM_SOCKET_DIR = Path("/run/workload-vm")
+
+# Default bridge for VM workloads.  _workload-br is the workloadctl-managed
+# isolated NAT bridge (auto-provisioned by workload-bridge.service). The name
+# is deliberately distinctive (and reserved) so the always-manage bridge setup
+# won't adopt an unrelated interface; it must stay <=15 chars (Linux IFNAMSIZ).
+# Override to e.g. "br0" to attach VMs directly to a pre-existing LAN bridge.
+VM_BRIDGE_NAME = "_workload-br"
+VM_BRIDGE_SUBNET = "192.168.200.0/24"
+VM_BRIDGE_IP = "192.168.200.1"
+VM_DHCP_RANGE = "192.168.200.100,192.168.200.199,12h"
+# dnsmasq for the bridge runs confined in the SELinux dnsmasq_t domain, which
+# may only write its lease/pid files in dnsmasq-owned, dnsmasq_lease_t-labeled
+# locations. /var/lib/workloads is labeled container_file_t (rootless podman),
+# so dnsmasq_t can neither write nor traverse it — putting the lease there made
+# dnsmasq fail to start on enforcing systems (the default), leaving VMs with no
+# DHCP. /var/lib/dnsmasq ships with the dnsmasq package, already labeled
+# dnsmasq_lease_t, and policy allows dnsmasq_t to create/write files there.
+VM_DHCP_LEASE_FILE = Path("/var/lib/dnsmasq/workload-bridge.leases")
+VM_DHCP_PIDFILE = Path("/var/lib/dnsmasq/workload-bridge.pid")
+
+# OVMF firmware search order (distro paths differ)
+OVMF_CODE_CANDIDATES = [
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+    "/usr/share/OVMF/OVMF_CODE.fd",
+    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+    "/usr/share/ovmf/OVMF.fd",
+]
+OVMF_VARS_CANDIDATES = [
+    "/usr/share/edk2/ovmf/OVMF_VARS.fd",
+    "/usr/share/OVMF/OVMF_VARS.fd",
+    "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
+    "/usr/share/ovmf/OVMF_VARS.fd",
+]
+
+
+# --- Kind routing ---
+
+def infer_workload_kind(config: dict) -> str:
+    """Return 'vm' if the config has a top-level [vm] section, else 'container'."""
+    return "vm" if "vm" in config else "container"
+
+
+# --- VM helpers ---
+
+def vm_mac_address(name: str) -> str:
+    """Derive a stable, locally-administered unicast MAC from the workload name."""
+    h = hashlib.md5(f"wl-vm-{name}".encode()).digest()
+    first = (h[0] & 0xFE) | 0x02  # locally administered, unicast
+    return ":".join(f"{b:02x}" for b in [first, h[1], h[2], h[3], h[4], h[5]])
+
+
+def vm_socket_dir(name: str) -> Path:
+    """Return the runtime socket directory for a VM workload."""
+    return VM_SOCKET_DIR / name
+
+
+def vm_home_dir(name: str) -> Path:
+    return WORKLOADS_BASE / name
+
+
+def find_ovmf_code() -> str | None:
+    """Return the first existing OVMF_CODE path, or None."""
+    for p in OVMF_CODE_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+def find_ovmf_vars() -> str | None:
+    """Return the first existing OVMF_VARS path, or None."""
+    for p in OVMF_VARS_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+def parse_memory_mib(value) -> int:
+    """Parse memory in QEMU notation ("2048", "2048M", "4G") to MiB as int.
+
+    Raises ValueError if the value is not a recognized form. Used by both
+    [vm].memory validation and the systemd unit generator so they agree.
+    """
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    if not s:
+        raise ValueError("empty memory value")
+    suffix = s[-1].upper()
+    if suffix.isdigit():
+        return int(s)
+    n = int(s[:-1])
+    if suffix == "M":
+        return n
+    if suffix == "G":
+        return n * 1024
+    if suffix == "K":
+        # qemu accepts K but it's not useful for VM RAM
+        return max(1, n // 1024)
+    raise ValueError(f"unknown memory unit suffix {suffix!r} in {value!r}")
+
+
+# --- QMP ---
+
+class QMPClient:
+    """Minimal QMP client over QEMU's newline-delimited JSON monitor.
+
+    Single source of truth for the QMP wire protocol — workload-vm-notify,
+    workload-vm-qmp, workload-exporter, and workloadctl all build on this so
+    the connect/retry, capabilities handshake, and async-event draining can't
+    drift between them. Usable as a context manager.
+
+    Note on monitor contention: a `-qmp unix:...,server=on,wait=off` socket
+    serves only one client at a time. The always-on metrics exporter therefore
+    connects to a *separate* QMP monitor (qmp-metrics.sock) so its polling can
+    never block the control monitor (qmp.sock) used for system_powerdown etc.
+    """
+
+    def __init__(self):
+        self._sock = None
+        self._buf = b""
+
+    def connect(self, path, timeout: float = 10.0, recv_timeout: float = 5.0):
+        """Connect to the QMP unix socket, retrying until `timeout` elapses.
+
+        Raises TimeoutError if the socket never becomes available.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(recv_timeout)
+                s.connect(str(path))
+                self._sock = s
+                return
+            except (OSError, ConnectionRefusedError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"QMP socket not ready after {timeout:.0f}s: {path}"
+                    )
+                time.sleep(0.2)
+
+    def _readline(self) -> dict:
+        """Read one newline-delimited JSON object from the socket."""
+        while True:
+            if b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                return json.loads(line.decode())
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("QMP socket closed")
+            self._buf += chunk
+
+    def _send(self, obj: dict):
+        self._sock.sendall((json.dumps(obj) + "\n").encode())
+
+    def negotiate(self):
+        """Read the QMP greeting and switch the monitor into command mode."""
+        self._readline()  # {"QMP": {"version": ..., "capabilities": [...]}}
+        self._send({"execute": "qmp_capabilities"})
+        self._readline()  # {"return": {}}
+
+    def execute(self, command: str, arguments: dict | None = None,
+                max_events: int = 20) -> dict:
+        """Run one QMP command, draining async events until its reply arrives.
+
+        Returns the full reply dict ({"return": ...} or {"error": ...}).
+        Raises ConnectionError if no reply arrives within max_events messages.
+        """
+        cmd = {"execute": command}
+        if arguments:
+            cmd["arguments"] = arguments
+        self._send(cmd)
+        for _ in range(max_events):
+            msg = self._readline()
+            if "return" in msg or "error" in msg:
+                return msg
+        raise ConnectionError(
+            f"no QMP reply for {command!r} after {max_events} messages"
+        )
+
+    def close(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+# --- virtiofs ---
+
+def virtiofs_tag(container_path: str, index: int = 0) -> str:
+    """Derive a virtiofs mount tag (<=36 chars) from a guest mountpoint.
+
+    Single source of truth: the generator, the cloud-init builder, and any
+    runtime helpers must derive tags through this function or they will drift.
+    """
+    tag = container_path.lstrip("/").replace("/", "-") or f"vol{index}"
+    tag = re.sub(r'[^a-zA-Z0-9_-]', '-', tag)
+    return tag[:36]
+
+
+def parse_volume_spec(vol_spec: str) -> tuple[str, str, str]:
+    """Parse a "host:guest[:opts]" volume spec, returning (host, guest, opts).
+
+    A bare token (no ':') is treated as host == guest. opts defaults to "rw".
+    Only the first two ':' delimit fields, so opts may itself contain a colon
+    (e.g. mount options). This is the single source of truth for the grammar;
+    expand_volume_path builds on it.
+    """
+    parts = vol_spec.split(":", 2)
+    host = parts[0]
+    guest = parts[1] if len(parts) > 1 else parts[0]
+    opts = parts[2] if len(parts) > 2 else "rw"
+    return host, guest, opts
 
 
 # --- Naming conventions ---
@@ -136,9 +366,132 @@ def infer_workload_mode(config: dict) -> str:
     return "pod" if "containers" in config else "single"
 
 
+def validate_vm_config(config: dict) -> list[str]:
+    """Validate the [vm] section. Returns a list of error strings."""
+    errors = []
+    vm = config.get("vm", {})
+
+    if "container" in config or "containers" in config:
+        errors.append("[vm] and [container]/[[containers]] are mutually exclusive")
+
+    sources = [bool(vm.get("image")), bool(vm.get("cloud_image_url")), bool(vm.get("local_image"))]
+    if sum(sources) == 0:
+        errors.append(
+            "[vm] requires exactly one image source: "
+            "vm.image (bootc ref), vm.cloud_image_url, or vm.local_image"
+        )
+    elif sum(sources) > 1:
+        errors.append("[vm] must specify exactly one image source; got multiple")
+
+    if vm.get("cloud_image_url") and not vm.get("cloud_image_checksum"):
+        errors.append("[vm].cloud_image_checksum is required when cloud_image_url is set")
+
+    checksum = vm.get("cloud_image_checksum", "")
+    if checksum and not checksum.startswith("sha256:"):
+        errors.append(f"[vm].cloud_image_checksum must start with 'sha256:', got {checksum!r}")
+
+    memory = vm.get("memory", "")
+    if memory:
+        try:
+            m = parse_memory_mib(memory)
+            if m < 256:
+                errors.append(f"[vm].memory must be at least 256 MiB, got {m}")
+        except (ValueError, TypeError):
+            errors.append(
+                f"[vm].memory must be in QEMU notation (e.g. 2048, '2048M', '4G'), got {memory!r}"
+            )
+
+    vcpus = vm.get("vcpus", 1)
+    if not isinstance(vcpus, int) or vcpus < 1:
+        errors.append(f"[vm].vcpus must be a positive integer, got {vcpus!r}")
+
+    rollback_keep = vm.get("rollback_keep", 2)
+    if not isinstance(rollback_keep, int) or rollback_keep < 1:
+        errors.append(f"[vm].rollback_keep must be a positive integer, got {rollback_keep!r}")
+
+    # [vm.network].bridge — defaults to _workload-br (managed NAT bridge); set to e.g.
+    # "br0" to attach to a pre-existing LAN bridge instead.
+    bridge = vm.get("network", {}).get("bridge", VM_BRIDGE_NAME)
+    if not isinstance(bridge, str) or not bridge:
+        errors.append(f"[vm.network].bridge must be a non-empty string, got {bridge!r}")
+    elif not re.match(r"^[a-zA-Z0-9_-]+$", bridge) or len(bridge) > 15:
+        # Linux IFNAMSIZ is 16, max 15 visible chars.
+        errors.append(
+            f"[vm.network].bridge {bridge!r} is not a valid interface name "
+            "(letters/digits/_/-, max 15 chars)"
+        )
+
+    # [vm.cloud_init] — optional override of the seed user-data.
+    ci = vm.get("cloud_init", {})
+    if ci:
+        if not isinstance(ci, dict):
+            errors.append("[vm.cloud_init] must be a table")
+        else:
+            ud = ci.get("user_data_file")
+            if ud is not None and not isinstance(ud, str):
+                errors.append(
+                    f"[vm.cloud_init].user_data_file must be a string path, got {ud!r}"
+                )
+            tv = ci.get("template_vars", {})
+            if not isinstance(tv, dict):
+                errors.append("[vm.cloud_init].template_vars must be a table of strings")
+            else:
+                for k, v in tv.items():
+                    if not isinstance(v, (str, int, float, bool)):
+                        errors.append(
+                            f"[vm.cloud_init].template_vars.{k} must be a scalar, got {type(v).__name__}"
+                        )
+
+    # Disk sizes are passed verbatim to `qemu-img create`/`resize`, which reads
+    # a bare number as *bytes*. Require an explicit unit so a typo like "60"
+    # isn't silently interpreted as a 60-byte disk (failing only at build time).
+    for key in ("system_disk_size", "data_disk_size"):
+        size = vm.get(key)
+        if size is not None and (
+            not isinstance(size, str)
+            or not re.match(r"^\d+(\.\d+)?[KkMmGgTtPp]i?B?$", size)
+        ):
+            errors.append(
+                f"[vm].{key} must be a size with a unit suffix "
+                f"(e.g. '40G', '512M'), got {size!r}"
+            )
+
+    balloon = vm.get("balloon")
+    if balloon is not None and not isinstance(balloon, bool):
+        errors.append(f"[vm].balloon must be a boolean, got {balloon!r}")
+
+    volumes = vm.get("volumes", [])
+    if not isinstance(volumes, list):
+        errors.append(
+            f"[vm].volumes must be an array of 'host:guest[:opts]' strings, "
+            f"got {type(volumes).__name__}"
+        )
+    else:
+        for v in volumes:
+            if not isinstance(v, str):
+                errors.append(f"[vm].volumes entries must be strings, got {v!r}")
+                continue
+            host, guest, _ = parse_volume_spec(v)
+            if not host or not guest:
+                errors.append(
+                    f"[vm].volumes entry {v!r} must have non-empty host and guest "
+                    "paths (format 'host:guest[:opts]')"
+                )
+
+    return errors
+
+
 def validate_workload_config(config: dict) -> list[str]:
     """Run schema-level checks. Returns a list of error strings (empty = OK)."""
     errors = []
+
+    kind = infer_workload_kind(config)
+
+    if kind == "vm":
+        errors.extend(validate_vm_config(config))
+        return errors
+
+    # --- container validation ---
     has_container = "container" in config
     has_containers = "containers" in config
 
@@ -208,15 +561,17 @@ def expand_volume_path(vol_spec: str, home_dir: str) -> str:
     Returns:
         Volume spec with ./ expanded to home directory
     """
-    if ':' not in vol_spec:
-        if vol_spec.startswith('./'):
-            return home_dir + '/' + vol_spec[2:]
-        return vol_spec
-
-    parts = vol_spec.split(':', 2)
-    if parts[0].startswith('./'):
-        parts[0] = home_dir + '/' + parts[0][2:]
-    return ':'.join(parts)
+    host, guest, opts = parse_volume_spec(vol_spec)
+    if host.startswith('./'):
+        host = home_dir + '/' + host[2:]
+    # Preserve the original arity: a bare path or a host:guest spec must not
+    # gain a synthesized opts field.
+    ncolons = vol_spec.count(':')
+    if ncolons == 0:
+        return host
+    if ncolons == 1:
+        return f"{host}:{guest}"
+    return f"{host}:{guest}:{opts}"
 
 
 # --- Environment variables ---
@@ -234,6 +589,75 @@ def validate_env_key(key: str) -> bool:
 
 # Pattern matching ${SECRET:name} references in env var values
 SECRET_PATTERN = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)}')
+
+# Pattern matching ${SECRET?name} — optional variant used by cloud-init
+# templates. Unlike SECRET_PATTERN, an unresolved name substitutes to the
+# empty string (mirrors shell ${VAR?default} semantics) so user-data can
+# include a credential reference that callers opt into without forcing
+# every operator to pre-seed a placeholder credstore entry.
+OPTIONAL_SECRET_PATTERN = re.compile(r'\$\{SECRET\?([a-zA-Z0-9_-]+)}')
+
+# Pattern matching ${VAR} substitutions in cloud-init user-data templates.
+# Deliberately distinct from SECRET_PATTERN so secret refs aren't swept up
+# by the plain template-var pass; the resolver below handles both.
+_TEMPLATE_VAR_PATTERN = re.compile(r'(?<!\$)\$\{([a-zA-Z_][a-zA-Z0-9_]*)}')
+
+
+def substitute_template(
+    text: str,
+    template_vars: dict | None = None,
+    env: dict | None = None,
+    secret_resolver=None,
+) -> str:
+    """Resolve ${VAR}, ${SECRET:name}, and ${SECRET?name} placeholders.
+
+    Resolution order for ${VAR}: template_vars first, then env. Unresolved
+    placeholders raise KeyError so a missing var fails loudly at ISO build
+    time rather than producing a broken guest.
+
+    ${SECRET:name} is delegated to secret_resolver(name) -> str so callers
+    decide where secrets come from (encrypted credstore, raw file, mock for
+    tests). If secret_resolver is None, ${SECRET:...} refs raise KeyError.
+
+    ${SECRET?name} is the *optional* variant: missing credentials (resolver
+    raises FileNotFoundError or KeyError) substitute to the empty string
+    instead of failing. This lets user-data reference a credential that the
+    operator may or may not pre-seed — the rendered shell can check whether
+    the resulting value is non-empty before using it.
+
+    ``$$`` collapses to a literal ``$`` after substitution, matching the
+    convention used by Python's string.Template and shell here-docs.
+    """
+    template_vars = template_vars or {}
+    env = env or {}
+
+    def _var(match):
+        name = match.group(1)
+        if name in template_vars:
+            return str(template_vars[name])
+        if name in env:
+            return env[name]
+        raise KeyError(f"unresolved ${{{name}}} in cloud-init template")
+
+    def _secret(match):
+        name = match.group(1)
+        if secret_resolver is None:
+            raise KeyError(f"${{SECRET:{name}}} present but no resolver provided")
+        return secret_resolver(name)
+
+    def _optional_secret(match):
+        name = match.group(1)
+        if secret_resolver is None:
+            return ""
+        try:
+            return secret_resolver(name)
+        except (FileNotFoundError, KeyError):
+            return ""
+
+    out = OPTIONAL_SECRET_PATTERN.sub(_optional_secret, text)
+    out = SECRET_PATTERN.sub(_secret, out)
+    out = _TEMPLATE_VAR_PATTERN.sub(_var, out)
+    return out.replace("$$", "$")
 
 
 def auto_detect_credentials(config: dict) -> set[str]:

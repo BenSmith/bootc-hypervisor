@@ -2,8 +2,10 @@
 """Unit tests for the shared workload library."""
 
 import os
+import socket
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from workload_lib import (
     workload_home_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,
     validate_workload_config, infer_workload_mode, normalize_containers,
+    parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address,
+    substitute_template, QMPClient,
 )
 
 
@@ -287,6 +291,12 @@ class TestExpandVolumePath(unittest.TestCase):
         result = expand_volume_path("/srv/data", "/home/wl")
         self.assertEqual(result, "/srv/data")
 
+    def test_opts_with_colon_preserved(self):
+        # opts may itself contain a colon; expansion must keep the full opts
+        # field intact (regression: parse used to split unbounded and drop it).
+        result = expand_volume_path("./d:/g:ro:context=x", "/home/wl")
+        self.assertEqual(result, "/home/wl/d:/g:ro:context=x")
+
 
 class TestDq(unittest.TestCase):
     def test_simple(self):
@@ -450,6 +460,387 @@ class TestResolveSecretEnvVars(unittest.TestCase):
         self.assertEqual(resolved, {})
 
 
+class TestParseMemoryMib(unittest.TestCase):
+    def test_int_passthrough(self):
+        self.assertEqual(parse_memory_mib(2048), 2048)
+
+    def test_bare_string(self):
+        self.assertEqual(parse_memory_mib("2048"), 2048)
+
+    def test_m_suffix(self):
+        self.assertEqual(parse_memory_mib("2048M"), 2048)
+
+    def test_g_suffix(self):
+        self.assertEqual(parse_memory_mib("4G"), 4096)
+
+    def test_lowercase_suffix(self):
+        # Suffix matching is case-insensitive (upper() is applied internally).
+        self.assertEqual(parse_memory_mib("2g"), 2048)
+
+    def test_k_suffix_rounds(self):
+        self.assertEqual(parse_memory_mib("2048K"), 2)
+
+    def test_k_suffix_small_value_floors_to_one(self):
+        # Sub-MiB values still produce a positive integer so the QEMU memfd
+        # backend doesn't get "size=0M".
+        self.assertEqual(parse_memory_mib("100K"), 1)
+
+    def test_unknown_suffix_raises(self):
+        with self.assertRaises(ValueError):
+            parse_memory_mib("2048T")
+
+    def test_empty_string_raises(self):
+        with self.assertRaises(ValueError):
+            parse_memory_mib("")
+
+
+class TestVirtiofsTag(unittest.TestCase):
+    def test_strips_leading_slash_and_replaces_inner(self):
+        self.assertEqual(virtiofs_tag("/mnt/data"), "mnt-data")
+
+    def test_empty_path_falls_back_to_index(self):
+        self.assertEqual(virtiofs_tag("", 7), "vol7")
+        self.assertEqual(virtiofs_tag("/", 0), "vol0")
+
+    def test_invalid_chars_replaced(self):
+        self.assertEqual(virtiofs_tag("/has spaces/and$weird"), "has-spaces-and-weird")
+
+    def test_clipped_to_36_chars(self):
+        long_path = "/" + "a" * 50
+        tag = virtiofs_tag(long_path)
+        self.assertEqual(len(tag), 36)
+
+    def test_stable_across_call_sites(self):
+        # The generator and the cloud-init builder must derive identical tags
+        # from the same guest path or virtiofs mounts won't match.
+        for guest in ("/data", "/var/lib/x", "/srv/share-one"):
+            self.assertEqual(virtiofs_tag(guest), virtiofs_tag(guest, 99))
+
+
+class TestParseVolumeSpec(unittest.TestCase):
+    def test_single_path_defaults_both_sides(self):
+        host, guest, opts = parse_volume_spec("/data")
+        self.assertEqual((host, guest, opts), ("/data", "/data", "rw"))
+
+    def test_host_and_guest(self):
+        host, guest, opts = parse_volume_spec("/host:/guest")
+        self.assertEqual((host, guest, opts), ("/host", "/guest", "rw"))
+
+    def test_host_guest_opts(self):
+        host, guest, opts = parse_volume_spec("/host:/guest:ro")
+        self.assertEqual((host, guest, opts), ("/host", "/guest", "ro"))
+
+    def test_relative_host_path_preserved(self):
+        # ./ expansion is the caller's responsibility; the parser leaves it
+        # alone so callers can decide what to root it against.
+        host, guest, _ = parse_volume_spec("./local:/g")
+        self.assertEqual(host, "./local")
+        self.assertEqual(guest, "/g")
+
+    def test_opts_may_contain_colon(self):
+        # Only the first two ':' delimit fields, so a colon inside opts stays.
+        host, guest, opts = parse_volume_spec("/host:/guest:ro:context=foo")
+        self.assertEqual((host, guest, opts), ("/host", "/guest", "ro:context=foo"))
+
+
+class TestVmMacAddress(unittest.TestCase):
+    def test_locally_administered_unicast(self):
+        # Bit 1 of the first byte = locally administered; bit 0 = unicast (0).
+        mac = vm_mac_address("fedora-vm")
+        first = int(mac.split(":")[0], 16)
+        self.assertEqual(first & 0x03, 0x02)
+
+    def test_stable_for_same_name(self):
+        self.assertEqual(vm_mac_address("a"), vm_mac_address("a"))
+
+    def test_differs_by_name(self):
+        self.assertNotEqual(vm_mac_address("a"), vm_mac_address("b"))
+
+
+class TestValidateVmConfig(unittest.TestCase):
+    def _base(self, **vm_overrides):
+        vm = {
+            "vcpus": 2,
+            "memory": "2048M",
+            "cloud_image_url": "https://example.com/x.qcow2",
+            "cloud_image_checksum": "sha256:" + "a" * 64,
+        }
+        vm.update(vm_overrides)
+        return {"workload": {"name": "fedora-vm"}, "vm": vm}
+
+    def test_minimal_valid(self):
+        self.assertEqual(validate_workload_config(self._base()), [])
+
+    def test_shipped_example_validates(self):
+        # Mirrors docs/examples/example-vm-fedora.toml so a regression in the
+        # validator that rejects the example will fail loudly here.
+        cfg = {
+            "workload": {"name": "fedora-vm"},
+            "vm": {
+                "vcpus": 2,
+                "memory": "2048M",
+                "cloud_image_url": "https://example.com/Fedora.qcow2",
+                "cloud_image_checksum": "sha256:" + "d" * 64,
+                "data_disk_size": "50G",
+                "user": "fedora",
+            },
+        }
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_memory_in_qemu_notation_accepted(self):
+        for mem in ("2048", "2048M", "4G", 2048):
+            cfg = self._base(memory=mem)
+            self.assertEqual(validate_workload_config(cfg), [],
+                             msg=f"memory={mem!r} should validate")
+
+    def test_memory_too_small_rejected(self):
+        errs = validate_workload_config(self._base(memory="64M"))
+        self.assertTrue(any("at least 256" in e for e in errs), errs)
+
+    def test_memory_garbage_rejected(self):
+        errs = validate_workload_config(self._base(memory="lots"))
+        self.assertTrue(any("QEMU notation" in e for e in errs), errs)
+
+    def test_mutually_exclusive_with_container(self):
+        cfg = self._base()
+        cfg["container"] = {"image": "nginx"}
+        errs = validate_workload_config(cfg)
+        self.assertTrue(any("mutually exclusive" in e for e in errs), errs)
+
+    def test_requires_an_image_source(self):
+        cfg = {"workload": {"name": "x"}, "vm": {"vcpus": 1, "memory": "512M"}}
+        errs = validate_workload_config(cfg)
+        self.assertTrue(any("exactly one image source" in e for e in errs), errs)
+
+    def test_rejects_multiple_image_sources(self):
+        cfg = self._base(local_image="/path/x.qcow2")
+        errs = validate_workload_config(cfg)
+        self.assertTrue(any("exactly one image source" in e for e in errs), errs)
+
+    def test_cloud_image_url_requires_checksum(self):
+        cfg = self._base()
+        del cfg["vm"]["cloud_image_checksum"]
+        errs = validate_workload_config(cfg)
+        self.assertTrue(any("cloud_image_checksum is required" in e for e in errs), errs)
+
+    def test_checksum_must_be_sha256(self):
+        errs = validate_workload_config(self._base(cloud_image_checksum="md5:abcd"))
+        self.assertTrue(any("sha256:" in e for e in errs), errs)
+
+    def test_vcpus_must_be_positive_int(self):
+        for bad in (0, -1, 1.5, "two"):
+            errs = validate_workload_config(self._base(vcpus=bad))
+            self.assertTrue(any("vcpus" in e for e in errs),
+                            msg=f"vcpus={bad!r} should be rejected, got {errs}")
+
+    def test_rollback_keep_must_be_positive_int(self):
+        for bad in (0, -1, "two"):
+            errs = validate_workload_config(self._base(rollback_keep=bad))
+            self.assertTrue(any("rollback_keep" in e for e in errs),
+                            msg=f"rollback_keep={bad!r} should be rejected")
+
+    def test_local_image_alone_is_valid(self):
+        cfg = {
+            "workload": {"name": "x"},
+            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/i.qcow2"},
+        }
+        self.assertEqual(validate_workload_config(cfg), [])
+
+
+class TestVmNetworkBridge(unittest.TestCase):
+    def _base(self, **network):
+        return {
+            "workload": {"name": "fedora-vm"},
+            "vm": {
+                "vcpus": 1,
+                "memory": "512M",
+                "local_image": "/srv/x.qcow2",
+                "network": network,
+            },
+        }
+
+    def test_default_bridge_when_section_omitted(self):
+        cfg = {
+            "workload": {"name": "fedora-vm"},
+            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/x.qcow2"},
+        }
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_custom_bridge_accepted(self):
+        self.assertEqual(validate_workload_config(self._base(bridge="br0")), [])
+
+    def test_bridge_must_be_non_empty_string(self):
+        for bad in ("", None, 42):
+            errs = validate_workload_config(self._base(bridge=bad))
+            self.assertTrue(any("bridge" in e for e in errs),
+                            msg=f"bridge={bad!r} should be rejected, got {errs}")
+
+    def test_bridge_too_long_rejected(self):
+        errs = validate_workload_config(self._base(bridge="x" * 16))
+        self.assertTrue(any("valid interface name" in e for e in errs), errs)
+
+    def test_bridge_invalid_charset_rejected(self):
+        for bad in ("br0!", "br 0", "br0/x", "br0.lan"):
+            errs = validate_workload_config(self._base(bridge=bad))
+            self.assertTrue(any("valid interface name" in e for e in errs),
+                            msg=f"bridge={bad!r} should be rejected")
+
+
+class TestVmCloudInit(unittest.TestCase):
+    def _base(self, **cloud_init):
+        return {
+            "workload": {"name": "fedora-vm"},
+            "vm": {
+                "vcpus": 1,
+                "memory": "512M",
+                "local_image": "/srv/x.qcow2",
+                "cloud_init": cloud_init,
+            },
+        }
+
+    def test_empty_cloud_init_accepted(self):
+        self.assertEqual(validate_workload_config(self._base()), [])
+
+    def test_user_data_file_string_accepted(self):
+        cfg = self._base(user_data_file="./cloud-init/user-data")
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_user_data_file_non_string_rejected(self):
+        errs = validate_workload_config(self._base(user_data_file=42))
+        self.assertTrue(any("user_data_file" in e for e in errs), errs)
+
+    def test_template_vars_must_be_table(self):
+        errs = validate_workload_config(self._base(template_vars="not a table"))
+        self.assertTrue(any("template_vars must be a table" in e for e in errs), errs)
+
+    def test_template_vars_scalars_accepted(self):
+        cfg = self._base(template_vars={"REPO": "x", "PORT": 8080, "DEBUG": True, "RATIO": 1.5})
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_template_vars_non_scalar_rejected(self):
+        errs = validate_workload_config(self._base(template_vars={"NESTED": {"a": 1}}))
+        self.assertTrue(any("must be a scalar" in e for e in errs), errs)
+
+    def test_template_vars_list_rejected(self):
+        errs = validate_workload_config(self._base(template_vars={"LIST": [1, 2, 3]}))
+        self.assertTrue(any("must be a scalar" in e for e in errs), errs)
+
+
+class TestSubstituteTemplate(unittest.TestCase):
+    def test_substitutes_template_var(self):
+        out = substitute_template("hello ${NAME}", template_vars={"NAME": "world"})
+        self.assertEqual(out, "hello world")
+
+    def test_template_var_coerces_to_string(self):
+        out = substitute_template("port=${PORT}", template_vars={"PORT": 8080})
+        self.assertEqual(out, "port=8080")
+
+    def test_template_vars_take_precedence_over_env(self):
+        out = substitute_template(
+            "${X}",
+            template_vars={"X": "from-template"},
+            env={"X": "from-env"},
+        )
+        self.assertEqual(out, "from-template")
+
+    def test_falls_back_to_env(self):
+        out = substitute_template("${HOME}", env={"HOME": "/srv"})
+        self.assertEqual(out, "/srv")
+
+    def test_missing_var_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            substitute_template("hi ${MISSING}")
+
+    def test_secret_uses_resolver(self):
+        seen = []
+        def resolver(name):
+            seen.append(name)
+            return "s3cr3t"
+        out = substitute_template("token=${SECRET:api-token}", secret_resolver=resolver)
+        self.assertEqual(out, "token=s3cr3t")
+        self.assertEqual(seen, ["api-token"])
+
+    def test_secret_without_resolver_raises(self):
+        with self.assertRaises(KeyError):
+            substitute_template("token=${SECRET:foo}")
+
+    def test_dollar_dollar_collapses(self):
+        # Escape mechanism so user-data can contain a literal `${shellvar}`.
+        out = substitute_template("price is $$5", template_vars={})
+        self.assertEqual(out, "price is $5")
+
+    def test_dollar_dollar_escapes_var_pattern(self):
+        # `$${HOME}` should not be substituted; it becomes the literal `${HOME}`.
+        out = substitute_template("$${HOME}", env={"HOME": "/nope"})
+        self.assertEqual(out, "${HOME}")
+
+    def test_multiple_vars_and_secrets(self):
+        out = substitute_template(
+            "user=${USER} pw=${SECRET:pw} home=${HOME}",
+            template_vars={"USER": "alice"},
+            env={"HOME": "/h/alice"},
+            secret_resolver=lambda n: "hunter2",
+        )
+        self.assertEqual(out, "user=alice pw=hunter2 home=/h/alice")
+
+    def test_empty_input_passthrough(self):
+        self.assertEqual(substitute_template(""), "")
+
+    def test_no_placeholders_passthrough(self):
+        self.assertEqual(substitute_template("plain text"), "plain text")
+
+    def test_optional_secret_resolved(self):
+        out = substitute_template(
+            "tok='${SECRET?api}'",
+            secret_resolver=lambda n: "REALVALUE",
+        )
+        self.assertEqual(out, "tok='REALVALUE'")
+
+    def test_optional_secret_missing_returns_empty(self):
+        def resolver(name):
+            raise FileNotFoundError(name)
+        out = substitute_template(
+            "tok='${SECRET?api}'",
+            secret_resolver=resolver,
+        )
+        self.assertEqual(out, "tok=''")
+
+    def test_optional_secret_missing_keyerror_returns_empty(self):
+        def resolver(name):
+            raise KeyError(name)
+        out = substitute_template(
+            "tok='${SECRET?api}'",
+            secret_resolver=resolver,
+        )
+        self.assertEqual(out, "tok=''")
+
+    def test_optional_secret_without_resolver_returns_empty(self):
+        # No resolver configured at all — the optional form must NOT raise
+        # (that's the whole point); it just substitutes empty.
+        out = substitute_template("tok='${SECRET?api}'")
+        self.assertEqual(out, "tok=''")
+
+    def test_optional_and_required_secret_coexist(self):
+        seen = []
+        def resolver(name):
+            seen.append(name)
+            if name == "missing":
+                raise FileNotFoundError(name)
+            return f"VAL-{name}"
+        out = substitute_template(
+            "req=${SECRET:present} opt=${SECRET?missing}",
+            secret_resolver=resolver,
+        )
+        self.assertEqual(out, "req=VAL-present opt=")
+        self.assertEqual(sorted(seen), ["missing", "present"])
+
+    def test_optional_secret_does_not_match_required_form(self):
+        # ${SECRET:name} must still go through the required path even when
+        # ${SECRET?...} is also present in the same template.
+        with self.assertRaises(KeyError):
+            substitute_template("req=${SECRET:x} opt=${SECRET?y}")
+
+
 class TestConstants(unittest.TestCase):
     def test_username_prefix(self):
         self.assertEqual(USERNAME_PREFIX, "_wl-")
@@ -461,6 +852,59 @@ class TestConstants(unittest.TestCase):
     def test_generator_owned_directives_is_frozenset(self):
         self.assertIsInstance(GENERATOR_OWNED_DIRECTIVES, frozenset)
         self.assertIn("ExecStart", GENERATOR_OWNED_DIRECTIVES)
+
+
+class TestQMPClient(unittest.TestCase):
+    """Exercise the shared QMP client against a fake QEMU monitor socket."""
+
+    def _serve_once(self, sock_path, reply_frames):
+        """Accept one client: send greeting, ack qmp_capabilities, then send
+        `reply_frames` (raw bytes) after reading the command. Returns the thread.
+        """
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock_path))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+
+        def serve():
+            conn, _ = srv.accept()
+            with conn:
+                conn.sendall(b'{"QMP": {"version": {}, "capabilities": []}}\n')
+                conn.recv(4096)  # qmp_capabilities
+                conn.sendall(b'{"return": {}}\n')
+                conn.recv(4096)  # the command
+                conn.sendall(reply_frames)
+                conn.recv(4096)  # wait for client to close
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        return t
+
+    def test_execute_skips_async_events_before_reply(self):
+        # A QMP async event arriving before the command's reply must be drained,
+        # not mistaken for the reply (the property all four call sites rely on).
+        tmp = Path(tempfile.mkdtemp())
+        sock_path = tmp / "qmp.sock"
+        self._serve_once(
+            sock_path,
+            b'{"event": "RESUME"}\n'
+            b'{"return": {"status": "running", "running": true}}\n',
+        )
+        qmp = QMPClient()
+        try:
+            qmp.connect(sock_path, timeout=2.0, recv_timeout=2.0)
+            qmp.negotiate()
+            reply = qmp.execute("query-status")
+        finally:
+            qmp.close()
+        self.assertEqual(reply["return"]["status"], "running")
+        self.assertTrue(reply["return"]["running"])
+
+    def test_connect_times_out_when_socket_absent(self):
+        missing = Path(tempfile.mkdtemp()) / "nope.sock"
+        qmp = QMPClient()
+        with self.assertRaises(TimeoutError):
+            qmp.connect(missing, timeout=0.3, recv_timeout=0.3)
 
 
 if __name__ == "__main__":

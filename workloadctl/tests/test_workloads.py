@@ -100,8 +100,10 @@ class TestWorkloadConfigParsing(unittest.TestCase):
                                  f"{filename}: name '{name}' != filename stem '{expected}'")
 
     def test_all_configs_have_image(self):
-        """Every config has [container].image."""
+        """Every container config has [container].image (VM workloads exempt)."""
         for filename, config in ALL_WORKLOADS:
+            if "vm" in config:
+                continue  # VM workloads have no container image
             with self.subTest(config=filename):
                 image = config.get("container", {}).get("image", "")
                 self.assertTrue(image, f"{filename} missing container.image")
@@ -277,7 +279,11 @@ class TestWorkloadGeneration(unittest.TestCase):
     def test_image_in_exec_start(self):
         """The container image appears in the ExecStart line."""
         for filename, config in self.configs.items():
+            if "vm" in config:
+                continue  # VM workloads have no container image
             name = config["workload"]["name"]
+            self.assertIn("container", config,
+                          f"{filename}: non-VM workload has no [container] section")
             image = config["container"]["image"]
             with self.subTest(workload=name):
                 service = self._read_service(name)
@@ -334,6 +340,8 @@ class TestWorkloadGeneration(unittest.TestCase):
     def test_userns_applied(self):
         """User namespace setting from config appears in podman args."""
         for filename, config in self.configs.items():
+            if "vm" in config:
+                continue  # VM workloads don't use podman userns
             name = config["workload"]["name"]
             security = config.get("security", {})
             userns = security.get("userns")
@@ -623,7 +631,11 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
     def test_local_images_have_pull_policy(self):
         """Images from localhost/ should explicitly set a pull policy."""
         for filename, config in ALL_WORKLOADS:
+            if "vm" in config:
+                continue  # VM workloads have no container image
             name = config["workload"]["name"]
+            self.assertIn("container", config,
+                          f"{filename}: non-VM workload has no [container] section")
             image = config["container"]["image"]
             if image.startswith("localhost/"):
                 with self.subTest(workload=name):
