@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two coupled projects in one repo:
 
 1. **Bootc hypervisor images** (repo root) — immutable Fedora bootc OS images for a homelab virtualization host. Built as a layered chain of Containerfiles, published to `ghcr.io/bensmith/`, signed with cosign (keyless OIDC). Atomic upgrades + instant rollback via `bootc`.
-2. **workloadctl** (`workloadctl/`) — a standalone, RPM-packaged Python tool (no bootc dependency) that turns `/etc/workloads.d/*.toml` files into isolated rootless-podman container workloads. It ships inside the hypervisor image but is developed and tested independently.
+2. **workloadctl** (`workloadctl/`) — a standalone, RPM-packaged Python tool (no bootc dependency) that turns `/etc/workloads.d/*.toml` files into isolated rootless-podman container workloads *and* KVM/QEMU VMs. It ships inside the hypervisor image but is developed and tested independently.
 
 The image is the *delivery vehicle*; workloadctl is where almost all application logic lives.
 
@@ -68,9 +68,9 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 ### Code layout (workloadctl/)
 
-- `bin/workloadctl` — the CLI (~4100 lines, argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
-- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, UID math.
-- `generators/`, `libexec/` — boot-time and helper scripts (also `workload-exporter` for Prometheus metrics).
+- `bin/workloadctl` — the CLI (~4600 lines, argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
+- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (`VM_BRIDGE_NAME`, UID math).
+- `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics).
 - `workloads.d/` — real example/shipped workload TOMLs. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.
 - `containers/<name>/` — custom container images that some workloads use, each with its own `Containerfile` + `build.sh`.
@@ -79,10 +79,14 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 `workload.mode` selects how a TOML maps to units: `single` (one `[container]`), `pod` (multiple `[[containers]]` sharing a netns, talk on localhost), `bridge` (per-container netns on an auto-created `workload-<name>-net`, resolve by container name). The generator's `normalize_containers()` collapses single/multi shapes so single-container TOMLs produce byte-identical units. Container-targeted CLI commands accept `<workload>/<container>`. `workloads.d/webproxy-demo.toml` is the smallest bridge-mode example.
 
+### VM workloads
+
+A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `wlbr0` bridge + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads.d/virtual-forgejo.toml` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+
 ## Secrets
 
 systemd credentials (`systemd-creds`), AES256-GCM with TPM2 (or host key fallback), decrypted into tmpfs at runtime. Encrypted blobs are safe to commit into images. Reference in env with `${SECRET:name}`. Managed via `workloadctl secret`.
 
 ## CI
 
-GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/workflows/`) build images on a weekly cadence (minimal Sat, variants Sun). Note (from project memory): Forgejo itself runs in a container, so container-in-container CI builds don't work there.
+GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/workflows/`) build images on a weekly cadence (minimal Sat, variants Sun). Note (from project memory): Forgejo itself runs in a container, so container-in-container CI builds don't work there — VM workloads exist partly to provide a native build host for that.
