@@ -30,20 +30,6 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
-      - name: Reclaim runner disk space
-        # zot (registry.local) is the source of truth for built images;
-        # local podman storage is just cache and accumulates across runs.
-        # Preserve the floating :<N> and :latest tags of fedora-bootc-minimal
-        # so build-hypervisor doesn't have to re-pull from zot; prune the rest.
-        run: |
-          df -h /
-          KEEP_RE='^registry\.local/fedora-bootc-minimal:([0-9]+|latest)$'
-          sudo podman images --format '{{.Repository}}:{{.Tag}}' \
-            | grep -Ev "$KEEP_RE" \
-            | grep -v '^<none>:<none>$' \
-            | xargs -rn1 sudo podman untag 2>/dev/null || true
-          sudo podman system prune -af --volumes || true
-          df -h /
       - uses: actions/checkout@v4
       - id: r
         run: |
@@ -81,10 +67,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
+        env:
+          # cosign v2.x emits the legacy ".sig" simple-signing format that
+          # containers-policy `sigstoreSigned` (bootc/podman pull verification)
+          # reads. cosign v3's default Sigstore-bundle format is NOT verified by
+          # sigstoreSigned — do not bump to v3 without migrating verification.
+          COSIGN_VERSION: v2.4.3
         run: |
           if ! command -v cosign >/dev/null; then
             sudo curl -fsSL \
-              https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+              "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
               -o /usr/local/bin/cosign
             sudo chmod +x /usr/local/bin/cosign
           fi
@@ -117,22 +109,24 @@ jobs:
             --device /dev/fuse \
             -f fedora-bootc-minimal.Containerfile \
             --build-arg MANIFEST=minimal \
+            --build-arg VERSION=${VERSION} \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${VERSION} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${VERSION} \
-            -t localhost/${IMAGE_NAME}:build \
+            -t "localhost/${IMAGE_NAME}:build-${VERSION}" \
             manifests
-          sudo podman inspect localhost/${IMAGE_NAME}:build > /dev/null
+          sudo podman inspect "localhost/${IMAGE_NAME}:build-${VERSION}" > /dev/null
 
       - name: Rechunk image
         env:
+          VERSION: ${{ matrix.fedora_version }}
           RECHUNKER: ${{ needs.setup.outputs.rechunker }}
         run: |
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
             quay.io/fedora/fedora-bootc:${RECHUNKER} \
             /usr/libexec/bootc-base-imagectl rechunk \
-            localhost/${IMAGE_NAME}:build \
-            localhost/${IMAGE_NAME}:rechunked
+            "localhost/${IMAGE_NAME}:build-${VERSION}" \
+            "localhost/${IMAGE_NAME}:rechunked-${VERSION}"
 
       - name: Tag and push
         id: push
@@ -149,7 +143,7 @@ jobs:
 
           FIRST=true
           for t in "${TAGS[@]}"; do
-            sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${t}"
+            sudo podman tag "localhost/${IMAGE_NAME}:rechunked-${VERSION}" "${IMAGE_BASE}:${t}"
             if [ "${FIRST}" = "true" ]; then
               sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
               FIRST=false
@@ -161,6 +155,7 @@ jobs:
           DIGEST=$(cat /tmp/digest.txt)
           {
             printf 'tags<<EOF\n%s\nEOF\n' "${TAGS[*]}"
+            echo "versioned_tag=${VERSION}-${TAG}"
             echo "digest=${DIGEST}"
           } >> "$GITHUB_OUTPUT"
 
@@ -168,8 +163,13 @@ jobs:
         # Best-effort: sign if a key is configured and cosign succeeds,
         # but never fail the build over signing.
         continue-on-error: true
+        timeout-minutes: 2
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          # cosign keys are always encrypted; CI must supply the password
+          # non-interactively. Empty (unset secret) is correct for a key
+          # generated without a password.
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           IMAGE_BASE: ${{ steps.params.outputs.image_base }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -177,6 +177,11 @@ jobs:
             echo "COSIGN_SECRET not set — skipping image signing."
             exit 0
           fi
+          # Local key-based signature only: --tlog-upload=false keeps image
+          # digests out of the public Sigstore transparency log (Rekor). These
+          # are private homelab images served from registry.local and are never
+          # distributed; the verification policy (policy*.json) checks the
+          # key-based signature via keyPath and needs no transparency-log entry.
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
@@ -195,3 +200,27 @@ jobs:
               echo "- \`${IMAGE_BASE}:${t}\`"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        # Drop intermediates and the dated registry tag. Keep the floating
+        # :<N> (and :latest, if stable) tags — build-hypervisor's FROM uses
+        # them to resolve from local cache without a re-pull from zot.
+        if: always()
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          VERSION: ${{ matrix.fedora_version }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+        run: |
+          sudo podman untag "localhost/${IMAGE_NAME}:build-${VERSION}" 2>/dev/null || true
+          sudo podman untag "localhost/${IMAGE_NAME}:rechunked-${VERSION}" 2>/dev/null || true
+          if [ -n "${VERSIONED_TAG:-}" ]; then
+            sudo podman untag "${IMAGE_BASE}:${VERSIONED_TAG}" 2>/dev/null || true
+          fi
+          # Reclaim the layers we just untagged (and any other dangling ones)
+          # on this long-lived native runner. Dangling-only: never removes a
+          # tagged image, so the floating :<N>/:latest base stays cached for
+          # build-hypervisor's FROM, and the Containerfile's type=cache build
+          # cache (bootc-base-image-cache) is preserved.
+          df -h /
+          sudo podman image prune -f || true
+          df -h /
