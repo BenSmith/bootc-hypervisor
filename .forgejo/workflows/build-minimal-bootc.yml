@@ -102,7 +102,7 @@ jobs:
       - name: Clone Fedora bootc manifests
         run: |
           rm -rf manifests
-          git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
+          git clone --depth 1 https://git.local/ben/fedora-bootc-base-images.git manifests
           git -C manifests log -1
           cp policy.json manifests/policy.json
           cp cosign.pub manifests/cosign.pub
