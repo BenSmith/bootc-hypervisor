@@ -31,8 +31,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Plain-HTTP registry shared with the justfile (registry.local:5000).
-  REGISTRY: registry.local:5000
+  # HTTPS registry fronted by Caddy on zamd (zot backend on :5050).
+  # Caddy's internal CA is trusted on the runner VM via cloud-init.
+  REGISTRY: registry.local
 
 jobs:
   setup:
@@ -42,6 +43,20 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
+      - name: Reclaim runner disk space
+        # zot (registry.local) is the source of truth for built images;
+        # local podman storage is just cache and accumulates across runs.
+        # Preserve the floating :<N> and :latest tags of fedora-bootc-minimal
+        # so this workflow's FROM resolves from local cache, not a re-pull.
+        run: |
+          df -h /
+          KEEP_RE='^registry\.local/fedora-bootc-minimal:([0-9]+|latest)$'
+          sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+            | grep -Ev "$KEEP_RE" \
+            | grep -v '^<none>:<none>$' \
+            | xargs -rn1 sudo podman untag 2>/dev/null || true
+          sudo podman system prune -af --volumes || true
+          df -h /
       - uses: actions/checkout@v4
       - id: r
         run: |
@@ -110,7 +125,6 @@ jobs:
         run: |
           sudo podman build \
             --pull=always \
-            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -143,14 +157,13 @@ jobs:
           FLOATING="${VERSION}"
 
           sudo podman tag localhost/hypervisor-bootc:rechunked "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --tls-verify=false \
-            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+          sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
-            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            sudo skopeo copy \
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
@@ -172,8 +185,6 @@ jobs:
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
-            --allow-http-registry \
-            --allow-insecure-registry \
             "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
@@ -279,7 +290,6 @@ jobs:
         run: |
           sudo podman build \
             --pull=always \
-            --tls-verify=false \
             --security-opt=label=disable \
             --security-opt=seccomp=unconfined \
             --cap-add=all \
@@ -318,16 +328,15 @@ jobs:
           FLOATING_TAG="${PREFIX}${VERSION}"
 
           sudo podman tag "localhost/${IMAGE}:rechunked" "${IMAGE_BASE}:${VERSIONED}"
-          sudo podman push --tls-verify=false \
-            --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
-          sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+          sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
-            sudo skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            sudo skopeo copy \
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
 
@@ -355,8 +364,6 @@ jobs:
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
-            --allow-http-registry \
-            --allow-insecure-registry \
             "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary

@@ -18,8 +18,9 @@ concurrency:
 
 env:
   IMAGE_NAME: fedora-bootc-minimal
-  # Plain-HTTP registry shared with the justfile (registry.local:5000).
-  REGISTRY: registry.local:5000
+  # HTTPS registry fronted by Caddy on zamd (zot backend on :5050).
+  # Caddy's internal CA is trusted on the runner VM via cloud-init.
+  REGISTRY: registry.local
 
 jobs:
   setup:
@@ -29,6 +30,20 @@ jobs:
       stable: ${{ steps.r.outputs.stable }}
       rechunker: ${{ steps.r.outputs.rechunker }}
     steps:
+      - name: Reclaim runner disk space
+        # zot (registry.local) is the source of truth for built images;
+        # local podman storage is just cache and accumulates across runs.
+        # Preserve the floating :<N> and :latest tags of fedora-bootc-minimal
+        # so build-hypervisor doesn't have to re-pull from zot; prune the rest.
+        run: |
+          df -h /
+          KEEP_RE='^registry\.local/fedora-bootc-minimal:([0-9]+|latest)$'
+          sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+            | grep -Ev "$KEEP_RE" \
+            | grep -v '^<none>:<none>$' \
+            | xargs -rn1 sudo podman untag 2>/dev/null || true
+          sudo podman system prune -af --volumes || true
+          df -h /
       - uses: actions/checkout@v4
       - id: r
         run: |
@@ -136,11 +151,10 @@ jobs:
           for t in "${TAGS[@]}"; do
             sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${t}"
             if [ "${FIRST}" = "true" ]; then
-              sudo podman push --tls-verify=false \
-                --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
+              sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
               FIRST=false
             else
-              sudo podman push --tls-verify=false "${IMAGE_BASE}:${t}"
+              sudo podman push "${IMAGE_BASE}:${t}"
             fi
           done
 
@@ -166,8 +180,6 @@ jobs:
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \
-            --allow-http-registry \
-            --allow-insecure-registry \
             "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
