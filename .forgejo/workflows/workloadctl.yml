@@ -52,6 +52,7 @@ jobs:
         with:
           name: workloadctl-rpm
           path: /tmp/rpm-stage/
+          run-id: ${{ github.run_id }}
 
       - name: Publish to Forgejo package registry
         env:
