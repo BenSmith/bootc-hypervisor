@@ -37,6 +37,7 @@ def run_generator(config_dir, services_dir, sysusers_dir):
     env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
     env["SYSUSERS_DIR"] = str(sysusers_dir)
     env["PYTHONPATH"] = LIB_DIR
+    env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
     return subprocess.run(
         [sys.executable, GENERATOR, str(services_dir)],
         capture_output=True, text=True, env=env,

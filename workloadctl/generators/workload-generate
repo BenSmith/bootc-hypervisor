@@ -121,6 +121,9 @@ def log_msg(msg, level="info"):
     }
     priority = priority_map.get(level, 6)
 
+    if os.environ.get("WORKLOAD_GENERATE_LOG_STDERR"):
+        print(f"workload-generate: {msg}", file=sys.stderr, flush=True)
+        return
     try:
         with open("/dev/kmsg", "w") as kmsg:
             kmsg.write(f"<{priority}>workload-generate: {msg}\n")
