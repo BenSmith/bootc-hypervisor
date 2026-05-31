@@ -206,7 +206,7 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
 RUN printf '[workloadctl]\nname=workloadctl\nbaseurl=https://git.local/api/packages/ben/rpm\nenabled=1\ngpgcheck=0\nsslverify=false\n' \
         > /etc/yum.repos.d/workloadctl.repo && \
     dnf install -y workloadctl && \
-    dnf download --no-deps --destdir /tmp/wl-rpms workloadctl && \
+    dnf download --destdir /tmp/wl-rpms workloadctl && \
     install -Dpm 0644 /tmp/wl-rpms/workloadctl-*.rpm \
         /usr/share/workloadctl/workloadctl.rpm && \
     rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl.repo && \
