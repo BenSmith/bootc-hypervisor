@@ -98,7 +98,7 @@ write_files:
           respond "no site configured for {host}" 404
       }
 
-  - path: /var/lib/workloads/forgejo/app.ini
+  - path: /var/lib/workloads/forgejo/app.ini.template
     content: |
       APP_NAME = Forgejo
       RUN_USER = git
@@ -231,11 +231,19 @@ write_files:
           /etc/workloads.d/alloy.toml
       fi
 
-      # Caddyfile + app.ini are written by write_files (substituted at ISO build
-      # time), so they're already in place — just ensure the dirs exist for
-      # workloadctl's volume bind-mounts and the data disk mount points.
+      # Caddyfile is written by write_files (substituted at ISO build time).
+      # app.ini.template is also written by write_files. The live app.ini is
+      # promoted from the template here only if Forgejo has not yet been
+      # initialized (INSTALL_LOCK absent or false). On instance-id rotation
+      # (e.g. a TOML edit that rebundles the ISO), cloud-init re-runs
+      # write_files but must NOT clobber an initialized app.ini: that file
+      # holds INSTALL_LOCK=true, SECRET_KEY, and INTERNAL_TOKEN — losing it
+      # silently resets Forgejo to the web installer and breaks git push.
       install -d /var/lib/workloads/caddy
       install -d /var/lib/workloads/forgejo
+      if ! grep -q 'INSTALL_LOCK = true' /var/lib/workloads/forgejo/app.ini 2>/dev/null; then
+        cp /var/lib/workloads/forgejo/app.ini.template /var/lib/workloads/forgejo/app.ini
+      fi
 
       # Per-workload data dirs under each workload's home (on the system
       # disk btrfs for caddy; on data.qcow2 for forgejo via the
