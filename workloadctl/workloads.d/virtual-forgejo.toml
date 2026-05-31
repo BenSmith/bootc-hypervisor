@@ -39,10 +39,9 @@ system_disk_size = "40G"
 # system.qcow2 only; data.qcow2 is only removed by `workloadctl disable
 # --purge`).
 #
-# Caddy and avahi do not get qcow2-backed storage — their state lives on
-# the system disk under their respective workload home dirs. Caddy can
-# re-derive its TLS material from the Caddyfile on every boot; avahi is
-# stateless.
+# Caddy does not get qcow2-backed storage — its state lives on the system
+# disk under its workload home dir, and it re-derives its TLS material from
+# the Caddyfile on every boot.
 data_disk_size = "60G"
 user = "fedora"
 rollback_keep = 2
@@ -60,8 +59,8 @@ user_data_file = "/usr/share/workloadctl/vms/virtual-forgejo/cloud-init/user-dat
 # Forgejo runner version pinned for reproducibility — bump after
 # verifying release notes on https://code.forgejo.org/forgejo/runner.
 RUNNER_VERSION = "6.2.2"
-# Hostname the VM announces via mDNS (Avahi) and serves via Caddy. Used in
-# fqdn, /etc/hosts, Caddyfile, and app.ini — change this to rename the forge.
+# Hostname the VM announces via mDNS (systemd-resolved) and serves via Caddy.
+# Used in fqdn, /etc/hosts, Caddyfile, and app.ini — change to rename the forge.
 FORGEJO_HOSTNAME = "virtual-forgejo.local"
 # URL the runner registers against when REGISTER_RUNNER = "true". For a
 # self-contained instance this should match https://${FORGEJO_HOSTNAME}.

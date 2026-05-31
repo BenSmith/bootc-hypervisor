@@ -143,8 +143,8 @@ write_files:
       # already-installed package; --skip-* tolerates both.
       dnf install -y --skip-broken --skip-unavailable \
         podman skopeo curl jq yq just git rpm-build \
-        python3 policycoreutils-python-utils checkpolicy avahi-tools \
-        qemu-guest-agent nss-mdns nodejs fuse3 \
+        python3 policycoreutils-python-utils checkpolicy \
+        qemu-guest-agent nodejs fuse3 \
         dnf-utils
 
       # 1a. Pull in any updates published since the cloud image was cut —
@@ -159,24 +159,24 @@ write_files:
       systemctl enable qemu-guest-agent || true
       systemctl enable --now systemd-timesyncd || true
 
-      # Enable mDNS resolution so subsequent steps can reach LAN hosts by name.
-      # We split publishing from resolving:
-      #   - Publishing: the containerized avahi workload (--network=host) owns
-      #     UDP/5353 as the sole mDNS responder in the VM netns. It publishes
-      #     the hostname plus any ALIASES configured in avahi.toml.
-      #   - Resolving: systemd-resolved with MulticastDNS=resolve sends mDNS
-      #     queries but does NOT bind 5353 as a responder, so it coexists
-      #     with the containerized avahi-daemon. nss-resolve in nsswitch
-      #     routes .local lookups through it.
-      # The native avahi-daemon would conflict with the container on 5353
-      # and trigger an avahi-publish NULL-name collision bug, so we keep it
-      # masked.
+      # mDNS via systemd-resolved alone — it both publishes this VM's hostname
+      # (<hostname>.local) and resolves remote .local names (registry.local,
+      # zamd.local) for CI. The VM only needs to announce a single name (its
+      # own hostname), which resolved does natively, so there is no separate
+      # avahi responder here — that avoids two mDNS stacks fighting over
+      # UDP/5353, the collision bug that motivated this design. (Contrast the
+      # hypervisor host, which must publish several service aliases and so runs
+      # the avahi container.) MulticastDNS=yes => resolve AND announce; the
+      # `resolve` value alone would not publish. nss-resolve in nsswitch routes
+      # .local lookups through resolved.
       mkdir -p /etc/systemd/resolved.conf.d
       cat > /etc/systemd/resolved.conf.d/10-mdns.conf <<'RESOLVED'
       [Resolve]
-      MulticastDNS=resolve
+      MulticastDNS=yes
       RESOLVED
       sed -i 's/^hosts:.*/hosts:      files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+      # Belt-and-suspenders: keep any native avahi-daemon out of the way so it
+      # can't grab 5353 and collide with resolved's mDNS responder.
       systemctl mask avahi-daemon.service avahi-daemon.socket || true
       systemctl enable --now systemd-resolved
       systemctl restart systemd-resolved
@@ -208,18 +208,15 @@ write_files:
       dnf install -y "$CIDATA_MNT/workloadctl.rpm"
       umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
 
-      # 3. Sidecar container images for caddy + avahi. The avahi container is
-      # the sole mDNS responder in the VM netns (the native avahi-daemon is
-      # masked above); systemd-resolved handles host-side .local resolution.
+      # 3. Sidecar container image for caddy (TLS terminator). mDNS is handled
+      # by systemd-resolved (configured above), so no avahi container is built.
       bash /usr/share/workloadctl/containers/caddy/build.sh
-      bash /usr/share/workloadctl/containers/avahi/build.sh
 
       # 4. Drop the in-VM workload TOMLs into the locations workloadctl expects.
       # TOMLs are installed by the RPM under /usr/share/workloadctl/vms/.
       install -d /etc/workloads.d
       install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/forgejo.toml /etc/workloads.d/forgejo.toml
       install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/caddy.toml   /etc/workloads.d/caddy.toml
-      install -m 0644 /usr/share/workloadctl/vms/virtual-forgejo/workloads/avahi.toml   /etc/workloads.d/avahi.toml
 
       # Alloy is opt-in: provision it only if the operator has named a
       # central otel-lgtm host. Substitution happens here (not at ISO build)
@@ -241,7 +238,7 @@ write_files:
       install -d /var/lib/workloads/forgejo
 
       # Per-workload data dirs under each workload's home (on the system
-      # disk btrfs for caddy/avahi; on data.qcow2 for forgejo via the
+      # disk btrfs for caddy; on data.qcow2 for forgejo via the
       # cloud-init mounts entry above). Created here so they exist before
       # `workloadctl enable` starts the containers. Pre-create
       # forgejo/data/custom/conf and the empty app.ini target so the
@@ -261,11 +258,10 @@ write_files:
         | tee /etc/sysctl.d/50-privileged-ports.conf
       sysctl -w net.ipv4.ip_unprivileged_port_start=0
 
-      # 6. Enable in dependency order: avahi (mDNS responder, name
-      # announcement), then caddy (TLS terminator), then forgejo (the
-      # upstream). Alloy is independent and gated on the operator naming
+      # 6. Enable in dependency order: caddy (TLS terminator), then forgejo
+      # (the upstream). mDNS name announcement is handled by systemd-resolved,
+      # not a workload. Alloy is independent and gated on the operator naming
       # a central otel-lgtm host above.
-      workloadctl enable avahi
       workloadctl enable caddy
       workloadctl enable forgejo
       if [ -n "${ALLOY_CENTRAL_HOST}" ]; then
@@ -372,8 +368,8 @@ write_files:
 # block device (no partition table) on first boot, then mounts it at
 # /var/lib/workloads/forgejo/data — the forgejo workload's data subdir,
 # so its persistent state (gitea db, repos) survives system disk rebuilds.
-# Caddy and avahi keep their state on the system disk under their own home
-# dirs; only forgejo gets qcow2-backed persistence.
+# Caddy keeps its state on the system disk under its own home dir; only
+# forgejo gets qcow2-backed persistence.
 #
 # We don't lay down a partition table: cloud-init's disk_setup module
 # (on the cloud-init that ships in Fedora 44) fails on a blank disk

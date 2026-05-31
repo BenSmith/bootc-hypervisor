@@ -11,8 +11,8 @@ host (workloadctl)
 └── workload-virtual-forgejo.service     [VM, raw QEMU]
     ├── workloadctl inside the VM
     │   ├── workload-forgejo.service     [container: codeberg.org/forgejo/forgejo]
-    │   ├── workload-caddy.service       [container: localhost/caddy — TLS for virtual-forgejo.local]
-    │   └── workload-avahi.service       [container: localhost/avahi  — mDNS]
+    │   └── workload-caddy.service       [container: localhost/caddy — TLS for virtual-forgejo.local]
+    │   # mDNS (publish <hostname>.local + resolve remote .local): systemd-resolved
     └── forgejo-runner.service           [native systemd unit]
 ```
 
@@ -93,8 +93,8 @@ template vars.
    ```
 
    First boot takes a few minutes — cloud-init clones the hypervisor
-   repo, builds workloadctl from source, builds the Caddy + Avahi
-   container images, and downloads the runner binary. Watch progress
+   repo, builds workloadctl from source, builds the Caddy
+   container image, and downloads the runner binary. Watch progress
    with:
 
    ```sh

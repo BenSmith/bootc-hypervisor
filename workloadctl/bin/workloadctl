@@ -635,6 +635,38 @@ def cmd_create(args, manager: WorkloadManager):
         print(f"  Enable:       workloadctl enable {name}")
 
 
+def _gating_units(config):
+    """Units that must succeed before the main service can start. VMs split
+    user/cloud-init setup and the system-disk build into their own units; a
+    failure there leaves the main service merely 'inactive' (dependency not
+    met), hiding the real cause. Container workloads run their setup as an
+    ExecStartPre of the main unit, so a failure already surfaces there."""
+    if config.is_vm:
+        return [f"workload-{config.name}-setup.service",
+                f"workload-{config.name}-build.service"]
+    return []
+
+
+def _effective_state(config):
+    """Return (state, failed_unit) for display. If the main service isn't
+    active but a gating unit has failed, report 'failed' and name the culprit
+    so the cause isn't buried behind a bland 'inactive'."""
+    main = subprocess.run(
+        ["systemctl", "is-active", config.service_name],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if main == "active":
+        return main, None
+    for unit in _gating_units(config):
+        st = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if st == "failed":
+            return "failed", unit
+    return main, None
+
+
 def cmd_list(args, manager: WorkloadManager):
     """List all available workloads"""
     configs = manager.get_all_configs()
@@ -650,11 +682,7 @@ def cmd_list(args, manager: WorkloadManager):
             # Get runtime state for enabled workloads
             state = None
             if config.enabled:
-                result = subprocess.run(
-                    ["systemctl", "is-active", config.service_name],
-                    capture_output=True, text=True
-                )
-                state = result.stdout.strip()
+                state, _ = _effective_state(config)
 
             # Get image ID if user exists
             image_id = None
@@ -709,16 +737,16 @@ def cmd_list(args, manager: WorkloadManager):
     print(f"  {'NAME':<{name_w}} {'STATUS':<10} {'STATE':<12} {'IMAGE_ID':<14} {'PORTS':<20} {'IMAGE':<30}")
     print(f"  {'-'*name_w} {'-'*10} {'-'*12} {'-'*14} {'-'*20} {'-'*30}")
 
+    failed_workloads = []
     for config in configs:
         status = "enabled" if config.enabled else "disabled"
 
-        # Get runtime state for enabled workloads
+        # Get runtime state for enabled workloads. _effective_state surfaces a
+        # failed VM setup/build helper as 'failed' instead of a bland 'inactive'.
         if config.enabled:
-            result = subprocess.run(
-                ["systemctl", "is-active", config.service_name],
-                capture_output=True, text=True
-            )
-            state = result.stdout.strip()
+            state, failed_unit = _effective_state(config)
+            if failed_unit:
+                failed_workloads.append((config.name, failed_unit))
         else:
             state = "-"
 
@@ -760,6 +788,13 @@ def cmd_list(args, manager: WorkloadManager):
 
     print()
     print(f"  Use 'workloadctl status <name>' for details on a specific workload.")
+
+    if failed_workloads:
+        print()
+        for name, unit in failed_workloads:
+            print(f"  WARNING: '{name}' is not running — {unit} failed.")
+        print(f"           Run 'workloadctl status <name>' or "
+              f"'sudo journalctl -u <unit>' to see why.")
 
 
 def cmd_status(args, manager: WorkloadManager):
@@ -842,6 +877,14 @@ def cmd_status(args, manager: WorkloadManager):
         helper = "pod" if config.mode == "pod" else "net"
         units.append(f"workload-{config.name}-{helper}.service")
         units.extend(config.sub_service_names())
+        subprocess.run(["systemctl", "status", "--no-pager"] + units)
+        return
+
+    if config.is_vm:
+        # Show the setup + system-disk build units alongside the main one: when
+        # a VM fails to start the cause is almost always one of these, and the
+        # main unit only reports a bland 'dependency failed'.
+        units = _gating_units(config) + [config.service_name]
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
