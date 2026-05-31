@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Refuse to push the internal branch (or any commit descending from it) to
+# GitHub.
+# Install: just install-hooks
+
+remote_url="$2"
+
+if [[ "$remote_url" != *github.com* ]]; then
+    exit 0
+fi
+
+ZERO_SHA="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    [[ "$local_sha" == "$ZERO_SHA" ]] && continue
+
+    if [[ "$local_ref" == "refs/heads/internal" ]]; then
+        echo "error: refusing to push 'internal' to GitHub" >&2
+        echo "  The internal branch contains private workloads." >&2
+        exit 1
+    fi
+
+    if git rev-parse --verify internal >/dev/null 2>&1; then
+        if git merge-base --is-ancestor internal "$local_sha" 2>/dev/null; then
+            echo "error: '$local_ref' descends from 'internal' — refusing to push to GitHub" >&2
+            echo "  This ref contains commits from the internal branch." >&2
+            exit 1
+        fi
+    fi
+done
+
+exit 0

@@ -24,6 +24,16 @@ _rechunk image:
   sudo podman rmi {{image}} {{image}}-rechunked || true
   echo "Rechunked {{image}}"
 
+# Install git hooks from .githooks/ into .git/hooks/
+install-hooks:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  for hook in .githooks/*; do
+    name=$(basename "$hook")
+    install -m 0755 "$hook" ".git/hooks/$name"
+    echo "installed .git/hooks/$name"
+  done
+
 # === Container image builds =================================================
 
 build-minimal version=fedora_version rechunk="false":
