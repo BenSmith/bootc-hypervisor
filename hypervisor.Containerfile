@@ -200,16 +200,16 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
     fi
 
 # Install workload provisioning system from the homelab RPM repo.
-# The repo file is removed after install; it points to zamd.local which is
-# not reachable outside the homelab build environment.
-# Also cache the RPM at a known path so workload-ensure-user can bundle it
-# into VM cloud-init ISOs without needing to re-download at runtime.
-COPY workloadctl/workloadctl-local.repo /etc/yum.repos.d/workloadctl-local.repo
-RUN dnf install -y workloadctl && \
+# The repo is removed after install — git.local is not reachable outside
+# the homelab build environment. The RPM is also cached at a known path so
+# workload-ensure-user can bundle it into VM cloud-init ISOs at runtime.
+RUN printf '[workloadctl]\nname=workloadctl\nbaseurl=https://git.local/api/packages/ben/rpm\nenabled=1\ngpgcheck=0\nsslverify=false\n' \
+        > /etc/yum.repos.d/workloadctl.repo && \
+    dnf install -y workloadctl && \
     dnf download --no-deps --destdir /tmp/wl-rpms workloadctl && \
     install -Dpm 0644 /tmp/wl-rpms/workloadctl-*.rpm \
         /usr/share/workloadctl/workloadctl.rpm && \
-    rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl-local.repo && \
+    rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl.repo && \
     dnf clean all
 
 # Bootc-specific: emergency access, cosy

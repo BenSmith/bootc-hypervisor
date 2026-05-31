@@ -1,4 +1,4 @@
-%undefine source_date_epoch_from_changelog
+%global source_date_epoch_from_changelog 0
 
 Name:           workloadctl
 Version:        0.1.0
@@ -122,8 +122,15 @@ install -pm 0644 %{_sourcedir}/LICENSE \
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
-install -Dpm 0644 %{_sourcedir}/workloadctl-local.repo \
-    %{buildroot}%{_sysconfdir}/yum.repos.d/workloadctl-local.repo
+install -dm 0755 %{buildroot}%{_sysconfdir}/yum.repos.d
+cat > %{buildroot}%{_sysconfdir}/yum.repos.d/workloadctl.repo << 'EOF'
+[workloadctl]
+name=workloadctl
+baseurl=https://git.local/api/packages/ben/rpm
+enabled=1
+gpgcheck=0
+sslverify=false
+EOF
 
 %post
 %systemd_post workload-exporter.service
@@ -157,6 +164,6 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
-%config(noreplace) %{_sysconfdir}/yum.repos.d/workloadctl-local.repo
+%config(noreplace) %{_sysconfdir}/yum.repos.d/workloadctl.repo
 
 %changelog
