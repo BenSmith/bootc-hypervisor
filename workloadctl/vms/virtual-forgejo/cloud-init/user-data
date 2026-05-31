@@ -94,6 +94,17 @@ write_files:
           reverse_proxy 127.0.0.1:3000
       }
 
+      ${FORGEJO_HOSTNAME}:80 {
+          route {
+              handle /caddy-root.crt {
+                  root * /var/lib/caddy/caddy/pki/authorities/local
+                  rewrite * /root.crt
+                  file_server
+              }
+              redir https://{host}{uri} 308
+          }
+      }
+
       :80 {
           respond "no site configured for {host}" 404
       }

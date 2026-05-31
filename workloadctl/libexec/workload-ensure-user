@@ -505,13 +505,11 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
 
 
 def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
-    """Copy or build the workloadctl RPM into seed_dir for in-VM installation.
+    """Copy the workloadctl RPM into seed_dir for in-VM installation.
 
-    Tries two paths in order:
-    1. /usr/share/workloadctl/workloadctl.rpm — pre-cached by the bootc image
-       (no rpmbuild needed at runtime).
-    2. Build from /usr/share/workloadctl/src/ using rpmbuild — for dev systems
-       where the RPM is built from a local checkout.
+    Uses the copy pre-cached by the hypervisor image build at
+    /usr/share/workloadctl/workloadctl.rpm (placed there by `dnf download`
+    during the image build so the ISO is self-contained).
     """
     import shutil as _shutil
 
@@ -523,35 +521,9 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
         log("  Bundled workloadctl RPM (cached copy)")
         return True
 
-    src_spec = Path("/usr/share/workloadctl/src/rpm/workloadctl.spec")
-    if not src_spec.exists() or not _shutil.which("rpmbuild"):
-        log("  WARNING: no cached workloadctl RPM and rpmbuild unavailable; "
-            "bootstrap will not be able to install workloadctl from the ISO.")
-        return False
-
-    src_dir = src_spec.parent.parent
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        for d in ("BUILD", "RPMS", "SRPMS", "SPECS"):
-            (tmp / d).mkdir()
-        result = subprocess.run(
-            ["rpmbuild", "-bb",
-             "--define", f"_topdir {tmp}",
-             "--define", f"_sourcedir {src_dir}",
-             "--define", f"_builddir {tmp}/BUILD",
-             str(src_spec)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log(f"  WARNING: workloadctl RPM build failed:\n{result.stderr[-400:]}")
-            return False
-        rpms = list((tmp / "RPMS").rglob("workloadctl-*.rpm"))
-        if not rpms:
-            log("  WARNING: rpmbuild produced no RPM")
-            return False
-        _shutil.copy2(rpms[0], dest)
-        log("  Built and bundled workloadctl RPM from source")
-        return True
+    log("  WARNING: no cached workloadctl RPM at /usr/share/workloadctl/workloadctl.rpm; "
+        "bootstrap will not be able to install workloadctl from the ISO.")
+    return False
 
 
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):

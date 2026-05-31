@@ -108,17 +108,6 @@ cp -a %{_sourcedir}/vms/. %{buildroot}%{_datadir}/workloadctl/vms/
 
 install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
 
-# Bundle the full source tree so workload-ensure-user can rebuild this RPM
-# for inclusion in VM cloud-init ISOs (enables offline in-VM installation).
-install -dm 0755 %{buildroot}%{_datadir}/workloadctl/src
-for d in bin lib libexec generators rpm systemd completions docs containers vms workloads.d; do
-    [ -d %{_sourcedir}/$d ] && \
-        cp -a %{_sourcedir}/$d %{buildroot}%{_datadir}/workloadctl/src/$d || true
-done
-install -pm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
-    %{buildroot}%{_datadir}/workloadctl/src/
-install -pm 0644 %{_sourcedir}/LICENSE \
-    %{buildroot}%{_datadir}/workloadctl/src/
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
