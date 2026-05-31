@@ -107,4 +107,5 @@
 - make missing host setup script an error not a warning
 - investigate inputtino https://github.com/games-on-whales/inputtino to see if it can replace my sunshine input hacky python
 - put all control surfaces in wireguard/vpn 
+- build all container workload images and host locally?
 

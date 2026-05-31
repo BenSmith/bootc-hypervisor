@@ -1,9 +1,10 @@
 name: workloadctl tests
 
 on:
-  # Auto-triggers (push / pull_request) intentionally omitted until a
-  # native:host runner is connected. Run manually via workflow_dispatch.
   workflow_dispatch:
+  push:
+    branches: [main, internal]
+    paths: ['workloadctl/**']
 
 jobs:
   test:
@@ -40,3 +41,31 @@ jobs:
           name: workloadctl-rpm
           path: workloadctl/rpmbuild/RPMS/**/*.rpm
           if-no-files-found: error
+
+  publish:
+    needs: test
+    runs-on: native
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/internal'
+    steps:
+      - name: Download RPM artifact
+        uses: forgejo/download-artifact@v4
+        with:
+          name: workloadctl-rpm
+          path: /tmp/rpm-stage/
+
+      - name: Publish to Forgejo package registry
+        env:
+          PKG_PUBLISH_TOKEN: ${{ secrets.PKG_PUBLISH_TOKEN }}
+        run: |
+          rpm=$(echo /tmp/rpm-stage/workloadctl-*.rpm)
+          code=$(curl -sS -o /tmp/pkg-upload.log -w "%{http_code}" \
+            -H "Authorization: token ${PKG_PUBLISH_TOKEN}" \
+            --upload-file "$rpm" \
+            "https://git.local/api/packages/ben/rpm")
+          # 201 = uploaded, 409 = version already exists (idempotent)
+          if [ "$code" != "201" ] && [ "$code" != "409" ]; then
+            echo "Upload failed (HTTP $code):"
+            cat /tmp/pkg-upload.log
+            exit 1
+          fi
+          echo "Published $(basename $rpm) (HTTP $code)"

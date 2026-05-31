@@ -1,17 +1,4 @@
-# Stage 1: Build workloadctl RPM (matches target python(abi))
 ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
-FROM ${BASE_IMAGE} AS workloadctl-builder
-RUN dnf install -y rpm-build systemd-rpm-macros && dnf clean all
-COPY workloadctl/ /src/
-RUN cd /src && \
-    mkdir -p rpmbuild/{BUILD,RPMS,SRPMS,SPECS} && \
-    rpmbuild -bb \
-      --define "_topdir $(pwd)/rpmbuild" \
-      --define "_sourcedir $(pwd)" \
-      --define "_builddir $(pwd)/rpmbuild/BUILD" \
-      rpm/workloadctl.spec
-
-# Stage 2: Hypervisor image
 FROM ${BASE_IMAGE}
 
 # Build argument for local development (enables passwordless sudo)
@@ -212,14 +199,18 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system from builder stage
-COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/workloadctl.rpm
-# Install, then cache the RPM at a known path so workload-ensure-user can
-# bundle it into VM cloud-init ISOs without needing rpmbuild at runtime.
-RUN dnf install -y /tmp/workloadctl.rpm && \
-    install -Dpm 0644 /tmp/workloadctl.rpm \
+# Install workload provisioning system from the homelab RPM repo.
+# The repo file is removed after install; it points to zamd.local which is
+# not reachable outside the homelab build environment.
+# Also cache the RPM at a known path so workload-ensure-user can bundle it
+# into VM cloud-init ISOs without needing to re-download at runtime.
+COPY workloadctl-local.repo /etc/yum.repos.d/workloadctl-local.repo
+RUN dnf install -y workloadctl && \
+    dnf download --no-deps --destdir /tmp/wl-rpms workloadctl && \
+    install -Dpm 0644 /tmp/wl-rpms/workloadctl-*.rpm \
         /usr/share/workloadctl/workloadctl.rpm && \
-    rm -f /tmp/workloadctl.rpm && dnf clean all
+    rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl-local.repo && \
+    dnf clean all
 
 # Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
