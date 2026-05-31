@@ -1,3 +1,5 @@
+%undefine source_date_epoch_from_changelog
+
 Name:           workloadctl
 Version:        0.1.0
 Release:        %{?buildserial:0.%{buildserial}}%{!?buildserial:1}%{?dist}
