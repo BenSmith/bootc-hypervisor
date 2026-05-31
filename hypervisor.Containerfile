@@ -190,7 +190,9 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     grep -E "^(video|render|input|audio|dialout|disk|kvm|seat|tpm):" /usr/lib/group >> /etc/group || true && \
     echo 'net.ipv4.ip_unprivileged_port_start = 0' > /usr/lib/sysctl.d/50-privileged-ports.conf && \
     semanage fcontext -a -t container_file_t '/var/lib/prometheus/node-exporter(/.*)?' || true && \
-    sed -i 's/^hosts:.*/hosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+    sed -i 's/^hosts:.*/hosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf && \
+    mkdir -p /etc/systemd/resolved.conf.d && \
+    printf '[Resolve]\nMulticastDNS=resolve\n' > /etc/systemd/resolved.conf.d/10-mdns.conf
 
 # SELinux: allow containers to connect to host seatd socket (KMS desktop workloads)
 # and allow containers to access host devices (GPU, input)
