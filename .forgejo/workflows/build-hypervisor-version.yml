@@ -90,6 +90,7 @@ jobs:
             --security-opt=seccomp=unconfined \
             --cap-add=all \
             --ipc=host \
+            --network=host \
             --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
             -f hypervisor.Containerfile \
             -t "localhost/hypervisor-bootc:build-${VERSION}" \
