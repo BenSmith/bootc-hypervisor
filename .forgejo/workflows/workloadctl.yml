@@ -1,4 +1,4 @@
-name: workloadctl tests
+name: workloadctl
 
 on:
   workflow_dispatch:
@@ -33,7 +33,10 @@ jobs:
 
       - name: Build RPM
         working-directory: workloadctl
-        run: just rpm-build
+        run: |
+          just rpm-build
+          mkdir -p /tmp/wl-rpm-${{ github.run_id }}
+          cp rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/wl-rpm-${{ github.run_id }}/
 
       - name: Upload RPM artifact
         uses: forgejo/upload-artifact@v4
@@ -47,18 +50,11 @@ jobs:
     runs-on: native
     if: github.ref == 'refs/heads/internal'
     steps:
-      - name: Download RPM artifact
-        uses: forgejo/download-artifact@v4
-        with:
-          name: workloadctl-rpm
-          path: /tmp/rpm-stage/
-          run-id: ${{ github.run_id }}
-
       - name: Publish to Forgejo package registry
         env:
           PKG_PUBLISH_TOKEN: ${{ secrets.PKG_PUBLISH_TOKEN }}
         run: |
-          rpm=(/tmp/rpm-stage/noarch/workloadctl-*.rpm)
+          rpm=(/tmp/wl-rpm-${{ github.run_id }}/workloadctl-*.rpm)
           code=$(curl -sS -o /tmp/pkg-upload.log -w "%{http_code}" \
             -H "Authorization: token ${PKG_PUBLISH_TOKEN}" \
             --upload-file "$rpm" \
@@ -70,3 +66,4 @@ jobs:
             exit 1
           fi
           echo "Published $(basename $rpm) (HTTP $code)"
+          rm -rf /tmp/wl-rpm-${{ github.run_id }}
