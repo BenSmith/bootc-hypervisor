@@ -1,5 +1,5 @@
 # Edit this file only when promoting a new stable release or dropping an EOL version.
 stable: 44
-supported: [43, 44]   # add 45 when it ships, drop 43 when EOL
+supported: [44, 43]   # add 45 when it ships, drop 43 when EOL
 rechunker: 44         # quay.io/fedora/fedora-bootc:${rechunker} — pin to a known-good image
                       # rechunker does NOT need to match the image being built

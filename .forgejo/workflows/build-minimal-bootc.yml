@@ -8,9 +8,13 @@ on:
         required: false
         default: ''
         type: string
+      manifests_repo:
+        description: 'Git URL of the fedora-bootc-base-images repo to clone'
+        required: false
+        default: 'https://git.local/ben/fedora-bootc-base-images.git'
+        type: string
 
-  # Auto-triggers (push) intentionally omitted until a native:host runner is
-  # connected. Run manually via workflow_dispatch for now.
+  # Run manually via workflow_dispatch for now.
 
 concurrency:
   group: build-minimal-bootc-${{ github.ref }}
@@ -21,6 +25,7 @@ env:
   # HTTPS registry fronted by Caddy (zot backend on :5050).
   # Caddy's internal CA is trusted on the runner VM via cloud-init.
   REGISTRY: registry.local
+  MANIFESTS_REPO: ${{ inputs.manifests_repo || 'https://git.local/ben/fedora-bootc-base-images.git' }}
 
 jobs:
   setup:
@@ -100,7 +105,7 @@ jobs:
       - name: Clone Fedora bootc manifests
         run: |
           rm -rf manifests
-          git clone --depth 1 https://git.local/ben/fedora-bootc-base-images.git manifests
+          git clone --depth 1 "${MANIFESTS_REPO}" manifests
           git -C manifests log -1
           cp policy.json manifests/policy.json
           cp cosign.pub manifests/cosign.pub

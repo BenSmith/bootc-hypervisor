@@ -19,7 +19,7 @@ on:
           - 'amd'
           - 'nvidia'
           - 'nvidia-negativo17'
-          - 'nvidia-rpmfusion'
+#          - 'nvidia-rpmfusion'
       versions_override:
         description: 'JSON array of Fedora versions to build, e.g. [44] (empty = use fedora-versions.yml)'
         required: false
