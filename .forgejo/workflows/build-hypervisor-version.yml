@@ -54,11 +54,17 @@ jobs:
           # sigstoreSigned — do not bump to v3 without migrating verification.
           COSIGN_VERSION: v2.4.3
         run: |
-          if ! command -v cosign >/dev/null; then
+          # Gate on the *pinned version*, not mere presence: this native runner
+          # is long-lived and may already have a different cosign on PATH
+          # (e.g. v3, which rejects the v2-style `--tlog-upload=false` below).
+          # Reinstall unless the exact pinned version is already present.
+          WANT="${COSIGN_VERSION#v}"
+          if ! cosign version 2>/dev/null | grep -q "GitVersion:[[:space:]]*${WANT}\b"; then
             sudo curl -fsSL \
               "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
               -o /usr/local/bin/cosign
             sudo chmod +x /usr/local/bin/cosign
+            hash -r
           fi
           cosign version
 
@@ -262,11 +268,17 @@ jobs:
           # sigstoreSigned — do not bump to v3 without migrating verification.
           COSIGN_VERSION: v2.4.3
         run: |
-          if ! command -v cosign >/dev/null; then
+          # Gate on the *pinned version*, not mere presence: this native runner
+          # is long-lived and may already have a different cosign on PATH
+          # (e.g. v3, which rejects the v2-style `--tlog-upload=false` below).
+          # Reinstall unless the exact pinned version is already present.
+          WANT="${COSIGN_VERSION#v}"
+          if ! cosign version 2>/dev/null | grep -q "GitVersion:[[:space:]]*${WANT}\b"; then
             sudo curl -fsSL \
               "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
               -o /usr/local/bin/cosign
             sudo chmod +x /usr/local/bin/cosign
+            hash -r
           fi
           cosign version
 
