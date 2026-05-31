@@ -57,7 +57,7 @@ jobs:
         env:
           PKG_PUBLISH_TOKEN: ${{ secrets.PKG_PUBLISH_TOKEN }}
         run: |
-          rpm=$(echo /tmp/rpm-stage/workloadctl-*.rpm)
+          rpm=(/tmp/rpm-stage/noarch/workloadctl-*.rpm)
           code=$(curl -sS -o /tmp/pkg-upload.log -w "%{http_code}" \
             -H "Authorization: token ${PKG_PUBLISH_TOKEN}" \
             --upload-file "$rpm" \
