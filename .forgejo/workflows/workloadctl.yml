@@ -3,7 +3,7 @@ name: workloadctl tests
 on:
   workflow_dispatch:
   push:
-    branches: [main, internal]
+    branches: [internal]
     paths: ['workloadctl/**']
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
   publish:
     needs: test
     runs-on: native
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/internal'
+    if: github.ref == 'refs/heads/internal'
     steps:
       - name: Download RPM artifact
         uses: forgejo/download-artifact@v4

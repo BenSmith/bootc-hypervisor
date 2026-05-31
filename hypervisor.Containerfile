@@ -204,7 +204,7 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
 # not reachable outside the homelab build environment.
 # Also cache the RPM at a known path so workload-ensure-user can bundle it
 # into VM cloud-init ISOs without needing to re-download at runtime.
-COPY workloadctl-local.repo /etc/yum.repos.d/workloadctl-local.repo
+COPY workloadctl/workloadctl-local.repo /etc/yum.repos.d/workloadctl-local.repo
 RUN dnf install -y workloadctl && \
     dnf download --no-deps --destdir /tmp/wl-rpms workloadctl && \
     install -Dpm 0644 /tmp/wl-rpms/workloadctl-*.rpm \

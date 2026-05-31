@@ -120,6 +120,9 @@ install -pm 0644 %{_sourcedir}/LICENSE \
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
+install -Dpm 0644 %{_sourcedir}/workloadctl-local.repo \
+    %{buildroot}%{_sysconfdir}/yum.repos.d/workloadctl-local.repo
+
 %post
 %systemd_post workload-exporter.service
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
@@ -152,5 +155,6 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
+%config(noreplace) %{_sysconfdir}/yum.repos.d/workloadctl-local.repo
 
 %changelog
