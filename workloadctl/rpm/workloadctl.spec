@@ -2,7 +2,7 @@
 
 Name:           workloadctl
 Version:        0.1.0
-Release:        %{?buildserial:0.%{buildserial}}%{!?buildserial:1}
+Release:        %{?buildserial:1.%{buildserial}}%{!?buildserial:1}
 Summary:        Declarative rootless container workload manager
 
 License:        MIT

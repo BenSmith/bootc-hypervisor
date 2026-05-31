@@ -94,17 +94,6 @@ write_files:
           reverse_proxy 127.0.0.1:3000
       }
 
-      ${FORGEJO_HOSTNAME}:80 {
-          route {
-              handle /caddy-root.crt {
-                  root * /var/lib/caddy/caddy/pki/authorities/local
-                  rewrite * /root.crt
-                  file_server
-              }
-              redir https://{host}{uri} 308
-          }
-      }
-
       :80 {
           respond "no site configured for {host}" 404
       }
@@ -319,6 +308,36 @@ write_files:
       done
       if [ ! -f /etc/pki/ca-trust/source/anchors/caddy-root.crt ]; then
         echo "WARNING: Caddy root CA not found after 3 minutes; runner TLS verify will fail."
+      fi
+
+      # Embed the generated root CA cert into the Caddyfile so external
+      # clients can bootstrap trust via:
+      #   curl -sk https://${FORGEJO_HOSTNAME}/caddy-root.crt | sudo tee ...
+      # file_server doesn't work reliably for Caddy-owned 600-mode files,
+      # so we use respond with the cert content baked in.
+      if [ -f "$CADDY_ROOT" ]; then
+        CERT_CONTENT=$(cat "$CADDY_ROOT")
+        cat > /var/lib/workloads/caddy/Caddyfile << CADDYEOF
+{
+    local_certs
+}
+
+${FORGEJO_HOSTNAME} {
+    route {
+        handle /caddy-root.crt {
+            header Content-Type text/plain
+            respond \`$${CERT_CONTENT}\` 200
+        }
+        reverse_proxy 127.0.0.1:3000
+    }
+}
+
+:80 {
+    respond "no site configured for {host}" 404
+}
+CADDYEOF
+        workloadctl recreate caddy
+        echo "Caddyfile updated with embedded root CA cert."
       fi
 
       # 8. Install the native forgejo-runner binary + unit unconditionally
