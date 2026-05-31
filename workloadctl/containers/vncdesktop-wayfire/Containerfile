@@ -14,6 +14,7 @@ FROM registry.fedoraproject.org/fedora:44
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
     adwaita-icon-theme \
+    avahi \
     bash-completion \
     clinfo \
     dbus-daemon \
@@ -39,6 +40,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-vulkan-drivers \
     nano \
     neovim \
+    nss-mdns \
     procps-ng \
     slurp \
     sudo \
@@ -63,6 +65,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     xdg-utils \
     xorg-x11-server-Xwayland \
     && dnf clean all
+
+RUN sed -i 's/^hosts:.*/hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
 
 # --- Firefox stability fix ---
 # Disable Wayland vsync: Firefox freezes under wlroots compositors without

@@ -47,6 +47,7 @@ FROM fedora:44
 #                              /usr/bin/Xwayland
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     arc-theme \
+    avahi \
     bash-completion \
     btop \
     cliphist \
@@ -62,6 +63,7 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     mako \
     mesa-dri-drivers \
     mesa-libEGL \
+    nss-mdns \
     papirus-icon-theme \
     procps-ng \
     sudo \
@@ -77,6 +79,8 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     xorg-x11-server-Xwayland \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+RUN sed -i 's/^hosts:.*/hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
 
 # UID 1000 matches the workload's keep-id user mapping. Use -M (no home)
 # because /home/desktop is provided at runtime by the workload's

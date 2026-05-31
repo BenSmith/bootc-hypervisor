@@ -15,6 +15,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     abattis-cantarell-fonts \
     adwaita-cursor-theme \
     arc-theme \
+    avahi \
     bash-completion \
     btop \
     dbus-daemon \
@@ -40,6 +41,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-vulkan-drivers \
     nano \
     neovim \
+    nss-mdns \
     papirus-icon-theme \
     procps-ng \
     slurp \
@@ -62,6 +64,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     xdg-utils \
     xorg-x11-server-Xwayland \
     && dnf clean all
+
+RUN sed -i 's/^hosts:.*/hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
 
 # Fedora ships /usr/bin/sway with cap_sys_nice+ep for realtime scheduling.
 # In a container with a reduced capability bounding set, execve() fails with
