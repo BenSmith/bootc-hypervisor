@@ -15,6 +15,7 @@
   - [Resource Constraints](#resource-constraints)
   - [Secrets Management](#secrets-management)
 - [Multi-Container Workloads](#multi-container-workloads)
+- [VM Workloads](#vm-workloads)
 - [Managing Workloads](#managing-workloads)
 - [Device Access](#device-access)
 - [Troubleshooting](#troubleshooting)
@@ -273,17 +274,17 @@ ports = ["8080:8080"]
 
 **Applying Changes:**
 
-After modifying configs:
+After modifying a workload TOML:
+
 ```bash
-sudo systemctl daemon-reload  # Regenerates configs
-sudo systemctl restart workload-{name}.service
+sudo workloadctl recreate NAME
 ```
 
-Or use `workloadctl`:
-```bash
-sudo workloadctl edit NAME    # Edit with validation
-sudo workloadctl recreate NAME # Apply changes
-```
+That re-runs the per-workload unit generator, reloads systemd, and restarts the service. **Plain `systemctl daemon-reload` is not enough.** Daemon-reload only re-runs the *systemd shell-generator*, which emits the `workload-generate.service` oneshot but does not run it — so the per-workload unit files in `/run/systemd/system/` keep their previous content until the next boot (or until you call `recreate`, which runs the Python generator explicitly).
+
+This trips most often on `[container.environment]` and `[security.extra_groups]` changes, because those values are inlined into the unit file at generate time. Values that flow through `EnvironmentFile=` (UID-derived `XDG_RUNTIME_DIR`, the auto-detected `HOST_IP`, and decrypted `${SECRET:...}` env vars) are re-read on each service start, so for those a plain restart is sufficient.
+
+`workloadctl edit NAME` is the validated path — it opens the TOML in `$EDITOR`, validates on save, and then runs the same regen + restart as `recreate`.
 
 ---
 
@@ -787,6 +788,208 @@ Two example workloads ship in `workloads.d/` (both disabled by default):
 
 ---
 
+## VM Workloads
+
+In addition to rootless containers, workloadctl can manage KVM/QEMU virtual machines using the same TOML config format and the same CLI commands. A workload is a VM when its config contains a `[vm]` section instead of `[container]` or `[[containers]]`.
+
+### Prerequisites
+
+```bash
+sudo dnf install qemu-kvm edk2-ovmf
+```
+
+The `workloadctl preflight` command checks these and reports any missing pieces before you try to enable a VM workload.
+
+### Basic Configuration
+
+```toml
+[workload]
+name = "fedora-vm"
+enabled = true
+
+[vm]
+vcpus = 2
+memory = "2048M"
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+data_disk_size = "50G"
+user = "fedora"
+```
+
+See [`docs/examples/example-vm-fedora.toml`](examples/example-vm-fedora.toml) for a ready-to-use example, and [`docs/schema-reference.toml`](schema-reference.toml) for all `[vm]` options.
+
+### Image Sources
+
+Exactly one image source is required:
+
+| Key | Description |
+|---|---|
+| `cloud_image_url` + `cloud_image_checksum` | Download a cloud qcow2 image. Downloaded once to `.image-cache/`, verified by sha256. |
+| `local_image` | Copy/reflink from a local path (e.g., a pre-built qcow2). |
+| `image` | Build from a bootc OCI container image via `bootc-image-builder`. Requires nested KVM. |
+
+### Disk Layout
+
+Each VM workload keeps its disks in `/var/lib/workloads/<name>/`:
+
+```
+/var/lib/workloads/fedora-vm/
+  system.qcow2          ← active system disk (cloud image + cloud-init)
+  data.qcow2            ← secondary data disk (created if data_disk_size is set)
+  system.qcow2.gen-1    ← previous generation (created by `update`)
+  nvram.fd              ← per-workload UEFI NVRAM (copy of OVMF_VARS.fd)
+  .ssh/id_ed25519       ← workload SSH keypair (injected via cloud-init)
+  .image-cache/         ← downloaded image cache (cloud_image_url source)
+```
+
+The data disk is formatted on first boot by cloud-init (checks `blkid` before formatting, so it is safe across reboots).
+
+### Networking
+
+VM workloads use a shared host bridge `_workload-br` (`192.168.200.0/24`). DHCP is served by a dnsmasq instance (`workload-vm-bridge.service`) with leases at `/var/lib/dnsmasq/workload-bridge.leases` (a dnsmasq-owned, SELinux-labeled path the confined `dnsmasq_t` domain can write). Each VM gets a stable MAC address derived from its workload name.
+
+VMs are not accessible from outside the host without explicit port forwarding on the host. To expose a VM service, add an iptables/nftables DNAT rule or a host-side proxy.
+
+#### Custom bridge
+
+To put a VM directly on an existing host bridge (e.g. a LAN bridge `br0` managed by NetworkManager or `systemd-networkd`), set `[vm.network].bridge`:
+
+```toml
+[vm.network]
+bridge = "br0"
+```
+
+When at least one VM uses the default `_workload-br`, the generator emits `workload-bridge.service` to bring it up. User-provided bridges are assumed to be managed elsewhere and that service is skipped — workloadctl will not create or modify them. The bridge name must be a valid Linux interface name (≤15 chars, letters/digits/`_`/`-`).
+
+### Memory Balloon
+
+By default the VM includes a `virtio-balloon-pci` device so the host can reclaim idle guest memory at runtime. The guest kernel handles this automatically (`virtio_balloon` module, included in Fedora Cloud).
+
+To disable it (e.g., for latency-sensitive workloads):
+
+```toml
+[vm]
+balloon = false
+```
+
+### Accessing a VM
+
+**Serial console** (works at any boot stage, no network required):
+```bash
+sudo workloadctl shell fedora-vm
+# Press Ctrl+] to detach
+```
+
+**SSH** (requires guest to be running and network up):
+```bash
+workloadctl exec fedora-vm -- bash
+workloadctl exec fedora-vm -- dnf upgrade -y
+```
+
+The SSH key is injected via cloud-init on first boot. `exec` resolves the guest IP from the DHCP lease file automatically.
+
+### virtiofs Volumes
+
+Share host directories into the VM:
+
+```toml
+[vm]
+vcpus = 2
+memory = "4096M"
+image = "quay.io/myorg/myapp:latest"
+
+[[vm.volumes]]
+host_path = "/data/myapp"
+guest_path = "/mnt/data"
+tag = "mydata"
+```
+
+virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured. The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
+
+### Update and Rollback
+
+**Update** rebuilds `system.qcow2` from the configured image source:
+
+```bash
+sudo workloadctl update fedora-vm
+# Building system disk for VM workload: fedora-vm
+#   Cached image found: Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+#   Checksum verified (sha256:28680fe5...)
+#   Rotating system.qcow2 → system.qcow2.gen-1
+#   Copying qcow2 to system disk (reflink if supported)...
+#   ✓ fedora-vm: rebuilt and restarted
+```
+
+The old disk is rotated to `system.qcow2.gen-N` before the new disk is written. `vm.rollback_keep` (default 2) counts the *older* generations kept in addition to the one just rotated, so the total number of retained `system.qcow2.gen-*` files is `rollback_keep + 1` (default 3).
+
+For `cloud_image_url`, the download is cached at `.image-cache/<filename>` and the cache is keyed by `cloud_image_checksum`. `update` re-downloads only when the cached file fails the configured checksum (or is missing) — bumping the upstream image means changing both `cloud_image_url` and `cloud_image_checksum` in the TOML first. For `local_image`, `update` re-copies the file every run.
+
+> **No auto-rollback.** Container `update` watches health checks and auto-rolls back on failure. VM `update` does **not** verify the guest after restart: if the new disk fails to boot, you must run `sudo workloadctl rollback <name>` manually. Use the serial console (`workloadctl shell <name>`) to diagnose before deciding.
+
+If the rebuild itself fails (download error, checksum mismatch, bootc-image-builder failure) the just-rotated `system.qcow2.gen-N` is renamed back to `system.qcow2` so the service still has a usable disk.
+
+**Rollback** restores the most recent generation and restarts:
+
+```bash
+sudo workloadctl rollback fedora-vm
+# Rolling back VM 'fedora-vm':
+#   system.qcow2.gen-1 → system.qcow2
+# ✓ Rolled back fedora-vm to generation 1
+```
+
+### Boot Flow
+
+```
+workload-fedora-vm-build.service   (oneshot, builds system.qcow2 on first enable)
+  └─ workload-vm-bridge.service    (_workload-br bridge + dnsmasq, shared across all VMs)
+  └─ workload-fedora-vm-virtiofs-*.service  (virtiofsd sidecars, one per volume)
+  └─ workload-fedora-vm.service    (Type=notify; workload-vm-notify starts QEMU,
+                                    polls QMP, sends READY=1 when guest is running)
+```
+
+### Bootstrapping a VM with cloud-init
+
+By default workloadctl generates a small built-in `#cloud-config` seed for each VM — enough to inject the workload's SSH key, mount any virtiofs shares, and format the data disk. That's all `workloadctl exec` needs.
+
+For anything more (clone a repo, install packages, register a daemon, drop config files into the guest), set `[vm.cloud_init].user_data_file` and ship your own `#cloud-config`. The file *is* the entire user-data; workloadctl does plain text substitution only, so the structure is fully yours and no YAML library is involved.
+
+```toml
+[vm.cloud_init]
+user_data_file = "./cloud-init/user-data"     # relative to the TOML's dir
+
+[vm.cloud_init.template_vars]
+REPO_URL = "https://forgejo.local/me/myproject.git"
+VERSION  = "1.4.2"
+```
+
+Inside the user-data file, three substitution forms are recognised:
+
+| Placeholder | Source |
+| --- | --- |
+| `${VAR}` | `[vm.cloud_init.template_vars]` first, then the environment. Unresolved → build fails loudly. |
+| `${SECRET:name}` | `systemd-creds decrypt /etc/credstore.encrypted/<name>` (falls back to `/etc/credstore/<name>`). Missing → build fails. |
+| `${SECRET?name}` | Same as `${SECRET:name}` but missing credential substitutes to `""` instead of erroring. Useful for runtime opt-ins gated by a shell check on the rendered value. |
+| `$$` | Collapses to a literal `$` — use `$${shellvar}` to keep `${shellvar}` literal in the rendered file. |
+
+Two magic variables are always injected:
+
+- `${WORKLOADCTL_SSH_KEY}` — the workload's generated SSH pubkey. Drop into `users[].ssh_authorized_keys` to keep `workloadctl exec` working.
+- `${WORKLOADCTL_WORKLOAD_NAME}` — the workload name (useful for `hostname:`).
+
+**Encrypting a runtime secret** for `${SECRET:name}`:
+
+```sh
+sudo systemd-creds encrypt --name=runner-token \
+  - /etc/credstore.encrypted/runner-token <<< 'PASTE-TOKEN-HERE'
+sudo chmod 0600 /etc/credstore.encrypted/runner-token
+```
+
+The decrypted value is baked into the seed ISO at build time. The ISO lives in the workload's home dir (root-only path, mode 0640), so the secret is at rest on disk for the lifetime of the VM — rotate by re-encrypting and re-running `workloadctl enable` (the seed rebuilds when the user-data file's mtime changes).
+
+A complete worked example lives at [`vms/virtual-forgejo/`](../vms/virtual-forgejo/README.md) (workload TOML at [`workloads.d/virtual-forgejo.toml`](../workloads.d/virtual-forgejo.toml)): a Fedora 44 VM that boots, installs workloadctl from source, runs Forgejo + Caddy + Avahi as containerized sidecars, and registers a native `forgejo-runner` against the in-VM Forgejo. The split mirrors the existing `containers/` convention — `workloads.d/` holds the TOML; `vms/<name>/` holds the bootstrap content.
+
+---
+
 ## Managing Workloads
 
 ### Using workloadctl (Recommended)
@@ -1015,7 +1218,7 @@ sudo userdel -r _wl-webserver
 
 ### Image Updates
 
-Pull the latest version of a workload's container image and restart if it changed.
+For **container workloads**, pull the latest image and restart if it changed. For **VM workloads**, rebuild the system disk from its image source (see [VM Workloads — Update and Rollback](#update-and-rollback)).
 
 ```bash
 sudo workloadctl update pihole
@@ -1084,6 +1287,8 @@ sudo workloadctl rollback pihole
 ```
 
 The previous image is tagged as `localhost/workload-rollback/{name}:latest` in the workload user's podman storage. Each update overwrites the rollback tag, so exactly one previous image is kept per workload (same two-slot model as bootc).
+
+For **VM workloads**, rollback restores the latest `system.qcow2.gen-N` (created during `update`) rather than a container image tag. See [VM Workloads — Update and Rollback](#update-and-rollback).
 
 ### Backup and Restore
 

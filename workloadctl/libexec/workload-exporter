@@ -36,11 +36,13 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         break
 # --- end bootstrap ---------------------------------------------------------
 from podman import Podman
+from workload_lib import QMPClient
 
 
 WORKLOAD_CONFIG_DIR = Path(
     os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
 )
+VM_SOCKET_DIR = Path("/run/workload-vm")
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
 
@@ -48,7 +50,7 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
 def get_enabled_workloads():
     """Read all enabled workload configs from config directory.
 
-    Returns list of (name, has_health_check) tuples.
+    Returns list of (name, has_health_check, is_vm) tuples.
     """
     workloads = []
     if not WORKLOAD_CONFIG_DIR.is_dir():
@@ -69,12 +71,63 @@ def get_enabled_workloads():
                 has_health = bool(
                     config.get("container", {}).get("health", {}).get("cmd", "")
                 )
+                is_vm = bool(config.get("vm"))
                 if name:
-                    workloads.append((name, has_health))
+                    workloads.append((name, has_health, is_vm))
         except Exception:
             continue
 
     return workloads
+
+
+def get_vm_qmp_metrics(name):
+    """Query QMP for VM-specific metrics. Returns dict, empty if unavailable.
+
+    Collects:
+      balloon_actual_bytes   — guest physical memory after balloon inflation
+      vcpu_{N}_cpu_seconds_total — per-vCPU CPU time (user+sys) from /proc/<tid>/stat
+    """
+    # Use the dedicated read-only metrics monitor, never the control socket
+    # (qmp.sock). A QMP monitor serves one client at a time, so scraping the
+    # control socket every 15s could block the ExecStop system_powerdown and
+    # force an unclean SIGKILL shutdown.
+    sock_path = VM_SOCKET_DIR / name / "qmp-metrics.sock"
+    if not sock_path.exists():
+        return {}
+
+    metrics = {}
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=2.0, recv_timeout=3.0)
+        qmp.negotiate()
+
+        # Balloon: actual guest physical memory in use
+        balloon = qmp.execute("query-balloon")
+        if "return" in balloon and "actual" in balloon["return"]:
+            metrics["balloon_actual_bytes"] = balloon["return"]["actual"]
+
+        # Per-vCPU CPU time via thread IDs + /proc/<tid>/stat
+        cpus = qmp.execute("query-cpus-fast")
+        if "return" in cpus:
+            clk_tck = os.sysconf("SC_CLK_TCK")
+            for cpu in cpus["return"]:
+                idx = cpu.get("cpu-index", 0)
+                tid = cpu.get("thread-id")
+                if tid is None:
+                    continue
+                try:
+                    stat = Path(f"/proc/{tid}/stat").read_text().split()
+                    utime = int(stat[13])
+                    stime = int(stat[14])
+                    metrics[f"vcpu_{idx}_cpu_seconds_total"] = (utime + stime) / clk_tck
+                except (OSError, ValueError, IndexError):
+                    pass
+    except Exception:
+        pass
+    finally:
+        qmp.close()
+
+    return metrics
 
 
 def systemd_show(service, *properties):
@@ -248,7 +301,7 @@ def format_metrics(all_metrics):
         lines.append(f"# HELP {metric_name} {help_text}")
         lines.append(f"# TYPE {metric_name} {metric_type}")
 
-        for workload_name, svc_metrics, cgroup_metrics in all_metrics:
+        for workload_name, svc_metrics, cgroup_metrics, _vm_metrics in all_metrics:
             key = metric_name.replace("workload_", "")
             if key in svc_metrics:
                 value = svc_metrics[key]
@@ -264,6 +317,23 @@ def format_metrics(all_metrics):
                     lines.append(f'{metric_name}{{workload="{workload_name}"}} {value}')
 
         lines.append("")
+
+    # VM-specific metrics (only emitted for workloads with a [vm] section)
+    lines.append("# HELP workload_vm_balloon_actual_bytes Guest physical memory in use after balloon inflation")
+    lines.append("# TYPE workload_vm_balloon_actual_bytes gauge")
+    for workload_name, _svc, _cgroup, vm_metrics in all_metrics:
+        if "balloon_actual_bytes" in vm_metrics:
+            lines.append(f'workload_vm_balloon_actual_bytes{{workload="{workload_name}"}} {vm_metrics["balloon_actual_bytes"]}')
+    lines.append("")
+
+    lines.append("# HELP workload_vm_vcpu_cpu_seconds_total Total CPU time consumed by a vCPU thread in seconds")
+    lines.append("# TYPE workload_vm_vcpu_cpu_seconds_total counter")
+    for workload_name, _svc, _cgroup, vm_metrics in all_metrics:
+        for key, value in vm_metrics.items():
+            if key.startswith("vcpu_") and key.endswith("_cpu_seconds_total"):
+                vcpu_idx = key.split("_")[1]
+                lines.append(f'workload_vm_vcpu_cpu_seconds_total{{workload="{workload_name}",vcpu="{vcpu_idx}"}} {value:.6f}')
+    lines.append("")
 
     lines.append("# HELP workload_enabled_total Total number of enabled workloads")
     lines.append("# TYPE workload_enabled_total gauge")
@@ -287,14 +357,15 @@ class MetricsHandler(BaseHTTPRequestHandler):
         try:
             workloads = get_enabled_workloads()
             all_metrics = []
-            for name, has_health in workloads:
+            for name, has_health, is_vm in workloads:
                 svc = get_service_metrics(name) or {}
                 cgroup = get_cgroup_metrics(name)
                 if has_health:
                     health = get_container_health(name)
                     if health is not None:
                         svc["health"] = 1 if health == "healthy" else 0
-                all_metrics.append((name, svc, cgroup))
+                vm = get_vm_qmp_metrics(name) if is_vm else {}
+                all_metrics.append((name, svc, cgroup, vm))
             body = format_metrics(all_metrics).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

@@ -41,14 +41,20 @@ from workload_lib import (
     auto_detect_credentials,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
+    infer_workload_kind,
     infer_workload_mode,
     MAX_NAME_LENGTH,
     NAME_PATTERN,
     normalize_containers,
+    QMPClient,
     USERNAME_PREFIX,
     validate_workload_name,
+    VM_SOCKET_DIR,
     WORKLOADS_BASE,
     WORKLOAD_CONFIG_DIR,
+    VM_BRIDGE_NAME,
+    VM_DHCP_LEASE_FILE,
+    vm_mac_address,
     workload_container_name,
     workload_home_dir,
     workload_service_name,
@@ -60,7 +66,7 @@ WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 # TODO: break this file into smaller units, perhaps per-command.
 # TODO: Consider whether it's useful to make HTTP API, which would need sudo to be useful for anything other
 #  than certain read-only options
-# TODO: There's a lot of non-optional print statemens here, consider making that optional or more flexible
+# TODO: There's a lot of non-optional print statements here, consider making that optional or more flexible
 
 def parse_workload_ref(ref: str) -> tuple[str, str | None]:
     """Parse 'workload[/container]' into (workload, container_or_None)."""
@@ -229,7 +235,19 @@ class WorkloadConfig:
         return self.config["workload"]["name"]
 
     @property
+    def kind(self) -> str:
+        return infer_workload_kind(self.config)
+
+    @property
+    def is_vm(self) -> bool:
+        return self.kind == "vm"
+
+    @property
     def image(self) -> str:
+        if self.is_vm:
+            vm = self.config.get("vm", {})
+            return (vm.get("image") or vm.get("cloud_image_url")
+                    or vm.get("local_image") or "(vm)")
         return self.config["container"]["image"]
 
     @property
@@ -249,6 +267,14 @@ class WorkloadConfig:
             raise WorkloadUserNotFound(self.name)
 
     @property
+    def gid(self) -> int:
+        """Get primary GID from passwd database."""
+        try:
+            return pwd.getpwnam(self.username).pw_gid
+        except KeyError:
+            raise WorkloadUserNotFound(self.name)
+
+    @property
     def service_name(self) -> str:
         return workload_service_name(self.name)
 
@@ -259,6 +285,10 @@ class WorkloadConfig:
     @property
     def home_dir(self) -> Path:
         return workload_home_dir(self.name)
+
+    @property
+    def vm_bridge(self) -> str:
+        return self.config.get("vm", {}).get("network", {}).get("bridge", VM_BRIDGE_NAME)
 
     def get_network_mode(self) -> str:
         return self.config.get("network", {}).get("mode", "pasta")
@@ -635,7 +665,11 @@ def cmd_list(args, manager: WorkloadManager):
                 # Gracefully handle any errors (e.g., no sudo access)
                 pass
 
-            if config.is_multi:
+            if config.is_vm:
+                vm_cfg = config.config.get("vm", {})
+                primary_image = (vm_cfg.get("cloud_image_url") or vm_cfg.get("local_image")
+                                 or vm_cfg.get("image") or None)
+            elif config.is_multi:
                 images = [img for _, img in config.container_images()]
                 primary_image = images[0] if images else None
             else:
@@ -643,10 +677,11 @@ def cmd_list(args, manager: WorkloadManager):
             workloads.append({
                 "filename": config.filename,
                 "name": config.name,
+                "kind": config.kind,
                 "enabled": config.enabled,
                 "state": state,
                 "mode": config.mode,
-                "containers": len(config.container_names()),
+                "containers": 0 if config.is_vm else len(config.container_names()),
                 "image": primary_image,
                 "image_id": image_id,
                 "ports": config.get_ports(),
@@ -704,8 +739,12 @@ def cmd_list(args, manager: WorkloadManager):
         if len(ports_str) > 20:
             ports_str = ports_str[:17] + "..."
 
-        # Image column: for multi-container workloads, show container count
-        if config.is_multi:
+        # Image column: VM / multi-container / single
+        if config.is_vm:
+            vm_cfg = config.config.get("vm", {})
+            image = (vm_cfg.get("cloud_image_url") or vm_cfg.get("local_image")
+                     or vm_cfg.get("image") or "[vm]")
+        elif config.is_multi:
             image = f"({len(config.container_names())} containers, {config.mode})"
         else:
             image = config.image
@@ -833,6 +872,39 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
         for exe in missing_recommended:
             print(f"    - {exe}")
         print("    Install: dnf install policycoreutils-python-utils checkpolicy")
+
+    if config.is_vm:
+        # VM-specific preflight: qemu, OVMF firmware, /dev/kvm, socat (for
+        # `workloadctl shell` which execs into socat to reach the serial
+        # console). Surface socat here so the first console attempt doesn't
+        # exec-fail with a generic ENOENT.
+        vm_required = ["qemu-system-x86_64", "qemu-img", "socat"]
+        missing_vm = [exe for exe in vm_required if not shutil.which(exe)]
+        if missing_vm:
+            print("  ✗ Missing required VM executables:")
+            for exe in missing_vm:
+                print(f"    - {exe}")
+            print("    Install: dnf install qemu-kvm socat")
+            failed = True
+
+        if not Path("/dev/kvm").exists():
+            print("  ✗ /dev/kvm not found — KVM acceleration unavailable")
+            print("    Enable nested KVM or run on bare metal")
+            failed = True
+
+        from workload_lib import find_ovmf_code
+        if not find_ovmf_code():
+            print("  ✗ OVMF firmware (edk2-ovmf) not found")
+            print("    Install: dnf install edk2-ovmf")
+            failed = True
+
+        bridge_conf = Path("/etc/qemu/bridge.conf")
+        bridge = config.vm_bridge
+        if not bridge_conf.exists() or f"allow {bridge}" not in bridge_conf.read_text(errors="replace"):
+            print(f"  ! /etc/qemu/bridge.conf missing 'allow {bridge}'")
+            print("    Will be configured automatically on first enable via workload-ensure-user")
+
+        return not failed
 
     # Check pull=never images exist locally (once per container)
     for _cname, image, pull in config.container_specs():
@@ -986,6 +1058,8 @@ def _provision_user(config: WorkloadConfig):
         f"# Workload user for {config.name}",
         f'u {user_name} {uid} "{config.name} workload" {home_dir}',
     ]
+    if config.is_vm:
+        sysusers_lines.append(f"m {user_name} kvm")
     for group in extra_groups:
         sysusers_lines.append(f"m {user_name} {group}")
 
@@ -1028,31 +1102,49 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
         else:
             print(f"  Transferring '{image}' from root store to workload user store...")
 
-        save = subprocess.Popen(
-            ["podman", "save", "--format", "docker-archive", image],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        load = subprocess.Popen(
-            ["sudo", "-n", "-u", config.username,
-             "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
-             "-E", f"HOME={config.home_dir}",
-             "podman", "load"],
-            stdin=save.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd="/tmp",
-        )
-        save.stdout.close()
-        load_out, load_err = load.communicate()
-        save_err = save.stderr.read() if save.stderr else b""
-        save.wait()
+        # Use a temp file rather than a pipe.  podman save via pipe creates a
+        # pipeDir in /var/tmp as root (mode 700); the target user can't access
+        # it, causing the load to fail with ENOENT on large images.  Writing to
+        # a file owned by the target user in their home dir sidesteps this.
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(suffix=".tar", dir=config.home_dir)
+        os.close(fd)
+        try:
+            os.chown(tmp_path, config.uid, config.gid)
 
-        if save.returncode != 0:
-            print(f"Error: Failed to save image '{image}': {save_err.decode(errors='replace')}",
-                  file=sys.stderr)
-            sys.exit(1)
-        if load.returncode != 0:
-            print(f"Error: Failed to transfer image '{image}': {load_err.decode(errors='replace')}",
-                  file=sys.stderr)
-            sys.exit(1)
+            save_result = subprocess.run(
+                ["podman", "save", "--format", "docker-archive", "-o", tmp_path, image],
+                capture_output=True,
+            )
+            if save_result.returncode != 0:
+                print(
+                    f"Error: Failed to save image '{image}': "
+                    f"{save_result.stderr.decode(errors='replace')}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            load_result = subprocess.run(
+                ["sudo", "-n", "-u", config.username,
+                 "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
+                 "-E", f"HOME={config.home_dir}",
+                 "-E", f"TMPDIR={config.home_dir}",
+                 "podman", "load", "-i", tmp_path],
+                capture_output=True,
+                cwd=config.home_dir,
+            )
+            if load_result.returncode != 0:
+                print(
+                    f"Error: Failed to transfer image '{image}': "
+                    f"{load_result.stderr.decode(errors='replace')}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
         print(f"  Image '{image}' transferred successfully")
         if user_image_id:
             active = subprocess.run(
@@ -1208,7 +1300,8 @@ def cmd_enable(args, manager: WorkloadManager):
 
     print()
     _provision_user(config)
-    _transfer_image(config, manager)
+    if not config.is_vm:
+        _transfer_image(config, manager)
     _activate_service(config)
 
     already_running = subprocess.run(
@@ -1239,6 +1332,15 @@ def cmd_disable(args, manager: WorkloadManager):
     print(f"  Stopping {config.service_name}...")
     subprocess.run(["systemctl", "stop", config.service_name], check=False)
 
+    if config.is_vm:
+        # Stop and reset the build/setup oneshot services so they re-run on
+        # the next enable. Without this, --purge deletes the disk but the
+        # build service stays in "active exited" and systemd skips it.
+        for suffix in ("build", "setup"):
+            svc = f"workload-{config.name}-{suffix}.service"
+            subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True)
+            subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True)
+
     # Run host setup teardown if configured
     _run_host_setup(config, "disable")
 
@@ -1268,35 +1370,53 @@ def cmd_disable(args, manager: WorkloadManager):
                            check=False, capture_output=True)
             time.sleep(0.5)
 
-            print("  Removing subuid/subgid entries...")
-            subid_lock = Path("/run/lock/workload-subid.lock")
-            subid_lock.parent.mkdir(parents=True, exist_ok=True)
-            with open(subid_lock, "w") as lock_fd:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-                for file in ["/etc/subuid", "/etc/subgid"]:
-                    p = Path(file)
-                    if p.exists():
-                        lines = [l for l in p.read_text().splitlines()
-                                 if not l.startswith(f"{config.username}:")]
-                        p.write_text("\n".join(lines) + ("\n" if lines else ""))
+            if config.is_vm:
+                # Clean up the runtime socket directory
+                vm_sock_dir = VM_SOCKET_DIR / config.name
+                if vm_sock_dir.exists():
+                    shutil.rmtree(vm_sock_dir, ignore_errors=True)
+            else:
+                print("  Removing subuid/subgid entries...")
+                subid_lock = Path("/run/lock/workload-subid.lock")
+                subid_lock.parent.mkdir(parents=True, exist_ok=True)
+                with open(subid_lock, "w") as lock_fd:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                    for file in ["/etc/subuid", "/etc/subgid"]:
+                        p = Path(file)
+                        if p.exists():
+                            lines = [l for l in p.read_text().splitlines()
+                                     if not l.startswith(f"{config.username}:")]
+                            p.write_text("\n".join(lines) + ("\n" if lines else ""))
 
             print(f"  Removing user {config.username}...")
             userdel = subprocess.run(["userdel", "-f", config.username],
                                      check=False, capture_output=True, text=True)
-            # userdel -f succeeds even when warning "user currently used by
-            # process N"; only surface stderr if it actually failed or the
-            # user still exists.
-            if userdel.returncode != 0 or userdel.stderr.strip():
-                try:
-                    pwd.getpwnam(config.username)
-                    sys.stderr.write(userdel.stderr)
-                except KeyError:
-                    pass
+            # userdel -f exits 0 even when it prints a warning about a process
+            # still using the account — check whether the user actually got
+            # removed rather than trusting the exit code.
+            user_still_exists = False
+            try:
+                pwd.getpwnam(config.username)
+                user_still_exists = True
+            except KeyError:
+                pass
+
+            if user_still_exists:
+                sys.stderr.write(f"  ! userdel failed — user {config.username} still exists.\n")
+                if userdel.stderr.strip():
+                    sys.stderr.write(f"    {userdel.stderr.strip()}\n")
+                sys.stderr.write(f"    Fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge.\n")
+                sys.exit(1)
 
             home_path = Path(home_dir)
             if home_path.exists():
                 print(f"  Removing home directory {home_dir}...")
-                shutil.rmtree(home_dir, ignore_errors=True)
+                try:
+                    shutil.rmtree(home_dir)
+                except OSError as e:
+                    sys.stderr.write(f"  ! Failed to fully remove {home_dir}: {e}\n")
+                    sys.stderr.write(f"  ! Workload data may still be present — remove manually before re-enabling.\n")
+                    sys.exit(1)
 
             print(f"✓ Workload '{args.workload}' disabled and purged")
         except KeyError:
@@ -1484,7 +1604,8 @@ def cmd_cleanup(args, manager: WorkloadManager):
 
 
 def cmd_recreate(args, manager: WorkloadManager):
-    """Recreate a workload container from its image (destroys overlay)"""
+    """Recreate a workload from its image/config (containers: destroy overlay;
+    VMs: rebuild the cloud-init seed and reboot QEMU onto it)."""
     require_root()
     config = WorkloadConfig(args.workload)
 
@@ -1495,13 +1616,26 @@ def cmd_recreate(args, manager: WorkloadManager):
         check=True,
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
+    if config.is_vm:
+        # The cloud-init ISO and nvram are built by the setup oneshot
+        # (RemainAfterExit=yes), which a plain main-service restart does NOT
+        # re-run. Restart it first so config edits (template_vars, volumes, …)
+        # are re-rendered into a fresh seed before QEMU boots onto it.
+        subprocess.run(
+            ["systemctl", "restart", f"workload-{config.name}-setup.service"],
+            check=True,
+        )
     subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"✓ Workload '{args.workload}' recreated")
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
 def cmd_reboot(args, manager: WorkloadManager):
-    """Soft-reboot a workload container (re-exec systemd, restart all services, keep overlay)"""
+    """Soft-reboot a workload (re-exec systemd, restart all services, keep disk).
+
+    Containers: `systemctl soft-reboot` in the container. VMs: the same
+    soft-reboot inside the guest over SSH (a container `podman exec` is
+    meaningless for a VM, which has no container)."""
     config = WorkloadConfig(args.workload)
 
     if not manager.user_exists(config):
@@ -1510,6 +1644,37 @@ def cmd_reboot(args, manager: WorkloadManager):
         sys.exit(1)
 
     print(f"Soft-rebooting workload: {args.workload}")
+
+    if config.is_vm:
+        guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+        if not guest_ip:
+            print(f"Error: could not determine IP for VM '{args.workload}'", file=sys.stderr)
+            print(f"  Check {VM_DHCP_LEASE_FILE} or use 'workloadctl shell {args.workload}' (console).",
+                  file=sys.stderr)
+            sys.exit(1)
+        # Fire the soft-reboot detached via systemd-run --no-block: a direct
+        # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
+        # connection drops and ssh exits nonzero *even on success*. Running it
+        # in a transient unit lets the SSH command return cleanly (0) before
+        # teardown; --collect reaps the unit. (`sudo` failures are still caught
+        # here; an unsupported soft-reboot on systemd <254 fails async.)
+        ssh_cmd = _vm_ssh_command(
+            config, guest_ip,
+            exec_args=["sudo", "systemd-run", "--collect", "--no-block",
+                       "systemctl", "soft-reboot"],
+            connect_timeout=5,
+        )
+        result = subprocess.run(ssh_cmd)
+        if result.returncode != 0:
+            print("Error: could not initiate guest soft-reboot.", file=sys.stderr)
+            print("  Needs passwordless sudo and systemd 254+ in the guest. To "
+                  "power-cycle the VM regardless of its init system (disk "
+                  "preserved), run:", file=sys.stderr)
+            print(f"    sudo systemctl restart {config.service_name}", file=sys.stderr)
+            sys.exit(1)
+        print(f"✓ VM '{args.workload}' soft-reboot initiated (disk preserved)")
+        return
+
     result = manager.run_podman(config, "exec", config.container_name,
                                 "systemctl", "soft-reboot")
     if result.returncode != 0:
@@ -1518,8 +1683,98 @@ def cmd_reboot(args, manager: WorkloadManager):
     print(f"✓ Workload '{args.workload}' soft-rebooted (overlay preserved)")
 
 
+def _vm_console_sock(name: str) -> Path:
+    return VM_SOCKET_DIR / name / "console.sock"
+
+
+def _vm_ssh_key(config: "WorkloadConfig") -> Path:
+    return config.home_dir / ".ssh" / "id_ed25519"
+
+
+def _vm_guest_user(config: "WorkloadConfig") -> str:
+    return config.config.get("vm", {}).get("user", "workload")
+
+
+def _vm_ssh_command(
+    config: "WorkloadConfig",
+    guest_ip: str,
+    exec_args: list[str] | None = None,
+    connect_timeout: int | None = None,
+) -> list[str]:
+    """Build the ssh argv used to reach a VM workload's guest user."""
+    key_path = _vm_ssh_key(config)
+    guest_user = _vm_guest_user(config)
+    cmd = [
+        "ssh",
+        *(["-t"] if sys.stdout.isatty() else []),
+        "-i", str(key_path),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ]
+    if connect_timeout is not None:
+        cmd += ["-o", f"ConnectTimeout={connect_timeout}"]
+    cmd.append(f"{guest_user}@{guest_ip}")
+    if exec_args:
+        cmd += ["--", *exec_args]
+    return cmd
+
+
+def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
+    """Look up the VM's IP by hostname in dnsmasq leases, MAC via ARP, or mDNS.
+
+    The dnsmasq lease file is only authoritative when workload-bridge.service
+    actually manages a bridge it created (signalled by /run/workload-vm/
+    bridge-managed). On a pre-existing LAN bridge (e.g. br0) no dnsmasq runs
+    and any old lease entries are stale, so we go straight to ARP.
+
+    Falls back to mDNS ({name}.local) when avahi/nss-mdns are available.
+    """
+    if Path("/run/workload-vm/bridge-managed").exists():
+        lease_file = VM_DHCP_LEASE_FILE
+        if lease_file.exists():
+            try:
+                for line in lease_file.read_text().splitlines():
+                    parts = line.split()
+                    # dnsmasq lease format: <timestamp> <mac> <ip> <hostname> <client-id>
+                    if len(parts) >= 4 and parts[3] == name:
+                        return parts[2]
+            except OSError:
+                pass
+
+    # Pre-existing LAN bridge: no lease file.  Look up by the VM's stable MAC.
+    mac = vm_mac_address(name)
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show", "dev", bridge],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # ip neigh format: <ip> dev <iface> lladdr <mac> <state>
+            if len(parts) >= 5 and parts[4].lower() == mac.lower():
+                return parts[0]
+    except OSError:
+        pass
+
+    # mDNS fallback: works when avahi + nss-mdns are installed on the host.
+    try:
+        result = subprocess.run(
+            ["getent", "hosts", f"{name}.local"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.split()
+            if parts:
+                return parts[0]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
 def cmd_shell(args, manager: WorkloadManager):
-    """Open interactive shell in workload container"""
+    """Open interactive shell in workload container or VM console"""
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
 
@@ -1527,6 +1782,40 @@ def cmd_shell(args, manager: WorkloadManager):
         print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
         print("Is the workload enabled and running?", file=sys.stderr)
         sys.exit(1)
+
+    if config.is_vm:
+        # Prefer SSH so the guest tty inherits the host's window size and
+        # signal handling. The serial console (socat below) is reserved as
+        # an explicit recovery path when --console is passed or SSH can't
+        # reach the VM (no lease, no network, sshd down).
+        if not args.console:
+            guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+            if guest_ip:
+                ssh_cmd = _vm_ssh_command(config, guest_ip, connect_timeout=5)
+                result = subprocess.run(ssh_cmd)
+                # 255 = ssh transport failure (host unreachable, auth, etc.);
+                # anything else came from the remote shell and should propagate.
+                if result.returncode != 255:
+                    sys.exit(result.returncode)
+                print(f"SSH to '{workload}' failed; falling back to serial console.",
+                      file=sys.stderr)
+            else:
+                print(f"No IP found for VM '{workload}'; falling back to serial console.",
+                      file=sys.stderr)
+
+        # Connect to the VM serial console via the socat multiplexer.
+        # The console socket is created by QEMU; multiple clients share it
+        # through a socat relay (each session gets its own input/output view).
+        console_sock = _vm_console_sock(config.name)
+        if not console_sock.exists():
+            print(f"Error: console socket not found: {console_sock}", file=sys.stderr)
+            print(f"Is workload '{workload}' running?", file=sys.stderr)
+            sys.exit(1)
+        print(f"Connecting to {workload} console (Ctrl-] to disconnect)...")
+        print()
+        os.execvp("socat", ["socat", "STDIO,raw,echo=0,escape=0x1d", f"UNIX-CONNECT:{console_sock}"])
+        # execvp replaces the process; unreachable
+        return
 
     target = resolve_container_target(config, container, workload)
 
@@ -1560,7 +1849,7 @@ def cmd_shell(args, manager: WorkloadManager):
 
 
 def cmd_exec(args, manager: WorkloadManager):
-    """Execute command in workload container"""
+    """Execute command in workload container or VM (via SSH)"""
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
 
@@ -1577,6 +1866,17 @@ def cmd_exec(args, manager: WorkloadManager):
     if not exec_args:
         print("Error: no command given to exec", file=sys.stderr)
         sys.exit(2)
+
+    if config.is_vm:
+        guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+        if not guest_ip:
+            print(f"Error: could not determine IP for VM '{workload}'", file=sys.stderr)
+            print(f"  Check {VM_DHCP_LEASE_FILE} or use 'workloadctl shell {workload}' (console).",
+                  file=sys.stderr)
+            sys.exit(1)
+        ssh_cmd = _vm_ssh_command(config, guest_ip, exec_args=exec_args)
+        result = subprocess.run(ssh_cmd)
+        sys.exit(result.returncode)
 
     target = resolve_container_target(config, container, workload)
     manager.run_podman(config, "exec", "-it", target, *exec_args, check=True)
@@ -1703,6 +2003,28 @@ def cmd_ps(args, manager: WorkloadManager):
         print("  No running workload containers found")
 
 
+def _vm_rebuild_and_restart(config: WorkloadConfig):
+    """Rebuild a VM's system disk (--update) and restart its service.
+
+    Returns True on success, False if the disk rebuild or the restart failed.
+    Never raises, so a single VM failure doesn't abort an `update --all` run.
+    """
+    print(f"Updating VM workload {config.name}...")
+    result = subprocess.run(
+        ["/usr/libexec/workloadctl/workload-vm-build-disk", config.name, "--update"],
+        check=False,
+    )
+    if result.returncode != 0:
+        print(f"  ✗ Disk rebuild failed for {config.name}", file=sys.stderr)
+        return False
+    restart = subprocess.run(["systemctl", "restart", config.service_name], check=False)
+    if restart.returncode != 0:
+        print(f"  ✗ Restart failed for {config.name}", file=sys.stderr)
+        return False
+    print(f"  ✓ {config.name}: rebuilt and restarted")
+    return True
+
+
 def cmd_update(args, manager: WorkloadManager):
     """Update workload image and restart"""
     require_root()
@@ -1713,10 +2035,18 @@ def cmd_update(args, manager: WorkloadManager):
             print("No enabled workloads found")
             return
 
-        # Phase 1: Pull and restart all
+        # Phase 1: Pull/rebuild and restart all
         updated = []  # (config, old_id) tuples
         skipped = 0
+        vm_total = 0
+        vm_failed = 0
         for config in configs:
+            if config.is_vm:
+                vm_total += 1
+                if not _vm_rebuild_and_restart(config):
+                    vm_failed += 1
+                print()
+                continue
             if all(pull == "never" for _, _, pull in config.container_specs()):
                 skipped += 1
                 continue
@@ -1725,17 +2055,27 @@ def cmd_update(args, manager: WorkloadManager):
                 updated.append(result)
             print()
 
-        # Phase 2: One wait, verify all
+        # Phase 2: One wait, verify all (containers only)
         rolled_back = 0
         if updated:
             rolled_back = _verify_all(updated, manager)
 
         print(f"Done: {len(updated) - rolled_back} updated, {rolled_back} rolled back, {skipped} skipped (pull=never)")
+        if vm_total:
+            print(f"VMs: {vm_total - vm_failed} rebuilt, {vm_failed} failed")
+        # VMs have no auto-rollback safety net, so a failed VM update must not
+        # be silently reported as success — exit nonzero for scripted callers.
+        if vm_failed:
+            sys.exit(1)
     else:
         if not args.workload:
             print("Error: Workload name required (or use --all)", file=sys.stderr)
             sys.exit(1)
         config = WorkloadConfig(args.workload)
+        if config.is_vm:
+            if not _vm_rebuild_and_restart(config):
+                sys.exit(1)
+            return
         if all(pull == "never" for _, _, pull in config.container_specs()):
             print(f"Error: {config.name} uses pull=never (local image). Build it manually.", file=sys.stderr)
             sys.exit(1)
@@ -1936,6 +2276,33 @@ def cmd_rollback(args, manager: WorkloadManager):
         print(f"Error: user {config.username} does not exist (workload not enabled?)", file=sys.stderr)
         sys.exit(1)
 
+    if config.is_vm:
+        home_dir = config.home_dir
+        system_disk = home_dir / "system.qcow2"
+        gens = sorted(
+            int(p.suffix[5:])
+            for p in home_dir.glob("system.qcow2.gen-*")
+            if p.suffix[5:].isdigit()
+        )
+        if not gens:
+            print(f"Error: No rollback generation found for VM '{config.name}'", file=sys.stderr)
+            print(f"  (generations are created automatically by 'workloadctl update')", file=sys.stderr)
+            sys.exit(1)
+        latest_gen = max(gens)
+        gen_path = home_dir / f"system.qcow2.gen-{latest_gen}"
+        print(f"Rolling back VM '{config.name}':")
+        print(f"  system.qcow2.gen-{latest_gen} → system.qcow2")
+        # Stop the VM before swapping disks: QEMU holds the active qcow2
+        # open, and renaming a file out from under it leaves the running
+        # guest writing to an unlinked inode while the new disk is mounted
+        # by the next start. Path.replace is atomic so the rename either
+        # succeeds entirely or leaves system_disk gone (and we surface that).
+        subprocess.run(["systemctl", "stop", config.service_name], check=False)
+        gen_path.replace(system_disk)
+        subprocess.run(["systemctl", "start", config.service_name], check=True)
+        print(f"✓ Rolled back {config.name} to generation {latest_gen}")
+        return
+
     pod = manager.podman(config)
 
     # Build the rollback plan: one entry per container that has a rollback
@@ -1976,10 +2343,128 @@ def cmd_rollback(args, manager: WorkloadManager):
     print(f"✓ Rolled back {config.name}")
 
 
+def _vm_qmp_status(name: str) -> str | None:
+    """Return the QMP running status string, or None if unavailable."""
+    sock_path = VM_SOCKET_DIR / name / "qmp.sock"
+    if not sock_path.exists():
+        return None
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=3.0, recv_timeout=3.0)
+        qmp.negotiate()
+        reply = qmp.execute("query-status")
+        if "return" in reply:
+            return reply["return"].get("status", "unknown")
+        return None
+    except Exception:
+        return None
+    finally:
+        qmp.close()
+
+
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
     config = WorkloadConfig(args.workload)
     user_exists = manager.user_exists(config)
+
+    if config.is_vm:
+        vm_cfg = config.config.get("vm", {})
+        home_dir = config.home_dir
+
+        # Disk info
+        system_disk = home_dir / "system.qcow2"
+        data_disk = home_dir / "data.qcow2"
+        gens = sorted(
+            int(p.suffix[5:])
+            for p in home_dir.glob("system.qcow2.gen-*")
+            if p.suffix[5:].isdigit()
+        ) if home_dir.exists() else []
+
+        # Guest IP from DHCP leases
+        guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+
+        # QMP status
+        qmp_status = _vm_qmp_status(config.name)
+
+        # Service state
+        show_result = subprocess.run(
+            ["systemctl", "show", config.service_name,
+             "--property=ActiveState,ActiveEnterTimestamp", "--timestamp=unix"],
+            capture_output=True, text=True,
+        )
+        svc_props = {}
+        for line in show_result.stdout.splitlines():
+            key, _, value = line.partition("=")
+            svc_props[key] = value
+        service_state = svc_props.get("ActiveState", "") or "inactive"
+        ts_raw = svc_props.get("ActiveEnterTimestamp", "")
+        active_since = None
+        if ts_raw and ts_raw.startswith("@"):
+            try:
+                active_since = int(float(ts_raw[1:]))
+            except ValueError:
+                pass
+
+        vm_info = {
+            "workload": {"name": config.name, "filename": config.filename,
+                         "config_path": str(config.path), "enabled": config.enabled},
+            "vm": {
+                "memory": vm_cfg.get("memory", "1024M"),
+                "vcpus": vm_cfg.get("vcpus", 1),
+                "image_source": (vm_cfg.get("cloud_image_url") or vm_cfg.get("local_image")
+                                 or vm_cfg.get("image") or "(none)"),
+                "data_disk_size": vm_cfg.get("data_disk_size", ""),
+                "system_disk": str(system_disk) if system_disk.exists() else None,
+                "data_disk": str(data_disk) if data_disk.exists() else None,
+                "rollback_generations": gens,
+                "guest_ip": guest_ip,
+                "qmp_status": qmp_status,
+            },
+            "user": {"name": config.username, "exists": user_exists},
+            "service": {"name": config.service_name, "state": service_state,
+                        "active_since": active_since},
+        }
+
+        if args.json:
+            print(json.dumps(vm_info, indent=2))
+            return
+
+        print(f"Workload: {config.name}  [VM]")
+        print(f"Config:   {config.path}")
+        print(f"Status:   {'enabled' if config.enabled else 'disabled'}")
+        print()
+        print("VM:")
+        print(f"  Memory: {vm_cfg.get('memory', '1024M')}  vCPUs: {vm_cfg.get('vcpus', 1)}")
+        src = (vm_cfg.get("cloud_image_url") or vm_cfg.get("local_image")
+               or vm_cfg.get("image") or "(none)")
+        print(f"  Source: {src}")
+        if system_disk.exists():
+            print(f"  System disk: {system_disk}")
+        if data_disk.exists():
+            print(f"  Data disk:   {data_disk}")
+        if gens:
+            print(f"  Rollback generations: {', '.join(f'gen-{g}' for g in gens)}")
+        if guest_ip:
+            print(f"  Guest IP:   {guest_ip}")
+        if qmp_status:
+            print(f"  QMP status: {qmp_status}")
+        print()
+        print("Service:")
+        print(f"  Name: {config.service_name}")
+        if service_state == "active" and active_since is not None:
+            since_str = datetime.datetime.fromtimestamp(active_since).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  Active: active (running) since {since_str}")
+        else:
+            print(f"  Active: {service_state}")
+        print()
+        print("Quick commands:")
+        print(f"  Console:  workloadctl shell {config.filename}")
+        if guest_ip:
+            print(f"  SSH:      workloadctl exec {config.filename} -- bash")
+        print(f"  Logs:     workloadctl logs -f {config.filename}")
+        print(f"  Update:   sudo workloadctl update {config.filename}")
+        print(f"  Rollback: sudo workloadctl rollback {config.filename}")
+        return
 
     # Container(s)
     if config.is_multi:
@@ -2667,11 +3152,29 @@ def cmd_edit(args, manager: WorkloadManager):
     if config.enabled:
         response = input("Apply changes and restart workload? [y/N] ")
         if response.lower() in ["y", "yes"]:
+            # daemon-reload alone won't regenerate per-workload unit files —
+            # only the systemd shell-generator re-runs, and it just emits a
+            # oneshot that doesn't fire until next boot. Run workload-generate
+            # explicitly so [container.environment] and other inlined values
+            # actually take effect.
+            subprocess.run(
+                ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+                check=True,
+            )
             subprocess.run(["systemctl", "daemon-reload"], check=True)
+            if config.is_vm:
+                # VM cloud-init/nvram are built by the setup oneshot
+                # (RemainAfterExit=yes); restart it so edits to [vm.cloud_init]
+                # / template_vars are re-rendered into a fresh seed before the
+                # main service reboots QEMU onto it.
+                subprocess.run(
+                    ["systemctl", "restart", f"workload-{config.name}-setup.service"],
+                    check=True,
+                )
             subprocess.run(["systemctl", "restart", config.service_name], check=True)
             print("✓ Changes applied and service restarted")
         else:
-            print("Changes saved but not applied. Run 'systemctl daemon-reload' and restart to apply.")
+            print(f"Changes saved but not applied. Run 'sudo workloadctl recreate {args.workload}' to apply.")
     else:
         print("✓ Changes saved (workload is disabled)")
 
@@ -3313,8 +3816,26 @@ def cmd_backup(args, manager: WorkloadManager):
         configs = [WorkloadConfig(args.workload)]
 
     backups = []
+    skipped = []
     for config in configs:
         name = config.name
+
+        # VM live-backup guard: tarring a running qcow2 without guest-agent
+        # fsfreeze + QMP quiesce can capture a torn, unbootable image. Until that
+        # quiesce path exists, refuse --no-stop for VMs rather than silently risk a
+        # corrupt backup. (Containers back up a stopped rootfs/volumes and are unaffected.)
+        if args.no_stop and config.is_vm:
+            msg = (f"--no-stop is unsafe for VM workload '{name}': backing up a live "
+                   f"qcow2 without guest quiesce can produce a corrupt image. "
+                   f"Re-run without --no-stop for a consistent (stopped) backup.")
+            if args.all:
+                if not args.json:
+                    print(f"  Skipping {name}: {msg}", file=sys.stderr)
+                skipped.append(name)
+                continue
+            print(f"Error: {msg}", file=sys.stderr)
+            sys.exit(1)
+
         if args.output:
             output = Path(args.output)
             if output.is_dir():
@@ -3328,9 +3849,15 @@ def cmd_backup(args, manager: WorkloadManager):
         backups.append({"workload": name, "archive": str(output), "size_bytes": size_bytes})
 
     if args.json:
-        print(json.dumps({"backups": backups}, indent=2))
+        result = {"backups": backups}
+        if skipped:
+            result["skipped"] = skipped
+        print(json.dumps(result, indent=2))
     elif args.all:
-        print(f"\nBacked up {len(configs)} workload(s)")
+        print(f"\nBacked up {len(backups)} workload(s)")
+        if skipped:
+            print(f"Skipped {len(skipped)} VM workload(s) (--no-stop unsafe): "
+                  f"{', '.join(skipped)}")
 
 
 def cmd_restore(args, manager: WorkloadManager):
@@ -3964,7 +4491,7 @@ def main():
     enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
     enable_parser.add_argument("workload", help="Workload name")
 
-    exec_parser = subparsers.add_parser("exec", help="Execute command in workload container")
+    exec_parser = subparsers.add_parser("exec", help="Execute command in workload container or VM (via SSH)")
     exec_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                              help="Workload, or workload/container for multi-container workloads")
     # REMAINDER captures the command verbatim, including leading-dash flags
@@ -4055,9 +4582,11 @@ def main():
     secret_import.add_argument("--force", action="store_true", help="Overwrite if exists")
     secret_import.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
 
-    shell_parser = subparsers.add_parser("shell", help="Open interactive shell in workload container")
+    shell_parser = subparsers.add_parser("shell", help="Open interactive shell in container, or SSH into VM workloads (serial console fallback)")
     shell_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                               help="Workload, or workload/container for multi-container workloads")
+    shell_parser.add_argument("--console", action="store_true",
+                              help="VM only: skip SSH and connect directly to the serial console (recovery path)")
 
     stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
     stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
@@ -4074,12 +4603,12 @@ def main():
     stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
     stop_parser.add_argument("workload", help="Workload name")
 
-    update_parser = subparsers.add_parser("update", help="Pull latest image and restart")
+    update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
     update_parser.add_argument("workload", nargs="?", help="Workload name")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
     update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
 
-    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image")
+    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
     rollback_parser.add_argument("workload", help="Workload name")
 
     validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")

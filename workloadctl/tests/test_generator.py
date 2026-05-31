@@ -1055,5 +1055,219 @@ class TestResolveAutoGpu(unittest.TestCase):
         self.assertEqual(self._resolve(), "none")
 
 
+class TestGeneratorVmWorkload(unittest.TestCase):
+    """Snapshot the generated unit files for a VM workload.
+
+    These tests assert structural invariants that were direct fallout from the
+    PR review — if any of them regress, real-world VMs would either fail to
+    boot, lose their sockets on sidecar restart, or silently degrade.
+    """
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _write_vm_config(self, name="fedora-vm", extra=""):
+        write_config(self.config_dir, name, f"""\
+            [workload]
+            name = "{name}"
+            enabled = true
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:{'d' * 64}"
+            data_disk_size = "20G"
+            user = "fedora"
+            {extra}
+        """)
+
+    def _run(self):
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(
+            result.returncode, 0,
+            msg=f"generator failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        return result
+
+    def _read(self, filename):
+        return (Path(self.services_dir) / filename).read_text()
+
+    def test_main_service_uses_integer_mib(self):
+        # parse_memory_mib must normalize "2048M" → 2048 so the memfd
+        # backend's size=NM stays valid. A regression here would mean
+        # virtiofs VMs fail to start with "invalid size=2048MM".
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-m 2048", svc)
+        self.assertNotIn("-m 2048M", svc)
+
+    def test_main_service_owns_runtime_dir_with_preserve(self):
+        # The per-VM socket dir must be owned by the *main* VM service (so
+        # virtiofsd sidecars don't yank console.sock/qmp.sock when they
+        # stop) and preserved across restarts (so systemctl restart doesn't
+        # wipe the dir between stop and start).
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("RuntimeDirectory=workload-vm/fedora-vm", svc)
+        self.assertIn("RuntimeDirectoryPreserve=yes", svc)
+
+    def test_virtiofsd_sidecar_does_not_declare_runtime_dir(self):
+        # If the sidecar owned RuntimeDirectory, systemd's refcount would
+        # clean up the parent dir on sidecar stop and break the VM.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertNotIn("RuntimeDirectory=", sidecar)
+        # The shared-dir path must be correctly quoted onto ExecStart.
+        self.assertIn("--shared-dir=\"/srv/data\"", sidecar)
+
+    def test_virtiofsd_uses_exec_type_with_socket_poll(self):
+        # virtiofsd 1.x only sends sd_notify READY after QEMU connects,
+        # which deadlocks with Type=notify + Before=VM.service. We use
+        # Type=exec and poll for the socket in ExecStartPost instead.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertIn("Type=exec", sidecar)
+        self.assertNotIn("Type=notify", sidecar)
+        self.assertNotIn("NotifyAccess=", sidecar)
+        socket_path = "/run/workload-vm/fedora-vm/virtiofs-mnt-data.sock"
+        self.assertIn(f"test -S {socket_path}", sidecar)
+        # Must run as root so virtiofsd can faithfully apply guest-requested
+        # uid/gid on writes (unprivileged virtiofsd squashes everything to its
+        # own uid, breaking multi-user data sharing inside the guest).
+        self.assertNotIn("User=", sidecar)
+        self.assertIn("--sandbox=chroot", sidecar)
+
+    def test_bridge_service_does_not_swallow_dnsmasq_failures(self):
+        # The earlier "|| true" trailing the dnsmasq ExecStart hid genuine
+        # failures (missing binary, port in use) and left VMs without DHCP.
+        self._write_vm_config()
+        self._run()
+        bridge = self._read("workload-bridge.service")
+        # The dnsmasq ExecStart line itself must not end with "|| true".
+        # (Other ExecStop lines may legitimately use || true for cleanup.)
+        dnsmasq_lines = [l for l in bridge.splitlines() if "/usr/sbin/dnsmasq" in l]
+        self.assertEqual(len(dnsmasq_lines), 1, dnsmasq_lines)
+        self.assertNotIn("|| true", dnsmasq_lines[0])
+        # The bogus --keep-in-foreground=no flag must not appear.
+        self.assertNotIn("--keep-in-foreground=no", bridge)
+        # Type=forking only allows one ExecStart= line — the setup steps
+        # must be ExecStartPre=, and dnsmasq is the sole ExecStart=.
+        # systemd refuses to load the unit otherwise.
+        exec_starts = [l for l in bridge.splitlines()
+                       if l.startswith("ExecStart=")]
+        self.assertEqual(len(exec_starts), 1, exec_starts)
+        self.assertIn("/usr/sbin/dnsmasq", exec_starts[0])
+
+    def test_bridge_service_has_no_before_workload_generate(self):
+        # workload-generate is a generator that runs before any unit
+        # activation; Before= on a finished unit is a no-op and was just
+        # noise.
+        self._write_vm_config()
+        self._run()
+        bridge = self._read("workload-bridge.service")
+        self.assertNotIn("Before=workload-generate.service", bridge)
+
+    def test_bridge_owns_workload_vm_runtime_dir(self):
+        # systemd must create /run/workload-vm/ before dnsmasq writes its
+        # pid file into it.
+        self._write_vm_config()
+        self._run()
+        bridge = self._read("workload-bridge.service")
+        self.assertIn("RuntimeDirectory=workload-vm", bridge)
+
+    def test_main_service_requires_bridge_and_build(self):
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("workload-fedora-vm-build.service", svc)
+        self.assertIn("workload-bridge.service", svc)
+        self.assertIn("workload-fedora-vm-setup.service", svc)
+
+    def test_custom_bridge_overrides_qemu_netdev_and_skips_managed_bridge(self):
+        # vm.network.bridge = "br0" → QEMU netdev uses br0, AND we don't
+        # emit workload-bridge.service or list it as a dependency (the user
+        # is responsible for bringing br0 up themselves).
+        self._write_vm_config(extra='[vm.network]\nbridge = "br0"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-netdev bridge,id=net0,br=br0", svc)
+        self.assertNotIn("br=_workload-br", svc)
+        self.assertNotIn("workload-bridge.service", svc)
+        # The bridge unit file itself must not be generated for this VM
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-bridge.service").exists(),
+            "workload-bridge.service must not be emitted for custom-bridge VMs",
+        )
+
+    def test_default_bridge_still_emits_workload_bridge_service(self):
+        # Regression guard: omitting [vm.network] keeps the managed bridge +
+        # workload-bridge.service.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-netdev bridge,id=net0,br=_workload-br", svc)
+        self.assertTrue(
+            (Path(self.services_dir) / "workload-bridge.service").exists(),
+        )
+
+    def test_sysusers_grants_kvm_membership(self):
+        self._write_vm_config()
+        self._run()
+        sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
+        self.assertIn("u _wl-fedora-vm", sysusers)
+        self.assertIn("m _wl-fedora-vm kvm", sysusers)
+
+    def test_data_disk_attached_when_size_set(self):
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("data.qcow2", svc)
+
+    def test_no_data_disk_when_size_omitted(self):
+        write_config(self.config_dir, "minvm", f"""\
+            [workload]
+            name = "minvm"
+            enabled = true
+
+            [vm]
+            vcpus = 1
+            memory = "512M"
+            cloud_image_url = "https://example.com/x.qcow2"
+            cloud_image_checksum = "sha256:{'a' * 64}"
+        """)
+        self._run()
+        svc = self._read("workload-minvm.service")
+        self.assertNotIn("data.qcow2", svc)
+
+    def test_memfd_only_when_virtiofs_in_use(self):
+        # Without volumes, no shared-memory backend is needed and adding
+        # one would gratuitously double VM memory cost.
+        self._write_vm_config()
+        self._run()
+        no_vfs = self._read("workload-fedora-vm.service")
+        self.assertNotIn("memory-backend-memfd", no_vfs)
+
+        # With volumes, memfd is required for virtiofs to work.
+        self.tearDown()
+        self.setUp()
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        with_vfs = self._read("workload-fedora-vm.service")
+        self.assertIn("memory-backend-memfd", with_vfs)
+        self.assertIn("size=2048M", with_vfs)
+
+
 if __name__ == "__main__":
     unittest.main()

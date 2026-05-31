@@ -1,0 +1,68 @@
+#!/usr/bin/python3
+"""
+workload-vm-qmp: Send a single QMP command to a running VM and exit.
+
+Usage: workload-vm-qmp <name> <qmp-command> [arg=value ...]
+
+Examples:
+  workload-vm-qmp myvm system_powerdown
+  workload-vm-qmp myvm query-status
+"""
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+
+from workload_lib import VM_SOCKET_DIR, QMPClient
+
+
+def qmp_send_cmd(sock_path: str, command: str, arguments: dict | None = None,
+                 timeout: float = 10.0):
+    """Connect to QMP socket, negotiate, send one command, print result."""
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=timeout, recv_timeout=timeout)
+    except TimeoutError:
+        print(f"Error: QMP socket not available: {sock_path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        qmp.negotiate()
+        print(json.dumps(qmp.execute(command, arguments), indent=2))
+    finally:
+        qmp.close()
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <name> <qmp-command> [key=value ...]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    name = sys.argv[1]
+    command = sys.argv[2]
+
+    arguments = {}
+    for kv in sys.argv[3:]:
+        if "=" in kv:
+            k, _, v = kv.partition("=")
+            arguments[k] = v
+
+    sock_path = str(VM_SOCKET_DIR / name / "qmp.sock")
+
+    if not Path(sock_path).exists():
+        print(f"Error: QMP socket not found: {sock_path}", file=sys.stderr)
+        print(f"Is workload '{name}' running?", file=sys.stderr)
+        sys.exit(1)
+
+    qmp_send_cmd(sock_path, command, arguments or None)
+
+
+if __name__ == "__main__":
+    main()

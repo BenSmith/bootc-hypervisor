@@ -1,0 +1,33 @@
+# Example: Fedora Cloud VM workload
+#
+# A KVM/QEMU VM running Fedora Cloud, with a 50G data disk.
+# After enabling, SSH in with:
+#   workloadctl exec fedora-vm -- bash
+# Or open the serial console:
+#   workloadctl shell fedora-vm
+#
+# Update the system disk (rebuilds from the same cloud image, rotates old):
+#   sudo workloadctl update fedora-vm
+#
+# Roll back to the previous disk generation:
+#   sudo workloadctl rollback fedora-vm
+
+[workload]
+name = "fedora-vm"
+enabled = false
+
+[vm]
+vcpus = 2
+memory = "2048M"
+
+# Download a Fedora Cloud qcow2 image. workload-vm-build-disk verifies
+# the sha256 checksum before copying to system.qcow2. The downloaded
+# image is cached in /var/lib/workloads/fedora-vm/.image-cache/.
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+
+# Create a 50G secondary data disk, formatted by cloud-init on first boot.
+data_disk_size = "50G"
+
+# cloud-init default user for this image
+user = "fedora"

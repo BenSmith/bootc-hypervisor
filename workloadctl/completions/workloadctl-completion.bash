@@ -33,7 +33,7 @@ _workload_ctl_completion() {
         containers=$(systemctl list-unit-files --no-legend "workload-${wl}-*.service" 2>/dev/null \
             | awk '{print $1}' \
             | sed -E "s/^workload-${wl}-//;s/\\.service$//" \
-            | grep -Ev '^(setup|pod|net)$')
+            | grep -Ev '^(setup|pod|net|build|virtiofs-.*)$')
         if [[ -z "$containers" ]]; then
             return
         fi
@@ -85,8 +85,12 @@ _workload_ctl_completion() {
             return 0
             ;;
         shell)
-            # Accepts <workload> or <workload>/<container>
-            _workloadctl_ref_complete "$cur"
+            # Accepts <workload> or <workload>/<container>, plus --console
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--console" -- "$cur") )
+            else
+                _workloadctl_ref_complete "$cur"
+            fi
             return 0
             ;;
         enable|start|stop)
@@ -297,4 +301,4 @@ _workload_ctl_completion() {
     esac
 }
 
-complete -F _workload_ctl_completion workloadctl
+complete -o bashdefault -F _workload_ctl_completion workloadctl

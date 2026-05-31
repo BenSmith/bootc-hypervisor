@@ -1,0 +1,414 @@
+name: Build Hypervisor Bootc (per Fedora version)
+
+# Reusable per-version pipeline. The caller invokes this once per Fedora
+# version (via a strategy matrix), so F44's variants only need to wait on
+# F44's base build, not on every version's base. Within a single version,
+# the three variants still fan out in parallel via the matrix on `variant`.
+on:
+  workflow_call:
+    inputs:
+      fedora_version:
+        type: number
+        required: true
+      stable:
+        type: string
+        required: true
+      rechunker:
+        type: string
+        required: true
+      variants:
+        type: string
+        required: false
+        default: 'all'
+      event_name:
+        type: string
+        required: true
+
+jobs:
+  base:
+    runs-on: native
+    timeout-minutes: 120
+    env:
+      REGISTRY: registry.local
+    outputs:
+      tag: ${{ steps.params.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        id: params
+        run: |
+          TAG=$(date +%Y%m%d-%H%M)
+          {
+            echo "tag=${TAG}"
+            echo "image_base=${REGISTRY}/hypervisor-bootc"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        env:
+          # cosign v2.x emits the legacy ".sig" simple-signing format that
+          # containers-policy `sigstoreSigned` (bootc/podman pull verification)
+          # reads. cosign v3's default Sigstore-bundle format is NOT verified by
+          # sigstoreSigned — do not bump to v3 without migrating verification.
+          COSIGN_VERSION: v2.4.3
+        run: |
+          if ! command -v cosign >/dev/null; then
+            sudo curl -fsSL \
+              "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+              -o /usr/local/bin/cosign
+            sudo chmod +x /usr/local/bin/cosign
+          fi
+          cosign version
+
+      - name: Render policy.json
+        run: |
+          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
+              policy-hypervisor.json.template > policy.json
+          cat policy.json
+
+      - name: Fetch cosy
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
+      - name: Build base hypervisor
+        env:
+          VERSION: ${{ inputs.fedora_version }}
+        run: |
+          sudo podman build \
+            --pull=newer \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
+            -f hypervisor.Containerfile \
+            -t "localhost/hypervisor-bootc:build-${VERSION}" \
+            .
+
+      - name: Rechunk base image
+        env:
+          VERSION: ${{ inputs.fedora_version }}
+          RECHUNKER: ${{ inputs.rechunker }}
+        run: |
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:${RECHUNKER} \
+            /usr/libexec/bootc-base-imagectl rechunk \
+            "localhost/hypervisor-bootc:build-${VERSION}" \
+            "localhost/hypervisor-bootc:rechunked-${VERSION}"
+
+      - name: Tag and push base
+        id: push_base
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          VERSION: ${{ inputs.fedora_version }}
+          TAG: ${{ steps.params.outputs.tag }}
+          STABLE: ${{ inputs.stable }}
+        run: |
+          VERSIONED="${VERSION}-${TAG}"
+          FLOATING="${VERSION}"
+
+          sudo podman tag "localhost/hypervisor-bootc:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          sudo skopeo copy \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
+          if [ "${VERSION}" = "${STABLE}" ]; then
+            sudo skopeo copy \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
+          fi
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign base
+        # Best-effort: sign if a key is configured and cosign succeeds,
+        # but never fail the build over signing.
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          # cosign keys are always encrypted; CI must supply the password
+          # non-interactively. Empty (unset secret) is correct for a key
+          # generated without a password.
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          DIGEST: ${{ steps.push_base.outputs.digest }}
+        run: |
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET not set — skipping image signing."
+            exit 0
+          fi
+          # Local key-based signature only: --tlog-upload=false keeps image
+          # digests out of the public Sigstore transparency log (Rekor). These
+          # are private homelab images served from registry.local and are never
+          # distributed; the verification policy (policy*.json) checks the
+          # key-based signature via keyPath and needs no transparency-log entry.
+          cosign sign -y \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            "${IMAGE_BASE}@${DIGEST}"
+
+      - name: Summary
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          VERSION: ${{ inputs.fedora_version }}
+          TAG: ${{ steps.params.outputs.tag }}
+          STABLE: ${{ inputs.stable }}
+        run: |
+          {
+            echo "## Base hypervisor build complete (F${VERSION})"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${VERSION}-${TAG}\`"
+            echo "- \`${IMAGE_BASE}:${VERSION}\`"
+            if [ "${VERSION}" = "${STABLE}" ]; then
+              echo "- \`${IMAGE_BASE}:latest\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        # Untag only what this job created. Safe under concurrent jobs
+        # because every tag is scoped by VERSION + this job's TAG.
+        # The floating registry.local/hypervisor-bootc:${VERSION} stays —
+        # variant jobs pull it as their FROM base.
+        if: always()
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          VERSION: ${{ inputs.fedora_version }}
+          TAG: ${{ steps.params.outputs.tag }}
+        run: |
+          sudo podman untag "localhost/hypervisor-bootc:build-${VERSION}" 2>/dev/null || true
+          sudo podman untag "localhost/hypervisor-bootc:rechunked-${VERSION}" 2>/dev/null || true
+          sudo podman untag "${IMAGE_BASE}:${VERSION}-${TAG}" 2>/dev/null || true
+          # Reclaim the layers we just untagged (and any other dangling ones)
+          # on this long-lived native runner. Dangling-only: never removes a
+          # tagged image, so the floating :${VERSION}/:latest base stays cached
+          # for the variant FROM, and the Containerfile's type=cache build cache
+          # is preserved. df framing makes disk use visible in the log.
+          df -h /
+          sudo podman image prune -f || true
+          df -h /
+
+  variant:
+    needs: base
+    runs-on: native
+    timeout-minutes: 120
+    env:
+      REGISTRY: registry.local
+
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: amd
+            image: hypervisor-amd
+            containerfile: hypervisor-amd.Containerfile
+            prefix: ''
+            floating: ''
+          - name: nvidia-negativo17
+            image: hypervisor-nvidia
+            containerfile: hypervisor-nvidia-negativo17.Containerfile
+            prefix: 'negativo17-'
+            floating: 'negativo17'
+          - name: nvidia-rpmfusion
+            image: hypervisor-nvidia
+            containerfile: hypervisor-nvidia-rpmfusion.Containerfile
+            prefix: 'rpmfusion-'
+            floating: 'rpmfusion'
+
+    steps:
+      - name: Decide whether to build this variant
+        id: gate
+        env:
+          SELECTION: ${{ inputs.variants }}
+          EVENT: ${{ inputs.event_name }}
+          NAME: ${{ matrix.variant.name }}
+        run: |
+          # workflow_run and schedule always build all variants.
+          # workflow_dispatch respects the user's selection.
+          if [ "$EVENT" != "workflow_dispatch" ] || [ "$SELECTION" = "all" ]; then
+            BUILD=true
+          elif [ "$SELECTION" = "none" ]; then
+            BUILD=false
+          elif [ "$SELECTION" = "nvidia" ] && [[ "$NAME" == nvidia-* ]]; then
+            BUILD=true
+          elif [ "$SELECTION" = "$NAME" ]; then
+            BUILD=true
+          else
+            BUILD=false
+          fi
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/checkout@v4
+
+      - name: Render policy.json
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
+              policy-hypervisor.json.template > policy.json
+
+      - name: Install cosign
+        if: steps.gate.outputs.build == 'true'
+        env:
+          # cosign v2.x emits the legacy ".sig" simple-signing format that
+          # containers-policy `sigstoreSigned` (bootc/podman pull verification)
+          # reads. cosign v3's default Sigstore-bundle format is NOT verified by
+          # sigstoreSigned — do not bump to v3 without migrating verification.
+          COSIGN_VERSION: v2.4.3
+        run: |
+          if ! command -v cosign >/dev/null; then
+            sudo curl -fsSL \
+              "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+              -o /usr/local/bin/cosign
+            sudo chmod +x /usr/local/bin/cosign
+          fi
+          cosign version
+
+      - name: Fetch cosy
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
+      - name: Build variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          CONTAINERFILE: ${{ matrix.variant.containerfile }}
+          VERSION: ${{ inputs.fedora_version }}
+        run: |
+          sudo podman build \
+            --pull=newer \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            --build-arg BASE=${REGISTRY}/hypervisor-bootc:${VERSION} \
+            -f "${CONTAINERFILE}" \
+            -t "localhost/${IMAGE}:build-${VERSION}" \
+            .
+
+      - name: Rechunk variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          VERSION: ${{ inputs.fedora_version }}
+          RECHUNKER: ${{ inputs.rechunker }}
+        run: |
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:${RECHUNKER} \
+            /usr/libexec/bootc-base-imagectl rechunk \
+            "localhost/${IMAGE}:build-${VERSION}" \
+            "localhost/${IMAGE}:rechunked-${VERSION}"
+
+      - name: Tag and push variant
+        if: steps.gate.outputs.build == 'true'
+        id: push
+        env:
+          BASE_TAG: ${{ needs.base.outputs.tag }}
+          IMAGE: ${{ matrix.variant.image }}
+          PREFIX: ${{ matrix.variant.prefix }}
+          FLOATING: ${{ matrix.variant.floating }}
+          VERSION: ${{ inputs.fedora_version }}
+          STABLE: ${{ inputs.stable }}
+        run: |
+          IMAGE_BASE="${REGISTRY}/${IMAGE}"
+          VERSIONED="${PREFIX}${VERSION}-${BASE_TAG}"
+          FLOATING_TAG="${PREFIX}${VERSION}"
+
+          sudo podman tag "localhost/${IMAGE}:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          sudo skopeo copy \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
+
+          if [ "${VERSION}" = "${STABLE}" ]; then
+            STABLE_FLOATING="${FLOATING:-latest}"
+            sudo skopeo copy \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
+          fi
+
+          {
+            echo "image_base=${IMAGE_BASE}"
+            echo "versioned_tag=${VERSIONED}"
+            echo "floating_tag=${FLOATING_TAG}"
+            echo "digest=${DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign variant
+        # Best-effort: sign if a key is configured and cosign succeeds,
+        # but never fail the build over signing.
+        if: steps.gate.outputs.build == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          # cosign keys are always encrypted; CI must supply the password
+          # non-interactively. Empty (unset secret) is correct for a key
+          # generated without a password.
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET not set — skipping image signing."
+            exit 0
+          fi
+          # Local key-based signature only: --tlog-upload=false keeps image
+          # digests out of the public Sigstore transparency log (Rekor). These
+          # are private homelab images served from registry.local and are never
+          # distributed; the verification policy (policy*.json) checks the
+          # key-based signature via keyPath and needs no transparency-log entry.
+          cosign sign -y \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            "${IMAGE_BASE}@${DIGEST}"
+
+      - name: Summary
+        if: steps.gate.outputs.build == 'true'
+        env:
+          NAME: ${{ matrix.variant.name }}
+          VERSION: ${{ inputs.fedora_version }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+          FLOATING_TAG: ${{ steps.push.outputs.floating_tag }}
+        run: |
+          {
+            echo "## Variant ${NAME} (F${VERSION}) complete"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${VERSIONED_TAG}\`"
+            echo "- \`${IMAGE_BASE}:${FLOATING_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        # Untag only what this matrix entry created. Variant images aren't
+        # consumed by anything downstream locally, so we drop the versioned
+        # registry tag too — zot keeps the source of truth.
+        if: always() && steps.gate.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          VERSION: ${{ inputs.fedora_version }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+        run: |
+          sudo podman untag "localhost/${IMAGE}:build-${VERSION}" 2>/dev/null || true
+          sudo podman untag "localhost/${IMAGE}:rechunked-${VERSION}" 2>/dev/null || true
+          if [ -n "${VERSIONED_TAG:-}" ]; then
+            sudo podman untag "${IMAGE_BASE}:${VERSIONED_TAG}" 2>/dev/null || true
+          fi
+          # Reclaim the layers we just untagged (and any other dangling ones)
+          # on this long-lived native runner. Dangling-only: never removes a
+          # tagged image, so the floating base tags stay cached and the
+          # Containerfile's type=cache build cache is preserved.
+          df -h /
+          sudo podman image prune -f || true
+          df -h /

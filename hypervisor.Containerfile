@@ -40,6 +40,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     atheros-firmware \
     attr \
     audit \
+    avahi \
     bash-completion \
     bind-utils \
     brcmfmac-firmware \
@@ -57,6 +58,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     dnsmasq \
     dosfstools \
     e2fsprogs \
+    edk2-ovmf \
     efibootmgr \
     ethtool \
     exfatprogs \
@@ -105,6 +107,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     nano \
     nc \
     neovim \
+    nss-mdns \
     NetworkManager \
     NetworkManager-wifi \
     numactl \
@@ -137,6 +140,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     shim \
     skopeo \
     smartmontools \
+    socat \
     sos \
     strace \
     sudo \
@@ -149,6 +153,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     tzdata \
     usbutils \
     virglrenderer \
+    virtiofsd \
     virt-install \
     virt-top \
     wget \
@@ -160,6 +165,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     dnf clean all && \
     rm -rf /var/log/* /var/cache/* /var/lib/dnf/* && \
     rm -rf /boot && mkdir -p /boot && \
+    systemctl unmask avahi-daemon avahi-daemon.socket && \
+    systemctl enable avahi-daemon && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
     systemctl enable incus.socket && \
@@ -182,7 +189,8 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     printf 'g tpm - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     grep -E "^(video|render|input|audio|dialout|disk|kvm|seat|tpm):" /usr/lib/group >> /etc/group || true && \
     echo 'net.ipv4.ip_unprivileged_port_start = 0' > /usr/lib/sysctl.d/50-privileged-ports.conf && \
-    semanage fcontext -a -t container_file_t '/var/lib/prometheus/node-exporter(/.*)?' || true
+    semanage fcontext -a -t container_file_t '/var/lib/prometheus/node-exporter(/.*)?' || true && \
+    sed -i 's/^hosts:.*/hosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
 
 # SELinux: allow containers to connect to host seatd socket (KMS desktop workloads)
 # and allow containers to access host devices (GPU, input)
@@ -204,7 +212,12 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
 
 # Install workload provisioning system from builder stage
 COPY --from=workloadctl-builder /src/rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/workloadctl.rpm
-RUN dnf install -y /tmp/workloadctl.rpm && rm -f /tmp/workloadctl.rpm && dnf clean all
+# Install, then cache the RPM at a known path so workload-ensure-user can
+# bundle it into VM cloud-init ISOs without needing rpmbuild at runtime.
+RUN dnf install -y /tmp/workloadctl.rpm && \
+    install -Dpm 0644 /tmp/workloadctl.rpm \
+        /usr/share/workloadctl/workloadctl.rpm && \
+    rm -f /tmp/workloadctl.rpm && dnf clean all
 
 # Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf

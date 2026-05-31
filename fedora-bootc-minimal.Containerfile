@@ -10,6 +10,7 @@ FROM $REPOS_IMAGE as repos
 FROM $BUILDER_IMAGE as builder
 RUN dnf -y install rpm-ostree selinux-policy-targeted python3
 ARG MANIFEST=fedora-standard
+ARG VERSION=rawhide
 
 COPY . /src
 RUN chmod -R a=rX,u+w /src  # Fix permissions, allow world-read
@@ -21,7 +22,7 @@ COPY --from=repos / /repos
 RUN rm -f /etc/yum.repos.d/fedora-cisco-openh264.repo || true
 
 # PODMAN 4 COMPATIBILITY: Inline sh -c instead of heredoc
-RUN --mount=type=cache,id=bootc-base-image-cache,target=/cache sh -c 'set -xeuo pipefail && \
+RUN --mount=type=cache,id=bootc-base-image-cache-${VERSION},target=/cache sh -c 'set -xeuo pipefail && \
     ./install-manifests && \
     install -m 0755 -t /usr/libexec ./bootc-base-imagectl && \
     /usr/libexec/bootc-base-imagectl list >/dev/null && \

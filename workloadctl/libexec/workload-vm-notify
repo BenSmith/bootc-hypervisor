@@ -1,0 +1,110 @@
+#!/usr/bin/python3
+"""
+workload-vm-notify: sd_notify wrapper for QEMU VM workloads.
+
+Usage: workload-vm-notify <name> <qemu-system-x86_64> [qemu-args...]
+
+Starts QEMU, connects to its QMP socket, waits until the guest enters the
+running state, then sends READY=1 to systemd. Exits with QEMU's exit code.
+"""
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+
+from workload_lib import VM_SOCKET_DIR, QMPClient
+
+
+def sd_notify(msg: str):
+    notify_socket = os.environ.get("NOTIFY_SOCKET", "")
+    if not notify_socket:
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            if notify_socket.startswith("@"):
+                notify_socket = "\0" + notify_socket[1:]
+            s.connect(notify_socket)
+            s.sendall(msg.encode())
+    except OSError:
+        pass
+
+
+def wait_running(qmp: QMPClient, timeout: float = 120.0):
+    """Block until the guest vCPUs are running or `timeout` expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        reply = qmp.execute("query-status")
+        if bool(reply.get("return", {}).get("running", False)):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"Guest did not enter running state within {timeout:.0f}s")
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <name> <qemu-binary> [qemu-args...]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    name = sys.argv[1]
+    qemu_cmd = sys.argv[2:]
+
+    qmp_sock = str(VM_SOCKET_DIR / name / "qmp.sock")
+
+    # Start QEMU as a child process. We stay alive to hold the service's
+    # main PID; systemd tracks *us* for cgroup membership.
+    proc = subprocess.Popen(qemu_cmd, stdin=subprocess.DEVNULL)
+
+    # Forward SIGTERM/SIGINT to QEMU so the ExecStop QMP command has time
+    # to fire; if QEMU is already dead these are no-ops.
+    def _forward(sig, _frame):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGTERM, _forward)
+    signal.signal(signal.SIGINT, _forward)
+
+    qmp = QMPClient()
+    try:
+        # Wait up to 60 s for QEMU to create the QMP socket
+        qmp.connect(qmp_sock, timeout=60.0)
+        qmp.negotiate()
+        # Wait up to 120 s for guest vCPUs to start running
+        wait_running(qmp, timeout=120.0)
+        sd_notify("READY=1")
+    except TimeoutError as e:
+        print(f"workload-vm-notify: {e}", file=sys.stderr)
+        sd_notify(f"STATUS=Timeout waiting for QMP: {e}")
+        # Don't kill QEMU — let systemd's TimeoutStartSec handle it.
+        # We fall through to proc.wait() so we exit when QEMU does.
+    except Exception as e:
+        # Best-effort: still send READY so the unit doesn't hang on this
+        # wrapper, but flag the degraded state via STATUS so `systemctl
+        # status` and the journal make the broken QMP path visible.
+        print(f"workload-vm-notify: QMP error: {e}", file=sys.stderr)
+        sd_notify(f"STATUS=Degraded: QMP unavailable ({e}); guest may still be running")
+        sd_notify("READY=1")
+    finally:
+        qmp.close()
+
+    # Wait for QEMU to exit and propagate its exit code
+    rc = proc.wait()
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

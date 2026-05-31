@@ -42,6 +42,223 @@ enabled = false
 # see the MULTI-CONTAINER WORKLOADS section below.
 # mode = "pod"
 
+# ============================================================================
+# VM WORKLOADS
+# ============================================================================
+# A workload with a [vm] top-level section runs as a KVM/QEMU virtual machine
+# instead of a container. [vm] is mutually exclusive with [container] and
+# [[containers]].
+#
+# Quick comparison with container workloads:
+#   - Same TOML file, same CLI (enable/disable/shell/exec/update/rollback/info)
+#   - Same per-workload isolation user _wl-{name} and home dir
+#   - Raw QEMU (not libvirt): service file, UEFI NVRAM, bridge networking, SSH
+#   - shell → socat serial console; exec → SSH
+#   - update → rebuilds system disk with generational rollback
+#
+# Networking:
+#   All VM workloads join the shared _workload-br bridge (192.168.200.0/24).
+#   DHCP assigns addresses in 192.168.200.100-199; hostnames are the workload
+#   name (e.g. "myvm"). The bridge and dnsmasq are managed by
+#   workload-bridge.service (auto-created alongside the first VM workload).
+#
+# Disk layout (under /var/lib/workloads/{name}):
+#   system.qcow2        - Writable root disk (built from image source once)
+#   system.qcow2.gen-N  - Previous generations (rollback_keep + 1 retained;
+#                         see rollback_keep below)
+#   data.qcow2          - Optional second disk (formatted by cloud-init)
+#   nvram.fd            - Per-VM UEFI NVRAM (copy of OVMF_VARS.fd)
+#   cloud-init.iso      - Seed ISO with SSH key and virtiofs fstab (rebuilt
+#                         when the SSH pubkey changes)
+#   .ssh/id_ed25519     - Per-workload SSH key (generated once)
+#   .image-cache/       - Downloaded cloud images (deduplicates re-enables)
+#
+# virtiofs:
+#   Each volume declared in vm.volumes gets a virtiofsd sidecar service.
+#   The guest mounts them via cloud-init on first boot.
+#   Requires: vm.memory and a shared-memory NUMA backend (auto-configured).
+#
+# [vm]
+# Required: Number of virtual CPUs
+# vcpus = 2
+#
+# Required: Memory in QEMU notation ("1024M", "4G", etc.)
+# memory = "2048M"
+#
+# Image source — exactly one required:
+#
+#   cloud_image_url + cloud_image_checksum
+#     Download a qcow2 cloud image once, verify its sha256, copy to system.qcow2.
+#     cloud_image_url      = "https://example.com/image.qcow2"
+#     cloud_image_checksum = "sha256:<64-hex-digits>"
+#
+#   local_image
+#     Copy (reflink if supported) a local qcow2 file.
+#     local_image = "/path/to/image.qcow2"
+#
+#   image
+#     Build via bootc-image-builder from an OCI container ref.
+#     Requires nested KVM; unsuitable for CI without nested KVM support.
+#     image = "quay.io/myorg/mybootcimage:latest"
+#
+# Optional: Size of the secondary data disk (omit to skip creating one)
+# Type: string in qemu-img notation ("20G", "100M", etc.)
+# data_disk_size = "20G"
+#
+# Optional: cloud-init username for SSH / exec access
+# Type: string
+# Default: "workload"
+# user = "workload"
+#
+# Optional: Shared directory mounts via virtiofs
+# Type: array of strings "host-path:guest-mountpoint"
+# Requires a shared-memory NUMA backend (auto-configured when non-empty).
+# volumes = ["/mnt/data:/mnt/data"]
+#
+# Optional: How many *older* system disk generations to keep for rollback,
+# in addition to the generation rotated by the current update. Each update
+# renames the live system.qcow2 to system.qcow2.gen-N (the newest rollback
+# point) and then keeps the rollback_keep next-most-recent generations, so the
+# total number of system.qcow2.gen-* files retained is rollback_keep + 1
+# (e.g. rollback_keep = 2 keeps 3 generations / restore points).
+# Type: integer >= 1
+# Default: 2
+# rollback_keep = 2
+#
+# Optional: Attach a virtio-balloon device so the host can reclaim idle guest
+# memory at runtime. Has no effect if the guest kernel lacks virtio_balloon
+# (Fedora Cloud includes it). Set to false only if the balloon driver causes
+# problems (e.g., real-time workloads sensitive to balloon-induced pauses).
+# Type: boolean
+# Default: true
+# balloon = true
+#
+# [vm.network]
+# Optional: Host bridge the VM's NIC attaches to (qemu-bridge-helper).
+# Type: string, valid Linux interface name (letters/digits/_/-, max 15 chars)
+# Default: "_workload-br"  — the workloadctl-managed bridge with built-in dnsmasq
+#                     DHCP/DNS. workloadctl provisions this on demand.
+# Set to your LAN bridge (e.g. "br0") to put the VM directly on the LAN.
+# When at least one VM uses "_workload-br", workload-bridge.service is generated
+# to bring it up; user-provided bridges are assumed to be managed elsewhere
+# (NetworkManager / systemd-networkd) and skip that service.
+# bridge = "_workload-br"
+#
+# [vm.cloud_init]
+# Optional: Override the seed ISO's user-data with a custom #cloud-config.
+# Without this section, workloadctl generates a small built-in user-data
+# with the workload's SSH key, optional virtiofs mounts, and optional
+# data-disk init — enough for `workloadctl exec` to work out of the box.
+#
+# When set, the file you supply IS the entire #cloud-config; workloadctl
+# does NOT parse or merge it. Substitutions happen via plain text only —
+# no YAML library is required, so the file's structure is fully yours.
+#
+# Optional: Path to the cloud-init user-data file. Relative paths are
+# resolved against the directory containing this TOML.
+# Type: string
+# user_data_file = "./cloud-init/user-data"
+#
+# Optional: Template variables substituted into user-data via ${VAR}.
+# Type: table; values must be scalars (string, int, float, bool).
+# template_vars = { REPO_URL = "https://...", VERSION = "1.2.3" }
+#
+# Substitution rules applied to the user_data_file (in order):
+#   ${SECRET:name}  - Decrypted via `systemd-creds decrypt` from
+#                     /etc/credstore.encrypted/<name> (falls back to plain
+#                     /etc/credstore/<name>). The secret is read at ISO
+#                     build time and baked into the seed (root-only path).
+#                     Missing credential → build fails loudly.
+#   ${SECRET?name}  - Optional variant: missing credential → empty string,
+#                     no error. Use when the user-data references a
+#                     credential the operator may or may not seed; gate
+#                     the consumer with a shell check on the rendered
+#                     value, e.g. `[ -n "${RUNNER_TOKEN}" ] && register ...`.
+#   ${VAR}          - Looked up in template_vars first, then the environment.
+#                     Unresolved refs raise an error at build time, so a
+#                     typo fails loudly instead of producing a broken guest.
+#   $$              - Collapses to a literal `$`; use $${shellvar} when
+#                     you need a literal `${...}` to survive substitution.
+#
+# Magic variables workloadctl injects (always available in template mode):
+#   ${WORKLOADCTL_SSH_KEY}        - The workload's generated SSH pubkey.
+#                                   Drop this into users[].ssh_authorized_keys
+#                                   so `workloadctl exec` keeps working.
+#   ${WORKLOADCTL_WORKLOAD_NAME}  - The workload name (e.g. for hostname).
+#
+# Notes:
+#   - The seed ISO lives in the workload's home dir, mode 0640, owned by
+#     the workload user. Secrets baked in are still on a root-only path
+#     but persist on disk — rotate them by re-encrypting and rebuilding.
+#   - Edits to user_data_file trigger a seed-ISO rebuild on next start
+#     (the file's mtime is part of the fingerprint).
+#   - If the rendered text doesn't start with `#cloud-config`, that
+#     header is prepended so cloud-init still recognises the document.
+
+# ============================================================================
+# END OF VM WORKLOADS SECTION
+# ============================================================================
+
+# ============================================================================
+# VM EXAMPLES
+# ============================================================================
+
+# Example VM-1: Fedora Cloud image with data disk
+# ------------------------------------------------
+# [workload]
+# name = "fedora-vm"
+# enabled = true
+#
+# [vm]
+# vcpus = 2
+# memory = "2048M"
+# cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+# cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+# data_disk_size = "50G"
+# user = "fedora"
+
+# Example VM-2: bootc image with virtiofs share
+# -----------------------------------------------
+# [workload]
+# name = "dev-vm"
+# enabled = true
+#
+# [vm]
+# vcpus = 4
+# memory = "8192M"
+# image = "quay.io/myorg/dev-image:latest"
+# data_disk_size = "100G"
+# volumes = ["/home/user/code:/home/workload/code"]
+# rollback_keep = 3
+
+# Example VM-3: Cloud image on LAN bridge with custom cloud-init
+# ---------------------------------------------------------------
+# [workload]
+# name = "lan-vm"
+# enabled = true
+#
+# [vm]
+# vcpus = 2
+# memory = "4G"
+# cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+# cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+# data_disk_size = "30G"
+# user = "fedora"
+#
+# [vm.network]
+# bridge = "br0"                    # LAN bridge instead of _workload-br
+#
+# [vm.cloud_init]
+# user_data_file = "./cloud-init/user-data"
+#
+# [vm.cloud_init.template_vars]
+# REPO_URL = "https://forgejo.local/me/myproject.git"
+# VERSION  = "1.4.2"
+# # In the user-data file, reference these as ${REPO_URL} / ${VERSION},
+# # and pull encrypted secrets with ${SECRET:db-password} etc.
+
+# ============================================================================
+
 [setup]
 # Optional: Files that must exist before the workload can be enabled.
 # workloadctl enable checks these before starting and prints copy instructions if missing.

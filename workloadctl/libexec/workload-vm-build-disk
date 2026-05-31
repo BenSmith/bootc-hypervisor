@@ -1,0 +1,343 @@
+#!/usr/bin/python3
+"""
+workload-vm-build-disk: Build or refresh the system.qcow2 for a VM workload.
+
+Usage: workload-vm-build-disk <name> [--update]
+
+Without --update: no-op if system.qcow2 already exists (ConditionPathExists
+in the build service handles this, but the check is duplicated here for
+safety when called directly).
+
+With --update: rotates system.qcow2 → system.qcow2.gen-N and rebuilds.
+
+Image sources (from [vm] TOML section, exactly one required):
+  vm.cloud_image_url + vm.cloud_image_checksum   Download + verify qcow2
+  vm.local_image                                  Copy/reflink from path
+  vm.image                                        bootc image ref (via bootc-image-builder)
+"""
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+
+from workload_lib import WORKLOAD_CONFIG_DIR, WORKLOADS_BASE
+
+
+def log(msg: str):
+    print(msg, flush=True)
+
+
+def load_config(name: str) -> dict:
+    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    with open(config_path, "rb") as f:
+        return tomllib.load(f)
+
+
+def rotate_generations(home_dir: Path, keep: int) -> Path | None:
+    """Rename existing system.qcow2 to system.qcow2.gen-N and prune old gens.
+
+    Returns the path the active disk was rotated to (so callers can restore
+    it on build failure), or None if there was nothing to rotate.
+    """
+    system_disk = home_dir / "system.qcow2"
+    if not system_disk.exists():
+        return None
+
+    # Find existing gen files
+    gens = sorted(
+        int(p.suffix[5:])
+        for p in home_dir.glob("system.qcow2.gen-*")
+        if p.suffix[5:].isdigit()
+    )
+    next_gen = (max(gens) + 1) if gens else 1
+
+    target = home_dir / f"system.qcow2.gen-{next_gen}"
+    log(f"  Rotating system.qcow2 → {target.name}")
+    system_disk.rename(target)
+
+    # Prune oldest gens beyond retention limit. Never prune the generation we
+    # just created — it's the only restore point if this build fails — so it is
+    # excluded from the candidate set below and always kept. `keep` therefore
+    # bounds the number of *older* generations retained alongside it, leaving
+    # keep + 1 system.qcow2.gen-* files in total (matches vm.rollback_keep docs).
+    all_gens = sorted(
+        int(p.suffix[5:])
+        for p in home_dir.glob("system.qcow2.gen-*")
+        if p.suffix[5:].isdigit() and int(p.suffix[5:]) != next_gen
+    )
+    to_prune = all_gens[:-keep] if len(all_gens) > keep else []
+    for gen_n in to_prune:
+        old = home_dir / f"system.qcow2.gen-{gen_n}"
+        log(f"  Pruning old generation: {old.name}")
+        old.unlink(missing_ok=True)
+    return target
+
+
+def verify_checksum(path: Path, checksum_spec: str):
+    """Verify file checksum. checksum_spec format: 'sha256:<hex>'."""
+    algo, _, expected = checksum_spec.partition(":")
+    if algo != "sha256":
+        raise ValueError(f"Unsupported checksum algorithm: {algo!r} (only sha256 supported)")
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    actual = h.hexdigest()
+    if actual != expected.lower():
+        raise ValueError(
+            f"Checksum mismatch for {path.name}:\n"
+            f"  expected: {expected.lower()}\n"
+            f"  actual:   {actual}"
+        )
+    log(f"  Checksum verified (sha256:{actual[:12]}...)")
+
+
+def download_cloud_image(url: str, checksum: str, home_dir: Path) -> Path:
+    """Download a cloud image, verify its checksum, return path to the qcow2."""
+    cache_dir = home_dir / ".image-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = url.split("/")[-1].split("?")[0] or "cloud-image.qcow2"
+    cached = cache_dir / filename
+
+    if cached.exists():
+        log(f"  Cached image found: {cached.name}")
+        try:
+            verify_checksum(cached, checksum)
+            return cached
+        except ValueError:
+            log(f"  Cached image checksum invalid; re-downloading")
+            cached.unlink()
+
+    log(f"  Downloading {url}")
+    # Bind tmp_path before the try so the except handler can clean it up
+    # even when urlopen fails before the inner tempfile is created.
+    tmp_path: Path | None = None
+    try:
+        with urllib.request.urlopen(url, timeout=300) as resp:
+            total = int(resp.getheader("Content-Length", 0))
+            downloaded = 0
+            with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False, suffix=".tmp") as tmp:
+                tmp_path = Path(tmp.name)
+                while chunk := resp.read(1 << 20):
+                    tmp.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = downloaded * 100 // total
+                        print(f"\r  Downloaded {downloaded // (1 << 20)}M / {total // (1 << 20)}M ({pct}%)",
+                              end="", flush=True)
+        print()
+    except urllib.error.URLError as e:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Download failed: {e}") from e
+
+    verify_checksum(tmp_path, checksum)
+    tmp_path.rename(cached)
+    log(f"  Saved to {cached.name}")
+    return cached
+
+
+def build_from_cloud_image(url: str, checksum: str, home_dir: Path, system_disk: Path):
+    source = download_cloud_image(url, checksum, home_dir)
+    if source.suffix == ".qcow2":
+        log(f"  Copying qcow2 to system disk (reflink if supported)...")
+        try:
+            subprocess.run(
+                ["cp", "--reflink=auto", str(source), str(system_disk)],
+                check=True
+            )
+        except subprocess.CalledProcessError:
+            shutil.copy2(source, system_disk)
+    else:
+        # Convert raw/vmdk/etc to qcow2
+        log(f"  Converting image to qcow2...")
+        subprocess.run(
+            ["qemu-img", "convert", "-f", "raw", "-O", "qcow2",
+             str(source), str(system_disk)],
+            check=True
+        )
+    log(f"  System disk ready: {system_disk}")
+
+
+def build_from_local_image(local_path: str, system_disk: Path):
+    src = Path(local_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Local image not found: {src}")
+    log(f"  Copying local image {src} → system disk (reflink if supported)...")
+    try:
+        subprocess.run(
+            ["cp", "--reflink=auto", str(src), str(system_disk)],
+            check=True
+        )
+    except subprocess.CalledProcessError:
+        shutil.copy2(src, system_disk)
+    log(f"  System disk ready: {system_disk}")
+
+
+def build_from_bootc_image(image_ref: str, home_dir: Path, system_disk: Path):
+    """Build system disk from a bootc container image using bootc-image-builder.
+
+    Requires nested KVM (bare metal or host with nested=1). CI environments
+    without nested KVM must skip this image source in integration tests.
+    """
+    if not shutil.which("bootc-image-builder"):
+        raise RuntimeError(
+            "bootc-image-builder not found. Install it with: "
+            "rpm-ostree install bootc-image-builder"
+        )
+
+    build_dir = home_dir / ".bib-build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    log(f"  Building disk from bootc image {image_ref!r} via bootc-image-builder...")
+    log(f"  This may take 10-30 minutes on first run.")
+
+    result = subprocess.run(
+        [
+            "bootc-image-builder",
+            "--type", "qcow2",
+            "--output", str(build_dir),
+            image_ref,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"bootc-image-builder failed (exit {result.returncode})")
+
+    # bib writes qcow2/<name>.qcow2 or disk.qcow2 depending on version
+    candidates = list(build_dir.glob("**/*.qcow2"))
+    if not candidates:
+        raise RuntimeError(f"bootc-image-builder produced no .qcow2 file in {build_dir}")
+
+    built = candidates[0]
+    log(f"  bootc build complete: {built.name}")
+    try:
+        subprocess.run(["cp", "--reflink=auto", str(built), str(system_disk)], check=True)
+    except subprocess.CalledProcessError:
+        shutil.copy2(built, system_disk)
+    log(f"  System disk ready: {system_disk}")
+
+
+def create_data_disk(home_dir: Path, size: str):
+    """Create data.qcow2 if it doesn't exist. Size format: '20G', '100M', etc."""
+    data_disk = home_dir / "data.qcow2"
+    if data_disk.exists():
+        return
+    log(f"  Creating data disk: {data_disk.name} ({size})")
+    subprocess.run(
+        ["qemu-img", "create", "-f", "qcow2", str(data_disk), size],
+        check=True
+    )
+
+
+def main():
+    update_mode = "--update" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+
+    if not args:
+        print(f"Usage: {sys.argv[0]} <name> [--update]", file=sys.stderr)
+        sys.exit(1)
+
+    name = args[0]
+    log(f"Building system disk for VM workload: {name}")
+
+    config = load_config(name)
+    vm_cfg = config.get("vm", {})
+    home_dir = WORKLOADS_BASE / name
+    home_dir.mkdir(parents=True, exist_ok=True)
+
+    system_disk = home_dir / "system.qcow2"
+    rollback_keep = vm_cfg.get("rollback_keep", 2)
+
+    if system_disk.exists() and not update_mode:
+        log(f"  system.qcow2 already exists; skipping system disk build (use --update to rebuild)")
+        # Don't exit — still let the data disk block run below so a
+        # data_disk_size added after first enable creates data.qcow2 on
+        # next start (instead of silently nothing happening because the
+        # system disk has already been built).
+        skip_system_build = True
+    else:
+        skip_system_build = False
+
+    rotated_to: Path | None = None
+    if not skip_system_build:
+        if update_mode and system_disk.exists():
+            rotated_to = rotate_generations(home_dir, rollback_keep)
+
+        # Build from source. On failure, restore the just-rotated generation so
+        # the service still has a usable system disk for its next start.
+        try:
+            if vm_cfg.get("cloud_image_url"):
+                build_from_cloud_image(
+                    vm_cfg["cloud_image_url"],
+                    vm_cfg["cloud_image_checksum"],
+                    home_dir,
+                    system_disk,
+                )
+            elif vm_cfg.get("local_image"):
+                build_from_local_image(vm_cfg["local_image"], system_disk)
+            elif vm_cfg.get("image"):
+                build_from_bootc_image(vm_cfg["image"], home_dir, system_disk)
+            else:
+                print("ERROR: no image source configured in [vm]", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            log(f"ERROR: {e}")
+            system_disk.unlink(missing_ok=True)
+            if rotated_to is not None and rotated_to.exists():
+                log(f"  Restoring previous generation: {rotated_to.name} → system.qcow2")
+                rotated_to.rename(system_disk)
+            sys.exit(1)
+
+        # Ensure correct ownership (running as root in the build service)
+        try:
+            import pwd
+            pw = pwd.getpwnam(f"_wl-{name}")
+            os.chown(system_disk, pw.pw_uid, pw.pw_gid)
+        except (KeyError, OSError):
+            pass
+
+        # Resize system disk if system_disk_size is set. The Fedora Cloud qcow2 is
+        # ~5GB; builds that write large artifacts (e.g. bootc-image-builder) need
+        # more. cloud-init's growpart module expands the partition on first boot.
+        system_disk_size = vm_cfg.get("system_disk_size", "")
+        if system_disk_size:
+            log(f"  Resizing system disk to {system_disk_size}...")
+            subprocess.run(
+                ["qemu-img", "resize", str(system_disk), system_disk_size],
+                check=True,
+            )
+            log(f"  System disk resized to {system_disk_size}")
+
+    # Create data disk if configured
+    data_disk_size = vm_cfg.get("data_disk_size", "")
+    if data_disk_size:
+        create_data_disk(home_dir, data_disk_size)
+        try:
+            import pwd
+            pw = pwd.getpwnam(f"_wl-{name}")
+            data_disk = home_dir / "data.qcow2"
+            os.chown(data_disk, pw.pw_uid, pw.pw_gid)
+        except (KeyError, OSError):
+            pass
+
+    log(f"Build complete for {name}")
+
+
+if __name__ == "__main__":
+    main()
