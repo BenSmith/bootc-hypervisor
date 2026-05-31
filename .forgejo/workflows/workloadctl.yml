@@ -61,7 +61,7 @@ jobs:
           code=$(curl -sS -o /tmp/pkg-upload.log -w "%{http_code}" \
             -H "Authorization: token ${PKG_PUBLISH_TOKEN}" \
             --upload-file "$rpm" \
-            "https://git.local/api/packages/ben/rpm")
+            "https://git.local/api/packages/ben/rpm/upload")
           # 201 = uploaded, 409 = version already exists (idempotent)
           if [ "$code" != "201" ] && [ "$code" != "409" ]; then
             echo "Upload failed (HTTP $code):"
