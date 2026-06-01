@@ -1,0 +1,44 @@
+; Per-workload SELinux type for the alloy telemetry-collector workload.
+;
+; alloy runs confined under its OWN type (__WL_MODULE__.process) rather than
+; widening the shared container_t domain. The allow-rules below grant read
+; access to the host's systemd journal and /proc/1; attaching them to
+; container_t (as the old .te module did) would hand that access to *every*
+; container on the host, since a semodule load is global.
+;
+; This is a udica-style CIL block. `(blockinherit container)` pulls in the
+; udica `container` base block (from /usr/share/udica/templates/base_container.cil,
+; loaded alongside by workloadctl), which supplies the full container process
+; domain — a bare `typeattribute container_domain` is NOT enough (the container
+; fails to launch on /proc/self/attr/keycreate). `(blockinherit net_container)`
+; grants the network access alloy needs to reach the central OTLP backend.
+;
+; __WL_MODULE__ is a placeholder substituted at enable time by workloadctl with
+; the name-keyed module/block name (wl_alloy). Do not hardcode it. See
+; docs/workload-bundles.md "SELinux: per-workload types".
+;
+; alloy reads the journal via libsystemd, which mmap()s the .journal files
+; (file map) and watches the directory for new entries via inotify (dir watch)
+; — both confirmed by AVC denials on first run. This replaces a blanket
+; security_opt = ["label=disable"]: if the host-metrics collectors (node_exporter
+; reading /host/proc and /host/sys) produce AVC denials, run `audit2allow -a`
+; and fold the additional rules in here rather than reverting to label=disable.
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+
+    ; Runtime journal: /run/log/journal/* is labeled syslogd_var_run_t.
+    (allow process syslogd_var_run_t (dir (open read search getattr watch)))
+    (allow process syslogd_var_run_t (file (open read getattr map)))
+
+    ; Persistent journal: /var/log/journal/* is labeled var_log_t.
+    (allow process var_log_t (dir (open read search getattr watch)))
+    (allow process var_log_t (file (open read getattr map)))
+
+    ; Filesystem collector: node_exporter opens /host/proc/1/mounts to enumerate
+    ; host mount points. /proc/1/ is labeled init_t; the type needs dir search to
+    ; traverse into it and file read to read the mounts file.
+    (allow process init_t (dir (search getattr open read)))
+    (allow process init_t (file (open read getattr)))
+)

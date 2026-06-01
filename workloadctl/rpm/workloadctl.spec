@@ -21,8 +21,10 @@ Suggests:       bash-completion
 # would relabel the tree back to var_lib_t and break every container.
 Requires:       policycoreutils
 Requires:       policycoreutils-python-utils
-# checkpolicy only compiles the optional per-workload .te policy modules.
-Suggests:       checkpolicy
+# Per-workload SELinux policy is shipped as udica-style CIL that inherits
+# udica's base container templates (loaded from /usr/share/udica/templates);
+# CIL loads directly via semodule, so no checkpolicy/checkmodule is needed.
+Requires:       udica
 # VM workloads require the bridge networking stack and a hypervisor.
 Requires:       dnsmasq
 Requires:       nftables

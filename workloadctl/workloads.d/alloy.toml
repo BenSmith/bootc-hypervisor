@@ -70,12 +70,14 @@ volumes = [
 # the workload user on the host.
 userns = "host"
 extra_groups = ["systemd-journal"]
-# Reading the host journal (syslogd_var_run_t / var_log_t) is denied to
-# container_t under SELinux enforcing. Rather than disabling confinement
-# wholesale (label=disable), the [host] setup.sh below installs a targeted
-# SELinux policy module (containers/alloy/alloy.te) that grants container_t
-# read access to just the journal file types. alloy stays confined as
-# container_t.
+# Reading the host journal (syslogd_var_run_t / var_log_t) is denied to the
+# stock container domain under SELinux enforcing. Rather than disabling
+# confinement wholesale (label=disable), enable loads a per-workload SELinux
+# type from containers/alloy/alloy.cil: alloy runs confined as its own
+# wl_alloy.process (a udica CIL block inheriting the base container domain) with
+# read access to just the journal file types, so no other container on the host
+# is widened.
+selinux_policy = true
 
 [network]
 # Pasta: alloy gets its own netns. node_exporter still reads host metrics via
@@ -102,11 +104,6 @@ ports = [
 # binds it to 127.0.0.1 inside the container, which pasta-forwarded ports
 # cannot reach. To scrape alloy's own metrics from the host, set alloy's
 # --server.http.listen-addr to 0.0.0.0:12345 and add "127.0.0.1:12345:12345".
-
-[host]
-# Installs the SELinux policy module (containers/alloy/alloy.te) on enable so
-# the confined container can read the host journal; removes it on disable.
-setup = "setup.sh"
 
 [resources]
 memory_max = "512M"
