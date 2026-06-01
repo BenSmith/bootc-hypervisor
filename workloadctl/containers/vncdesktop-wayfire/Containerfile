@@ -40,6 +40,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     nano \
     neovim \
     procps-ng \
+    rsync \
     slurp \
     sudo \
     swappy \

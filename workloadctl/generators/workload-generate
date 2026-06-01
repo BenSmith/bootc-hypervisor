@@ -1032,6 +1032,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "ProtectSystem=strict",
         f'ReadWritePaths="{home_dir}" /run/user/{uid}',
         "PrivateTmp=yes",
+        "# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and",
+        "# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list",
+        "# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.",
+        "RestrictAddressFamilies=~AF_ALG AF_PACKET",
     ])
 
     resources = container.get("resources", {})
