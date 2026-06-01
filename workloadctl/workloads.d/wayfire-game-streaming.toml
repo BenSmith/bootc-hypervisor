@@ -47,6 +47,12 @@ extra_groups = ["video", "render", "input", "audio"]
 # /home/desktop/.config land on a subuid the host workload user can't touch.
 extra_uidmaps = ["+0:@{UID}:1"]
 extra_gidmaps = ["+0:@{GID}:1"]
+# Per-workload SELinux type (wl_<name>.process) loaded from
+# containers/wayfire-game-streaming/wayfire-game-streaming.cil on enable:
+# /dev/uinput + /dev/input, /dev/snd, udev, Steam's bwrap sandbox, and
+# Wine/Proton execheap/mmap_zero/execmod — scoped to this workload instead of
+# all of container_t. The container runs systemd, so the type is init-capable.
+selinux_policy = true
 
 [storage]
 volumes = [
@@ -59,12 +65,15 @@ volumes = [
 [network]
 mode = "host"
 
-[host]
-setup = "setup.sh"
-
 [resources]
 shm_size = "2g"
 memory_max = "8G"
 memory_high = "6G"
 cpu_quota = "400%"
 tasks_max = 16384
+
+[host]
+# Non-SELinux host prerequisites (uinput kernel module, udev rule, and the
+# host-side udev input-event relay). The SELinux policy is handled separately by
+# [security].selinux_policy above.
+setup = "setup.sh"

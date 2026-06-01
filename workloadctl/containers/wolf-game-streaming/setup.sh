@@ -1,20 +1,20 @@
 #!/bin/bash
-# Host setup for the sunshine-game-streaming workload.
+# Host setup for the wolf-game-streaming workload.
 #
 # Usage:
 #   setup.sh enable   — configure host prerequisites
 #   setup.sh disable  — remove host prerequisites
 #
 # Idempotent in both directions. Called by workloadctl enable/disable.
+#
+# SELinux policy is handled separately via [security].selinux_policy (the
+# wolf-game-streaming.cil per-workload type); this script only sets up the
+# non-SELinux host prerequisites (the uinput device).
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULES_LOAD="/etc/modules-load.d/uinput.conf"
 UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
-RELAY_SERVICE="sunshine-udev-relay.service"
-RELAY_UNIT="/etc/systemd/system/${RELAY_SERVICE}"
-WORKLOAD_USER="_wl-sunshine-game-streaming"
 
 enable() {
     echo "  [host] Configuring uinput kernel module..."
@@ -38,34 +38,10 @@ enable() {
     # Apply rule to already-loaded device
     udevadm trigger --action=change /sys/class/misc/uinput 2>/dev/null || true
 
-    # Host-side udev relay. The container's libudev drops the host udevd's
-    # hotplug events (sender UID maps to "nobody" in the container user
-    # namespace), and a rootless host-networked container can't re-broadcast
-    # them itself (no CAP_NET_ADMIN over the host net namespace). This host
-    # service re-broadcasts input events with a corrected sender UID so
-    # labwc's libinput sees Sunshine's devices appear at runtime.
-    echo "  [host] Installing udev input-event relay..."
-    cat > "$RELAY_UNIT" <<UNIT
-[Unit]
-Description=Relay host udev input hotplug events into the sunshine-game-streaming container
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/udev-relay ${WORKLOAD_USER}
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    systemctl daemon-reload
-    systemctl enable --now "$RELAY_SERVICE"
-
     echo "  [host] Host setup complete"
     echo ""
-    echo "  NOTE: Sunshine requires the following firewall ports:"
-    echo "    sudo firewall-cmd --permanent --add-port={47984,47989,47990,48010}/tcp --add-port=47998-48000/udp"
+    echo "  NOTE: Wolf requires the following firewall ports:"
+    echo "    sudo firewall-cmd --permanent --add-port={47984,47989,48010}/tcp --add-port={47999,48100-48110,48200-48210}/udp"
     echo "    sudo firewall-cmd --reload"
 }
 
@@ -78,13 +54,6 @@ disable() {
     if [ -f "$UDEV_RULE" ]; then
         rm -f "$UDEV_RULE"
         udevadm control --reload-rules
-    fi
-
-    echo "  [host] Removing udev input-event relay..."
-    if [ -e "$RELAY_UNIT" ]; then
-        systemctl disable --now "$RELAY_SERVICE" 2>/dev/null || true
-        rm -f "$RELAY_UNIT"
-        systemctl daemon-reload
     fi
 
     echo "  [host] Host teardown complete"

@@ -1,0 +1,33 @@
+; Per-workload SELinux policy for the vncdesktop-sway workload container.
+; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
+;
+; GTK4's glycin image loaders run inside a bwrap sandbox to decode SVGs (icon
+; themes). Without these rules, bwrap fails during namespace setup and every SVG
+; icon load fails, leaving waybar with a zero-size layer surface and no bar.
+;
+; The container runs systemd (--systemd=always), so the type is attributed into
+; container_init_domain — systemd-as-PID1 will not boot without it — and the old
+; .te's container_init_t rules are applied to this single type.
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+    (typeattributeset container_init_domain (process))
+
+    ; bwrap mounts a tmpfs for the sandbox's /tmp-home and /tmp-run.
+    (allow process tmpfs_t (filesystem (mount remount)))
+    ; bwrap mounts a fresh devpts inside the sandbox.
+    (allow process devpts_t (filesystem (mount)))
+    ; bwrap bind-mounts over existing sockets while composing the sandbox root.
+    (allow process container_file_t (sock_file (mounton)))
+    (allow process user_tmp_t (sock_file (mounton)))
+
+    ; Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
+    (allow process udev_var_run_t (dir (read)))
+    (allow process udev_var_run_t (file (getattr open read)))
+
+    ; Sway launches Xwayland on demand for X11 clients.
+    (allow process xserver_exec_t (file (execute execute_no_trans getattr map open read)))
+    (allow process xserver_misc_device_t (chr_file (setattr)))
+    (allow process xserver_t (unix_stream_socket (connectto)))
+    (allow process var_run_t (sock_file (getattr write))))

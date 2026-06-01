@@ -51,3 +51,8 @@ memory_max = "8G"
 memory_high = "6G"
 cpu_quota = "400%"
 tasks_max = 16384
+
+[host]
+# Non-SELinux host prerequisites (uinput kernel module + udev rule). The SELinux
+# policy is handled separately by [security].selinux_policy above.
+setup = "setup.sh"
