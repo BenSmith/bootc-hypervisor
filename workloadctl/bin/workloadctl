@@ -1285,16 +1285,11 @@ def _selinux_available() -> bool:
 def _apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 
-    The bundle ships its policy as a udica-style CIL template (`<name>.cil`)
-    using the __WL_MODULE__ placeholder. On enable we substitute the name-keyed
-    block name (wl_<name>), and load it *together with* udica's base templates,
-    which the workload's `(blockinherit container)` resolves against. CIL loads
-    directly via `semodule -i` — no checkmodule/semodule_package compile step.
-
-    Keyed on the workload NAME, so a duplicated workload gets an independently
-    removable module (wl_<name>) and a distinct type (wl_<name>.process) rather
-    than sharing a widened domain. The udica base modules are shared and left
-    loaded on disable. See docs/workload-bundles.md.
+    The bundle ships its policy as a CIL template (`<name>.cil`) using the
+    __WL_MODULE__ placeholder. On enable we substitute the name-keyed block name
+    (wl_<name>) and load it alongside udica's base templates (which the
+    workload's `(blockinherit ...)` resolves against); on disable we remove the
+    wl_<name> module, leaving the shared base templates loaded.
 
     No-op for workloads without `[security].selinux_policy = true`.
     """

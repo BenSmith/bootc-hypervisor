@@ -551,26 +551,14 @@ def validate_workload_name(name: str):
 
 # --- Per-workload SELinux identifiers ---
 #
-# Each workload that ships extra rights gets its OWN SELinux type rather than
-# widening the shared container_t/container_init_t domains (a semodule load is
-# global, so allow-rules on the stock domains leak to every container on the
-# host). The type is keyed on the workload NAME (not its bundle) so that a
-# duplicated workload gets an independently loadable/removable module — see
-# docs/workload-bundles.md "SELinux: per-workload types".
+# Each workload that ships extra rights gets its own name-keyed type instead of
+# widening the shared container_t: a CIL module `wl_<name>` defining the process
+# domain `wl_<name>.process`. The CLI (which loads the policy) and the generator
+# (which labels the container) both derive identifiers through these functions
+# so they can't drift. See llms.txt "SELinux confinement" for the rationale.
 #
-# The policy is shipped as a udica-style CIL block, `(block wl_<name>
-# (blockinherit container) ...)`. The CIL block name is the module name
-# (wl_<name>); the process domain it defines is the namespaced type
-# wl_<name>.process, which is what the container is labelled with. A plain
-# `typeattribute container_domain` is NOT enough — the container won't even
-# launch (crun fails on /proc/self/attr/keycreate); inheriting the udica
-# `container` base block is what supplies the missing process-attr permissions.
-#
-# Identifier chars: SELinux allows [a-zA-Z0-9_] (plus '.' as the CIL namespace
-# separator). NAME_PATTERN forbids underscores, so the hyphen->underscore
-# sanitize is injective — two distinct workload names can never collide. Both
-# the CLI (load) and the generator (label injection) must derive identifiers
-# through these functions or they will drift.
+# hyphen->underscore is injective: NAME_PATTERN forbids underscores, so two
+# distinct workload names can never collide on the same type.
 
 def selinux_module_name(name: str) -> str:
     """SELinux/CIL module (block) name for a workload, e.g. 'wl_wayfire_bob'."""
@@ -580,8 +568,7 @@ def selinux_module_name(name: str) -> str:
 def selinux_type_name(name: str) -> str:
     """SELinux process type for a workload, e.g. 'wl_wayfire_bob.process'.
 
-    This is the CIL-namespaced type emitted by `(block wl_<name> ...)` and is
-    what gets passed to `podman --security-opt label=type:`.
+    Passed to `podman --security-opt label=type:`.
     """
     return selinux_module_name(name) + ".process"
 

@@ -1,28 +1,15 @@
-; Per-workload SELinux type for the alloy telemetry-collector workload.
+; Per-workload SELinux policy for the alloy telemetry-collector workload.
+; __WL_MODULE__ is substituted with the name-keyed block name (wl_alloy) at
+; enable time; do not hardcode it. inherits container (full container domain)
+; and net_container (alloy reaches the central OTLP backend over the network).
 ;
-; alloy runs confined under its OWN type (__WL_MODULE__.process) rather than
-; widening the shared container_t domain. The allow-rules below grant read
-; access to the host's systemd journal and /proc/1; attaching them to
-; container_t (as the old .te module did) would hand that access to *every*
-; container on the host, since a semodule load is global.
-;
-; This is a udica-style CIL block. `(blockinherit container)` pulls in the
-; udica `container` base block (from /usr/share/udica/templates/base_container.cil,
-; loaded alongside by workloadctl), which supplies the full container process
-; domain — a bare `typeattribute container_domain` is NOT enough (the container
-; fails to launch on /proc/self/attr/keycreate). `(blockinherit net_container)`
-; grants the network access alloy needs to reach the central OTLP backend.
-;
-; __WL_MODULE__ is a placeholder substituted at enable time by workloadctl with
-; the name-keyed module/block name (wl_alloy). Do not hardcode it. See
-; docs/workload-bundles.md "SELinux: per-workload types".
-;
-; alloy reads the journal via libsystemd, which mmap()s the .journal files
-; (file map) and watches the directory for new entries via inotify (dir watch)
-; — both confirmed by AVC denials on first run. This replaces a blanket
+; The allow-rules grant just journal + /proc/1 read, scoped to wl_alloy.process
+; alone. alloy reads the journal via libsystemd, which mmap()s the .journal
+; files (file map) and watches the directory via inotify (dir watch) — both
+; confirmed by AVC denials on first run. This replaces a blanket
 ; security_opt = ["label=disable"]: if the host-metrics collectors (node_exporter
-; reading /host/proc and /host/sys) produce AVC denials, run `audit2allow -a`
-; and fold the additional rules in here rather than reverting to label=disable.
+; reading /host/proc and /host/sys) produce AVC denials, regenerate with udica /
+; `audit2allow -a` and fold the rules in here rather than reverting to label=disable.
 
 (block __WL_MODULE__
     (blockinherit container)
