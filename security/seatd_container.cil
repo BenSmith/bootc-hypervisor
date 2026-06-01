@@ -1,7 +1,17 @@
-; Allow containers to connect to the host seatd socket for DRM/KMS access
-; (KMS desktop workloads). Intentionally host-wide on container_t: seatd runs as
-; unconfined_service_t and exposes its socket under var_run_t. Per-workload
-; scoping is the direction for the desktop workloads; this host-wide grant stays
-; until those migrate.
-(allow container_t unconfined_service_t (unix_stream_socket (connectto)))
-(allow container_t var_run_t (sock_file (read write getattr)))
+; Allow containers to connect to the host seatd socket for DRM/KMS access.
+;
+; This is host-wide on container_t (seatd runs as unconfined_service_t and
+; exposes its socket under var_run_t), and its consumers — KMS desktops — are
+; bare containers, not workloadctl workloads, so they can't get a per-workload
+; type. To avoid leaking the grant to every container all the time, it is gated
+; behind a boolean that is OFF by default. Turn it on only while running a KMS
+; desktop:
+;
+;     sudo setsebool -P seatd_container_connect on    # before
+;     sudo setsebool -P seatd_container_connect off   # after
+;
+(boolean seatd_container_connect false)
+(booleanif seatd_container_connect
+    (true
+        (allow container_t unconfined_service_t (unix_stream_socket (connectto)))
+        (allow container_t var_run_t (sock_file (read write getattr)))))
