@@ -2,7 +2,7 @@
 ; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
 ;
 ; Wolf is non-systemd, so all its processes — including Steam and bwrap — run as
-; this single type (the old .te was already entirely container_t). Grants:
+; this single type. Grants:
 ;   /dev/uinput + /dev/input/*  — create virtual input devices, read evdev
 ;   /run/udev                   — device property lookups (libdrm, mesa, ALSA)
 ;   filesystem mount/remount    — Steam's bubblewrap sandbox (srt-bwrap)

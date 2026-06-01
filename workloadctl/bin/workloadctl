@@ -260,9 +260,9 @@ class WorkloadConfig:
     def selinux_policy(self) -> bool:
         """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
 
-        When set, enable/disable compile+load/remove the bundle's .te template
-        under a name-keyed module, and the generator labels the container with
-        the matching type. See docs/workload-bundles.md.
+        When set, enable/disable load/remove the bundle's CIL policy
+        (`<bundle>.cil`) as a name-keyed module, and the generator labels the
+        container with the matching type. See docs/workload-bundles.md.
         """
         return bool(self.config.get("security", {}).get("selinux_policy", False))
 

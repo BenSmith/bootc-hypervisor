@@ -7,8 +7,8 @@
 ; but icons silently fail to render. This image is GTK3-only today, but the
 ; policy is shipped pre-emptively so adding a GTK4 app Just Works.
 ;
-; The container runs non-systemd (--init), so all processes are this one type;
-; the old .te's container_init_t and container_t rules are merged onto it.
+; The container runs non-systemd (--init), so all its processes are this one
+; type — the device/bwrap rules below all apply to it directly.
 
 (block __WL_MODULE__
     (blockinherit container)

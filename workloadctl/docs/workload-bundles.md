@@ -10,7 +10,7 @@ into lookups against immutable `/usr`:
 
 - `/usr/share/doc/workloadctl/examples/<name>.toml` — the example declaration (docdir)
 - `/usr/share/workloadctl/containers/<name>/` — control files (`Containerfile`,
-  `build.sh`, `setup.sh`, `<name>.te`, config templates)
+  `build.sh`, `setup.sh`, `<name>.cil`, config templates)
 - `/etc/workloads.d/<name>.toml` — the *only* place `enable` reads
 - `/var/lib/workloads/<name>/` — the workload user's `$HOME`, doing triple duty
   as podman image storage, `./`-volume base, and config-template drop point
@@ -23,7 +23,7 @@ Consequences:
 - **Customizing** means copying read-only control files somewhere writable,
   editing, and repointing the TOML — and because build/setup/SELinux lookups are
   all keyed on `containers/{name}`, a renamed copy breaks in several places at
-  once (`build.sh` path, `[host].setup` resolution, `module <name>` in the `.te`).
+  once (`build.sh` path, `[host].setup` resolution, the `block <name>` in the `.cil`).
 - **`/var/lib/workloads/<name>/` is a junk drawer.** On a live box, alloy's dir
   is 505 MB — 100% podman layer storage — sitting beside the 6.6 KB config file
   that actually matters, because `HOME=` points at the dir root.
@@ -46,7 +46,7 @@ audience:
 /usr/share/workloadctl/workloads/<bundle>/   # pristine shipped bundle (read-only)
     workload.toml                            #   the template declaration
     Containerfile  build.sh                  #   control files (any subset)
-    setup.sh  <bundle>.te  *.conf templates  #   that the bundle needs
+    setup.sh  <bundle>.cil  *.conf templates  #   that the bundle needs
 
 /etc/workloads.d/<name>.toml                 # the authoritative declaration
 
@@ -88,7 +88,7 @@ name   = "wayfire-bob"
 bundle = "vncdesktop-wayfire"   # defaults to `name` if omitted
 ```
 
-For control file `F` (e.g. `setup.sh`, `Containerfile`, the `.te`):
+For control file `F` (e.g. `setup.sh`, `Containerfile`, the `.cil`):
 
 1. `/var/lib/workloads/<name>/base/F` — operator override (usually absent)
 2. `/usr/share/workloadctl/workloads/<bundle>/F` — shipped default
@@ -132,7 +132,7 @@ sudo workloadctl duplicate vncdesktop-wayfire wayfire-bob
 | `data/` | empty by default; `--clone-data` to seed from source |
 | user / UID / subuid | allocated fresh on enable (first-free, host-local) |
 | image | whatever the new TOML says — shared by default, diverge by editing one line |
-| SELinux policy | covered by the shared bundle/`.te` until a copy overrides it |
+| SELinux policy | covered by the shared bundle/`.cil` until a copy overrides it |
 
 `init <name>` is the same operation with the source being a `/usr` catalog entry
 instead of a live workload. `workloadctl catalog` lists shippable bundles.
@@ -169,71 +169,71 @@ that initially points at the same image/policy via explicit TOML fields +
 
 ## SELinux: per-workload types (security fix, can land independently)
 
-**Decided.** Every shipped `.te` today writes its `allow` rules against the
-shared `container_t`/`container_init_t` domains, so loading any module widens
+**Decided (now implemented).** Before this fix, every shipped policy module
+wrote its `allow` rules against the shared `container_t`/`container_init_t`
+domains, so loading any module widened
 **every** container on the host — `semodule` load is global. Blast radius is
 real: the game-streaming modules grant `/dev/input` read (keylogging),
 `/dev/uinput` (input injection), and `execheap`/`execmod`/`mmap_zero` (W^X
 bypass) to all containers; the desktop/alloy modules add device/journal access.
 This is a live regression, independent of the bundle work.
 
-Fix: each workload that needs extra rights gets its **own** type
-(`wl_<name>_t`), attributed into the container domain, with the `allow` rules
-moved onto that type. The container launches with
-`--security-opt label=type:wl_<name>_t`. `container_t` stays stock for everything
-else.
+Fix (**implemented** — see `llms.txt` "SELinux confinement"): each workload that
+needs extra rights gets its **own** type — a udica-style CIL block
+(`wl_<name>.process`) that inherits the container base domain, with the `allow`
+rules on that type. The container launches with
+`--security-opt label=type:wl_<name>.process`. `container_t` stays stock for
+everything else.
 
-- The generic `[security].security_opt` passthrough already exists
-  (`workload-generate:747`); the missing pieces are (a) defining the type in the
-  policy and (b) auto-injecting the label on enable.
-- Systemd-in-container workloads fold their `container_init_t` rules onto the
-  single custom type (the whole container runs as that type). The automatic
-  `container_init` transition under a custom label is the finicky part —
-  test per workload; lean on `udica` to generate the policy from a running
-  container rather than hand-writing.
-- Resolves the duplicate-naming question: a copy gets its own `wl_<name>_t`, so
-  two instances don't share a widened domain, and copies that need no extra
+- The generic `[security].security_opt` passthrough already existed; the pieces
+  added were `[security].selinux_policy`, an enable-time CIL loader, and the
+  generator auto-injecting the label.
+- Systemd-in-container workloads (`--systemd=always`) additionally need the type
+  attributed into `container_init_domain` — without it systemd-as-PID1 exits 255
+  with no AVCs (a missing attribute, not a denied rule). Everything in the
+  container then runs as the one type (no internal init transition). Author new
+  policy with `udica` against a running container.
+- Resolves the duplicate-naming question: a copy gets its own `wl_<name>.process`,
+  so two instances don't share a widened domain, and copies that need no extra
   rights get none. Per-workload confinement by construction.
-- Can and should ship **before** the layout reshape; it depends on none of it.
+- Shipped **before** the layout reshape; it depends on none of it.
 
 ### Key the type on `name`, not `bundle`
 
-Running two of something forces a decision the `wl_<name>_t` shorthand glosses:
-two wayfires (`wayfire-alice`, `wayfire-bob`, both `bundle =
-vncdesktop-wayfire`) could either **share** one `wl_vncdesktop-wayfire_t` or get
-a type **each**. Key it on **`name`** (one type per *instance*).
+Running two of something forces a decision the `wl_<name>.process` shorthand
+glosses: two wayfires (`wayfire-alice`, `wayfire-bob`, both `bundle =
+vncdesktop-wayfire`) could either **share** one `wl_vncdesktop_wayfire.process`
+or get a type **each**. Key it on **`name`** (one type per *instance*).
 
-Bundle-keying is tempting — the `.te` *source* already resolves by `bundle`
+Bundle-keying is tempting — the `.cil` *source* already resolves by `bundle`
 (it's a control file) — but it silently reintroduces the refcount problem
-per-workload types exist to kill: `semodule -r wl_vncdesktop-wayfire_t` is safe
+per-workload types exist to kill: `semodule -r wl_vncdesktop_wayfire` is safe
 only once the *last* instance on that bundle is disabled, so you're refcounting
 again, just at the bundle level instead of the global `container_t` level. The
 decidable-teardown property requires **1 type ⇄ 1 enabled workload**. So the
-type is named after the instance; the `.te` is sourced from the bundle.
+type is named after the instance; the `.cil` is sourced from the bundle.
 
-### The `.te` is a per-bundle template, instantiated at enable
+### The `.cil` is a per-bundle template, instantiated at enable
 
 Consequence of name-keying: the bundle no longer ships a final loadable module —
-it ships a **template** with the instance identity left as a placeholder. SELinux
-itself has no template syntax (`.te` files are static); the markers below are just
-an enable-time string substitution, reusing the repo's existing
-`__UID__`/`__SVCDIR__` placeholder convention. The whole type/module identifier is
-the placeholder, so the `wl_`/`_t` affixing and sanitization live in the
-substitution code, not in the bundle author's `.te`:
+it ships a **template** with the instance identity left as a placeholder. The
+block name is the placeholder, so the `wl_` prefix and sanitization live in the
+substitution code (reusing the repo's existing `__UID__`/`__SVCDIR__` convention),
+not in the bundle author's `.cil`:
 
 ```
-module __WL_MODULE__ 1.0;
-type __WL_TYPE__;
-typeattribute __WL_TYPE__ container_domain;
-allow __WL_TYPE__ ... ;
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)              ; if the workload needs the network
+    (typeattributeset container_init_domain (process))  ; only for systemd workloads
+    (allow process <target_type> (<class> (<perms>))))
 ```
 
-where `__WL_TYPE__` → `wl_<sanitized-name>_t` and `__WL_MODULE__` →
-`wl_<sanitized-name>`. `enable` performs the substitution, compiles, loads
-`wl_<name>`, and injects
-`--security-opt label=type:wl_<name>_t`. (Alternatively generate fresh per
-instance with `udica` from the running container — more robust for the
-systemd-in-container `container_init` transition, heavier.) This substitution is
+where `__WL_MODULE__` → `wl_<sanitized-name>` and the type the container is
+labelled with is `wl_<sanitized-name>.process`. `enable` performs the
+substitution and loads it with `semodule -i` alongside udica's base templates
+(which `blockinherit` resolves against) — CIL loads directly, no compile step —
+then injects `--security-opt label=type:wl_<name>.process`. This is
 **enable-time CLI work, not boot path** — the generator stays dumb, same
 discipline as the rest of this doc.
 
@@ -241,11 +241,11 @@ discipline as the rest of this doc.
 
 `duplicate wayfire-alice wayfire-bob` → bob gets his own module/type from the
 shared bundle template: one extra `semodule -i` on enable, one `semodule -r` on
-disable, no `.te` copy, independently removable, orphan-reconcile works verbatim.
+disable, no `.cil` copy, independently removable, orphan-reconcile works verbatim.
 
 Be honest about the benefit for *identical* copies, though: two instances of the
-same bundle have identical rule needs, so `wl_wayfire_alice_t` and
-`wl_wayfire_bob_t` are **byte-identical in granted rights**. The win is *not*
+same bundle have identical rule needs, so `wl_wayfire_alice.process` and
+`wl_wayfire_bob.process` are **byte-identical in granted rights**. The win is *not*
 "alice can't do what bob can" — it's (1) clean ownership/teardown (disabling bob
 removes exactly bob's grants) and (2) the host's *other* containers stay
 unwidened. Differential privilege only matters across *different* bundles (the
@@ -253,15 +253,15 @@ common case across the herd), not within a duplicated pair.
 
 ### Gotcha: type-identifier sanitization
 
-SELinux type identifiers allow `[a-zA-Z0-9_]` only — **no hyphens**. Every
-workload name here is hyphenated (`vncdesktop-wayfire`), and today's `.te`s dodge
-this only because they declare *stock* types (`container_init_t`), never their
-own. Declaring `wl_<name>_t` means sanitizing `wayfire-bob` → `wl_wayfire_bob_t`.
-No collision guard is needed: `NAME_PATTERN` is `^[a-z][a-z0-9-]*$`
-(`workload_lib.py:33`) — names contain no underscores — so hyphen→underscore is
-injective and two distinct names can never map to the same type. The sanitize
-belongs in the same enable-time step that allocates the UID and the per-instance
-SSH key — another fresh-per-instance identity.
+SELinux/CIL identifiers allow `[a-zA-Z0-9_]` only — **no hyphens** (the `.` in
+`wl_<name>.process` is the CIL namespace separator, not part of the block name).
+Every workload name here is hyphenated (`vncdesktop-wayfire`), so the block name
+`wl_<name>` means sanitizing `wayfire-bob` → `wl_wayfire_bob` (type
+`wl_wayfire_bob.process`). No collision guard is needed: `NAME_PATTERN` is
+`^[a-z][a-z0-9-]*$` (`workload_lib.py:33`) — names contain no underscores — so
+hyphen→underscore is injective and two distinct names can never map to the same
+type. The sanitize belongs in the same enable-time step that allocates the UID
+and the per-instance SSH key — another fresh-per-instance identity.
 
 Net rule: **type keyed on `name`, sourced from a per-`bundle` template,
 instantiated + sanitized + label-injected at enable, torn down 1:1 on disable.**
@@ -280,7 +280,7 @@ Today a VM stores everything flat under `/var/lib/workloads/<name>/`:
 | Bundle concept | Container | VM |
 |---|---|---|
 | **Declaration** (`/etc`, authoritative) | `[container]`/`[[containers]]` | `[vm]` — identical |
-| **Control file** (lazy override, keyed on `bundle`) | Containerfile, build.sh, setup.sh, `.te`, `*.conf` | the cloud-init user-data template (`[vm.cloud_init]`) |
+| **Control file** (lazy override, keyed on `bundle`) | Containerfile, build.sh, setup.sh, `.cil`, `*.conf` | the cloud-init user-data template (`[vm.cloud_init]`) |
 | **State → `home/`** (rebuildable, backup-skip) | podman graphroot | `system.qcow2`+`.gen-N`, `cloud-init.iso`, `nvram.fd`, `.image-cache/` |
 | **State → `data/`** (durable, backup) | `./`-volumes | `data.qcow2` |
 | **Image ref** (shared, diverge by editing) | image tag | `image` / `cloud_image_url` |
@@ -330,7 +330,7 @@ confinement is its own unaddressed question** — flagged here, not solved by th
 
 ## Open details (decide during build)
 
-- **`base/` SELinux labeling** — control files (Containerfiles, `.te`) likely
+- **`base/` SELinux labeling** — control files (Containerfiles, `.cil`) likely
   want different labeling than the `container_file_t` blanket on `data/`/`home/`.
 
 ## CLI surface (delta)
