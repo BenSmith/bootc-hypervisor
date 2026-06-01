@@ -255,11 +255,10 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         uses: actions/checkout@v4
 
-      - name: Render policy.json
-        if: steps.gate.outputs.build == 'true'
-        run: |
-          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
-              policy-hypervisor.json.template > policy.json
+      # No "Render policy.json" here: variant images inherit
+      # /etc/containers/policy.json from the base layer and never COPY it
+      # (the variant Containerfiles don't reference policy.json), so rendering
+      # it in this job was dead work.
 
       - name: Verify cosign (provisioned on runner)
         if: steps.gate.outputs.build == 'true'
