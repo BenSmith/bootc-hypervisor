@@ -11,7 +11,8 @@
           }
         }
       ],
-      "ghcr.io": [{"type": "insecureAcceptAnything"}]
+      "ghcr.io": [{"type": "insecureAcceptAnything"}],
+      "registry.local": [{"type": "insecureAcceptAnything"}]
     },
     "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
     "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},

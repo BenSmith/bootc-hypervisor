@@ -12,7 +12,7 @@
 # to /etc/xdg/* serves the defaults for every tool used here. Users
 # customize by dropping files into the host-side home directory.
 
-FROM fedora:44
+FROM registry.fedoraproject.org/fedora:44
 
 # Desktop session components:
 #   arc-theme             - GTK theme (clean dark style)

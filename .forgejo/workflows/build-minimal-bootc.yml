@@ -95,11 +95,13 @@ jobs:
           fi
 
       - name: Render policy.json
+        env:
+          OWNER: ${{ github.repository_owner }}
         run: |
-          # The placeholder governs the trusted namespace baked into the image;
-          # registry.local images carry no namespace, so this stays as-is for
-          # any ghcr.io mirror and the registry.local rule is matched literally.
-          sed -e "s|__REGISTRY_NAMESPACE__|bensmith|g" \
+          # Scope the ghcr.io rule to this repo's owner (matches the GitHub
+          # pipeline's ${OWNER}) rather than hardcoding a namespace, so forks
+          # trust their own subtree. registry.local trust comes from the template.
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
               policy-minimal.json.template > policy.json
           cat policy.json
 

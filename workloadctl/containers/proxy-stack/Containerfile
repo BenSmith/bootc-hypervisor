@@ -1,4 +1,4 @@
-FROM alpine AS microsocks-builder
+FROM docker.io/library/alpine AS microsocks-builder
 
 RUN apk add --no-cache ca-certificates build-base git
 

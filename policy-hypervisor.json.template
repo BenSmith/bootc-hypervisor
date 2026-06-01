@@ -11,6 +11,7 @@
           }
         }
       ],
+      "registry.local": [{"type": "insecureAcceptAnything"}],
       "registry.fedoraproject.org": [{"type": "insecureAcceptAnything"}],
       "docker.io": [{"type": "insecureAcceptAnything"}],
       "quay.io": [{"type": "insecureAcceptAnything"}],
