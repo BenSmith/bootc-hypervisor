@@ -7,6 +7,8 @@ Requires=workload-vncdesktop-wayfire-setup.service
 After=network.target workload-vncdesktop-wayfire-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+Requires=nvidia-cdi-generator.service
+After=nvidia-cdi-generator.service
 
 [Service]
 Type=exec
@@ -23,10 +25,11 @@ MemoryMax=4G
 MemoryHigh=3G
 TasksMax=16384
 
+ExecStartPre=/bin/bash -c 'test -s /run/cdi/nvidia.yaml || { echo "NVIDIA CDI spec missing: check nvidia-cdi-generator.service" >&2; exit 1; }'
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-vncdesktop-wayfire" --hostname "vncdesktop-wayfire" --rm --systemd=always --sdnotify=ignore --pull=never --log-driver=journald --uidmap +1000:@__UID__:1 --gidmap +1000:@__UID__:1 --gidmap +39:@39:1 --gidmap +105:@105:1 --uidmap +0:@__UID__:1 --gidmap +0:@__UID__:1 --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=FSETID --cap-add=KILL --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --group-add=keep-groups --shm-size=2G --pids-limit=16384 --network="host" --volume "/var/lib/workloads/vncdesktop-wayfire/home":/home/desktop --volume "/run/udev":/run/udev:ro --volume "/run/systemd/journal/socket":/run/host-systemd/journal/socket --env HOST_IP=${HOST_IP} --env CONTAINER_USER=desktop --env CONTAINER_UID=1000 --env CONTAINER_GID=1000 --env LANG=C.UTF-8 --env NO_AT_BRIDGE=1 --health-cmd "pgrep -x wayfire > /dev/null || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/vncdesktop-wayfire:latest"
+ExecStart=/usr/bin/podman run --name "workload-vncdesktop-wayfire" --hostname "vncdesktop-wayfire" --rm --systemd=always --sdnotify=ignore --pull=never --log-driver=journald --uidmap +1000:@__UID__:1 --gidmap +1000:@__UID__:1 --gidmap +39:@39:1 --gidmap +105:@105:1 --uidmap +0:@__UID__:1 --gidmap +0:@__UID__:1 --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=FSETID --cap-add=KILL --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --group-add=keep-groups --device=nvidia.com/gpu=all --device /dev/dri --shm-size=2G --pids-limit=16384 --network="host" --volume "/var/lib/workloads/vncdesktop-wayfire/home":/home/desktop --volume "/run/udev":/run/udev:ro --volume "/run/systemd/journal/socket":/run/host-systemd/journal/socket --env HOST_IP=${HOST_IP} --env CONTAINER_USER=desktop --env CONTAINER_UID=1000 --env CONTAINER_GID=1000 --env LANG=C.UTF-8 --env NO_AT_BRIDGE=1 --health-cmd "pgrep -x wayfire > /dev/null || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/vncdesktop-wayfire:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-vncdesktop-wayfire"
 
