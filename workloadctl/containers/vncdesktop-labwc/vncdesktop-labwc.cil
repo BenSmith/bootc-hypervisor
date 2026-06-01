@@ -1,0 +1,23 @@
+; Per-workload SELinux policy for the vncdesktop-labwc workload container.
+; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
+;
+; GTK4's glycin image loaders run inside a bwrap sandbox to decode SVGs and
+; other image formats (icon themes, thumbnails). Without these rules, bwrap
+; fails during namespace setup and every image load fails — apps appear to run
+; but icons silently fail to render. This image is GTK3-only today, but the
+; policy is shipped pre-emptively so adding a GTK4 app Just Works.
+;
+; The container runs non-systemd (--init), so all processes are this one type;
+; the old .te's container_init_t and container_t rules are merged onto it.
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+
+    ; bwrap mounts a tmpfs for the sandbox's /tmp-home and /tmp-run.
+    (allow process tmpfs_t (filesystem (mount remount)))
+    ; bwrap mounts a fresh devpts inside the sandbox.
+    (allow process devpts_t (filesystem (mount)))
+    ; bwrap bind-mounts over existing sockets while composing the sandbox root.
+    (allow process container_file_t (sock_file (mounton)))
+    (allow process user_tmp_t (sock_file (mounton))))

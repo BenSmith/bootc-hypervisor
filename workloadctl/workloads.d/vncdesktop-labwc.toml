@@ -74,15 +74,14 @@ volumes = [
 [security]
 userns = "keep-id:uid=1000,gid=1000"
 extra_groups = ["video", "render"]
+# Per-workload SELinux type (wl_<name>.process) loaded from
+# containers/vncdesktop-labwc/vncdesktop-labwc.cil on enable. Allows GTK4's
+# glycin/bwrap image-loader sandbox to start inside the container — without it,
+# GTK4 apps render with missing icons / images — scoped to this workload alone.
+selinux_policy = true
 
 [network]
 mode = "host"
-
-[host]
-# Installs an SELinux policy module on enable, removes it on disable.
-# Allows GTK4's glycin/bwrap image-loader sandbox to start inside the
-# container. Without this, GTK4 apps render with missing icons / images.
-setup = "setup.sh"
 
 [resources]
 shm_size = "2G"

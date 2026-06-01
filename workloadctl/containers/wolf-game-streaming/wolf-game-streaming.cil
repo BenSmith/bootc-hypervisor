@@ -1,0 +1,42 @@
+; Per-workload SELinux policy for the wolf-game-streaming workload container.
+; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
+;
+; Wolf is non-systemd, so all its processes — including Steam and bwrap — run as
+; this single type (the old .te was already entirely container_t). Grants:
+;   /dev/uinput + /dev/input/*  — create virtual input devices, read evdev
+;   /run/udev                   — device property lookups (libdrm, mesa, ALSA)
+;   filesystem mount/remount    — Steam's bubblewrap sandbox (srt-bwrap)
+;   Wine/Proton                 — execheap, mmap_zero, execmod for Windows PE
+;   Steam IPC                   — /tmp socket and file operations
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+
+    ; Input devices: /dev/uinput + /dev/input/event* (event_device_t on Fedora).
+    (allow process event_device_t (chr_file (open read write ioctl getattr)))
+    (allow process event_device_t (dir (open read search getattr)))
+
+    ; Udev runtime database (libdrm, mesa, ALSA).
+    (allow process udev_var_run_t (dir (open read search getattr)))
+    (allow process udev_var_run_t (file (open read getattr)))
+    (allow process udev_var_run_t (sock_file (getattr)))
+    (allow process udev_var_run_t (lnk_file (read getattr)))
+
+    ; Steam bwrap sandbox (srt-bwrap / pressure-vessel) remounts/mounts.
+    (allow process cgroup_t (filesystem (remount)))
+    (allow process pstore_t (filesystem (remount)))
+    (allow process bpf_t (filesystem (remount)))
+    (allow process tmpfs_t (filesystem (remount)))
+    (allow process devpts_t (filesystem (mount)))
+    (allow process container_file_t (sock_file (mounton)))
+
+    ; Steam IPC: /tmp sockets and temp files (user_tmp_t).
+    (allow process user_tmp_t (dir (open read write search getattr add_name remove_name ioctl lock)))
+    (allow process user_tmp_t (sock_file (create write getattr setattr unlink mounton)))
+    (allow process user_tmp_t (file (open read write create getattr unlink lock map)))
+
+    ; Wine/Proton PE loader: executable heap, NULL-page map, text relocations.
+    (allow process self (process (execheap)))
+    (allow process self (memprotect (mmap_zero)))
+    (allow process container_file_t (file (execmod))))
