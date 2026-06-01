@@ -137,6 +137,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     traceroute \
     tuned \
     tzdata \
+    udica \
     usbutils \
     virglrenderer \
     virtiofsd \

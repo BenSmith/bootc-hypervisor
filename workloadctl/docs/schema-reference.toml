@@ -696,27 +696,20 @@ virtualization = true
 #
 # security_opt = []
 
-# Optional: Ship a per-workload SELinux type instead of widening shared domains
+# Optional: Ship a per-workload SELinux type
 # Type: bool
 # Default: false
-# When true, `enable` loads the bundle's udica-style CIL policy template
-# (containers/<bundle>/<bundle>.cil) as a NAME-keyed module (wl_<name>), and the
-# generator launches the container with
-# --security-opt=label=type:wl_<name>.process. `disable` removes the module.
-# The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted at
-# enable time) that inherits udica's base container domain, e.g.:
+# When true, `enable` loads the bundle's udica-style CIL policy
+# (containers/<bundle>/<bundle>.cil) as a name-keyed module (wl_<name>) and the
+# generator labels the container with type wl_<name>.process; `disable` removes
+# it. The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted
+# at enable time), e.g.:
 #     (block __WL_MODULE__
-#         (blockinherit container)        ; full container process domain
+#         (blockinherit container)        ; required — full container domain
 #         (blockinherit net_container)    ; if the workload needs the network
 #         (allow process <target_type> (<class> (<perms>))))
-# workloadctl loads udica's base templates (/usr/share/udica/templates/*.cil)
-# alongside, which the blockinherit resolves against. Always inherit a base
-# container block — its rules are required for the container to start at all.
-# This keeps the workload's extra rights scoped to itself rather than granting
-# them to every container on the host. Keyed on name, so a duplicated workload
-# gets its own independently removable module. Author new policy with `udica`
-# against a running container. See docs/workload-bundles.md "SELinux:
-# per-workload types".
+# Author new policy with `udica` against a running container. See
+# docs/workload-bundles.md and llms.txt "SELinux confinement" for the rationale.
 # selinux_policy = false
 
 # Optional: Additional system groups for the workload user

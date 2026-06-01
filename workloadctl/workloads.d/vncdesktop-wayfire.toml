@@ -41,10 +41,6 @@ capabilities = [
 extra_groups = ["video", "render"]
 extra_uidmaps = ["+0:@{UID}:1"]
 extra_gidmaps = ["+0:@{GID}:1"]
-# Per-workload SELinux type (wl_<name>.process) loaded from
-# containers/vncdesktop-wayfire/vncdesktop-wayfire.cil on enable. Lets GTK4's
-# glycin/bwrap image-loader sandbox start (else icons fail to render), scoped to
-# this workload. The container runs systemd, so the type is init-capable.
 selinux_policy = true
 
 [storage]

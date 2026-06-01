@@ -27,11 +27,6 @@ capabilities = [
     "SYS_CHROOT", "SYS_NICE",
 ]
 extra_groups = ["video", "render", "input"]
-# Per-workload SELinux type (wl_<name>.process) loaded from
-# containers/wolf-game-streaming/wolf-game-streaming.cil on enable: /dev/uinput
-# + /dev/input, udev lookups, Steam's bwrap sandbox, and Wine/Proton's
-# execheap/mmap_zero/execmod — scoped to this workload instead of all of
-# container_t.
 selinux_policy = true
 
 [storage]
@@ -53,6 +48,5 @@ cpu_quota = "400%"
 tasks_max = 16384
 
 [host]
-# Non-SELinux host prerequisites (uinput kernel module + udev rule). The SELinux
-# policy is handled separately by [security].selinux_policy above.
+# Host prerequisites: uinput kernel module + udev rule.
 setup = "setup.sh"

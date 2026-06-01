@@ -40,11 +40,6 @@ capabilities = [
     "SYS_CHROOT", "SYS_NICE",
 ]
 extra_groups = ["video", "render", "input", "audio"]
-# Per-workload SELinux type (wl_<name>.process) loaded from
-# containers/sunshine-game-streaming/sunshine-game-streaming.cil on enable:
-# /dev/uinput + /dev/input, /dev/snd, udev, Steam's bwrap sandbox, and
-# Wine/Proton execheap/mmap_zero/execmod — scoped to this workload instead of
-# all of container_t. The container runs systemd, so the type is init-capable.
 selinux_policy = true
 
 [storage]
@@ -66,7 +61,6 @@ cpu_quota = "400%"
 tasks_max = 16384
 
 [host]
-# Non-SELinux host prerequisites (uinput kernel module, udev rule, and the
-# host-side udev input-event relay). The SELinux policy is handled separately by
-# [security].selinux_policy above.
+# Host prerequisites: uinput kernel module, udev rule, and the host-side udev
+# input-event relay.
 setup = "setup.sh"

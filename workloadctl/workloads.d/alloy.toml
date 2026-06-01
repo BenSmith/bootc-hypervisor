@@ -70,13 +70,6 @@ volumes = [
 # the workload user on the host.
 userns = "host"
 extra_groups = ["systemd-journal"]
-# Reading the host journal (syslogd_var_run_t / var_log_t) is denied to the
-# stock container domain under SELinux enforcing. Rather than disabling
-# confinement wholesale (label=disable), enable loads a per-workload SELinux
-# type from containers/alloy/alloy.cil: alloy runs confined as its own
-# wl_alloy.process (a udica CIL block inheriting the base container domain) with
-# read access to just the journal file types, so no other container on the host
-# is widened.
 selinux_policy = true
 
 [network]

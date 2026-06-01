@@ -244,8 +244,7 @@ pressure-vessel.
 
 This was the most iterative and time-consuming part of the deployment. The
 container ships a per-workload SELinux type, `wl_sunshine_game_streaming.process`
-(via `[security].selinux_policy`), instead of widening the shared
-`container_t`/`container_init_t`. The rule discovery below was done against
+(via `[security].selinux_policy`). The rule discovery below was done against
 `container_init_t` (the stock systemd-container PID 1 context) and the same
 rules now apply to the workload's own type. Every new component surfaced new
 denials.
