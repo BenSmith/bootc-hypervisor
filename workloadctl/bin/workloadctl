@@ -1794,9 +1794,15 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
         )
         for line in result.stdout.splitlines():
             parts = line.split()
-            # ip neigh format: <ip> dev <iface> lladdr <mac> <state>
-            if len(parts) >= 5 and parts[4].lower() == mac.lower():
-                return parts[0]
+            # `ip neigh show dev <iface>` omits the `dev <iface>` tokens it
+            # prints in the unfiltered form, so the MAC's column isn't fixed
+            # (`<ip> lladdr <mac> <state>` here vs `<ip> dev <iface> lladdr
+            # <mac> <state>` unfiltered). Find it by the `lladdr` marker, which
+            # is stable either way; parts[0] is always the IP.
+            if "lladdr" in parts:
+                mac_idx = parts.index("lladdr") + 1
+                if mac_idx < len(parts) and parts[mac_idx].lower() == mac.lower():
+                    return parts[0]
     except OSError:
         pass
 
