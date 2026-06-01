@@ -344,15 +344,49 @@ CADDYEOF
       # — registration is the gated step. Putting the binary on disk now
       # means an operator who later sets REGISTER_RUNNER=true (or runs
       # `forgejo-runner register` by hand) doesn't have to re-bootstrap.
+      #
+      # Idempotent + re-bootstrap safe: skip the download when the pinned
+      # version is already installed, otherwise stage a temp file alongside
+      # the target and atomically rename it into place. Writing the binary
+      # in place with `curl -o` fails on a re-bootstrap because the *running*
+      # runner holds the file busy — open-for-write of a live executable
+      # returns ETXTBSY, surfacing as `curl: (23)` and (under set -e)
+      # aborting the whole runcmd. rename(2) swaps the dentry without
+      # touching the inode the running process still holds.
       mkdir -p /var/lib/forgejo-runner
-      curl -fsSL -o /usr/local/bin/forgejo-runner \
-        "https://code.forgejo.org/forgejo/runner/releases/download/v${RUNNER_VERSION}/forgejo-runner-${RUNNER_VERSION}-linux-amd64"
-      chmod +x /usr/local/bin/forgejo-runner
+      if ! /usr/local/bin/forgejo-runner --version 2>/dev/null | grep -qF "${RUNNER_VERSION}"; then
+        curl -fsSL -o /usr/local/bin/.forgejo-runner.new \
+          "https://code.forgejo.org/forgejo/runner/releases/download/v${RUNNER_VERSION}/forgejo-runner-${RUNNER_VERSION}-linux-amd64"
+        chmod 0755 /usr/local/bin/.forgejo-runner.new
+        mv -f /usr/local/bin/.forgejo-runner.new /usr/local/bin/forgejo-runner
+      fi
 
       install -m 0644 \
         /usr/share/workloadctl/vms/virtual-forgejo/forgejo-runner.service \
         /etc/systemd/system/forgejo-runner.service
       systemctl daemon-reload
+
+      # 8b. Install the pinned cosign that CI uses to sign images. Pinned to v2
+      # on purpose: cosign v2 emits the legacy ".sig" simple-signing format that
+      # containers-policy `sigstoreSigned` (bootc/podman pull verification) reads;
+      # v3's default bundle format is NOT verified by sigstoreSigned. Keep this
+      # version matched to COSIGN_VERSION in .forgejo/workflows. Provisioning it
+      # here (once) instead of fetching on every CI run keeps image builds
+      # working when GitHub is unreachable and lets the workflow's cosign step be
+      # a no-download version check. Non-fatal: a failed fetch leaves signing
+      # (already best-effort) to be skipped, not the whole boot. Temp file +
+      # atomic rename so a re-bootstrap can't trip over a busy binary.
+      if ! /usr/local/bin/cosign version 2>/dev/null | grep -qF "2.4.3"; then
+        if curl -fsSL -o /usr/local/bin/.cosign.new \
+            "https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign-linux-amd64"; then
+          chmod 0755 /usr/local/bin/.cosign.new
+          mv -f /usr/local/bin/.cosign.new /usr/local/bin/cosign
+        else
+          rm -f /usr/local/bin/.cosign.new
+          echo "WARNING: cosign v2.4.3 install failed (GitHub unreachable?); CI image signing will be skipped until reinstalled." \
+            | tee -a /var/log/virtual-forgejo-bootstrap.log
+        fi
+      fi
 
       # 9. Register + enable the runner, but only if both knobs say so.
       # Chicken-and-egg: when this VM hosts Forgejo itself, no admin has

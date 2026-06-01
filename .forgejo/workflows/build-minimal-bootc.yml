@@ -71,27 +71,28 @@ jobs:
             echo "image_base=${REGISTRY}/${IMAGE_NAME}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install cosign
+      - name: Verify cosign (provisioned on runner)
+        # cosign is installed once on the runner during VM bootstrap
+        # (vms/virtual-forgejo/cloud-init/user-data, step 8b), pinned to v2:
+        # v2 emits the legacy ".sig" simple-signing format that containers-policy
+        # `sigstoreSigned` (bootc/podman pull verification) reads; v3's default
+        # bundle format is NOT verified by sigstoreSigned. We assert the pinned
+        # version here instead of downloading, so a GitHub outage can't fail the
+        # build; if it's absent/wrong, signing (already best-effort) is skipped.
         env:
-          # cosign v2.x emits the legacy ".sig" simple-signing format that
-          # containers-policy `sigstoreSigned` (bootc/podman pull verification)
-          # reads. cosign v3's default Sigstore-bundle format is NOT verified by
-          # sigstoreSigned — do not bump to v3 without migrating verification.
           COSIGN_VERSION: v2.4.3
         run: |
-          # Gate on the *pinned version*, not mere presence: this native runner
-          # is long-lived and may already have a different cosign on PATH
-          # (e.g. v3, which rejects the v2-style `--tlog-upload=false` below).
-          # Reinstall unless the exact pinned version is already present.
           WANT="${COSIGN_VERSION#v}"
-          if ! cosign version 2>/dev/null | grep -q "GitVersion:[[:space:]]*${WANT}\b"; then
-            sudo curl -fsSL \
-              "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
-              -o /usr/local/bin/cosign
-            sudo chmod +x /usr/local/bin/cosign
-            hash -r
+          # cosign reports `GitVersion:    v2.4.3` — note the leading `v`. Match
+          # that line allowing the optional v, with dots taken literally. The
+          # earlier `[[:space:]]*${WANT}` (v stripped) never matched the v-prefixed
+          # output, so signing was silently skipped on every build.
+          if cosign version 2>/dev/null | grep -qE "GitVersion:[[:space:]]+v?${WANT//./\\.}\b"; then
+            echo "Pinned cosign ${WANT} present on runner."
+            cosign version
+          else
+            echo "::warning::Pinned cosign ${WANT} not found on runner — image signing will be skipped. Reinstall via the VM bootstrap (user-data step 8b)."
           fi
-          cosign version
 
       - name: Render policy.json
         run: |
