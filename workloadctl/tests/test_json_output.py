@@ -771,7 +771,8 @@ class TestCleanupJson(unittest.TestCase):
                 with patch('pwd.getpwall', return_value=[]):
                     with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
                         data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
-        for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'removed_users', 'removed_dirs'):
+        for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'orphan_modules',
+                    'removed_users', 'removed_dirs', 'removed_modules'):
             self.assertIn(key, data, f'missing key: {key}')
 
     def test_dry_run_flag_is_true(self):
@@ -811,6 +812,45 @@ class TestCleanupJson(unittest.TestCase):
                         data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
         self.assertEqual(data['removed_users'], [])
         self.assertEqual(data['removed_dirs'], [])
+
+    @staticmethod
+    def _semodule_l(modules):
+        """side_effect for subprocess.run that fakes `semodule -l`."""
+        def _run(cmd, *a, **k):
+            if cmd[:2] == ['semodule', '-l']:
+                return CompletedProcess(cmd, 0, stdout='\n'.join(modules) + '\n', stderr='')
+            return CompletedProcess(cmd, 0, stdout='', stderr='')
+        return _run
+
+    def test_orphan_module_reported(self):
+        # test-wl does not declare selinux_policy, so a loaded wl_orphan module
+        # (and even wl_test_wl) has nothing backing it. Base/seatd modules are
+        # ignored (no wl_ prefix).
+        with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
+            args = _args(json=True, apply=False)
+            with patch.object(wctl, 'require_root'), \
+                 patch('pwd.getpwall', return_value=[]), \
+                 patch('shutil.which', return_value='/usr/sbin/semodule'), \
+                 patch('subprocess.run',
+                       side_effect=self._semodule_l(['wl_orphan', 'container', 'seatd_container'])), \
+                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+        self.assertIn('wl_orphan', data['orphan_modules'])
+        self.assertNotIn('container', data['orphan_modules'])
+        self.assertNotIn('seatd_container', data['orphan_modules'])
+
+    def test_declared_module_not_orphan(self):
+        toml = MINIMAL_TOML + '\n[security]\nselinux_policy = true\n'
+        with _WorkloadDir(toml, 'test-wl') as tmp:
+            args = _args(json=True, apply=False)
+            with patch.object(wctl, 'require_root'), \
+                 patch('pwd.getpwall', return_value=[]), \
+                 patch('shutil.which', return_value='/usr/sbin/semodule'), \
+                 patch('subprocess.run',
+                       side_effect=self._semodule_l(['wl_test_wl', 'container'])), \
+                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+        self.assertEqual(data['orphan_modules'], [])
 
 
 # ── Task 2.6 — backup --json ─────────────────────────────────────────────────

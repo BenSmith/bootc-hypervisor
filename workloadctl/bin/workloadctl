@@ -1592,6 +1592,9 @@ def cmd_cleanup(args, manager: WorkloadManager):
     # Collect names of ALL configured workloads (enabled or not)
     # A user with a config (even disabled) is not orphaned
     configured_names = set()
+    # Per-workload SELinux modules a config still expects (selinux_policy = true).
+    # Keyed on declaration, not enabled state — same as users above.
+    expected_modules = set()
     for config_file in WORKLOAD_DIR.glob("*.toml"):
         try:
             with open(config_file, "rb") as f:
@@ -1599,8 +1602,23 @@ def cmd_cleanup(args, manager: WorkloadManager):
             name = cfg.get("workload", {}).get("name")
             if name:
                 configured_names.add(name)
+                if cfg.get("security", {}).get("selinux_policy"):
+                    expected_modules.add(selinux_module_name(name))
         except Exception:
             pass
+
+    # Orphaned per-workload SELinux modules: loaded wl_* modules that no config
+    # still declares. semodule loads are persistent (a reboot reloads the same
+    # policy), so a hand-deleted TOML or a dropped selinux_policy leaves the
+    # module loaded with nothing behind it. The wl_ prefix scopes this to
+    # per-workload modules — udica base templates and seatd_container are untouched.
+    orphaned_modules = []
+    if shutil.which("semodule"):
+        r = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
+        if r.returncode == 0:
+            loaded = {ln.strip() for ln in r.stdout.splitlines()
+                      if ln.strip().startswith("wl_")}
+            orphaned_modules = sorted(loaded - expected_modules)
 
     # Find all _wl-* system users
     all_users = pwd.getpwall()
@@ -1629,19 +1647,23 @@ def cmd_cleanup(args, manager: WorkloadManager):
             "dry_run": True,
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "orphan_modules": orphaned_modules,
             "removed_users": [],
-            "removed_dirs": []
+            "removed_dirs": [],
+            "removed_modules": []
         }, indent=2))
         return
 
-    if not orphaned_users and not orphaned_dirs:
+    if not orphaned_users and not orphaned_dirs and not orphaned_modules:
         if args.json:
             print(json.dumps({
                 "dry_run": not apply,
                 "orphan_users": [],
                 "orphan_dirs": [],
+                "orphan_modules": [],
                 "removed_users": [],
-                "removed_dirs": []
+                "removed_dirs": [],
+                "removed_modules": []
             }, indent=2))
         else:
             print("Nothing to clean up.")
@@ -1672,6 +1694,11 @@ def cmd_cleanup(args, manager: WorkloadManager):
             print(f"\nOrphaned directories ({len(orphaned_dirs)}):")
             for d in orphaned_dirs:
                 print(f"  {d}")
+
+        if orphaned_modules:
+            print(f"\nOrphaned SELinux modules ({len(orphaned_modules)}):")
+            for m in orphaned_modules:
+                print(f"  {m}  (no workload declares selinux_policy)")
 
         if not apply:
             print("\nRun with --apply to remove the above.")
@@ -1715,13 +1742,29 @@ def cmd_cleanup(args, manager: WorkloadManager):
         if not args.json:
             print(f"  ✓ Removed {d}")
 
+    # Remove orphaned SELinux modules
+    removed_modules = []
+    for m in orphaned_modules:
+        if not args.json:
+            print(f"Removing SELinux module {m}...")
+        rc = subprocess.run(["semodule", "-r", m], check=False,
+                            capture_output=True, text=True)
+        if rc.returncode == 0:
+            removed_modules.append(m)
+            if not args.json:
+                print(f"  ✓ Removed {m}")
+        elif not args.json:
+            print(f"  ✗ Failed to remove {m}: {rc.stderr.strip()}", file=sys.stderr)
+
     if args.json:
         print(json.dumps({
             "dry_run": False,
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "orphan_modules": orphaned_modules,
             "removed_users": removed_users,
-            "removed_dirs": removed_dirs
+            "removed_dirs": removed_dirs,
+            "removed_modules": removed_modules
         }, indent=2))
     else:
         print("\nCleanup complete.")
@@ -4623,7 +4666,7 @@ def main():
                                help="Don't stop the service (live backup, may be inconsistent)")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users and directories")
+    cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users, directories, and SELinux modules")
     cleanup_parser.add_argument("--apply", action="store_true",
                                 help="Actually remove orphaned users/dirs (default is dry run)")
     cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
