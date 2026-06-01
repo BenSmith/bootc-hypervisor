@@ -185,12 +185,10 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
 # and allow containers to access host devices (GPU, input)
 RUN setsebool -P container_use_devices on
 
-COPY security/seatd_container.te /tmp/seatd_container.te
+COPY security/seatd_container.cil /tmp/seatd_container.cil
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
-    checkmodule -M -m -o /tmp/seatd_container.mod /tmp/seatd_container.te && \
-    semodule_package -o /tmp/seatd_container.pp -m /tmp/seatd_container.mod && \
-    semodule -i /tmp/seatd_container.pp && \
-    rm -f /tmp/seatd_container.te /tmp/seatd_container.mod /tmp/seatd_container.pp
+    semodule -i /tmp/seatd_container.cil && \
+    rm -f /tmp/seatd_container.cil
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
