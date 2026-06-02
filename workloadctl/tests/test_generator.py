@@ -1196,6 +1196,24 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("workload-bridge.service", svc)
         self.assertIn("workload-fedora-vm-setup.service", svc)
 
+    def test_execstop_waits_for_graceful_poweroff(self):
+        # ExecStop must call workload-vm-shutdown, which *blocks* until the
+        # guest powers off. A fire-and-forget `workload-vm-qmp system_powerdown`
+        # returns instantly, so systemd SIGTERM's QEMU within milliseconds and
+        # every stop becomes an unclean power-off (guest data corruption).
+        # TimeoutStopSec must still backstop a guest that ignores ACPI.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        exec_stops = [l for l in svc.splitlines() if l.startswith("ExecStop=")]
+        self.assertEqual(len(exec_stops), 1, exec_stops)
+        self.assertIn("workload-vm-shutdown", exec_stops[0])
+        self.assertIn("fedora-vm", exec_stops[0])
+        # Regression guard: the old fire-and-forget powerdown must be gone.
+        self.assertNotIn("workload-vm-qmp", svc)
+        self.assertNotIn("system_powerdown", svc)
+        self.assertIn("TimeoutStopSec=90", svc)
+
     def test_custom_bridge_overrides_qemu_netdev_and_skips_managed_bridge(self):
         # vm.network.bridge = "br0" → QEMU netdev uses br0, AND we don't
         # emit workload-bridge.service or list it as a dependency (the user

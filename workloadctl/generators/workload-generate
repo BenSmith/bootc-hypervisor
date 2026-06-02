@@ -1424,8 +1424,13 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
         f"ExecStart=/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\",
         f"    {qemu_cmd}",
         "",
-        # Clean shutdown via QMP system_powerdown; timeout forces kill
-        f"ExecStop=/usr/libexec/workloadctl/workload-vm-qmp {dq(name)} system_powerdown",
+        # Graceful shutdown: ACPI power-off, then *block* until the guest is
+        # gone (workload-vm-shutdown waits up to 80s). ExecStop must block —
+        # systemd only enters its kill phase after it returns, so a
+        # fire-and-forget powerdown would let SIGTERM hard-kill QEMU within
+        # milliseconds (unclean power-off / data corruption). TimeoutStopSec
+        # below (90s) is the backstop if the guest ignores ACPI.
+        f"ExecStop=/usr/libexec/workloadctl/workload-vm-shutdown {dq(name)}",
         "",
         "StandardOutput=journal",
         "StandardError=journal",

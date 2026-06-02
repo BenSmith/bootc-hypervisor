@@ -41,7 +41,7 @@ ExecStart=/usr/libexec/workloadctl/workload-vm-notify "virtual-forgejo" \
         -no-reboot \
         -name virtual-forgejo
 
-ExecStop=/usr/libexec/workloadctl/workload-vm-qmp "virtual-forgejo" system_powerdown
+ExecStop=/usr/libexec/workloadctl/workload-vm-shutdown "virtual-forgejo"
 
 StandardOutput=journal
 StandardError=journal

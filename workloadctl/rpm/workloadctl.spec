@@ -69,6 +69,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-shutdown
 
 install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
     %{buildroot}%{_unitdir}/workload-exporter.service
@@ -145,6 +147,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_libexecdir}/workloadctl/workload-vm-build-disk
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-qmp
+%{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_unitdir}/workload-exporter.service
 %{_unitdir}/workloads.slice
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf

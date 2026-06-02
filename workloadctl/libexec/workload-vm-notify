@@ -67,8 +67,11 @@ def main():
     # main PID; systemd tracks *us* for cgroup membership.
     proc = subprocess.Popen(qemu_cmd, stdin=subprocess.DEVNULL)
 
-    # Forward SIGTERM/SIGINT to QEMU so the ExecStop QMP command has time
-    # to fire; if QEMU is already dead these are no-ops.
+    # Forward SIGTERM/SIGINT to QEMU. In a normal stop the graceful ExecStop
+    # (workload-vm-shutdown) has already powered the guest off and QEMU has
+    # exited before systemd's kill phase, so this never fires. It's the
+    # last-resort hard kill if the guest ignored ACPI and ExecStop timed out;
+    # if QEMU is already dead these are no-ops.
     def _forward(sig, _frame):
         try:
             proc.send_signal(sig)

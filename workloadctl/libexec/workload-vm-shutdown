@@ -1,0 +1,97 @@
+#!/usr/bin/python3
+"""
+workload-vm-shutdown: gracefully power off a VM workload and wait for it.
+
+Usage: workload-vm-shutdown <name> [timeout-seconds]
+
+Sends an ACPI power-button event (QMP `system_powerdown`) to the guest, then
+*blocks* until QEMU exits (the guest finished shutting down) or `timeout`
+elapses. Default timeout is 80s.
+
+This is the unit's ExecStop. Blocking here is the whole point: systemd only
+enters its kill phase (SIGTERM/SIGKILL to the cgroup) *after* ExecStop returns,
+so waiting for the guest to power off is what gives it the time to flush and
+unmount cleanly. The earlier fire-and-forget `workload-vm-qmp ... system_powerdown`
+returned immediately, so systemd SIGTERM'd QEMU within milliseconds and every
+stop was an unclean power-off (truncated guest writes / corrupted data). Keep
+the internal timeout comfortably under the unit's TimeoutStopSec so a guest
+that ignores ACPI still falls through to systemd's kill rather than being cut
+off mid-shutdown.
+"""
+import sys
+import time
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+
+from workload_lib import VM_SOCKET_DIR, QMPClient
+
+DEFAULT_TIMEOUT = 80.0
+
+
+def shutdown_and_wait(sock_path: str, timeout: float) -> bool:
+    """Request power-off and poll until the guest is gone. Returns True if the
+    guest powered off within `timeout`, False if it timed out."""
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=10.0, recv_timeout=5.0)
+        qmp.negotiate()
+        qmp.execute("system_powerdown")
+    except (OSError, ConnectionError, TimeoutError) as e:
+        # If we can't even reach the monitor, the VM is already down or wedged;
+        # don't block the stop — let systemd's kill phase take over.
+        print(f"workload-vm-shutdown: QMP unavailable ({e}); skipping wait",
+              file=sys.stderr)
+        qmp.close()
+        return False
+
+    # Poll query-status until the monitor drops: QEMU runs with -no-reboot, so a
+    # completed power-off makes it exit and close the socket. A dropped
+    # connection (ConnectionError/OSError) is therefore the "guest is gone"
+    # signal; an explicit "shutdown" status counts too.
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            try:
+                reply = qmp.execute("query-status")
+            except (ConnectionError, OSError):
+                return True  # monitor closed => QEMU exited => guest powered off
+            status = reply.get("return", {}).get("status")
+            if status == "shutdown":
+                return True
+            time.sleep(0.5)
+    finally:
+        qmp.close()
+    return False
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <name> [timeout-seconds]", file=sys.stderr)
+        sys.exit(1)
+
+    name = sys.argv[1]
+    timeout = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_TIMEOUT
+
+    sock_path = VM_SOCKET_DIR / name / "qmp.sock"
+    if not sock_path.exists():
+        # Already stopped — nothing to do, exit cleanly.
+        return
+
+    if shutdown_and_wait(str(sock_path), timeout):
+        print(f"workload-vm-shutdown: {name} powered off cleanly")
+    else:
+        # Don't fail the unit: returning lets systemd proceed to its kill phase
+        # (SIGTERM then SIGKILL within TimeoutStopSec) as the last resort.
+        print(f"workload-vm-shutdown: {name} did not power off within "
+              f"{timeout:.0f}s; deferring to systemd kill", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
