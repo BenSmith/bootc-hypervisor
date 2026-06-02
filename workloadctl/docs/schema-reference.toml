@@ -1026,6 +1026,10 @@ ports = ["8080:80", "8443:443"]
 # Purpose: How long to wait for graceful shutdown before force-killing
 # Use case: Increase for applications with long shutdown procedures
 # Systemd directive: TimeoutStopSec=
+# Note: also raises `podman stop -t` (the container's drain grace) to this
+#   value minus a 5s margin, so a longer drain actually reaches the container
+#   instead of being cut off by podman's default 10s. A systemd timespan
+#   (e.g. "2min") keeps podman's grace at the 10s default. (integer seconds)
 # timeout_stop_sec = 30
 
 # ============================================================================

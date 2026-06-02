@@ -1018,9 +1018,26 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     lines.append(f"ExecStart={podman_cmd}")
 
+    # podman's own container-stop grace (-t): how long the container gets to
+    # exit on the stop signal before podman SIGKILLs it. Keep it a few seconds
+    # under the unit's TimeoutStopSec so systemd doesn't kill `podman stop`
+    # before podman can do its own SIGKILL + reap. Tracks timeout_stop_sec when
+    # set (so a write-heavy workload's longer drain actually reaches podman);
+    # otherwise stays the historical 10s (systemd default TimeoutStopSec=30).
+    resources = container.get("resources", {})
+    stop_grace = resources.get("timeout_stop_sec")
+    try:
+        podman_stop_timeout = (
+            max(1, int(stop_grace) - 5) if stop_grace is not None else 10
+        )
+    except (TypeError, ValueError):
+        # timeout_stop_sec given as a systemd timespan (e.g. "2min"); fall back
+        # to the safe default rather than guessing a seconds value.
+        podman_stop_timeout = 10
+
     lines.extend([
         "",
-        f"ExecStop=/usr/bin/podman stop -t 10 {container_name_quoted}",
+        f"ExecStop=/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}",
         "",
         "StandardOutput=journal",
         "StandardError=journal",
@@ -1038,7 +1055,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "RestrictAddressFamilies=~AF_ALG AF_PACKET",
     ])
 
-    resources = container.get("resources", {})
     if "timeout_start_sec" not in resources:
         lines.append("TimeoutStartSec=300")
     if "timeout_stop_sec" not in resources:
