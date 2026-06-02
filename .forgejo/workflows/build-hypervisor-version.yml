@@ -161,10 +161,17 @@ jobs:
           # are private homelab images served from registry.local and are never
           # distributed; the verification policy (policy*.json) checks the
           # key-based signature via keyPath and needs no transparency-log entry.
-          cosign sign -y \
-            --key env://COSIGN_PRIVATE_KEY \
-            --tlog-upload=false \
-            "${IMAGE_BASE}@${DIGEST}"
+          # Three attempts with a 10s backoff handle transient registry failures
+          # (e.g. redirect loops during a Caddy/zot restart on the registry host).
+          for attempt in 1 2 3; do
+            if cosign sign -y \
+                --key env://COSIGN_PRIVATE_KEY \
+                --tlog-upload=false \
+                "${IMAGE_BASE}@${DIGEST}"; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
 
       - name: Summary
         env:
@@ -387,10 +394,17 @@ jobs:
           # are private homelab images served from registry.local and are never
           # distributed; the verification policy (policy*.json) checks the
           # key-based signature via keyPath and needs no transparency-log entry.
-          cosign sign -y \
-            --key env://COSIGN_PRIVATE_KEY \
-            --tlog-upload=false \
-            "${IMAGE_BASE}@${DIGEST}"
+          # Three attempts with a 10s backoff handle transient registry failures
+          # (e.g. redirect loops during a Caddy/zot restart on the registry host).
+          for attempt in 1 2 3; do
+            if cosign sign -y \
+                --key env://COSIGN_PRIVATE_KEY \
+                --tlog-upload=false \
+                "${IMAGE_BASE}@${DIGEST}"; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
 
       - name: Summary
         if: steps.gate.outputs.build == 'true'

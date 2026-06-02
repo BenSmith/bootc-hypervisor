@@ -658,6 +658,64 @@ class TestGeneratorResources(unittest.TestCase):
         self.assertIn("MemoryMax=4G", service)
         self.assertIn("TasksMax=100", service)
 
+    def test_default_stop_grace_is_ten_seconds(self):
+        # No timeout_stop_sec → podman's -t grace stays the historical 10s and
+        # systemd's TimeoutStopSec defaults to 30 (comfortable margin above it).
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+            enabled = true
+
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-plain.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
+        self.assertIn("TimeoutStopSec=30", service)
+
+    def test_timeout_stop_sec_plumbs_into_podman_stop_grace(self):
+        # A longer drain must reach podman's -t, not just systemd: podman's
+        # grace tracks timeout_stop_sec minus a margin so systemd doesn't kill
+        # `podman stop` before podman can SIGKILL + reap the container.
+        write_config(self.config_dir, "slowdb", """\
+            [workload]
+            name = "slowdb"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [resources]
+            timeout_stop_sec = 60
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-slowdb.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 55 ", service)
+        self.assertIn("TimeoutStopSec=60", service)
+        # The old hardcoded 10s grace must not linger.
+        self.assertNotIn("podman stop -t 10 ", service)
+
+    def test_timeout_stop_sec_as_timespan_falls_back_to_default_grace(self):
+        # timeout_stop_sec accepts systemd timespans (e.g. "2min"); we can't
+        # safely turn that into a -t seconds value, so podman's grace falls back
+        # to 10s while TimeoutStopSec still passes the timespan through verbatim.
+        write_config(self.config_dir, "spanstop", """\
+            [workload]
+            name = "spanstop"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [resources]
+            timeout_stop_sec = "2min"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-spanstop.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
+        self.assertIn("TimeoutStopSec=2min", service)
+
 
 class TestGeneratorSlice(unittest.TestCase):
     def setUp(self):
@@ -1195,6 +1253,24 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("workload-fedora-vm-build.service", svc)
         self.assertIn("workload-bridge.service", svc)
         self.assertIn("workload-fedora-vm-setup.service", svc)
+
+    def test_execstop_waits_for_graceful_poweroff(self):
+        # ExecStop must call workload-vm-shutdown, which *blocks* until the
+        # guest powers off. A fire-and-forget `workload-vm-qmp system_powerdown`
+        # returns instantly, so systemd SIGTERM's QEMU within milliseconds and
+        # every stop becomes an unclean power-off (guest data corruption).
+        # TimeoutStopSec must still backstop a guest that ignores ACPI.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        exec_stops = [l for l in svc.splitlines() if l.startswith("ExecStop=")]
+        self.assertEqual(len(exec_stops), 1, exec_stops)
+        self.assertIn("workload-vm-shutdown", exec_stops[0])
+        self.assertIn("fedora-vm", exec_stops[0])
+        # Regression guard: the old fire-and-forget powerdown must be gone.
+        self.assertNotIn("workload-vm-qmp", svc)
+        self.assertNotIn("system_powerdown", svc)
+        self.assertIn("TimeoutStopSec=90", svc)
 
     def test_custom_bridge_overrides_qemu_netdev_and_skips_managed_bridge(self):
         # vm.network.bridge = "br0" → QEMU netdev uses br0, AND we don't

@@ -1035,9 +1035,26 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     lines.append(f"ExecStart={podman_cmd}")
 
+    # podman's own container-stop grace (-t): how long the container gets to
+    # exit on the stop signal before podman SIGKILLs it. Keep it a few seconds
+    # under the unit's TimeoutStopSec so systemd doesn't kill `podman stop`
+    # before podman can do its own SIGKILL + reap. Tracks timeout_stop_sec when
+    # set (so a write-heavy workload's longer drain actually reaches podman);
+    # otherwise stays the historical 10s (systemd default TimeoutStopSec=30).
+    resources = container.get("resources", {})
+    stop_grace = resources.get("timeout_stop_sec")
+    try:
+        podman_stop_timeout = (
+            max(1, int(stop_grace) - 5) if stop_grace is not None else 10
+        )
+    except (TypeError, ValueError):
+        # timeout_stop_sec given as a systemd timespan (e.g. "2min"); fall back
+        # to the safe default rather than guessing a seconds value.
+        podman_stop_timeout = 10
+
     lines.extend([
         "",
-        f"ExecStop=/usr/bin/podman stop -t 10 {container_name_quoted}",
+        f"ExecStop=/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}",
         "",
         "StandardOutput=journal",
         "StandardError=journal",
@@ -1055,7 +1072,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "RestrictAddressFamilies=~AF_ALG AF_PACKET",
     ])
 
-    resources = container.get("resources", {})
     if "timeout_start_sec" not in resources:
         lines.append("TimeoutStartSec=300")
     if "timeout_stop_sec" not in resources:
@@ -1441,8 +1457,13 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
         f"ExecStart=/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\",
         f"    {qemu_cmd}",
         "",
-        # Clean shutdown via QMP system_powerdown; timeout forces kill
-        f"ExecStop=/usr/libexec/workloadctl/workload-vm-qmp {dq(name)} system_powerdown",
+        # Graceful shutdown: ACPI power-off, then *block* until the guest is
+        # gone (workload-vm-shutdown waits up to 80s). ExecStop must block —
+        # systemd only enters its kill phase after it returns, so a
+        # fire-and-forget powerdown would let SIGTERM hard-kill QEMU within
+        # milliseconds (unclean power-off / data corruption). TimeoutStopSec
+        # below (90s) is the backstop if the guest ignores ACPI.
+        f"ExecStop=/usr/libexec/workloadctl/workload-vm-shutdown {dq(name)}",
         "",
         "StandardOutput=journal",
         "StandardError=journal",
