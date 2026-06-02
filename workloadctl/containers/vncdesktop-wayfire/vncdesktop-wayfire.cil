@@ -23,6 +23,20 @@
     (allow process container_file_t (sock_file (mounton)))
     (allow process user_tmp_t (sock_file (mounton)))
 
+    ; bwrap populates the sandbox root on the tmpfs above: create/mount its
+    ; dirs, stage and exec the glycin loaders (execute+map => running code
+    ; mmap'd from tmpfs), create its symlinks, and unmount the bind-mounted
+    ; container_file_t mounts on teardown. Granted directly to container_init_t
+    ; by container-selinux's base policy, but not inherited by a per-workload
+    ; type, so they must be enumerated here.
+    (allow process tmpfs_t (dir (create mounton)))
+    (allow process tmpfs_t (file (create open mounton execute map)))
+    (allow process tmpfs_t (lnk_file (create)))
+    (allow process container_file_t (filesystem (unmount)))
+    ; ioctl on a /proc file; write the journald/syslog socket.
+    (allow process proc_t (file (ioctl)))
+    (allow process syslogd_var_run_t (sock_file (write)))
+
     ; Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
     (allow process udev_var_run_t (dir (read)))
     (allow process udev_var_run_t (file (getattr open read)))
