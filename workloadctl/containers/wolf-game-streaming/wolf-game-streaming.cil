@@ -38,5 +38,9 @@
 
     ; Wine/Proton PE loader: executable heap, NULL-page map, text relocations.
     (allow process self (process (execheap)))
+    ; mmap_zero is neverallow'd for normal domains; refpolicy's exempt set is
+    ; the mmap_low_domain_type attribute. Join it so the allow below is legal
+    ; even when neverallow checking is on (host runs expand-check=0 today).
+    (typeattributeset mmap_low_domain_type (process))
     (allow process self (memprotect (mmap_zero)))
     (allow process container_file_t (file (execmod))))
