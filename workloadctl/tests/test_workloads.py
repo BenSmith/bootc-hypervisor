@@ -12,6 +12,7 @@ These tests catch regressions from editing workload configs or the generator.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -509,13 +510,15 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
 
         run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
 
-        # Patch helper paths for verify (not present on dev machines)
+        # Patch helper paths for verify: workloadctl's libexec helpers live in
+        # the installed package, not the test env (dev box or CI). systemd-analyze
+        # verify only needs each Exec* binary to exist and be executable, so swap
+        # every /usr/libexec/workloadctl/<helper> for /bin/true. Done generically
+        # (not per-helper) so adding a new helper — e.g. workload-vm-shutdown —
+        # never silently breaks verify again.
         for service_path in Path(cls.services_dir).glob("workload-*.service"):
             content = service_path.read_text()
-            content = content.replace(
-                "/usr/libexec/workloadctl/workload-ensure-user", "/bin/true")
-            content = content.replace(
-                "/usr/libexec/workloadctl/workload-write-env", "/bin/true")
+            content = re.sub(r"/usr/libexec/workloadctl/[\w-]+", "/bin/true", content)
             service_path.write_text(content)
 
     @classmethod
