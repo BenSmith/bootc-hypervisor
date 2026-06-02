@@ -853,6 +853,49 @@ class TestCleanupJson(unittest.TestCase):
         self.assertEqual(data['orphan_modules'], [])
 
 
+# ── selinux_policy bool-or-string → selinux_bundle ───────────────────────────
+
+class TestSelinuxBundleResolution(unittest.TestCase):
+    """`selinux_policy` may be true (bundle == workload name) or a string naming
+    the bundle dir; `selinux_bundle` resolves the source, decoupled from the
+    (renameable) workload name."""
+
+    def _config(self, security_block=''):
+        # config dict + name are loaded in __init__, so the object is usable
+        # after the temp dir is torn down (selinux_bundle does no file I/O).
+        with _WorkloadDir(MINIMAL_TOML + security_block, 'test-wl'):
+            return wctl.WorkloadConfig('test-wl')
+
+    def test_true_keys_off_workload_name(self):
+        cfg = self._config('\n[security]\nselinux_policy = true\n')
+        self.assertTrue(cfg.selinux_policy)
+        self.assertEqual(cfg.selinux_bundle, 'test-wl')
+
+    def test_string_names_bundle_explicitly(self):
+        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-sway"\n')
+        self.assertTrue(cfg.selinux_policy)
+        self.assertEqual(cfg.selinux_bundle, 'vncdesktop-sway')
+
+    def test_false_has_no_bundle(self):
+        cfg = self._config('\n[security]\nselinux_policy = false\n')
+        self.assertFalse(cfg.selinux_policy)
+        self.assertIsNone(cfg.selinux_bundle)
+
+    def test_absent_has_no_bundle(self):
+        cfg = self._config('')
+        self.assertFalse(cfg.selinux_policy)
+        self.assertIsNone(cfg.selinux_bundle)
+
+    def test_apply_rejects_path_traversal_bundle(self):
+        # A bundle string goes straight into a filesystem path; a value that
+        # isn't a plain workload-style name must be rejected before lookup.
+        cfg = self._config('\n[security]\nselinux_policy = "../etc/evil"\n')
+        self.assertEqual(cfg.selinux_bundle, '../etc/evil')
+        with patch.object(wctl, '_selinux_available', return_value=True):
+            with self.assertRaises(SystemExit):
+                wctl._apply_selinux_policy(cfg, 'enable')
+
+
 # ── Task 2.6 — backup --json ─────────────────────────────────────────────────
 
 class TestBackupJson(unittest.TestCase):
