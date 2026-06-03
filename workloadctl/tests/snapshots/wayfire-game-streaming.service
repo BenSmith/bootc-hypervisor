@@ -24,6 +24,8 @@ CPUQuota=400%
 MemoryMax=8G
 MemoryHigh=6G
 TasksMax=16384
+LimitNICE=40
+LimitRTPRIO=20
 
 ExecStartPre=/bin/bash -c 'test -s /run/cdi/nvidia.yaml || { echo "NVIDIA CDI spec missing: check nvidia-cdi-generator.service" >&2; exit 1; }'
 
