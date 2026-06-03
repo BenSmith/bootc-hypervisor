@@ -598,6 +598,17 @@ STARTUP
 
 RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && chmod 700 /run/user/1000
 
+# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
+# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
+# which breaks apps with a bundled TLS stack that read the bundle *file*
+# ("unable to load trusted SSL root certificates"). Restore the legacy names as
+# symlinks to the stable extracted bundle (Fedora's documented permanent fix).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
 USER desktop
 WORKDIR /home/desktop
 

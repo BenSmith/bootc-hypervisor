@@ -67,6 +67,20 @@ memory_high = "6G"
 cpu_quota = "400%"
 tasks_max = 16384
 
+# Raise the scheduling-priority rlimit ceilings so the SYS_NICE capability above
+# is actually usable. Without these the unit inherits LimitNICE=0/LimitRTPRIO=0,
+# so Sunshine's capture/encode threads and the compositor are stuck at nice 0 and
+# cannot get real-time scheduling — Steam logs "failed to set thread priority …
+# elevated priorities most likely unavailable", and stream frame-pacing jitters
+# under load. systemd propagates these into the container (podman inherits the
+# caller's rlimits; default_ulimits is empty). LimitNICE=40 ⇒ allows down to nice
+# -20 (safe: CFS is proportional-share, negative nice cannot starve the host).
+# LimitRTPRIO=20 gives Sunshine modest real-time headroom while staying well
+# below host kernel RT threads (migration/* at 99); the global RT throttle
+# (kernel.sched_rt_runtime_us, 5% reserved for non-RT) bounds it further. Note:
+# cgroup v2 cpu.max does NOT throttle RT tasks, so keep this ceiling low.
+custom_directives = { LimitNICE = "40", LimitRTPRIO = "20" }
+
 [host]
 # Host prerequisites: uinput kernel module, udev rule, and the host-side udev
 # input-event relay.

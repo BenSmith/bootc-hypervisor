@@ -3,3 +3,17 @@ stable: 44
 supported: [44, 43]   # add 45 when it ships, drop 43 when EOL
 rechunker: 44         # quay.io/fedora/fedora-bootc:${rechunker} — pin to a known-good image
                       # rechunker does NOT need to match the image being built
+
+# Heads-up when promoting workloads to Fedora 44+:
+# F44 dropped the consolidated CA bundle files (cert.pem, ca-bundle.crt,
+# ca-certificates.crt) in favour of the directory-hash format — see
+# https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile
+# The fedora-bootc base (the hypervisor host) keeps the compat symlinks, so the
+# host is fine. But the minimal `fedora:44` container base ships NONE of them,
+# which breaks apps with a bundled TLS stack that read the bundle *file* (Steam,
+# Sunshine: "unable to load trusted SSL root certificates" / "http error 0").
+# `dnf install ca-certificates` and `update-ca-trust` do NOT restore them.
+# Any workload Containerfile based on fedora:44+ must symlink the legacy names to
+# /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem — see containers/*-game-streaming
+# and containers/vncdesktop-* for the snippet. Apply this to any `:43` workload
+# bumped to `:44` when F43 is dropped.
