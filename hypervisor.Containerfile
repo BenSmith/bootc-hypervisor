@@ -15,6 +15,18 @@ COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dic
 # header) — without this, large pulls through the Caddy->zot reverse proxy hang.
 COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d/10-pasta-no-splice.conf
 
+# CI-injectable trust anchors. The Forgejo pipeline drops the homelab root CA
+# (public cert) into ca-trust-inject/ from the HOMELAB_ROOT_CA secret before
+# building, so internal images trust the shared homelab CA. The dir is empty in
+# git and on the public GitHub pipeline, so this is a no-op there. Only *.crt
+# are installed; the README is ignored.
+COPY ca-trust-inject/ /tmp/ca-trust-inject/
+RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
+        cp /tmp/ca-trust-inject/*.crt /etc/pki/ca-trust/source/anchors/ && \
+        update-ca-trust && \
+        echo "Installed CI-injected trust anchors"; \
+    fi && rm -rf /tmp/ca-trust-inject
+
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
 # rpm-ostree base-db (which share the same lower inode). This corrupts the

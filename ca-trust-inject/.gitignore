@@ -1,0 +1,5 @@
+# CI injects *.crt here at build time — never commit them (or any key).
+*.crt
+*.pem
+*.key
+!README.md
