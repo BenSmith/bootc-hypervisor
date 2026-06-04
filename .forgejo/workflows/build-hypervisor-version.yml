@@ -86,6 +86,22 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
+      - name: Inject homelab CA trust
+        # Bake the shared homelab root CA (public cert) into the image trust
+        # store so every host built from the internal images trusts all *.local
+        # Caddy services. The private key is never here. Secret unset => no-op
+        # (e.g. forks), and the public GitHub pipeline never runs this step.
+        env:
+          HOMELAB_ROOT_CA: ${{ secrets.HOMELAB_ROOT_CA }}
+        run: |
+          if [ -n "$HOMELAB_ROOT_CA" ]; then
+            printf '%s\n' "$HOMELAB_ROOT_CA" > ca-trust-inject/homelab-root.crt
+            openssl x509 -in ca-trust-inject/homelab-root.crt -noout -subject \
+              && echo "Injected homelab root CA into build context"
+          else
+            echo "HOMELAB_ROOT_CA secret not set; building without injected anchors"
+          fi
+
       - name: Build base hypervisor
         env:
           VERSION: ${{ inputs.fedora_version }}
