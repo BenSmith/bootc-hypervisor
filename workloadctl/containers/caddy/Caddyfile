@@ -17,6 +17,23 @@
     # Local-only deployment: no public ACME, use Caddy's internal CA for HTTPS.
     # Drop this block if you want to serve plain HTTP only.
     local_certs
+
+    # Shared homelab CA (see README "Shared homelab CA"). Makes this host's
+    # internal `local` CA use the shared homelab root, so clients trust ONE root
+    # for every host's *.local services instead of a different self-signed root
+    # per host. Caddy still mints its own per-host intermediate. The public root
+    # cert comes from the image trust store (CI-injected); the private key is a
+    # per-host 0400 file. Remove this block + the two [storage] mounts in
+    # caddy.toml to fall back to a per-host self-signed CA.
+    pki {
+        ca local {
+            name "Homelab"
+            root {
+                cert /etc/caddy/homelab-root.crt
+                key  /etc/caddy/homelab-root.key
+            }
+        }
+    }
 }
 
 zot.local, registry.local {

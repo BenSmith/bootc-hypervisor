@@ -234,4 +234,64 @@ restart, breaking clients that previously trusted it.
 Setting `XDG_DATA_HOME=/var/lib/caddy` (and `XDG_CONFIG_HOME=/etc/caddy/config`)
 forces the storage into the bind-mounted volumes so certs and state
 persist across restarts. The CA root referenced in the TLS section above
-lives at `/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt`.
+lives at `/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt`
+(self-signed CA only; with the shared CA below, only `intermediate.crt`/`.key`
+live there and the root is the mounted file).
+
+## Shared homelab CA
+
+By default each host's Caddy generates its own self-signed root, so clients must
+trust a different root per host — and they are all confusingly named
+`Caddy Local Authority`, which makes a mismatched one fail with
+`SEC_ERROR_BAD_SIGNATURE` rather than a clear "untrusted" error. To trust ONE
+root for every host's `*.local` services, point every Caddy at a shared homelab
+root via the `pki` block (already wired into the sample `Caddyfile` and
+`caddy.toml`):
+
+- **Public root cert** — provided by the image trust store. The Forgejo build
+  injects it from the `HOMELAB_ROOT_CA` secret into
+  `/etc/pki/ca-trust/source/anchors/homelab-root.crt` (see `ca-trust-inject/` at
+  the repo root), which the workload mounts read-only.
+- **Private root key** — a per-host `0400` file at
+  `/var/lib/workloads/caddy/homelab-root.key`, owned by the workload user. Never
+  shipped in the image or committed. caddy runs as that user under `keep-id`, so
+  it can read it (no `userns=host` needed).
+
+Each Caddy still mints its own intermediate signed by the shared root, so leaf
+certs rotate normally; only the root is shared.
+
+### One-time CA generation (once for the whole homelab)
+```
+openssl ecparam -name prime256v1 -genkey -noout -out homelab-root.key
+openssl req -x509 -new -key homelab-root.key -sha256 -days 3650 \
+    -subj "/CN=Homelab Root CA/O=miniverse" -out homelab-root.crt
+```
+Set the Forgejo `HOMELAB_ROOT_CA` secret to the contents of `homelab-root.crt`,
+and back up `homelab-root.key` offline — it is the homelab CA key.
+
+### Per host
+```
+sudo install -m 0400 -o _wl-caddy -g _wl-caddy homelab-root.key \
+    /var/lib/workloads/caddy/homelab-root.key
+sudo workloadctl recreate caddy
+```
+
+### Switching an existing self-signed Caddy to the shared root
+Caddy reuses an existing on-disk `local` CA in preference to the configured
+root, so clear the stale authority + cached leaf certs first or it keeps serving
+the old root:
+```
+sudo systemctl stop workload-caddy.service
+sudo rm -rf /var/lib/workloads/caddy/data/caddy/pki/authorities/local \
+            /var/lib/workloads/caddy/data/caddy/certificates
+sudo systemctl start workload-caddy.service
+# served chain should now be issued by "Homelab - ECC Intermediate":
+echo | openssl s_client -connect zot.local:443 -servername zot.local 2>/dev/null | grep ^issuer=
+```
+
+### Clients
+Hosts built from the internal image already trust the root (CI-injected). Other
+machines trust it once: put `homelab-root.crt` in
+`/etc/pki/ca-trust/source/anchors/` and run `update-ca-trust`. Firefox uses its
+own store — import the root under Authorities (trust for websites), or set
+`security.enterprise_roots.enabled`.
