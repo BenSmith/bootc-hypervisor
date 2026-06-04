@@ -64,6 +64,14 @@ volumes = [
     "./Caddyfile:/etc/caddy/Caddyfile:ro",
     "./data:/var/lib/caddy",
     "./config:/etc/caddy/config",
+    # Shared homelab CA (see README "Shared homelab CA"). The public root cert is
+    # provided by the image trust store (CI-injected on internal builds); the
+    # private key is a per-host 0400 file you place at ./homelab-root.key (owned
+    # by the workload user — NOT shipped in the image or repo). caddy runs as the
+    # workload user under keep-id, so it can read both. Remove these two lines
+    # and the Caddyfile pki block to use a per-host self-signed CA instead.
+    "/etc/pki/ca-trust/source/anchors/homelab-root.crt:/etc/caddy/homelab-root.crt:ro",
+    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",
 ]
 
 [security]
