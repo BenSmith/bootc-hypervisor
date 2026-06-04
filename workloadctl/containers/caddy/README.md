@@ -251,7 +251,10 @@ root via the `pki` block (already wired into the sample `Caddyfile` and
 - **Public root cert** — provided by the image trust store. The Forgejo build
   injects it from the `HOMELAB_ROOT_CA` secret into
   `/etc/pki/ca-trust/source/anchors/homelab-root.crt` (see `ca-trust-inject/` at
-  the repo root), which the workload mounts read-only.
+  the repo root). `[setup] required_files` copies it from there into the workload
+  dir as `./homelab-root.crt` so it gets a `container_file_t` label the container
+  can read — mounting the trust anchor directly fails (`cert_t` is SELinux-denied
+  to `container_t`, surfacing as `open …homelab-root.crt: permission denied`).
 - **Private root key** — a per-host `0400` file at
   `/var/lib/workloads/caddy/homelab-root.key`, owned by the workload user. Never
   shipped in the image or committed. caddy runs as that user under `keep-id`, so
