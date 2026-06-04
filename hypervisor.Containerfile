@@ -11,6 +11,9 @@ COPY policy.json /etc/containers/policy.json
 COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY registries.d/ghcr.io.yaml /etc/containers/registries.d/ghcr.io.yaml
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
+# Work around pasta's loopback splice() throughput regression (see the file's
+# header) — without this, large pulls through the Caddy->zot reverse proxy hang.
+COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d/10-pasta-no-splice.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
