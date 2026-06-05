@@ -46,7 +46,7 @@ ExecStop=/usr/libexec/workloadctl/workload-vm-shutdown "virtual-forgejo"
 StandardOutput=journal
 StandardError=journal
 
-Restart=on-failure
+Restart=always
 RestartSec=10s
 TimeoutStartSec=300
 TimeoutStopSec=90

@@ -1453,6 +1453,29 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
         lines += resource_lines
         lines.append("")
 
+    # Restart policy. Default "always" because QEMU runs with -no-reboot: a
+    # guest reboot makes QEMU exit 0, which Restart=on-failure treats as success
+    # and never brings the VM back (e.g. the first-boot kernel-upgrade reboot
+    # would leave the VM down). "always" turns a guest reboot into a fresh QEMU
+    # process; StartLimitBurst above bounds a boot-loop. An explicit
+    # `workloadctl stop`/`disable` goes through ExecStop and is never
+    # auto-restarted regardless of this. "on-failure" keeps the old behavior.
+    # "on-reboot" (restart only on a guest reboot, honoring an in-guest
+    # poweroff) needs reason-aware exit handling in workload-vm-notify that
+    # isn't implemented yet, so it falls back to "always" with a warning.
+    restart_mode = vm_cfg.get("restart", "always")
+    if restart_mode == "on-failure":
+        restart_directive = "on-failure"
+    else:
+        if restart_mode == "on-reboot":
+            log_msg(
+                f"WARNING: [vm].restart='on-reboot' for {name} is not implemented "
+                "yet; using 'always'. (Reason-aware restart needs work in "
+                "workload-vm-notify.)",
+                level="warning",
+            )
+        restart_directive = "always"
+
     lines += [
         f"ExecStart=/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\",
         f"    {qemu_cmd}",
@@ -1468,7 +1491,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
         "StandardOutput=journal",
         "StandardError=journal",
         "",
-        "Restart=on-failure",
+        f"Restart={restart_directive}",
         "RestartSec=10s",
         # Generous start timeout: guest may be slow on first boot
         "TimeoutStartSec=300",

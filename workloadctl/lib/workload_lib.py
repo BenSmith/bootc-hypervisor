@@ -409,6 +409,18 @@ def validate_vm_config(config: dict) -> list[str]:
     if not isinstance(rollback_keep, int) or rollback_keep < 1:
         errors.append(f"[vm].rollback_keep must be a positive integer, got {rollback_keep!r}")
 
+    # Restart policy for the VM service. "always" (default) treats a guest
+    # reboot — which QEMU's -no-reboot turns into a clean exit — as a reason to
+    # relaunch; "on-failure" keeps the VM down on a clean exit; "on-reboot" is
+    # reserved for reason-aware restart (not implemented yet; falls back to
+    # "always"). See generate_vm_service.
+    restart = vm.get("restart", "always")
+    if restart not in ("always", "on-failure", "on-reboot"):
+        errors.append(
+            "[vm].restart must be one of 'always', 'on-failure', 'on-reboot', "
+            f"got {restart!r}"
+        )
+
     # [vm.network].bridge — defaults to _workload-br (managed NAT bridge); set to e.g.
     # "br0" to attach to a pre-existing LAN bridge instead.
     bridge = vm.get("network", {}).get("bridge", VM_BRIDGE_NAME)

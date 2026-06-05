@@ -1169,6 +1169,31 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("-m 2048", svc)
         self.assertNotIn("-m 2048M", svc)
 
+    def test_vm_restart_defaults_to_always(self):
+        # QEMU runs with -no-reboot, so a guest reboot is a clean exit;
+        # the default must be Restart=always or the VM stays down after its
+        # first-boot kernel-upgrade reboot.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=always", svc)
+        self.assertNotIn("Restart=on-failure", svc)
+
+    def test_vm_restart_on_failure_override(self):
+        self._write_vm_config(extra='restart = "on-failure"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=on-failure", svc)
+        self.assertNotIn("Restart=always", svc)
+
+    def test_vm_restart_on_reboot_falls_back_to_always(self):
+        # "on-reboot" is reserved for reason-aware restart that isn't
+        # implemented yet; it must degrade to the safe always-on behavior.
+        self._write_vm_config(extra='restart = "on-reboot"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=always", svc)
+
     def test_main_service_owns_runtime_dir_with_preserve(self):
         # The per-VM socket dir must be owned by the *main* VM service (so
         # virtiofsd sidecars don't yank console.sock/qmp.sock when they

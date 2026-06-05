@@ -673,6 +673,16 @@ class TestValidateVmConfig(unittest.TestCase):
         }
         self.assertEqual(validate_workload_config(cfg), [])
 
+    def test_restart_rejects_unknown_value(self):
+        errs = validate_workload_config(self._base(restart="sometimes"))
+        self.assertTrue(any("restart" in e for e in errs), errs)
+
+    def test_restart_accepts_known_values(self):
+        for val in ("always", "on-failure", "on-reboot"):
+            errs = validate_workload_config(self._base(restart=val))
+            self.assertFalse(any("restart" in e for e in errs),
+                             msg=f"restart={val!r} should be accepted, got {errs}")
+
 
 class TestVmNetworkBridge(unittest.TestCase):
     def _base(self, **network):
