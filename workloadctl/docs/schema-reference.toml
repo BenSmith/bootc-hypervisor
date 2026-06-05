@@ -125,6 +125,22 @@ enabled = false
 # Default: 2
 # rollback_keep = 2
 #
+# Optional: systemd restart policy for the VM service.
+#   "always"     - (default) relaunch QEMU on any unexpected exit. QEMU runs
+#                  with -no-reboot, so a guest reboot becomes a clean exit;
+#                  "always" turns that into a fresh boot (e.g. the first-boot
+#                  kernel-upgrade reboot). StartLimitBurst still bounds a
+#                  boot-loop, and `workloadctl stop`/`disable` (which goes via
+#                  ExecStop) is never auto-restarted regardless.
+#   "on-failure" - leave the VM down on a clean exit (incl. a guest reboot);
+#                  relaunch only on a non-zero QEMU exit (a crash).
+#   "on-reboot"  - reserved: restart only on a guest reboot while honoring an
+#                  in-guest poweroff. Not implemented yet — currently falls
+#                  back to "always" with a warning.
+# Type: string ("always" | "on-failure" | "on-reboot")
+# Default: "always"
+# restart = "always"
+#
 # Optional: Attach a virtio-balloon device so the host can reclaim idle guest
 # memory at runtime. Has no effect if the guest kernel lacks virtio_balloon
 # (Fedora Cloud includes it). Set to false only if the balloon driver causes
