@@ -317,25 +317,31 @@ write_files:
       # so we use respond with the cert content baked in.
       if [ -f "$CADDY_ROOT" ]; then
         CERT_CONTENT=$(cat "$CADDY_ROOT")
+        # NOTE: the heredoc body AND the CADDYEOF terminator must stay at this
+        # file's block-scalar base indent (6 spaces), like the RESOLVED heredoc
+        # above. cloud-init strips that base indent when it parses `content: |`,
+        # so the terminator lands at column 0 for the shell. A column-0 line
+        # here (less indented than the base) instead ENDS the YAML block scalar
+        # and corrupts the rest of the user-data document.
         cat > /var/lib/workloads/caddy/Caddyfile << CADDYEOF
-{
-    local_certs
-}
+      {
+          local_certs
+      }
 
-${FORGEJO_HOSTNAME} {
-    route {
-        handle /caddy-root.crt {
-            header Content-Type text/plain
-            respond \`$${CERT_CONTENT}\` 200
-        }
-        reverse_proxy 127.0.0.1:3000
-    }
-}
+      ${FORGEJO_HOSTNAME} {
+          route {
+              handle /caddy-root.crt {
+                  header Content-Type text/plain
+                  respond \`$${CERT_CONTENT}\` 200
+              }
+              reverse_proxy 127.0.0.1:3000
+          }
+      }
 
-:80 {
-    respond "no site configured for {host}" 404
-}
-CADDYEOF
+      :80 {
+          respond "no site configured for {host}" 404
+      }
+      CADDYEOF
         workloadctl recreate caddy
         echo "Caddyfile updated with embedded root CA cert."
       fi
