@@ -323,8 +323,8 @@ write_files:
         # `bash -n`) rather than under-running the block scalar and corrupting
         # the whole user-data document — which a column-0 heredoc terminator
         # would. $CERT_CONTENT (no braces) is a runtime shell var, invisible to
-        # workloadctl's ${VAR} substitution; its embedded newlines land inside
-        # Caddy's backtick string literal so the multi-line PEM is served as-is.
+        # workloadctl's dollar-brace template substitution; its embedded
+        # newlines land inside Caddy's backtick literal so the PEM serves as-is.
         {
           printf '%s\n' \
             '{' \
