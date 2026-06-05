@@ -11,6 +11,7 @@ StartLimitBurst=5
 [Service]
 Type=exec
 Slice=workloads.slice
+Delegate=yes
 User=_wl-alloy
 Group=_wl-alloy
 Environment="HOME=/var/lib/workloads/alloy"
@@ -24,7 +25,7 @@ MemoryHigh=384M
 
 # Image pulling handled by podman run --pull=newer
 
-ExecStart=/usr/bin/podman run --name "workload-alloy" --hostname "alloy" --rm --init --sdnotify=ignore --pull=newer --log-driver=journald --userns=host --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --group-add=keep-groups --network="pasta" --publish 127.0.0.1:4317:4317 --publish 127.0.0.1:4318:4318 --volume "/var/lib/workloads/alloy/alloy-config.alloy":/etc/alloy/config.alloy:ro --volume "/run/log/journal":/run/log/journal:ro --volume "/var/log/journal":/var/log/journal:ro --volume "/":/host:ro,rslave --env HOST_IP=${HOST_IP} --env CENTRAL_HOST=CHANGE_ME --env HOST_LABEL=CHANGE_ME --env ROLE_LABEL=CHANGE_ME --health-cmd "bash -c 'exec 3<>/dev/tcp/localhost/12345' || exit 1" --health-interval=30s --health-start-period=30s --health-on-failure=kill "docker.io/grafana/alloy:latest"
+ExecStart=/usr/bin/podman run --name "workload-alloy" --hostname "alloy" --rm --init --sdnotify=ignore --pull=newer --log-driver=journald --cgroups=split --userns=host --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --group-add=keep-groups --network="pasta" --publish 127.0.0.1:4317:4317 --publish 127.0.0.1:4318:4318 --volume "/var/lib/workloads/alloy/alloy-config.alloy":/etc/alloy/config.alloy:ro --volume "/run/log/journal":/run/log/journal:ro --volume "/var/log/journal":/var/log/journal:ro --volume "/":/host:ro,rslave --env HOST_IP=${HOST_IP} --env CENTRAL_HOST=CHANGE_ME --env HOST_LABEL=CHANGE_ME --env ROLE_LABEL=CHANGE_ME --health-cmd "bash -c 'exec 3<>/dev/tcp/localhost/12345' || exit 1" --health-interval=30s --health-start-period=30s --health-on-failure=kill "docker.io/grafana/alloy:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-alloy"
 

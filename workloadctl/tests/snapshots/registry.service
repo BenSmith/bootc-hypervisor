@@ -11,6 +11,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 Slice=workloads.slice
+Delegate=yes
 User=_wl-registry
 Group=_wl-registry
 Environment="HOME=/var/lib/workloads/registry"
@@ -24,7 +25,7 @@ MemoryHigh=192M
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/registry:2"
+ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/registry:2"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-registry"
 

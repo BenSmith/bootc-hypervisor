@@ -731,6 +731,16 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "--log-driver=journald",
     ])
 
+    # Keep the container cgroup under the unit (workloads.slice/workload-<name>.service)
+    # so that systemd resource directives (MemoryMax, CPUQuota, MemoryHigh, TasksMax,
+    # IOWeight, etc.) actually bind the container's cgroup. Without this, conmon
+    # migrates the container into a transient scope under user@<uid>.service and the
+    # unit directives are silently ignored. Pod members cannot use --cgroups=split
+    # (podman rejects it) — the flag is pod-mode-safe because pod members join the
+    # pod's cgroup hierarchy, not a unit-delegated one.
+    if mode != "pod":
+        podman_args.append("--cgroups=split")
+
     # User namespace / UID-GID maps.
     # In pod mode the user namespace is owned by the pod's infra container and
     # is set on `podman pod create` (see generate_pod_service); member
@@ -971,6 +981,12 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         f"Type={service_type}",
         f"Slice={slice_name}",
     ])
+
+    # Delegate the cgroup subtree to the workload user so conmon can create
+    # sub-cgroups under this unit (required by --cgroups=split). Not needed for
+    # pod mode (the pod owns its own cgroup hierarchy and members just join it).
+    if mode != "pod":
+        lines.append("Delegate=yes")
 
     # NotifyAccess only needed for Type=notify
     if service_type == "notify":
