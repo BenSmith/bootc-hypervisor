@@ -98,6 +98,22 @@ write_files:
           respond "no site configured for {host}" 404
       }
 
+  # Shared homelab CA material (optional). Seeded as base64 from the
+  # homelab-root-crt / homelab-root-key credstore secrets (a multi-line PEM
+  # breaks YAML write_files, so the secrets store base64 — `base64 -w0`). Both
+  # empty (secrets absent) → step 7 keeps Caddy's self-signed per-host CA. When
+  # both are present, Caddy mints its intermediate under this shared root so
+  # every ${FORGEJO_HOSTNAME} leaf validates against the one homelab root that
+  # clients already trust. The cert is public; the key is sensitive (0400).
+  - path: /etc/homelab-ca/homelab-root.crt
+    encoding: b64
+    permissions: '0444'
+    content: '${SECRET?homelab-root-crt}'
+  - path: /etc/homelab-ca/homelab-root.key
+    encoding: b64
+    permissions: '0400'
+    content: '${SECRET?homelab-root-key}'
+
   - path: /var/lib/workloads/forgejo/app.ini.template
     content: |
       APP_NAME = Forgejo
@@ -294,48 +310,53 @@ write_files:
       # the seclabel xattr, so chcon persists.
       chcon -R -t container_file_t /var/lib/workloads/forgejo/data
 
-      # 7. Trust Caddy's internal CA so the runner verifies ${FORGEJO_HOSTNAME}.
-      # Caddy generates the root on first start; wait up to ~3 minutes.
-      CADDY_ROOT=/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt
-      for i in $(seq 1 90); do
-        if [ -f "$CADDY_ROOT" ]; then
-          install -m 0644 "$CADDY_ROOT" /etc/pki/ca-trust/source/anchors/caddy-root.crt
-          update-ca-trust extract
-          echo "Caddy root CA trusted after $${i} probes."
-          break
+      # 7. CA bootstrap. If the operator seeded the shared homelab root (cert +
+      # key, via the homelab-root-crt / homelab-root-key secrets, landed in
+      # /etc/homelab-ca/ by write_files), point Caddy's `local` CA at that root
+      # so its per-host intermediate — and every ${FORGEJO_HOSTNAME} leaf —
+      # chains to the ONE homelab root that clients already trust. Otherwise
+      # fall back to Caddy's self-signed per-host local CA.
+      if [ -s /etc/homelab-ca/homelab-root.crt ] && [ -s /etc/homelab-ca/homelab-root.key ]; then
+        echo "Shared homelab CA seeded; configuring Caddy to mint under it."
+        # Cert+key into the caddy workload dir, owned by _wl-caddy and labeled
+        # container_file_t (mounting from the trust anchor's cert_t is
+        # SELinux-denied). _wl-caddy exists: `workloadctl enable caddy` (step 6) ran.
+        install -m 0444 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.crt /var/lib/workloads/caddy/homelab-root.crt
+        install -m 0400 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.key /var/lib/workloads/caddy/homelab-root.key
+        chcon -t container_file_t /var/lib/workloads/caddy/homelab-root.crt /var/lib/workloads/caddy/homelab-root.key
+        # Mount cert+key into the caddy container (idempotent on re-bootstrap).
+        if ! grep -q "homelab-root.crt:/etc/caddy/homelab-root.crt" /etc/workloads.d/caddy.toml; then
+          sed -i 's#\( *"./config:/etc/caddy/config",\)#\1\n    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",\n    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",#' /etc/workloads.d/caddy.toml
         fi
-        sleep 2
-      done
-      if [ ! -f /etc/pki/ca-trust/source/anchors/caddy-root.crt ]; then
-        echo "WARNING: Caddy root CA not found after 3 minutes; runner TLS verify will fail."
-      fi
-
-      # Embed the generated root CA cert into the Caddyfile so external
-      # clients can bootstrap trust via:
-      #   curl -sk https://${FORGEJO_HOSTNAME}/caddy-root.crt | sudo tee ...
-      # file_server doesn't work reliably for Caddy-owned 600-mode files,
-      # so we use respond with the cert content baked in.
-      if [ -f "$CADDY_ROOT" ]; then
-        CERT_CONTENT=$(cat "$CADDY_ROOT")
-        # Build the Caddyfile with printf, not a heredoc: every line stays
-        # indented inside cloud-init's `content:` block scalar, so an
-        # indentation slip can at worst break this shell command (caught by
-        # `bash -n`) rather than under-running the block scalar and corrupting
-        # the whole user-data document — which a column-0 heredoc terminator
-        # would. $CERT_CONTENT (no braces) is a runtime shell var, invisible to
-        # workloadctl's dollar-brace template substitution; its embedded
-        # newlines land inside Caddy's backtick literal so the PEM serves as-is.
+        # Trust the shared root in the VM's own store (runner + outbound).
+        install -m 0444 /var/lib/workloads/caddy/homelab-root.crt /etc/pki/ca-trust/source/anchors/homelab-root.crt
+        update-ca-trust extract
+        # pki Caddyfile: the global `local` CA roots at the shared homelab
+        # cert/key, so Caddy mints its intermediate under it; /caddy-root.crt
+        # serves the shared root for client bootstrap. Built with printf (see
+        # the self-signed branch's note on why, not a heredoc). $ROOT_CONTENT
+        # (no braces) is a runtime shell var, invisible to template substitution.
+        ROOT_CONTENT=$(cat /var/lib/workloads/caddy/homelab-root.crt)
         {
           printf '%s\n' \
             '{' \
             '    local_certs' \
+            '    pki {' \
+            '        ca local {' \
+            '            name "Homelab"' \
+            '            root {' \
+            '                cert /etc/caddy/homelab-root.crt' \
+            '                key  /etc/caddy/homelab-root.key' \
+            '            }' \
+            '        }' \
+            '    }' \
             '}' \
             '' \
             "${FORGEJO_HOSTNAME} {" \
             '    route {' \
             '        handle /caddy-root.crt {' \
             '            header Content-Type text/plain'
-          printf '            respond `%s` 200\n' "$CERT_CONTENT"
+          printf '            respond `%s` 200\n' "$ROOT_CONTENT"
           printf '%s\n' \
             '        }' \
             '        reverse_proxy 127.0.0.1:3000' \
@@ -346,8 +367,68 @@ write_files:
             '    respond "no site configured for {host}" 404' \
             '}'
         } > /var/lib/workloads/caddy/Caddyfile
+        chown _wl-caddy:_wl-caddy /var/lib/workloads/caddy/Caddyfile
+        # Clear the stale self-signed local CA so Caddy regenerates its
+        # intermediate under the shared root, then apply.
+        rm -rf /var/lib/workloads/caddy/data/caddy/pki/authorities/local /var/lib/workloads/caddy/data/caddy/certificates
         workloadctl recreate caddy
-        echo "Caddyfile updated with embedded root CA cert."
+        echo "Caddy reconfigured to mint under the shared homelab CA."
+      else
+        # 7b. Self-signed fallback: trust Caddy's own generated local CA so the
+        # runner verifies ${FORGEJO_HOSTNAME}. Caddy generates the root on first
+        # start; wait up to ~3 minutes.
+        CADDY_ROOT=/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt
+        for i in $(seq 1 90); do
+          if [ -f "$CADDY_ROOT" ]; then
+            install -m 0644 "$CADDY_ROOT" /etc/pki/ca-trust/source/anchors/caddy-root.crt
+            update-ca-trust extract
+            echo "Caddy root CA trusted after $${i} probes."
+            break
+          fi
+          sleep 2
+        done
+        if [ ! -f /etc/pki/ca-trust/source/anchors/caddy-root.crt ]; then
+          echo "WARNING: Caddy root CA not found after 3 minutes; runner TLS verify will fail."
+        fi
+
+        # Embed the generated root CA cert into the Caddyfile so external
+        # clients can bootstrap trust via:
+        #   curl -sk https://${FORGEJO_HOSTNAME}/caddy-root.crt | sudo tee ...
+        # file_server doesn't work reliably for Caddy-owned 600-mode files,
+        # so we use respond with the cert content baked in. Built with printf,
+        # not a heredoc: every line stays indented inside cloud-init's
+        # `content:` block scalar, so an indentation slip can at worst break
+        # this shell command (caught by `bash -n`) rather than under-running the
+        # block scalar and corrupting the whole user-data document — which a
+        # column-0 heredoc terminator would. $CERT_CONTENT (no braces) is a
+        # runtime shell var, invisible to template substitution; its embedded
+        # newlines land inside Caddy's backtick literal so the PEM serves as-is.
+        if [ -f "$CADDY_ROOT" ]; then
+          CERT_CONTENT=$(cat "$CADDY_ROOT")
+          {
+            printf '%s\n' \
+              '{' \
+              '    local_certs' \
+              '}' \
+              '' \
+              "${FORGEJO_HOSTNAME} {" \
+              '    route {' \
+              '        handle /caddy-root.crt {' \
+              '            header Content-Type text/plain'
+            printf '            respond `%s` 200\n' "$CERT_CONTENT"
+            printf '%s\n' \
+              '        }' \
+              '        reverse_proxy 127.0.0.1:3000' \
+              '    }' \
+              '}' \
+              '' \
+              ':80 {' \
+              '    respond "no site configured for {host}" 404' \
+              '}'
+          } > /var/lib/workloads/caddy/Caddyfile
+          workloadctl recreate caddy
+          echo "Caddyfile updated with embedded root CA cert."
+        fi
       fi
 
       # 8. Install the native forgejo-runner binary + unit unconditionally
