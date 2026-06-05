@@ -476,7 +476,20 @@ mounts:
   - [LABEL=workloaddata, /var/lib/workloads/forgejo/data, ext4, "defaults,nofail", 0, 2]
 
 runcmd:
-  - [/usr/local/bin/virtual-forgejo-bootstrap]
+  # Launch the bootstrap as its own transient systemd unit instead of running
+  # it directly under runcmd. cloud-init 25.3 (Fedora 44 cloud image) runs
+  # runcmd inside the single-process cloud-init-main.service (Type=notify,
+  # KillMode=process). The bootstrap's heavy `dnf install` provokes an
+  # RPM-scriptlet `systemctl daemon-reload` + systemd re-exec that topples that
+  # service (main PID exits status=1), orphaning the bootstrap's dnf and killing
+  # the half-run transaction (podman installed, git/just not). A transient
+  # systemd-run unit runs in its own cgroup, decoupled from cloud-init's
+  # lifecycle, so it survives the reload/re-exec and runs to completion.
+  # systemd-run returns once the unit is started (no --wait), so runcmd — and
+  # thus cloud-init — finishes promptly while the bootstrap continues.
+  - [systemd-run, --unit=virtual-forgejo-bootstrap, --collect,
+     --property=Type=oneshot, --property=TimeoutStartSec=infinity,
+     /usr/local/bin/virtual-forgejo-bootstrap]
 
 package_update: false
 package_upgrade: false
