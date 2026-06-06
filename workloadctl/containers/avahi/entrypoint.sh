@@ -10,12 +10,20 @@ set -euo pipefail
 
 ALIASES="${ALIASES:-}"
 
+_route="$(ip -4 route get 1.1.1.1 2>/dev/null)"
 if [[ -z "${HOST_IP:-}" ]]; then
-    HOST_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    HOST_IP="$(awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' <<< "$_route")"
 fi
 if [[ -z "$HOST_IP" ]]; then
     echo "avahi: could not detect host IP (set HOST_IP env var to override)" >&2
     exit 1
+fi
+# Restrict avahi to the LAN interface so transient container interfaces
+# (podman0, veth*, etc.) don't cause mDNS multicast churn.
+_iface="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<< "$_route")"
+if [[ -n "$_iface" ]]; then
+    sed -i "s/^#*allow-interfaces=.*/allow-interfaces=$_iface/" /etc/avahi/avahi-daemon.conf
+    echo "avahi: restricting mDNS to interface $_iface"
 fi
 
 ALIAS_NAMES=()
