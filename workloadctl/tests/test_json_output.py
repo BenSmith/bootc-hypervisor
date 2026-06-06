@@ -771,7 +771,8 @@ class TestCleanupJson(unittest.TestCase):
                 with patch('pwd.getpwall', return_value=[]):
                     with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
                         data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
-        for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'removed_users', 'removed_dirs'):
+        for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'orphan_modules',
+                    'removed_users', 'removed_dirs', 'removed_modules'):
             self.assertIn(key, data, f'missing key: {key}')
 
     def test_dry_run_flag_is_true(self):
@@ -811,6 +812,88 @@ class TestCleanupJson(unittest.TestCase):
                         data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
         self.assertEqual(data['removed_users'], [])
         self.assertEqual(data['removed_dirs'], [])
+
+    @staticmethod
+    def _semodule_l(modules):
+        """side_effect for subprocess.run that fakes `semodule -l`."""
+        def _run(cmd, *a, **k):
+            if cmd[:2] == ['semodule', '-l']:
+                return CompletedProcess(cmd, 0, stdout='\n'.join(modules) + '\n', stderr='')
+            return CompletedProcess(cmd, 0, stdout='', stderr='')
+        return _run
+
+    def test_orphan_module_reported(self):
+        # test-wl does not declare selinux_policy, so a loaded wl_orphan module
+        # (and even wl_test_wl) has nothing backing it. Base/seatd modules are
+        # ignored (no wl_ prefix).
+        with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
+            args = _args(json=True, apply=False)
+            with patch.object(wctl, 'require_root'), \
+                 patch('pwd.getpwall', return_value=[]), \
+                 patch('shutil.which', return_value='/usr/sbin/semodule'), \
+                 patch('subprocess.run',
+                       side_effect=self._semodule_l(['wl_orphan', 'container', 'seatd_container'])), \
+                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+        self.assertIn('wl_orphan', data['orphan_modules'])
+        self.assertNotIn('container', data['orphan_modules'])
+        self.assertNotIn('seatd_container', data['orphan_modules'])
+
+    def test_declared_module_not_orphan(self):
+        toml = MINIMAL_TOML + '\n[security]\nselinux_policy = true\n'
+        with _WorkloadDir(toml, 'test-wl') as tmp:
+            args = _args(json=True, apply=False)
+            with patch.object(wctl, 'require_root'), \
+                 patch('pwd.getpwall', return_value=[]), \
+                 patch('shutil.which', return_value='/usr/sbin/semodule'), \
+                 patch('subprocess.run',
+                       side_effect=self._semodule_l(['wl_test_wl', 'container'])), \
+                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+        self.assertEqual(data['orphan_modules'], [])
+
+
+# ── selinux_policy bool-or-string → selinux_bundle ───────────────────────────
+
+class TestSelinuxBundleResolution(unittest.TestCase):
+    """`selinux_policy` may be true (bundle == workload name) or a string naming
+    the bundle dir; `selinux_bundle` resolves the source, decoupled from the
+    (renameable) workload name."""
+
+    def _config(self, security_block=''):
+        # config dict + name are loaded in __init__, so the object is usable
+        # after the temp dir is torn down (selinux_bundle does no file I/O).
+        with _WorkloadDir(MINIMAL_TOML + security_block, 'test-wl'):
+            return wctl.WorkloadConfig('test-wl')
+
+    def test_true_keys_off_workload_name(self):
+        cfg = self._config('\n[security]\nselinux_policy = true\n')
+        self.assertTrue(cfg.selinux_policy)
+        self.assertEqual(cfg.selinux_bundle, 'test-wl')
+
+    def test_string_names_bundle_explicitly(self):
+        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-sway"\n')
+        self.assertTrue(cfg.selinux_policy)
+        self.assertEqual(cfg.selinux_bundle, 'vncdesktop-sway')
+
+    def test_false_has_no_bundle(self):
+        cfg = self._config('\n[security]\nselinux_policy = false\n')
+        self.assertFalse(cfg.selinux_policy)
+        self.assertIsNone(cfg.selinux_bundle)
+
+    def test_absent_has_no_bundle(self):
+        cfg = self._config('')
+        self.assertFalse(cfg.selinux_policy)
+        self.assertIsNone(cfg.selinux_bundle)
+
+    def test_apply_rejects_path_traversal_bundle(self):
+        # A bundle string goes straight into a filesystem path; a value that
+        # isn't a plain workload-style name must be rejected before lookup.
+        cfg = self._config('\n[security]\nselinux_policy = "../etc/evil"\n')
+        self.assertEqual(cfg.selinux_bundle, '../etc/evil')
+        with patch.object(wctl, '_selinux_available', return_value=True):
+            with self.assertRaises(SystemExit):
+                wctl._apply_selinux_policy(cfg, 'enable')
 
 
 # ── Task 2.6 — backup --json ─────────────────────────────────────────────────

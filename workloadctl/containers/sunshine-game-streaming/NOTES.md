@@ -240,12 +240,14 @@ pressure-vessel.
 
 ---
 
-## SELinux Policy (sunshine-devices.te)
+## SELinux Policy (sunshine-game-streaming.cil)
 
 This was the most iterative and time-consuming part of the deployment. The
-container runs under `container_init_t` (systemd container PID 1 context),
-which has fewer permissions than a standard process. Every new component
-surfaced new denials.
+container ships a per-workload SELinux type, `wl_sunshine_game_streaming.process`
+(via `[security].selinux_policy`). The rule discovery below was done against
+`container_init_t` (the stock systemd-container PID 1 context) and the same
+rules now apply to the workload's own type. Every new component surfaced new
+denials.
 
 ### Debugging technique
 
@@ -309,16 +311,23 @@ runs systemd so all processes use `container_init_t`.
 
 ### Policy installation on bootc
 
-The SELinux policy module is compiled from the `.te` source and installed via
-`semodule`. This writes to `/var/lib/selinux` which is writable on bootc
-systems (only `/usr` is immutable). The `setup.sh` script handles compilation
-and installation:
+The policy is a udica-style CIL block (`sunshine-game-streaming.cil`) loaded by
+`workloadctl enable` (via `[security].selinux_policy`) — no `checkmodule`
+compile step; CIL loads directly. It writes to `/var/lib/selinux`, which is
+writable on bootc systems (only `/usr` is immutable). Roughly what enable does:
 
 ```bash
-checkmodule -M -m -o sunshine-devices.mod sunshine-devices.te
-semodule_package -o sunshine-devices.pp -m sunshine-devices.mod
-sudo semodule -i sunshine-devices.pp
+# __WL_MODULE__ -> wl_sunshine_game_streaming, then:
+sudo semodule -i wl_sunshine_game_streaming.cil /usr/share/udica/templates/*.cil
 ```
+
+**Key gotcha:** because the container runs systemd (`--systemd=always`), the
+type must be attributed into `container_init_domain`
+(`(typeattributeset container_init_domain (process))` in the CIL) — without it
+systemd-as-PID1 exits 255 with *no AVCs* (it's a missing attribute, not a denied
+rule). `(blockinherit container)` alone gives a `container_t`-equivalent, which
+is not init-capable. The `setup.sh` host hook now only handles the non-SELinux
+prerequisites (uinput module, udev rule, the udev relay).
 
 ### SELinux research sources
 

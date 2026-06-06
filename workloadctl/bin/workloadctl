@@ -47,6 +47,8 @@ from workload_lib import (
     NAME_PATTERN,
     normalize_containers,
     QMPClient,
+    selinux_module_name,
+    selinux_type_name,
     USERNAME_PREFIX,
     validate_workload_name,
     VM_SOCKET_DIR,
@@ -254,6 +256,36 @@ class WorkloadConfig:
     @property
     def enabled(self) -> bool:
         return self.config.get("workload", {}).get("enabled", False)
+
+    @property
+    def selinux_policy(self) -> bool:
+        """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
+
+        When set, enable/disable load/remove the bundle's CIL policy
+        (`<bundle>.cil`) as a name-keyed module, and the generator labels the
+        container with the matching type. See docs/workload-bundles.md.
+
+        `selinux_policy` may be `true` (source the bundle named after this
+        workload) or a string naming the bundle directory to source the CIL
+        from — see `selinux_bundle`.
+        """
+        return bool(self.config.get("security", {}).get("selinux_policy", False))
+
+    @property
+    def selinux_bundle(self) -> str | None:
+        """The `containers/<bundle>/` directory to source the CIL from.
+
+        `selinux_policy = true` keys off the workload name (the bundle is named
+        after the workload); a string value names the bundle explicitly, which
+        decouples the policy source from the (renameable) workload name so a
+        renamed workload can keep using its original bundle. None when policy is
+        disabled. The loaded module and label stay keyed to the workload name
+        (`wl_<name>.process`) regardless.
+        """
+        val = self.config.get("security", {}).get("selinux_policy", False)
+        if not val:
+            return None
+        return val if isinstance(val, str) else self.name
 
     @property
     def username(self) -> str:
@@ -946,7 +978,7 @@ def cmd_status(args, manager: WorkloadManager):
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
-RECOMMENDED_EXECUTABLES = ["semanage", "checkmodule", "semodule_package"]
+RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
 
 def _preflight_checks(config: WorkloadConfig) -> bool:
@@ -1316,6 +1348,76 @@ def _run_host_setup(config: WorkloadConfig, action: str):
             sys.exit(1)
 
 
+UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
+
+
+def _selinux_available() -> bool:
+    """True if the host can load CIL policy modules (semodule + udica bases)."""
+    return bool(shutil.which("semodule")) and UDICA_TEMPLATE_DIR.is_dir()
+
+
+def _apply_selinux_policy(config: WorkloadConfig, action: str):
+    """Load (enable) or remove (disable) a workload's per-workload SELinux type.
+
+    The bundle ships its policy as a CIL template (`<name>.cil`) using the
+    __WL_MODULE__ placeholder. On enable we substitute the name-keyed block name
+    (wl_<name>) and load it alongside udica's base templates (which the
+    workload's `(blockinherit ...)` resolves against); on disable we remove the
+    wl_<name> module, leaving the shared base templates loaded.
+
+    No-op for workloads without `[security].selinux_policy = true`.
+    """
+    if not config.selinux_policy:
+        return
+
+    module = selinux_module_name(config.name)
+
+    if not _selinux_available():
+        print(f"  WARNING: SELinux tooling (semodule + udica templates) not "
+              f"found; skipping policy {action} for '{config.name}'",
+              file=sys.stderr)
+        return
+
+    if action == "disable":
+        loaded = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
+        if module in loaded.stdout.split():
+            print(f"  Removing SELinux module {module}...")
+            subprocess.run(["semodule", "-r", module], check=False)
+        return
+
+    # enable: substitute the block name and load the workload CIL alongside the
+    # udica base templates (so any `(blockinherit ...)` resolves). semodule -i
+    # upgrades in place, so re-enabling is idempotent. The CIL is sourced from
+    # the bundle dir (defaults to the workload name; a `selinux_policy` string
+    # names it explicitly so a renamed workload keeps its original policy).
+    bundle = config.selinux_bundle
+    if not NAME_PATTERN.match(bundle):
+        # bundle goes straight into a filesystem path; reject anything that
+        # isn't a plain workload-style name (blocks traversal / odd values).
+        print(f"  ERROR: invalid selinux_policy bundle {bundle!r} "
+              f"(must match {NAME_PATTERN.pattern})", file=sys.stderr)
+        sys.exit(1)
+    template = Path(f"/usr/share/workloadctl/containers/{bundle}/{bundle}.cil")
+    if not template.exists():
+        print(f"  ERROR: SELinux policy template not found: {template}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    bases = sorted(str(p) for p in UDICA_TEMPLATE_DIR.glob("*.cil"))
+    src = template.read_text().replace("__WL_MODULE__", module)
+
+    print(f"  Installing SELinux module {module} (type {selinux_type_name(config.name)})...")
+    with tempfile.TemporaryDirectory() as work:
+        cil = Path(work) / f"{module}.cil"
+        cil.write_text(src)
+        try:
+            subprocess.run(["semodule", "-i", str(cil), *bases], check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"  Error: SELinux policy install failed (exit {e.returncode})",
+                  file=sys.stderr)
+            sys.exit(1)
+
+
 _WORKLOAD_SECTION_RE = re.compile(
     r'(?ms)(?P<header>^\[workload\][^\n]*\n)(?P<body>.*?)(?=^\[|\Z)'
 )
@@ -1395,6 +1497,10 @@ def cmd_enable(args, manager: WorkloadManager):
     # Run host setup script if configured
     _run_host_setup(config, "enable")
 
+    # Load the per-workload SELinux type (before the service starts, so the
+    # container's label resolves).
+    _apply_selinux_policy(config, "enable")
+
     print()
     _provision_user(config)
     if not config.is_vm:
@@ -1440,6 +1546,10 @@ def cmd_disable(args, manager: WorkloadManager):
 
     # Run host setup teardown if configured
     _run_host_setup(config, "disable")
+
+    # Remove the per-workload SELinux module (1:1 with the workload, so this is
+    # an unambiguous teardown — nothing else depends on wl_<name>).
+    _apply_selinux_policy(config, "disable")
 
     config_path = WORKLOAD_DIR / f"{args.workload}.toml"
     content = config_path.read_text()
@@ -1565,6 +1675,9 @@ def cmd_cleanup(args, manager: WorkloadManager):
     # Collect names of ALL configured workloads (enabled or not)
     # A user with a config (even disabled) is not orphaned
     configured_names = set()
+    # Per-workload SELinux modules a config still expects (selinux_policy = true).
+    # Keyed on declaration, not enabled state — same as users above.
+    expected_modules = set()
     for config_file in WORKLOAD_DIR.glob("*.toml"):
         try:
             with open(config_file, "rb") as f:
@@ -1572,8 +1685,23 @@ def cmd_cleanup(args, manager: WorkloadManager):
             name = cfg.get("workload", {}).get("name")
             if name:
                 configured_names.add(name)
+                if cfg.get("security", {}).get("selinux_policy"):
+                    expected_modules.add(selinux_module_name(name))
         except Exception:
             pass
+
+    # Orphaned per-workload SELinux modules: loaded wl_* modules that no config
+    # still declares. semodule loads are persistent (a reboot reloads the same
+    # policy), so a hand-deleted TOML or a dropped selinux_policy leaves the
+    # module loaded with nothing behind it. The wl_ prefix scopes this to
+    # per-workload modules — udica base templates and seatd_container are untouched.
+    orphaned_modules = []
+    if shutil.which("semodule"):
+        r = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
+        if r.returncode == 0:
+            loaded = {ln.strip() for ln in r.stdout.splitlines()
+                      if ln.strip().startswith("wl_")}
+            orphaned_modules = sorted(loaded - expected_modules)
 
     # Find all _wl-* system users
     all_users = pwd.getpwall()
@@ -1602,19 +1730,23 @@ def cmd_cleanup(args, manager: WorkloadManager):
             "dry_run": True,
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "orphan_modules": orphaned_modules,
             "removed_users": [],
-            "removed_dirs": []
+            "removed_dirs": [],
+            "removed_modules": []
         }, indent=2))
         return
 
-    if not orphaned_users and not orphaned_dirs:
+    if not orphaned_users and not orphaned_dirs and not orphaned_modules:
         if args.json:
             print(json.dumps({
                 "dry_run": not apply,
                 "orphan_users": [],
                 "orphan_dirs": [],
+                "orphan_modules": [],
                 "removed_users": [],
-                "removed_dirs": []
+                "removed_dirs": [],
+                "removed_modules": []
             }, indent=2))
         else:
             print("Nothing to clean up.")
@@ -1645,6 +1777,11 @@ def cmd_cleanup(args, manager: WorkloadManager):
             print(f"\nOrphaned directories ({len(orphaned_dirs)}):")
             for d in orphaned_dirs:
                 print(f"  {d}")
+
+        if orphaned_modules:
+            print(f"\nOrphaned SELinux modules ({len(orphaned_modules)}):")
+            for m in orphaned_modules:
+                print(f"  {m}  (no workload declares selinux_policy)")
 
         if not apply:
             print("\nRun with --apply to remove the above.")
@@ -1688,13 +1825,29 @@ def cmd_cleanup(args, manager: WorkloadManager):
         if not args.json:
             print(f"  ✓ Removed {d}")
 
+    # Remove orphaned SELinux modules
+    removed_modules = []
+    for m in orphaned_modules:
+        if not args.json:
+            print(f"Removing SELinux module {m}...")
+        rc = subprocess.run(["semodule", "-r", m], check=False,
+                            capture_output=True, text=True)
+        if rc.returncode == 0:
+            removed_modules.append(m)
+            if not args.json:
+                print(f"  ✓ Removed {m}")
+        elif not args.json:
+            print(f"  ✗ Failed to remove {m}: {rc.stderr.strip()}", file=sys.stderr)
+
     if args.json:
         print(json.dumps({
             "dry_run": False,
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
+            "orphan_modules": orphaned_modules,
             "removed_users": removed_users,
-            "removed_dirs": removed_dirs
+            "removed_dirs": removed_dirs,
+            "removed_modules": removed_modules
         }, indent=2))
     else:
         print("\nCleanup complete.")
@@ -3006,6 +3159,24 @@ def cmd_verify(args, manager: WorkloadManager):
         else:
             _check("linger_enabled", False, "Linger not enabled",
                    fix=f"sudo loginctl enable-linger {config.uid}")
+
+    # Check: per-workload SELinux module loaded (only if the workload ships one)
+    if config.selinux_policy:
+        module = selinux_module_name(config.name)
+        if not shutil.which("semodule"):
+            _check("selinux_module", False,
+                   "SELinux tooling (semodule) not found",
+                   fix="sudo dnf install policycoreutils")
+        else:
+            loaded = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
+            if module in loaded.stdout.split():
+                _check("selinux_module", True,
+                       f"SELinux module loaded: {module} "
+                       f"(type {selinux_type_name(config.name)})")
+            else:
+                _check("selinux_module", False,
+                       f"SELinux module not loaded: {module}",
+                       fix=f"sudo workloadctl enable {config.name}")
 
     # Check 4: Runtime directory exists
     if user_exists:
@@ -4578,7 +4749,7 @@ def main():
                                help="Don't stop the service (live backup, may be inconsistent)")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users and directories")
+    cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users, directories, and SELinux modules")
     cleanup_parser.add_argument("--apply", action="store_true",
                                 help="Actually remove orphaned users/dirs (default is dry run)")
     cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")

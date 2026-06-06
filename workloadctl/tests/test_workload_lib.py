@@ -21,6 +21,7 @@ from workload_lib import (
     validate_workload_config, infer_workload_mode, normalize_containers,
     parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address,
     substitute_template, QMPClient,
+    selinux_module_name, selinux_type_name,
 )
 
 
@@ -268,6 +269,32 @@ class TestValidation(unittest.TestCase):
 
     def test_max_length_accepted(self):
         validate_workload_name("a" * MAX_NAME_LENGTH)
+
+
+class TestSelinuxIdentifiers(unittest.TestCase):
+    def test_simple_name(self):
+        self.assertEqual(selinux_module_name("alloy"), "wl_alloy")
+        # Type is the CIL-namespaced process domain (wl_<name>.process).
+        self.assertEqual(selinux_type_name("alloy"), "wl_alloy.process")
+
+    def test_hyphens_become_underscores(self):
+        self.assertEqual(selinux_module_name("wayfire-bob"), "wl_wayfire_bob")
+        self.assertEqual(selinux_type_name("vncdesktop-wayfire"),
+                         "wl_vncdesktop_wayfire.process")
+
+    def test_identifiers_are_selinux_safe(self):
+        # The module/block name is a plain identifier; the type adds the CIL
+        # namespace separator '.' before the inherited 'process' domain.
+        for name in ["alloy", "wayfire-bob", "vncdesktop-labwc", "a1-b2-c3"]:
+            self.assertRegex(selinux_module_name(name), r"^[a-zA-Z0-9_]+$")
+            self.assertRegex(selinux_type_name(name), r"^[a-zA-Z0-9_]+\.process$")
+
+    def test_sanitize_is_injective(self):
+        # NAME_PATTERN forbids underscores, so hyphen->underscore never collides:
+        # distinct valid names always map to distinct types.
+        names = ["a-b", "ab", "a-b-c", "abc", "x-y", "xy"]
+        types = [selinux_type_name(n) for n in names]
+        self.assertEqual(len(types), len(set(types)))
 
 
 class TestExpandVolumePath(unittest.TestCase):

@@ -75,6 +75,37 @@ Uses systemd credentials (`systemd-creds`) for secret management:
 - `${SECRET:name}` syntax in environment variables for auto-detection
 - Portable export/import between machines
 
+### SELinux confinement
+
+A workload that needs rights beyond the stock container domain sets
+`[security].selinux_policy = true` and ships a policy file. Each such workload
+gets its **own** SELinux type (`wl_<name>.process`) rather than adding rules to
+the shared `container_t`. This matters because a `semodule` load is global: a
+rule written against `container_t` widens *every* container on the host, so the
+desktop/telemetry workloads' device and journal grants would otherwise leak
+host-wide. Per-workload types keep each workload's extra rights scoped to
+itself, and — because the type is keyed on the workload name — a duplicated
+workload gets an independently loadable/removable module.
+
+The policy is written in **CIL** (Common Intermediate Language, the IR the
+SELinux userspace compiles `.te`/`.pp` down to), not `.te`, for two reasons:
+
+- **Inheritance.** `(block wl_<name> (blockinherit container) ...)` stamps out a
+  full copy of the base `container` domain and adds the workload's extra rules
+  on top. A flat `.te` rule on `container_t` can't be "copied per workload";
+  a bare `typeattribute container_domain` is not a complete container domain
+  (the container won't even start). Inheriting udica's base block is what
+  supplies the full domain.
+- **Namespacing + direct load.** CIL blocks namespace their types
+  (`wl_<name>.process`), so two workloads never collide on a shared type, and
+  `semodule -i` loads `.cil` directly — no `checkmodule`/`semodule_package`
+  compile step (and no `checkpolicy` dependency).
+
+Authoring is done with **udica** against a running container; it emits the CIL
+block and the base templates (`/usr/share/udica/templates/*.cil`) that
+workloadctl loads alongside the workload module on `enable`. See
+`docs/workload-bundles.md` "SELinux: per-workload types".
+
 ## Key Commands
 
 | Command | Description |

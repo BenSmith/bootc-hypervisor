@@ -106,6 +106,23 @@ RUN dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \
     dnf install -y steam mesa-va-drivers-freeworld && \
     dnf clean all
 
+# Fedora 44 dropped the consolidated CA bundle files (cert.pem, ca-bundle.crt,
+# ca-certificates.crt) and their /etc/ssl symlinks in favour of the faster
+# directory-hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile
+# System tools (curl/git) use the hash dir and still work, but apps with a
+# bundled TLS stack that read the consolidated bundle *file* — here Steam's
+# OpenSSL — fail with "unable to load trusted SSL root certificates", so every
+# HTTPS request returns "http error 0", the bootstrap self-update never
+# completes, and Steam refuses to start. Restore the legacy names as symlinks to
+# the stable extracted bundle (Fedora's documented permanent approach; the
+# `update-ca-trust extract --rhbz2387674` temp flag is intentionally avoided —
+# it's discouraged for automation and slated for removal).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
 # --- Sunshine ---
 # Sunshine captures the wayfire display via wlr-screencopy and encodes with
 # the GPU's hardware encoder. Encoder + adapter are detected at runtime from

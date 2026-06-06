@@ -722,6 +722,32 @@ virtualization = true
 #
 # security_opt = []
 
+# Optional: Ship a per-workload SELinux type
+# Type: bool OR string
+# Default: false
+# When true, `enable` loads the bundle's udica-style CIL policy
+# (containers/<bundle>/<bundle>.cil) as a name-keyed module (wl_<name>) and the
+# generator labels the container with type wl_<name>.process; `disable` removes
+# it.
+#
+# The bundle dir defaults to the workload name (true → containers/<name>/). Set
+# a string to source the CIL from a differently-named bundle instead — e.g.
+# `selinux_policy = "vncdesktop-sway"` loads containers/vncdesktop-sway/
+# vncdesktop-sway.cil. This decouples the policy source from the workload name,
+# so a renamed workload can keep using its original bundle (the loaded module
+# and label stay wl_<name>.process regardless). The string must be a valid
+# workload-style name ([a-z][a-z0-9-]*).
+#
+# The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted
+# at enable time), e.g.:
+#     (block __WL_MODULE__
+#         (blockinherit container)        ; required — full container domain
+#         (blockinherit net_container)    ; if the workload needs the network
+#         (allow process <target_type> (<class> (<perms>))))
+# Author new policy with `udica` against a running container. See
+# docs/workload-bundles.md and llms.txt "SELinux confinement" for the rationale.
+# selinux_policy = false
+
 # Optional: Additional system groups for the workload user
 # Type: array of strings
 # Default: [] (no additional groups)

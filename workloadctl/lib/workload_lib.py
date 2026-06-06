@@ -561,6 +561,30 @@ def validate_workload_name(name: str):
         )
 
 
+# --- Per-workload SELinux identifiers ---
+#
+# Each workload that ships extra rights gets its own name-keyed type instead of
+# widening the shared container_t: a CIL module `wl_<name>` defining the process
+# domain `wl_<name>.process`. The CLI (which loads the policy) and the generator
+# (which labels the container) both derive identifiers through these functions
+# so they can't drift. See llms.txt "SELinux confinement" for the rationale.
+#
+# hyphen->underscore is injective: NAME_PATTERN forbids underscores, so two
+# distinct workload names can never collide on the same type.
+
+def selinux_module_name(name: str) -> str:
+    """SELinux/CIL module (block) name for a workload, e.g. 'wl_wayfire_bob'."""
+    return "wl_" + name.replace("-", "_")
+
+
+def selinux_type_name(name: str) -> str:
+    """SELinux process type for a workload, e.g. 'wl_wayfire_bob.process'.
+
+    Passed to `podman --security-opt label=type:`.
+    """
+    return selinux_module_name(name) + ".process"
+
+
 # --- Volume path expansion ---
 
 def expand_volume_path(vol_spec: str, home_dir: str) -> str:

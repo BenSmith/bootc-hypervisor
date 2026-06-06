@@ -972,5 +972,17 @@ RUN mkdir -p /etc/systemd/system && \
     chmod +x /etc/xdg/labwc/autostart /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-prestart
 
+# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
+# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
+# which breaks apps with a bundled TLS stack that read the bundle *file* (e.g.
+# Sunshine/Steam: "unable to load trusted SSL root certificates", "http error 0").
+# Restore the legacy names as symlinks to the stable extracted bundle (Fedora's
+# documented permanent fix; the --rhbz2387674 temp flag is intentionally avoided).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

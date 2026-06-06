@@ -82,6 +82,7 @@ try:
         VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE,
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tag, parse_volume_spec,
+        selinux_type_name,
     )
     _early_log("Python imports complete")
 except Exception as e:
@@ -772,6 +773,14 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     security_opts = container.get("security", {}).get("security_opt", [])
     for opt in security_opts:
         podman_args.append(f"--security-opt={opt}")
+
+    # Per-workload SELinux type: launch the container under wl_<name>.process
+    # instead of widening the shared container_t/container_init_t domains (a
+    # global semodule load). The matching CIL policy module is loaded by the CLI
+    # on enable; here we only apply the label, which is a pure string function of
+    # the workload name — no I/O, boot-path safe.
+    if container.get("security", {}).get("selinux_policy"):
+        podman_args.append(f"--security-opt=label=type:{selinux_type_name(name)}")
 
     # Apply baseline seccomp profile unless the workload overrides it or uses --privileged
     # (--privileged disables seccomp anyway; adding it would just be noise)

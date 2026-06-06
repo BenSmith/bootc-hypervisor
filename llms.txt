@@ -85,7 +85,7 @@ policy-hypervisor.json.template           Policy template with registry allowlis
 policy-minimal.json.template              Minimal policy template
 
 security/
-  seatd_container.te                      SELinux module: allow containers to use seatd socket
+  seatd_container.cil                     SELinux module (CIL): allow containers to use seatd socket
   pwquality-no-dictionary.conf            Disable dictionary check for password quality
 
 systemd/

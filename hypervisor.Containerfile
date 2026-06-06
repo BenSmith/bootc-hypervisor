@@ -137,7 +137,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     rsync \
     samba-client \
     seatd \
-    selinux-policy-devel \
     setools-console \
     shim \
     skopeo \
@@ -153,6 +152,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     traceroute \
     tuned \
     tzdata \
+    udica \
     usbutils \
     virglrenderer \
     virtiofsd \
@@ -196,16 +196,17 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     mkdir -p /etc/systemd/resolved.conf.d && \
     printf '[Resolve]\nMulticastDNS=resolve\n' > /etc/systemd/resolved.conf.d/10-mdns.conf
 
-# SELinux: allow containers to connect to host seatd socket (KMS desktop workloads)
-# and allow containers to access host devices (GPU, input)
+# SELinux: allow containers to access host devices (GPU, input)
 RUN setsebool -P container_use_devices on
 
-COPY security/seatd_container.te /tmp/seatd_container.te
+# SELinux: gate container access to the host seatd socket (KMS desktops) behind
+# the seatd_container_connect boolean, shipped OFF so the host-wide container_t
+# grant is inert until a KMS desktop is run:
+#   sudo setsebool -P seatd_container_connect on
+COPY security/seatd_container.cil /tmp/seatd_container.cil
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
-    checkmodule -M -m -o /tmp/seatd_container.mod /tmp/seatd_container.te && \
-    semodule_package -o /tmp/seatd_container.pp -m /tmp/seatd_container.mod && \
-    semodule -i /tmp/seatd_container.pp && \
-    rm -f /tmp/seatd_container.te /tmp/seatd_container.mod /tmp/seatd_container.pp
+    semodule -i /tmp/seatd_container.cil && \
+    rm -f /tmp/seatd_container.cil
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
