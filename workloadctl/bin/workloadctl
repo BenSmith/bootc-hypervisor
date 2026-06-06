@@ -399,6 +399,35 @@ class WorkloadConfig:
         return result
 
 
+def delegated_unit_cgroup(proc_cgroup_text: str) -> str | None:
+    """Relative cgroup path of a container's *delegated* systemd unit, parsed
+    from the contents of its /proc/<pid>/cgroup; None when there isn't one.
+
+    Containers started with --cgroups=split (single/bridge mode) run under the
+    system manager's workloads.slice, e.g.
+
+        0::/workloads.slice/workload-bigdevfire.service/libpod-payload-<id>
+
+    The `workload-<name>.service` (or `workload-<name>-<container>.service` in
+    bridge mode) directory is the cgroup systemd delegated to the workload user
+    (Delegate=yes), so this returns "/workloads.slice/workload-bigdevfire.service".
+
+    When the container instead lives in the *user* manager (pod mode, or a
+    container migrated to user@<uid>.service without split) there is no
+    `workload-*.service` ancestor, so this returns None and callers fall back to
+    the plain `sudo -u` exec path (which works there).
+    """
+    rel = ""
+    for line in proc_cgroup_text.splitlines():
+        if line.startswith("0::"):  # cgroup v2 unified line
+            rel = line[3:]
+            break
+    parts = [p for p in rel.split("/") if p]
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i].startswith("workload-") and parts[i].endswith(".service"):
+            return "/" + "/".join(parts[: i + 1])
+    return None
+
 
 class WorkloadManager:
     """Manages workload operations"""
@@ -429,6 +458,96 @@ class WorkloadManager:
                "podman"] + list(args)
         return subprocess.run(cmd, capture_output=capture_output, text=True,
                               check=check, cwd=cwd)
+
+    def run_podman_exec(self, config: WorkloadConfig, container: str, args,
+                        check=False, capture_output=False):
+        """Run `podman exec <args>` against a workload container, joining the
+        container's delegated unit cgroup first so the exec actually works.
+
+        Containers started with --cgroups=split run under the system manager's
+        workloads.slice. A normal `sudo -u` re-homes the child into a *user*
+        login-session scope (pam_systemd), so crun's attempt to migrate the exec
+        process into the container's cgroup crosses the root cgroup boundary and
+        fails — `crun: write to .../cgroup.procs: Permission denied` — which is
+        also why podman's own healthcheck can't run. We instead (as root) join a
+        leaf of the container's delegated unit cgroup, then drop privileges
+        *without* PAM (setresuid in a preexec hook) so the migration stays inside
+        the delegated subtree.
+
+        `container` is the container name used to look up the running PID; `args`
+        is the full `podman exec` argument vector (options, container, command).
+        Falls back to the plain `sudo -u` path when not running as root or when
+        the container is not under a delegated unit cgroup (pod mode, or a
+        container that migrated into the user manager) — exec works normally
+        there.
+        """
+        def plain():
+            return self.run_podman(config, "exec", *args,
+                                   check=check, capture_output=capture_output)
+
+        if os.geteuid() != 0:
+            return plain()
+
+        # Locate the container's delegated unit cgroup via its PID.
+        pid_res = self.run_podman(config, "inspect", container,
+                                  "--format", "{{.State.Pid}}", capture_output=True)
+        pid = pid_res.stdout.strip() if pid_res.returncode == 0 else ""
+        if not pid or pid == "0":
+            return plain()
+        try:
+            unit_rel = delegated_unit_cgroup(Path(f"/proc/{pid}/cgroup").read_text())
+        except OSError:
+            return plain()
+        if not unit_rel:
+            return plain()
+
+        uid, gid, username = config.uid, config.gid, config.username
+
+        leaf = Path("/sys/fs/cgroup") / unit_rel.lstrip("/") / "wlctl-exec"
+        try:
+            leaf.mkdir(exist_ok=True)
+            # The leaf must be *owned* by the workload uid, not merely writable.
+            # We park podman in this leaf (the migration's source cgroup), then
+            # crun migrates the exec process out of it into the container payload.
+            # cgroup v2 delegation grants that move only when the rootless euid
+            # owns the source cgroup directory: a root-owned leaf fails with
+            # `crun: write to .../cgroup.procs: Permission denied` even though the
+            # placement write itself is done as root. (Owning the directory is
+            # what counts; chowning cgroup.procs alone is not enough — verified
+            # live on onepiece.) See [[cgroups-split-breaks-podman-exec]].
+            os.chown(leaf, uid, gid)
+        except OSError:
+            return plain()
+
+        procs_file = str(leaf / "cgroup.procs")
+        env = {
+            "XDG_RUNTIME_DIR": f"/run/user/{uid}",
+            "HOME": str(config.home_dir),
+            "PATH": "/usr/bin:/bin",
+            "TERM": os.environ.get("TERM", "xterm"),
+        }
+
+        def _enter_cgroup_and_drop_privs():
+            # Forked child, still root, pre-execve: join the delegated leaf, then
+            # drop to the workload user without PAM (no session-scope re-homing).
+            with open(procs_file, "w") as f:
+                f.write(str(os.getpid()))
+            os.initgroups(username, gid)
+            os.setgid(gid)
+            os.setuid(uid)
+
+        try:
+            return subprocess.run(
+                ["/usr/bin/podman", "exec", *args],
+                preexec_fn=_enter_cgroup_and_drop_privs,
+                env=env, check=check, capture_output=capture_output,
+                text=True, cwd="/tmp",
+            )
+        finally:
+            try:
+                leaf.rmdir()  # best-effort; fails (ignored) if another exec is live
+            except OSError:
+                pass
 
     def podman(self, config: WorkloadConfig) -> Podman:
         """Return a memoized Podman wrapper for this workload's user."""
@@ -1718,8 +1837,8 @@ def cmd_reboot(args, manager: WorkloadManager):
         print(f"✓ VM '{args.workload}' soft-reboot initiated (disk preserved)")
         return
 
-    result = manager.run_podman(config, "exec", config.container_name,
-                                "systemctl", "soft-reboot")
+    result = manager.run_podman_exec(config, config.container_name,
+                                     [config.container_name, "systemctl", "soft-reboot"])
     if result.returncode != 0:
         print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
         sys.exit(1)
@@ -1892,9 +2011,9 @@ def cmd_shell(args, manager: WorkloadManager):
     # Try bash first, fall back to sh only if bash isn't available in the image.
     # 127 = command not found; any other non-zero is propagated from the user's
     # last command (e.g. 130 after ^C), not a reason to relaunch.
-    result = manager.run_podman(config, "exec", *exec_opts, target, "/bin/bash")
+    result = manager.run_podman_exec(config, target, [*exec_opts, target, "/bin/bash"])
     if result.returncode == 127:
-        manager.run_podman(config, "exec", *exec_opts, target, "/bin/sh", check=True)
+        manager.run_podman_exec(config, target, [*exec_opts, target, "/bin/sh"], check=True)
 
 
 def cmd_exec(args, manager: WorkloadManager):
@@ -1928,7 +2047,7 @@ def cmd_exec(args, manager: WorkloadManager):
         sys.exit(result.returncode)
 
     target = resolve_container_target(config, container, workload)
-    manager.run_podman(config, "exec", "-it", target, *exec_args, check=True)
+    manager.run_podman_exec(config, target, ["-it", target, *exec_args], check=True)
 
 
 def cmd_logs(args, manager: WorkloadManager):
