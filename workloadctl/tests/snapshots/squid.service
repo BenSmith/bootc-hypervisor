@@ -7,6 +7,7 @@ Requires=workload-squid-setup.service
 After=network.target workload-squid-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+Wants=workload-squid-health.timer
 
 [Service]
 Type=exec
@@ -15,6 +16,7 @@ Delegate=yes
 User=_wl-squid
 Group=_wl-squid
 Environment="HOME=/var/lib/workloads/squid"
+Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-squid.env
 
 # Resource limits and constraints
@@ -25,7 +27,7 @@ MemoryHigh=384M
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-squid" --hostname "squid" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 3128:3128 --volume "/var/lib/workloads/squid/squid.conf":/etc/squid/squid.conf:ro --volume "/var/lib/workloads/squid/cache":/var/spool/squid --env HOST_IP=${HOST_IP} --health-cmd "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/squid:latest"
+ExecStart=/usr/bin/podman run --name "workload-squid" --hostname "squid" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 3128:3128 --volume "/var/lib/workloads/squid/squid.conf":/etc/squid/squid.conf:ro --volume "/var/lib/workloads/squid/cache":/var/spool/squid --env HOST_IP=${HOST_IP} --health-cmd "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=none "localhost/squid:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-squid"
 

@@ -7,6 +7,7 @@ Requires=workload-caddy-setup.service
 After=network.target workload-caddy-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+Wants=workload-caddy-health.timer
 
 [Service]
 Type=simple
@@ -15,6 +16,7 @@ Delegate=yes
 User=_wl-caddy
 Group=_wl-caddy
 Environment="HOME=/var/lib/workloads/caddy"
+Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-caddy.env
 
 # Resource limits and constraints
@@ -25,7 +27,7 @@ MemoryHigh=128M
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-caddy" --hostname "caddy" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/caddy/Caddyfile":/etc/caddy/Caddyfile:ro --volume "/var/lib/workloads/caddy/data":/var/lib/caddy --volume "/var/lib/workloads/caddy/config":/etc/caddy/config --volume "/var/lib/workloads/caddy/homelab-root.crt":/etc/caddy/homelab-root.crt:ro --volume "/var/lib/workloads/caddy/homelab-root.key":/etc/caddy/homelab-root.key:ro --env HOST_IP=${HOST_IP} --health-cmd "curl -sS --max-time 5 -o /dev/null http://localhost:80/" --health-interval=30s --health-timeout=10s --health-retries=3 --health-start-period=15s --health-on-failure=kill "localhost/caddy:latest"
+ExecStart=/usr/bin/podman run --name "workload-caddy" --hostname "caddy" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/caddy/Caddyfile":/etc/caddy/Caddyfile:ro --volume "/var/lib/workloads/caddy/data":/var/lib/caddy --volume "/var/lib/workloads/caddy/config":/etc/caddy/config --volume "/var/lib/workloads/caddy/homelab-root.crt":/etc/caddy/homelab-root.crt:ro --volume "/var/lib/workloads/caddy/homelab-root.key":/etc/caddy/homelab-root.key:ro --env HOST_IP=${HOST_IP} --health-cmd "curl -sS --max-time 5 -o /dev/null http://localhost:80/" --health-interval=30s --health-timeout=10s --health-retries=3 --health-start-period=15s --health-on-failure=none "localhost/caddy:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-caddy"
 

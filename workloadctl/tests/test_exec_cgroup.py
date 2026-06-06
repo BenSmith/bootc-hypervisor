@@ -67,5 +67,26 @@ class TestDelegatedUnitCgroup(unittest.TestCase):
                          "/workloads.slice/workload-bigdevfire.service")
 
 
+class TestCgroupExecModule(unittest.TestCase):
+    """The shared lib/cgroup_exec module imports cleanly and exposes the same
+    parser (used by both `workloadctl exec` and the split healthcheck libexec)."""
+
+    def test_module_importable_and_parses(self):
+        import cgroup_exec
+        self.assertTrue(callable(cgroup_exec.delegated_unit_cgroup))
+        self.assertTrue(callable(cgroup_exec.cgroup_placed_podman))
+        self.assertEqual(
+            cgroup_exec.delegated_unit_cgroup(
+                "0::/workloads.slice/workload-foo.service/libpod-payload-x\n"),
+            "/workloads.slice/workload-foo.service",
+        )
+
+    def test_bin_reexports_lib(self):
+        # bin/workloadctl imports the parser from cgroup_exec, so it's the same
+        # object — exec and the healthcheck libexec can't drift apart.
+        import cgroup_exec
+        self.assertIs(wctl.delegated_unit_cgroup, cgroup_exec.delegated_unit_cgroup)
+
+
 if __name__ == "__main__":
     unittest.main()

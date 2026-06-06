@@ -9,6 +9,7 @@ BindsTo=workload-webproxy-demo-net.service
 PartOf=workload-webproxy-demo.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+Wants=workload-webproxy-demo-app-health.timer
 
 [Service]
 Type=exec
@@ -17,6 +18,7 @@ Delegate=yes
 User=_wl-webproxy-demo
 Group=_wl-webproxy-demo
 Environment="HOME=/var/lib/workloads/webproxy-demo"
+Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-webproxy-demo.env
 
 # Resource limits and constraints
@@ -26,7 +28,7 @@ MemoryHigh=48M
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-webproxy-demo-app" --hostname "webproxy-demo" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-webproxy-demo-net" --network-alias="app" --env HOST_IP=${HOST_IP} --health-cmd "wget -qO- http://localhost:8080/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/traefik/whoami:latest" "--port" "8080"
+ExecStart=/usr/bin/podman run --name "workload-webproxy-demo-app" --hostname "webproxy-demo" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-webproxy-demo-net" --network-alias="app" --env HOST_IP=${HOST_IP} --health-cmd "wget -qO- http://localhost:8080/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=none "docker.io/traefik/whoami:latest" "--port" "8080"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-webproxy-demo-app"
 

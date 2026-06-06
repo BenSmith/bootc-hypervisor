@@ -1,0 +1,124 @@
+#!/usr/bin/python3
+"""Run a split workload's healthcheck from the system manager.
+
+Containers started with --cgroups=split run under the system manager's
+workloads.slice. podman's own healthcheck timer runs from the *user* manager
+(`systemd-run --user`), so its probe exec can't migrate into the container's
+payload cgroup across the root cgroup boundary and always records failure. We
+disable that timer (DISABLE_HC_SYSTEMD=true on the workload unit) and instead
+run the probe from here, parked in the container's *delegated* unit cgroup —
+the same mechanism `workloadctl exec` uses. See the project memory note
+`cgroups-split-breaks-podman-exec`.
+
+This is the ExecStart of a system oneshot service fired by a per-workload
+.timer (both emitted by workload-generate). It:
+  1. runs `podman healthcheck run <container>` cgroup-placed (updates podman's
+     health status / failing-streak / log, respecting --health-retries);
+  2. reads the resulting status; and
+  3. on `unhealthy`, takes the configured on_failure action against the
+     workload's systemd unit (restart / stop). podman's own --health-on-failure
+     is pinned to none so the action lives here, in the system manager.
+
+Always exits 0: a healthcheck-infra hiccup must never fault the timer or the
+workload. Usage:
+
+    workload-healthcheck <workload> <podman-container-name> <unit-name> <on_failure>
+"""
+
+import pwd
+import subprocess
+import sys
+from pathlib import Path
+
+# --- workloadctl lib bootstrap ---------------------------------------------
+# Keep this block byte-identical across bin/workloadctl, generators/workload-
+# generate, and libexec/workload-{ensure-user,write-env,exporter}. Locates
+# workload_lib.py (and its sibling podman.py) in: this script's own dir
+# (installed libexec scripts), <repo>/lib (dev checkout), or
+# /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match wins;
+# insert(0) keeps it ahead of any PyPI package of the same name. True
+# centralization needs a packaging change (sitelib install or .pth file).
+_here = Path(__file__).resolve().parent
+for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
+    if (_libdir / "workload_lib.py").is_file():
+        sys.path.insert(0, str(_libdir))
+        break
+# --- end bootstrap ---------------------------------------------------------
+from workload_lib import workload_username, WORKLOADS_BASE
+from cgroup_exec import delegated_unit_cgroup, cgroup_placed_podman
+
+
+def log(msg):
+    print(f"workload-healthcheck: {msg}", file=sys.stderr)
+
+
+def run_podman_as(username, uid, home, args, capture=True):
+    """`sudo -u` podman for read-only calls (inspect) that don't exec into the
+    container, so don't need cgroup placement."""
+    cmd = ["sudo", "-n", "-u", username,
+           "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+           "-E", f"HOME={home}", "podman", *args]
+    return subprocess.run(cmd, capture_output=capture, text=True, cwd="/tmp")
+
+
+def main():
+    if len(sys.argv) != 5:
+        log(f"usage: {sys.argv[0]} <workload> <container> <unit> <on_failure>")
+        return 0
+
+    name, container, unit, on_failure = sys.argv[1:5]
+
+    username = workload_username(name)
+    try:
+        pw = pwd.getpwnam(username)
+    except KeyError:
+        log(f"user {username} does not exist yet; skipping")
+        return 0
+    uid, gid = pw.pw_uid, pw.pw_gid
+    home = str(WORKLOADS_BASE / name)
+
+    # Locate the container's delegated unit cgroup via its PID.
+    pid_res = run_podman_as(username, uid, home, ["inspect", container,
+                                        "--format", "{{.State.Pid}}"])
+    pid = pid_res.stdout.strip() if pid_res.returncode == 0 else ""
+    if not pid or pid == "0":
+        log(f"{container} not running; skipping probe")
+        return 0
+    try:
+        unit_rel = delegated_unit_cgroup(Path(f"/proc/{pid}/cgroup").read_text())
+    except OSError:
+        unit_rel = None
+    if not unit_rel:
+        # Not under a delegated unit cgroup (e.g. pod mode / user manager).
+        # podman's own timer handles those, so there's nothing for us to do.
+        log(f"{container} not under a delegated unit cgroup; skipping")
+        return 0
+
+    # Run the probe cgroup-placed. This updates podman's stored health status,
+    # failing-streak and log (honouring --health-retries / --health-start-period).
+    try:
+        cgroup_placed_podman(unit_rel, uid, gid, username, home,
+                             ["healthcheck", "run", container],
+                             leaf_name="wlctl-hc", capture_output=True)
+    except OSError as e:
+        log(f"could not place probe in cgroup: {e}")
+        return 0
+
+    # Read the retry-aware verdict podman just recorded and act on it.
+    st = run_podman_as(username, uid, home, ["inspect", container, "--format",
+                                   "{{.State.Health.Status}}"])
+    status = st.stdout.strip() if st.returncode == 0 else "unknown"
+    if status != "unhealthy":
+        return 0
+
+    action = {"restart": "restart", "kill": "restart", "stop": "stop"}.get(on_failure)
+    if not action:
+        # on_failure == "none" (or unrecognised): status-only, no action.
+        return 0
+    log(f"{container} unhealthy -> systemctl {action} {unit}")
+    subprocess.run(["systemctl", action, "--no-block", unit], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

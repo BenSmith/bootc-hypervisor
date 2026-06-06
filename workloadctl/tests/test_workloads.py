@@ -457,7 +457,13 @@ class TestWorkloadGeneration(unittest.TestCase):
                     if "start_period" in health:
                         self.assertIn(f"--health-start-period={health['start_period']}", service)
                     if "on_failure" in health:
-                        self.assertIn(f"--health-on-failure={health['on_failure']}", service)
+                        # Under --cgroups=split, podman's own healthcheck timer
+                        # is suppressed and its on-failure action is pinned to
+                        # none — workload-healthcheck (a system-manager timer)
+                        # owns the action. See test_generator for that timer.
+                        expected = ("none" if "--cgroups=split" in service
+                                    else health["on_failure"])
+                        self.assertIn(f"--health-on-failure={expected}", service)
                 else:
                     self.assertNotIn("--health-cmd", service,
                                      f"Unexpected --health-cmd for {name}")

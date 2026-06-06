@@ -299,7 +299,81 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertIn('--health-cmd "curl -f http://localhost/ || exit 1"', web)
         self.assertIn("--health-interval=10s", web)
         self.assertIn("--health-start-period=5s", web)
+        # Under --cgroups=split (bridge mode) podman's own user-manager
+        # healthcheck timer is broken, so the generator suppresses it, pins
+        # podman's own on-failure action to none (workload-healthcheck owns it),
+        # and Wants= a system-manager timer instead.
+        self.assertIn("--health-on-failure=none", web)
+        self.assertNotIn("--health-on-failure=kill", web)
+        self.assertIn("Environment=DISABLE_HC_SYSTEMD=true", web)
+        self.assertIn("Wants=workload-app-web-health.timer", web)
+
+    def test_split_healthcheck_units_emitted(self):
+        """A split (single-mode) workload with a health.cmd gets a paired
+        system-manager healthcheck .service + .timer that runs
+        workload-healthcheck, and the workload unit suppresses podman's own
+        --user timer."""
+        write_config(self.config_dir, "hc", """\
+            [workload]
+            name = "hc"
+            enabled = true
+            mode = "single"
+
+            [container]
+            image = "myapp:latest"
+            [container.health]
+            cmd = "test -f /tmp/ok"
+            interval = "30s"
+            start_period = "15s"
+            on_failure = "restart"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        svc = (Path(self.services_dir) / "workload-hc.service").read_text()
+        self.assertIn("Environment=DISABLE_HC_SYSTEMD=true", svc)
+        self.assertIn("Wants=workload-hc-health.timer", svc)
+        self.assertIn("--health-on-failure=none", svc)
+
+        hsvc = (Path(self.services_dir) / "workload-hc-health.service").read_text()
+        self.assertIn(
+            "ExecStart=/usr/libexec/workloadctl/workload-healthcheck "
+            "hc workload-hc workload-hc.service restart",
+            hsvc,
+        )
+        self.assertIn("Type=oneshot", hsvc)
+        self.assertIn("BindsTo=workload-hc.service", hsvc)
+
+        timer = (Path(self.services_dir) / "workload-hc-health.timer").read_text()
+        self.assertIn("OnActiveSec=15s", timer)
+        self.assertIn("OnUnitActiveSec=30s", timer)
+        self.assertIn("BindsTo=workload-hc.service", timer)
+
+    def test_pod_mode_keeps_podman_healthcheck(self):
+        """Pod-mode containers run in the user manager where podman's own
+        healthcheck timer works, so the generator must NOT suppress it or emit
+        its own timer."""
+        write_config(self.config_dir, "pm", """\
+            [workload]
+            name = "pm"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.health]
+            cmd = "true"
+            on_failure = "kill"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        web = (Path(self.services_dir) / "workload-pm-web.service").read_text()
         self.assertIn("--health-on-failure=kill", web)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", web)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-pm-web-health.timer").exists()
+        )
 
     def test_per_container_secret_env_var(self):
         """${SECRET:name} inside a [containers.environment] block must trigger

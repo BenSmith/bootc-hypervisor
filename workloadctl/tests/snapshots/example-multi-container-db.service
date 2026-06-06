@@ -9,6 +9,7 @@ BindsTo=workload-example-multi-container-net.service
 PartOf=workload-example-multi-container.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+Wants=workload-example-multi-container-db-health.timer
 
 [Service]
 Type=exec
@@ -17,6 +18,7 @@ Delegate=yes
 User=_wl-example-multi-container
 Group=_wl-example-multi-container
 Environment="HOME=/var/lib/workloads/example-multi-container"
+Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-example-multi-container.env
 
 # Resource limits and constraints
@@ -30,7 +32,7 @@ ExecStartPre=+/usr/libexec/workloadctl/workload-write-env example-multi-containe
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-example-multi-container-db" --hostname "example-multi-container" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-example-multi-container-net" --network-alias="db" --volume "/var/lib/workloads/example-multi-container/db":/var/lib/postgresql/data --env HOST_IP=${HOST_IP} --env POSTGRES_USER=forgejo --env POSTGRES_DB=forgejo --env-file "/run/workload-env/workload-example-multi-container-db.secrets" --health-cmd "pg_isready -U forgejo" --health-interval=30s --health-start-period=30s --health-on-failure=kill "docker.io/library/postgres:16"
+ExecStart=/usr/bin/podman run --name "workload-example-multi-container-db" --hostname "example-multi-container" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-example-multi-container-net" --network-alias="db" --volume "/var/lib/workloads/example-multi-container/db":/var/lib/postgresql/data --env HOST_IP=${HOST_IP} --env POSTGRES_USER=forgejo --env POSTGRES_DB=forgejo --env-file "/run/workload-env/workload-example-multi-container-db.secrets" --health-cmd "pg_isready -U forgejo" --health-interval=30s --health-start-period=30s --health-on-failure=none "docker.io/library/postgres:16"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-example-multi-container-db"
 
