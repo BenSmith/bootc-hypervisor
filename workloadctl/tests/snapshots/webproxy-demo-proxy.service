@@ -13,6 +13,7 @@ StartLimitBurst=5
 [Service]
 Type=exec
 Slice=workloads.slice
+Delegate=yes
 User=_wl-webproxy-demo
 Group=_wl-webproxy-demo
 Environment="HOME=/var/lib/workloads/webproxy-demo"
@@ -25,7 +26,7 @@ MemoryHigh=96M
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-webproxy-demo-proxy" --hostname "webproxy-demo" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-webproxy-demo-net" --network-alias="proxy" --publish 8888:8080 --env HOST_IP=${HOST_IP} --health-cmd "wget -qO- http://localhost:8080/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/caddy:2-alpine" "caddy" "reverse-proxy" "--from" ":8080" "--to" "http://app:8080"
+ExecStart=/usr/bin/podman run --name "workload-webproxy-demo-proxy" --hostname "webproxy-demo" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="workload-webproxy-demo-net" --network-alias="proxy" --publish 8888:8080 --env HOST_IP=${HOST_IP} --health-cmd "wget -qO- http://localhost:8080/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/caddy:2-alpine" "caddy" "reverse-proxy" "--from" ":8080" "--to" "http://app:8080"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-webproxy-demo-proxy"
 
