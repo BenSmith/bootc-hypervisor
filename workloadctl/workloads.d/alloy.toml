@@ -32,13 +32,13 @@ required_files = [
 image = "docker.io/grafana/alloy:latest"
 # "newer" pulls only when a newer tag is available; falls back to local copy
 # if the registry is unreachable (e.g. boot before network is up).
-pull = "newer"
+pull = "never"
 
 [container.health]
 # The UI/metrics server (12345) is probed from inside the container, so this
 # works whether or not 12345 is published to the host.
 cmd = "bash -c 'exec 3<>/dev/tcp/localhost/12345' || exit 1"
-interval = "30s"
+interval = "60s"
 start_period = "30s"
 on_failure = "kill"
 

@@ -52,7 +52,8 @@ def delegated_unit_cgroup(proc_cgroup_text: str) -> str | None:
 
 def cgroup_placed_podman(unit_rel: str, uid: int, gid: int, username: str,
                          home_dir, podman_args, *, leaf_name: str,
-                         check=False, capture_output=False, extra_env=None):
+                         check=False, capture_output=False, extra_env=None,
+                         timeout=None):
     """Run `podman <podman_args>` parked in a uid-owned leaf of a split
     container's delegated unit cgroup, dropping privileges without PAM.
 
@@ -93,7 +94,7 @@ def cgroup_placed_podman(unit_rel: str, uid: int, gid: int, username: str,
             ["/usr/bin/podman", *podman_args],
             preexec_fn=_enter_cgroup_and_drop_privs,
             env=env, check=check, capture_output=capture_output,
-            text=True, cwd="/tmp",
+            text=True, cwd="/tmp", timeout=timeout,
         )
     finally:
         try:

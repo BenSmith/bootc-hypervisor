@@ -52,13 +52,18 @@ def log(msg):
     print(f"workload-healthcheck: {msg}", file=sys.stderr)
 
 
-def run_podman_as(username, uid, home, args, capture=True):
+def run_podman_as(username, uid, home, args, capture=True, timeout=30):
     """`sudo -u` podman for read-only calls (inspect) that don't exec into the
     container, so don't need cgroup placement."""
     cmd = ["sudo", "-n", "-u", username,
            "-E", f"XDG_RUNTIME_DIR=/run/user/{uid}",
            "-E", f"HOME={home}", "podman", *args]
-    return subprocess.run(cmd, capture_output=capture, text=True, cwd="/tmp")
+    try:
+        return subprocess.run(cmd, capture_output=capture, text=True, cwd="/tmp",
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"podman {' '.join(str(a) for a in args[:2])} timed out after {timeout}s")
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
 
 
 def main():
@@ -78,6 +83,7 @@ def main():
     home = str(WORKLOADS_BASE / name)
 
     # Locate the container's delegated unit cgroup via its PID.
+    log(f"{container}: inspecting PID")
     pid_res = run_podman_as(username, uid, home, ["inspect", container,
                                         "--format", "{{.State.Pid}}"])
     pid = pid_res.stdout.strip() if pid_res.returncode == 0 else ""
@@ -96,15 +102,21 @@ def main():
 
     # Run the probe cgroup-placed. This updates podman's stored health status,
     # failing-streak and log (honouring --health-retries / --health-start-period).
+    log(f"{container}: running healthcheck probe (cgroup: {unit_rel})")
     try:
         cgroup_placed_podman(unit_rel, uid, gid, username, home,
                              ["healthcheck", "run", container],
-                             leaf_name="wlctl-hc", capture_output=True)
+                             leaf_name="wlctl-hc", capture_output=True,
+                             timeout=180)
+    except subprocess.TimeoutExpired:
+        log(f"{container}: healthcheck probe timed out after 180s")
+        return 0
     except OSError as e:
         log(f"could not place probe in cgroup: {e}")
         return 0
 
     # Read the retry-aware verdict podman just recorded and act on it.
+    log(f"{container}: reading health status")
     st = run_podman_as(username, uid, home, ["inspect", container, "--format",
                                    "{{.State.Health.Status}}"])
     status = st.stdout.strip() if st.returncode == 0 else "unknown"
