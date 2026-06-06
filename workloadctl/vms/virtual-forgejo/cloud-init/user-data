@@ -248,33 +248,30 @@ write_files:
       fi
 
       # Caddyfile is written by write_files (substituted at ISO build time).
-      # app.ini.template is also written by write_files. The live app.ini is
-      # promoted from the template here only if Forgejo has not yet been
-      # initialized (INSTALL_LOCK absent or false). On instance-id rotation
-      # (e.g. a TOML edit that rebundles the ISO), cloud-init re-runs
-      # write_files but must NOT clobber an initialized app.ini: that file
-      # holds INSTALL_LOCK=true, SECRET_KEY, and INTERNAL_TOKEN — losing it
-      # silently resets Forgejo to the web installer and breaks git push.
+      # app.ini.template is also written by write_files. The live app.ini
+      # lives on the data disk (data/custom/conf/app.ini) so it survives
+      # system disk rebuilds — it is promoted from the template below only
+      # on first boot. On instance-id rotation (e.g. a TOML edit that
+      # rebundles the ISO), cloud-init re-runs write_files but the live
+      # app.ini on the data disk is untouched.
       install -d /var/lib/workloads/caddy
       install -d /var/lib/workloads/forgejo
-      if ! grep -q 'INSTALL_LOCK = true' /var/lib/workloads/forgejo/app.ini 2>/dev/null; then
-        cp /var/lib/workloads/forgejo/app.ini.template /var/lib/workloads/forgejo/app.ini
-      fi
 
       # Per-workload data dirs under each workload's home (on the system
       # disk btrfs for caddy; on data.qcow2 for forgejo via the
       # cloud-init mounts entry above). Created here so they exist before
-      # `workloadctl enable` starts the containers. Pre-create
-      # forgejo/data/custom/conf and the empty app.ini target so the
-      # single-file bind mount works — without this, crun tries to mkdir
-      # the mount-point chain at container start as the container's root
-      # (a subuid that doesn't own the parent), and the bind needs the
-      # target file to exist as a regular file before mount() can shadow
-      # it. Ownership/labels get set after `workloadctl enable` creates
-      # the workload users.
+      # `workloadctl enable` starts the containers. Ownership/labels get
+      # set after `workloadctl enable` creates the workload users.
       install -d /var/lib/workloads/caddy/data /var/lib/workloads/caddy/config
       install -d /var/lib/workloads/forgejo/data/custom/conf
-      : > /var/lib/workloads/forgejo/data/custom/conf/app.ini
+
+      # app.ini lives on the data disk (data.qcow2) so it survives system
+      # disk rebuilds. Promote from the template only if Forgejo has not
+      # yet been initialized — an existing app.ini holds INSTALL_LOCK=true,
+      # SECRET_KEY, and INTERNAL_TOKEN that must not be clobbered.
+      if ! grep -q 'INSTALL_LOCK = true' /var/lib/workloads/forgejo/data/custom/conf/app.ini 2>/dev/null; then
+        cp /var/lib/workloads/forgejo/app.ini.template /var/lib/workloads/forgejo/data/custom/conf/app.ini
+      fi
 
       # 5. Allow containers to bind privileged ports (< 1024) so Caddy can
       # serve :80/:443. Persist via sysctl.d so this survives reboots.
