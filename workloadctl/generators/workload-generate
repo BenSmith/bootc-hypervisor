@@ -735,9 +735,13 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # so that systemd resource directives (MemoryMax, CPUQuota, MemoryHigh, TasksMax,
     # IOWeight, etc.) actually bind the container's cgroup. Without this, conmon
     # migrates the container into a transient scope under user@<uid>.service and the
-    # unit directives are silently ignored. Pod members cannot use --cgroups=split
-    # (podman rejects it) — the flag is pod-mode-safe because pod members join the
-    # pod's cgroup hierarchy, not a unit-delegated one.
+    # unit directives are silently ignored.
+    #
+    # Pod mode is excluded: podman rejects --cgroups=split for pod members (they
+    # join the pod's own cgroup hierarchy). The consequence is that pod-member
+    # units do NOT get per-unit resource enforcement — their [resources]
+    # directives are emitted but don't bind, exactly the situation split fixes
+    # for single/bridge. See docs/resource-caps-and-split-review.md.
     if mode != "pod":
         podman_args.append("--cgroups=split")
 

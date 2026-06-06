@@ -403,6 +403,8 @@ If a group from `extra_groups` doesn't exist on the host, the generator warns an
 
 Control CPU, memory, I/O, and process limits for workloads using systemd cgroup v2 controls. Resource limits prevent workloads from consuming excessive system resources and allow you to prioritize critical workloads.
 
+> **How enforcement works (and a pod-mode caveat).** For limits to bind, the generated unit runs podman with `--cgroups=split` + `Delegate=yes` so the container's cgroup stays under `workloads.slice/workload-<name>.service`. workloadctl adds these automatically for **single-** and **bridge-mode** workloads. **Pod-mode** workloads are the exception: podman rejects `--cgroups=split` for pod members, so their `[resources]` directives are emitted but do not bind. Use single or bridge mode when you need enforceable per-workload limits. See [resource-caps-and-split-review.md](resource-caps-and-split-review.md).
+
 #### Workloads Slice (aggregate protection)
 
 All workloads run inside `workloads.slice` by default, which provides aggregate resource limits that protect the host even if individual workloads have no limits set:

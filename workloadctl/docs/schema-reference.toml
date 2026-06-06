@@ -511,11 +511,21 @@ image = "ghcr.io/example/workload:latest"
 # Default: "none"
 # Options:
 #   "none"    - Only mark as unhealthy (visible in podman inspect / metrics)
-#   "kill"    - Kill the container (systemd will restart it via Restart=on-failure)
-#   "restart" - Restart the container (podman-level restart, not systemd)
-#   "stop"    - Stop the container (systemd will restart it via Restart=on-failure)
-# Recommended: "kill" or "stop" — lets systemd handle the restart and track it
-#   in NRestarts, which surfaces in monitoring.
+#   "kill"    - Restart the workload unit (systemctl restart)
+#   "restart" - Restart the workload unit (systemctl restart)
+#   "stop"    - Stop the workload unit (systemctl stop); it stays down
+# Recommended: "kill" — restart the workload and track it in NRestarts, which
+#   surfaces in monitoring. Use "stop" only when a failing workload should stay
+#   down rather than flap.
+#
+# How the action fires: for single- and bridge-mode workloads (which run under
+# --cgroups=split), podman's own healthcheck timer can't exec into the container,
+# so workloadctl drives the probe from a system-manager timer
+# (workload-<name>-health.timer -> workload-healthcheck) and takes the on_failure
+# action there. Because the action is a systemctl verb on the unit, "kill" and
+# "restart" both mean "restart the unit", and "stop" leaves the unit stopped
+# (Restart=on-failure does not re-trigger on an explicit stop). Pod-mode
+# workloads keep podman's own --health-on-failure handling.
 # on_failure = "none"
 
 [container.environment]
@@ -853,7 +863,18 @@ ports = ["8080:80", "8443:443"]
 # - Use escape hatches for fine-grained control (custom systemd directives)
 #
 # All resource limits use systemd cgroup v2 controls applied at the service level.
-# This works seamlessly with rootless podman and provides comprehensive isolation.
+#
+# For these to actually bind the container, the generated unit runs podman with
+# --cgroups=split and Delegate=yes (single- and bridge-mode workloads). Without
+# that, conmon migrates the container into a transient scope under the user
+# manager and the directives below are silently ignored. workloadctl adds both
+# automatically; you don't configure them.
+#
+# LIMITATION (pod mode): podman rejects --cgroups=split for pod members, so
+# pod-mode workloads do NOT get per-unit resource enforcement — the directives
+# below are emitted but don't bind (the pod's containers run under the user
+# manager, outside the unit cgroup). Use single or bridge mode when you need
+# enforceable per-workload limits.
 
 # Optional: systemd slice for cgroup grouping
 # Type: string (systemd slice unit name)
