@@ -252,8 +252,8 @@ write_files:
       # lives on the data disk (data/custom/conf/app.ini) so it survives
       # system disk rebuilds — it is promoted from the template below only
       # on first boot. On instance-id rotation (e.g. a TOML edit that
-      # rebundles the ISO), cloud-init re-runs write_files but the live
-      # app.ini on the data disk is untouched.
+      # rebundles the ISO), cloud-init re-runs write_files and this script,
+      # but the app.ini copy is gated on the database being empty (see below).
       install -d /var/lib/workloads/caddy
       install -d /var/lib/workloads/forgejo
 
@@ -267,9 +267,12 @@ write_files:
 
       # app.ini lives on the data disk (data.qcow2) so it survives system
       # disk rebuilds. Promote from the template only if Forgejo has not
-      # yet been initialized — an existing app.ini holds INSTALL_LOCK=true,
-      # SECRET_KEY, and INTERNAL_TOKEN that must not be clobbered.
-      if ! grep -q 'INSTALL_LOCK = true' /var/lib/workloads/forgejo/data/custom/conf/app.ini 2>/dev/null; then
+      # yet been initialized. Guard on the database being non-empty rather
+      # than INSTALL_LOCK in app.ini — Forgejo can rewrite app.ini with
+      # INSTALL_LOCK=false if it boots into install mode, but the database
+      # is only populated after a completed setup and is never cleared by
+      # Forgejo itself.
+      if [ ! -s /var/lib/workloads/forgejo/data/data/gitea.db ]; then
         cp /var/lib/workloads/forgejo/app.ini.template /var/lib/workloads/forgejo/data/custom/conf/app.ini
       fi
 
