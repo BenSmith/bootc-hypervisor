@@ -54,7 +54,7 @@ write_files:
         level: info
         job_level: info
       runner:
-        file: .runner
+        file: /var/lib/forgejo-runner/.runner
         capacity: 1
         envs: {}
         timeout: 3h
