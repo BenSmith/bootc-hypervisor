@@ -10,7 +10,7 @@ image = "codeberg.org/forgejo/forgejo:15-rootless"
 pull = "missing"
 
 [container.health]
-cmd = "wget -qO- http://localhost:3000/api/healthz > /dev/null || exit 1"
+cmd = "curl -sf http://localhost:3000/api/healthz"
 interval = "30s"
 start_period = "30s"
 on_failure = "kill"
