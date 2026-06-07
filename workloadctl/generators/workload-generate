@@ -715,6 +715,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     if mode != "pod":
         podman_args.append(f"--hostname {dq(name)}")
     podman_args.append("--rm")
+    # --replace removes a same-named container leftover from an unclean shutdown
+    # (OOM kill, SIGKILL) before starting, breaking the "name already in use" loop.
+    podman_args.append("--replace")
 
     # --init provides a minimal init process (tini) for signal handling.
     # Skip when container.systemd is set — the container either runs systemd
