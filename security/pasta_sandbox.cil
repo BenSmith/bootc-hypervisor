@@ -1,0 +1,20 @@
+; pasta_t sandbox-setup permissions missing from container-selinux on Fedora 44
+; kernel 7.0.11.
+;
+; pasta(1) sandboxes itself at startup by creating a new user+mount namespace,
+; writing uid/gid maps, mounting a tmpfs at /tmp, then pivot_root(2)'ing into
+; it. Two groups of permissions are missing from container-selinux's pasta_t:
+;
+;   cap_userns { setuid setgid } — pasta writes /proc/self/{uid,gid}_map from
+;     inside the new user namespace; the kernel checks these capabilities
+;     against the namespace the write originates from (cap_userns class), not
+;     the outer namespace (capability class).
+;
+;   tmpfs_t:dir { mounton } — /tmp on this host is a tmpfs, so its label is
+;     tmpfs_t. pasta mounts a fresh tmpfs on top of it; that requires mounton
+;     permission on the target directory's type.
+;
+; These should be fixed upstream in container-selinux; track the issue there
+; and remove this module once the fix ships in the distro package.
+(allow pasta_t self (cap_userns (setgid setuid)))
+(allow pasta_t tmpfs_t (dir (mounton)))

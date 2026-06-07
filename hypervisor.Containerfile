@@ -203,10 +203,10 @@ RUN setsebool -P container_use_devices on
 # the seatd_container_connect boolean, shipped OFF so the host-wide container_t
 # grant is inert until a KMS desktop is run:
 #   sudo setsebool -P seatd_container_connect on
-COPY security/seatd_container.cil /tmp/seatd_container.cil
+COPY security/seatd_container.cil security/pasta_sandbox.cil /tmp/
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
-    semodule -i /tmp/seatd_container.cil && \
-    rm -f /tmp/seatd_container.cil
+    semodule -i /tmp/seatd_container.cil /tmp/pasta_sandbox.cil && \
+    rm -f /tmp/seatd_container.cil /tmp/pasta_sandbox.cil
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
