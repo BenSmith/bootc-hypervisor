@@ -53,6 +53,14 @@ grafana.local {
 # here. Without this, an unknown Host gets Caddy's stock empty-200, which is
 # hard to distinguish from "site exists but backend is broken."
 :80 {
+    # Serve the homelab CA root cert over plain HTTP so bootstrap clients can
+    # fetch and install it before they trust HTTPS. Reachable at any Host header
+    # (http://<host>.local/caddy-root.crt) since named sites redirect to HTTPS.
+    handle /caddy-root.crt {
+        rewrite * /homelab-root.crt
+        file_server
+        root /etc/caddy
+    }
     respond "no site configured for {host}" 404
 }
 

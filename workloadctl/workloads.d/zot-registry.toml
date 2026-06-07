@@ -65,7 +65,7 @@ image = "localhost/zot-registry:latest"
 pull = "never"
 
 [container.health]
-cmd = "curl -fsS http://localhost:5000/v2/ > /dev/null || exit 1"
+cmd = "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1"
 interval = "30s"
 start_period = "10s"
 on_failure = "kill"
@@ -80,8 +80,9 @@ volumes = [
 userns = "keep-id"
 
 [network]
-mode = "pasta"
-ports = ["5050:5000"]
+# pasta sandbox fails for rootless workload users on this kernel/passt version;
+# host networking avoids the issue and zot listens directly on :5050.
+mode = "host"
 
 [resources]
 # Registry doesn't send systemd ready notifications, use simple type
