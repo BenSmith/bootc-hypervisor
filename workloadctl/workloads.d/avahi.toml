@@ -76,6 +76,6 @@ mode = "host"
 
 [resources]
 service_type = "simple"
-memory_max = "64M"
-memory_high = "32M"
+memory_max = "128M"
+memory_high = "96M"
 cpu_quota = "50%"
