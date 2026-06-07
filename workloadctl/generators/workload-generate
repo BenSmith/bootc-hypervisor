@@ -779,7 +779,16 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # global semodule load). The matching CIL policy module is loaded by the CLI
     # on enable; here we only apply the label, which is a pure string function of
     # the workload name — no I/O, boot-path safe.
-    if container.get("security", {}).get("selinux_policy"):
+    # selinux_policy is a workload-level decision (one module per workload, keyed
+    # on the workload name). Read it from the top-level [security] block so the
+    # label matches what cmd_enable loads in all modes including multi-container.
+    workload_selinux = config.get("security", {}).get("selinux_policy")
+    if mode != "single" and container.get("security", {}).get("selinux_policy"):
+        log_msg(f"WARNING: {name}/{container.get('name', '?')} sets selinux_policy "
+                f"under [containers.security]; this is ignored. Set selinux_policy "
+                f"in the top-level [security] block to apply it to all containers "
+                f"in this workload.", level="warning")
+    if workload_selinux:
         podman_args.append(f"--security-opt=label=type:{selinux_type_name(name)}")
 
     # Apply baseline seccomp profile unless the workload overrides it or uses --privileged

@@ -22,9 +22,11 @@ Suggests:       bash-completion
 Requires:       policycoreutils
 Requires:       policycoreutils-python-utils
 # Per-workload SELinux policy ships as udica-style CIL (e.g. alloy.cil) that
-# inherits udica's base container templates from /usr/share/udica/templates and
-# loads directly via semodule. No .te anywhere, so no checkpolicy/checkmodule.
-Requires:       udica
+# inherits base container templates from /usr/share/udica/templates (shipped by
+# container-selinux, not udica) and loads via semodule. The udica binary itself
+# is an authoring-only tool; it is not invoked at runtime.
+Requires:       container-selinux
+Recommends:     udica
 # VM workloads require the bridge networking stack and a hypervisor.
 Requires:       dnsmasq
 Requires:       nftables

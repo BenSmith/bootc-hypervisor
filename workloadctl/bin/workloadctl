@@ -1356,6 +1356,15 @@ def _selinux_available() -> bool:
     return bool(shutil.which("semodule")) and UDICA_TEMPLATE_DIR.is_dir()
 
 
+def _selinux_enforcing() -> bool:
+    """True if SELinux is currently in enforcing mode."""
+    try:
+        result = subprocess.run(["getenforce"], capture_output=True, text=True)
+        return result.returncode == 0 and result.stdout.strip() == "Enforcing"
+    except FileNotFoundError:
+        return False
+
+
 def _apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 
@@ -1373,6 +1382,13 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     module = selinux_module_name(config.name)
 
     if not _selinux_available():
+        if _selinux_enforcing():
+            print(f"  ERROR: selinux_policy is set for '{config.name}' but SELinux tooling "
+                  f"(semodule + container-selinux templates) is missing. The container "
+                  f"would fail to start under enforcing mode. Install container-selinux "
+                  f"and policycoreutils, then re-run enable.",
+                  file=sys.stderr)
+            sys.exit(1)
         print(f"  WARNING: SELinux tooling (semodule + udica templates) not "
               f"found; skipping policy {action} for '{config.name}'",
               file=sys.stderr)

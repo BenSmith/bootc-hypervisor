@@ -997,6 +997,81 @@ class TestGeneratorUserns(unittest.TestCase):
         self.assertIn("--userns=keep-id", service)
 
 
+class TestGeneratorSelinuxLabel(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def test_single_container_workload_level_label(self):
+        write_config(self.config_dir, "labeled", """\
+            [workload]
+            name = "labeled"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [security]
+            selinux_policy = true
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-labeled.service").read_text()
+        self.assertIn("--security-opt=label=type:wl_labeled.process", service)
+
+    def test_multi_container_workload_level_label_applied_to_all(self):
+        # selinux_policy in top-level [security] → label on every container
+        write_config(self.config_dir, "multi-sel", """\
+            [workload]
+            name = "multi-sel"
+            enabled = true
+            mode = "pod"
+
+            [security]
+            selinux_policy = true
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+
+            [[containers]]
+            name = "sidecar"
+            [containers.container]
+            image = "mysidecar"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        for cname in ("app", "sidecar"):
+            svc = (Path(self.services_dir) / f"workload-multi-sel-{cname}.service").read_text()
+            self.assertIn("--security-opt=label=type:wl_multi_sel.process", svc)
+
+    def test_multi_container_per_container_selinux_ignored_with_warning(self):
+        # selinux_policy under [containers.security] is ignored; warning emitted
+        write_config(self.config_dir, "bad-sel", """\
+            [workload]
+            name = "bad-sel"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+            [containers.security]
+            selinux_policy = true
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        svc = (Path(self.services_dir) / "workload-bad-sel-app.service").read_text()
+        self.assertNotIn("label=type:", svc)
+        self.assertIn("selinux_policy", result.stderr)
+        self.assertIn("top-level [security] block", result.stderr)
+
+
 class TestGeneratorServiceType(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
