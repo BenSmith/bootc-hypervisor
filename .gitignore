@@ -13,6 +13,7 @@ workloadctl/rpmbuild/
 __pycache__/
 bin/cosy
 man/cosy.1
+.reference/
 
 # In-progress design proposals — kept local until promoted to tracked docs
 workloadctl/docs/wip/
