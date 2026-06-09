@@ -8,6 +8,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from unittest import mock
 
 # Import workloadctl as a module (hyphenated filename requires importlib).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
@@ -86,6 +87,20 @@ class TestCgroupExecModule(unittest.TestCase):
         # object — exec and the healthcheck libexec can't drift apart.
         import cgroup_exec
         self.assertIs(wctl.delegated_unit_cgroup, cgroup_exec.delegated_unit_cgroup)
+
+
+class TestInteractiveExecFlags(unittest.TestCase):
+    """`workloadctl exec/shell` allocate a pseudo-TTY only when stdin is a real
+    terminal — passing -t without one hangs on piped input and can trip conmon
+    under --cgroups=split."""
+
+    def test_pty_when_stdin_is_a_tty(self):
+        with mock.patch.object(wctl.sys, "stdin", mock.Mock(isatty=lambda: True)):
+            self.assertEqual(wctl._interactive_exec_flags(), ["-i", "-t"])
+
+    def test_no_pty_when_stdin_not_a_tty(self):
+        with mock.patch.object(wctl.sys, "stdin", mock.Mock(isatty=lambda: False)):
+            self.assertEqual(wctl._interactive_exec_flags(), ["-i"])
 
 
 if __name__ == "__main__":

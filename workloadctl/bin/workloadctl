@@ -2087,6 +2087,18 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
     return None
 
 
+def _interactive_exec_flags():
+    """Interactivity flags for `podman exec`: always keep stdin open (-i), but
+    only allocate a pseudo-TTY (-t) when stdin is a real terminal.
+
+    Passing -t without a TTY both hangs on piped input and, under
+    --cgroups=split, can trip conmon's terminal setup. Without -t, scripted /
+    non-interactive callers go through the same plain (no-pty) exec path the
+    split healthcheck uses, which is robust.
+    """
+    return ["-i", "-t"] if sys.stdin.isatty() else ["-i"]
+
+
 def cmd_shell(args, manager: WorkloadManager):
     """Open interactive shell in workload container or VM console"""
     workload, container = parse_workload_ref(args.workload)
@@ -2138,7 +2150,7 @@ def cmd_shell(args, manager: WorkloadManager):
     container_user = env.get("CONTAINER_USER")
     container_uid = env.get("CONTAINER_UID")
 
-    exec_opts = ["-it"]
+    exec_opts = _interactive_exec_flags()
     if container_user:
         uid = container_uid or "1000"
         home = f"/home/{container_user}"
@@ -2193,7 +2205,7 @@ def cmd_exec(args, manager: WorkloadManager):
         sys.exit(result.returncode)
 
     target = resolve_container_target(config, container, workload)
-    manager.run_podman_exec(config, target, ["-it", target, *exec_args], check=True)
+    manager.run_podman_exec(config, target, [*_interactive_exec_flags(), target, *exec_args], check=True)
 
 
 def cmd_logs(args, manager: WorkloadManager):
