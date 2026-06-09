@@ -4,6 +4,7 @@
 import importlib.machinery
 import importlib.util
 import io
+from contextlib import redirect_stderr
 import json
 import os
 import pwd
@@ -894,6 +895,33 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         with patch.object(wctl, '_selinux_available', return_value=True):
             with self.assertRaises(SystemExit):
                 wctl._apply_selinux_policy(cfg, 'enable')
+
+    def test_underscore_bundle_suggests_hyphenated_form(self):
+        # Footgun: users copy the SELinux *type* name (underscores) into
+        # selinux_policy, but the bundle is a hyphenated directory name. The
+        # invalid-bundle error should suggest the hyphenated form.
+        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop_wayfire"\n')
+        err = io.StringIO()
+        with patch.object(wctl, '_selinux_available', return_value=True):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    wctl._apply_selinux_policy(cfg, 'enable')
+        self.assertIn('vncdesktop-wayfire', err.getvalue())
+
+    def test_missing_bundle_lists_available(self):
+        # A well-formed but nonexistent bundle should list the bundles that do
+        # ship a CIL, plus a close-match suggestion.
+        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-wayfir"\n')
+        err = io.StringIO()
+        with patch.object(wctl, '_selinux_available', return_value=True), \
+                patch.object(wctl, '_available_bundles',
+                             return_value=['vncdesktop-sway', 'vncdesktop-wayfire']):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    wctl._apply_selinux_policy(cfg, 'enable')
+        out = err.getvalue()
+        self.assertIn('available bundles', out)
+        self.assertIn('vncdesktop-wayfire', out)
 
 
 # ── Task 2.6 — backup --json ─────────────────────────────────────────────────

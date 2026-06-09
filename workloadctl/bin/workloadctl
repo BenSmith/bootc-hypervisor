@@ -8,6 +8,7 @@ running as system services with rootless podman.
 
 import argparse
 import datetime
+import difflib
 import fcntl
 import grp
 import json
@@ -1365,6 +1366,34 @@ def _selinux_enforcing() -> bool:
         return False
 
 
+_CONTAINERS_DIR = Path("/usr/share/workloadctl/containers")
+
+
+def _available_bundles() -> list[str]:
+    """Bundle names shipping a CIL policy under the containers share dir.
+
+    A bundle is a subdir <name>/ that contains <name>.cil (the template
+    _apply_selinux_policy loads). Returned sorted for stable output.
+    """
+    if not _CONTAINERS_DIR.is_dir():
+        return []
+    return sorted(
+        d.name for d in _CONTAINERS_DIR.iterdir()
+        if d.is_dir() and (d / f"{d.name}.cil").exists()
+    )
+
+
+def _print_available_bundles(bundle: str):
+    """Hint at valid selinux_policy bundles after a missing-template error."""
+    available = _available_bundles()
+    if not available:
+        return
+    match = difflib.get_close_matches(bundle, available, n=1)
+    if match:
+        print(f"         did you mean {match[0]!r}?", file=sys.stderr)
+    print("         available bundles: " + ", ".join(available), file=sys.stderr)
+
+
 def _apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 
@@ -1412,11 +1441,19 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
         # isn't a plain workload-style name (blocks traversal / odd values).
         print(f"  ERROR: invalid selinux_policy bundle {bundle!r} "
               f"(must match {NAME_PATTERN.pattern})", file=sys.stderr)
+        # Common footgun: users copy the SELinux *type* name (wl_foo_bar,
+        # underscores) into selinux_policy, but the bundle is a directory name
+        # and dirs are hyphenated. Suggest the hyphenated form.
+        if "_" in bundle:
+            print(f"         did you mean {bundle.replace('_', '-')!r}? "
+                  f"(the bundle is a directory name and uses hyphens, not the "
+                  f"underscores of the SELinux type name)", file=sys.stderr)
         sys.exit(1)
     template = Path(f"/usr/share/workloadctl/containers/{bundle}/{bundle}.cil")
     if not template.exists():
         print(f"  ERROR: SELinux policy template not found: {template}",
               file=sys.stderr)
+        _print_available_bundles(bundle)
         sys.exit(1)
 
     bases = sorted(str(p) for p in UDICA_TEMPLATE_DIR.glob("*.cil"))

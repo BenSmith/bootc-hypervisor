@@ -19,6 +19,8 @@
 # Run:
 #   workload-ctl enable wayfire-game-streaming
 
+ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/Sunshine-2026.516.143833-1.fc44.x86_64.rpm
+
 FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
@@ -132,7 +134,6 @@ RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
 # Pre-release RPM URL changes frequently — pass via build arg:
 #   podman build --build-arg SUNSHINE_RPM_URL=https://... .
 
-ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.517.140229/Sunshine-2026.517.140229-1.fc44.x86_64.rpm
 RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
     dnf clean all
 
