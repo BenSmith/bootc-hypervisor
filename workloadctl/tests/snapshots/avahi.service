@@ -21,8 +21,8 @@ EnvironmentFile=-/run/workload-env/workload-avahi.env
 
 # Resource limits and constraints
 CPUQuota=50%
-MemoryMax=64M
-MemoryHigh=32M
+MemoryMax=128M
+MemoryHigh=96M
 
 
 # Image pulling handled by podman run --pull=never

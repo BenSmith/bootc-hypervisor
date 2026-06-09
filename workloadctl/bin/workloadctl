@@ -64,7 +64,7 @@ from workload_lib import (
     workload_username,
 )
 from podman import Podman, PodmanError
-from cgroup_exec import cgroup_for_pid, cgroup_placed_podman
+from cgroup_exec import cgroup_for_pid, cgroup_placed_podman, delegated_unit_cgroup
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 # TODO: break this file into smaller units, perhaps per-command.
@@ -1412,7 +1412,11 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     module = selinux_module_name(config.name)
 
     if not _selinux_available():
-        if _selinux_enforcing():
+        # Hard-fail only on enable: the container would fail to start under
+        # enforcing mode without its type loaded. disable is best-effort
+        # teardown — without tooling there's nothing we could remove anyway, so
+        # never block it.
+        if action != "disable" and _selinux_enforcing():
             print(f"  ERROR: selinux_policy is set for '{config.name}' but SELinux tooling "
                   f"(semodule + container-selinux templates) is missing. The container "
                   f"would fail to start under enforcing mode. Install container-selinux "
