@@ -50,6 +50,18 @@ def delegated_unit_cgroup(proc_cgroup_text: str) -> str | None:
     return None
 
 
+def cgroup_for_pid(pid: str) -> str | None:
+    """Return the delegated unit cgroup for a running container PID, or None.
+
+    Wraps delegated_unit_cgroup() + the /proc read so callers don't each need
+    a bare try/except around Path(...).read_text().
+    """
+    try:
+        return delegated_unit_cgroup(Path(f"/proc/{pid}/cgroup").read_text())
+    except OSError:
+        return None
+
+
 def cgroup_placed_podman(unit_rel: str, uid: int, gid: int, username: str,
                          home_dir, podman_args, *, leaf_name: str,
                          check=False, capture_output=False, extra_env=None,

@@ -45,7 +45,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         break
 # --- end bootstrap ---------------------------------------------------------
 from workload_lib import workload_username, WORKLOADS_BASE
-from cgroup_exec import delegated_unit_cgroup, cgroup_placed_podman
+from cgroup_exec import cgroup_for_pid, cgroup_placed_podman
 
 
 def log(msg):
@@ -90,10 +90,7 @@ def main():
     if not pid or pid == "0":
         log(f"{container} not running; skipping probe")
         return 0
-    try:
-        unit_rel = delegated_unit_cgroup(Path(f"/proc/{pid}/cgroup").read_text())
-    except OSError:
-        unit_rel = None
+    unit_rel = cgroup_for_pid(pid)
     if not unit_rel:
         # Not under a delegated unit cgroup (e.g. pod mode / user manager).
         # podman's own timer handles those, so there's nothing for us to do.

@@ -64,7 +64,7 @@ from workload_lib import (
     workload_username,
 )
 from podman import Podman, PodmanError
-from cgroup_exec import delegated_unit_cgroup, cgroup_placed_podman
+from cgroup_exec import cgroup_for_pid, cgroup_placed_podman
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 # TODO: break this file into smaller units, perhaps per-command.
@@ -498,10 +498,7 @@ class WorkloadManager:
         pid = pid_res.stdout.strip() if pid_res.returncode == 0 else ""
         if not pid or pid == "0":
             return plain()
-        try:
-            unit_rel = delegated_unit_cgroup(Path(f"/proc/{pid}/cgroup").read_text())
-        except OSError:
-            return plain()
+        unit_rel = cgroup_for_pid(pid)
         if not unit_rel:
             return plain()
 
@@ -510,7 +507,11 @@ class WorkloadManager:
                 unit_rel, config.uid, config.gid, config.username,
                 config.home_dir, ["exec", *args], leaf_name="wlctl-exec",
                 check=check, capture_output=capture_output,
-                extra_env={"TERM": os.environ.get("TERM", "xterm")},
+                extra_env={
+                    "TERM": os.environ.get("TERM", "xterm"),
+                    **{k: v for k, v in os.environ.items()
+                       if k == "LANG" or k.startswith("LC_")},
+                },
             )
         except OSError:
             # Leaf cgroup could not be created/chowned — fall back to the plain
