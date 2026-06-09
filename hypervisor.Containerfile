@@ -3,7 +3,7 @@ ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
 FROM fedora:latest AS rpm-builder
 COPY workloadctl/ /workloadctl/
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
-        rpm-build python3 just && \
+        rpm-build python3 just systemd-rpm-macros && \
     dnf clean all && \
     cd /workloadctl && just rpm-build
 

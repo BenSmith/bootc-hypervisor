@@ -10,6 +10,11 @@ URL:            https://github.com/BenSmith/bootc-hypervisor
 
 BuildArch:      noarch
 
+# %{_unitdir} (used in %install and %files for the exporter unit + slice) is
+# defined by systemd-rpm-macros. Without it rpmbuild emits the literal
+# "%{_unitdir}/..." and fails with: File must begin with "/".
+BuildRequires:  systemd-rpm-macros
+
 Requires:       python3 >= 3.11
 Requires:       podman >= 5.3
 Requires:       systemd

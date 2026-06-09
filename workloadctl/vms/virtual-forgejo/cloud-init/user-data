@@ -144,6 +144,15 @@ write_files:
 
       [security]
       INSTALL_LOCK = false
+      # SECRET_KEY encrypts every Actions secret stored in the DB. Forgejo 15
+      # does NOT regenerate it when missing (unlike INTERNAL_TOKEN / the JWT
+      # secrets), so if it is ever lost, every stored secret becomes
+      # undecryptable — FetchTask then panics and CI dies. Seed a
+      # `forgejo-secret-key` host credential to pin a known value (e.g. to
+      # carry existing secrets across a full VM rebuild). If left unseeded this
+      # renders empty and the bootstrap below generates+persists one instead,
+      # so the forge is never silently keyless.
+      SECRET_KEY = ${SECRET?forgejo-secret-key}
 
       [service]
       DISABLE_REGISTRATION = false
@@ -271,9 +280,24 @@ write_files:
       # than INSTALL_LOCK in app.ini — Forgejo can rewrite app.ini with
       # INSTALL_LOCK=false if it boots into install mode, but the database
       # is only populated after a completed setup and is never cleared by
-      # Forgejo itself.
-      if [ ! -s /var/lib/workloads/forgejo/data/data/gitea.db ]; then
-        cp /var/lib/workloads/forgejo/app.ini.template /var/lib/workloads/forgejo/data/custom/conf/app.ini
+      # Forgejo itself. Belt-and-suspenders: also refuse to overwrite an
+      # app.ini that already exists, so an instance-id rotation can never
+      # clobber a live config (and the SECRET_KEY in it) on re-seed.
+      forgejo_appini=/var/lib/workloads/forgejo/data/custom/conf/app.ini
+      if [ ! -s /var/lib/workloads/forgejo/data/data/gitea.db ] && [ ! -s "$forgejo_appini" ]; then
+        cp /var/lib/workloads/forgejo/app.ini.template "$forgejo_appini"
+      fi
+
+      # Ensure a persistent SECRET_KEY. The template renders an empty value
+      # when no `forgejo-secret-key` credential was seeded; generate and
+      # persist one here so the forge is never keyless (a keyless forge makes
+      # every stored Actions secret undecryptable -> FetchTask panics). This
+      # is idempotent: once a non-empty key is present it is left untouched.
+      if [ -s "$forgejo_appini" ] && \
+         ! grep -qE '^[[:space:]]*SECRET_KEY[[:space:]]*=[[:space:]]*[^[:space:]]' "$forgejo_appini"; then
+        forgejo_key=$(openssl rand -hex 32)
+        sed -i -E '/^[[:space:]]*SECRET_KEY[[:space:]]*=/d' "$forgejo_appini"
+        sed -i -E "/^\[security\]/a SECRET_KEY = $forgejo_key" "$forgejo_appini"
       fi
 
       # 5. Allow containers to bind privileged ports (< 1024) so Caddy can
