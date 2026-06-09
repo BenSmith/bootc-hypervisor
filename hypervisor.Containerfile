@@ -1,4 +1,12 @@
 ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
+
+FROM fedora:latest AS rpm-builder
+COPY workloadctl/ /workloadctl/
+RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
+        rpm-build python3 just && \
+    dnf clean all && \
+    cd /workloadctl && just rpm-build
+
 FROM ${BASE_IMAGE}
 
 # Build argument for local development (enables passwordless sudo)
@@ -215,19 +223,15 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system from the homelab RPM repo.
-# The repo is removed after install — git.local is not reachable outside
-# the homelab build environment. The RPM is also cached at a known path so
-# workload-ensure-user can bundle it into VM cloud-init ISOs at runtime.
-RUN printf '[workloadctl]\nname=workloadctl\nbaseurl=https://git.local/api/packages/ben/rpm\nenabled=1\ngpgcheck=0\nsslverify=false\n' \
-        > /etc/yum.repos.d/workloadctl.repo && \
-    dnf install -y workloadctl && \
-    mkdir -p /tmp/wl-rpms && \
-    dnf download --destdir /tmp/wl-rpms workloadctl && \
-    rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
+# Install workload provisioning system, built from source in the rpm-builder stage.
+# The RPM is also cached at a known path so workload-ensure-user can bundle it
+# into VM cloud-init ISOs at runtime.
+COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
+RUN rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
     test -f "$rpm" && \
+    dnf install -y "$rpm" && \
     install -Dpm 0644 "$rpm" /usr/share/workloadctl/workloadctl.rpm && \
-    rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl.repo && \
+    rm -rf /tmp/wl-rpms && \
     dnf clean all
 
 # Bootc-specific: emergency access, cosy
