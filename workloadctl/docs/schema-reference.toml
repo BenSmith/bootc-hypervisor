@@ -443,25 +443,29 @@ image = "ghcr.io/example/workload:latest"
 # ============================================================================
 # LOGGING
 # ============================================================================
-# Container logs are sent to the host's systemd journal using the journald
-# log driver (--log-driver=journald). This provides:
+# Container stdout/stderr go straight into the host's systemd journal via the
+# passthrough log driver (--log-driver=passthrough): podman hands the unit's
+# journal stream fds to the container, so every line is stored exactly once.
+# (The journald driver kept a second, untagged copy of each line via the
+# unit's stdout relay.) The stream is named after the container with
+# SyslogIdentifier=, so lines read:
 #
-# - Integration with journalctl for querying logs
-# - Automatic log rotation via systemd journal settings (journald.conf)
-# - Structured metadata (container name, ID, etc.)
-# - No additional configuration needed
+#   workload-{name}[pid]: message         # single mode
+#   workload-{wl}-{ctr}[pid]: message     # pod/bridge member containers
+#
+# Podman's own messages (image pulls, errors) share the same identifier.
 #
 # View logs:
-#   journalctl -u workload-{name}.service      # Service and container logs
-#   journalctl CONTAINER_NAME=workload-{name}  # Container logs only
-#   journalctl -f CONTAINER_NAME=workload-{name}  # Follow container logs
+#   workloadctl logs {name}                 # wraps journalctl
+#   journalctl -u workload-{name}.service   # service lifecycle + container
+#   journalctl -t workload-{name}           # container output only
+#   journalctl -ft workload-{name}          # follow container output
 #
-# For systemd containers (containers running systemd inside):
-#   - Internal journal entries appear in host journal automatically
-#   - Filter by process: journalctl CONTAINER_NAME=... | grep sshd
+# For systemd containers (containers running systemd inside), console output
+# forwarded by the guest systemd lands in the same stream.
 #
-# Alternative: Use podman logs command
-#   sudo -u _wl-{name} -E XDG_RUNTIME_DIR=/run/user/{uid} podman logs {container}
+# Note: `podman logs` does NOT work with the passthrough driver — podman never
+# stores its own copy. Use journalctl (or `workloadctl logs`) instead.
 #
 # This is not configurable per-workload. Log rotation is managed by journald.
 # ============================================================================

@@ -313,20 +313,20 @@ sudo -u _wl-<name> \
 
 ## Viewing Logs
 
-All container logs are sent to the systemd journal using the journald log driver. This provides powerful querying and filtering capabilities.
+Container stdout/stderr go straight into the systemd journal via podman's passthrough log driver — each line is stored exactly once, tagged with the container name as the syslog identifier (`SyslogIdentifier=workload-<name>`, or `workload-<wl>-<ctr>` for pod/bridge member containers). Log lines read `workload-<name>[pid]: message`.
 
 ### Basic log viewing
 
 ```bash
-# View all logs for a workload (service + container)
+# View all logs for a workload (service lifecycle + container output)
 sudo journalctl -u workload-<name>.service
 
-# View only container logs (excludes systemd service messages)
-sudo journalctl CONTAINER_NAME=workload-<name>
+# View only container output (excludes systemd service messages)
+sudo journalctl -t workload-<name>
 
 # Follow logs in real-time
 sudo journalctl -fu workload-<name>.service
-sudo journalctl -f CONTAINER_NAME=workload-<name>
+sudo journalctl -ft workload-<name>
 
 # Last N lines
 sudo journalctl -u workload-<name>.service -n 50
@@ -339,11 +339,11 @@ sudo journalctl -u workload-<name>.service --since "2024-01-01 10:00:00"
 ### Advanced log queries
 
 ```bash
-# Combine service and container filters
-sudo journalctl -u workload-squid.service CONTAINER_NAME=workload-squid
+# Container output for one member of a multi-container workload
+sudo journalctl -t workload-stack-db
 
 # Search for specific text
-sudo journalctl CONTAINER_NAME=workload-squid | grep "ERROR"
+sudo journalctl -t workload-squid | grep "ERROR"
 
 # Show with extra metadata
 sudo journalctl -u workload-squid.service -o verbose
@@ -357,45 +357,22 @@ sudo journalctl -u workload-squid.service > /tmp/workload.log
 
 ### For systemd containers
 
-Containers running systemd inside (like borgbackup) have their internal journal entries forwarded to the host:
+Containers running systemd inside (like borgbackup) forward console output to the host journal under the same identifier:
 
 ```bash
 # View sshd logs from inside borgbackup container
-sudo journalctl CONTAINER_NAME=workload-borgbackup | grep sshd
+sudo journalctl -t workload-borgbackup | grep sshd
 
 # View all systemd messages from inside container
-sudo journalctl CONTAINER_NAME=workload-borgbackup | grep systemd
+sudo journalctl -t workload-borgbackup | grep systemd
 
 # Combine with time filters
-sudo journalctl CONTAINER_NAME=workload-borgbackup --since "10 minutes ago" | grep sshd
+sudo journalctl -t workload-borgbackup --since "10 minutes ago" | grep sshd
 ```
 
-### Using podman logs (alternative)
+### Why `podman logs` does not work
 
-You can also use podman's logs command directly:
-
-```bash
-# Get workload user and UID
-WORKLOAD_USER="_wl-<name>"
-WORKLOAD_UID=$(id -u $WORKLOAD_USER)
-
-# View logs
-sudo -u $WORKLOAD_USER \
-  -E XDG_RUNTIME_DIR=/run/user/$WORKLOAD_UID \
-  podman logs workload-<name>
-
-# Follow logs
-sudo -u $WORKLOAD_USER \
-  -E XDG_RUNTIME_DIR=/run/user/$WORKLOAD_UID \
-  podman logs -f workload-<name>
-
-# Last 50 lines
-sudo -u $WORKLOAD_USER \
-  -E XDG_RUNTIME_DIR=/run/user/$WORKLOAD_UID \
-  podman logs --tail 50 workload-<name>
-```
-
-Note: `journalctl` is generally preferred as it integrates service lifecycle events (restarts, failures) with container logs.
+`podman logs` refuses to run against containers using the passthrough log driver — podman never stores its own copy of the output. Use `journalctl` (or `workloadctl logs`, which wraps it) instead; it also integrates service lifecycle events (restarts, failures) with container output.
 
 ## Debugging Techniques
 
@@ -509,7 +486,6 @@ systemctl daemon-reload                      # Reload after config changes
 # Podman operations (as workload user)
 sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman ps
 sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman images
-sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman logs <container>
 sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman system migrate
 
 # Debugging

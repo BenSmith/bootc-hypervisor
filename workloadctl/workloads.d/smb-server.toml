@@ -85,8 +85,7 @@ volumes = [
 userns = "keep-id"
 
 [network]
-# Host networking required: pasta's pivot_root() sandboxing fails under
-# ProtectSystem=strict, and SMB clients connect to the real host IP anyway.
+# Host networking: SMB clients connect to the real host IP anyway.
 mode = "host"
 
 [resources]

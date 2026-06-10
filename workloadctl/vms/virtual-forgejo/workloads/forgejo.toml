@@ -28,14 +28,10 @@ volumes = [
 userns = "keep-id:uid=1000,gid=1000"
 
 [network]
-# Use the VM's network namespace directly instead of pasta. The passt
-# 20260120 build that ships with the current Fedora cloud image
-# deterministically fails its sandbox setup ("Failed to mount empty tmpfs
-# for pivot_root()") from a rootless container userns; --network=host
-# avoids the userns + pasta interaction entirely. The VM is already on
-# the LAN bridge with its own IP, so Forgejo listens directly on :3000
-# (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on this
-# VM) reverse-proxies HTTPS:443 to localhost:3000.
+# Use the VM's network namespace directly instead of pasta. The VM is
+# already on the LAN bridge with its own IP, so Forgejo listens directly
+# on :3000 (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on
+# this VM) reverse-proxies HTTPS:443 to localhost:3000.
 mode = "host"
 
 [resources]
