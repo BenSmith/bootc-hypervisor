@@ -1779,6 +1779,10 @@ def cmd_cleanup(args, manager: WorkloadManager):
         for d in workloads_base.iterdir():
             if not d.is_dir() or d.name.startswith("."):
                 continue
+            # The shared backup output dir has no _wl- user; it is not an
+            # orphaned workload dir (`workloadctl backup` writes here).
+            if d.name == BACKUP_DIR.name:
+                continue
             expected_user = workload_username(d.name)
             if expected_user not in existing_users:
                 orphaned_dirs.append(d)

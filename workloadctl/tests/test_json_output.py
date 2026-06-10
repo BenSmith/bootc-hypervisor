@@ -814,6 +814,22 @@ class TestCleanupJson(unittest.TestCase):
         self.assertEqual(data['removed_users'], [])
         self.assertEqual(data['removed_dirs'], [])
 
+    def test_backup_dir_not_reported_as_orphan_dir(self):
+        # B2: the shared backup output dir under WORKLOADS_BASE has no _wl-
+        # user; cleanup must not flag it (and --apply must not delete it).
+        with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
+            base = Path(tmp) / 'workloads'
+            backups = base / wctl.BACKUP_DIR.name
+            backups.mkdir(parents=True)
+            (backups / 'test-wl-20260610.tar.zst').write_text('x')
+            (base / 'orphan').mkdir()
+            args = _args(json=True, apply=False)
+            with patch.object(wctl, 'require_root'):
+                with patch('pwd.getpwall', return_value=[]):
+                    with patch.object(wctl, 'WORKLOADS_BASE', base):
+                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+        self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
+
     @staticmethod
     def _semodule_l(modules):
         """side_effect for subprocess.run that fakes `semodule -l`."""
