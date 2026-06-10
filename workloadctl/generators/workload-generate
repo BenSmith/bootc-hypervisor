@@ -954,19 +954,21 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         # Credential will be decrypted to /run/credentials/{service}/
         source_path = f"/run/credentials/{service_name}/{credential_name}"
 
-        # Validate and default to read-only for security
-        mode = file_spec.get("mode", "ro")
+        # Validate and default to read-only for security. Careful: this loop
+        # runs inside generate_system_service(), whose `mode` parameter is the
+        # workload mode — don't shadow it.
+        file_mode = file_spec.get("mode", "ro")
         valid_modes = ["ro", "rw"]
-        if mode not in valid_modes:
+        if file_mode not in valid_modes:
             log_msg(
-                f"WARNING: Invalid mode '{mode}' for credential '{credential_name}', "
+                f"WARNING: Invalid mode '{file_mode}' for credential '{credential_name}', "
                 f"must be 'ro' or 'rw'. Defaulting to 'ro'.",
                 level="warning"
             )
-            mode = "ro"
+            file_mode = "ro"
 
-        podman_args.append(f"--volume {dq(source_path)}:{dq(container_path)}:{mode}")
-        log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {mode})")
+        podman_args.append(f"--volume {dq(source_path)}:{dq(container_path)}:{file_mode}")
+        log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {file_mode})")
 
     # HOST_IP is auto-detected by workload-ensure-user and written to the
     # EnvironmentFile; pass it into the container so configs can use it.

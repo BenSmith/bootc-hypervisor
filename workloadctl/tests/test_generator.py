@@ -709,6 +709,78 @@ class TestGeneratorSecrets(unittest.TestCase):
         )
         self.assertNotIn("/run/credentials/workload-multi-creds.service/", app_service)
 
+    def test_secret_files_do_not_clobber_workload_mode(self):
+        # Regression (B1): the secrets.files loop assigned its per-file mount
+        # mode ("ro"/"rw") to `mode`, shadowing generate_system_service()'s
+        # workload-mode parameter and corrupting every later mode check.
+        write_config(self.config_dir, "clobber", """\
+            [workload]
+            name = "clobber"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            API_KEY = "${SECRET:api-key}"
+
+            [secrets]
+            files = [
+                { credential = "tls-cert", path = "/etc/ssl/cert.pem", mode = "ro" }
+            ]
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-clobber.service").read_text()
+
+        # Single mode keeps the one-arg write-env form. The clobbered two-arg
+        # form wrote workload-clobber-clobber.secrets while --env-file pointed
+        # at workload-clobber.secrets → podman failed to start (missing file).
+        self.assertIn(
+            "ExecStartPre=+/usr/libexec/workloadctl/workload-write-env clobber\n",
+            service,
+        )
+        self.assertIn('--env-file "/run/workload-env/workload-clobber.secrets"', service)
+        # Single-mode unit keeps its [Install] block.
+        self.assertIn("WantedBy=multi-user.target", service)
+
+    def test_secret_files_do_not_clobber_pod_member_mode(self):
+        # Regression (B1), pod flavor: a member with secrets.files used to be
+        # treated as non-pod after the clobber — wrongly getting Delegate=yes
+        # and the split-healthcheck wiring (which pins on_failure to none).
+        write_config(self.config_dir, "podsec", """\
+            [workload]
+            name = "podsec"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+            [containers.container.health]
+            cmd = "curl -sf http://localhost/healthz"
+            on_failure = "kill"
+            [containers.secrets]
+            files = [
+                { credential = "tls-cert", path = "/etc/ssl/cert.pem", mode = "ro" }
+            ]
+
+            [[containers]]
+            name = "sidecar"
+            [containers.container]
+            image = "mysidecar"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        app = (Path(self.services_dir) / "workload-podsec-app.service").read_text()
+
+        self.assertNotIn("Delegate=yes", app)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", app)
+        self.assertNotIn("-health.timer", app)
+        # Pod members keep podman's own healthcheck action.
+        self.assertIn("--health-on-failure=kill", app)
+
 
 class TestGeneratorVolumeExpansion(unittest.TestCase):
     def setUp(self):
