@@ -522,9 +522,24 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
         # every /usr/libexec/workloadctl/<helper> for /bin/true. Done generically
         # (not per-helper) so adding a new helper — e.g. workload-vm-shutdown —
         # never silently breaks verify again.
+        # Same idea for podman itself: dev containers don't ship it, and
+        # systemd-analyze fails the whole unit on a non-executable ExecStart.
+        # Only patched when actually absent so real hosts keep strict verify.
+        patch_podman = not os.path.exists("/usr/bin/podman")
+
+        # GPU workloads Require= nvidia-cdi-generator.service, shipped by the
+        # hypervisor image. Stub it next to the units (systemd-analyze resolves
+        # references from the unit's own directory) when the host lacks it.
+        if not os.path.exists("/usr/lib/systemd/system/nvidia-cdi-generator.service"):
+            (Path(cls.services_dir) / "nvidia-cdi-generator.service").write_text(
+                "[Unit]\nDescription=verify stub\n"
+                "[Service]\nType=oneshot\nExecStart=/bin/true\n"
+            )
         for service_path in Path(cls.services_dir).glob("workload-*.service"):
             content = service_path.read_text()
             content = re.sub(r"/usr/libexec/workloadctl/[\w-]+", "/bin/true", content)
+            if patch_podman:
+                content = content.replace("/usr/bin/podman", "/bin/true")
             service_path.write_text(content)
 
     @classmethod
