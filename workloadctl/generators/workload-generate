@@ -740,7 +740,13 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     podman_args.extend([
         f"--sdnotify={sdnotify}",
         f"--pull={pull_policy}",
-        "--log-driver=journald",
+        # passthrough: conmon hands the container's stdout/stderr fds straight
+        # to the unit's journal stream (single copy, named via the unit's
+        # SyslogIdentifier=). The journald driver would double-log every line:
+        # once tagged by conmon, once as untagged podman[pid] via the attached
+        # foreground `podman run` relaying container output to unit stdout.
+        # `workloadctl logs` reads the journal by unit, so it is unaffected.
+        "--log-driver=passthrough",
     ])
 
     # Keep the container cgroup under the unit (workloads.slice/workload-<name>.service)
@@ -1131,6 +1137,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "",
         "StandardOutput=journal",
         "StandardError=journal",
+        # Name the journal stream after the container so passthrough log lines
+        # read `workload-<name>[pid]: ...` (members: workload-<wl>-<ctr>).
+        # Podman's own messages (pull errors etc.) share the identifier.
+        f"SyslogIdentifier={container_name}",
         "",
         "Restart=on-failure",
         "RestartSec=5s",

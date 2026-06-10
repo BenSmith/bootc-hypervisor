@@ -98,6 +98,42 @@ class TestGeneratorBasic(unittest.TestCase):
         sysusers = self.read_sysusers("web")
         self.assertIn("u _wl-web", sysusers)
 
+    def test_passthrough_logging_with_named_journal_stream(self):
+        """Container logs use --log-driver=passthrough (single journal copy via
+        the unit's stream) and the unit names that stream after the container
+        so lines read `workload-<name>[pid]: ...`. Members get the combined
+        workload-<wl>-<ctr> identifier."""
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+
+            [container]
+            image = "docker.io/nginx:latest"
+        """)
+        write_config(self.config_dir, "stack", """\
+            [workload]
+            name = "stack"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+        """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        web = self.read_service("web")
+        self.assertIn("--log-driver=passthrough", web)
+        self.assertNotIn("--log-driver=journald", web)
+        self.assertIn("SyslogIdentifier=workload-web", web)
+
+        db = (Path(self.services_dir) / "workload-stack-db.service").read_text()
+        self.assertIn("--log-driver=passthrough", db)
+        self.assertIn("SyslogIdentifier=workload-stack-db", db)
+
     def test_disabled_workload_skipped(self):
         write_config(self.config_dir, "off", """\
             [workload]
