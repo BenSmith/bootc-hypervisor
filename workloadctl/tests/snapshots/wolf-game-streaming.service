@@ -28,6 +28,7 @@ MemoryHigh=6G
 TasksMax=16384
 
 ExecStartPre=/bin/bash -c 'test -s /run/cdi/nvidia.yaml || { echo "NVIDIA CDI spec missing: check nvidia-cdi-generator.service" >&2; exit 1; }'
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 

@@ -515,6 +515,10 @@ def generate_pod_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
+        # Stale-pause cleanup (see the comment in generate_system_service):
+        # this is the workload's first podman touch, so the recreated pause
+        # namespace stays consistent for every member container.
+        "ExecStartPre=-/usr/bin/podman system migrate",
         f"ExecStartPre=-/usr/bin/podman pod rm -f --ignore workload-{name}",
         f"ExecStart=/usr/bin/podman pod create {pod_args_str}",
         f"ExecStop=/usr/bin/podman pod rm -f --ignore workload-{name}",
@@ -558,6 +562,10 @@ def generate_net_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
+        # Stale-pause cleanup (see the comment in generate_system_service):
+        # this is the workload's first podman touch, so the recreated pause
+        # namespace stays consistent for every member container.
+        "ExecStartPre=-/usr/bin/podman system migrate",
         f"ExecStartPre=-/usr/bin/podman network rm -f {net_name}",
         f"ExecStart=/usr/bin/podman network create {net_name}",
         f"ExecStop=/usr/bin/podman network rm -f {net_name}",
@@ -1081,6 +1089,18 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
             "'test -s /run/cdi/nvidia.yaml"
             " || { echo \"NVIDIA CDI spec missing: check nvidia-cdi-generator.service\" >&2; exit 1; }'"
         )
+
+    if mode == "single":
+        # Kill any stale libpod pause process before the first podman touch of
+        # this invocation. A pause that outlives the previous invocation (it
+        # gets moved into podman-pause-*.scope under user@<uid> by any host-side
+        # podman call) pins a mount namespace whose PrivateTmp /tmp is already
+        # deleted; pasta then fails its sandbox mount of /tmp with ENOENT and
+        # the unit restart-loops until StartLimitBurst. Tolerant "-" so a
+        # missing rundir on first boot can't block startup. Pod/bridge members
+        # must NOT do this (it would kill the pause out from under the live
+        # pod infra / sibling containers) — their head units handle it.
+        lines.append("ExecStartPre=-/usr/bin/podman system migrate")
 
     lines.append("")
     lines.append(f"# Image pulling handled by podman run --pull={pull_policy}")

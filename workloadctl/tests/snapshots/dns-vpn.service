@@ -24,6 +24,7 @@ CPUQuota=10%
 MemoryMax=64M
 MemoryHigh=48M
 
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 

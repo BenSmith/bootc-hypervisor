@@ -201,6 +201,61 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertIn("workload-app-net.service", umbrella)
         self.assertNotIn("workload-app-pod.service", umbrella)
 
+    def test_stale_pause_migrate_in_head_units_only(self):
+        """`podman system migrate` must run in each workload's first
+        podman-touching unit (single service, pod service, net service) and
+        never in pod/bridge member services — there it would kill the libpod
+        pause out from under the live pod infra / sibling containers.
+        Regresses the pasta restart-loop bug (stale pause pins a mount ns
+        whose PrivateTmp /tmp is deleted; pasta's sandbox mount gets ENOENT).
+        """
+        migrate = "ExecStartPre=-/usr/bin/podman system migrate"
+        write_config(self.config_dir, "solo", """\
+            [workload]
+            name = "solo"
+            enabled = true
+
+            [container]
+            image = "docker.io/nginx:latest"
+        """)
+        write_config(self.config_dir, "grp", """\
+            [workload]
+            name = "grp"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+        """)
+        write_config(self.config_dir, "brg", """\
+            [workload]
+            name = "brg"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        solo = (Path(self.services_dir) / "workload-solo.service").read_text()
+        self.assertIn(migrate, solo)
+
+        pod = (Path(self.services_dir) / "workload-grp-pod.service").read_text()
+        self.assertIn(migrate, pod)
+        pod_member = (Path(self.services_dir) / "workload-grp-db.service").read_text()
+        self.assertNotIn(migrate, pod_member)
+
+        net = (Path(self.services_dir) / "workload-brg-net.service").read_text()
+        self.assertIn(migrate, net)
+        net_member = (Path(self.services_dir) / "workload-brg-web.service").read_text()
+        self.assertNotIn(migrate, net_member)
+
     def test_per_container_environment_sibling_form(self):
         """[containers.environment] (sibling of [containers.container]) must
         reach the per-container service as --env flags. This is the form the

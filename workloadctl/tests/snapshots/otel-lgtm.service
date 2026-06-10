@@ -28,6 +28,7 @@ MemoryHigh=3G
 LoadCredentialEncrypted=grafana-admin-password:/etc/credstore.encrypted/grafana-admin-password
 
 ExecStartPre=+/usr/libexec/workloadctl/workload-write-env otel-lgtm
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=newer
 
