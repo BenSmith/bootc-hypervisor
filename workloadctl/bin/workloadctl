@@ -1129,15 +1129,21 @@ def _provision_user(config: WorkloadConfig):
     home_dir = str(config.home_dir)
     extra_groups = config.config.get("security", {}).get("extra_groups", [])
 
-    # Look up existing UID or allocate the next free one in the workload range
-    try:
-        uid = pwd.getpwnam(user_name).pw_uid
-    except KeyError:
-        used_uids = set()
-        for pw in pwd.getpwall():
-            if 10000 <= pw.pw_uid <= 52948:
-                used_uids.add(pw.pw_uid)
-        uid = next(u for u in range(10000, 52949) if u not in used_uids)
+    # Look up existing UID or allocate the next free one in the workload range.
+    # Flock matches /run/lock/workload-subid.lock in workload-ensure-user so
+    # concurrent enables don't race on the same UID slot.
+    _subid_lock = Path("/run/lock/workload-subid.lock")
+    _subid_lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(_subid_lock, "w") as _lock_fd:
+        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            uid = pwd.getpwnam(user_name).pw_uid
+        except KeyError:
+            used_uids = set()
+            for pw in pwd.getpwall():
+                if 10000 <= pw.pw_uid <= 52948:
+                    used_uids.add(pw.pw_uid)
+            uid = next(u for u in range(10000, 52949) if u not in used_uids)
 
     # Write a temporary sysusers config (the generator creates the persistent
     # copy at boot in /run/systemd/system/, but enable runs before boot)

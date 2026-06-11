@@ -36,7 +36,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         break
 # --- end bootstrap ---------------------------------------------------------
 from podman import Podman
-from workload_lib import QMPClient
+from workload_lib import QMPClient, normalize_containers
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -66,12 +66,13 @@ def get_enabled_workloads():
         try:
             with open(toml_path, "rb") as f:
                 config = tomllib.load(f)
-            if config.get("workload", {}).get("enabled", True):
+            if config.get("workload", {}).get("enabled", False):
                 name = config.get("workload", {}).get("name", "")
-                has_health = bool(
-                    config.get("container", {}).get("health", {}).get("cmd", "")
-                )
                 is_vm = bool(config.get("vm"))
+                has_health = any(
+                    bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
+                    for ctr in normalize_containers(config)
+                ) if not is_vm else False
                 if name:
                     workloads.append((name, has_health, is_vm))
         except Exception:

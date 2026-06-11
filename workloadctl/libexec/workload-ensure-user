@@ -39,7 +39,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
-    virtiofs_tag, parse_volume_spec, substitute_template,
+    virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
 )
 
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
@@ -162,11 +162,12 @@ def configure_subuid_subgid(pw, config):
             main_already_allocated = any(
                 line.startswith(f"{username}:") for line in existing.splitlines()
             )
+            existing_lines = set(existing.splitlines())
             missing = []
             for entry in required_entries:
                 if entry == main_entry and main_already_allocated:
                     continue
-                if entry not in existing:
+                if entry not in existing_lines:
                     missing.append(entry)
 
             if missing:
@@ -225,7 +226,14 @@ def setup_volume_directories(pw, config):
             path = str(home_path) + "/" + path[2:]
         required_file_paths.add(path)
 
-    for volume_spec in config.get("storage", {}).get("volumes", []):
+    # Gather volumes from all containers (single and multi-container shapes).
+    # Top-level storage.volumes only exists for single-container TOMLs;
+    # [[containers]] entries each carry their own storage.volumes.
+    all_volume_specs = []
+    for ctr in normalize_containers(config):
+        all_volume_specs.extend(ctr.get("storage", {}).get("volumes", []))
+
+    for volume_spec in all_volume_specs:
         expanded = expand_volume_path(volume_spec, str(home_path))
         host_path_str = expanded.split(":", 2)[0]
         if not host_path_str:

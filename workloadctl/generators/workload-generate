@@ -138,28 +138,6 @@ UID_MIN = 10000
 UID_MAX = 52948
 
 
-def allocate_uid():
-    """Find the next free UID in the workload range (10000-52948).
-
-    Scans /etc/passwd for UIDs already in use and returns the lowest
-    available. Called once per new workload during generation.
-    """
-    used_uids = set()
-    try:
-        for pw in pwd.getpwall():
-            if UID_MIN <= pw.pw_uid <= UID_MAX:
-                used_uids.add(pw.pw_uid)
-    except Exception:
-        pass  # If getpwall fails, start from UID_MIN
-
-    for uid in range(UID_MIN, UID_MAX + 1):
-        if uid not in used_uids:
-            used_uids.add(uid)  # Reserve for subsequent calls in same run
-            return uid
-
-    raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
-
-
 # Track UIDs allocated during this run (for multiple workloads)
 _allocated_uids = set()
 
@@ -1658,7 +1636,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
 
 
 def generate_vm_workload(config, user_name: str, uid: int):
-    """Emit all unit files for a VM workload. Returns list of written paths."""
+    """Emit all unit files for a VM workload. Returns the workload name."""
     name = config["workload"]["name"]
     home_dir = str(WORKLOADS_BASE / name)
     vm_cfg = config.get("vm", {})
@@ -1793,7 +1771,7 @@ def main():
             sysuser_content = generate_sysuser_config(config, user_name, uid)
             sysuser_file = SYSUSERS_DIR / f"workload-{name}.conf"
             sysuser_file.write_text(sysuser_content)
-            log_msg(f"  Created sysusers config" + (f" with UID {uid}" if uid else " (range 10000-52948)"))
+            log_msg(f"  Created sysusers config with UID {uid}")
 
             # user@<uid>.service.d drop-in: redirect the user manager into
             # workloads.slice and apply workload-level cgroup limits (ADR 001 option 1b).

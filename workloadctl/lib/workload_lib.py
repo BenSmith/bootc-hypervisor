@@ -96,7 +96,7 @@ def infer_workload_kind(config: dict) -> str:
 
 def vm_mac_address(name: str) -> str:
     """Derive a stable, locally-administered unicast MAC from the workload name."""
-    h = hashlib.md5(f"wl-vm-{name}".encode()).digest()
+    h = hashlib.md5(f"wl-vm-{name}".encode(), usedforsecurity=False).digest()
     first = (h[0] & 0xFE) | 0x02  # locally administered, unicast
     return ":".join(f"{b:02x}" for b in [first, h[1], h[2], h[3], h[4], h[5]])
 

@@ -397,6 +397,37 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             self.assertTrue(any(str(existing) in c[0] for c in chown_calls))
 
 
+class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
+    """C1: multi-container workload volume dirs are created."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_multi_container_volumes_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            pw = _fake_pw(home)
+            config = {
+                "workload": {"name": "myapp"},
+                "containers": [
+                    {
+                        "name": "web",
+                        "container": {"image": "nginx"},
+                        "storage": {"volumes": ["./web-data:/data"]},
+                    },
+                    {
+                        "name": "db",
+                        "container": {"image": "postgres"},
+                        "storage": {"volumes": ["./db-data:/var/lib/postgresql"]},
+                    },
+                ],
+            }
+            with mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_volume_directories(pw, config)
+            self.assertTrue((home / "web-data").is_dir())
+            self.assertTrue((home / "db-data").is_dir())
+
+
 class TestConfigureSubuidSubgid(unittest.TestCase):
     """Tests for configure_subuid_subgid — formula and grandfathering logic."""
 
