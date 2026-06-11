@@ -177,8 +177,13 @@ jobs:
           # are private homelab images served from registry.local and are never
           # distributed; the verification policy (policy*.json) checks the
           # key-based signature via keyPath and needs no transparency-log entry.
-          # Three attempts with a 10s backoff handle transient registry failures
-          # (e.g. redirect loops during a Caddy/zot restart on the registry host).
+          # Three attempts with a 10s backoff handle transient registry failures.
+          # If you see "stopped after 10 redirects" here: that is cosign's
+          # *.local http/https scheme race losing to Caddy's 80->443 redirect
+          # on the registry host (NOT a Caddy/zot restart). The registry host's
+          # Caddyfile must 404 /v2* on plain HTTP instead of redirecting, so
+          # the http probe always fails — see
+          # docs/cosign-local-redirect-loop.md.
           for attempt in 1 2 3; do
             if cosign sign -y \
                 --key env://COSIGN_PRIVATE_KEY \
@@ -410,8 +415,13 @@ jobs:
           # are private homelab images served from registry.local and are never
           # distributed; the verification policy (policy*.json) checks the
           # key-based signature via keyPath and needs no transparency-log entry.
-          # Three attempts with a 10s backoff handle transient registry failures
-          # (e.g. redirect loops during a Caddy/zot restart on the registry host).
+          # Three attempts with a 10s backoff handle transient registry failures.
+          # If you see "stopped after 10 redirects" here: that is cosign's
+          # *.local http/https scheme race losing to Caddy's 80->443 redirect
+          # on the registry host (NOT a Caddy/zot restart). The registry host's
+          # Caddyfile must 404 /v2* on plain HTTP instead of redirecting, so
+          # the http probe always fails — see
+          # docs/cosign-local-redirect-loop.md.
           for attempt in 1 2 3; do
             if cosign sign -y \
                 --key env://COSIGN_PRIVATE_KEY \

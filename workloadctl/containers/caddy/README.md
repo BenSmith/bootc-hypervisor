@@ -76,13 +76,16 @@ backend is silent. The 404 makes "you didn't configure this name" obvious.
 ```bash
 # Local test, no DNS needed — -k trusts the local CA, --resolve fakes the name:
 curl -k --resolve zot.local:443:127.0.0.1 https://zot.local/v2/
-curl -kL http://zot.local/v2/                          # full path: DNS + 80->443 redirect + backend
+curl -kL http://grafana.local/                         # full path: DNS + 80->443 redirect + backend
+curl http://zot.local/v2/                              # registry API over plain HTTP: expect 404, NOT a redirect
 workloadctl logs caddy | tail                          # access + error log
 ```
 
 Named sites are served over HTTPS; `http://<name>` 308-redirects to
 `https://<name>`, so use `-L` (follow redirects) and `-k` (trust Caddy's
-internal CA) when testing with `curl`.
+internal CA) when testing with `curl`. The one exception is the registry API:
+`http://<name>/v2*` must return 404 (see "Stopping the redirect" below) — if
+it 308s, image signing will break.
 
 ## Troubleshooting
 
@@ -171,11 +174,24 @@ the global block in the Caddyfile with `{ auto_https off }`.
 
 ### Stopping the http://name -> https://name redirect
 
-Caddy redirects HTTP to HTTPS by default once a site has a cert, so the sample
-Caddyfile lets `http://<name>` 308-redirect to `https://<name>`. That is the
-intended behavior — clients reach the same place either way. To serve plain
-HTTP *without* the redirect, add `auto_https disable_redirects` to the global
-block; to drop HTTPS entirely, replace the global block with `{ auto_https off }`.
+Caddy redirects HTTP to HTTPS by default once a site has a cert. The sample
+Caddyfile *disables* that (`auto_https disable_redirects`) and reimplements
+the redirect inside the `:80` catchall, so `http://<name>` still 308-redirects
+to `https://<name>` for any `*.local` Host — with one deliberate carve-out:
+
+**the registry API (`/v2*`) is never redirected, on any host.** cosign's
+registry client treats `*.local` names as possibly-http and races http vs
+https on its first ping; if the http probe wins via a followed redirect,
+every later request gets pinned to http and loops on the 308 until cosign
+fails with "stopped after 10 redirects". The `:80` block hard-404s `/v2*`
+instead, so the http probe always loses. The rule is path-based on purpose —
+it protects any current or future registry behind this proxy without
+maintaining a hostname list. See `docs/cosign-local-redirect-loop.md` for the
+full failure analysis.
+
+To serve plain HTTP *without* any redirect, drop the `@dotlocal` redirect
+from the `:80` block; to drop HTTPS entirely, replace the global block with
+`{ auto_https off }`.
 
 ### `curl: (35) ... tlsv1 alert internal error` on an unknown name
 

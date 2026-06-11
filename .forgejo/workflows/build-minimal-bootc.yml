@@ -196,6 +196,9 @@ jobs:
           # are private homelab images served from registry.local and are never
           # distributed; the verification policy (policy*.json) checks the
           # key-based signature via keyPath and needs no transparency-log entry.
+          # If this fails with "stopped after 10 redirects", see
+          # docs/cosign-local-redirect-loop.md (cosign *.local scheme race vs
+          # Caddy's 80->443 redirect on the registry host).
           cosign sign -y \
             --key env://COSIGN_PRIVATE_KEY \
             --tlog-upload=false \

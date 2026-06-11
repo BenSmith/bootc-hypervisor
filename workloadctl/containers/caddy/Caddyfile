@@ -9,11 +9,16 @@
 # host networking + ip_unprivileged_port_start=0 (set by hypervisor.Containerfile)
 # lets Caddy bind 80/443 directly as the rootless _wl-caddy user.
 
-# Named sites below are served over HTTPS with Caddy's internal CA, and Caddy
-# auto-installs an 80->443 redirect for each, so http://<name> reaches the
-# same place. Add `auto_https disable_redirects` here to keep plain HTTP
-# available without the redirect.
+# Named sites below are served over HTTPS with Caddy's internal CA. Caddy's
+# automatic 80->443 redirects are DISABLED; the :80 block at the bottom
+# replaces them with a generic redirect that exempts the registry API
+# (/v2*), because a plain-HTTP 308 on /v2 breaks cosign image signing.
+# See docs/cosign-local-redirect-loop.md.
 {
+    # The :80 catchall below owns all plain-HTTP behavior (redirects, the
+    # /v2* registry-API exemption, CA-cert bootstrap, unknown-host 404s).
+    auto_https disable_redirects
+
     # Local-only deployment: no public ACME, use Caddy's internal CA for HTTPS.
     # Drop this block if you want to serve plain HTTP only.
     local_certs
@@ -46,21 +51,47 @@ grafana.local {
 
 # Add one block per service this host fronts.
 
-# Catchall for port 80 — matches requests whose Host doesn't hit any named
-# block above. The per-host 80->443 redirects Caddy installs for the named
-# sites are more specific than this hostless :80 block, so a named site still
-# redirects to HTTPS while an unconfigured Host (or a request by raw IP) lands
-# here. Without this, an unknown Host gets Caddy's stock empty-200, which is
-# hard to distinguish from "site exists but backend is broken."
+# Single plain-HTTP entrypoint (auto-redirects are disabled globally above,
+# so every :80 request lands here regardless of Host). `route` pins the
+# evaluation order. Raw-IP or foreign-name requests still get an explicit
+# 404 rather than Caddy's stock empty-200, which is hard to distinguish
+# from "site exists but backend is broken."
 :80 {
-    # Serve the homelab CA root cert over plain HTTP so bootstrap clients can
-    # fetch and install it before they trust HTTPS. Reachable at any Host header
-    # (http://<host>.local/caddy-root.crt) since named sites redirect to HTTPS.
-    handle /caddy-root.crt {
-        rewrite * /homelab-root.crt
-        file_server
-        root /etc/caddy
-    }
-    respond "no site configured for {host}" 404
-}
+    @dotlocal host *.local
 
+    route {
+        # Serve the homelab CA root cert over plain HTTP so bootstrap clients
+        # can fetch and install it before they trust HTTPS — for any Host,
+        # ahead of the redirect so it stays reachable without TLS.
+        handle /caddy-root.crt {
+            rewrite * /homelab-root.crt
+            file_server
+            root /etc/caddy
+        }
+
+        # The container-registry API is https-only on EVERY host, no name
+        # list to maintain. Never redirect it: cosign's registry client
+        # (go-containerregistry) hardcodes *.local names as possibly-http
+        # and races an http ping against https with only a 300ms https head
+        # start. If the http probe wins (a followed 308 counts as an http
+        # success), the client pins scheme=http and rewrites every redirect
+        # it follows back to http — an infinite 80->443->80 loop ("stopped
+        # after 10 redirects") that breaks image signing whenever the host
+        # is busy. A hard 404 makes the http probe lose every time, so
+        # cosign always lands on https. Full story:
+        # docs/cosign-local-redirect-loop.md.
+        handle /v2* {
+            respond "registry API is https-only" 404
+        }
+
+        # Generic stand-in for the disabled auto-redirects: any *.local
+        # Host goes to HTTPS. Unknown .local names then fail the TLS
+        # handshake with a clear alert (see README "tlsv1 alert internal
+        # error"); everything else falls through to the 404 below.
+        handle @dotlocal {
+            redir https://{host}{uri} 308
+        }
+
+        respond "no site configured for {host}" 404
+    }
+}
