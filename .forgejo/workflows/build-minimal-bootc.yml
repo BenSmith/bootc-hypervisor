@@ -71,29 +71,6 @@ jobs:
             echo "image_base=${REGISTRY}/${IMAGE_NAME}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Verify cosign (provisioned on runner)
-        # cosign is installed once on the runner during VM bootstrap
-        # (vms/virtual-forgejo/cloud-init/user-data, step 8b), pinned to v2:
-        # v2 emits the legacy ".sig" simple-signing format that containers-policy
-        # `sigstoreSigned` (bootc/podman pull verification) reads; v3's default
-        # bundle format is NOT verified by sigstoreSigned. We assert the pinned
-        # version here instead of downloading, so a GitHub outage can't fail the
-        # build; if it's absent/wrong, signing (already best-effort) is skipped.
-        env:
-          COSIGN_VERSION: v2.4.3
-        run: |
-          WANT="${COSIGN_VERSION#v}"
-          # cosign reports `GitVersion:    v2.4.3` — note the leading `v`. Match
-          # that line allowing the optional v, with dots taken literally. The
-          # earlier `[[:space:]]*${WANT}` (v stripped) never matched the v-prefixed
-          # output, so signing was silently skipped on every build.
-          if cosign version 2>/dev/null | grep -qE "GitVersion:[[:space:]]+v?${WANT//./\\.}\b"; then
-            echo "Pinned cosign ${WANT} present on runner."
-            cosign version
-          else
-            echo "::warning::Pinned cosign ${WANT} not found on runner — image signing will be skipped. Reinstall via the VM bootstrap (user-data step 8b)."
-          fi
-
       - name: Render policy.json
         env:
           OWNER: ${{ github.repository_owner }}
@@ -155,11 +132,31 @@ jobs:
             TAGS+=("latest")
           fi
 
+          # Sign at push via containers/image (no cosign in CI; its *.local
+          # scheme race broke signing — docs/cosign-local-redirect-loop.md).
+          # The signature is a cosign-compatible sigstore attachment, verified
+          # by both `sigstoreSigned` policy and `cosign verify`. Key and
+          # passphrase are host-key-sealed systemd credentials decrypted into
+          # the runner service's tmpfs (sealed once by the seal-signing-key
+          # workflow — docs/ci-image-signing.md); no Forgejo secrets involved.
+          # Missing credentials → push unsigned with a warning (same
+          # best-effort stance as before). Only the first push signs: the
+          # signature is digest-addressed (sha256-<digest>.sig in the same
+          # repo), so further tags of the same image are already covered.
+          CREDS=/run/credentials/forgejo-runner.service
+          SIGN_ARGS=()
+          if sudo test -s "${CREDS}/cosign-key"; then
+            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                       --sign-passphrase-file "${CREDS}/cosign-pass")
+          else
+            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          fi
+
           FIRST=true
           for t in "${TAGS[@]}"; do
             sudo podman tag "localhost/${IMAGE_NAME}:rechunked-${VERSION}" "${IMAGE_BASE}:${t}"
             if [ "${FIRST}" = "true" ]; then
-              sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
+              sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
               FIRST=false
             else
               sudo podman push "${IMAGE_BASE}:${t}"
@@ -172,37 +169,6 @@ jobs:
             echo "versioned_tag=${VERSION}-${TAG}"
             echo "digest=${DIGEST}"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Sign images
-        # Best-effort: sign if a key is configured and cosign succeeds,
-        # but never fail the build over signing.
-        continue-on-error: true
-        timeout-minutes: 2
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
-          # cosign keys are always encrypted; CI must supply the password
-          # non-interactively. Empty (unset secret) is correct for a key
-          # generated without a password.
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
-            echo "COSIGN_SECRET not set — skipping image signing."
-            exit 0
-          fi
-          # Local key-based signature only: --tlog-upload=false keeps image
-          # digests out of the public Sigstore transparency log (Rekor). These
-          # are private homelab images served from registry.local and are never
-          # distributed; the verification policy (policy*.json) checks the
-          # key-based signature via keyPath and needs no transparency-log entry.
-          # If this fails with "stopped after 10 redirects", see
-          # docs/cosign-local-redirect-loop.md (cosign *.local scheme race vs
-          # Caddy's 80->443 redirect on the registry host).
-          cosign sign -y \
-            --key env://COSIGN_PRIVATE_KEY \
-            --tlog-upload=false \
-            "${IMAGE_BASE}@${DIGEST}"
 
       - name: Summary
         env:
