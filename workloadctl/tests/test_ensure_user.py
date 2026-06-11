@@ -160,7 +160,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
-                                            if name == "genisoimage" else None):
+                                            if name == "genisoimage" else None), \
+             mock.patch.object(self.mod.shutil, "rmtree"):
             self.mod.build_cloud_init_iso(
                 self.pw, config, name,
                 config_path=self.config_dir / f"{name}.toml",
@@ -298,6 +299,46 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         self.assertEqual(fp_first, fp_second)
         self.assertEqual(iso_mtime_first, iso_mtime_second)
 
+    def test_user_data_written_0600(self):
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nhostname: test\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        import shutil as _shutil
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
+             mock.patch.object(_shutil, "which",
+                               lambda name: "/usr/bin/genisoimage"
+                                            if name == "genisoimage" else None), \
+             mock.patch.object(self.mod.shutil, "rmtree"):
+            self.mod.build_cloud_init_iso(
+                self.pw, cfg, "myvm",
+                config_path=self.config_dir / "myvm.toml",
+            )
+        ud_path = self.home / ".cloud-init-seed" / "user-data"
+        mode = oct(ud_path.stat().st_mode & 0o777)
+        self.assertEqual(mode, "0o600")
+
+    def test_seed_dir_removed_after_iso_build(self):
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nhostname: test\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        import shutil as _shutil
+        rmtree_calls = []
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
+             mock.patch.object(_shutil, "which",
+                               lambda name: "/usr/bin/genisoimage"
+                                            if name == "genisoimage" else None), \
+             mock.patch.object(self.mod.shutil, "rmtree",
+                               side_effect=lambda p, **kw: rmtree_calls.append(p)):
+            self.mod.build_cloud_init_iso(
+                self.pw, cfg, "myvm",
+                config_path=self.config_dir / "myvm.toml",
+            )
+        seed_dir = self.home / ".cloud-init-seed"
+        self.assertTrue(any(str(seed_dir) in str(p) for p in rmtree_calls),
+                        f"seed_dir not removed; rmtree calls: {rmtree_calls}")
+
     def test_default_mode_used_when_no_user_data_file(self):
         # No [vm.cloud_init].user_data_file → built-in cloud-config (no
         # template substitution surface). Sanity check: no error, and the
@@ -354,6 +395,79 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
                 with mock.patch("os.chmod"):
                     self.mod.setup_vm_volume_directories(pw, config)
             self.assertTrue(any(str(existing) in c[0] for c in chown_calls))
+
+
+class TestConfigureSubuidSubgid(unittest.TestCase):
+    """Tests for configure_subuid_subgid — formula and grandfathering logic."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def _run(self, uid, subuid_content="", subgid_content="", config=None):
+        """Call configure_subuid_subgid with mocked /etc/subuid|subgid."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=uid)
+        pw.pw_name = "_wl-test"
+        if config is None:
+            config = {}
+
+        subuid_written = []
+        subgid_written = []
+
+        def fake_open(path, mode="r"):
+            if mode == "r":
+                if "subuid" in str(path):
+                    return mock.mock_open(read_data=subuid_content)()
+                if "subgid" in str(path):
+                    return mock.mock_open(read_data=subgid_content)()
+            if mode == "a":
+                if "subuid" in str(path):
+                    buf = []
+                    m = mock.MagicMock()
+                    m.write = lambda s: buf.append(s) or subuid_written.append(s)
+                    m.__enter__ = lambda s: m
+                    m.__exit__ = mock.MagicMock(return_value=False)
+                    return m
+                if "subgid" in str(path):
+                    buf = []
+                    m = mock.MagicMock()
+                    m.write = lambda s: buf.append(s) or subgid_written.append(s)
+                    m.__enter__ = lambda s: m
+                    m.__exit__ = mock.MagicMock(return_value=False)
+                    return m
+            # lock file
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()), \
+             mock.patch.object(self.mod.Path, "mkdir"):
+            self.mod.configure_subuid_subgid(pw, config)
+
+        return subuid_written, subgid_written
+
+    def test_new_user_uid_10000_gets_new_formula(self):
+        written, _ = self._run(uid=10000)
+        self.assertEqual(len(written), 1)
+        entry = written[0].strip()
+        # offset=0 → 600100000 + 0 = 600100000
+        self.assertEqual(entry, "_wl-test:600100000:65536")
+
+    def test_new_user_uid_52948_gets_new_formula(self):
+        written, _ = self._run(uid=52948)
+        self.assertEqual(len(written), 1)
+        entry = written[0].strip()
+        # offset=42948 → 600100000 + 42948*65536 = 3414740128
+        self.assertEqual(entry, "_wl-test:3414740128:65536")
+
+    def test_existing_entry_not_rewritten(self):
+        old_entry = "_wl-test:100000:65536\n"
+        written, _ = self._run(uid=10000, subuid_content=old_entry, subgid_content=old_entry)
+        # Main entry must not be added again — old range is grandfathered
+        self.assertEqual(written, [])
 
 
 class TestDecryptSystemdCredential(unittest.TestCase):

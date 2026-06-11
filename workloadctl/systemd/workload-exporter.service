@@ -8,6 +8,15 @@ Type=simple
 ExecStart=/usr/libexec/workloadctl/workload-exporter
 Restart=on-failure
 RestartSec=10s
+# Hardening — root and 0.0.0.0 bind are deliberate (scrapes cgroups as root,
+# alloy reaches it via host.containers.internal which never resolves to loopback)
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

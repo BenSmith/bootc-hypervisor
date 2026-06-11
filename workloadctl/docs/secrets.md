@@ -934,4 +934,20 @@ Each machine has a different auth key, but the workload config is the same acros
 
 ---
 
+## VM workloads: cloud-init.iso residual risk
+
+For VM workloads, `workload-ensure-user` renders `${SECRET:...}` references from
+`[vm.cloud_init].user_data_file` into a `user-data` file and packages it into a
+`cloud-init.iso` in the workload home. The staging directory (`~/.cloud-init-seed/`)
+is removed immediately after ISO creation. The ISO itself (`~/cloud-init.iso`) is
+kept at mode 0640 (root + workload group) for QEMU to read on every boot.
+
+**Accepted residual risk:** `cloud-init.iso` contains rendered secrets in plaintext
+at 0640. It is only readable by root and the workload system user, and it lives on
+the host filesystem rather than a shareable location. The guest reads it once per
+cloud-init run. Encrypting the ISO would require a guest key exchange that
+complicates bootstrap; this is accepted scope for the current design.
+
+---
+
 **Last updated:** 2026-01-02

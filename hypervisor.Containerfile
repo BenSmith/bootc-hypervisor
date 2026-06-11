@@ -5,7 +5,7 @@ COPY workloadctl/ /workloadctl/
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
         rpm-build python3 just systemd-rpm-macros && \
     dnf clean all && \
-    cd /workloadctl && just rpm-build
+    cd /workloadctl && just test && just rpm-build
 
 FROM ${BASE_IMAGE}
 
@@ -190,7 +190,14 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
         -not -path '/var/lib/rpm/*' \
         -delete && \
     find /var -depth -type d -empty -delete && \
-    bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
+    LINT_OUT=$(bootc container lint 2>&1) || { \
+        UNEXPECTED=$(echo "$LINT_OUT" | grep -i 'warning\|error' | \
+            grep -v 'gssproxy\|/var/lib/pcp\|rpm-state\|/var/lib/rpm'); \
+        if [ -n "$UNEXPECTED" ]; then \
+            echo "bootc container lint: unexpected warnings:" && \
+            echo "$LINT_OUT" && exit 1; \
+        fi; \
+    }; true
 
 # Ensure device access groups exist, propagate to /etc/group, set privileged port sysctl.
 # /usr/lib/group is immutable on bootc; /etc/group is mutable and needed for usermod.

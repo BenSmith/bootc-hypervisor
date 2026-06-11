@@ -14,6 +14,7 @@ import hashlib
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -110,7 +111,10 @@ def configure_subuid_subgid(pw, config):
     if uid < base_uid:
         raise ValueError(f"UID {uid} is below minimum workload UID {base_uid}")
     uid_offset = uid - base_uid
-    subid_start = 100000 + (uid_offset * 100000)
+    # Place subid ranges above the Fedora useradd window (SUB_UID_MIN=524288).
+    # Old formula (100000 + offset*100000) collides with that window for low UIDs.
+    # New formula: 600100000 + (offset * 65536); max end ≈ 3.4G, within uint32.
+    subid_start = 600100000 + (uid_offset * 65536)
     count = 65536
 
     # Verify ranges fit within uint32 (max 4,294,967,295)
@@ -152,8 +156,16 @@ def configure_subuid_subgid(pw, config):
             except FileNotFoundError:
                 existing = ""
 
+            # Grandfather the main range: if the user already has any entry,
+            # keep it unchanged — shifting a UID mapping under a running
+            # container corrupts its namespace.
+            main_already_allocated = any(
+                line.startswith(f"{username}:") for line in existing.splitlines()
+            )
             missing = []
             for entry in required_entries:
+                if entry == main_entry and main_already_allocated:
+                    continue
                 if entry not in existing:
                     missing.append(entry)
 
@@ -638,7 +650,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     meta_data = f"instance-id: {instance_id}\nlocal-hostname: {name}\n"
     (seed_dir / "meta-data").write_text(meta_data)
 
-    (seed_dir / "user-data").write_text(user_data_text)
+    ud = seed_dir / "user-data"
+    fd = os.open(ud, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, user_data_text.encode())
+    finally:
+        os.close(fd)
 
     # For VM workloads: bundle the workloadctl RPM so the bootstrap can install
     # it directly from the cdrom instead of fetching it from a git repo.
@@ -685,6 +702,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
     fingerprint_file.write_text(current_fp)
     os.chown(fingerprint_file, pw.pw_uid, pw.pw_gid)
+
+    # Remove the seed staging directory — the rendered user-data contains
+    # secrets in plaintext and is no longer needed once the ISO is built.
+    shutil.rmtree(seed_dir, ignore_errors=True)
     log(f"  Built cloud-init ISO: {iso_path}")
 
 
