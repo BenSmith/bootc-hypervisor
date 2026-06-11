@@ -7,30 +7,23 @@ Requires=workload-pihole-setup.service
 After=network.target workload-pihole-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-pihole-health.timer
 
 [Service]
 Type=exec
 Slice=workloads.slice
-Delegate=yes
 User=_wl-pihole
 Group=_wl-pihole
 Environment="HOME=/var/lib/workloads/pihole"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-pihole.env
-
-# Resource limits and constraints
-CPUQuota=25%
-MemoryMax=256M
-MemoryHigh=192M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-pihole" --hostname "pihole" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --cgroups=split --userns=host --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/pihole/etc-pihole":/etc/pihole --volume "/var/lib/workloads/pihole/etc-dnsmasq.d":/etc/dnsmasq.d --env HOST_IP=${HOST_IP} --env WEBPASSWORD='' --env PIHOLE_DNS_='1.1.1.1;1.0.0.1' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=none "docker.io/pihole/pihole:latest"
+ExecStart=/usr/bin/podman run --name "workload-pihole" --hostname "pihole" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=host --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=256M --cpus=0.25 --network="host" --volume "/var/lib/workloads/pihole/etc-pihole":/etc/pihole --volume "/var/lib/workloads/pihole/etc-dnsmasq.d":/etc/dnsmasq.d --env HOST_IP=${HOST_IP} --env WEBPASSWORD='' --env PIHOLE_DNS_='1.1.1.1;1.0.0.1' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=kill "docker.io/pihole/pihole:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-pihole"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-pihole"
 
 StandardOutput=journal
 StandardError=journal

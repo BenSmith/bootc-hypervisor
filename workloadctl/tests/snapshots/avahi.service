@@ -7,30 +7,23 @@ Requires=workload-avahi-setup.service
 After=network.target workload-avahi-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-avahi-health.timer
 
 [Service]
 Type=simple
 Slice=workloads.slice
-Delegate=yes
 User=_wl-avahi
 Group=_wl-avahi
 Environment="HOME=/var/lib/workloads/avahi"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-avahi.env
-
-# Resource limits and constraints
-CPUQuota=50%
-MemoryMax=128M
-MemoryHigh=96M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --cgroups=split --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --env HOST_IP=${HOST_IP} --env ALIASES='zot registry' --health-cmd "avahi-daemon --check" --health-interval=60s --health-timeout=35s --health-retries=3 --health-start-period=10s --health-on-failure=none "localhost/avahi:latest"
+ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.5 --network="host" --env HOST_IP=${HOST_IP} --env ALIASES='zot registry' --health-cmd "avahi-daemon --check" --health-interval=60s --health-timeout=35s --health-retries=3 --health-start-period=10s --health-on-failure=kill "localhost/avahi:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-avahi"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-avahi"
 
 StandardOutput=journal
 StandardError=journal

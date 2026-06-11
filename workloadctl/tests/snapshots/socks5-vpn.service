@@ -7,30 +7,23 @@ Requires=workload-socks5-vpn-setup.service
 After=network.target workload-socks5-vpn-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-socks5-vpn-health.timer
 
 [Service]
 Type=exec
 Slice=workloads.slice
-Delegate=yes
 User=_wl-socks5-vpn
 Group=_wl-socks5-vpn
 Environment="HOME=/var/lib/workloads/socks5-vpn"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-socks5-vpn.env
-
-# Resource limits and constraints
-CPUQuota=20%
-MemoryMax=128M
-MemoryHigh=96M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-socks5-vpn" --hostname "socks5-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --cgroups=split --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 127.0.0.1:1080:1080 --volume "/var/lib/workloads/socks5-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env SOCKS_PORT=1080 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=none "localhost/socks5-vpn:latest"
+ExecStart=/usr/bin/podman run --name "workload-socks5-vpn" --hostname "socks5-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.2 --network="pasta" --publish 127.0.0.1:1080:1080 --volume "/var/lib/workloads/socks5-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env SOCKS_PORT=1080 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/socks5-vpn:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-socks5-vpn"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-socks5-vpn"
 
 StandardOutput=journal
 StandardError=journal

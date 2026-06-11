@@ -7,30 +7,23 @@ Requires=workload-proxy-stack-setup.service
 After=network.target workload-proxy-stack-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-proxy-stack-health.timer
 
 [Service]
 Type=exec
 Slice=workloads.slice
-Delegate=yes
 User=_wl-proxy-stack
 Group=_wl-proxy-stack
 Environment="HOME=/var/lib/workloads/proxy-stack"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-proxy-stack.env
-
-# Resource limits and constraints
-CPUQuota=30%
-MemoryMax=512M
-MemoryHigh=384M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-proxy-stack" --hostname "proxy-stack" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --cgroups=split --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 3128:3128/tcp --publish 1080:1080/tcp --publish 53:53/udp --publish 53:53/tcp --publish 80:80/tcp --volume "/var/lib/workloads/proxy-stack/wg0.conf":/etc/wireguard/wg0.conf:ro --volume "/var/lib/workloads/proxy-stack/squid.conf":/etc/squid/squid.conf:ro --volume "/var/lib/workloads/proxy-stack/etc-pihole":/etc/pihole --volume "/var/lib/workloads/proxy-stack/etc-dnsmasq.d":/etc/dnsmasq.d --volume "/var/lib/workloads/proxy-stack/cache":/var/spool/squid --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env SOCKS_PORT=1080 --env WEBPASSWORD='' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=none "localhost/proxy-stack:latest"
+ExecStart=/usr/bin/podman run --name "workload-proxy-stack" --hostname "proxy-stack" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=512M --cpus=0.3 --network="pasta" --publish 3128:3128/tcp --publish 1080:1080/tcp --publish 53:53/udp --publish 53:53/tcp --publish 80:80/tcp --volume "/var/lib/workloads/proxy-stack/wg0.conf":/etc/wireguard/wg0.conf:ro --volume "/var/lib/workloads/proxy-stack/squid.conf":/etc/squid/squid.conf:ro --volume "/var/lib/workloads/proxy-stack/etc-pihole":/etc/pihole --volume "/var/lib/workloads/proxy-stack/etc-dnsmasq.d":/etc/dnsmasq.d --volume "/var/lib/workloads/proxy-stack/cache":/var/spool/squid --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env SOCKS_PORT=1080 --env WEBPASSWORD='' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=kill "localhost/proxy-stack:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-proxy-stack"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-proxy-stack"
 
 StandardOutput=journal
 StandardError=journal

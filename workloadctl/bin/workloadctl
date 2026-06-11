@@ -64,7 +64,6 @@ from workload_lib import (
     workload_username,
 )
 from podman import Podman, PodmanError
-from cgroup_exec import cgroup_for_pid, cgroup_placed_podman, delegated_unit_cgroup
 
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 # TODO: break this file into smaller units, perhaps per-command.
@@ -463,60 +462,17 @@ class WorkloadManager:
         return subprocess.run(cmd, capture_output=capture_output, text=True,
                               check=check, cwd=cwd)
 
-    def run_podman_exec(self, config: WorkloadConfig, container: str, args,
+    def run_podman_exec(self, config: WorkloadConfig, args,
                         check=False, capture_output=False):
-        """Run `podman exec <args>` against a workload container, joining the
-        container's delegated unit cgroup first so the exec actually works.
+        """Run `podman exec <args>` against a workload container.
 
-        Containers started with --cgroups=split run under the system manager's
-        workloads.slice. A normal `sudo -u` re-homes the child into a *user*
-        login-session scope (pam_systemd), so crun's attempt to migrate the exec
-        process into the container's cgroup crosses the root cgroup boundary and
-        fails — `crun: write to .../cgroup.procs: Permission denied` — which is
-        also why podman's own healthcheck can't run. We instead (as root) join a
-        leaf of the container's delegated unit cgroup, then drop privileges
-        *without* PAM (setresuid in a preexec hook) so the migration stays inside
-        the delegated subtree.
-
-        `container` is the container name used to look up the running PID; `args`
-        is the full `podman exec` argument vector (options, container, command).
-        Falls back to the plain `sudo -u` path when not running as root or when
-        the container is not under a delegated unit cgroup (pod mode, or a
-        container that migrated into the user manager) — exec works normally
-        there.
+        Under ADR 001 option 1b, containers run inside the user manager
+        (user@<uid>.service → workloads.slice), so crun's cgroup migration stays
+        within the delegated subtree and plain sudo -u exec works without any
+        cgroup placement shim.
         """
-        def plain():
-            return self.run_podman(config, "exec", *args,
-                                   check=check, capture_output=capture_output)
-
-        if os.geteuid() != 0:
-            return plain()
-
-        # Locate the container's delegated unit cgroup via its PID.
-        pid_res = self.run_podman(config, "inspect", container,
-                                  "--format", "{{.State.Pid}}", capture_output=True)
-        pid = pid_res.stdout.strip() if pid_res.returncode == 0 else ""
-        if not pid or pid == "0":
-            return plain()
-        unit_rel = cgroup_for_pid(pid)
-        if not unit_rel:
-            return plain()
-
-        try:
-            return cgroup_placed_podman(
-                unit_rel, config.uid, config.gid, config.username,
-                config.home_dir, ["exec", *args], leaf_name="wlctl-exec",
-                check=check, capture_output=capture_output,
-                extra_env={
-                    "TERM": os.environ.get("TERM", "xterm"),
-                    **{k: v for k, v in os.environ.items()
-                       if k == "LANG" or k.startswith("LC_")},
-                },
-            )
-        except OSError:
-            # Leaf cgroup could not be created/chowned — fall back to the plain
-            # path (works for non-split containers; harmless retry otherwise).
-            return plain()
+        return self.run_podman(config, "exec", *args,
+                               check=check, capture_output=capture_output)
 
     def podman(self, config: WorkloadConfig) -> Podman:
         """Return a memoized Podman wrapper for this workload's user."""
@@ -1578,6 +1534,18 @@ def cmd_enable(args, manager: WorkloadManager):
         print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
+def _remove_user_dropin(config: WorkloadConfig):
+    """Remove the user@<uid>.service.d/50-workload.conf drop-in for a workload."""
+    dropin_dir = Path("/run/systemd/system") / f"user@{config.uid}.service.d"
+    dropin_conf = dropin_dir / "50-workload.conf"
+    if dropin_conf.exists():
+        dropin_conf.unlink()
+    try:
+        dropin_dir.rmdir()
+    except OSError:
+        pass
+
+
 def cmd_disable(args, manager: WorkloadManager):
     """Disable and stop a workload"""
     require_root()
@@ -1616,6 +1584,12 @@ def cmd_disable(args, manager: WorkloadManager):
     else:
         content = re.sub(r'^(\[workload\])', r'\1\nenabled = false', content, flags=re.MULTILINE)
     config_path.write_text(content)
+
+    # Remove the user@ drop-in so systemd stops constraining user@<uid>
+    # to workloads.slice once the workload is disabled.  Lives in /run so
+    # it would vanish on reboot anyway, but clean it up eagerly.
+    _remove_user_dropin(config)
+
     subprocess.run(["systemctl", "daemon-reload"], check=False)
 
     if purge:
@@ -1987,7 +1961,7 @@ def cmd_reboot(args, manager: WorkloadManager):
         print(f"✓ VM '{args.workload}' soft-reboot initiated (disk preserved)")
         return
 
-    result = manager.run_podman_exec(config, config.container_name,
+    result = manager.run_podman_exec(config,
                                      [config.container_name, "systemctl", "soft-reboot"])
     if result.returncode != 0:
         print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
@@ -2173,9 +2147,9 @@ def cmd_shell(args, manager: WorkloadManager):
     # Try bash first, fall back to sh only if bash isn't available in the image.
     # 127 = command not found; any other non-zero is propagated from the user's
     # last command (e.g. 130 after ^C), not a reason to relaunch.
-    result = manager.run_podman_exec(config, target, [*exec_opts, target, "/bin/bash"])
+    result = manager.run_podman_exec(config, [*exec_opts, target, "/bin/bash"])
     if result.returncode == 127:
-        manager.run_podman_exec(config, target, [*exec_opts, target, "/bin/sh"], check=True)
+        manager.run_podman_exec(config, [*exec_opts, target, "/bin/sh"], check=True)
 
 
 def cmd_exec(args, manager: WorkloadManager):
@@ -2209,7 +2183,7 @@ def cmd_exec(args, manager: WorkloadManager):
         sys.exit(result.returncode)
 
     target = resolve_container_target(config, container, workload)
-    manager.run_podman_exec(config, target, [*_interactive_exec_flags(), target, *exec_args], check=True)
+    manager.run_podman_exec(config, [*_interactive_exec_flags(), target, *exec_args], check=True)
 
 
 def cmd_logs(args, manager: WorkloadManager):

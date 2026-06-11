@@ -60,9 +60,6 @@ install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
     %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
 install -Dpm 0644 %{_sourcedir}/lib/podman.py \
     %{buildroot}%{_libexecdir}/workloadctl/podman.py
-install -Dpm 0644 %{_sourcedir}/lib/cgroup_exec.py \
-    %{buildroot}%{_libexecdir}/workloadctl/cgroup_exec.py
-
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
@@ -72,8 +69,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-ensure-user \
     %{buildroot}%{_libexecdir}/workloadctl/workload-ensure-user
 install -Dpm 0755 %{_sourcedir}/libexec/workload-write-env \
     %{buildroot}%{_libexecdir}/workloadctl/workload-write-env
-install -Dpm 0755 %{_sourcedir}/libexec/workload-healthcheck \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-healthcheck
 install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-exporter
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
@@ -126,16 +121,6 @@ install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloa
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
-install -dm 0755 %{buildroot}%{_sysconfdir}/yum.repos.d
-cat > %{buildroot}%{_sysconfdir}/yum.repos.d/workloadctl.repo << 'EOF'
-[workloadctl]
-name=workloadctl
-baseurl=https://git.local/api/packages/ben/rpm
-enabled=1
-gpgcheck=0
-sslverify=false
-EOF
-
 %post
 %systemd_post workload-exporter.service
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
@@ -151,13 +136,11 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_bindir}/workloadctl
 %{_libexecdir}/workloadctl/workload_lib.py
 %{_libexecdir}/workloadctl/podman.py
-%{_libexecdir}/workloadctl/cgroup_exec.py
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
 %{_libexecdir}/workloadctl/workload-generate
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
-%{_libexecdir}/workloadctl/workload-healthcheck
 %{_libexecdir}/workloadctl/workload-exporter
 %{_libexecdir}/workloadctl/workload-vm-build-disk
 %{_libexecdir}/workloadctl/workload-vm-notify
@@ -171,6 +154,5 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
-%config(noreplace) %{_sysconfdir}/yum.repos.d/workloadctl.repo
 
 %changelog

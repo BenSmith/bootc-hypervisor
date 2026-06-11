@@ -205,8 +205,10 @@ def get_container_health(name):
 def find_workload_cgroup(name):
     """Find the cgroup path for a workload's podman container.
 
-    Rootless podman containers live under:
-    /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/libpod-*.scope
+    Under ADR 001 option 1b the user manager is placed in workloads.slice:
+      /sys/fs/cgroup/workloads.slice/user@{uid}.service/.../libpod-*.scope
+    Falls back to the pre-1b login-session path for rollback compatibility:
+      /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/.../libpod-*.scope
     """
     username = f"_wl-{name}"
     try:
@@ -216,13 +218,16 @@ def find_workload_cgroup(name):
     except (KeyError, ImportError):
         return None
 
-    user_slice = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service")
-    if not user_slice.is_dir():
-        return None
-
-    for scope in user_slice.rglob("libpod-*.scope"):
-        if scope.is_dir():
-            return scope
+    candidates = [
+        Path(f"/sys/fs/cgroup/workloads.slice/user@{uid}.service"),
+        Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service"),
+    ]
+    for user_service in candidates:
+        if not user_service.is_dir():
+            continue
+        for scope in user_service.rglob("libpod-*.scope"):
+            if scope.is_dir():
+                return scope
 
     return None
 

@@ -367,7 +367,7 @@ class TestGeneratorMultiContainer(unittest.TestCase):
 
     def test_per_container_health_sibling_form(self):
         """[containers.health] should render as --health-* flags on the
-        per-container service."""
+        per-container service using podman's native user-manager timer (1b)."""
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
@@ -390,20 +390,21 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertIn('--health-cmd "curl -f http://localhost/ || exit 1"', web)
         self.assertIn("--health-interval=10s", web)
         self.assertIn("--health-start-period=5s", web)
-        # Under --cgroups=split (bridge mode) podman's own user-manager
-        # healthcheck timer is broken, so the generator suppresses it, pins
-        # podman's own on-failure action to none (workload-healthcheck owns it),
-        # and Wants= a system-manager timer instead.
-        self.assertIn("--health-on-failure=none", web)
-        self.assertNotIn("--health-on-failure=kill", web)
-        self.assertIn("Environment=DISABLE_HC_SYSTEMD=true", web)
-        self.assertIn("Wants=workload-app-web-health.timer", web)
+        # Under option 1b podman's native user-manager healthcheck timer works:
+        # on_failure is passed through directly, no DISABLE_HC_SYSTEMD shim,
+        # no separate system-manager timer unit.
+        self.assertIn("--health-on-failure=kill", web)
+        self.assertNotIn("--health-on-failure=none", web)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", web)
+        self.assertNotIn("Wants=workload-app-web-health.timer", web)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-app-web-health.timer").exists()
+        )
 
-    def test_split_healthcheck_units_emitted(self):
-        """A split (single-mode) workload with a health.cmd gets a paired
-        system-manager healthcheck .service + .timer that runs
-        workload-healthcheck, and the workload unit suppresses podman's own
-        --user timer."""
+    def test_native_healthcheck_single_mode(self):
+        """Under option 1b all modes use podman's native user-manager timer:
+        on_failure passes through, no DISABLE_HC_SYSTEMD shim, no separate
+        system-manager timer unit."""
         write_config(self.config_dir, "hc", """\
             [workload]
             name = "hc"
@@ -421,23 +422,17 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         r = self.run_gen()
         self.assertEqual(r.returncode, 0, r.stderr)
         svc = (Path(self.services_dir) / "workload-hc.service").read_text()
-        self.assertIn("Environment=DISABLE_HC_SYSTEMD=true", svc)
-        self.assertIn("Wants=workload-hc-health.timer", svc)
-        self.assertIn("--health-on-failure=none", svc)
-
-        hsvc = (Path(self.services_dir) / "workload-hc-health.service").read_text()
-        self.assertIn(
-            "ExecStart=/usr/libexec/workloadctl/workload-healthcheck "
-            "hc workload-hc workload-hc.service restart",
-            hsvc,
-        )
-        self.assertIn("Type=oneshot", hsvc)
-        self.assertIn("BindsTo=workload-hc.service", hsvc)
-
-        timer = (Path(self.services_dir) / "workload-hc-health.timer").read_text()
-        self.assertIn("OnActiveSec=15s", timer)
-        self.assertIn("OnUnitActiveSec=30s", timer)
-        self.assertIn("BindsTo=workload-hc.service", timer)
+        # Health flags pass through directly
+        self.assertIn('--health-cmd "test -f /tmp/ok"', svc)
+        self.assertIn("--health-interval=30s", svc)
+        self.assertIn("--health-start-period=15s", svc)
+        self.assertIn("--health-on-failure=restart", svc)
+        # No split shim
+        self.assertNotIn("DISABLE_HC_SYSTEMD", svc)
+        self.assertNotIn("Wants=workload-hc-health.timer", svc)
+        # No separate system-manager timer/service files
+        self.assertFalse((Path(self.services_dir) / "workload-hc-health.service").exists())
+        self.assertFalse((Path(self.services_dir) / "workload-hc-health.timer").exists())
 
     def test_pod_mode_keeps_podman_healthcheck(self):
         """Pod-mode containers run in the user manager where podman's own
@@ -874,6 +869,10 @@ class TestGeneratorResources(unittest.TestCase):
             shutil.rmtree(d)
 
     def test_cpu_and_memory_limits(self):
+        """Under option 1b, workload-level resource limits land in the
+        user@<uid>.service.d drop-in (cgroup directives) and as podman flags
+        on the container (per-container OOM scoping); not as service directives
+        on the workload unit itself."""
         write_config(self.config_dir, "limited", """\
             [workload]
             name = "limited"
@@ -891,9 +890,22 @@ class TestGeneratorResources(unittest.TestCase):
         run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         service = (Path(self.services_dir) / "workload-limited.service").read_text()
 
-        self.assertIn("CPUQuota=200%", service)
-        self.assertIn("MemoryMax=4G", service)
-        self.assertIn("TasksMax=100", service)
+        # Cgroup directives are NOT on the workload unit (payload is in user@<uid>.service)
+        self.assertNotIn("CPUQuota=200%", service)
+        self.assertNotIn("MemoryMax=4G", service)
+        self.assertNotIn("TasksMax=100", service)
+
+        # Per-container resource flags bind in the payload scope
+        self.assertIn("--cpus=2.0", service)
+        self.assertIn("--memory=4G", service)
+        self.assertIn("--pids-limit=100", service)
+
+        # Workload-level cgroup limits are in the user@<uid> drop-in
+        dropin = (Path(self.services_dir) / "user@10000.service.d" / "50-workload.conf").read_text()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("CPUQuota=200%", dropin)
+        self.assertIn("MemoryMax=4G", dropin)
+        self.assertIn("TasksMax=100", dropin)
 
     def test_default_stop_grace_is_ten_seconds(self):
         # No timeout_stop_sec → podman's -t grace stays the historical 10s and
@@ -952,6 +964,134 @@ class TestGeneratorResources(unittest.TestCase):
         service = (Path(self.services_dir) / "workload-spanstop.service").read_text()
         self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
         self.assertIn("TimeoutStopSec=2min", service)
+
+
+class TestGeneratorUserDropin(unittest.TestCase):
+    """Tests for the user@<uid>.service.d/50-workload.conf drop-in (ADR 001 option 1b)."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _dropin(self, uid=10000):
+        return (Path(self.services_dir) / f"user@{uid}.service.d" / "50-workload.conf").read_text()
+
+    def test_dropin_emitted_for_single_mode(self):
+        """Every container workload gets a user@<uid> drop-in with Slice=workloads.slice."""
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+            [container]
+            image = "nginx:latest"
+        """)
+        r = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("Workload web:", dropin)
+
+    def test_dropin_emitted_for_pod_mode(self):
+        """Pod-mode workloads also get a drop-in — placement is uniform across modes."""
+        write_config(self.config_dir, "pm", """\
+            [workload]
+            name = "pm"
+            enabled = true
+            mode = "pod"
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "nginx:latest"
+            [[containers]]
+            name = "b"
+            [containers.container]
+            image = "redis:latest"
+        """)
+        r = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+
+    def test_dropin_carries_workload_level_resources(self):
+        """Workload-level cgroup directives go into the drop-in, not the unit."""
+        write_config(self.config_dir, "capped", """\
+            [workload]
+            name = "capped"
+            enabled = true
+            [container]
+            image = "myapp"
+            [resources]
+            cpu_quota = "50%"
+            cpu_weight = 200
+            memory_max = "1G"
+            memory_high = "768M"
+            memory_swap_max = "500M"
+            tasks_max = 512
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("CPUQuota=50%", dropin)
+        self.assertIn("CPUWeight=200", dropin)
+        self.assertIn("MemoryMax=1G", dropin)
+        self.assertIn("MemoryHigh=768M", dropin)
+        self.assertIn("MemorySwapMax=500M", dropin)
+        self.assertIn("TasksMax=512", dropin)
+        # Cgroup directives must NOT appear as [Service] directives on the unit
+        service = (Path(self.services_dir) / "workload-capped.service").read_text()
+        self.assertNotIn("CPUQuota=", service)
+        self.assertNotIn("MemoryMax=", service)
+        self.assertNotIn("MemoryHigh=", service)
+
+    def test_dropin_no_unconditional_cpu_io_weight_defaults(self):
+        """A workload without explicit cpu_weight/io_weight gets no default
+        in the drop-in (workloads.slice already carries CPUWeight=80/IOWeight=80)."""
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertNotIn("CPUWeight=", dropin)
+        self.assertNotIn("IOWeight=", dropin)
+
+    def test_dropin_no_cgroup_split_or_delegate(self):
+        """The workload unit must not contain Delegate=yes or --cgroups=split."""
+        write_config(self.config_dir, "clean", """\
+            [workload]
+            name = "clean"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-clean.service").read_text()
+        self.assertNotIn("Delegate=yes", service)
+        self.assertNotIn("--cgroups=split", service)
+
+    def test_execstoppost_reaps_payload(self):
+        """Single and bridge containers get ExecStopPost to clean up the payload
+        (which is no longer in the unit's cgroup under option 1b)."""
+        write_config(self.config_dir, "rm", """\
+            [workload]
+            name = "rm"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-rm.service").read_text()
+        self.assertIn('ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-rm"', service)
 
 
 class TestGeneratorSlice(unittest.TestCase):

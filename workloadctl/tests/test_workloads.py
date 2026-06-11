@@ -378,24 +378,41 @@ class TestWorkloadGeneration(unittest.TestCase):
                     self.assertIn(f"--cap-add={cap}", service,
                                   f"Capability {cap} not added for {name}")
 
+    def _read_dropin(self, name):
+        """Read the user@<uid>.service.d/50-workload.conf for a workload by name."""
+        for dropin in Path(self.services_dir).glob("user@*.service.d/50-workload.conf"):
+            text = dropin.read_text()
+            if f"Workload {name}:" in text:
+                return text
+        return ""
+
     def test_resource_limits_applied(self):
-        """Resource limits from config appear in the [Service] section."""
+        """Under option 1b: cgroup limits land in the user@ drop-in (not the
+        workload unit); per-container OOM limits appear as podman flags."""
         for filename, config in self.configs.items():
+            if "vm" in config:
+                continue  # VM workloads use system-unit resource directives directly
             name = config["workload"]["name"]
             resources = config.get("resources", {})
             with self.subTest(workload=name):
                 service = self._read_service(name)
+                dropin = self._read_dropin(name)
                 if "cpu_quota" in resources:
-                    self.assertIn(f"CPUQuota={resources['cpu_quota']}", service)
+                    # Drop-in carries the cgroup directive; service carries the podman flag
+                    self.assertIn(f"CPUQuota={resources['cpu_quota']}", dropin)
+                    self.assertNotIn(f"CPUQuota={resources['cpu_quota']}", service)
                 if "memory_max" in resources:
-                    self.assertIn(f"MemoryMax={resources['memory_max']}", service)
+                    self.assertIn(f"MemoryMax={resources['memory_max']}", dropin)
+                    self.assertNotIn(f"MemoryMax={resources['memory_max']}", service)
+                    self.assertIn(f"--memory={resources['memory_max']}", service)
                 if "memory_high" in resources:
-                    self.assertIn(f"MemoryHigh={resources['memory_high']}", service)
+                    self.assertIn(f"MemoryHigh={resources['memory_high']}", dropin)
                 if "tasks_max" in resources:
-                    self.assertIn(f"TasksMax={resources['tasks_max']}", service)
+                    self.assertIn(f"TasksMax={resources['tasks_max']}", dropin)
+                    self.assertIn(f"--pids-limit={resources['tasks_max']}", service)
                 if "memory_swap_max" in resources:
                     self.assertIn(
-                        f"MemorySwapMax={resources['memory_swap_max']}", service)
+                        f"MemorySwapMax={resources['memory_swap_max']}", dropin)
 
     def test_environment_variables(self):
         """Plain (non-secret) env vars appear as --env args."""
@@ -457,13 +474,7 @@ class TestWorkloadGeneration(unittest.TestCase):
                     if "start_period" in health:
                         self.assertIn(f"--health-start-period={health['start_period']}", service)
                     if "on_failure" in health:
-                        # Under --cgroups=split, podman's own healthcheck timer
-                        # is suppressed and its on-failure action is pinned to
-                        # none — workload-healthcheck (a system-manager timer)
-                        # owns the action. See test_generator for that timer.
-                        expected = ("none" if "--cgroups=split" in service
-                                    else health["on_failure"])
-                        self.assertIn(f"--health-on-failure={expected}", service)
+                        self.assertIn(f"--health-on-failure={health['on_failure']}", service)
                 else:
                     self.assertNotIn("--health-cmd", service,
                                      f"Unexpected --health-cmd for {name}")

@@ -7,30 +7,23 @@ Requires=workload-forgejo-setup.service
 After=network.target workload-forgejo-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-forgejo-health.timer
 
 [Service]
 Type=exec
 Slice=workloads.slice
-Delegate=yes
 User=_wl-forgejo
 Group=_wl-forgejo
 Environment="HOME=/var/lib/workloads/forgejo"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-forgejo.env
-
-# Resource limits and constraints
-CPUQuota=100%
-MemoryMax=512M
-MemoryHigh=384M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-forgejo" --hostname "forgejo" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --cgroups=split --userns=keep-id:uid=1000,gid=1000 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 3000:3000 --publish 2222:2222 --volume "/var/lib/workloads/forgejo/data":/var/lib/gitea --env HOST_IP=${HOST_IP} --health-cmd "curl -sf http://localhost:3000/api/healthz" --health-interval=30s --health-start-period=30s --health-on-failure=none "codeberg.org/forgejo/forgejo:15-rootless"
+ExecStart=/usr/bin/podman run --name "workload-forgejo" --hostname "forgejo" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id:uid=1000,gid=1000 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=512M --cpus=1.0 --network="pasta" --publish 3000:3000 --publish 2222:2222 --volume "/var/lib/workloads/forgejo/data":/var/lib/gitea --env HOST_IP=${HOST_IP} --health-cmd "curl -sf http://localhost:3000/api/healthz" --health-interval=30s --health-start-period=30s --health-on-failure=kill "codeberg.org/forgejo/forgejo:15-rootless"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-forgejo"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-forgejo"
 
 StandardOutput=journal
 StandardError=journal

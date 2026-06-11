@@ -892,19 +892,20 @@ ports = ["8080:80", "8443:443"]
 # - Use simple percentage/size strings for convenience ("50%", "2G")
 # - Use escape hatches for fine-grained control (custom systemd directives)
 #
-# All resource limits use systemd cgroup v2 controls applied at the service level.
+# All resource limits use systemd cgroup v2 controls (ADR 001 option 1b).
 #
-# For these to actually bind the container, the generated unit runs podman with
-# --cgroups=split and Delegate=yes (single- and bridge-mode workloads). Without
-# that, conmon migrates the container into a transient scope under the user
-# manager and the directives below are silently ignored. workloadctl adds both
-# automatically; you don't configure them.
+# WORKLOAD-LEVEL CAPS (MemoryMax, MemoryHigh, CPUWeight, IOWeight, etc.): go on the
+# user@<uid>.service drop-in emitted by the generator; they bind the entire
+# workload subtree including all its containers.
 #
-# LIMITATION (pod mode): podman rejects --cgroups=split for pod members, so
-# pod-mode workloads do NOT get per-unit resource enforcement — the directives
-# below are emitted but don't bind (the pod's containers run under the user
-# manager, outside the unit cgroup). Use single or bridge mode when you need
-# enforceable per-workload limits.
+# PER-CONTAINER CAPS (memory_max, cpu_quota, pids_max, etc.): passed as podman
+# flags (--memory, --cpus, --pids-limit, --device-read-bps, --device-write-bps)
+# and bind natively via the user manager's delegated cgroup subtree. All modes
+# (single, pod, bridge) are enforced equally — there is no pod-mode exception.
+#
+# NOTE: per-container MemoryHigh has no podman equivalent (--memory-reservation
+# maps to memory.low, not memory.high). Use the workload-level memory_high
+# directive for throttle-before-kill semantics.
 
 # Optional: systemd slice for cgroup grouping
 # Type: string (systemd slice unit name)

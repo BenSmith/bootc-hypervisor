@@ -7,30 +7,23 @@ Requires=workload-zot-registry-setup.service
 After=network.target workload-zot-registry-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-zot-registry-health.timer
 
 [Service]
 Type=simple
 Slice=workloads.slice
-Delegate=yes
 User=_wl-zot-registry
 Group=_wl-zot-registry
 Environment="HOME=/var/lib/workloads/zot-registry"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-zot-registry.env
-
-# Resource limits and constraints
-CPUQuota=100%
-MemoryMax=1G
-MemoryHigh=768M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/zot-registry/config.json":/etc/zot/config.json:ro --volume "/var/lib/workloads/zot-registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=none "localhost/zot-registry:latest"
+ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=1G --cpus=1.0 --network="host" --volume "/var/lib/workloads/zot-registry/config.json":/etc/zot/config.json:ro --volume "/var/lib/workloads/zot-registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/zot-registry:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-zot-registry"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-zot-registry"
 
 StandardOutput=journal
 StandardError=journal

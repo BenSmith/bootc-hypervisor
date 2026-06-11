@@ -7,30 +7,23 @@ Requires=workload-registry-setup.service
 After=network.target workload-registry-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Wants=workload-registry-health.timer
 
 [Service]
 Type=simple
 Slice=workloads.slice
-Delegate=yes
 User=_wl-registry
 Group=_wl-registry
 Environment="HOME=/var/lib/workloads/registry"
-Environment=DISABLE_HC_SYSTEMD=true
 EnvironmentFile=-/run/workload-env/workload-registry.env
-
-# Resource limits and constraints
-CPUQuota=50%
-MemoryMax=256M
-MemoryHigh=192M
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --cgroups=split --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=none "docker.io/library/registry:2"
+ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=256M --cpus=0.5 --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/registry:2"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-registry"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-registry"
 
 StandardOutput=journal
 StandardError=journal
