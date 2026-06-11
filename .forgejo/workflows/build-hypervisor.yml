@@ -58,6 +58,11 @@ jobs:
   # base + variant jobs, so F44's variants only need F44's base
   build:
     needs: setup
+    # runs-on forces the legacy runner-side reusable-workflow path. Forgejo 15's
+    # server-side expansion (expandForJob skips jobs with runs-on labels) evaluates
+    # the `with:` expressions below without the dispatch inputs/github contexts,
+    # baking variants='all' and event_name=null into the callee's input defaults.
+    runs-on: native
     strategy:
       fail-fast: false
       matrix:
