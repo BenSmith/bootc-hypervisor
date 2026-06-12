@@ -58,26 +58,13 @@ try:
     import re
     from pathlib import Path
 
-    # --- workloadctl lib bootstrap -----------------------------------------
-    # Keep this block byte-identical across bin/workloadctl, generators/
-    # workload-generate, and libexec/workload-{ensure-user,write-env,exporter}.
-    # Locates workload_lib.py (and its sibling podman.py) in: this script's
-    # own dir (installed libexec scripts), <repo>/lib (dev checkout), or
-    # /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match
-    # wins; insert(0) keeps it ahead of any PyPI package of the same name.
-    # True centralization needs a packaging change (sitelib install or .pth).
-    _here = Path(__file__).resolve().parent
-    for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
-        if (_libdir / "workload_lib.py").is_file():
-            sys.path.insert(0, str(_libdir))
-            break
-    # --- end bootstrap -----------------------------------------------------
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
         workload_username, workload_home_dir, expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
+        UID_MIN, UID_MAX, get_next_uid,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_IP, VM_DHCP_RANGE,
         VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE,
         vm_mac_address, find_ovmf_code,
@@ -133,31 +120,6 @@ def log_msg(msg, level="info"):
         # in a test); fall back to stderr so the message isn't lost.
         print(f"workload-generate: {msg}", file=sys.stderr, flush=True)
 
-
-UID_MIN = 10000
-UID_MAX = 52948
-
-
-# Track UIDs allocated during this run (for multiple workloads)
-_allocated_uids = set()
-
-
-def get_next_uid():
-    """Get next free UID, accounting for UIDs allocated earlier in this run."""
-    used_uids = set(_allocated_uids)
-    try:
-        for pw in pwd.getpwall():
-            if UID_MIN <= pw.pw_uid <= UID_MAX:
-                used_uids.add(pw.pw_uid)
-    except Exception:
-        pass
-
-    for uid in range(UID_MIN, UID_MAX + 1):
-        if uid not in used_uids:
-            _allocated_uids.add(uid)
-            return uid
-
-    raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
 
 
 def generate_sysuser_config(config, user_name, uid):

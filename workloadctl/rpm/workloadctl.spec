@@ -54,12 +54,15 @@ UID/subuid namespace, home directory, and rootless podman instance.
 %install
 install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadctl
 
-# Private library — kept under %{_libexecdir} instead of %{python3_sitelib}
-# to avoid implying a public, importable Python API.
-install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
-    %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
-install -Dpm 0644 %{_sourcedir}/lib/podman.py \
-    %{buildroot}%{_libexecdir}/workloadctl/podman.py
+# Private library modules under %{_libexecdir}/workloadctl/.
+# A .pth file in %{python3_sitelib} makes them importable by all workloadctl
+# scripts without any sys.path manipulation.
+install -dm 0755 %{buildroot}%{_libexecdir}/workloadctl
+for _f in %{_sourcedir}/lib/*.py; do
+    install -pm 0644 "$_f" %{buildroot}%{_libexecdir}/workloadctl/
+done
+install -dm 0755 %{buildroot}%{python3_sitelib}
+echo '%{_libexecdir}/workloadctl' > %{buildroot}%{python3_sitelib}/workloadctl.pth
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
@@ -134,10 +137,10 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %files
 %{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
-%{_libexecdir}/workloadctl/workload_lib.py
-%{_libexecdir}/workloadctl/podman.py
+%{python3_sitelib}/workloadctl.pth
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
+%{_libexecdir}/workloadctl/*.py
 %{_libexecdir}/workloadctl/workload-generate
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
