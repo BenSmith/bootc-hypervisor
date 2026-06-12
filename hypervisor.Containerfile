@@ -81,8 +81,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     hostname \
     htop \
     hwloc \
-    incus \
-    incus-tools \
     intel-audio-firmware \
     intel-gpu-firmware \
     iotop \
@@ -177,9 +175,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     rm -rf /boot && mkdir -p /boot && \
     systemctl unmask avahi-daemon avahi-daemon.socket && \
     systemctl enable avahi-daemon && \
+    systemctl enable fail2ban && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
-    systemctl enable incus.socket && \
     systemctl enable seatd && \
     systemctl enable sshd && \
     systemctl enable tuned && \

@@ -31,6 +31,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-wolf-game-streaming"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-wolf-game-streaming
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

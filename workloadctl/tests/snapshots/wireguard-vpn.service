@@ -28,6 +28,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-wireguard-vpn"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-wireguard-vpn
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

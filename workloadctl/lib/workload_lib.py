@@ -545,6 +545,21 @@ def validate_workload_config(config: dict) -> list[str]:
     except ValueError as e:
         errors.append(str(e))
 
+    # [workload].requires / .after — must be lists of valid workload name strings
+    wl = config.get("workload", {})
+    for key in ("requires", "after"):
+        val = wl.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, list) or not all(isinstance(n, str) for n in val):
+            errors.append(f"[workload].{key} must be a list of workload name strings")
+        else:
+            for n in val:
+                try:
+                    validate_workload_name(n)
+                except ValueError as e:
+                    errors.append(f"[workload].{key}: {e}")
+
     return errors
 
 

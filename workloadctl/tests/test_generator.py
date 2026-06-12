@@ -179,6 +179,102 @@ class TestGeneratorBasic(unittest.TestCase):
         self.assertTrue(wants.is_symlink())
         self.assertEqual(os.readlink(wants), "../workload-svc.service")
 
+    def test_requires_emits_wants(self):
+        """[workload].requires = ["caddy"] → Wants=workload-caddy.service."""
+        write_config(self.config_dir, "caddy", """\
+            [workload]
+            name = "caddy"
+            enabled = true
+            [container]
+            image = "docker.io/caddy:latest"
+        """)
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            requires = ["caddy"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("app")
+        self.assertIn("Wants=workload-caddy.service", service)
+
+    def test_after_emits_after(self):
+        """[workload].after = ["registry"] → After=workload-registry.service."""
+        write_config(self.config_dir, "registry", """\
+            [workload]
+            name = "registry"
+            enabled = true
+            [container]
+            image = "docker.io/registry:2"
+        """)
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            after = ["registry"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("app")
+        self.assertIn("After=workload-registry.service", service)
+
+    def test_requires_and_after_combined(self):
+        """Both requires and after emit their respective systemd directives."""
+        for name in ("db", "cache"):
+            write_config(self.config_dir, name, f"""\
+                [workload]
+                name = "{name}"
+                enabled = true
+                [container]
+                image = "alpine"
+            """)
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+            requires = ["db"]
+            after = ["cache"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("web")
+        self.assertIn("Wants=workload-db.service", service)
+        self.assertIn("After=workload-cache.service", service)
+
+    def test_log_rate_limit_defaults_emitted(self):
+        """LogRateLimitIntervalSec and LogRateLimitBurst appear in generated units."""
+        write_config(self.config_dir, "svc2", """\
+            [workload]
+            name = "svc2"
+            enabled = true
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("svc2")
+        self.assertIn("LogRateLimitIntervalSec=30", service)
+        self.assertIn("LogRateLimitBurst=250", service)
+
+    def test_log_rate_limit_overridable_via_custom_directives(self):
+        """Custom LogRateLimitIntervalSec suppresses the generator default."""
+        write_config(self.config_dir, "svc3", """\
+            [workload]
+            name = "svc3"
+            enabled = true
+            [container]
+            image = "alpine"
+            [resources]
+            custom_directives = {LogRateLimitIntervalSec = "0"}
+        """)
+        self.run_gen()
+        service = self.read_service("svc3")
+        self.assertNotIn("LogRateLimitIntervalSec=30", service)
+        self.assertIn("LogRateLimitIntervalSec=0", service)
+
 
 class TestGeneratorMultiContainer(unittest.TestCase):
     def setUp(self):

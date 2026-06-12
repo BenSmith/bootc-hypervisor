@@ -28,6 +28,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-proxy-stack"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-proxy-stack
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

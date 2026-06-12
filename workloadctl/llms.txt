@@ -208,6 +208,20 @@ Pre-built container definitions in `containers/`:
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
 - [Example configs](workloads.d/) — real-world workload definitions
 
+## Deliberate non-adoptions
+
+These patterns were considered and explicitly rejected:
+
+- **Stdlib-only constraint.** `lib/` has no third-party dependencies; all imports are stdlib + `tomllib`. The rationale: the tool ships inside a bootc image RPM. Adding pip/venv machinery to a system Python package creates unresolvable version-conflict surface; keeping everything stdlib means `PYTHONPATH=lib python3 -m unittest` "just works" and the RPM only needs `python3`.
+
+- **`podman secret` for runtime secrets.** Rejected: podman secrets are stored as plaintext JSON on disk under the user's homedir (`$HOME/.local/share/containers/storage/secrets/`). workloadctl uses systemd credentials (`systemd-creds`, AES256-GCM, TPM2-bound) instead — encrypted blobs that only decrypt in-process to a tmpfs mount at runtime. See `docs/secrets.md`.
+
+- **`podman auto-update` for image updates.** Rejected: auto-update is keyed on the container having an `io.containers.autoupdate` label and uses `sd_notify` to signal readiness. workloadctl's update flow does a health-verified rollback (pull → recreate → health check → rollback on failure), which auto-update can't replicate. The `workloadctl update` verb is the correct path.
+
+- **Quadlet (systemd `.container` units).** Rejected in favour of the current generator approach; see `docs/adr/001-container-cgroup-placement.md` option 3. Quadlet generates units at daemon-reload time, not boot-generator time, which means the units don't exist when `workload-generate.service` runs (`Before=basic.target`). Cgroup placement under Quadlet also hardcodes the system unit cgroup tree, blocking the option-1b `workloads.slice` redirect. Keeping an explicit generator preserves full control of the unit content and ordering.
+
+- **Rootful `--userns=auto` (per-container UID remapping).** Rejected; see `docs/adr/001-container-cgroup-placement.md` option 4. Rootful podman with `--userns=auto` remaps container UIDs to an unprivileged range but still runs the container manager as root — any container escape exposes the full root privilege of the host. workloadctl's dedicated `_wl-<name>` users run the podman *process* itself unprivileged. The blast radius of a container escape is bounded to the workload user, not root.
+
 ## License
 
 MIT

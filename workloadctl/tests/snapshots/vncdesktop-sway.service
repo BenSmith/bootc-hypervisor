@@ -32,6 +32,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-vncdesktop-sway"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-vncdesktop-sway
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

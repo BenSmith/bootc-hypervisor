@@ -28,6 +28,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-socks5-vpn"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-socks5-vpn
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

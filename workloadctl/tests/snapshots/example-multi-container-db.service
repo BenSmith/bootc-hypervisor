@@ -33,6 +33,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-example-multi-container-db"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-example-multi-container-db
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s

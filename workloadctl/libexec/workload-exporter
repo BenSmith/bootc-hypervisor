@@ -375,6 +375,12 @@ def format_metrics(all_metrics):
     return "\n".join(lines)
 
 
+# Scrape-scaling note: collection is synchronous — one `sudo -u _wl-<name>
+# podman` round-trip per enabled workload, serialised within a single request.
+# At ~50 workloads the wall-clock scrape latency is measurable but acceptable
+# for a 15s Prometheus interval. If it becomes a bottleneck, a 5s TTL in-
+# process cache (collect once, serve N scrapers from the cache, refresh in a
+# background thread) is the natural next step.
 class MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in ("/metrics", "/metrics/"):

@@ -28,6 +28,8 @@ ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-caddy"
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=workload-caddy
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
