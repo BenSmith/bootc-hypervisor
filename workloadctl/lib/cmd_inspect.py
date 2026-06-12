@@ -867,12 +867,21 @@ def cmd_stats(args, manager: WorkloadManager):
     if args.workload:
         config = WorkloadConfig(args.workload)
 
+        # VM workloads always get NotApplicable — check before user_exists so
+        # an unprovisioned VM doesn't hide the "not applicable" message.
+        substrate = get_substrate(config, manager)
+        if config.is_vm:
+            try:
+                substrate.resource_usage([])
+            except NotApplicable as e:
+                print(f"stats: not applicable for {config.name} — {e.reason}")
+                sys.exit(0)
+
         if not manager.user_exists(config):
             print("Error: Workload user not found. Is workload enabled?", file=sys.stderr)
             sys.exit(1)
 
-        # VM workloads have no container-level resource metrics
-        substrate = get_substrate(config, manager)
+        # substrate already resolved above
         target_names = (
             [config.podman_container_name(c) for c in config.container_names()]
             if config.is_multi else [config.container_name]
