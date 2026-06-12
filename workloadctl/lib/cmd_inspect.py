@@ -1117,7 +1117,46 @@ def cmd_health(args, manager: WorkloadManager):
     if not user_exists:
         all_healthy = False
 
-    # Check 3: Container running (only if user exists)
+    # Check 3: User manager placement (only if user exists)
+    # Slice= only takes effect when user@<uid>.service (re)starts; if the user
+    # manager was already running before the drop-in existed it may be under
+    # user.slice rather than workloads.slice, in which case no cap binds.
+    if user_exists:
+        uid = config.uid
+        expected_slice = config.config.get("resources", {}).get("slice", "workloads.slice")
+        r = subprocess.run(
+            ["systemctl", "is-active", f"user@{uid}.service"],
+            capture_output=True, text=True,
+        )
+        user_manager_active = r.returncode == 0
+        if user_manager_active:
+            r2 = subprocess.run(
+                ["systemctl", "show", f"user@{uid}.service", "-p", "Slice", "--value"],
+                capture_output=True, text=True,
+            )
+            actual_slice = r2.stdout.strip()
+            placement_ok = actual_slice == expected_slice
+            if not placement_ok:
+                health_data["checks"].append({
+                    "check": "user_manager_placement",
+                    "healthy": False,
+                    "message": (
+                        f"user@{uid}.service is in {actual_slice!r}, expected {expected_slice!r} — "
+                        f"run: systemctl stop workload-{config.name}.service && "
+                        f"systemctl restart user@{uid}.service"
+                    ),
+                    "details": {"actual_slice": actual_slice, "expected_slice": expected_slice},
+                })
+                all_healthy = False
+            else:
+                health_data["checks"].append({
+                    "check": "user_manager_placement",
+                    "healthy": True,
+                    "message": f"user@{uid}.service in {actual_slice}",
+                    "details": {"slice": actual_slice},
+                })
+
+    # Check 4: Container running (only if user exists)
     container_running = False
     container_status = "unknown"
     if user_exists:
@@ -1139,7 +1178,7 @@ def cmd_health(args, manager: WorkloadManager):
             })
             all_healthy = False
 
-    # Check 4: Container health check (if configured and container running)
+    # Check 5: Container health check (if configured and container running)
     if container_running and config.has_health_check():
         health_status = manager.podman(config).container_health(config.container_name)
         if health_status:
@@ -1159,7 +1198,7 @@ def cmd_health(args, manager: WorkloadManager):
                 "message": "Container health check not available",
             })
 
-    # Check 5: Port accessibility (if ports defined, container running, and network exposes to host)
+    # Check 6: Port accessibility (if ports defined, container running, and network exposes to host)
     ports = config.get_ports()
     network_mode = config.get_network_mode()
     if ports and container_running and network_mode in ("pasta", "host"):
@@ -1185,7 +1224,7 @@ def cmd_health(args, manager: WorkloadManager):
             except ValueError:
                 pass  # Skip invalid port numbers
 
-    # Check 6: Uptime (if service active)
+    # Check 7: Uptime (if service active)
     if service_active:
         result = subprocess.run(
             ["systemctl", "show", config.service_name,

@@ -115,6 +115,31 @@ def cmd_drift(args, manager):
                     live_text = live_file.read_text()
                     diffs.append((live_file.name, live_text, ""))
 
+        # Compare user@<uid>.service.d/50-workload.conf drop-ins (ADR 001 option
+        # 1b): these carry the Slice= redirect and workload-level caps, so they
+        # are as load-bearing as the service units themselves.
+        for gen_dropin_dir in sorted(gen_dir.glob("user@*.service.d")):
+            dropin_name = f"{gen_dropin_dir.name}/50-workload.conf"
+            gen_dropin = gen_dropin_dir / "50-workload.conf"
+            if not gen_dropin.exists():
+                continue
+            gen_text = _normalize(gen_dropin.read_text())
+            live_dropin = LIVE_UNITS_DIR / gen_dropin_dir.name / "50-workload.conf"
+            live_text = live_dropin.read_text() if live_dropin.exists() else ""
+            if gen_text != live_text:
+                diffs.append((dropin_name, live_text, gen_text))
+
+        # Orphan drop-ins: live drop-in exists but no generated counterpart
+        gen_dropin_dirs = {d.name for d in gen_dir.glob("user@*.service.d")}
+        if LIVE_UNITS_DIR.is_dir():
+            for live_dropin_dir in sorted(LIVE_UNITS_DIR.glob("user@*.service.d")):
+                live_dropin = live_dropin_dir / "50-workload.conf"
+                if not live_dropin.exists():
+                    continue
+                if live_dropin_dir.name not in gen_dropin_dirs:
+                    dropin_name = f"{live_dropin_dir.name}/50-workload.conf"
+                    diffs.append((dropin_name, live_dropin.read_text(), ""))
+
     if json_output:
         import json
         out = []

@@ -254,13 +254,14 @@ C11 changes shape under this decision: do **not** implement pod caps as
 they stop binding. Per-workload caps go on the `user@<uid>.service.d` drop-in
 alongside the `Slice=` redirect (see costs above).
 
-Implementation checklist — Stage 1 complete:
+Implementation checklist — Stage 1 complete, follow-ups verified 2026-06-12:
 - ✅ `ExecStopPost=-podman rm -f -t0` added to generated container units
 - ✅ `cgroup_exec.py` + healthcheck-shim stack deleted
 - ✅ `MemorySwapMax=90%` set on `workloads.slice`
+- ✅ `ProtectSystem`/`RestrictAddressFamilies` confirmed on tp (see spike item 5)
+- ✅ Health-verified update + rollback cycle confirmed on tp (see below)
 
 Still open (subsequent stages):
-- Verify `ProtectSystem`/`RestrictAddressFamilies` inheritance with real non-split units
 - Measure `systemctl status workload-X` / exporter cgroup-path behaviour
 
 ## Source-verified mechanics (podman clone at `.reference/podman`, 2026-06)
@@ -306,15 +307,29 @@ Still open (subsequent stages):
    `user@<uid>.service` drop-in. Per-container `memory.high` remains
    unavailable.
 4. ~~Confirm plain `sudo -u` exec + healthcheck timers~~ **Confirmed
-   2026-06-11:** non-interactive `sudo -u` exec (incl. `-w`/`-e`) works;
-   `--health-cmd` creates the transient timer in the user manager and reports
-   `healthy`. The `cgroup_exec.py` + healthcheck-shim deletion is real.
-   (Tested via direct `podman run` under the user manager, not a generated
-   system unit — re-confirm once non-split units exist.)
-5. Confirm the unit's `ProtectSystem`/`RestrictAddressFamilies` still constrain
-   the migrated payload (they're namespace/seccomp properties, inherited across
-   cgroup migration — expected yes; verify). **Still open — needs real
-   non-split generated units; part of the implementation checklist.**
+   2026-06-11 (direct) + 2026-06-12 (generated units):** non-interactive
+   `sudo -u` exec (incl. `-w`/`-e`) works; `--health-cmd` fires podman's
+   native user-manager timer and reports `healthy` under real non-split
+   generated units. `workloadctl update alloy --force` waited for the native
+   health check and confirmed healthy after restart; `workloadctl rollback`
+   also confirmed functional.
+5. ~~Confirm the unit's `ProtectSystem`/`RestrictAddressFamilies` still
+   constrain the migrated payload~~ **Confirmed 2026-06-12 on tp (alloy,
+   UID 10008, Fedora 44/systemd 259, non-split generated units):**
+   `ProtectSystem=strict` and `RestrictAddressFamilies=~AF_ALG AF_PACKET`
+   apply to the `workload-alloy.service` system unit process (the podman
+   client). Key findings: (a) the system unit's mount namespace is private and
+   distinct from the container's (`mnt:[4026532522]` vs `mnt:[4026532672]`);
+   `/usr` is read-only in the system unit's namespace (`EROFS` confirmed) but
+   the container has its own overlay rootfs. (b) The system unit process has
+   `Seccomp_filters: 2` (systemd's `RestrictAddressFamilies` filter active);
+   the container has `Seccomp_filters: 3` (adds crun's OCI profile on top).
+   Clarification vs the original framing: these are constraints on the
+   **podman client process in the system unit**, not on the container payload
+   — crun always creates a fresh mount namespace and applies its own seccomp
+   profile. This was equally true under split. The hardening protects the
+   podman client from host filesystem writes and disallowed address families,
+   and is unchanged under 1b.
 6. Measure what `systemctl status workload-X` / `workloadctl status` lose and
    what the exporter's cgroup paths become. **Still open — implementation
    checklist.**
