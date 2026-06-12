@@ -400,6 +400,7 @@ class TestMetricsFormat(unittest.TestCase):
             "workload_memory_max_bytes": "gauge",
             "workload_pids_current": "gauge",
             "workload_health": "gauge",
+            "workload_disk_bytes": "gauge",
             "workload_enabled_total": "gauge",
             "workload_metrics_last_collect_timestamp_seconds": "gauge",
         }
@@ -452,6 +453,13 @@ class TestMetricsFormat(unittest.TestCase):
         # May be 0 or 1 depending on system — just check it exists and is valid
         if active is not None:
             self.assertIn(active, ("0", "1"))
+
+    def test_disk_bytes_gauge_declared(self):
+        """workload_disk_bytes gauge TYPE and HELP are always emitted."""
+        types = parse_type_declarations(self.prom)
+        self.assertIn("workload_disk_bytes", types)
+        self.assertEqual(types["workload_disk_bytes"], "gauge")
+        self.assertIn("# HELP workload_disk_bytes ", self.prom)
 
     def test_content_type_is_prometheus(self):
         """/metrics is served with the Prometheus exposition content type."""

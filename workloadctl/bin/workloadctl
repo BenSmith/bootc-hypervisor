@@ -3645,7 +3645,7 @@ def cmd_cp(args, manager: WorkloadManager):
     src = args.source
     dest = args.destination
 
-    # Parse workload:path syntax
+    # Parse workload[/container]:path syntax
     workload_pattern = re.compile(r'^([^:]+):(.+)$')
 
     src_match = workload_pattern.match(src)
@@ -3653,13 +3653,13 @@ def cmd_cp(args, manager: WorkloadManager):
 
     if src_match and not dest_match:
         # Copy from container
-        workload = src_match.group(1)
+        workload_ref = src_match.group(1)
         container_path = src_match.group(2)
         host_path = dest
         direction = "from"
     elif dest_match and not src_match:
         # Copy to container
-        workload = dest_match.group(1)
+        workload_ref = dest_match.group(1)
         container_path = dest_match.group(2)
         host_path = src
         direction = "to"
@@ -3668,8 +3668,10 @@ def cmd_cp(args, manager: WorkloadManager):
         print("Examples:", file=sys.stderr)
         print("  workloadctl cp webserver:/etc/config ./config", file=sys.stderr)
         print("  workloadctl cp ./file.txt webserver:/data/file.txt", file=sys.stderr)
+        print("  workloadctl cp proxy/web:/etc/config ./config", file=sys.stderr)
         sys.exit(1)
 
+    workload, container = parse_workload_ref(workload_ref)
     config = WorkloadConfig(workload)
 
     if not manager.user_exists(config):
@@ -3677,10 +3679,12 @@ def cmd_cp(args, manager: WorkloadManager):
         print("Is the workload enabled and running?", file=sys.stderr)
         sys.exit(1)
 
+    target = resolve_container_target(config, container, workload)
+
     if direction == "from":
-        manager.run_podman(config, "cp", f"{config.container_name}:{container_path}", host_path, check=True)
+        manager.run_podman(config, "cp", f"{target}:{container_path}", host_path, check=True)
     else:
-        manager.run_podman(config, "cp", host_path, f"{config.container_name}:{container_path}", check=True)
+        manager.run_podman(config, "cp", host_path, f"{target}:{container_path}", check=True)
 
     print("✓ Copied successfully")
 
@@ -3837,18 +3841,20 @@ def cmd_images(args, manager: WorkloadManager):
 
 def cmd_attach(args, manager: WorkloadManager):
     """Attach to container process"""
-    config = WorkloadConfig(args.workload)
+    workload, container = parse_workload_ref(args.workload)
+    config = WorkloadConfig(workload)
 
     if not manager.user_exists(config):
         print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
         print("Is the workload enabled and running?", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Attaching to {config.container_name}...")
+    target = resolve_container_target(config, container, workload)
+    print(f"Attaching to {target}...")
     print("(Press Ctrl+C to detach)")
     print()
 
-    manager.run_podman(config, "attach", config.container_name, check=True)
+    manager.run_podman(config, "attach", target, check=True)
 
 
 def _multi_container_health(config, manager, only_container):
@@ -4055,13 +4061,23 @@ CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 BACKUP_DIR = WORKLOADS_BASE / "backups"
 
 
+def _ignore_image_store(base_dir):
+    """Return a copytree ignore callable that skips .local/share/containers."""
+    target_parent = Path(base_dir) / ".local" / "share"
+    def _ignore(src_dir, contents):
+        if Path(src_dir) == target_parent:
+            return {"containers"} & set(contents)
+        return set()
+    return _ignore
+
+
 def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool = False) -> int:
     """Create a backup archive for a single workload. Returns size in bytes.
 
     Archive layout:
         workload.toml           — the config file
         credentials/            — referenced encrypted credentials (TPM-bound)
-        home/                   — full home directory contents
+        home/                   — full home directory contents (.local/share/containers excluded)
     """
     name = config.name
     home_dir = config.home_dir
@@ -4096,7 +4112,8 @@ def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool
 
             if home_dir.is_dir():
                 shutil.copytree(home_dir, staging / "home",
-                                symlinks=True, dirs_exist_ok=False)
+                                symlinks=True, dirs_exist_ok=False,
+                                ignore=_ignore_image_store(home_dir))
             else:
                 (staging / "home").mkdir()
 
@@ -4268,7 +4285,12 @@ def cmd_restore(args, manager: WorkloadManager):
 
         print()
 
-        # 4. TPM warning for cross-machine restores
+        # 4. Note about excluded image storage
+        print("Note: container images are not included in backups.")
+        print(f"Run `workloadctl update {name}` to re-pull images after starting.")
+        print()
+
+        # 5. TPM warning for cross-machine restores
         if tpm_warning:
             print("Note: Credentials are TPM-bound to the original machine.")
             print("If restoring on a different machine, re-encrypt each credential:")
@@ -4276,7 +4298,7 @@ def cmd_restore(args, manager: WorkloadManager):
                 print(f"  sudo workloadctl secret rotate {cred_name}")
             print()
 
-        # 5. Enable the workload
+        # 6. Enable the workload
         if args.enable:
             print(f"Enabling {name}...")
             subprocess.run(
