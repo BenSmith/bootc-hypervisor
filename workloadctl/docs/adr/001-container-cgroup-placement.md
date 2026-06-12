@@ -262,7 +262,7 @@ Implementation checklist — Stage 1 complete, follow-ups verified 2026-06-12:
 - ✅ Health-verified update + rollback cycle confirmed on tp (see below)
 
 Still open (subsequent stages):
-- Measure `systemctl status workload-X` / exporter cgroup-path behaviour
+- ✅ `systemctl status` / exporter measurement — see spike item 6 below
 
 ## Source-verified mechanics (podman clone at `.reference/podman`, 2026-06)
 
@@ -330,9 +330,27 @@ Still open (subsequent stages):
    profile. This was equally true under split. The hardening protects the
    podman client from host filesystem writes and disallowed address families,
    and is unchanged under 1b.
-6. Measure what `systemctl status workload-X` / `workloadctl status` lose and
-   what the exporter's cgroup paths become. **Still open — implementation
-   checklist.**
+6. ~~Measure what `systemctl status workload-X` / `workloadctl status` lose
+   and what the exporter's cgroup paths become~~ **Measured 2026-06-12 on tp
+   (alloy, UID 10008):**
+   - `systemctl status workload-alloy.service` shows only the podman client
+     (202838) and catatonit (202855) under its CGroup entry. Memory/tasks
+     figures are for the podman client only: 25.4M RAM, 13 tasks. The
+     container payload (alloy: 79MB RAM, 17 PIDs, plus conmon + pasta) is
+     NOT visible in this view — it is under `user@10008.service`.
+   - `workloadctl status` proxies to `systemctl status` and has the same
+     limitation. `workloadctl stats` uses `podman stats` directly and shows
+     the correct container-level figures (79MB / 512MB cap, 17 PIDs).
+   - `systemd-cgls /workloads.slice` remains the authoritative whole-tree
+     view: `workload-alloy.service` (podman client) and
+     `user@10008.service/user.slice/libpod-<id>.scope/container` (payload)
+     are both visible as siblings under `workloads.slice`.
+   - The exporter (`workload-exporter`) uses the 1b cgroup path
+     (`/sys/fs/cgroup/workloads.slice/user@{uid}.service/.../libpod-*.scope`)
+     and correctly reports container-level metrics: `workload_memory_current_bytes`
+     = 79MB (matches `podman stats`), `workload_pids_current` = 17,
+     `workload_memory_max_bytes` = 512MB (the `--memory` cap). No observability
+     gap at the Prometheus layer.
 7. ~~OOM behavior~~ **Confirmed 2026-06-11:** per-container `--memory` kills
    only the hog task inside the container (`memory.oom.group=0`, PID 1
    survives); a tight slice-level cap OOM-kills the largest consumer in the
