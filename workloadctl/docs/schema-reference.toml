@@ -522,14 +522,19 @@ image = "ghcr.io/example/workload:latest"
 #   surfaces in monitoring. Use "stop" only when a failing workload should stay
 #   down rather than flap.
 #
-# How the action fires: for single- and bridge-mode workloads (which run under
-# --cgroups=split), podman's own healthcheck timer can't exec into the container,
-# so workloadctl drives the probe from a system-manager timer
-# (workload-<name>-health.timer -> workload-healthcheck) and takes the on_failure
-# action there. Because the action is a systemctl verb on the unit, "kill" and
-# "restart" both mean "restart the unit", and "stop" leaves the unit stopped
-# (Restart=on-failure does not re-trigger on an explicit stop). Pod-mode
-# workloads keep podman's own --health-on-failure handling.
+# How the action fires: podman's native healthcheck timer runs inside the user
+# manager (ADR 001 option 1b topology) for all modes — single, bridge, and pod.
+# There is no separate system-manager timer or workload-healthcheck shim.
+# "restart" — podman restarts the container in place (container-level restart,
+#             not a full unit restart; the unit stays active).
+# "kill"    — podman kills the container; the unit's Restart=on-failure then
+#             recovers the workload (unit-level restart). This is the recommended
+#             pattern for systemd-managed containers: the unit RestartSec=5s
+#             prevents flapping and surfaces NRestarts in monitoring.
+# "stop"    — podman stops the container; the unit also stops and stays down
+#             (Restart=on-failure does not re-trigger on an explicit stop).
+# "none"    — only marks the container unhealthy (visible in podman inspect /
+#             metrics); no automatic action.
 # on_failure = "none"
 
 [container.environment]
