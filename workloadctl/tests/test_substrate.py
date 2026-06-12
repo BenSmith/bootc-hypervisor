@@ -38,6 +38,7 @@ from substrate import (
     _ignore_vm_rebuild,
 )
 import cmd_drift
+import cmd_inspect
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -411,6 +412,235 @@ class TestCmdDrift(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             data = json.loads(buf.getvalue())
             self.assertFalse(data['drifted'])
+
+
+# ── cmd_drift: drop-in coverage ──────────────────────────────────────────────
+
+class TestCmdDriftDropins(unittest.TestCase):
+
+    def _write_unit(self, directory: Path, name: str, content: str):
+        p = directory / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+
+    def _run_drift(self, gen_dir, live_dir, json_output=True):
+        def fake_run(cmd, **kw):
+            return CompletedProcess(args=cmd, returncode=0, stdout='', stderr='')
+
+        args = _args(workload=None, json=json_output)
+        buf = io.StringIO()
+        with patch('subprocess.run', side_effect=fake_run), \
+             patch.object(cmd_drift, 'LIVE_UNITS_DIR', Path(live_dir)), \
+             patch('tempfile.TemporaryDirectory') as mock_td:
+            mock_td.return_value.__enter__ = lambda s: gen_dir
+            mock_td.return_value.__exit__ = lambda s, *a: None
+            with patch('sys.stdout', buf):
+                with self.assertRaises(SystemExit) as cm:
+                    cmd_drift.cmd_drift(args, None)
+        return cm.exception.code, buf.getvalue()
+
+    def test_insync_dropin_exits_zero(self):
+        """When generated and live drop-ins match, no drift is reported."""
+        dropin_content = "[Service]\nSlice=workloads.slice\n"
+        with tempfile.TemporaryDirectory() as gen_dir, \
+             tempfile.TemporaryDirectory() as live_dir:
+            gd = Path(gen_dir)
+            ld = Path(live_dir)
+            self._write_unit(gd, "user@10001.service.d/50-workload.conf", dropin_content)
+            self._write_unit(ld, "user@10001.service.d/50-workload.conf", dropin_content)
+            code, out = self._run_drift(gen_dir, live_dir)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertFalse(data['drifted'])
+
+    def test_drifted_dropin_exits_one(self):
+        """When a live drop-in differs from the generated one, drift is detected."""
+        gen_content = "[Service]\nSlice=workloads.slice\nMemoryMax=2G\n"
+        live_content = "[Service]\nSlice=workloads.slice\n"
+        with tempfile.TemporaryDirectory() as gen_dir, \
+             tempfile.TemporaryDirectory() as live_dir:
+            gd = Path(gen_dir)
+            ld = Path(live_dir)
+            self._write_unit(gd, "user@10001.service.d/50-workload.conf", gen_content)
+            self._write_unit(ld, "user@10001.service.d/50-workload.conf", live_content)
+            code, out = self._run_drift(gen_dir, live_dir)
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertTrue(data['drifted'])
+        self.assertEqual(data['units'][0]['unit'], 'user@10001.service.d/50-workload.conf')
+
+    def test_orphan_dropin_is_drift(self):
+        """A live drop-in with no generated counterpart is orphan drift."""
+        with tempfile.TemporaryDirectory() as gen_dir, \
+             tempfile.TemporaryDirectory() as live_dir:
+            ld = Path(live_dir)
+            self._write_unit(ld, "user@10099.service.d/50-workload.conf",
+                             "[Service]\nSlice=workloads.slice\n")
+            # gen_dir is empty — workload was removed from TOML
+            code, out = self._run_drift(gen_dir, live_dir)
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertTrue(data['drifted'])
+        self.assertEqual(data['units'][0]['unit'], 'user@10099.service.d/50-workload.conf')
+
+
+# ── cmd_health: user manager placement ───────────────────────────────────────
+
+CONTAINER_TOML = """\
+[workload]
+name = "test-wl"
+enabled = true
+
+[container]
+image = "example.com/test:latest"
+"""
+
+CONTAINER_TOML_CUSTOM_SLICE = """\
+[workload]
+name = "test-wl"
+enabled = true
+
+[container]
+image = "example.com/test:latest"
+
+[resources]
+slice = "custom.slice"
+"""
+
+
+class TestCmdHealthPlacement(unittest.TestCase):
+    """Verify that cmd_health detects user@<uid>.service in the wrong slice."""
+
+    def _run_health(self, toml, fake_run, user_exists=True):
+        """Run cmd_health and return (exit_code, health_data_dict)."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(toml)
+            args = _args(workload='test-wl', json=True)
+            manager = MagicMock()
+            manager.user_exists.return_value = user_exists
+            # container_status returns a plain string so JSON serialization works
+            manager.podman.return_value.container_status.return_value = "running"
+            manager.podman.return_value.container_health.return_value = None
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch('subprocess.run', side_effect=fake_run), \
+                 patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
+                with self.assertRaises(SystemExit) as cm:
+                    wctl.cmd_health(args, manager)
+            output = buf_out.getvalue()
+            data = json.loads(output) if output.strip() else {}
+            return cm.exception.code, data
+
+    def test_placement_ok_when_in_correct_slice(self):
+        """user@<uid>.service in workloads.slice → placement check healthy."""
+        call_count = [0]
+
+        def fake_run(cmd, **kw):
+            call_count[0] += 1
+            cmd_str = ' '.join(str(c) for c in cmd)
+            if 'is-active' in cmd_str and 'user@' in cmd_str:
+                return _ok(stdout='active\n', returncode=0)
+            if 'show' in cmd_str and 'user@' in cmd_str and 'Slice' in cmd_str:
+                return _ok(stdout='workloads.slice\n')
+            # Other checks (service_status, uptime, etc.)
+            return _ok(stdout='active\n', returncode=0)
+
+        with patch('pwd.getpwnam') as mock_pw:
+            pw = MagicMock()
+            pw.pw_uid = 10001
+            mock_pw.return_value = pw
+            code, data = self._run_health(CONTAINER_TOML, fake_run)
+
+        placement = next(
+            (c for c in data.get('checks', []) if c['check'] == 'user_manager_placement'),
+            None,
+        )
+        self.assertIsNotNone(placement, "placement check missing from output")
+        self.assertTrue(placement['healthy'])
+
+    def test_placement_unhealthy_when_wrong_slice(self):
+        """user@<uid>.service in user.slice instead of workloads.slice → unhealthy."""
+        def fake_run(cmd, **kw):
+            cmd_str = ' '.join(str(c) for c in cmd)
+            if 'is-active' in cmd_str and 'user@' in cmd_str:
+                return _ok(stdout='active\n', returncode=0)
+            if 'show' in cmd_str and 'user@' in cmd_str and 'Slice' in cmd_str:
+                return _ok(stdout='user.slice\n')
+            return _ok(stdout='active\n', returncode=0)
+
+        with patch('pwd.getpwnam') as mock_pw:
+            pw = MagicMock()
+            pw.pw_uid = 10001
+            mock_pw.return_value = pw
+            code, data = self._run_health(CONTAINER_TOML, fake_run)
+
+        placement = next(
+            (c for c in data.get('checks', []) if c['check'] == 'user_manager_placement'),
+            None,
+        )
+        self.assertIsNotNone(placement)
+        self.assertFalse(placement['healthy'])
+        self.assertIn('user.slice', placement['message'])
+        self.assertIn('workloads.slice', placement['message'])
+        self.assertEqual(code, 1)
+
+    def test_placement_skipped_when_user_manager_not_running(self):
+        """user@<uid>.service not active → placement check is omitted (skip, not fail)."""
+        def fake_run(cmd, **kw):
+            cmd_str = ' '.join(str(c) for c in cmd)
+            if 'is-active' in cmd_str and 'user@' in cmd_str:
+                return _ok(stdout='inactive\n', returncode=3)
+            return _ok(stdout='active\n', returncode=0)
+
+        with patch('pwd.getpwnam') as mock_pw:
+            pw = MagicMock()
+            pw.pw_uid = 10001
+            mock_pw.return_value = pw
+            code, data = self._run_health(CONTAINER_TOML, fake_run)
+
+        placement = next(
+            (c for c in data.get('checks', []) if c['check'] == 'user_manager_placement'),
+            None,
+        )
+        self.assertIsNone(placement, "placement check should be absent when user@ not running")
+
+    def test_placement_uses_custom_slice(self):
+        """Workload with [resources] slice = custom.slice checks against that slice."""
+        def fake_run(cmd, **kw):
+            cmd_str = ' '.join(str(c) for c in cmd)
+            if 'is-active' in cmd_str and 'user@' in cmd_str:
+                return _ok(stdout='active\n', returncode=0)
+            if 'show' in cmd_str and 'user@' in cmd_str and 'Slice' in cmd_str:
+                return _ok(stdout='custom.slice\n')
+            return _ok(stdout='active\n', returncode=0)
+
+        with patch('pwd.getpwnam') as mock_pw:
+            pw = MagicMock()
+            pw.pw_uid = 10001
+            mock_pw.return_value = pw
+            code, data = self._run_health(CONTAINER_TOML_CUSTOM_SLICE, fake_run)
+
+        placement = next(
+            (c for c in data.get('checks', []) if c['check'] == 'user_manager_placement'),
+            None,
+        )
+        self.assertIsNotNone(placement)
+        self.assertTrue(placement['healthy'])
+
+    def test_placement_not_run_when_user_missing(self):
+        """When user doesn't exist yet, placement check is not attempted."""
+        def fake_run(cmd, **kw):
+            return _ok(stdout='inactive\n', returncode=3)
+
+        code, data = self._run_health(CONTAINER_TOML, fake_run, user_exists=False)
+
+        placement = next(
+            (c for c in data.get('checks', []) if c['check'] == 'user_manager_placement'),
+            None,
+        )
+        self.assertIsNone(placement)
 
 
 if __name__ == '__main__':
