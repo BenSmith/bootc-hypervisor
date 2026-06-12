@@ -131,10 +131,8 @@ def _interactive_exec_flags():
     """Interactivity flags for `podman exec`: always keep stdin open (-i), but
     only allocate a pseudo-TTY (-t) when stdin is a real terminal.
 
-    Passing -t without a TTY both hangs on piped input and, under
-    --cgroups=split, can trip conmon's terminal setup. Without -t, scripted /
-    non-interactive callers go through the same plain (no-pty) exec path the
-    split healthcheck uses, which is robust.
+    Passing -t without a TTY hangs on piped input. Without -t, scripted /
+    non-interactive callers use a plain no-pty exec path, which is robust.
     """
     return ["-i", "-t"] if sys.stdin.isatty() else ["-i"]
 
