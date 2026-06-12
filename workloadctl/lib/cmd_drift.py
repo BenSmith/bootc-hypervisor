@@ -70,6 +70,15 @@ def cmd_drift(args, manager):
 
         gen_dir = Path(tmpdir)
 
+        # The generator embeds the services output dir into the sysusers ExecStart
+        # path.  Normalize it to the canonical live path so the diff only shows
+        # real content changes, not the temp-dir artifact.
+        _tmpdir_prefix = tmpdir + "/"
+        _live_prefix = str(LIVE_UNITS_DIR) + "/"
+
+        def _normalize(text: str) -> str:
+            return text.replace(_tmpdir_prefix, _live_prefix)
+
         diffs = []  # list of (filename, live_text, gen_text)
 
         for gen_file in sorted(gen_dir.glob("workload-*.service")):
@@ -84,7 +93,7 @@ def cmd_drift(args, manager):
                     continue
 
             live_file = LIVE_UNITS_DIR / gen_file.name
-            gen_text = gen_file.read_text()
+            gen_text = _normalize(gen_file.read_text())
             live_text = live_file.read_text() if live_file.exists() else ""
 
             if gen_text != live_text:
