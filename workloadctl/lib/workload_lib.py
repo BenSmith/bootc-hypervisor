@@ -9,6 +9,7 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 import hashlib
 import json
 import os
+import pwd
 import re
 import socket
 import time
@@ -25,6 +26,10 @@ WORKLOADS_BASE = Path("/var/lib/workloads")
 
 # Username prefix for workload system users
 USERNAME_PREFIX = "_wl-"
+
+# UID range reserved for workload users.
+UID_MIN = 10000
+UID_MAX = 52948
 
 # Maximum workload name length (32-char Linux username limit - 4-char prefix - 1)
 MAX_NAME_LENGTH = 27
@@ -278,6 +283,32 @@ def parse_volume_spec(vol_spec: str) -> tuple[str, str, str]:
 def workload_username(name: str) -> str:
     """Return the system username for a workload: _wl-{name}."""
     return f"{USERNAME_PREFIX}{name}"
+
+
+# Per-run tracking set: `get_next_uid` records UIDs allocated during this
+# process invocation so multiple workloads enabled in the same run don't race.
+_allocated_uids: set[int] = set()
+
+
+def get_next_uid() -> int:
+    """Return the next free UID in the workload range [UID_MIN, UID_MAX].
+
+    Combines the live /etc/passwd snapshot with UIDs already allocated in this
+    process invocation.  Caller holds /run/lock/workload-subid.lock to prevent
+    concurrent processes from picking the same slot.
+    """
+    used = set(_allocated_uids)
+    try:
+        for pw in pwd.getpwall():
+            if UID_MIN <= pw.pw_uid <= UID_MAX:
+                used.add(pw.pw_uid)
+    except Exception:
+        pass
+    for uid in range(UID_MIN, UID_MAX + 1):
+        if uid not in used:
+            _allocated_uids.add(uid)
+            return uid
+    raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
 
 
 def workload_service_name(name: str) -> str:
