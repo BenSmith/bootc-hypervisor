@@ -24,6 +24,7 @@ from workloadctl_core import (
     require_root,
     WORKLOAD_DIR,
 )
+from substrate import get_substrate
 
 CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 BACKUP_DIR = WORKLOADS_BASE / "backups"
@@ -46,73 +47,17 @@ def _ignore_image_store(base_dir):
 def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool = False) -> int:
     """Create a backup archive for a single workload. Returns size in bytes.
 
+    Routes through the Substrate port so VM backups are safe (excludes
+    rebuild artifacts; refuses --no-stop which risks a corrupt live disk).
+
     Archive layout:
         workload.toml           — the config file
         credentials/            — referenced encrypted credentials (TPM-bound)
-        home/                   — full home directory contents (.local/share/containers excluded)
+        home/                   — home directory (.local/share/containers and
+                                  VM rebuild artifacts excluded)
     """
-    name = config.name
-    home_dir = config.home_dir
-    config_path = WORKLOAD_DIR / f"{name}.toml"
-    service_name = config.service_name
-
-    service_was_active = subprocess.run(
-        ["systemctl", "is-active", "--quiet", service_name],
-    ).returncode == 0
-
-    if service_was_active and not no_stop:
-        if not quiet:
-            print(f"  Stopping {service_name}...")
-        subprocess.run(["systemctl", "stop", service_name], check=True)
-
-    try:
-        with tempfile.TemporaryDirectory() as staging:
-            staging = Path(staging)
-
-            shutil.copy2(config_path, staging / "workload.toml")
-
-            creds = auto_detect_credentials(config.config)
-            if creds:
-                cred_dir = staging / "credentials"
-                cred_dir.mkdir()
-                for cred_name in sorted(creds):
-                    cred_path = CREDSTORE_DIR / cred_name
-                    if cred_path.exists():
-                        shutil.copy2(cred_path, cred_dir / cred_path.name)
-                    elif not quiet:
-                        print(f"  Warning: Credential '{cred_name}' not found, skipping")
-
-            if home_dir.is_dir():
-                shutil.copytree(home_dir, staging / "home",
-                                symlinks=True, dirs_exist_ok=False,
-                                ignore=_ignore_image_store(home_dir))
-            else:
-                (staging / "home").mkdir()
-
-            output.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                ["tar", "-C", str(staging), "-cf", str(output),
-                 "--zstd", "."],
-                check=True,
-            )
-    finally:
-        if service_was_active and not no_stop:
-            if not quiet:
-                print(f"  Starting {service_name}...")
-            subprocess.run(["systemctl", "start", service_name])
-
-    size = output.stat().st_size
-    if not quiet:
-        if size >= 1_000_000_000:
-            size_str = f"{size / 1_000_000_000:.1f}G"
-        elif size >= 1_000_000:
-            size_str = f"{size / 1_000_000:.1f}M"
-        elif size >= 1_000:
-            size_str = f"{size / 1_000:.1f}K"
-        else:
-            size_str = f"{size}B"
-        print(f"  Backup: {output} ({size_str})")
-    return size
+    substrate = get_substrate(config, None)
+    return substrate.capture(output, no_stop=no_stop, quiet=quiet)
 
 
 # ---------------------------------------------------------------------------

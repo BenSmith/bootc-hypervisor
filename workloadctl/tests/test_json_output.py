@@ -478,12 +478,19 @@ class TestStatsJson(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 wctl.cmd_stats(args, wctl.WorkloadManager())
 
+    def _make_stats_manager(self, podman_stdout):
+        """Return a WorkloadManager mock whose podman().run() returns podman_stdout."""
+        m = MagicMock()
+        m.user_exists.return_value = True
+        fake_podman = MagicMock()
+        fake_podman.run.return_value = _ok(stdout=podman_stdout)
+        m.podman.return_value = fake_podman
+        return m
+
     def test_single_workload_shape(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
-            m = wctl.WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            m.run_podman = MagicMock(return_value=_ok(stdout=json.dumps([_STATS_ROW])))
+            m = self._make_stats_manager(json.dumps([_STATS_ROW]))
             data = _capture_json(lambda: wctl.cmd_stats(args, m))
 
         self.assertIn('stats', data)
@@ -496,9 +503,7 @@ class TestStatsJson(unittest.TestCase):
     def test_numeric_types(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
-            m = wctl.WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            m.run_podman = MagicMock(return_value=_ok(stdout=json.dumps([_STATS_ROW])))
+            m = self._make_stats_manager(json.dumps([_STATS_ROW]))
             data = _capture_json(lambda: wctl.cmd_stats(args, m))
 
         row = data['stats'][0]
@@ -514,9 +519,7 @@ class TestStatsJson(unittest.TestCase):
     def test_stat_keys(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
-            m = wctl.WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            m.run_podman = MagicMock(return_value=_ok(stdout=json.dumps([_STATS_ROW])))
+            m = self._make_stats_manager(json.dumps([_STATS_ROW]))
             data = _capture_json(lambda: wctl.cmd_stats(args, m))
 
         row = data['stats'][0]
@@ -528,9 +531,7 @@ class TestStatsJson(unittest.TestCase):
     def test_empty_stats_when_container_not_running(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
-            m = wctl.WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            m.run_podman = MagicMock(return_value=_ok(stdout=''))
+            m = self._make_stats_manager('')
             data = _capture_json(lambda: wctl.cmd_stats(args, m))
         self.assertEqual(data['stats'], [])
 

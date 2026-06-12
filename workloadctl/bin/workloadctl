@@ -17,6 +17,7 @@ import cmd_update as _cmd_update
 import cmd_backup as _cmd_backup
 import cmd_secret as _cmd_secret
 import cmd_admin as _cmd_admin
+import cmd_drift as _cmd_drift
 import workloadctl_core as _workloadctl_core
 
 from workloadctl_core import *  # noqa: F401,F403 — re-export for tests
@@ -65,6 +66,7 @@ _import_rebound(_cmd_update)
 _import_rebound(_cmd_backup)
 _import_rebound(_cmd_secret)
 _import_rebound(_cmd_admin)
+_import_rebound(_cmd_drift)
 
 # Re-assert WORKLOAD_DIR after _import_rebound (cmd modules may have set it)
 WORKLOAD_DIR = WORKLOAD_CONFIG_DIR  # noqa: F811
@@ -290,6 +292,18 @@ def main():
     uid_map_parser.add_argument("workload", help="Workload name")
     uid_map_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
+    drift_parser = subparsers.add_parser(
+        "drift",
+        help="Show diff between running units and what would be generated from current TOMLs",
+    )
+    drift_parser.add_argument(
+        "workload", nargs="?", metavar="WORKLOAD",
+        help="Filter to units belonging to a specific workload (default: all workloads)",
+    )
+    drift_parser.add_argument(
+        "--json", action="store_true",
+        help="Output diff as JSON",
+    )
 
     args = parser.parse_args()
 
@@ -324,6 +338,7 @@ def main():
         "status": cmd_status,
         "stop": cmd_stop,
         "rollback": cmd_rollback,
+        "drift": cmd_drift,
         "uid-map": cmd_uid_map,
         "update": cmd_update,
         "validate": cmd_validate,
