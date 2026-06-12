@@ -340,9 +340,9 @@ def cmd_cp(args, manager: WorkloadManager):
     target = resolve_container_target(config, container, workload)
 
     if direction == "from":
-        manager.run_podman(config, "cp", f"{target}:{container_path}", host_path, check=True)
+        manager.podman(config).run("cp", f"{target}:{container_path}", host_path, check=True)
     else:
-        manager.run_podman(config, "cp", host_path, f"{target}:{container_path}", check=True)
+        manager.podman(config).run("cp", host_path, f"{target}:{container_path}", check=True)
 
     print("✓ Copied successfully")
 
@@ -362,4 +362,4 @@ def cmd_attach(args, manager: WorkloadManager):
     print("(Press Ctrl+C to detach)")
     print()
 
-    manager.run_podman(config, "attach", target, check=True)
+    manager.podman(config).run("attach", target, check=True)

@@ -20,6 +20,7 @@ from workload_lib import (
     VM_SOCKET_DIR,
 )
 from podman import Podman
+from substrate import NotApplicable, get_substrate
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -844,6 +845,19 @@ def _stats_parse_mem(row: dict) -> tuple[int, int]:
             _parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
 
 
+def _stats_one(config, manager, target_names, *, json_out, follow):
+    """Run podman stats for one workload's containers via ContainerSubstrate."""
+    substrate = get_substrate(config, manager)
+    try:
+        substrate.resource_usage(
+            target_names, json_out=json_out, follow=follow,
+        )
+        return getattr(substrate, "_last_stats_result", None)
+    except NotApplicable as e:
+        print(f"stats: not applicable for {config.name} — {e.reason}", file=sys.stderr)
+        return None
+
+
 def cmd_stats(args, manager: WorkloadManager):
     """Show resource usage statistics"""
     if args.json and args.follow:
@@ -857,16 +871,25 @@ def cmd_stats(args, manager: WorkloadManager):
             print("Error: Workload user not found. Is workload enabled?", file=sys.stderr)
             sys.exit(1)
 
+        # VM workloads have no container-level resource metrics
+        substrate = get_substrate(config, manager)
         target_names = (
             [config.podman_container_name(c) for c in config.container_names()]
             if config.is_multi else [config.container_name]
         )
 
+        try:
+            substrate.resource_usage(
+                target_names, json_out=args.json, follow=args.follow,
+            )
+        except NotApplicable as e:
+            print(f"stats: not applicable for {config.name} — {e.reason}")
+            sys.exit(0)
+
         if args.json:
-            result = manager.run_podman(config, "stats", "--no-stream", "--format", "json",
-                                        *target_names, capture_output=True)
+            result = getattr(substrate, "_last_stats_result", None)
             stats_list = []
-            if result.returncode == 0 and result.stdout.strip():
+            if result is not None and result.returncode == 0 and result.stdout.strip():
                 raw = json.loads(result.stdout)
                 for row in (raw if isinstance(raw, list) else [raw]):
                     net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
@@ -887,17 +910,11 @@ def cmd_stats(args, manager: WorkloadManager):
                         "pids": int(row.get("pids") or row.get("PIDs", 0))
                     })
             print(json.dumps({"stats": stats_list}, indent=2))
-            return
-
-        if args.follow:
-            manager.run_podman(config, "stats", *target_names, check=True)
-        else:
-            manager.run_podman(config, "stats", "--no-stream", *target_names, check=True)
     else:
         configs = manager.get_all_configs(enabled_only=True)
 
         def _running_targets(c):
-            if not manager.user_exists(c):
+            if c.is_vm or not manager.user_exists(c):
                 return []
             names = ([c.podman_container_name(n) for n in c.container_names()]
                      if c.is_multi else [c.container_name])
@@ -908,9 +925,13 @@ def cmd_stats(args, manager: WorkloadManager):
         if args.json:
             stats_list = []
             for config, target_names in running:
-                result = manager.run_podman(config, "stats", "--no-stream", "--format", "json",
-                                            *target_names, capture_output=True)
-                if result.returncode == 0 and result.stdout.strip():
+                substrate = get_substrate(config, manager)
+                try:
+                    substrate.resource_usage(target_names, json_out=True)
+                except NotApplicable:
+                    continue
+                result = getattr(substrate, "_last_stats_result", None)
+                if result is not None and result.returncode == 0 and result.stdout.strip():
                     raw = json.loads(result.stdout)
                     for row in (raw if isinstance(raw, list) else [raw]):
                         net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
@@ -938,11 +959,15 @@ def cmd_stats(args, manager: WorkloadManager):
             return
 
         for config, target_names in running:
-            if args.follow:
-                print(f"Note: --follow with multiple workloads shows only {config.name}")
-                manager.run_podman(config, "stats", *target_names, check=True)
-                return
-            manager.run_podman(config, "stats", "--no-stream", *target_names)
+            substrate = get_substrate(config, manager)
+            try:
+                if args.follow:
+                    print(f"Note: --follow with multiple workloads shows only {config.name}")
+                    substrate.resource_usage(target_names, follow=True)
+                    return
+                substrate.resource_usage(target_names)
+            except NotApplicable:
+                continue
             print()
 
 
@@ -996,6 +1021,43 @@ def cmd_health(args, manager: WorkloadManager):
     """Check workload health"""
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
+
+    # VMs have no container layer — health = service active + user exists.
+    if config.is_vm:
+        substrate = get_substrate(config, manager)
+        liveness = substrate.liveness()
+        service_active = liveness["service_active"]
+        service_state = liveness["service_state"]
+        user_exists = manager.user_exists(config)
+        all_healthy = service_active and user_exists
+        health_data = {
+            "workload": config.name,
+            "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
+            "checks": [
+                {
+                    "check": "service_status",
+                    "healthy": service_active,
+                    "message": "Service active" if service_active else f"Service {service_state}",
+                    "details": {"state": service_state},
+                },
+                {
+                    "check": "user_exists",
+                    "healthy": user_exists,
+                    "message": f"User {config.username} exists" if user_exists
+                               else f"User {config.username} does not exist",
+                },
+            ],
+        }
+        if args.json:
+            print(json.dumps(health_data, indent=2))
+        else:
+            print(f"Workload: {health_data['workload']}")
+            print(f"Overall: {health_data['overall']}")
+            print()
+            for check in health_data["checks"]:
+                symbol = "✓" if check["healthy"] else "✗"
+                print(f"{symbol} {check['message']}")
+        sys.exit(0 if all_healthy else 1)
 
     if config.is_multi:
         data, all_healthy = _multi_container_health(config, manager, container)
