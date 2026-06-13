@@ -56,17 +56,17 @@ def _vm_gen_count(target: Target, name: str) -> int:
 class TestUpdateRollbackContainer:
     @pytest.mark.mutating
     @pytest.mark.slow
-    def test_update_force_creates_rollback_tag(self, target, clitest_single, record_property):
+    def test_update_force_creates_rollback_tag(self, target, fresh_single, record_property):
         """update --force restarts the service (creates a rollback image tag)."""
         record_property("cell", "update/container")
 
-        r = target.wl(f"update --force {clitest_single}", check=True, timeout=300)
+        r = target.wl(f"update --force {fresh_single}", check=True, timeout=300)
         assert r.rc == 0
         assert "Traceback" not in r.stderr
 
         # Service should be active after update
-        assert _wait_active(target, clitest_single, timeout=120), (
-            f"{clitest_single!r} not active after update"
+        assert _wait_active(target, fresh_single, timeout=120), (
+            f"{fresh_single!r} not active after update"
         )
 
     @pytest.mark.mutating
@@ -106,17 +106,16 @@ class TestUpdateRollbackContainer:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
             target.run(["rm", "-f", toml_path], sudo=True, check=False)
 
-    def test_rollback_without_prior_fails_cleanly(self, target, clitest_single, record_property):
+    def test_rollback_without_prior_fails_cleanly(self, target, fresh_single, record_property):
         """rollback when no rollback tag exists: exit nonzero, no traceback."""
         record_property("cell", "rollback/container")
-        # We only run rollback if no prior update was done in this session.
-        # This is a fresh fixture so no rollback tag should exist yet.
-        r = target.wl(f"rollback {clitest_single}", check=False, timeout=30)
-        # May succeed if another test ran update first; just check for no traceback
+        # This is a fresh, per-test fixture so no rollback tag exists yet.
+        r = target.wl(f"rollback {fresh_single}", check=False, timeout=30)
+        # No prior update in this fixture's lifetime; just check for no traceback
         assert "Traceback" not in r.stderr
 
     @pytest.mark.mutating
-    def test_update_all(self, target, clitest_single, record_property):
+    def test_update_all(self, target, fresh_single, record_property):
         """update --all doesn't crash with container workloads present."""
         record_property("cell", "update_all/container")
         r = target.wl("update --all", check=False, timeout=600)

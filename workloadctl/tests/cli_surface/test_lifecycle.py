@@ -194,24 +194,24 @@ class TestEnableDisable:
 
 class TestStartStop:
     @pytest.mark.mutating
-    def test_stop_stops_service(self, target, clitest_single, record_property):
+    def test_stop_stops_service(self, target, fresh_single, record_property):
         record_property("cell", "stop/container")
-        assert _is_active(target, clitest_single)
-        target.wl(f"stop {clitest_single}", check=True)
-        assert _wait_inactive(target, clitest_single), (
-            f"Workload {clitest_single!r} did not stop"
+        assert _is_active(target, fresh_single)
+        target.wl(f"stop {fresh_single}", check=True)
+        assert _wait_inactive(target, fresh_single), (
+            f"Workload {fresh_single!r} did not stop"
         )
 
     @pytest.mark.mutating
-    def test_start_starts_service(self, target, clitest_single, record_property):
+    def test_start_starts_service(self, target, fresh_single, record_property):
         record_property("cell", "start/container")
         # First stop it
-        target.wl(f"stop {clitest_single}", check=False)
-        _wait_inactive(target, clitest_single, timeout=15)
+        target.wl(f"stop {fresh_single}", check=False)
+        _wait_inactive(target, fresh_single, timeout=15)
         # Now start
-        target.wl(f"start {clitest_single}", check=True)
-        assert _wait_active(target, clitest_single), (
-            f"Workload {clitest_single!r} did not start"
+        target.wl(f"start {fresh_single}", check=True)
+        assert _wait_active(target, fresh_single), (
+            f"Workload {fresh_single!r} did not start"
         )
 
     @pytest.mark.mutating
@@ -240,14 +240,14 @@ class TestStartStop:
 
 class TestRecreate:
     @pytest.mark.mutating
-    def test_recreate_container(self, target, clitest_single, record_property):
+    def test_recreate_container(self, target, fresh_single, record_property):
         """recreate restarts the container without destroying data."""
         record_property("cell", "recreate/container")
-        r = target.wl(f"recreate {clitest_single}", check=True, timeout=120)
+        r = target.wl(f"recreate {fresh_single}", check=True, timeout=120)
         assert r.rc == 0
         # Should be active after recreate
-        assert _wait_active(target, clitest_single, timeout=90), (
-            f"{clitest_single!r} not active after recreate"
+        assert _wait_active(target, fresh_single, timeout=90), (
+            f"{fresh_single!r} not active after recreate"
         )
 
     @pytest.mark.mutating
@@ -271,7 +271,7 @@ class TestRecreate:
 class TestReboot:
     @pytest.mark.mutating
     @pytest.mark.slow
-    def test_reboot_container(self, target, clitest_single, record_property):
+    def test_reboot_container(self, target, fresh_single, record_property):
         """reboot on a container: systemctl soft-reboot inside the container.
 
         Note: caddy is not a systemd container so this may fail with a
@@ -279,7 +279,7 @@ class TestReboot:
         and re-checks that the workload service is still active.
         """
         record_property("cell", "reboot/container")
-        r = target.wl(f"reboot {clitest_single}", check=False, timeout=30)
+        r = target.wl(f"reboot {fresh_single}", check=False, timeout=30)
         # soft-reboot may fail in a non-systemd container; don't require rc==0
         # but must not produce a Python traceback
         assert "Traceback" not in r.stderr, (
@@ -289,7 +289,7 @@ class TestReboot:
         # container may restart, but the unit must not end up failed.
         time.sleep(5)
         state = target.run(
-            ["systemctl", "is-active", f"workload-{clitest_single}.service"],
+            ["systemctl", "is-active", f"workload-{fresh_single}.service"],
             sudo=False, check=False,
         ).stdout.strip()
         assert state in ("active", "activating"), (
@@ -318,7 +318,7 @@ class TestReboot:
 
 class TestEdit:
     @pytest.mark.mutating
-    def test_edit_applies_change(self, target, clitest_single, record_property):
+    def test_edit_applies_change(self, target, fresh_single, record_property):
         """edit with a non-interactive EDITOR changes the TOML."""
         record_property("cell", "edit/container")
 
@@ -337,13 +337,13 @@ class TestEdit:
         # rather than exporting it in the outer shell (where it would be lost).
         r = target.run(
             ["sudo", "-n", "env", f"EDITOR={remote_editor}",
-             "workloadctl", "edit", clitest_single],
+             "workloadctl", "edit", fresh_single],
             sudo=False, check=True,
         )
         assert r.rc == 0
 
         # Verify the change is in the TOML
-        content = target.read(f"/etc/workloads.d/{clitest_single}.toml")
+        content = target.read(f"/etc/workloads.d/{fresh_single}.toml")
         assert "edited-by-clitest" in content, (
             f"edit did not persist the change: {content[:500]}"
         )

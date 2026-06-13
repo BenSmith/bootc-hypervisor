@@ -1,8 +1,25 @@
 """
 fixtures.py — pytest fixtures that provision and tear down clitest-* workloads.
 
+Two flavours of workload fixture exist, because provisioning a workload
+(enable → wait active → wait container up → purge on teardown) is by far the
+dominant cost in this suite:
+
+  - **Session-scoped "shared" topologies** (clitest_single / clitest_pod /
+    clitest_bridge / clitest_host). Provisioned ONCE per session and reused by
+    every *read-only* test (introspection, exec, logs, cleanup-no-orphan, …).
+    These tests never mutate the workload, so sharing one instance is safe and
+    turns dozens of enable/purge cycles into one.
+
+  - **Function-scoped "fresh" instances** (fresh_single / fresh_bridge).
+    A brand-new, isolated workload per test, for *mutating* tests
+    (stop/start/recreate/edit, backup, update/rollback, network create). They
+    use distinct workload names + host ports (clitest-fresh-*) so a fresh
+    instance can run alongside the long-lived shared one without colliding on
+    the name or the published port.
+
 All workload fixtures are:
-  - Function-scoped (lazy: only created when a test requests them)
+  - Lazy: only created when a test requests them
   - Idempotent: safe to call on a target that already has the workload
   - Self-cleaning: a finalizer disables --purge the workload on teardown
 
@@ -131,12 +148,16 @@ def _purge_workload(target: Target, name: str):
 
 
 # ---------------------------------------------------------------------------
-# Container workload fixtures
+# Shared (session-scoped) container topologies — for READ-ONLY tests.
+#
+# Provisioned once per session and reused across every test that only inspects
+# the workload (it must not be mutated, or other tests sharing it would see the
+# change). Mutating tests must use the fresh_* fixtures below instead.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def clitest_single(target: Target):
-    """Single-container workload (pasta networking, port mapped)."""
+    """Shared single-container workload (pasta networking, port mapped)."""
     name = _install_toml(target, "clitest-single.toml")
     try:
         _enable_workload(target, name, timeout=180)
@@ -147,9 +168,9 @@ def clitest_single(target: Target):
     _purge_workload(target, name)
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def clitest_pod(target: Target):
-    """Pod-mode multi-container workload (shared netns)."""
+    """Shared pod-mode multi-container workload (shared netns)."""
     name = _install_toml(target, "clitest-pod.toml")
     try:
         _enable_workload(target, name, timeout=180)
@@ -160,9 +181,9 @@ def clitest_pod(target: Target):
     _purge_workload(target, name)
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def clitest_bridge(target: Target):
-    """Bridge-mode multi-container workload (per-container netns)."""
+    """Shared bridge-mode multi-container workload (per-container netns)."""
     name = _install_toml(target, "clitest-bridge.toml")
     try:
         _enable_workload(target, name, timeout=180)
@@ -173,10 +194,43 @@ def clitest_bridge(target: Target):
     _purge_workload(target, name)
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def clitest_host(target: Target):
-    """Single container with host networking."""
+    """Shared single container with host networking."""
     name = _install_toml(target, "clitest-host.toml")
+    try:
+        _enable_workload(target, name, timeout=180)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+# ---------------------------------------------------------------------------
+# Fresh (function-scoped) container instances — for MUTATING tests.
+#
+# A brand-new isolated workload per test. Distinct name + host port from the
+# shared topologies above so the two can coexist within one session.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def fresh_single(target: Target):
+    """Fresh, isolated single-container workload (clitest-fresh-single)."""
+    name = _install_toml(target, "clitest-fresh-single.toml")
+    try:
+        _enable_workload(target, name, timeout=180)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+@pytest.fixture()
+def fresh_bridge(target: Target):
+    """Fresh, isolated bridge-mode workload (clitest-fresh-bridge)."""
+    name = _install_toml(target, "clitest-fresh-bridge.toml")
     try:
         _enable_workload(target, name, timeout=180)
     except Exception:

@@ -115,6 +115,25 @@ workloadctl/tests/cli_surface/
 | `--deploy`   | off      | rsync + rpm-install before testing       |
 | `--key-type` | `auto`   | Secret encryption: auto/tpm2/host        |
 
+## Fixture scoping (shared vs. fresh)
+
+Provisioning a workload (enable → wait active → wait container up → purge) is
+the dominant cost in this suite, so workload fixtures come in two flavours:
+
+- **Shared, session-scoped** — `clitest_single`, `clitest_pod`,
+  `clitest_bridge`, `clitest_host`. Provisioned once per session and reused by
+  every *read-only* test (introspection, exec/cp, logs, cleanup-no-orphan, …).
+  These tests never mutate the workload, so one instance serves all of them.
+- **Fresh, function-scoped** — `fresh_single`, `fresh_bridge`. A brand-new,
+  isolated workload per test, for *mutating* tests (stop/start/recreate/edit,
+  backup, update/rollback, network create). They use distinct names + host
+  ports (`clitest-fresh-*`) so a fresh instance can run alongside the long-lived
+  shared one without colliding.
+
+When adding a test: if it only inspects a workload, request the shared
+`clitest_*` fixture; if it changes workload state, request a `fresh_*` fixture
+(add one for the topology if it doesn't exist yet).
+
 ## Idempotency
 
 A session-scoped autouse fixture purges all `clitest-*` workloads at session

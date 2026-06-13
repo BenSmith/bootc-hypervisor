@@ -20,13 +20,13 @@ from target import Target
 
 class TestNetworkCreate:
     @pytest.mark.mutating
-    def test_network_create_for_workload(self, target, clitest_single, record_property):
+    def test_network_create_for_workload(self, target, fresh_single, record_property):
         """network create: creates a podman network as the workload user."""
         record_property("cell", "network/container")
         net_name = "clitest-testnet"
 
         r = target.wl(
-            f"network {net_name} create {clitest_single}",
+            f"network {net_name} create {fresh_single}",
             check=True, timeout=30,
         )
         assert r.rc == 0
@@ -34,7 +34,7 @@ class TestNetworkCreate:
 
         # Verify the network exists for the workload user
         # Get the workload's UID
-        uid_r = target.wl(f"uid-map --json {clitest_single}", check=False)
+        uid_r = target.wl(f"uid-map --json {fresh_single}", check=False)
         uid = None
         if uid_r.rc == 0:
             try:
@@ -46,13 +46,13 @@ class TestNetworkCreate:
                 pass
 
         if uid is not None:
-            username = f"_wl-{clitest_single}"
+            username = f"_wl-{fresh_single}"
             # Run podman as the workload user. sudo's `-E KEY=VAL` form does not
             # exist; set the env via `env` in the target command instead.
             r2 = target.run(
                 ["sudo", "-n", "-u", username, "env",
                  f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                 f"HOME=/var/lib/workloads/{clitest_single}",
+                 f"HOME=/var/lib/workloads/{fresh_single}",
                  "podman", "network", "ls", "--format", "{{.Name}}"],
                 sudo=False, check=False,
             )
@@ -61,12 +61,12 @@ class TestNetworkCreate:
             )
 
     @pytest.mark.mutating
-    def test_network_create_bridge_workload(self, target, clitest_bridge, record_property):
+    def test_network_create_bridge_workload(self, target, fresh_bridge, record_property):
         """network create for a bridge-mode workload."""
         record_property("cell", "network/container/bridge")
         net_name = "clitest-bridgenet"
         r = target.wl(
-            f"network {net_name} create {clitest_bridge}",
+            f"network {net_name} create {fresh_bridge}",
             check=True, timeout=30,
         )
         assert r.rc == 0

@@ -43,22 +43,22 @@ def _archive_exists(target: Target, path: str) -> bool:
 
 class TestBackupContainer:
     @pytest.mark.mutating
-    def test_backup_single(self, target, clitest_single, record_property):
+    def test_backup_single(self, target, fresh_single, record_property):
         """backup creates an archive for a running workload."""
         record_property("cell", "backup/container")
-        r = target.wl(f"backup {clitest_single}", check=True, timeout=120)
+        r = target.wl(f"backup {fresh_single}", check=True, timeout=120)
         assert r.rc == 0
         assert "Traceback" not in r.stderr
 
-        archive = _find_backup(target, clitest_single)
-        assert archive, f"No backup archive found for {clitest_single}"
+        archive = _find_backup(target, fresh_single)
+        assert archive, f"No backup archive found for {fresh_single}"
         assert _archive_exists(target, archive), f"Archive {archive} does not exist"
 
     @pytest.mark.mutating
-    def test_backup_json(self, target, clitest_single, record_property):
+    def test_backup_json(self, target, fresh_single, record_property):
         """backup --json returns structured output with archive path."""
         record_property("cell", "backup/container")
-        r = target.wl(f"backup --json {clitest_single}", check=True, timeout=120)
+        r = target.wl(f"backup --json {fresh_single}", check=True, timeout=120)
         assert r.rc == 0
         data = json.loads(r.stdout)
         assert "backups" in data
@@ -70,13 +70,13 @@ class TestBackupContainer:
         assert entry["size_bytes"] > 0
 
     @pytest.mark.mutating
-    def test_backup_output_path(self, target, clitest_single, record_property):
+    def test_backup_output_path(self, target, fresh_single, record_property):
         """backup --output writes to a specified path."""
         record_property("cell", "backup/container")
-        output_path = f"/tmp/clitest-backup-{clitest_single}.tar.zst"
+        output_path = f"/tmp/clitest-backup-{fresh_single}.tar.zst"
         try:
             r = target.wl(
-                f"backup --output {output_path} {clitest_single}",
+                f"backup --output {output_path} {fresh_single}",
                 check=True, timeout=120,
             )
             assert r.rc == 0
@@ -85,21 +85,21 @@ class TestBackupContainer:
             target.run(["rm", "-f", output_path], sudo=True, check=False)
 
     @pytest.mark.mutating
-    def test_backup_no_stop(self, target, clitest_single, record_property):
+    def test_backup_no_stop(self, target, fresh_single, record_property):
         """backup --no-stop creates archive without stopping the service."""
         record_property("cell", "backup/container")
         # Service must remain active
-        r = target.wl(f"backup --no-stop {clitest_single}", check=True, timeout=120)
+        r = target.wl(f"backup --no-stop {fresh_single}", check=True, timeout=120)
         assert r.rc == 0
         # Service still running
         svc_r = target.run(
-            ["systemctl", "is-active", f"workload-{clitest_single}.service"],
+            ["systemctl", "is-active", f"workload-{fresh_single}.service"],
             sudo=False, check=False,
         )
         assert svc_r.stdout.strip() == "active", "Service stopped during --no-stop backup"
 
     @pytest.mark.mutating
-    def test_backup_all(self, target, clitest_single, record_property):
+    def test_backup_all(self, target, fresh_single, record_property):
         """backup --all backs up all workloads without crashing."""
         record_property("cell", "backup_all/any")
         r = target.wl("backup --all", check=True, timeout=300)
