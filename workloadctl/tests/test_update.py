@@ -1,65 +1,61 @@
 #!/usr/bin/env python3
 """Unit tests for workloadctl update/rollback functionality."""
 
-import importlib.util
 import os
 import sys
 import unittest
 from pathlib import Path
 
-# Import workloadctl as a module (hyphenated filename requires importlib)
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
-_ctl_path = os.path.join(os.path.dirname(__file__), '..', 'bin', 'workloadctl')
-_loader = importlib.machinery.SourceFileLoader("workload_ctl", _ctl_path)
-_spec = importlib.util.spec_from_loader("workload_ctl", _loader)
-wctl = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(wctl)
+import cmd_lifecycle
+import cmd_update
+from workloadctl_core import WorkloadConfig
 
 
 class TestParseDuration(unittest.TestCase):
     def test_seconds(self):
-        self.assertEqual(wctl._parse_duration("30s"), 30)
-        self.assertEqual(wctl._parse_duration("0s"), 0)
-        self.assertEqual(wctl._parse_duration("5s"), 5)
+        self.assertEqual(cmd_update._parse_duration("30s"), 30)
+        self.assertEqual(cmd_update._parse_duration("0s"), 0)
+        self.assertEqual(cmd_update._parse_duration("5s"), 5)
 
     def test_minutes(self):
-        self.assertEqual(wctl._parse_duration("5m"), 300)
-        self.assertEqual(wctl._parse_duration("1m"), 60)
+        self.assertEqual(cmd_update._parse_duration("5m"), 300)
+        self.assertEqual(cmd_update._parse_duration("1m"), 60)
 
     def test_hours(self):
-        self.assertEqual(wctl._parse_duration("1h"), 3600)
-        self.assertEqual(wctl._parse_duration("2h"), 7200)
+        self.assertEqual(cmd_update._parse_duration("1h"), 3600)
+        self.assertEqual(cmd_update._parse_duration("2h"), 7200)
 
     def test_bare_number(self):
-        self.assertEqual(wctl._parse_duration("42"), 42)
+        self.assertEqual(cmd_update._parse_duration("42"), 42)
 
     def test_whitespace(self):
-        self.assertEqual(wctl._parse_duration("  30s  "), 30)
+        self.assertEqual(cmd_update._parse_duration("  30s  "), 30)
 
 
 class TestRollbackTag(unittest.TestCase):
     def test_format(self):
         self.assertEqual(
-            wctl.rollback_tag("pihole"),
+            cmd_update.rollback_tag("pihole"),
             "localhost/workload-rollback/pihole:latest"
         )
 
     def test_hyphenated_name(self):
         self.assertEqual(
-            wctl.rollback_tag("smb-server"),
+            cmd_update.rollback_tag("smb-server"),
             "localhost/workload-rollback/smb-server:latest"
         )
 
     def test_per_container_tag(self):
         self.assertEqual(
-            wctl.rollback_tag("stack", "web"),
+            cmd_update.rollback_tag("stack", "web"),
             "localhost/workload-rollback/stack-web:latest"
         )
 
     def test_none_container_matches_workload_tag(self):
-        self.assertEqual(wctl.rollback_tag("stack", None), wctl.rollback_tag("stack"))
+        self.assertEqual(cmd_update.rollback_tag("stack", None), cmd_update.rollback_tag("stack"))
 
 
 class TestContainerSpecs(unittest.TestCase):
@@ -82,7 +78,7 @@ class TestContainerSpecs(unittest.TestCase):
             "container": {"image": "nginx", "pull": "missing"},
         }, is_multi=False)
         self.assertEqual(
-            wctl.WorkloadConfig.container_specs(fc),
+            WorkloadConfig.container_specs(fc),
             [("web", "nginx", "missing")],
         )
 
@@ -91,7 +87,7 @@ class TestContainerSpecs(unittest.TestCase):
             "workload": {"name": "web"},
             "container": {"image": "nginx"},
         }, is_multi=False)
-        self.assertEqual(wctl.WorkloadConfig.container_specs(fc),
+        self.assertEqual(WorkloadConfig.container_specs(fc),
                          [("web", "nginx", "missing")])
 
     def test_multi_container(self):
@@ -103,7 +99,7 @@ class TestContainerSpecs(unittest.TestCase):
             ],
         }, is_multi=True)
         self.assertEqual(
-            wctl.WorkloadConfig.container_specs(fc),
+            WorkloadConfig.container_specs(fc),
             [("web", "img-a", "never"), ("db", "img-b", "missing")],
         )
 
@@ -118,7 +114,7 @@ class TestContainerSpecs(unittest.TestCase):
             ],
         }, is_multi=True)
         self.assertEqual(
-            wctl.WorkloadConfig.all_volumes(fc),
+            WorkloadConfig.all_volumes(fc),
             ["./w:/w", "./d:/d", "./e:/e"],
         )
 
@@ -148,16 +144,16 @@ class TestHealthWaitSeconds(unittest.TestCase):
             "start_period": "60s",
             "interval": "30s",
         })
-        self.assertEqual(wctl._health_wait_seconds(config), 90)
+        self.assertEqual(cmd_update._health_wait_seconds(config), 90)
 
     def test_no_health_check(self):
         config = self._make_config({})
-        self.assertEqual(wctl._health_wait_seconds(config), 0)
+        self.assertEqual(cmd_update._health_wait_seconds(config), 0)
 
     def test_defaults(self):
         # Only cmd set, start_period and interval use defaults (0s and 30s)
         config = self._make_config({"cmd": "true"})
-        self.assertEqual(wctl._health_wait_seconds(config), 30)
+        self.assertEqual(cmd_update._health_wait_seconds(config), 30)
 
     def test_all_workload_health_configs(self):
         """Verify _health_wait_seconds parses every real workload's health config."""
@@ -171,7 +167,7 @@ class TestHealthWaitSeconds(unittest.TestCase):
                 continue
             # Build a fake config with the real health section
             config = self._make_config(health)
-            wait = wctl._health_wait_seconds(config)
+            wait = cmd_update._health_wait_seconds(config)
             self.assertGreater(wait, 0, f"{toml_path.name}: wait should be > 0")
             # Sanity: no workload should need more than 5 minutes
             self.assertLess(wait, 300, f"{toml_path.name}: wait seems too long ({wait}s)")
@@ -183,27 +179,27 @@ class TestReplaceWorkloadEnabled(unittest.TestCase):
 
     def test_flip_false_to_true(self):
         src = "[workload]\nname = \"x\"\nenabled = false\n"
-        out, had = wctl._replace_workload_enabled(src, "true")
+        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
         self.assertIn("enabled = true", out)
         self.assertNotIn("enabled = false", out)
         self.assertTrue(had)
 
     def test_flip_true_to_false(self):
         src = "[workload]\nname = \"x\"\nenabled = true\n"
-        out, had = wctl._replace_workload_enabled(src, "false")
+        out, had = cmd_lifecycle._replace_workload_enabled(src, "false")
         self.assertIn("enabled = false", out)
         self.assertNotIn("enabled = true", out)
         self.assertTrue(had)
 
     def test_insert_when_missing(self):
         src = "[workload]\nname = \"x\"\n"
-        out, had = wctl._replace_workload_enabled(src, "true")
+        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
         self.assertIn("enabled = true", out)
         self.assertFalse(had)
 
     def test_remove_when_present(self):
         src = "[workload]\nname = \"x\"\nenabled = true\n"
-        out, had = wctl._replace_workload_enabled(src, None)
+        out, had = cmd_lifecycle._replace_workload_enabled(src, None)
         self.assertNotIn("enabled", out)
         self.assertTrue(had)
 
@@ -219,7 +215,7 @@ class TestReplaceWorkloadEnabled(unittest.TestCase):
             "name = \"web\"\n"
             "enabled = false   # hypothetical per-container field\n"
         )
-        out, had = wctl._replace_workload_enabled(src, "true")
+        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
         # [workload].enabled flipped:
         self.assertIn("[workload]", out)
         workload_section = out.split("[[containers]]")[0]
@@ -237,14 +233,14 @@ class TestReplaceWorkloadEnabled(unittest.TestCase):
             "enabled = false\n"
             "enabled = false\n"
         )
-        out, _ = wctl._replace_workload_enabled(src, "true")
+        out, _ = cmd_lifecycle._replace_workload_enabled(src, "true")
         # Exactly one true, exactly one false
         self.assertEqual(out.count("enabled = true"), 1)
         self.assertEqual(out.count("enabled = false"), 1)
 
     def test_no_workload_section_creates_one(self):
         src = "[container]\nimage = \"x\"\n"
-        out, had = wctl._replace_workload_enabled(src, "true")
+        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
         self.assertIn("[workload]", out)
         self.assertIn("enabled = true", out)
         self.assertFalse(had)

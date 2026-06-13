@@ -934,7 +934,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
     # Per-workload SELinux modules a config still expects (selinux_policy = true).
     # Keyed on declaration, not enabled state — same as users above.
     expected_modules = set()
-    for config_file in WORKLOAD_DIR.glob("*.toml"):
+    for config_file in manager.workload_dir.glob("*.toml"):
         try:
             with open(config_file, "rb") as f:
                 cfg = tomllib.load(f)

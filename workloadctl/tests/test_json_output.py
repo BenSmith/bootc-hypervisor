@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for workloadctl JSON output — covers plan tasks 1.1 through 2.6."""
 
-import importlib.machinery
-import importlib.util
 import io
 from contextlib import redirect_stderr
 import json
@@ -17,19 +15,18 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
-# ── module load ───────────────────────────────────────────────────────────────
+# ── imports from lib ──────────────────────────────────────────────────────────
 
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
-_SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'bin', 'workloadctl')
-_loader = importlib.machinery.SourceFileLoader('workloadctl', _SCRIPT)
-_spec = importlib.util.spec_from_loader('workloadctl', _loader, origin=_SCRIPT)
-wctl = importlib.util.module_from_spec(_spec)
-# The script resolves its lib/ dir relative to __file__; module_from_spec does
-# not set it when origin is passed explicitly, so set it before exec.
-wctl.__file__ = _SCRIPT
-_spec.loader.exec_module(wctl)
+import cmd_admin
+import cmd_backup
+import cmd_inspect
+import cmd_lifecycle
+import cmd_secret
+import workloadctl_core
+from workloadctl_core import WorkloadConfig, WorkloadManager
 
 # ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -106,7 +103,7 @@ class _WorkloadDir:
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
         (tmp_path / f'{self._name}.toml').write_text(self._toml)
-        self._patcher = patch.object(wctl, 'WORKLOAD_DIR', tmp_path)
+        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
@@ -170,7 +167,7 @@ class TestStatusJson(unittest.TestCase):
                 return _ok()
 
             with patch('subprocess.run', side_effect=fake_run):
-                return _capture_json(lambda: wctl.cmd_status(args, wctl.WorkloadManager()))
+                return _capture_json(lambda: cmd_inspect.cmd_status(args, WorkloadManager()))
 
     def test_active_service_values(self):
         data = self._run(_SHOW_ACTIVE)
@@ -222,7 +219,7 @@ class TestStatusJson(unittest.TestCase):
 class TestListJson(unittest.TestCase):
 
     def _manager(self, user_exists=False, image_id=''):
-        m = wctl.WorkloadManager()
+        m = WorkloadManager()
         m.user_exists = MagicMock(return_value=user_exists)
         m.get_image_id = MagicMock(return_value=image_id)
         return m
@@ -231,21 +228,21 @@ class TestListJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('inactive\n')):
-                data = _capture_json(lambda: wctl.cmd_list(args, self._manager()))
+                data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager()))
         self.assertIsNone(data['workloads'][0]['state'])
 
     def test_enabled_workload_state_is_raw_string(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('inactive\n')):
-                data = _capture_json(lambda: wctl.cmd_list(args, self._manager(user_exists=True)))
+                data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
         self.assertEqual(data['workloads'][0]['state'], 'inactive')
 
     def test_activating_not_remapped(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('activating\n')):
-                data = _capture_json(lambda: wctl.cmd_list(args, self._manager(user_exists=True)))
+                data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
         wl = data['workloads'][0]
         self.assertEqual(wl['state'], 'activating')
         self.assertNotEqual(wl['state'], 'starting')
@@ -254,14 +251,14 @@ class TestListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('failed\n', returncode=3)):
-                data = _capture_json(lambda: wctl.cmd_list(args, self._manager(user_exists=True)))
+                data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
         self.assertEqual(data['workloads'][0]['state'], 'failed')
 
     def test_workload_shape(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('inactive\n')):
-                data = _capture_json(lambda: wctl.cmd_list(args, self._manager()))
+                data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager()))
         self.assertIn('workloads', data)
         wl = data['workloads'][0]
         for key in ('filename', 'name', 'enabled', 'state', 'image', 'image_id', 'ports'):
@@ -273,7 +270,7 @@ class TestListJson(unittest.TestCase):
 class TestInfoJson(unittest.TestCase):
 
     def _manager(self, user_exists=False):
-        m = wctl.WorkloadManager()
+        m = WorkloadManager()
         m.user_exists = MagicMock(return_value=user_exists)
         m.get_image_id = MagicMock(return_value='sha256:abcdef' if user_exists else '')
         return m
@@ -290,7 +287,7 @@ class TestInfoJson(unittest.TestCase):
                 return _ok()
 
             with patch('subprocess.run', side_effect=fake_run):
-                return _capture_json(lambda: wctl.cmd_info(args, self._manager(user_exists)))
+                return _capture_json(lambda: cmd_inspect.cmd_info(args, self._manager(user_exists)))
 
     def test_all_top_level_sections_present(self):
         data = self._run()
@@ -333,7 +330,7 @@ class TestPortsJson(unittest.TestCase):
     def test_bridge_entry_is_dict_with_host_and_container(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: wctl.cmd_ports(args, wctl.WorkloadManager()))
+            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         entry = data['accessible_at'][0]
         self.assertIsInstance(entry, dict)
         self.assertEqual(entry['host'], 'localhost:8080')
@@ -342,7 +339,7 @@ class TestPortsJson(unittest.TestCase):
     def test_bridge_entry_not_a_string(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: wctl.cmd_ports(args, wctl.WorkloadManager()))
+            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         for entry in data['accessible_at']:
             self.assertNotIsInstance(entry, str)
 
@@ -350,7 +347,7 @@ class TestPortsJson(unittest.TestCase):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
             with patch('subprocess.run', return_value=_ok(stdout='192.168.1.1\n')):
-                data = _capture_json(lambda: wctl.cmd_ports(args, wctl.WorkloadManager()))
+                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         for entry in data['accessible_at']:
             self.assertIn('container', entry)
             self.assertIsNone(entry['container'])
@@ -358,14 +355,14 @@ class TestPortsJson(unittest.TestCase):
     def test_no_ports_gives_empty_accessible_at(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: wctl.cmd_ports(args, wctl.WorkloadManager()))
+            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         self.assertEqual(data['accessible_at'], [])
 
     def test_host_network_includes_ip_variants(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
             with patch('subprocess.run', return_value=_ok(stdout='10.0.0.1 192.168.1.1\n')):
-                data = _capture_json(lambda: wctl.cmd_ports(args, wctl.WorkloadManager()))
+                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         hosts = [e['host'] for e in data['accessible_at']]
         self.assertIn('localhost:8080', hosts)
         self.assertIn('10.0.0.1:8080', hosts)
@@ -377,7 +374,7 @@ class TestPortsJson(unittest.TestCase):
 class TestImagesListJson(unittest.TestCase):
 
     def _manager_with_image(self, info):
-        m = wctl.WorkloadManager()
+        m = WorkloadManager()
         m.user_exists = MagicMock(return_value=True)
         mock_podman = MagicMock()
         mock_podman.image_info.return_value = info
@@ -388,7 +385,7 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 129499136, 'Created': None})
-            data = _capture_json(lambda: wctl.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['size_bytes'], int)
         self.assertEqual(data['images'][0]['size_bytes'], 129499136)
 
@@ -396,21 +393,21 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': '2024-11-15T10:30:00Z'})
-            data = _capture_json(lambda: wctl.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['created'], int)
 
     def test_created_null_when_none(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
-            data = _capture_json(lambda: wctl.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsNone(data['images'][0]['created'])
 
     def test_no_human_strings_in_size(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 99000000, 'Created': None})
-            data = _capture_json(lambda: wctl.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         size = data['images'][0]['size_bytes']
         self.assertNotIn('MB', str(size))
         self.assertNotIn('GB', str(size))
@@ -419,7 +416,7 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
-            data = _capture_json(lambda: wctl.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         img = data['images'][0]
         for key in ('workload', 'image', 'size_bytes', 'created'):
             self.assertIn(key, img, f'missing key: {key}')
@@ -431,10 +428,10 @@ class TestValidateSingleSeverity(unittest.TestCase):
 
     def _run_validate(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            config = wctl.WorkloadConfig('test-wl')
-            manager = wctl.WorkloadManager()
+            config = WorkloadConfig('test-wl')
+            manager = WorkloadManager()
             manager.get_image_id = MagicMock(return_value='')
-            return wctl.validate_single(config, manager)
+            return cmd_admin.validate_single(config, manager)
 
     def test_every_check_has_severity(self):
         result = self._run_validate()
@@ -476,7 +473,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(json=True, follow=True, workload='test-wl')
             with self.assertRaises(SystemExit):
-                wctl.cmd_stats(args, wctl.WorkloadManager())
+                cmd_inspect.cmd_stats(args, WorkloadManager())
 
     def _make_stats_manager(self, podman_stdout):
         """Return a WorkloadManager mock whose podman().run() returns podman_stdout."""
@@ -491,7 +488,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: wctl.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
 
         self.assertIn('stats', data)
         self.assertEqual(len(data['stats']), 1)
@@ -504,7 +501,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: wctl.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
 
         row = data['stats'][0]
         self.assertIsInstance(row['mem_usage'], int)
@@ -520,7 +517,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: wctl.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
 
         row = data['stats'][0]
         for key in ('workload', 'username', 'container', 'cpu_percent', 'mem_usage',
@@ -532,7 +529,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager('')
-            data = _capture_json(lambda: wctl.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
         self.assertEqual(data['stats'], [])
 
 
@@ -541,7 +538,7 @@ class TestStatsJson(unittest.TestCase):
 class TestSecretListJson(unittest.TestCase):
 
     def _path_redirect(self, real_dir):
-        real_Path = wctl.Path
+        real_Path = cmd_secret.Path
 
         def fake_path(*args, **kwargs):
             result = real_Path(*args, **kwargs)
@@ -554,8 +551,8 @@ class TestSecretListJson(unittest.TestCase):
     def test_empty_dir_returns_empty_credentials(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             args = _args(subcommand='list', json=True)
-            with patch.object(wctl, 'Path', self._path_redirect(tmpdir)):
-                data = _capture_json(lambda: wctl.cmd_secret(args, wctl.WorkloadManager()))
+            with patch.object(cmd_secret, 'Path', self._path_redirect(tmpdir)):
+                data = _capture_json(lambda: cmd_secret.cmd_secret(args, WorkloadManager()))
         self.assertEqual(data, {'credentials': []})
 
     def test_credentials_shape(self):
@@ -563,8 +560,8 @@ class TestSecretListJson(unittest.TestCase):
             (Path(tmpdir) / 'api-key').write_bytes(b'x' * 42)
             (Path(tmpdir) / 'db-pass').write_bytes(b'y' * 20)
             args = _args(subcommand='list', json=True)
-            with patch.object(wctl, 'Path', self._path_redirect(tmpdir)):
-                data = _capture_json(lambda: wctl.cmd_secret(args, wctl.WorkloadManager()))
+            with patch.object(cmd_secret, 'Path', self._path_redirect(tmpdir)):
+                data = _capture_json(lambda: cmd_secret.cmd_secret(args, WorkloadManager()))
 
         self.assertEqual(len(data['credentials']), 2)
         names = {c['name'] for c in data['credentials']}
@@ -575,7 +572,7 @@ class TestSecretListJson(unittest.TestCase):
             self.assertGreater(cred['size'], 0)
 
     def test_nonexistent_cred_dir_gives_empty(self):
-        real_Path = wctl.Path
+        real_Path = cmd_secret.Path
 
         def redirect_missing(*args, **kwargs):
             result = real_Path(*args, **kwargs)
@@ -584,16 +581,16 @@ class TestSecretListJson(unittest.TestCase):
             return result
 
         args = _args(subcommand='list', json=True)
-        with patch.object(wctl, 'Path', MagicMock(side_effect=redirect_missing)):
-            data = _capture_json(lambda: wctl.cmd_secret(args, wctl.WorkloadManager()))
+        with patch.object(cmd_secret, 'Path', MagicMock(side_effect=redirect_missing)):
+            data = _capture_json(lambda: cmd_secret.cmd_secret(args, WorkloadManager()))
         self.assertEqual(data, {'credentials': []})
 
     def test_credential_sizes_match_file_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             (Path(tmpdir) / 'mykey').write_bytes(b'a' * 100)
             args = _args(subcommand='list', json=True)
-            with patch.object(wctl, 'Path', self._path_redirect(tmpdir)):
-                data = _capture_json(lambda: wctl.cmd_secret(args, wctl.WorkloadManager()))
+            with patch.object(cmd_secret, 'Path', self._path_redirect(tmpdir)):
+                data = _capture_json(lambda: cmd_secret.cmd_secret(args, WorkloadManager()))
         self.assertEqual(data['credentials'][0]['size'], 100)
 
 
@@ -623,11 +620,11 @@ class TestUidMapJson(unittest.TestCase):
     def test_shape(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            m = wctl.WorkloadManager()
+            m = WorkloadManager()
             m.user_exists = MagicMock(return_value=True)
             with patch('pwd.getpwnam', return_value=self._mock_pw()):
                 with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: wctl.cmd_uid_map(args, m))
+                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
 
         for key in ('workload', 'username', 'host_uid', 'host_gid',
                     'subuid', 'subgid', 'userns_mode', 'mapped_uid', 'mapped_gid'):
@@ -636,11 +633,11 @@ class TestUidMapJson(unittest.TestCase):
     def test_default_keep_id_mapped_uid_equals_host_uid(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            m = wctl.WorkloadManager()
+            m = WorkloadManager()
             m.user_exists = MagicMock(return_value=True)
             with patch('pwd.getpwnam', return_value=self._mock_pw(uid=20001, gid=20001)):
                 with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: wctl.cmd_uid_map(args, m))
+                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
 
         self.assertEqual(data['host_uid'], 20001)
         self.assertEqual(data['mapped_uid'], 20001)
@@ -660,11 +657,11 @@ userns = "keep-id:uid=999,gid=888"
 """
         with _WorkloadDir(toml, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            m = wctl.WorkloadManager()
+            m = WorkloadManager()
             m.user_exists = MagicMock(return_value=True)
             with patch('pwd.getpwnam', return_value=self._mock_pw()):
                 with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: wctl.cmd_uid_map(args, m))
+                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
 
         self.assertEqual(data['mapped_uid'], 999)
         self.assertEqual(data['mapped_gid'], 888)
@@ -681,11 +678,11 @@ userns = "keep-id:uid=999,gid=888"
 
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            m = wctl.WorkloadManager()
+            m = WorkloadManager()
             m.user_exists = MagicMock(return_value=True)
             with patch('pwd.getpwnam', return_value=self._mock_pw()):
                 with patch('builtins.open', side_effect=no_subuid):
-                    data = _capture_json(lambda: wctl.cmd_uid_map(args, m))
+                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
 
         self.assertIsNone(data['subuid']['start'])
         self.assertIsNone(data['subuid']['count'])
@@ -698,7 +695,7 @@ class TestVerifyJson(unittest.TestCase):
     def _run_no_user(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
-            m = wctl.WorkloadManager()
+            m = WorkloadManager()
             m.user_exists = MagicMock(return_value=False)
             m.get_image_id = MagicMock(return_value='')
 
@@ -709,9 +706,9 @@ class TestVerifyJson(unittest.TestCase):
                     return _ok(stdout='inactive\n', returncode=3)
                 return _ok()
 
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_admin, 'require_root'):
                 with patch('subprocess.run', side_effect=fake_run):
-                    return _capture_json_exitok(lambda: wctl.cmd_verify(args, m))
+                    return _capture_json_exitok(lambda: cmd_admin.cmd_verify(args, m))
 
     def test_top_level_shape(self):
         data = self._run_no_user()
@@ -769,10 +766,10 @@ class TestCleanupJson(unittest.TestCase):
     def test_schema_keys_always_present(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'orphan_modules',
                     'removed_users', 'removed_dirs', 'removed_modules'):
             self.assertIn(key, data, f'missing key: {key}')
@@ -780,38 +777,38 @@ class TestCleanupJson(unittest.TestCase):
     def test_dry_run_flag_is_true(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertTrue(data['dry_run'])
 
     def test_configured_user_not_reported_as_orphan(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall', return_value=[self._configured_pw()]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_users'], [])
 
     def test_orphan_user_reported(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall',
                            return_value=[self._configured_pw(), self._orphan_pw()]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertIn('_wl-orphan', data['orphan_users'])
 
     def test_dry_run_removed_lists_are_empty(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall', return_value=[self._orphan_pw()]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['removed_users'], [])
         self.assertEqual(data['removed_dirs'], [])
 
@@ -820,15 +817,15 @@ class TestCleanupJson(unittest.TestCase):
         # user; cleanup must not flag it (and --apply must not delete it).
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             base = Path(tmp) / 'workloads'
-            backups = base / wctl.BACKUP_DIR.name
+            backups = base / cmd_backup.BACKUP_DIR.name
             backups.mkdir(parents=True)
             (backups / 'test-wl-20260610.tar.zst').write_text('x')
             (base / 'orphan').mkdir()
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'):
+            with patch.object(cmd_lifecycle, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(wctl, 'WORKLOADS_BASE', base):
-                        data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
 
     @staticmethod
@@ -846,13 +843,13 @@ class TestCleanupJson(unittest.TestCase):
         # ignored (no wl_ prefix).
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'), \
+            with patch.object(cmd_lifecycle, 'require_root'), \
                  patch('pwd.getpwall', return_value=[]), \
                  patch('shutil.which', return_value='/usr/sbin/semodule'), \
                  patch('subprocess.run',
                        side_effect=self._semodule_l(['wl_orphan', 'container', 'seatd_container'])), \
-                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertIn('wl_orphan', data['orphan_modules'])
         self.assertNotIn('container', data['orphan_modules'])
         self.assertNotIn('seatd_container', data['orphan_modules'])
@@ -861,13 +858,13 @@ class TestCleanupJson(unittest.TestCase):
         toml = MINIMAL_TOML + '\n[security]\nselinux_policy = true\n'
         with _WorkloadDir(toml, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(wctl, 'require_root'), \
+            with patch.object(cmd_lifecycle, 'require_root'), \
                  patch('pwd.getpwall', return_value=[]), \
                  patch('shutil.which', return_value='/usr/sbin/semodule'), \
                  patch('subprocess.run',
                        side_effect=self._semodule_l(['wl_test_wl', 'container'])), \
-                 patch.object(wctl, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                data = _capture_json(lambda: wctl.cmd_cleanup(args, wctl.WorkloadManager()))
+                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_modules'], [])
 
 
@@ -882,7 +879,7 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # config dict + name are loaded in __init__, so the object is usable
         # after the temp dir is torn down (selinux_bundle does no file I/O).
         with _WorkloadDir(MINIMAL_TOML + security_block, 'test-wl'):
-            return wctl.WorkloadConfig('test-wl')
+            return WorkloadConfig('test-wl')
 
     def test_true_keys_off_workload_name(self):
         cfg = self._config('\n[security]\nselinux_policy = true\n')
@@ -909,9 +906,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # isn't a plain workload-style name must be rejected before lookup.
         cfg = self._config('\n[security]\nselinux_policy = "../etc/evil"\n')
         self.assertEqual(cfg.selinux_bundle, '../etc/evil')
-        with patch.object(wctl, '_selinux_available', return_value=True):
+        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with self.assertRaises(SystemExit):
-                wctl._apply_selinux_policy(cfg, 'enable')
+                cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
 
     def test_underscore_bundle_suggests_hyphenated_form(self):
         # Footgun: users copy the SELinux *type* name (underscores) into
@@ -919,10 +916,10 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # invalid-bundle error should suggest the hyphenated form.
         cfg = self._config('\n[security]\nselinux_policy = "vncdesktop_wayfire"\n')
         err = io.StringIO()
-        with patch.object(wctl, '_selinux_available', return_value=True):
+        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with redirect_stderr(err):
                 with self.assertRaises(SystemExit):
-                    wctl._apply_selinux_policy(cfg, 'enable')
+                    cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
         self.assertIn('vncdesktop-wayfire', err.getvalue())
 
     def test_missing_bundle_lists_available(self):
@@ -930,12 +927,12 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # ship a CIL, plus a close-match suggestion.
         cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-wayfir"\n')
         err = io.StringIO()
-        with patch.object(wctl, '_selinux_available', return_value=True), \
-                patch.object(wctl, '_available_bundles',
+        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True), \
+                patch.object(cmd_lifecycle, '_available_bundles',
                              return_value=['vncdesktop-sway', 'vncdesktop-wayfire']):
             with redirect_stderr(err):
                 with self.assertRaises(SystemExit):
-                    wctl._apply_selinux_policy(cfg, 'enable')
+                    cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
         out = err.getvalue()
         self.assertIn('available bundles', out)
         self.assertIn('vncdesktop-wayfire', out)
@@ -950,10 +947,10 @@ class TestBackupJson(unittest.TestCase):
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
                              output=out_tmp, no_stop=False)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', return_value=98304):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=98304):
                         data = _capture_json(
-                            lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         self.assertIn('backups', data)
         self.assertEqual(len(data['backups']), 1)
@@ -968,10 +965,10 @@ class TestBackupJson(unittest.TestCase):
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
                              output=out_tmp, no_stop=False)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', return_value=0):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=0):
                         data = _capture_json(
-                            lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         for key in ('workload', 'archive', 'size_bytes'):
             self.assertIn(key, data['backups'][0], f'missing key: {key}')
@@ -981,10 +978,10 @@ class TestBackupJson(unittest.TestCase):
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, no_stop=False)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', return_value=4096):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=4096):
                         data = _capture_json(
-                            lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         self.assertIsInstance(data['backups'], list)
         self.assertGreater(len(data['backups']), 0)
@@ -994,10 +991,10 @@ class TestBackupJson(unittest.TestCase):
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
                              output=out_tmp, no_stop=False)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', return_value=1024):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=1024):
                         data = _capture_json(
-                            lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         archive = data['backups'][0]['archive']
         self.assertTrue(archive.startswith(out_tmp))
@@ -1010,11 +1007,11 @@ class TestBackupJson(unittest.TestCase):
                 args = _args(workload='test-vm', json=False, all=False,
                              output=out_tmp, no_stop=True)
                 mock_backup = MagicMock(return_value=0)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', mock_backup):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', mock_backup):
                         with patch('sys.stderr', io.StringIO()):
                             with self.assertRaises(SystemExit) as cm:
-                                wctl.cmd_backup(args, wctl.WorkloadManager())
+                                cmd_backup.cmd_backup(args, WorkloadManager())
         self.assertEqual(cm.exception.code, 1)
         mock_backup.assert_not_called()
 
@@ -1026,11 +1023,11 @@ class TestBackupJson(unittest.TestCase):
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, no_stop=True)
                 mock_backup = MagicMock(return_value=4096)
-                with patch.object(wctl, 'require_root'):
-                    with patch.object(wctl, '_backup_one', mock_backup):
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', mock_backup):
                         with patch('sys.stderr', io.StringIO()):
                             data = _capture_json(
-                                lambda: wctl.cmd_backup(args, wctl.WorkloadManager()))
+                                lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         backed_up = {b['workload'] for b in data['backups']}
         self.assertIn('test-wl', backed_up)
@@ -1057,7 +1054,7 @@ class TestBackupImageStoreExclude(unittest.TestCase):
             src = self._make_home(tmp)
             dst = Path(tmp) / "staging"
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=wctl._ignore_image_store(src))
+                            ignore=cmd_backup._ignore_image_store(src))
             self.assertFalse((dst / ".local" / "share" / "containers").exists(),
                              ".local/share/containers should be excluded")
             self.assertTrue((dst / "data" / "db" / "mydb.sqlite").exists(),
@@ -1071,7 +1068,7 @@ class TestBackupImageStoreExclude(unittest.TestCase):
             (src / "config.txt").write_text("cfg")
             dst = Path(tmp) / "staging"
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=wctl._ignore_image_store(src))
+                            ignore=cmd_backup._ignore_image_store(src))
             self.assertTrue((dst / "config.txt").exists())
             # No error, just a no-op exclusion
             self.assertFalse((dst / ".local" / "share" / "containers").exists())

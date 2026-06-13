@@ -62,18 +62,9 @@ WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
 
 
 def _get_workload_dir() -> "Path":
-    """Return the current WORKLOAD_DIR.
-
-    When bin/workloadctl is loaded as the 'workloadctl' or 'workload_ctl'
-    module (as test harnesses do), defer to that module's WORKLOAD_DIR so
-    that patch.object(wctl, 'WORKLOAD_DIR', tmp) affects WorkloadConfig and
-    WorkloadManager at call time.
-    """
-    import sys as _sys
-    for _mod_name in ('workloadctl', 'workload_ctl'):
-        _mod = _sys.modules.get(_mod_name)
-        if _mod is not None and hasattr(_mod, 'WORKLOAD_DIR'):
-            return _mod.WORKLOAD_DIR
+    """Return the current WORKLOAD_DIR (indirection so patch.object on this
+    module's WORKLOAD_DIR is honored by WorkloadConfig/WorkloadManager at call
+    time)."""
     return WORKLOAD_DIR
 
 

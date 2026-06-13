@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Tests for substrate dispatch, parity fixes, and workloadctl drift."""
 
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -15,19 +13,10 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
-# ── module load ───────────────────────────────────────────────────────────────
+# ── imports from lib ──────────────────────────────────────────────────────────
 
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
-
-_SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'bin', 'workloadctl')
-_loader = importlib.machinery.SourceFileLoader('workloadctl', _SCRIPT)
-_spec = importlib.util.spec_from_loader('workloadctl', _loader, origin=_SCRIPT)
-wctl = importlib.util.module_from_spec(_spec)
-wctl.__file__ = _SCRIPT
-_spec.loader.exec_module(wctl)
-
-# ── imports from lib ──────────────────────────────────────────────────────────
 
 import workloadctl_core
 from substrate import (
@@ -37,6 +26,7 @@ from substrate import (
     get_substrate,
     _ignore_vm_rebuild,
 )
+import cmd_backup
 import cmd_drift
 import cmd_inspect
 
@@ -85,7 +75,7 @@ class _WorkloadDir:
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
         (tmp_path / f'{self._name}.toml').write_text(self._toml)
-        self._patcher = patch.object(wctl, 'WORKLOAD_DIR', tmp_path)
+        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
@@ -102,7 +92,7 @@ def _make_vm_config():
         p = Path(d)
         (p / 'test-vm.toml').write_text(VM_TOML)
         with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
-            return wctl.WorkloadConfig('test-vm')
+            return workloadctl_core.WorkloadConfig('test-vm')
 
 
 class TestVMLiveness(unittest.TestCase):
@@ -163,7 +153,7 @@ class TestVMStats(unittest.TestCase):
             with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
-                    wctl.cmd_stats(args, manager)
+                    cmd_inspect.cmd_stats(args, manager)
             self.assertEqual(cm.exception.code, 0)
             output = buf_out.getvalue() + buf_err.getvalue()
             self.assertIn('not applicable', output.lower())
@@ -209,10 +199,10 @@ class TestVMBackupNoStop(unittest.TestCase):
             manager = MagicMock()
             buf_err = io.StringIO()
             with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
-                 patch.object(wctl, 'require_root'), \
+                 patch.object(cmd_backup, 'require_root'), \
                  patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
-                    wctl.cmd_backup(args, manager)
+                    cmd_backup.cmd_backup(args, manager)
             self.assertNotEqual(cm.exception.code, 0)
             # Should mention the VM-specific reason, not a generic error
             self.assertIn('vm', buf_err.getvalue().lower())
@@ -528,7 +518,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
                  patch('subprocess.run', side_effect=fake_run), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
-                    wctl.cmd_health(args, manager)
+                    cmd_inspect.cmd_health(args, manager)
             output = buf_out.getvalue()
             data = json.loads(output) if output.strip() else {}
             return cm.exception.code, data

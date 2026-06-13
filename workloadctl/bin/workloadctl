@@ -9,87 +9,25 @@ running as system services with rootless podman.
 import argparse
 import sys
 
-import types as _types
-import cmd_lifecycle as _cmd_lifecycle
-import cmd_inspect as _cmd_inspect
-import cmd_interact as _cmd_interact
-import cmd_update as _cmd_update
-import cmd_backup as _cmd_backup
-import cmd_secret as _cmd_secret
-import cmd_admin as _cmd_admin
-import cmd_drift as _cmd_drift
-import workloadctl_core as _workloadctl_core
-
-from workloadctl_core import *  # noqa: F401,F403 — re-export for tests
-
-# Backward compat alias (also defined in workloadctl_core but re-affirm here)
-from workload_lib import WORKLOAD_CONFIG_DIR  # noqa: F401
-WORKLOAD_DIR = WORKLOAD_CONFIG_DIR  # noqa: F811
-
-# ---------------------------------------------------------------------------
-# Rebind all cmd-module functions to use THIS module's globals so that
-# patch.object(wctl, 'require_root') / patch.object(wctl, 'WORKLOAD_DIR') etc.
-# affect the functions at call time (needed by test_json_output.py).
-# ---------------------------------------------------------------------------
-
-def _rebind(fn):
-    """Return a copy of fn whose __globals__ is this module's namespace."""
-    return _types.FunctionType(
-        fn.__code__, globals(), fn.__name__, fn.__defaults__, fn.__closure__
-    )
-
-
-def _import_rebound(mod):
-    """Import all public + private names from *mod*, rebinding functions defined there.
-
-    Only rebinds functions whose __module__ matches the module being imported.
-    Functions that were imported INTO the module from other libraries (e.g.
-    vm_mac_address from workload_lib) are NOT rebound — they keep their
-    original __globals__ so their stdlib/local-lib imports stay intact.
-    """
-    g = globals()
-    mod_name = getattr(mod, '__name__', None)
-    for name, obj in vars(mod).items():
-        if name.startswith('__'):
-            continue
-        if (isinstance(obj, _types.FunctionType)
-                and getattr(obj, '__module__', None) == mod_name):
-            g[name] = _rebind(obj)
-        else:
-            g.setdefault(name, obj)  # constants + imported names: keep first-seen
-
-
-_import_rebound(_cmd_lifecycle)
-_import_rebound(_cmd_inspect)
-_import_rebound(_cmd_interact)
-_import_rebound(_cmd_update)
-_import_rebound(_cmd_backup)
-_import_rebound(_cmd_secret)
-_import_rebound(_cmd_admin)
-_import_rebound(_cmd_drift)
-
-# Re-assert WORKLOAD_DIR after _import_rebound (cmd modules may have set it)
-WORKLOAD_DIR = WORKLOAD_CONFIG_DIR  # noqa: F811
-
-# Register this module in sys.modules under its __name__ so that
-# workloadctl_core._get_workload_dir() can find it and return the patched
-# WORKLOAD_DIR when tests call patch.object(wctl, 'WORKLOAD_DIR', tmp).
-# When loaded via importlib.machinery.SourceFileLoader + exec_module (as test
-# harnesses do), Python does NOT auto-register the module in sys.modules — we
-# do it here by locating the module object that owns our globals() dict.
-import sys as _sys
-
-def _self_register():
-    import gc as _gc
-    _g = globals()
-    for _referrer in _gc.get_referrers(_g):
-        if (isinstance(_referrer, _types.ModuleType)
-                and getattr(_referrer, '__dict__', None) is _g):
-            _sys.modules.setdefault(__name__, _referrer)
-            break
-
-_self_register()
-del _self_register
+from cmd_admin import cmd_create, cmd_edit, cmd_uid_map, cmd_validate, cmd_verify
+from cmd_backup import cmd_backup, cmd_restore
+from cmd_drift import cmd_drift
+from cmd_inspect import (
+    cmd_health, cmd_images, cmd_info, cmd_list, cmd_network,
+    cmd_ports, cmd_ps, cmd_stats, cmd_status,
+)
+from cmd_interact import cmd_attach, cmd_cp, cmd_exec, cmd_logs, cmd_shell
+from cmd_lifecycle import (
+    cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
+    cmd_recreate, cmd_start, cmd_stop,
+)
+from cmd_secret import cmd_secret
+from cmd_update import cmd_rollback, cmd_update
+from workloadctl_core import (
+    WorkloadManager,
+    WorkloadMasked,
+    WorkloadUserNotFound,
+)
 
 
 def main():
