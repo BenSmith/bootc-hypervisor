@@ -74,7 +74,7 @@ def _install_toml(target: Target, toml_name: str) -> str:
 
 
 def _enable_workload(target: Target, name: str, timeout: int = 120,
-                     expect_container: bool = True):
+                     expect_container: bool = True, retries: int = 1):
     """Enable a workload and wait until it is genuinely ready.
 
     For container workloads, unit-active is NOT sufficient: with Type=exec the
@@ -82,11 +82,35 @@ def _enable_workload(target: Target, name: str, timeout: int = 120,
     container is actually up and listable. So after the unit is active we also
     wait for the container to appear running. VM workloads have no container,
     so callers pass expect_container=False for them.
+
+    A *first* enable can lose a rootless cold-start race that a retry clears:
+    the workload's `/run/user/<uid>` (XDG_RUNTIME_DIR) or user session bus may
+    not be up yet when an auxiliary unit (e.g. the bridge-mode `-net` service,
+    or aardvark-dns) runs, so the workload never reaches ready. This is genuine
+    workloadctl first-enable flakiness, not something this CLI-surface suite is
+    meant to assert on — so reset cleanly and retry once before giving up.
     """
-    target.wl(f"enable {name}", check=True, timeout=timeout)
-    _wait_active(target, name, timeout=timeout)
-    if expect_container:
-        _wait_container_running(target, name, timeout=timeout)
+    attempt = 0
+    while True:
+        target.wl(f"enable {name}", check=True, timeout=timeout)
+        try:
+            _wait_active(target, name, timeout=timeout)
+            if expect_container:
+                _wait_container_running(target, name, timeout=timeout)
+            return
+        except TimeoutError:
+            if attempt >= retries:
+                raise
+            attempt += 1
+            # Tear down to a clean slate (disable --purge keeps the TOML in
+            # /etc/workloads.d, so the retry's enable still finds it) and clear
+            # any failed/start-limit state before re-enabling.
+            target.wl(f"disable --purge {name}", check=False, timeout=60)
+            target.run(
+                ["systemctl", "reset-failed", f"workload-{name}.service"],
+                sudo=True, check=False,
+            )
+            time.sleep(5)
 
 
 def _wait_active(target: Target, name: str, timeout: int = 120):
@@ -138,9 +162,22 @@ def _wait_container_running(target: Target, name: str, timeout: int = 120):
 
 
 def _purge_workload(target: Target, name: str):
-    """Disable --purge a workload. Best-effort: ignores all errors."""
+    """Disable --purge a workload. Best-effort: ignores all errors.
+
+    Also clears any lingering systemd failed/start-limit state. A mutating test
+    (e.g. backup, which does an internal stop→start) can leave the unit mid-
+    restart when `disable --purge` arrives; that races `Restart=on-failure` and
+    trips StartLimitBurst, leaving the unit stuck in "start request repeated too
+    quickly". Without a reset-failed that lockout survives the purge and poisons
+    the *next* fresh fixture's `enable` (it never reaches active). reset-failed
+    is idempotent and harmless when the unit is already clean.
+    """
     target.wl(f"disable --purge {name}", check=False, timeout=60)
     time.sleep(1)
+    target.run(
+        ["systemctl", "reset-failed", f"workload-{name}.service"],
+        sudo=True, check=False,
+    )
     target.run(
         ["rm", "-f", f"/etc/workloads.d/{name}.toml"],
         sudo=True, check=False,
