@@ -47,188 +47,44 @@ def main():
     cp_parser.add_argument("destination", help="Destination (workload:path or path)")
 
     create_parser = subparsers.add_parser("create", help="Create a new workload configuration")
-    create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens, max 27 chars)")
-    create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
+    create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
+    create_parser.add_argument("--device", metavar="DEVICE", nargs="+", help="Generic device passthrough (e.g., /dev/ttyUSB0 /dev/video0 /dev/sdb)")
+    create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
     create_parser.add_argument("--gpu", metavar="SPEC", help="GPU access (convenience flag): 'amd', 'nvidia', 'intel', 'none', 'auto', or 'nvidia:<index|UUID>' to pin one GPU (see `nvidia-ctk cdi list`)")
     create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input dialout audio kvm)")
-    create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
-    create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")
-    create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
-    create_parser.add_argument("--device", metavar="DEVICE", nargs="+", help="Generic device passthrough (e.g., /dev/ttyUSB0 /dev/video0 /dev/sdb)")
+    create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
     create_parser.add_argument("--input", action="store_true", help="Enable input devices (/dev/input + /dev/uinput) - convenience flag")
-    create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
-    create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
+    create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")
+    create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
+    create_parser.add_argument("--shm-size", metavar="SIZE", help="Shared memory size (e.g., 256m, 2g; default: 64m)")
     create_parser.add_argument("--systemd", metavar="MODE", choices=["always", "true", "false"],
                                help="Systemd container mode: 'always', 'true', or 'false' (skips --init, adds KillSignal)")
-    create_parser.add_argument("--shm-size", metavar="SIZE", help="Shared memory size (e.g., 256m, 2g; default: 64m)")
-    create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
+    create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
+    create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
+    create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens, max 27 chars)")
 
     # Resource limit flags
     create_parser.add_argument("--cpu-quota", metavar="PERCENT", help="CPU quota (e.g., 50%%, 100%%, 200%%)")
     create_parser.add_argument("--cpu-weight", type=int, metavar="WEIGHT", help="CPU scheduling weight (1-10000, default 100)")
-    create_parser.add_argument("--memory-max", metavar="SIZE", help="Maximum memory (e.g., 512M, 2G, 4G)")
-    create_parser.add_argument("--memory-high", metavar="SIZE", help="Memory soft limit for throttling (e.g., 384M, 1.5G)")
-    create_parser.add_argument("--memory-swap-max", metavar="SIZE", help="Maximum swap usage (0 to disable, or size like 512M)")
     create_parser.add_argument("--io-weight", type=int, metavar="WEIGHT", help="I/O scheduling weight (1-10000, default 100)")
+    create_parser.add_argument("--memory-high", metavar="SIZE", help="Memory soft limit for throttling (e.g., 384M, 1.5G)")
+    create_parser.add_argument("--memory-max", metavar="SIZE", help="Maximum memory (e.g., 512M, 2G, 4G)")
+    create_parser.add_argument("--memory-swap-max", metavar="SIZE", help="Maximum swap usage (0 to disable, or size like 512M)")
     create_parser.add_argument("--tasks-max", type=int, metavar="NUM", help="Maximum number of tasks/threads")
 
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
-    backup_parser.add_argument("workload", nargs="?", help="Workload name")
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
-    backup_parser.add_argument("--output", "-o", metavar="PATH",
-                               help="Output path (file or directory)")
+    backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     backup_parser.add_argument("--no-stop", action="store_true",
                                help="Don't stop the service (live backup, may be inconsistent)")
-    backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    backup_parser.add_argument("--output", "-o", metavar="PATH",
+                               help="Output path (file or directory)")
+    backup_parser.add_argument("workload", nargs="?", help="Workload name")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users, directories, and SELinux modules")
     cleanup_parser.add_argument("--apply", action="store_true",
                                 help="Actually remove orphaned users/dirs (default is dry run)")
     cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)")
-    disable_parser.add_argument("workload", help="Workload name")
-    disable_parser.add_argument("--purge", action="store_true",
-                               help="Also remove user, home, and subuid/subgid")
-
-    edit_parser = subparsers.add_parser("edit", help="Edit config and apply changes")
-    edit_parser.add_argument("workload", help="Workload name")
-
-    enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
-    enable_parser.add_argument("workload", help="Workload name")
-
-    exec_parser = subparsers.add_parser("exec", help="Execute command in workload container or VM (via SSH)")
-    exec_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
-                             help="Workload, or workload/container for multi-container workloads")
-    # REMAINDER captures the command verbatim, including leading-dash flags
-    # (e.g. `workloadctl exec web wget -qO- ...`) — nargs="+" would reject them.
-    exec_parser.add_argument("exec_args", metavar="COMMAND", nargs=argparse.REMAINDER,
-                             help="Command to execute (a leading -- is optional)")
-
-    health_parser = subparsers.add_parser("health", help="Check workload health")
-    health_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
-                               help="Workload, or workload/container for multi-container workloads")
-    health_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    images_parser = subparsers.add_parser("images", help="Show images or prune unused")
-    images_parser.add_argument("subcommand", nargs="?", default="list",
-                              choices=["list", "prune"], help="Subcommand (list or prune)")
-    images_parser.add_argument("--json", action="store_true", help="Output in JSON format (for list)")
-
-    info_parser = subparsers.add_parser("info", help="Show detailed workload information")
-    info_parser.add_argument("workload", help="Workload name")
-    info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    list_parser = subparsers.add_parser("list", help="List all available workloads")
-    list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    logs_parser = subparsers.add_parser("logs", help="View workload logs (journalctl wrapper)")
-    logs_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
-                             help="Workload, or workload/container for multi-container workloads")
-    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
-    logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines (default: 50)")
-    logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
-    logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
-
-    network_parser = subparsers.add_parser("network", help="Manage podman networks")
-    network_parser.add_argument("subcommand", choices=["create"], help="Subcommand (create)")
-    network_parser.add_argument("network_name", help="Network name")
-    network_parser.add_argument("workload", help="Workload to create network for")
-
-    ports_parser = subparsers.add_parser("ports", help="Show port information")
-    ports_parser.add_argument("workload", help="Workload name")
-    ports_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    ps_parser = subparsers.add_parser("ps", help="Show all running workload containers")
-    ps_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
-    reboot_parser.add_argument("workload", help="Workload name")
-
-    recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
-    recreate_parser.add_argument("workload", help="Workload name")
-
-    restore_parser = subparsers.add_parser("restore", help="Restore a workload from backup")
-    restore_parser.add_argument("archive", help="Path to backup archive (.tar.zst)")
-    restore_parser.add_argument("--force", action="store_true",
-                                help="Overwrite existing config, credentials, and home dir")
-    restore_parser.add_argument("--enable", action="store_true",
-                                help="Enable the workload after restore")
-
-    secret_parser = subparsers.add_parser("secret", help="Manage secrets (systemd credentials)")
-    secret_subparsers = secret_parser.add_subparsers(dest="subcommand", required=True, help="Secret operation")
-
-    secret_create = secret_subparsers.add_parser("create", help="Create a new encrypted credential")
-    secret_create.add_argument("name", help="Credential name")
-    secret_create.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
-    secret_create.add_argument("--file", help="Read secret from file instead of stdin")
-    secret_create.add_argument("--force", action="store_true", help="Overwrite if exists")
-
-    secret_list = secret_subparsers.add_parser("list", help="List all encrypted credentials")
-    secret_list.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    secret_delete = secret_subparsers.add_parser("delete", help="Delete an encrypted credential")
-    secret_delete.add_argument("name", help="Credential name")
-    secret_delete.add_argument("--force", action="store_true", help="Skip confirmation")
-
-    secret_show = secret_subparsers.add_parser("show", help="Decrypt and show credential value")
-    secret_show.add_argument("name", help="Credential name")
-
-    secret_rotate = secret_subparsers.add_parser("rotate", help="Rotate a credential and restart affected workloads")
-    secret_rotate.add_argument("name", help="Credential name")
-    secret_rotate.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
-
-    secret_export = secret_subparsers.add_parser("export", help="Export credential with passphrase encryption (portable)")
-    secret_export.add_argument("name", help="Credential name")
-    secret_export.add_argument("--output", "-o", metavar="FILE", help="Output file (default: NAME.secret)")
-
-    secret_import = secret_subparsers.add_parser("import", help="Import passphrase-encrypted credential and re-encrypt with TPM")
-    secret_import.add_argument("name", help="Credential name")
-    secret_import.add_argument("file", help="Passphrase-encrypted file to import")
-    secret_import.add_argument("--force", action="store_true", help="Overwrite if exists")
-    secret_import.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
-
-    shell_parser = subparsers.add_parser("shell", help="Open interactive shell in container, or SSH into VM workloads (serial console fallback)")
-    shell_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
-                              help="Workload, or workload/container for multi-container workloads")
-    shell_parser.add_argument("--console", action="store_true",
-                              help="VM only: skip SSH and connect directly to the serial console (recovery path)")
-
-    stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
-    stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
-    stats_parser.add_argument("-f", "--follow", action="store_true", help="Follow stats (live updating)")
-    stats_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    status_parser = subparsers.add_parser("status", help="Show workload service status")
-    status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
-    status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    start_parser = subparsers.add_parser("start", help="Start a workload service")
-    start_parser.add_argument("workload", help="Workload name")
-
-    stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
-    stop_parser.add_argument("workload", help="Workload name")
-
-    update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
-    update_parser.add_argument("workload", nargs="?", help="Workload name")
-    update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
-    update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
-
-    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
-    rollback_parser.add_argument("workload", help="Workload name")
-
-    validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")
-    validate_parser.add_argument("workload", nargs="?", help="Workload name")
-    validate_parser.add_argument("--all", action="store_true", help="Validate all workloads")
-    validate_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    verify_parser = subparsers.add_parser("verify", help="Verify workload setup and diagnose issues")
-    verify_parser.add_argument("workload", help="Workload name")
-    verify_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    uid_map_parser = subparsers.add_parser("uid-map", help="Show UID/GID mapping for a workload")
-    uid_map_parser.add_argument("workload", help="Workload name")
-    uid_map_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     drift_parser = subparsers.add_parser(
         "drift",
@@ -242,6 +98,149 @@ def main():
         "--json", action="store_true",
         help="Output diff as JSON",
     )
+
+    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)")
+    disable_parser.add_argument("--purge", action="store_true",
+                               help="Also remove user, home, and subuid/subgid")
+    disable_parser.add_argument("workload", help="Workload name")
+
+    edit_parser = subparsers.add_parser("edit", help="Edit config and apply changes")
+    edit_parser.add_argument("workload", help="Workload name")
+
+    enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
+    enable_parser.add_argument("workload", help="Workload name")
+
+    exec_parser = subparsers.add_parser("exec", help="Execute command in workload container or VM (via SSH)")
+    # REMAINDER captures the command verbatim, including leading-dash flags
+    # (e.g. `workloadctl exec web wget -qO- ...`) — nargs="+" would reject them.
+    exec_parser.add_argument("exec_args", metavar="COMMAND", nargs=argparse.REMAINDER,
+                             help="Command to execute (a leading -- is optional)")
+    exec_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
+                             help="Workload, or workload/container for multi-container workloads")
+
+    health_parser = subparsers.add_parser("health", help="Check workload health")
+    health_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    health_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
+                               help="Workload, or workload/container for multi-container workloads")
+
+    info_parser = subparsers.add_parser("info", help="Show detailed workload information")
+    info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    info_parser.add_argument("workload", help="Workload name")
+
+    images_parser = subparsers.add_parser("images", help="Show images or prune unused")
+    images_parser.add_argument("--json", action="store_true", help="Output in JSON format (for list)")
+    images_parser.add_argument("subcommand", nargs="?", default="list",
+                               choices=["list", "prune"], help="Subcommand (list or prune)")
+    list_parser = subparsers.add_parser("list", help="List all available workloads")
+    list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    logs_parser = subparsers.add_parser("logs", help="View workload logs (journalctl wrapper)")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+    logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines (default: 50)")
+    logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
+    logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
+    logs_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
+                             help="Workload, or workload/container for multi-container workloads")
+
+    network_parser = subparsers.add_parser("network", help="Manage podman networks")
+    network_parser.add_argument("network_name", help="Network name")
+    network_parser.add_argument("subcommand", choices=["create"], help="Subcommand (create)")
+    network_parser.add_argument("workload", help="Workload to create network for")
+
+    ports_parser = subparsers.add_parser("ports", help="Show port information")
+    ports_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    ports_parser.add_argument("workload", help="Workload name")
+
+    ps_parser = subparsers.add_parser("ps", help="Show all running workload containers")
+    ps_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
+    reboot_parser.add_argument("workload", help="Workload name")
+
+    recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
+    recreate_parser.add_argument("workload", help="Workload name")
+
+    restore_parser = subparsers.add_parser("restore", help="Restore a workload from backup")
+    restore_parser.add_argument("--enable", action="store_true",
+                                help="Enable the workload after restore")
+    restore_parser.add_argument("--force", action="store_true",
+                                help="Overwrite existing config, credentials, and home dir")
+    restore_parser.add_argument("archive", help="Path to backup archive (.tar.zst)")
+
+    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
+    rollback_parser.add_argument("workload", help="Workload name")
+
+    secret_parser = subparsers.add_parser("secret", help="Manage secrets (systemd credentials)")
+    secret_subparsers = secret_parser.add_subparsers(dest="subcommand", required=True, help="Secret operation")
+
+    secret_create = secret_subparsers.add_parser("create", help="Create a new encrypted credential")
+    secret_create.add_argument("--file", help="Read secret from file instead of stdin")
+    secret_create.add_argument("--force", action="store_true", help="Overwrite if exists")
+    secret_create.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+    secret_create.add_argument("name", help="Credential name")
+
+    secret_list = secret_subparsers.add_parser("list", help="List all encrypted credentials")
+    secret_list.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    secret_delete = secret_subparsers.add_parser("delete", help="Delete an encrypted credential")
+    secret_delete.add_argument("--force", action="store_true", help="Skip confirmation")
+    secret_delete.add_argument("name", help="Credential name")
+
+    secret_show = secret_subparsers.add_parser("show", help="Decrypt and show credential value")
+    secret_show.add_argument("name", help="Credential name")
+
+    secret_rotate = secret_subparsers.add_parser("rotate", help="Rotate a credential and restart affected workloads")
+    secret_rotate.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+    secret_rotate.add_argument("name", help="Credential name")
+
+    secret_export = secret_subparsers.add_parser("export", help="Export credential with passphrase encryption (portable)")
+    secret_export.add_argument("--output", "-o", metavar="FILE", help="Output file (default: NAME.secret)")
+    secret_export.add_argument("name", help="Credential name")
+
+    secret_import = secret_subparsers.add_parser("import", help="Import passphrase-encrypted credential and re-encrypt with TPM")
+    secret_import.add_argument("--force", action="store_true", help="Overwrite if exists")
+    secret_import.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+    secret_import.add_argument("name", help="Credential name")
+    secret_import.add_argument("file", help="Passphrase-encrypted file to import")
+
+    shell_parser = subparsers.add_parser("shell", help="Open interactive shell in container, or SSH into VM workloads (serial console fallback)")
+    shell_parser.add_argument("--console", action="store_true",
+                              help="VM only: skip SSH and connect directly to the serial console (recovery path)")
+    shell_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
+                              help="Workload, or workload/container for multi-container workloads")
+
+    stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
+    stats_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    stats_parser.add_argument("-f", "--follow", action="store_true", help="Follow stats (live updating)")
+    stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
+
+    status_parser = subparsers.add_parser("status", help="Show workload service status")
+    status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
+
+    start_parser = subparsers.add_parser("start", help="Start a workload service")
+    start_parser.add_argument("workload", help="Workload name")
+
+    stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
+    stop_parser.add_argument("workload", help="Workload name")
+
+    uid_map_parser = subparsers.add_parser("uid-map", help="Show UID/GID mapping for a workload")
+    uid_map_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    uid_map_parser.add_argument("workload", help="Workload name")
+
+    update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
+    update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
+    update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
+    update_parser.add_argument("workload", nargs="?", help="Workload name")
+
+    validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")
+    validate_parser.add_argument("--all", action="store_true", help="Validate all workloads")
+    validate_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    validate_parser.add_argument("workload", nargs="?", help="Workload name")
+
+    verify_parser = subparsers.add_parser("verify", help="Verify workload setup and diagnose issues")
+    verify_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    verify_parser.add_argument("workload", help="Workload name")
 
     args = parser.parse_args()
 
