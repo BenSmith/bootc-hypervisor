@@ -141,14 +141,25 @@ class Target:
             cmd_list = ["sudo", "-n"] + cmd_list
 
         if self.dest == "local":
-            result = subprocess.run(
-                cmd_list,
-                capture_output=True,
-                text=True,
-                input=input,
-                timeout=timeout,
-                env={**os.environ, **(env or {})},
-            )
+            try:
+                result = subprocess.run(
+                    cmd_list,
+                    capture_output=True,
+                    text=True,
+                    input=input,
+                    timeout=timeout,
+                    env={**os.environ, **(env or {})},
+                )
+            except FileNotFoundError as e:
+                # The executable itself is missing (e.g. `which` not installed
+                # on a minimal image). Mirror a shell's rc=127 instead of
+                # crashing capability detection.
+                r = RunResult(rc=127, stdout="", stderr=str(e))
+                if check:
+                    raise AssertionError(
+                        f"Command not found: {' '.join(str(x) for x in cmd_list)}"
+                    )
+                return r
         else:
             self._ensure_master()
             ssh_base = [
@@ -265,8 +276,9 @@ class Target:
         r = self.run(["podman", "--version"], sudo=False, check=False)
         caps["podman_version_raw"] = r.stdout.strip() if r.ok else "unknown"
 
-        # workloadctl installed
-        r = self.run(["which", "workloadctl"], sudo=False, check=False)
+        # workloadctl installed (use the `command -v` shell builtin rather than
+        # the external `which`, which isn't present on minimal images)
+        r = self.run(["sh", "-c", "command -v workloadctl"], sudo=False, check=False)
         caps["has_workloadctl"] = r.rc == 0
 
         return caps
