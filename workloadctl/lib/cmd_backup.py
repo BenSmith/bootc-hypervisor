@@ -34,16 +34,6 @@ BACKUP_DIR = WORKLOADS_BASE / "backups"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ignore_image_store(base_dir):
-    """Return a copytree ignore callable that skips .local/share/containers."""
-    target_parent = Path(base_dir) / ".local" / "share"
-    def _ignore(src_dir, contents):
-        if Path(src_dir) == target_parent:
-            return {"containers"} & set(contents)
-        return set()
-    return _ignore
-
-
 def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool = False) -> int:
     """Create a backup archive for a single workload. Returns size in bytes.
 

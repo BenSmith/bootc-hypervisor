@@ -721,10 +721,7 @@ def cmd_disable(args, manager: WorkloadManager):
 
     config_path = WORKLOAD_DIR / f"{args.workload}.toml"
     content = config_path.read_text()
-    if re.search(r'^enabled\s*=', content, re.MULTILINE):
-        content = re.sub(r'^enabled\s*=\s*true', 'enabled = false', content, flags=re.MULTILINE)
-    else:
-        content = re.sub(r'^(\[workload\])', r'\1\nenabled = false', content, flags=re.MULTILINE)
+    content, _ = _replace_workload_enabled(content, "false")
     config_path.write_text(content)
 
     # Remove the user@ drop-in so systemd stops constraining user@<uid>
@@ -979,7 +976,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
                 continue
             # The shared backup output dir has no _wl- user; it is not an
             # orphaned workload dir (`workloadctl backup` writes here).
-            if d.name == BACKUP_DIR.name:
+            if d == workloads_base / BACKUP_DIR.name:
                 continue
             expected_user = workload_username(d.name)
             if expected_user not in existing_users:

@@ -38,6 +38,24 @@ from cmd_lifecycle import _effective_state, _gating_units
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _systemctl_show(unit: str, properties: list[str], extra_args: list[str] | None = None) -> dict[str, str]:
+    """Run `systemctl show` and return a {key: value} dict."""
+    r = subprocess.run(
+        ["systemctl", "show", unit, f"--property={','.join(properties)}"] + (extra_args or []),
+        capture_output=True, text=True,
+    )
+    result = {}
+    for line in r.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key:
+            result[key] = value
+    return result
+
+
+# ---------------------------------------------------------------------------
 # cmd_list
 # ---------------------------------------------------------------------------
 
@@ -185,16 +203,12 @@ def cmd_status(args, manager: WorkloadManager):
 
     if args.json:
         UINT64_MAX = 18446744073709551615
-        props_result = subprocess.run(
-            ["systemctl", "show", config.service_name,
-             "--property=ActiveState,UnitFileState,MainPID,MemoryCurrent,TasksCurrent,Result,ActiveEnterTimestamp",
-             "--timestamp=unix"],
-            capture_output=True, text=True
+        props = _systemctl_show(
+            config.service_name,
+            ["ActiveState", "UnitFileState", "MainPID", "MemoryCurrent",
+             "TasksCurrent", "Result", "ActiveEnterTimestamp"],
+            extra_args=["--timestamp=unix"],
         )
-        props = {}
-        for line in props_result.stdout.splitlines():
-            key, _, value = line.partition("=")
-            props[key] = value
 
         def _int_or_null(v):
             if not v or v == "[n/a]":
@@ -234,15 +248,7 @@ def cmd_status(args, manager: WorkloadManager):
             out["mode"] = config.mode
             sub = []
             for cname, unit in zip(config.container_names(), config.sub_service_names()):
-                r = subprocess.run(
-                    ["systemctl", "show", unit, "--property=ActiveState,Result"],
-                    capture_output=True, text=True,
-                )
-                sp = {}
-                for line in r.stdout.splitlines():
-                    k, _, v = line.partition("=")
-                    if k:
-                        sp[k] = v
+                sp = _systemctl_show(unit, ["ActiveState", "Result"])
                 sub.append({"name": cname, "service": unit,
                             "state": sp.get("ActiveState") or None,
                             "result": sp.get("Result") or None})
@@ -560,15 +566,10 @@ def cmd_info(args, manager: WorkloadManager):
         qmp_status = _vm_qmp_status(config.name)
 
         # Service state
-        show_result = subprocess.run(
-            ["systemctl", "show", config.service_name,
-             "--property=ActiveState,ActiveEnterTimestamp", "--timestamp=unix"],
-            capture_output=True, text=True,
+        svc_props = _systemctl_show(
+            config.service_name, ["ActiveState", "ActiveEnterTimestamp"],
+            extra_args=["--timestamp=unix"],
         )
-        svc_props = {}
-        for line in show_result.stdout.splitlines():
-            key, _, value = line.partition("=")
-            svc_props[key] = value
         service_state = svc_props.get("ActiveState", "") or "inactive"
         ts_raw = svc_props.get("ActiveEnterTimestamp", "")
         active_since = None
@@ -689,17 +690,10 @@ def cmd_info(args, manager: WorkloadManager):
             storage_size = du.stdout.split()[0] if du.returncode == 0 else None
 
     # Service state + active_since in one call
-    show_result = subprocess.run(
-        ["systemctl", "show", config.service_name,
-         "--property=ActiveState,ActiveEnterTimestamp",
-         "--timestamp=unix"],
-        capture_output=True, text=True
+    svc_props = _systemctl_show(
+        config.service_name, ["ActiveState", "ActiveEnterTimestamp"],
+        extra_args=["--timestamp=unix"],
     )
-    svc_props = {}
-    for line in show_result.stdout.splitlines():
-        key, _, value = line.partition("=")
-        svc_props[key] = value
-
     service_state = svc_props.get("ActiveState", "") or "inactive"
     ts_raw = svc_props.get("ActiveEnterTimestamp", "")
     active_since = None
@@ -1197,6 +1191,7 @@ def cmd_health(args, manager: WorkloadManager):
                 "healthy": False,
                 "message": "Container health check not available",
             })
+            all_healthy = False
 
     # Check 6: Port accessibility (if ports defined, container running, and network exposes to host)
     ports = config.get_ports()

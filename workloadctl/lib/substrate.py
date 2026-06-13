@@ -124,12 +124,16 @@ class ContainerSubstrate(Substrate):
         container_running = False
         container_status_str = None
         if service_active and self.manager.user_exists(self.config):
-            status = self.manager.podman(self.config).container_status(
-                self.config.container_name
-            )
-            if status:
-                container_running = True
-                container_status_str = status
+            podman = self.manager.podman(self.config)
+            names = self.config.container_names() if self.config.is_multi else [self.config.container_name]
+            for cname in names:
+                status = podman.container_status(
+                    f"workload-{self.config.name}-{cname}" if self.config.is_multi else cname
+                )
+                if status:
+                    container_running = True
+                    container_status_str = status
+                    break
 
         healthy = service_active and container_running
         return {
@@ -254,9 +258,12 @@ def _ignore_image_store(base_dir):
 
 # VM rebuild artifacts that should not be backed up (they are regenerated
 # by workload-vm-build-disk on next enable/update).
+# Each entry is either an exact basename or a suffix matched with endswith().
+# Prefix matches (e.g. "system.qcow2.gen-") use the "startswith:" convention.
 _VM_REBUILD_PATTERNS = (
-    "system.qcow2",
-    ".image-cache",
+    "system.qcow2",            # exact
+    "startswith:system.qcow2.gen-",
+    "endswith:.image-cache",
 )
 
 
@@ -268,10 +275,13 @@ def _ignore_vm_rebuild(base_dir):
             return set()
         skip = set()
         for name in contents:
-            if name == "system.qcow2" or name.startswith("system.qcow2.gen-"):
-                skip.add(name)
-            if name.endswith(".image-cache"):
-                skip.add(name)
+            for pat in _VM_REBUILD_PATTERNS:
+                if pat.startswith("startswith:") and name.startswith(pat[len("startswith:"):]):
+                    skip.add(name)
+                elif pat.startswith("endswith:") and name.endswith(pat[len("endswith:"):]):
+                    skip.add(name)
+                elif name == pat:
+                    skip.add(name)
         return skip
     return _ignore
 

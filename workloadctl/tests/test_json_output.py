@@ -25,6 +25,7 @@ import cmd_backup
 import cmd_inspect
 import cmd_lifecycle
 import cmd_secret
+import substrate
 import workloadctl_core
 from workloadctl_core import WorkloadConfig, WorkloadManager
 
@@ -1054,7 +1055,7 @@ class TestBackupImageStoreExclude(unittest.TestCase):
             src = self._make_home(tmp)
             dst = Path(tmp) / "staging"
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=cmd_backup._ignore_image_store(src))
+                            ignore=substrate._ignore_image_store(src))
             self.assertFalse((dst / ".local" / "share" / "containers").exists(),
                              ".local/share/containers should be excluded")
             self.assertTrue((dst / "data" / "db" / "mydb.sqlite").exists(),
@@ -1068,7 +1069,7 @@ class TestBackupImageStoreExclude(unittest.TestCase):
             (src / "config.txt").write_text("cfg")
             dst = Path(tmp) / "staging"
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=cmd_backup._ignore_image_store(src))
+                            ignore=substrate._ignore_image_store(src))
             self.assertTrue((dst / "config.txt").exists())
             # No error, just a no-op exclusion
             self.assertFalse((dst / ".local" / "share" / "containers").exists())
