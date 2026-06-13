@@ -1,0 +1,34 @@
+# clitest-bridge — bridge-mode multi-container fixture.
+# Two containers, each with its own netns, joined via an auto-created
+# workload-clitest-bridge-net bridge. The "proxy" container reaches
+# "app" by short-name DNS ("app:8080").
+
+[workload]
+name = "clitest-bridge"
+enabled = false
+mode = "bridge"
+
+[[containers]]
+name = "app"
+
+[containers.container]
+image = "docker.io/traefik/whoami:latest"
+command = ["--port", "8080"]
+
+[containers.resources]
+memory_max = "64M"
+memory_high = "48M"
+
+[[containers]]
+name = "proxy"
+
+[containers.container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "reverse-proxy", "--from", ":8080", "--to", "http://app:8080"]
+
+[containers.network]
+ports = ["19082:8080"]
+
+[containers.resources]
+memory_max = "128M"
+memory_high = "96M"

@@ -111,12 +111,15 @@ def main():
     enable_parser.add_argument("workload", help="Workload name")
 
     exec_parser = subparsers.add_parser("exec", help="Execute command in workload container or VM (via SSH)")
-    # REMAINDER captures the command verbatim, including leading-dash flags
-    # (e.g. `workloadctl exec web wget -qO- ...`) — nargs="+" would reject them.
-    exec_parser.add_argument("exec_args", metavar="COMMAND", nargs=argparse.REMAINDER,
-                             help="Command to execute (a leading -- is optional)")
+    # Order matters and is NOT alphabetizable: WORKLOAD must come before the
+    # COMMAND positional. argparse.REMAINDER is greedy, so it has to be the LAST
+    # positional — first token binds to WORKLOAD, the rest are the command
+    # (e.g. `workloadctl exec web wget -qO- ...`). Putting COMMAND first makes
+    # the workload bind to the trailing token instead. Matches docker/podman.
     exec_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                              help="Workload, or workload/container for multi-container workloads")
+    exec_parser.add_argument("exec_args", metavar="COMMAND", nargs=argparse.REMAINDER,
+                             help="Command to execute (a leading -- is optional)")
 
     health_parser = subparsers.add_parser("health", help="Check workload health")
     health_parser.add_argument("--json", action="store_true", help="Output in JSON format")

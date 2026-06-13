@@ -1,0 +1,164 @@
+# workloadctl CLI-surface acceptance harness
+
+End-to-end acceptance tests for `workloadctl`. Provisions real workload
+fixtures, runs every verb against every applicable substrate, and prints a
+**verb × substrate PASS/FAIL/SKIP/NA matrix**.
+
+Runs on a controller (your dev host). Executes everything over SSH against a
+target Fedora system (specified with `--target=user@host`). Nothing is
+installed on the target beyond what `workloadctl` already ships.
+
+## Prerequisites
+
+### Controller (where you run pytest)
+
+```
+pip install --user pytest
+```
+
+Optional for HTML reports:
+```
+pip install --user pytest-html
+```
+
+### Target
+
+- `sshd` running, controller's SSH key authorized
+- Passwordless sudo configured
+- `workloadctl` installed (via RPM or `--deploy` flag below)
+- For VM cells: `/dev/kvm` present (bare metal or nested KVM)
+- For `clitest-vm-bridged` cell: `br0` bridge up
+
+## Running
+
+`--target` is required. All invocations from the repo root (or workloadctl/).
+
+```sh
+# Run everything against a target host
+pytest workloadctl/tests/cli_surface/ --target=user@host
+
+# Or via just (from workloadctl/)
+just test-cli user@host
+
+# Run against controller directly (no SSH)
+pytest workloadctl/tests/cli_surface/ --target=local
+
+# Deploy current workloadctl tree to target first, then test
+pytest workloadctl/tests/cli_surface/ --target=user@host --deploy
+
+# Deploy to a VM by IP
+pytest workloadctl/tests/cli_surface/ --target=user@<vm-ip> --deploy
+
+# Container tests only (skip VM — much faster)
+pytest workloadctl/tests/cli_surface/ --target=user@host -m "not vm and not slow"
+
+# VM substrate only
+pytest workloadctl/tests/cli_surface/ --target=user@host -m vm
+
+# Just the secret area
+pytest workloadctl/tests/cli_surface/test_secret.py --target=user@host
+
+# One verb group, one topology
+pytest workloadctl/tests/cli_surface/ --target=user@host -k "lifecycle and single"
+
+# One verb, all substrates
+pytest workloadctl/tests/cli_surface/ --target=user@host -k recreate
+
+# Introspection verbs only (read-only, fast)
+pytest workloadctl/tests/cli_surface/test_introspect.py --target=user@host
+
+# Skip slow tests (VM boot, image pull)
+pytest workloadctl/tests/cli_surface/ --target=user@host -m "not slow"
+
+# With HTML report
+pytest workloadctl/tests/cli_surface/ --target=user@host --html=report.html --self-contained-html
+```
+
+## Layout
+
+```
+workloadctl/tests/cli_surface/
+  conftest.py             --target/--deploy options, Target fixture,
+                          session purge, matrix-summary hook
+  target.py               Target abstraction (run/put/capabilities)
+  fixtures.py             workload-provisioning pytest fixtures
+  workloads/              fixture TOMLs (clitest-*.toml)
+  test_introspect.py      list, ps, info, status, ports, health, uid-map,
+                          verify, validate, drift, logs, stats, images
+  test_lifecycle.py       create, enable, start, stop, disable(+--purge),
+                          edit, reboot, recreate
+  test_exec.py            exec, cp, attach, shell
+  test_secret.py          secret create/list/show/rotate/export/import/delete
+  test_data.py            backup(+--all/--no-stop), restore
+  test_update_rollback.py update(+--all/--force), rollback
+  test_network.py         network create
+  test_cleanup.py         cleanup (dry-run + --apply + --json)
+  README.md               this file
+```
+
+## Markers
+
+| Marker        | Meaning                                        |
+|---------------|------------------------------------------------|
+| `container`   | Exercises the container substrate              |
+| `vm`          | Requires `/dev/kvm` (skips otherwise)          |
+| `slow`        | Long-running: VM boot, image pull              |
+| `interactive` | Pty/shell smoke tests (lower assurance)        |
+| `mutating`    | Modifies workload state                        |
+| `destructive` | Permanently removes state (purge, delete)      |
+
+## Options
+
+| Option       | Default  | Description                              |
+|--------------|----------|------------------------------------------|
+| `--target`   | required | SSH destination (e.g. `user@host`) or `local` |
+| `--deploy`   | off      | rsync + rpm-install before testing       |
+| `--key-type` | `auto`   | Secret encryption: auto/tpm2/host        |
+
+## Idempotency
+
+A session-scoped autouse fixture purges all `clitest-*` workloads at session
+start and end. Running twice back-to-back is safe. The user's `alloy.toml`
+and any other non-`clitest-*` workloads are never touched.
+
+## Matrix output
+
+At the end of the run, pytest prints a `verb × substrate` matrix:
+
+```
+================== verb × substrate matrix ==================
+VERB           container   vm
+------------------------------------------------------------
+backup         PASS        PASS
+cleanup        PASS        —
+create         PASS        —
+...
+stats          PASS        PASS (exit 0, N/A message)
+```
+
+Cells marked `FAIL` are likely workloadctl bugs (e.g. an unguarded verb
+crashing on the wrong substrate). A findings section lists them.
+
+## Fixture TOMLs
+
+All test workloads are named `clitest-<topology>` and live in `workloads/`.
+They are installed to `/etc/workloads.d/` on the target at test setup and
+removed at teardown. The user's `alloy.toml` is never touched.
+
+| Fixture               | Topology                    | Port   |
+|-----------------------|-----------------------------|--------|
+| `clitest-single.toml` | single container, pasta net | 19080  |
+| `clitest-pod.toml`    | pod mode, 2 containers      | 19081  |
+| `clitest-bridge.toml` | bridge mode, 2 containers   | 19082  |
+| `clitest-host.toml`   | single, host networking     | 19083  |
+| `clitest-secret.toml` | single, references secret   | 19084  |
+| `clitest-broken.toml` | invalid schema (negative)   | —      |
+| `clitest-vm.toml`     | VM, NAT bridge              | —      |
+| `clitest-vm-bridged`  | VM, br0 LAN bridge          | —      |
+
+## Notes on interactive verbs
+
+`shell` and `attach` are smoke-tested via `echo exit | timeout N workloadctl ...`
+or `timeout N ... || true`. They verify: no Python traceback, process exits.
+Full interactive assertion is not possible in a subprocess harness; these are
+explicitly marked `interactive` and documented as smoke-grade.

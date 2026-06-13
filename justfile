@@ -535,6 +535,22 @@ test-unit:
 test-integration:
   cd workloadctl && just test-integration
 
+# Run CLI-surface acceptance harness (all verbs, both substrates)
+test-cli target:
+  cd workloadctl && just test-cli {{target}}
+
+# CLI surface — container substrate only (no VM boot; much faster)
+test-cli-containers target:
+  cd workloadctl && just test-cli-containers {{target}}
+
+# CLI surface — VM substrate only (requires /dev/kvm on target)
+test-cli-vm target:
+  cd workloadctl && just test-cli-vm {{target}}
+
+# CLI surface — deploy current tree to target first, then run all tests
+test-cli-deploy target:
+  cd workloadctl && just test-cli-deploy {{target}}
+
 # Build workloadctl RPM
 workload-rpm:
   cd workloadctl && just rpm-build

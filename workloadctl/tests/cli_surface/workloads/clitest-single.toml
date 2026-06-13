@@ -1,0 +1,19 @@
+# clitest-single — single-container fixture for the CLI-surface harness.
+# Uses caddy as a trivially always-running image with a port map.
+# Do NOT enable this manually; it is managed by the test harness.
+
+[workload]
+name = "clitest-single"
+enabled = false
+
+[container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":8080"]
+
+[network]
+mode = "pasta"
+ports = ["19080:8080"]
+
+[resources]
+memory_max = "128M"
+memory_high = "96M"

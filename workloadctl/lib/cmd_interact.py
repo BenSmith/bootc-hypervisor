@@ -247,7 +247,11 @@ def cmd_exec(args, manager: WorkloadManager):
         sys.exit(result.returncode)
 
     target = resolve_container_target(config, container, workload)
-    manager.run_podman_exec(config, [*_interactive_exec_flags(), target, *exec_args], check=True)
+    # Propagate the command's exit code (like the VM path above) rather than
+    # raising on nonzero: `exec ... -- sh -c 'exit 42'` should exit 42, not
+    # surface a raw CalledProcessError as exit 1.
+    result = manager.run_podman_exec(config, [*_interactive_exec_flags(), target, *exec_args])
+    sys.exit(result.returncode)
 
 
 def cmd_logs(args, manager: WorkloadManager):

@@ -1,0 +1,12 @@
+# clitest-broken — intentionally invalid config for negative-case tests.
+# This TOML has a workload name that does NOT match the filename
+# (clitest-broken.toml contains name "clitest-broken-WRONG").
+# WorkloadConfig raises ValueError which workloadctl catches cleanly.
+# validate/verify must exit nonzero with no Python traceback.
+
+[workload]
+name = "clitest-broken-wrong"
+enabled = false
+
+[container]
+image = "docker.io/library/alpine:latest"
