@@ -31,22 +31,33 @@ class TestExec:
         )
 
     def test_exec_pod_container(self, target, clitest_pod, record_property):
-        """exec targeting a specific container in a pod."""
+        """exec targeting a specific container in a pod.
+
+        Targets the `proxy` container (caddy:2-alpine) rather than `app`
+        (traefik/whoami): whoami is a scratch image with no shell and no
+        `echo` binary, so exec — which hands the command straight to crun
+        with no shell — has nothing to run there. proxy exercises the same
+        container-targeted exec path with a busybox userland present.
+        """
         record_property("cell", "exec/container/pod")
         r = target.wl_exec(
-            f"{clitest_pod}/app", "echo pod-app-marker",
+            f"{clitest_pod}/proxy", "echo pod-proxy-marker",
             check=True, timeout=30,
         )
-        assert "pod-app-marker" in r.stdout
+        assert "pod-proxy-marker" in r.stdout
 
     def test_exec_bridge_container(self, target, clitest_bridge, record_property):
-        """exec targeting a specific container in a bridge-mode workload."""
+        """exec targeting a specific container in a bridge-mode workload.
+
+        Targets `proxy` (caddy:2-alpine) not `app` (traefik/whoami, a
+        shell-less scratch image) — see test_exec_pod_container.
+        """
         record_property("cell", "exec/container/bridge")
         r = target.wl_exec(
-            f"{clitest_bridge}/app", "echo bridge-app-marker",
+            f"{clitest_bridge}/proxy", "echo bridge-proxy-marker",
             check=True, timeout=30,
         )
-        assert "bridge-app-marker" in r.stdout
+        assert "bridge-proxy-marker" in r.stdout
 
     def test_exec_writes_file(self, target, clitest_single, record_property):
         """exec can write a file inside the container."""

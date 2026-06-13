@@ -8,11 +8,40 @@ are gated on has_kvm and marked slow.
 """
 
 import json
+import time
 
 import pytest
 
 from conftest import skip_if_no_kvm
 from target import Target
+
+
+def _health_json(target: Target, ref: str, retries: int = 5):
+    """Run `health --json <ref>` and return the parsed dict.
+
+    `health` can transiently print nothing to stdout right after a workload
+    comes up: if it hits an internal error while the rootless user's runtime
+    is still settling, workloadctl's top-level handler writes `Error: …` to
+    stderr (no traceback) and exits, leaving stdout empty. That's a cold-start
+    race, not a product defect — health emits valid JSON (HEALTHY or
+    UNHEALTHY) once it can complete. Poll briefly for parseable output rather
+    than letting a bare json.loads('') raise an opaque JSONDecodeError.
+    """
+    last = None
+    for _ in range(retries):
+        r = target.wl(f"health --json {ref}", sudo=False, check=False)
+        assert "Traceback" not in r.stderr, f"health crashed: {r.stderr}"
+        if r.stdout.strip():
+            try:
+                return json.loads(r.stdout)
+            except json.JSONDecodeError:
+                pass
+        last = r
+        time.sleep(2)
+    raise AssertionError(
+        f"health --json {ref} never produced parseable JSON; "
+        f"last stdout={last.stdout!r} stderr={last.stderr!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -236,18 +265,14 @@ class TestHealth:
 
     def test_health_json_single(self, target, clitest_single, record_property):
         record_property("cell", "health/container")
-        r = target.wl(f"health --json {clitest_single}", sudo=False, check=False)
-        assert "Traceback" not in r.stderr
-        data = json.loads(r.stdout)
+        data = _health_json(target, clitest_single)
         assert "workload" in data
         assert "overall" in data
         assert "checks" in data
 
     def test_health_pod(self, target, clitest_pod, record_property):
         record_property("cell", "health/container/pod")
-        r = target.wl(f"health --json {clitest_pod}", sudo=False, check=False)
-        assert "Traceback" not in r.stderr
-        data = json.loads(r.stdout)
+        data = _health_json(target, clitest_pod)
         assert data["overall"] in ("HEALTHY", "UNHEALTHY")
 
     @pytest.mark.vm
