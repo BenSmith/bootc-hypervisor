@@ -136,6 +136,19 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 
 %postun
 %systemd_postun_with_restart workload-exporter.service
+# On full uninstall ($1 == 0, not upgrade) reverse the host-global state that
+# workload-ensure-user accretes but never per-workload teardown can safely
+# remove (it's shared across workloads while the package is installed):
+#   - the semanage fcontext rule for /var/lib/workloads
+#   - the managed VM bridge's allow line in qemu-bridge-helper's allowlist
+# A custom/admin bridge (e.g. allow br0) is intentionally left alone — the admin
+# owns it and may rely on it outside workloadctl.
+if [ $1 -eq 0 ]; then
+    semanage fcontext -d '/var/lib/workloads(/.*)?' 2>/dev/null || :
+    if [ -f /etc/qemu/bridge.conf ]; then
+        sed -i '/^allow _workload-br$/d' /etc/qemu/bridge.conf 2>/dev/null || :
+    fi
+fi
 
 %files
 %{_datadir}/licenses/workloadctl/LICENSE

@@ -33,6 +33,7 @@ from workloadctl_core import (
     WorkloadManager,
     require_root,
     WORKLOAD_DIR,
+    VM_BRIDGE_NAME,
 )
 from cmd_admin import validate_single
 from cmd_backup import BACKUP_DIR
@@ -619,6 +620,56 @@ def _remove_user_dropin(config: WorkloadConfig):
         pass
 
 
+def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
+    """Delete a workload's /run/workload-env files on purge. Returns names removed.
+
+    These are tmpfs + root-owned, written by workload-write-env (decrypted
+    ${SECRET:…} values → .secrets) and workload-ensure-user
+    (XDG_RUNTIME_DIR/HOST_IP → .env). Nothing rewrites them once the workload is
+    gone, so without this a purge leaves decrypted secrets readable in /run
+    until the next reboot. Uses exact basenames (not a glob) so e.g. purging
+    'git' never touches 'github's files. Honors WORKLOAD_ENV_DIR for tests,
+    matching workload-write-env.
+    """
+    env_dir = Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
+    basenames = [
+        f"workload-{config.name}.env",
+        f"workload-{config.name}.secrets",
+    ]
+    if config.is_multi:
+        basenames += [
+            f"workload-{config.name}-{cname}.secrets"
+            for cname in config.container_names()
+        ]
+    removed = []
+    for basename in basenames:
+        path = env_dir / basename
+        if path.exists():
+            path.unlink()
+            removed.append(basename)
+    return removed
+
+
+def _stop_user_manager(username: str) -> bool:
+    """Tear down a workload user's lingering systemd manager on disable.
+
+    Terminates the user's session/manager and removes the linger marker so a
+    *disabled* workload doesn't keep a live user@<uid>.service with a pinned
+    /run/user/<uid>. Idempotent and safe: the user, home, and subuid ranges are
+    left intact, and workload-ensure-user re-enables linger on the next start.
+    Returns True if the user existed (and we acted), False otherwise.
+    """
+    try:
+        uid = pwd.getpwnam(username).pw_uid
+    except KeyError:
+        return False
+    subprocess.run(["loginctl", "terminate-user", str(uid)],
+                   check=False, capture_output=True)
+    subprocess.run(["loginctl", "disable-linger", str(uid)],
+                   check=False, capture_output=True)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -686,6 +737,33 @@ def cmd_enable(args, manager: WorkloadManager):
         print(f"✓ Workload '{args.workload}' enabled and starting")
         print(f"  Check status: workloadctl status {args.workload}")
         print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+
+
+def _stop_bridge_if_last_vm(config: WorkloadConfig, manager: WorkloadManager):
+    """Stop the shared VM bridge service when no managed-bridge VMs remain enabled.
+
+    Called at the end of cmd_disable (purge and non-purge alike).  If the
+    disabled workload was not itself a managed-bridge VM, returns immediately
+    without consulting the workload list.  When it *was* the last such workload,
+    stops workload-bridge.service so the _workload-br interface, dnsmasq, and
+    nftables NAT table are torn down without waiting for a reboot.
+    """
+    if not (config.is_vm and config.vm_bridge == VM_BRIDGE_NAME):
+        return
+
+    still_needed = any(
+        c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != config.name
+        for c in manager.get_all_configs(enabled_only=True)
+    )
+    if still_needed:
+        return
+
+    subprocess.run(
+        ["systemctl", "stop", "workload-bridge.service"],
+        check=False,
+        capture_output=True,
+    )
+    print("  Stopped shared VM bridge (no managed-bridge VMs remain)")
 
 
 def cmd_disable(args, manager: WorkloadManager):
@@ -758,14 +836,18 @@ def cmd_disable(args, manager: WorkloadManager):
             home_dir = pw.pw_dir
 
             print(f"  Terminating user sessions for {config.username}...")
-            subprocess.run(["loginctl", "terminate-user", str(uid)], check=False)
-            subprocess.run(["loginctl", "disable-linger", str(uid)], check=False)
+            _stop_user_manager(config.username)
             time.sleep(1)
             # Kill any straggler processes (rootless podman, conmon, etc.)
             # so userdel doesn't print "user is currently used by process N".
             subprocess.run(["pkill", "-KILL", "-u", str(uid)],
                            check=False, capture_output=True)
             time.sleep(0.5)
+
+            # Remove per-workload runtime files in /run/workload-env (decrypted
+            # secrets + the env file) so a purge doesn't leave them readable in
+            # /run until the next reboot.
+            _remove_runtime_env_files(config)
 
             if config.is_vm:
                 # Clean up the runtime socket directory
@@ -819,7 +901,15 @@ def cmd_disable(args, manager: WorkloadManager):
         except KeyError:
             print(f"✓ Workload '{args.workload}' disabled (user not found)")
     else:
+        # A disabled (non-purged) workload keeps its user, home, and subuid
+        # ranges, but should not keep a live lingering user manager. Stop it so
+        # /run/user/<uid> and user@<uid>.service don't idle on; re-enable
+        # re-establishes linger via workload-ensure-user.
+        if _stop_user_manager(config.username):
+            print(f"  Stopped lingering user manager for {config.username}")
         print(f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)")
+
+    _stop_bridge_if_last_vm(config, manager)
 
 
 def cmd_start(args, manager: WorkloadManager):
