@@ -8,6 +8,7 @@ workload user.
 """
 
 import json
+import time
 
 import pytest
 
@@ -49,15 +50,30 @@ class TestNetworkCreate:
             username = f"_wl-{fresh_single}"
             # Run podman as the workload user. sudo's `-E KEY=VAL` form does not
             # exist; set the env via `env` in the target command instead.
-            r2 = target.run(
-                ["sudo", "-n", "-u", username, "env",
-                 f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                 f"HOME=/var/lib/workloads/{fresh_single}",
-                 "podman", "network", "ls", "--format", "{{.Name}}"],
-                sudo=False, check=False,
-            )
+            #
+            # This is a *raw* podman-as-user probe, so unlike workloadctl's own
+            # calls it doesn't go through podman.py's self-healing retry. Under
+            # create/purge churn /run/user/<uid> transiently vanishes ("lstat
+            # ...: no such file or directory"); re-pin linger and retry a few
+            # times so the probe doesn't flake on that known race.
+            r2 = None
+            for attempt in range(5):
+                r2 = target.run(
+                    ["sudo", "-n", "-u", username, "env",
+                     f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     f"HOME=/var/lib/workloads/{fresh_single}",
+                     "podman", "network", "ls", "--format", "{{.Name}}"],
+                    sudo=False, check=False,
+                )
+                if net_name in r2.stdout:
+                    break
+                if "no such file or directory" in r2.stderr.lower():
+                    target.run(["loginctl", "enable-linger", str(uid)],
+                               sudo=True, check=False)
+                time.sleep(1.0)
             assert net_name in r2.stdout, (
-                f"Network {net_name!r} not found in workload user's networks: {r2.stdout}"
+                f"Network {net_name!r} not found in workload user's networks: "
+                f"{r2.stdout!r} (stderr: {r2.stderr!r})"
             )
 
     @pytest.mark.mutating

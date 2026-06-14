@@ -361,7 +361,17 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
         if service_was_active and not no_stop:
             if not quiet:
                 print(f"  Starting {service_name}...")
-            subprocess.run(["systemctl", "start", service_name])
+            # Containers: re-pin the runtime dir and tolerate start-limit thrash
+            # when bringing the workload back up after the cold-backup stop.
+            # VMs have no /run/user/<uid>, so start them plainly.
+            if vm:
+                subprocess.run(["systemctl", "start", service_name])
+            else:
+                from workloadctl_core import restart_workload_service
+                try:
+                    restart_workload_service(config.uid, service_name, action="start")
+                except subprocess.CalledProcessError:
+                    pass
 
 
 def _print_backup_size(output: Path, size: int) -> None:

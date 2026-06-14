@@ -31,6 +31,7 @@ from podman import Podman
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    restart_workload_service,
     require_root,
     WORKLOAD_DIR,
     VM_BRIDGE_NAME,
@@ -421,6 +422,12 @@ def _activate_service(config: WorkloadConfig):
 
     print(f"  Starting {config.service_name}...")
     print("  (Image pull may take a few minutes on first start)")
+    # A re-enabled unit name can still carry a `start-limit-hit` lockout from a
+    # prior incarnation (StartLimitBurst survives userdel/purge), which would
+    # refuse this fresh start. Clear it first; idempotent on a clean unit. The
+    # start stays `--no-block` so enable returns before a slow first image pull.
+    subprocess.run(["systemctl", "reset-failed", config.service_name],
+                   check=False, capture_output=True)
     subprocess.run(["systemctl", "start", "--no-block", config.service_name], check=True)
 
 
@@ -923,9 +930,20 @@ def cmd_start(args, manager: WorkloadManager):
 
     config = WorkloadConfig(args.workload)
     print(f"Starting {config.service_name}...")
-    result = subprocess.run(["systemctl", "start", config.service_name])
-    if result.returncode != 0:
-        sys.exit(result.returncode)
+    # Containers: re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
+    # thrash (a bare `systemctl start` doesn't re-run the setup oneshot, so a
+    # GC'd runtime dir fails ExecStart with 226/NAMESPACE, and a recycled unit
+    # name may carry a start-limit lockout). `action="start"` keeps start-only
+    # semantics (won't bounce an already-running unit). VMs have no runtime dir.
+    if not config.is_vm and manager.user_exists(config):
+        try:
+            restart_workload_service(config.uid, config.service_name, action="start")
+        except subprocess.CalledProcessError as e:
+            sys.exit(e.returncode or 1)
+    else:
+        result = subprocess.run(["systemctl", "start", config.service_name])
+        if result.returncode != 0:
+            sys.exit(result.returncode)
     print(f"✓ Workload '{args.workload}' started")
 
 
@@ -979,7 +997,14 @@ def cmd_recreate(args, manager: WorkloadManager):
             ["systemctl", "restart", f"workload-{config.name}-setup.service"],
             check=True,
         )
-    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+        subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    elif manager.user_exists(config):
+        # Container restart: the setup oneshot stays active-exited and won't
+        # re-create /run/user/<uid> if it was GC'd, so re-pin it (and tolerate
+        # start-limit thrash) via the self-healing restart helper.
+        restart_workload_service(config.uid, config.service_name)
+    else:
+        subprocess.run(["systemctl", "restart", config.service_name], check=True)
     print(f"✓ Workload '{args.workload}' recreated")
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 

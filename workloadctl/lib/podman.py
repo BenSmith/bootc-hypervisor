@@ -97,11 +97,29 @@ class Podman:
         cmd += ["podman", "--log-level=error", *args]
         return cmd
 
+    def _manager_active(self) -> bool:
+        """True iff user@<uid>.service (the lingering manager) is running.
+
+        The real signal that linger is effective — a transient login session
+        also creates /run/user/<uid>, so a dir-existence check false-positives.
+        """
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", f"user@{self._uid}.service"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return False
+        return r.stdout.strip() == "active"
+
     def _ensure_runtime_dir(self) -> None:
-        """Best-effort: re-assert linger and wait for /run/user/<uid> to appear.
+        """Best-effort: make linger genuinely effective and wait for it.
 
         Called when a podman invocation fails with the runtime-dir-missing
-        signature.  Swallows all exceptions — if we can't fix it, the
+        signature.  Gate on `user@<uid>.service` being active (not just on the
+        dir existing — a transient login session creates that too) and
+        explicitly start the manager so /run/user/<uid> stays pinned across
+        session churn.  Swallows all exceptions — if we can't fix it, the
         subsequent retry will fail and fall through to normal error handling.
         """
         try:
@@ -110,13 +128,18 @@ class Podman:
                 capture_output=True,
                 timeout=5,
             )
+            subprocess.run(
+                ["systemctl", "start", f"user@{self._uid}.service"],
+                capture_output=True,
+                timeout=30,
+            )
         except Exception:
             pass
 
         runtime_dir = f"/run/user/{self._uid}"
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if os.path.isdir(runtime_dir):
+            if self._manager_active() and os.path.isdir(runtime_dir):
                 return
             time.sleep(0.1)
 

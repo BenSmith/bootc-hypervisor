@@ -24,6 +24,7 @@ from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     WorkloadUserNotFound,
+    restart_workload_service,
     require_root,
     toml_string,
     WORKLOAD_DIR,
@@ -681,6 +682,16 @@ def cmd_verify(args, manager: WorkloadManager):
 # cmd_edit
 # ---------------------------------------------------------------------------
 
+def _ask_yes_no(prompt: str) -> bool:
+    """Prompt for y/N. Treat EOF (non-interactive stdin) as 'no' rather than
+    crashing with `EOFError: EOF when reading a line`."""
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        print()
+        return False
+
+
 def cmd_edit(args, manager: WorkloadManager):
     """Edit config and apply changes"""
     require_root()
@@ -720,8 +731,7 @@ def cmd_edit(args, manager: WorkloadManager):
         result = validate_single(config, manager, json_mode=False)
         if not result["passed"]:
             print()
-            response = input("Validation failed. Restore backup? [y/N] ")
-            if response.lower() in ["y", "yes"]:
+            if _ask_yes_no("Validation failed. Restore backup? [y/N] "):
                 shutil.copy2(backup_path, config_path)
                 print("Backup restored")
             else:
@@ -730,8 +740,7 @@ def cmd_edit(args, manager: WorkloadManager):
             sys.exit(1)
     except Exception as e:
         print(f"Error loading config: {e}", file=sys.stderr)
-        response = input("Restore backup? [y/N] ")
-        if response.lower() in ["y", "yes"]:
+        if _ask_yes_no("Restore backup? [y/N] "):
             shutil.copy2(backup_path, config_path)
             print("Backup restored")
         backup_path.unlink()
@@ -744,8 +753,12 @@ def cmd_edit(args, manager: WorkloadManager):
     print()
 
     if config.enabled:
-        response = input("Apply changes and restart workload? [y/N] ")
-        if response.lower() in ["y", "yes"]:
+        if getattr(args, "yes", False):
+            print("Apply changes and restart workload? [y/N] y")
+            apply = True
+        else:
+            apply = _ask_yes_no("Apply changes and restart workload? [y/N] ")
+        if apply:
             # daemon-reload alone won't regenerate per-workload unit files —
             # only the systemd shell-generator re-runs, and it just emits a
             # oneshot that doesn't fire until next boot. Run workload-generate
@@ -765,7 +778,13 @@ def cmd_edit(args, manager: WorkloadManager):
                     ["systemctl", "restart", f"workload-{config.name}-setup.service"],
                     check=True,
                 )
-            subprocess.run(["systemctl", "restart", config.service_name], check=True)
+                subprocess.run(["systemctl", "restart", config.service_name], check=True)
+            elif manager.user_exists(config):
+                # Container: self-healing restart (re-pin runtime dir + clear
+                # start-limit thrash) rather than a bare systemctl restart.
+                restart_workload_service(config.uid, config.service_name)
+            else:
+                subprocess.run(["systemctl", "restart", config.service_name], check=True)
             print("✓ Changes applied and service restarted")
         else:
             print(f"Changes saved but not applied. Run 'sudo workloadctl recreate {args.workload}' to apply.")

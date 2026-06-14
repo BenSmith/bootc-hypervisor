@@ -10,7 +10,9 @@ from podman import PodmanError
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    ensure_runtime_dir,
     require_root,
+    restart_workload_service,
 )
 
 
@@ -57,7 +59,7 @@ def _do_rollback(config: WorkloadConfig, manager: WorkloadManager, old_ids: dict
         tag = rollback_tag(config.name, cname if config.is_multi else None)
         if pod.image_id(tag):
             pod.tag(tag, image)
-    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    restart_workload_service(config.uid, config.service_name)
     print(f"  ✗ {config.name}: rolled back to previous image(s)")
 
 
@@ -84,6 +86,18 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
 
     for cname, image, pull in specs:
         old_id = pod.image_id(image)
+        if not old_id:
+            # A just-(re)started rootless store can transiently report an empty
+            # `inspect` (mid `podman system migrate`, or while a recycled UID's
+            # runtime dir is being re-pinned) even though the image is present
+            # — losing the rollback point. Re-pin and retry briefly before
+            # giving up; a genuinely-absent image just falls through with "".
+            ensure_runtime_dir(config.uid)
+            for _ in range(10):
+                time.sleep(0.5)
+                old_id = pod.image_id(image)
+                if old_id:
+                    break
         old_ids[cname] = old_id
         if pull == "never":
             continue
@@ -108,7 +122,7 @@ def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: b
         if old_id:
             pod.tag(old_id, rollback_tag(config.name, cname if config.is_multi else None))
 
-    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    restart_workload_service(config.uid, config.service_name)
     print(f"  ✓ {config.name}: restarted")
 
     return (config, old_ids)
@@ -358,5 +372,5 @@ def cmd_rollback(args, manager: WorkloadManager):
             sys.exit(1)
         print(f"  {label}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}")
 
-    subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    restart_workload_service(config.uid, config.service_name)
     print(f"✓ Rolled back {config.name}")

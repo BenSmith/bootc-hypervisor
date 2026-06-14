@@ -13,6 +13,7 @@ import time
 import pytest
 
 from target import Target
+from fixtures import _wait_container_running, _purge_workload
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,16 @@ class TestUpdateRollbackContainer:
             target.put_content(toml_content, toml_path)
             target.wl(f"enable {name}", check=True, timeout=180)
             assert _wait_active(target, name)
+            # Unit-active is NOT enough: with Type=exec the unit goes active
+            # while the service's `ExecStartPre=podman system migrate` is still
+            # settling the rootless store, so a *peer* podman call (which is
+            # exactly what `update` does to read the old image id) transiently
+            # sees an empty store. Updating in that window reads an empty
+            # old_id (→ no rollback tag) and restarts a still-settling unit,
+            # tripping StartLimitBurst. Wait for the container to actually be
+            # Up before mutating. (The fresh_* fixtures already do this; this
+            # test builds its workload inline so it must do it too.)
+            _wait_container_running(target, name)
 
             # Update --force to create a rollback tag
             r = target.wl(f"update --force {name}", check=True, timeout=300)
@@ -103,7 +114,12 @@ class TestUpdateRollbackContainer:
             )
 
         finally:
-            target.wl(f"disable --purge {name}", check=False, timeout=60)
+            # Use the shared purge helper, not a bare `disable --purge`: it also
+            # `systemctl reset-failed`s the unit. Without that, if this test's
+            # workload ever trips StartLimitBurst (start-limit-hit), the failed
+            # state survives the purge and poisons the *next* run's `enable` of
+            # the same unit name (it never reaches active).
+            _purge_workload(target, name)
             target.run(["rm", "-f", toml_path], sudo=True, check=False)
 
     def test_rollback_without_prior_fails_cleanly(self, target, fresh_single, record_property):

@@ -482,6 +482,12 @@ def cmd_images(args, manager: WorkloadManager):
         for config in configs:
             if not manager.user_exists(config):
                 continue
+            # VM workloads have no OCI images — container_specs() returns the
+            # qcow2 download URL as the "image", which would blow up
+            # `podman inspect --type=image` ("invalid reference format") and
+            # abort the whole listing. Skip them.
+            if config.is_vm:
+                continue
 
             podman = manager.podman(config)
             # Iterate every container's image so multi-container (pod/bridge)

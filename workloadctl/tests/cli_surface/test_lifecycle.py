@@ -385,9 +385,11 @@ class TestEdit:
         # Run edit with EDITOR set to our script.  sudo scrubs the environment
         # by default, so pass EDITOR through with `env` inside the sudo context
         # rather than exporting it in the outer shell (where it would be lost).
+        # --yes confirms the post-validation "Apply and restart?" prompt
+        # non-interactively (the harness has no tty to answer it on).
         r = target.run(
             ["sudo", "-n", "env", f"EDITOR={remote_editor}",
-             "workloadctl", "edit", fresh_single],
+             "workloadctl", "edit", "--yes", fresh_single],
             sudo=False, check=True,
         )
         assert r.rc == 0

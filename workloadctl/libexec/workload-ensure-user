@@ -324,27 +324,51 @@ def write_environment_file(name, pw, config):
     log(f"  Wrote environment file {env_file}")
 
 
+def _linger_manager_active(uid_str):
+    """True iff the persistent user manager (user@<uid>.service) is running.
+
+    This — NOT the mere existence of /run/user/<uid> — is the real signal that
+    linger is effective. A transient `sudo -u … podman` login session makes
+    pam_systemd create /run/user/<uid> on session-open and tear it down on
+    session-close; that flapping dir can satisfy a naive "is the dir there?"
+    check while no lingering manager exists at all.
+    """
+    r = subprocess.run(
+        ["systemctl", "is-active", f"user@{uid_str}.service"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() == "active"
+
+
 def enable_linger(pw):
     """Enable lingering for the workload user — effectively and synchronously.
 
     Creates a persistent systemd user manager (user@UID.service) that maintains
     /run/user/<uid> and the D-Bus session rootless podman needs.
 
-    We deliberately do NOT short-circuit on `show-user … Linger=yes`. That
-    reading can be stale or ineffective: the linger marker
-    (/var/lib/systemd/linger/<name>) survives `userdel`, so after a same-name
-    workload user is purged and recreated within one boot, logind reports
-    Linger=yes while NOT actually keeping user@<uid>.service alive. Trusting it
-    left the workload with no lingering manager, so /run/user/<uid> only existed
-    for the lifetime of each transient `sudo -u … podman` session and was GC'd
-    in between — making CLI podman calls (health/images/status/logs/…)
-    intermittently fail with "lstat /run/user/<uid>: no such file or directory".
+    We gate on `user@<uid>.service` being *active*, not on /run/user/<uid>
+    merely existing. A transient `sudo -u … podman` login session makes
+    pam_systemd create /run/user/<uid> on session-open and remove it on
+    session-close; under rapid UID recycling those flapping login-session dirs
+    can satisfy a naive existence check, so a dir-only wait would return
+    "success" while NO lingering manager is running. The dir then vanishes the
+    instant that transient session ends — GC'd out from under the workload's own
+    container (conmon: "/run/user/<uid>/…: No such file or directory") and
+    making CLI podman calls (health/images/status/logs/…) intermittently see an
+    empty store. Only a live user@<uid>.service keeps /run/user/<uid> pinned
+    across session churn.
 
-    Re-issuing `enable-linger` (idempotent) makes logind start and pin the
-    manager; we then wait for /run/user/<uid> so callers and the workload's own
-    containers find it ready instead of racing the async cold start.
+    We also do NOT short-circuit on `show-user … Linger=yes`: the linger marker
+    (/var/lib/systemd/linger/<name>) survives `userdel`, so logind can report
+    Linger=yes while user@<uid>.service is not actually running.
+
+    Re-issuing `enable-linger` sets the marker; we then explicitly *start*
+    user@<uid>.service (systemd serializes this after any in-flight stop of a
+    prior occupant of this recycled UID, so we never latch onto a dying
+    session's runtime dir) and wait for it to be genuinely active.
     """
     uid_str = str(pw.pw_uid)
+    service = f"user@{uid_str}.service"
 
     result = subprocess.run(
         ["loginctl", "enable-linger", uid_str],
@@ -353,24 +377,23 @@ def enable_linger(pw):
     if result.returncode != 0:
         raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
 
+    # Explicitly start the persistent manager. Queued after any in-flight stop
+    # of this UID's previous occupant, so the wait below can't false-positive on
+    # a dying session's /run/user/<uid>.
+    subprocess.run(["systemctl", "start", service],
+                   check=False, capture_output=True, timeout=30)
+
     runtime_dir = Path(f"/run/user/{pw.pw_uid}")
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if runtime_dir.is_dir():
+        if _linger_manager_active(uid_str) and runtime_dir.is_dir():
             log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
             return
         time.sleep(0.2)
 
-    # The manager didn't come up on its own in time — force it and check once
-    # more. The caller logs a warning on failure; boot is never blocked on this.
-    subprocess.run(["systemctl", "start", f"user@{uid_str}.service"],
-                   check=False, capture_output=True)
-    if runtime_dir.is_dir():
-        log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
-    else:
-        raise RuntimeError(
-            f"linger enabled but /run/user/{pw.pw_uid} did not appear"
-        )
+    raise RuntimeError(
+        f"linger enabled but {service} did not become active for {pw.pw_name}"
+    )
 
 
 def setup_vm_bridge(name: str, bridge: str):

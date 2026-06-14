@@ -19,6 +19,7 @@ from workload_lib import (
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    restart_workload_service,
     require_root,
     WORKLOAD_DIR,
 )
@@ -268,7 +269,13 @@ def cmd_secret(args, manager: WorkloadManager):
                 for wl_name in affected_workloads:
                     try:
                         wl = WorkloadConfig(wl_name)
-                        subprocess.run(["systemctl", "restart", wl.service_name], check=True)
+                        # Containers go through the self-healing restart (re-pin
+                        # runtime dir + clear start-limit thrash); VMs have no
+                        # /run/user/<uid>, so restart them plainly.
+                        if wl.is_vm:
+                            subprocess.run(["systemctl", "restart", wl.service_name], check=True)
+                        else:
+                            restart_workload_service(wl.uid, wl.service_name)
                         print(f"  ✓ Restarted {wl_name}")
                     except Exception as e:
                         print(f"  ✗ Failed to restart {wl_name}: {e}", file=sys.stderr)
