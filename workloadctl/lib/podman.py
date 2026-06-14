@@ -8,9 +8,20 @@ pattern is preserved; only parsing/typing changes.
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable
+
+
+# Matches logind GC'ing /run/user/<uid> out from under a live workload.
+# Pattern: lstat /run/user/<digits>: no such file
+_RUNTIME_DIR_MISSING_RE = re.compile(
+    r"lstat\s+/run/user/(\d+):\s+no such file",
+    re.IGNORECASE,
+)
 
 
 _NOT_FOUND_PHRASES = (
@@ -86,6 +97,29 @@ class Podman:
         cmd += ["podman", "--log-level=error", *args]
         return cmd
 
+    def _ensure_runtime_dir(self) -> None:
+        """Best-effort: re-assert linger and wait for /run/user/<uid> to appear.
+
+        Called when a podman invocation fails with the runtime-dir-missing
+        signature.  Swallows all exceptions — if we can't fix it, the
+        subsequent retry will fail and fall through to normal error handling.
+        """
+        try:
+            subprocess.run(
+                ["loginctl", "enable-linger", str(self._uid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+        runtime_dir = f"/run/user/{self._uid}"
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if os.path.isdir(runtime_dir):
+                return
+            time.sleep(0.1)
+
     def _run(
         self,
         *args: str,
@@ -93,11 +127,26 @@ class Podman:
         allow_missing: bool = False,
         check: bool = True,
     ):
-        proc = subprocess.run(
-            self._build_cmd(*args),
-            capture_output=True, text=True, cwd="/tmp",
-            timeout=self._timeout,
-        )
+        def _exec() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                self._build_cmd(*args),
+                capture_output=True, text=True, cwd="/tmp",
+                timeout=self._timeout,
+            )
+
+        proc = _exec()
+
+        # Part B: self-healing retry on runtime-dir-missing (user podman only).
+        if (
+            proc.returncode != 0
+            and self._username is not None
+            and not (allow_missing and _is_not_found(proc.stderr))
+        ):
+            m = _RUNTIME_DIR_MISSING_RE.search(proc.stderr)
+            if m and m.group(1) == str(self._uid):
+                self._ensure_runtime_dir()
+                proc = _exec()  # exactly one retry
+
         if proc.returncode != 0:
             if allow_missing and _is_not_found(proc.stderr):
                 return None

@@ -289,6 +289,10 @@ def workload_username(name: str) -> str:
 # process invocation so multiple workloads enabled in the same run don't race.
 _allocated_uids: set[int] = set()
 
+# Cursor state file: persists the last-allocated UID across invocations so
+# rapid create/purge cycles don't immediately reuse the same UID.
+_UID_CURSOR_FILE = Path("/var/lib/workloadctl/uid-cursor")
+
 
 def get_next_uid() -> int:
     """Return the next free UID in the workload range [UID_MIN, UID_MAX].
@@ -296,6 +300,11 @@ def get_next_uid() -> int:
     Combines the live /etc/passwd snapshot with UIDs already allocated in this
     process invocation.  Caller holds /run/lock/workload-subid.lock to prevent
     concurrent processes from picking the same slot.
+
+    Allocation uses a rotating cursor (persisted in _UID_CURSOR_FILE) to avoid
+    immediate reuse of a just-freed UID.  The cursor is only a starting point —
+    every candidate is still validated against the live /etc/passwd snapshot and
+    _allocated_uids, so the returned UID is guaranteed to be genuinely free.
     """
     used = set(_allocated_uids)
     try:
@@ -304,9 +313,26 @@ def get_next_uid() -> int:
                 used.add(pw.pw_uid)
     except Exception:
         pass
-    for uid in range(UID_MIN, UID_MAX + 1):
+
+    # Read the cursor (last allocated UID); start scanning from cursor+1.
+    cursor = UID_MIN - 1
+    try:
+        cursor = int(_UID_CURSOR_FILE.read_text().strip())
+    except Exception:
+        pass
+
+    # Scan from cursor+1, wrapping around; two passes covers the full range.
+    uid_range = UID_MAX - UID_MIN + 1
+    for offset in range(uid_range):
+        uid = UID_MIN + (cursor - UID_MIN + 1 + offset) % uid_range
         if uid not in used:
             _allocated_uids.add(uid)
+            # Persist cursor; best-effort (directory may not exist yet in tests)
+            try:
+                _UID_CURSOR_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _UID_CURSOR_FILE.write_text(str(uid))
+            except Exception:
+                pass
             return uid
     raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
 
