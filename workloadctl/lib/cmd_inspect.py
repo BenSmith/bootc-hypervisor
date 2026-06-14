@@ -483,23 +483,29 @@ def cmd_images(args, manager: WorkloadManager):
             if not manager.user_exists(config):
                 continue
 
-            info = manager.podman(config).image_info(config.image)
-            if info:
-                size_bytes = info.get("Size") or 0
-                images_data.append({
-                    "workload": config.filename,
-                    "image": config.image,
-                    "size_bytes": size_bytes,
-                    "created": _created_unix(info.get("Created"))
-                })
+            podman = manager.podman(config)
+            # Iterate every container's image so multi-container (pod/bridge)
+            # workloads list each image instead of crashing on the absent
+            # top-level [container] block.
+            for cname, image, _pull in config.container_specs():
+                info = podman.image_info(image)
+                if info:
+                    size_bytes = info.get("Size") or 0
+                    images_data.append({
+                        "workload": config.filename,
+                        "container": cname,
+                        "image": image,
+                        "size_bytes": size_bytes,
+                        "created": _created_unix(info.get("Created"))
+                    })
 
         if args.json:
             print(json.dumps({"images": images_data, "total": len(images_data)}, indent=2))
             return
 
         # Human-readable output
-        print(f"{'WORKLOAD':<20} {'IMAGE':<50} {'SIZE':<10} {'PULLED':<15}")
-        print("-" * 95)
+        print(f"{'WORKLOAD':<20} {'CONTAINER':<16} {'IMAGE':<50} {'SIZE':<10} {'PULLED':<15}")
+        print("-" * 112)
 
         for img in images_data:
             image = img["image"]
@@ -507,7 +513,7 @@ def cmd_images(args, manager: WorkloadManager):
                 image = image[:47] + "..."
             size_str = _format_size(img["size_bytes"]) if img["size_bytes"] else "unknown"
             pulled_str = _format_created(img["created"])
-            print(f"{img['workload']:<20} {image:<50} {size_str:<10} {pulled_str:<15}")
+            print(f"{img['workload']:<20} {img['container']:<16} {image:<50} {size_str:<10} {pulled_str:<15}")
 
         print()
         if len(images_data) == 0:

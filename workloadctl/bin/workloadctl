@@ -48,19 +48,19 @@ def main():
 
     create_parser = subparsers.add_parser("create", help="Create a new workload configuration")
     create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
-    create_parser.add_argument("--device", metavar="DEVICE", nargs="+", help="Generic device passthrough (e.g., /dev/ttyUSB0 /dev/video0 /dev/sdb)")
+    create_parser.add_argument("--device", metavar="DEVICE", action="append", help="Generic device passthrough; repeat per device (e.g., --device /dev/ttyUSB0 --device /dev/video0)")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
     create_parser.add_argument("--gpu", metavar="SPEC", help="GPU access (convenience flag): 'amd', 'nvidia', 'intel', 'none', 'auto', or 'nvidia:<index|UUID>' to pin one GPU (see `nvidia-ctk cdi list`)")
-    create_parser.add_argument("--groups", metavar="GROUP", nargs="+", help="Additional system groups (e.g., video render input dialout audio kvm)")
+    create_parser.add_argument("--groups", metavar="GROUP", action="append", help="Additional system group; repeat per group (e.g., --groups video --groups render)")
     create_parser.add_argument("--image", required=True, help="Container image (e.g., docker.io/library/nginx:alpine)")
     create_parser.add_argument("--input", action="store_true", help="Enable input devices (/dev/input + /dev/uinput) - convenience flag")
     create_parser.add_argument("--network", metavar="MODE", help="Network mode: 'host', 'pasta', 'none', or custom network name (default: pasta)")
-    create_parser.add_argument("--ports", metavar="PORT", nargs="+", help="Port mappings (e.g., 8080:80 8443:443)")
+    create_parser.add_argument("--ports", metavar="PORT", action="append", help="Port mapping; repeat per port (e.g., --ports 8080:80 --ports 8443:443)")
     create_parser.add_argument("--shm-size", metavar="SIZE", help="Shared memory size (e.g., 256m, 2g; default: 64m)")
     create_parser.add_argument("--systemd", metavar="MODE", choices=["always", "true", "false"],
                                help="Systemd container mode: 'always', 'true', or 'false' (skips --init, adds KillSignal)")
     create_parser.add_argument("--virtualization", action="store_true", help="Enable KVM (/dev/kvm + vhost devices) - convenience flag")
-    create_parser.add_argument("--volumes", metavar="VOL", nargs="+", help="Volume mounts (e.g., /host/path:/container/path:ro)")
+    create_parser.add_argument("--volumes", metavar="VOL", action="append", help="Volume mount; repeat per volume (e.g., --volumes /host/path:/container/path:ro)")
     create_parser.add_argument("name", help="Workload name (lowercase letters, numbers, hyphens, max 27 chars)")
 
     # Resource limit flags
@@ -198,11 +198,21 @@ def main():
 
     secret_export = secret_subparsers.add_parser("export", help="Export credential with passphrase encryption (portable)")
     secret_export.add_argument("--output", "-o", metavar="FILE", help="Output file (default: NAME.secret)")
+    secret_export_pass = secret_export.add_mutually_exclusive_group()
+    secret_export_pass.add_argument("--passphrase-file", metavar="PATH",
+                                    help="Read passphrase from PATH ('-' for stdin) instead of prompting")
+    secret_export_pass.add_argument("--passphrase-stdin", action="store_true",
+                                    help="Read passphrase from stdin instead of prompting")
     secret_export.add_argument("name", help="Credential name")
 
     secret_import = secret_subparsers.add_parser("import", help="Import passphrase-encrypted credential and re-encrypt with TPM")
     secret_import.add_argument("--force", action="store_true", help="Overwrite if exists")
     secret_import.add_argument("--key-type", choices=["tpm2", "host", "host+tpm2"], help="Encryption key type (default: tpm2)")
+    secret_import_pass = secret_import.add_mutually_exclusive_group()
+    secret_import_pass.add_argument("--passphrase-file", metavar="PATH",
+                                    help="Read passphrase from PATH ('-' for stdin) instead of prompting")
+    secret_import_pass.add_argument("--passphrase-stdin", action="store_true",
+                                    help="Read passphrase from stdin instead of prompting")
     secret_import.add_argument("name", help="Credential name")
     secret_import.add_argument("file", help="Passphrase-encrypted file to import")
 

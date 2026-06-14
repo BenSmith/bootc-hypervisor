@@ -3,11 +3,14 @@ cmd_interact — interactive/exec commands: shell, exec, logs, cp, attach.
 Also contains VM SSH/console helpers used by other modules.
 """
 
+import contextlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 from workload_lib import (
     VM_BRIDGE_NAME,
@@ -340,13 +343,117 @@ def cmd_cp(args, manager: WorkloadManager):
         sys.exit(1)
 
     target = resolve_container_target(config, container, workload)
+    pod = manager.podman(config)
 
+    # The host side of the copy must run in the root context (workloadctl runs
+    # as root): the rootless `_wl` user generally cannot read root-owned/0600
+    # host sources (host->container "not found") and cannot write the host
+    # destination — and because podman runs with cwd=/tmp, relative host
+    # destinations silently land in /tmp instead of the caller's directory
+    # (container->host data loss). We bridge through a staging dir owned by the
+    # workload user: root does all host I/O, podman does all container-side path
+    # semantics natively against the staged copy.
     if direction == "from":
-        manager.podman(config).run("cp", f"{target}:{container_path}", host_path, check=True)
+        _cp_from_container(pod, config, target, container_path, host_path)
     else:
-        manager.podman(config).run("cp", host_path, f"{target}:{container_path}", check=True)
+        _cp_to_container(pod, config, target, container_path, host_path)
 
     print("✓ Copied successfully")
+
+
+@contextlib.contextmanager
+def _cp_staging(config: "WorkloadConfig"):
+    """A temp dir owned by the workload user (0700) for staging cp transfers.
+
+    Owned by `_wl-<name>` so its rootless podman can read/write inside it; root
+    keeps access regardless, and 0700 keeps other workload users out. Always
+    removed on exit.
+    """
+    d = Path(tempfile.mkdtemp(prefix="workloadctl-cp-", dir="/var/tmp"))
+    try:
+        os.chown(d, config.uid, config.gid)
+        os.chmod(d, 0o700)
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    """Recursively chown path (not following symlinks)."""
+    os.chown(path, uid, gid, follow_symlinks=False)
+    if path.is_dir() and not path.is_symlink():
+        for root, dirs, files in os.walk(path):
+            for name in dirs + files:
+                try:
+                    os.chown(os.path.join(root, name), uid, gid,
+                             follow_symlinks=False)
+                except OSError:
+                    pass
+
+
+def _cp_to_container(pod, config, target, container_path, host_path):
+    """Copy a host path into a container (host read happens as root)."""
+    src = Path(host_path)
+    if not src.exists() and not src.is_symlink():
+        print(f"Error: Source path '{host_path}' does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    with _cp_staging(config) as stage:
+        staged = stage / src.name
+        # Copy as root so root-owned / 0600 sources are readable.
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, staged, symlinks=True)
+        else:
+            shutil.copy2(src, staged, follow_symlinks=False)
+        # Hand ownership to the workload user so its rootless podman can read it.
+        _chown_tree(staged, config.uid, config.gid)
+
+        # podman handles all container-side semantics (dir vs file, overwrite).
+        proc = pod.run("cp", str(staged), f"{target}:{container_path}",
+                       capture_output=True)
+        if proc.returncode != 0:
+            print(f"Error: copy into container failed:\n{proc.stderr.strip()}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+
+def _cp_from_container(pod, config, target, container_path, host_path):
+    """Copy a container path to the host (host write happens as root)."""
+    dest = Path(host_path)
+    if not dest.is_dir() and not dest.parent.is_dir():
+        print(f"Error: Destination directory '{dest.parent}' does not exist",
+              file=sys.stderr)
+        sys.exit(1)
+
+    with _cp_staging(config) as stage:
+        # podman copies the source into the staging dir using its basename, as
+        # the workload user (only it can read its rootless container's fs).
+        proc = pod.run("cp", f"{target}:{container_path}", f"{stage}/",
+                       capture_output=True)
+        if proc.returncode != 0:
+            print(f"Error: copy from container failed:\n{proc.stderr.strip()}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        entries = list(stage.iterdir())
+        if not entries:
+            print("Error: nothing was copied from the container", file=sys.stderr)
+            sys.exit(1)
+        produced = entries[0]
+
+        # Move into place as root with docker-cp destination semantics:
+        # existing dir -> copy in under the source basename; otherwise the
+        # destination names the result (overwriting any existing file/dir).
+        final = dest / produced.name if dest.is_dir() else dest
+        if final.is_symlink() or final.exists():
+            if final.is_dir() and not final.is_symlink():
+                shutil.rmtree(final)
+            else:
+                final.unlink()
+        shutil.move(str(produced), str(final))
+        # Owned by the workload user after the move on same-fs renames; normalize
+        # to root so the host result isn't left owned by `_wl-<name>`.
+        _chown_tree(final, 0, 0)
 
 
 def cmd_attach(args, manager: WorkloadManager):

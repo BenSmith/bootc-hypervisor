@@ -24,6 +24,55 @@ from workloadctl_core import (
 )
 
 
+def _read_passphrase(args, *, prompt: str, confirm: bool) -> str:
+    """Resolve a passphrase from a non-interactive source or interactive prompt.
+
+    Precedence: --passphrase-stdin / --passphrase-file ('-' == stdin) over the
+    prompt. For file/stdin sources a single trailing newline is stripped so the
+    common `echo pw > file` / `... | workloadctl ...` idioms work, but an
+    *embedded* newline is rejected: a multi-line passphrase file is almost
+    always an accident (extra line, pasted blob) that would otherwise encrypt
+    with bytes the operator didn't intend and fail to decrypt later. The
+    passphrase must be non-empty. `confirm` adds a second interactive prompt
+    (export); import uses a single prompt.
+    """
+    from_stdin = getattr(args, "passphrase_stdin", False)
+    pass_file = getattr(args, "passphrase_file", None)
+
+    if from_stdin or pass_file == "-":
+        passphrase = _strip_trailing_newline(sys.stdin.buffer.read().decode())
+    elif pass_file:
+        try:
+            passphrase = _strip_trailing_newline(Path(pass_file).read_text())
+        except OSError as e:
+            print(f"Error: Cannot read passphrase file: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # getpass already strips the trailing newline of interactive input.
+        passphrase = getpass.getpass(prompt)
+        if confirm and passphrase != getpass.getpass("Confirm passphrase: "):
+            print("Error: Passphrases do not match", file=sys.stderr)
+            sys.exit(1)
+
+    if not passphrase:
+        print("Error: Passphrase cannot be empty", file=sys.stderr)
+        sys.exit(1)
+    if "\n" in passphrase or "\r" in passphrase:
+        print("Error: Passphrase must be a single line (no embedded newlines)",
+              file=sys.stderr)
+        sys.exit(1)
+    return passphrase
+
+
+def _strip_trailing_newline(text: str) -> str:
+    """Strip exactly one trailing newline (LF or CRLF), nothing more."""
+    if text.endswith("\r\n"):
+        return text[:-2]
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
 # ---------------------------------------------------------------------------
 # cmd_secret
 # ---------------------------------------------------------------------------
@@ -247,15 +296,9 @@ def cmd_secret(args, manager: WorkloadManager):
             print("Error: Failed to decrypt credential (TPM unavailable?)", file=sys.stderr)
             sys.exit(1)
 
-        # Read passphrase
-        passphrase = getpass.getpass("Passphrase for export: ")
-        confirm = getpass.getpass("Confirm passphrase: ")
-        if passphrase != confirm:
-            print("Error: Passphrases do not match", file=sys.stderr)
-            sys.exit(1)
-        if not passphrase:
-            print("Error: Passphrase cannot be empty", file=sys.stderr)
-            sys.exit(1)
+        # Read passphrase (non-interactive source or interactive double-prompt)
+        passphrase = _read_passphrase(args, prompt="Passphrase for export: ",
+                                      confirm=True)
 
         # Encrypt with openssl (passphrase-based, portable)
         # Use a temp file for the passphrase to avoid leaking it in /proc/*/cmdline
@@ -292,8 +335,8 @@ def cmd_secret(args, manager: WorkloadManager):
             print(f"Error: Credential '{name}' already exists. Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
 
-        # Read passphrase
-        passphrase = getpass.getpass("Passphrase: ")
+        # Read passphrase (non-interactive source or interactive prompt)
+        passphrase = _read_passphrase(args, prompt="Passphrase: ", confirm=False)
 
         # Decrypt with openssl
         with tempfile.NamedTemporaryFile(mode='w', suffix='.pass') as pf:
