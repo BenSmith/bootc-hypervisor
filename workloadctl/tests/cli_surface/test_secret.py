@@ -187,14 +187,14 @@ class TestSecretExportImport:
         export_path = f"/tmp/clitest-export-{name}.secret"
 
         try:
-            # Export
+            # Export (non-interactive: passphrase via stdin, single line)
             r = target.wl(
-                f"secret export --output {export_path} {name}",
-                input="testpass\ntestpass\n",  # passphrase prompt (enter twice)
+                f"secret export --passphrase-stdin --output {export_path} {name}",
+                input="testpass\n",
                 check=False, timeout=30,
             )
             if r.rc != 0:
-                pytest.skip(f"secret export failed (may need interactive TTY): {r.stderr}")
+                pytest.skip(f"secret export failed: {r.stderr}")
 
             # Verify export file exists
             assert target.remote_path_exists(export_path), "Export file not created"
@@ -206,8 +206,8 @@ class TestSecretExportImport:
             import_name = f"{name}-imported"
             try:
                 r = target.wl(
-                    f"secret import --key-type {key_type} --force {import_name} {export_path}",
-                    input="testpass\n",  # passphrase for decryption
+                    f"secret import --passphrase-stdin --key-type {key_type} --force {import_name} {export_path}",
+                    input="testpass\n",  # passphrase via stdin (non-interactive)
                     check=False, timeout=30,
                 )
                 if r.rc != 0:
