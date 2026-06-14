@@ -130,10 +130,10 @@ class TestUpdateRollbackContainer:
 @pytest.mark.vm
 @pytest.mark.slow
 class TestUpdateRollbackVM:
-    def test_update_then_rollback_vm(self, target, clitest_vm, record_property):
+    def test_update_then_rollback_vm(self, target, fresh_vm, record_property):
         """update → rollback on a VM, in sequence on one fixture.
 
-        clitest_vm is function-scoped, so each test gets a fresh VM with zero
+        fresh_vm is function-scoped, so each test gets a fresh VM with zero
         generations. Update and rollback must therefore run in a single test:
         update creates system.qcow2.gen-N, rollback restores the prior disk.
         If update can't produce a generation (cloud image unchanged, build
@@ -141,13 +141,13 @@ class TestUpdateRollbackVM:
         """
         record_property("cell", "update/vm")
 
-        gen_before = _vm_gen_count(target, clitest_vm)
+        gen_before = _vm_gen_count(target, fresh_vm)
 
-        r = target.wl(f"update {clitest_vm}", check=False, timeout=600)
+        r = target.wl(f"update {fresh_vm}", check=False, timeout=600)
         # May fail if cloud image unchanged or disk build fails; check no traceback
         assert "Traceback" not in r.stderr, f"update crashed on VM: {r.stderr}"
 
-        gen_after = _vm_gen_count(target, clitest_vm)
+        gen_after = _vm_gen_count(target, fresh_vm)
         if r.rc != 0 or gen_after <= gen_before:
             pytest.skip(
                 "update did not produce a new VM generation "
@@ -157,9 +157,9 @@ class TestUpdateRollbackVM:
 
         # A generation now exists — exercise rollback.
         record_property("cell", "rollback/vm")
-        r = target.wl(f"rollback {clitest_vm}", check=True, timeout=120)
+        r = target.wl(f"rollback {fresh_vm}", check=True, timeout=120)
         assert r.rc == 0
         assert "Traceback" not in r.stderr
-        assert _wait_active(target, clitest_vm, timeout=300), (
-            f"{clitest_vm!r} not active after rollback"
+        assert _wait_active(target, fresh_vm, timeout=300), (
+            f"{fresh_vm!r} not active after rollback"
         )

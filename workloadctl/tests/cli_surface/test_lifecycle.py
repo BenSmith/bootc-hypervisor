@@ -5,6 +5,15 @@ Covers: create, enable, start, stop, disable (--purge), edit, reboot, recreate.
 
 Most tests use a fresh workload per test (function-scoped fixtures).
 Side effects are verified, not just exit codes.
+
+VM lifecycle tests (stop/start/recreate/reboot) share ONE module-scoped
+clitest_vm_lifecycle fixture so the VM is booted once for the group rather
+than four times.  Each test calls _vm_lifecycle_baseline() at entry to:
+  - clear any accumulated StartLimitBurst state (reset-failed), and
+  - restore the VM to active/running before exercising the verb under test.
+This is harness-level hygiene, not a product fix: the product's StartLimitBurst
+settings are tight by design, so the harness must not allow limit state to
+bleed across tests that share one unit.
 """
 
 import json
@@ -61,6 +70,37 @@ def _wait_inactive(target: Target, name: str, timeout: int = 30) -> bool:
             return True
         time.sleep(1)
     return False
+
+
+def _vm_lifecycle_baseline(target: Target, name: str, timeout: int = 120):
+    """Bring clitest_vm_lifecycle to a known-good baseline before each test.
+
+    Shared lifecycle tests mutate the VM (stop it, reboot it, etc.).  Without
+    explicit baseline restoration a test that finds the VM already stopped (left
+    by the previous test) would either skip the interesting verb or produce a
+    confusing failure.  This helper:
+
+      1. Clears any accumulated StartLimitBurst/failed state on the systemd
+         unit — necessary because StartLimitBurst=3/300s is tight and the
+         lifecycle tests trigger several start/stop cycles on the same unit.
+         reset-failed is idempotent and harmless when the unit is clean.
+
+      2. If the VM is not already active, starts it and waits until it is.
+         This ensures every test begins with a running VM regardless of what
+         the previous test did to it.
+
+    Call at the very top of each VM lifecycle test body (after record_property).
+    """
+    svc = f"workload-{name}.service"
+    # Step 1: clear start-limit state unconditionally.
+    target.run(["systemctl", "reset-failed", svc], sudo=True, check=False)
+    # Step 2: ensure the VM is running.
+    if not _is_active(target, name):
+        target.wl(f"start {name}", check=True, timeout=30)
+        assert _wait_active(target, name, timeout=timeout), (
+            f"clitest_vm_lifecycle did not become active within {timeout}s "
+            "during per-test baseline restore"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -217,21 +257,27 @@ class TestStartStop:
     @pytest.mark.mutating
     @pytest.mark.vm
     @pytest.mark.slow
-    def test_stop_vm(self, target, clitest_vm, record_property):
+    def test_stop_vm(self, target, clitest_vm_lifecycle, record_property):
         record_property("cell", "stop/vm")
-        assert _is_active(target, clitest_vm)
-        target.wl(f"stop {clitest_vm}", check=True, timeout=30)
-        assert _wait_inactive(target, clitest_vm, timeout=30)
+        _vm_lifecycle_baseline(target, clitest_vm_lifecycle)
+        assert _is_active(target, clitest_vm_lifecycle)
+        target.wl(f"stop {clitest_vm_lifecycle}", check=True, timeout=30)
+        assert _wait_inactive(target, clitest_vm_lifecycle, timeout=30)
 
     @pytest.mark.mutating
     @pytest.mark.vm
     @pytest.mark.slow
-    def test_start_vm(self, target, clitest_vm, record_property):
+    def test_start_vm(self, target, clitest_vm_lifecycle, record_property):
         record_property("cell", "start/vm")
-        target.wl(f"stop {clitest_vm}", check=False, timeout=30)
-        _wait_inactive(target, clitest_vm, timeout=30)
-        target.wl(f"start {clitest_vm}", check=True, timeout=30)
-        assert _wait_active(target, clitest_vm, timeout=60)
+        # Baseline: reset-failed + ensure inactive so we can start from cold.
+        svc = f"workload-{clitest_vm_lifecycle}.service"
+        target.run(["systemctl", "reset-failed", svc], sudo=True, check=False)
+        if _is_active(target, clitest_vm_lifecycle):
+            target.wl(f"stop {clitest_vm_lifecycle}", check=False, timeout=30)
+            _wait_inactive(target, clitest_vm_lifecycle, timeout=30)
+        # Now exercise start
+        target.wl(f"start {clitest_vm_lifecycle}", check=True, timeout=30)
+        assert _wait_active(target, clitest_vm_lifecycle, timeout=60)
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +299,15 @@ class TestRecreate:
     @pytest.mark.mutating
     @pytest.mark.vm
     @pytest.mark.slow
-    def test_recreate_vm(self, target, clitest_vm, record_property):
+    def test_recreate_vm(self, target, clitest_vm_lifecycle, record_property):
         """recreate on a VM rebuilds the cloud-init seed and reboots QEMU."""
         record_property("cell", "recreate/vm")
-        r = target.wl(f"recreate {clitest_vm}", check=True, timeout=120)
+        _vm_lifecycle_baseline(target, clitest_vm_lifecycle)
+        r = target.wl(f"recreate {clitest_vm_lifecycle}", check=True, timeout=120)
         assert r.rc == 0
         # VM should come back up
-        assert _wait_active(target, clitest_vm, timeout=300), (
-            f"{clitest_vm!r} not active after recreate"
+        assert _wait_active(target, clitest_vm_lifecycle, timeout=300), (
+            f"{clitest_vm_lifecycle!r} not active after recreate"
         )
 
 
@@ -299,16 +346,17 @@ class TestReboot:
     @pytest.mark.mutating
     @pytest.mark.vm
     @pytest.mark.slow
-    def test_reboot_vm(self, target, clitest_vm, record_property):
+    def test_reboot_vm(self, target, clitest_vm_lifecycle, record_property):
         """reboot on a VM: sends soft-reboot to the guest over SSH."""
         record_property("cell", "reboot/vm")
-        r = target.wl(f"reboot {clitest_vm}", check=False, timeout=30)
+        _vm_lifecycle_baseline(target, clitest_vm_lifecycle)
+        r = target.wl(f"reboot {clitest_vm_lifecycle}", check=False, timeout=30)
         assert "Traceback" not in r.stderr, f"reboot traceback: {r.stderr}"
         # rc==0 expected when SSH succeeds
         # Give the VM time to reboot and come back
         time.sleep(60)
-        assert _wait_active(target, clitest_vm, timeout=180), (
-            f"{clitest_vm!r} not active after reboot"
+        assert _wait_active(target, clitest_vm_lifecycle, timeout=180), (
+            f"{clitest_vm_lifecycle!r} not active after reboot"
         )
 
 

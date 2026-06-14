@@ -6,17 +6,19 @@ Two flavours of workload fixture exist, because provisioning a workload
 dominant cost in this suite:
 
   - **Session-scoped "shared" topologies** (clitest_single / clitest_pod /
-    clitest_bridge / clitest_host). Provisioned ONCE per session and reused by
-    every *read-only* test (introspection, exec, logs, cleanup-no-orphan, …).
-    These tests never mutate the workload, so sharing one instance is safe and
-    turns dozens of enable/purge cycles into one.
+    clitest_bridge / clitest_host / clitest_vm). Provisioned ONCE per session
+    and reused by every *read-only* test (introspection, exec, logs,
+    cleanup-no-orphan, …). These tests never mutate the workload, so sharing
+    one instance is safe and turns dozens of enable/purge cycles into one.
+    clitest_vm follows the same pattern for VM workloads (one boot per session).
 
-  - **Function-scoped "fresh" instances** (fresh_single / fresh_bridge).
-    A brand-new, isolated workload per test, for *mutating* tests
+  - **Function-scoped "fresh" instances** (fresh_single / fresh_bridge /
+    fresh_vm). A brand-new, isolated workload per test, for *mutating* tests
     (stop/start/recreate/edit, backup, update/rollback, network create). They
     use distinct workload names + host ports (clitest-fresh-*) so a fresh
     instance can run alongside the long-lived shared one without colliding on
-    the name or the published port.
+    the name or the published port. fresh_vm provides the same isolation for
+    mutating VM tests (backup, update/rollback).
 
 All workload fixtures are:
   - Lazy: only created when a test requests them
@@ -105,7 +107,7 @@ def _enable_workload(target: Target, name: str, timeout: int = 120,
             # Tear down to a clean slate (disable --purge keeps the TOML in
             # /etc/workloads.d, so the retry's enable still finds it) and clear
             # any failed/start-limit state before re-enabling.
-            target.wl(f"disable --purge {name}", check=False, timeout=60)
+            target.wl(f"disable --purge {name}", check=False, timeout=120)
             target.run(
                 ["systemctl", "reset-failed", f"workload-{name}.service"],
                 sudo=True, check=False,
@@ -171,8 +173,13 @@ def _purge_workload(target: Target, name: str):
     quickly". Without a reset-failed that lockout survives the purge and poisons
     the *next* fresh fixture's `enable` (it never reaches active). reset-failed
     is idempotent and harmless when the unit is already clean.
+
+    Timeout is 120s because VM workloads run ExecStop (workload-vm-shutdown)
+    which sends ACPI power-off and blocks up to 80s waiting for the guest.
+    The VM may have just restarted (e.g. after rollback), so a generous timeout
+    avoids a spurious teardown ERROR when the stop is simply slow.
     """
-    target.wl(f"disable --purge {name}", check=False, timeout=60)
+    target.wl(f"disable --purge {name}", check=False, timeout=120)
     time.sleep(1)
     target.run(
         ["systemctl", "reset-failed", f"workload-{name}.service"],
@@ -318,9 +325,14 @@ def clitest_broken(target: Target):
 # VM workload fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def clitest_vm(target: Target):
-    """VM workload on the managed NAT bridge (_workload-br).
+    """Shared VM workload on the managed NAT bridge (_workload-br).
+
+    Provisioned ONCE per session and reused by every *read-only* VM test
+    (introspection, exec, logs, stats, images, …). Mirrors the wording and
+    intent of the session-scoped container fixtures above. Mutating VM tests
+    (backup, update/rollback) must use the fresh_vm fixture below instead.
 
     Tests that use this fixture carry their own @pytest.mark.vm/slow markers;
     markers on a fixture function do not propagate to its consumers.
@@ -332,6 +344,53 @@ def clitest_vm(target: Target):
         # container, so don't wait for one.
         _enable_workload(target, name, timeout=600, expect_container=False)
         # Wait a bit extra for cloud-init to complete
+        time.sleep(30)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+@pytest.fixture()
+def fresh_vm(target: Target):
+    """Fresh, isolated VM per test, for mutating VM tests (backup, update/rollback).
+
+    A brand-new VM workload instance backed by clitest-vm-fresh.toml
+    (workload name clitest-vm-fresh). Uses the same managed NAT bridge
+    (_workload-br) as clitest_vm but with a distinct name, so both can
+    coexist within one session without colliding.
+    """
+    skip_if_no_kvm(target)
+    name = _install_toml(target, "clitest-vm-fresh.toml")
+    try:
+        _enable_workload(target, name, timeout=600, expect_container=False)
+        time.sleep(30)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+@pytest.fixture(scope="module")
+def clitest_vm_lifecycle(target: Target):
+    """Shared module-scoped VM for the four mutating lifecycle tests in test_lifecycle.py.
+
+    Booted ONCE per module (stop/start/recreate/reboot tests all share it),
+    saving ~3 VM boots vs. per-test fresh_vm.  Backed by
+    clitest-vm-lifecycle.toml (distinct name → distinct DHCP/MAC so it can
+    coexist on _workload-br with clitest_vm and clitest-vm-fresh).
+
+    Module scope means this fixture is provisioned the first time any lifecycle
+    VM test runs and torn down after the last one in that module finishes —
+    isolated from the session-scoped read-only clitest_vm and from fresh_vm.
+    """
+    skip_if_no_kvm(target)
+    name = _install_toml(target, "clitest-vm-lifecycle.toml")
+    try:
+        _enable_workload(target, name, timeout=600, expect_container=False)
+        # Extra settle time: cloud-init still running after systemd sees active
         time.sleep(30)
     except Exception:
         _purge_workload(target, name)

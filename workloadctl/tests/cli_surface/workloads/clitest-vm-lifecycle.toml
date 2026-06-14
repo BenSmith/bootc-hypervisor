@@ -1,0 +1,25 @@
+# clitest-vm-lifecycle — shared lifecycle-test VM on the workloadctl-managed NAT bridge.
+# Uses the Fedora 44 Cloud image.  cloud-init enables sshd, creates the
+# workload user, and touches /var/lib/clitest-vm-ready as a readiness marker.
+# Gate: has_kvm.
+# Distinct name from clitest-vm and clitest-vm-fresh so all three can coexist
+# on _workload-br (distinct name → distinct DHCP/MAC).  This VM is
+# module-scoped: booted ONCE for the test_lifecycle.py VM tests (stop, start,
+# recreate, reboot) and torn down after that module, saving ~3 boots vs.
+# function-scoped fresh_vm.
+
+[workload]
+name = "clitest-vm-lifecycle"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "1024M"
+system_disk_size = "10G"
+user = "workload"
+rollback_keep = 1
+
+[vm.network]
+# Default: _workload-br (workloadctl-managed NAT bridge)

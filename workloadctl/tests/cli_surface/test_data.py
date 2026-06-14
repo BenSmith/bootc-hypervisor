@@ -114,22 +114,21 @@ class TestBackupContainer:
 @pytest.mark.vm
 @pytest.mark.slow
 class TestBackupVM:
-    def test_backup_vm(self, target, clitest_vm, record_property):
+    def test_backup_vm(self, target, fresh_vm, record_property):
         """backup a stopped VM workload."""
         record_property("cell", "backup/vm")
         # Stop VM first (backup requires it stopped for VMs)
-        target.wl(f"stop {clitest_vm}", check=False, timeout=30)
+        target.wl(f"stop {fresh_vm}", check=False, timeout=30)
         time.sleep(5)
 
-        r = target.wl(f"backup {clitest_vm}", check=True, timeout=300)
+        r = target.wl(f"backup {fresh_vm}", check=True, timeout=300)
         assert r.rc == 0
         assert "Traceback" not in r.stderr
 
-        archive = _find_backup(target, clitest_vm)
-        assert archive, f"No backup archive for {clitest_vm}"
+        archive = _find_backup(target, fresh_vm)
+        assert archive, f"No backup archive for {fresh_vm}"
 
-        # Restart for other tests
-        target.wl(f"start {clitest_vm}", check=False, timeout=60)
+        # fresh_vm is torn down by its fixture finalizer; no need to restart
 
     def test_backup_vm_no_stop_rejected(self, target, clitest_vm, record_property):
         """backup --no-stop on a VM must be rejected (unsafe)."""

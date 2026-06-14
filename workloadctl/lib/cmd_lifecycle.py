@@ -959,6 +959,17 @@ def cmd_recreate(args, manager: WorkloadManager):
         check=True,
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
+    # Clear any failed/start-limit state before restarting. A VM that was
+    # stopped and started several times in quick succession (e.g. during
+    # debug cycles or immediately after a fresh enable) can hit
+    # StartLimitBurst and refuse a restart even though the underlying QEMU
+    # binary is healthy. `recreate` explicitly means "restart fresh from
+    # config", so it should never be blocked by accumulated start-limit
+    # state. reset-failed is idempotent and harmless on a clean unit.
+    subprocess.run(
+        ["systemctl", "reset-failed", config.service_name],
+        check=False, capture_output=True,
+    )
     if config.is_vm:
         # The cloud-init ISO and nvram are built by the setup oneshot
         # (RemainAfterExit=yes), which a plain main-service restart does NOT
