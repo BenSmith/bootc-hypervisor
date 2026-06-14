@@ -363,13 +363,22 @@ def cmd_cp(args, manager: WorkloadManager):
 
 @contextlib.contextmanager
 def _cp_staging(config: "WorkloadConfig"):
-    """A temp dir owned by the workload user (0700) for staging cp transfers.
+    """A temp dir under the workload's home (0700) for staging cp transfers.
 
-    Owned by `_wl-<name>` so its rootless podman can read/write inside it; root
-    keeps access regardless, and 0700 keeps other workload users out. Always
-    removed on exit.
+    Must live inside the workload user's home, not /var/tmp or /tmp: the
+    rootless podman runs in a mount namespace with a private tmp (PrivateTmp),
+    so a host-side dir created under /var/tmp is invisible to it ("could not be
+    found on the host"). The home dir is on podman's own storage path and is
+    always visible inside that namespace. Owned by `_wl-<name>` so its podman
+    can read/write inside it; root keeps access regardless, and 0700 keeps other
+    workload users out. Always removed on exit.
     """
-    d = Path(tempfile.mkdtemp(prefix="workloadctl-cp-", dir="/var/tmp"))
+    home = config.home_dir
+    if not home.is_dir():
+        print(f"Error: Workload home '{home}' does not exist (is it enabled?)",
+              file=sys.stderr)
+        sys.exit(1)
+    d = Path(tempfile.mkdtemp(prefix=".workloadctl-cp-", dir=str(home)))
     try:
         os.chown(d, config.uid, config.gid)
         os.chmod(d, 0o700)
