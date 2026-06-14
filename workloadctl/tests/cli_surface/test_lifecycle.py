@@ -329,8 +329,10 @@ class TestEdit:
         )
         # Upload the editor script to a temp location on the target
         remote_editor = "/tmp/clitest-editor.sh"
+        # put_content writes via `sudo tee`, so the file is root-owned; the
+        # chmod must therefore run as root too (a non-sudo chmod hits EPERM).
         target.put_content(editor_script, remote_editor)
-        target.run(["chmod", "+x", remote_editor], sudo=False, check=True)
+        target.run(["chmod", "+x", remote_editor], sudo=True, check=True)
 
         # Run edit with EDITOR set to our script.  sudo scrubs the environment
         # by default, so pass EDITOR through with `env` inside the sudo context

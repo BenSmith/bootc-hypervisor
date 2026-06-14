@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -324,28 +325,52 @@ def write_environment_file(name, pw, config):
 
 
 def enable_linger(pw):
-    """Enable lingering for the workload user.
+    """Enable lingering for the workload user — effectively and synchronously.
 
-    Creates persistent systemd user manager (user@UID.service) that
-    maintains /run/user/<uid> and provides D-Bus session for podman.
+    Creates a persistent systemd user manager (user@UID.service) that maintains
+    /run/user/<uid> and the D-Bus session rootless podman needs.
+
+    We deliberately do NOT short-circuit on `show-user … Linger=yes`. That
+    reading can be stale or ineffective: the linger marker
+    (/var/lib/systemd/linger/<name>) survives `userdel`, so after a same-name
+    workload user is purged and recreated within one boot, logind reports
+    Linger=yes while NOT actually keeping user@<uid>.service alive. Trusting it
+    left the workload with no lingering manager, so /run/user/<uid> only existed
+    for the lifetime of each transient `sudo -u … podman` session and was GC'd
+    in between — making CLI podman calls (health/images/status/logs/…)
+    intermittently fail with "lstat /run/user/<uid>: no such file or directory".
+
+    Re-issuing `enable-linger` (idempotent) makes logind start and pin the
+    manager; we then wait for /run/user/<uid> so callers and the workload's own
+    containers find it ready instead of racing the async cold start.
     """
     uid_str = str(pw.pw_uid)
-
-    check = subprocess.run(
-        ["loginctl", "show-user", uid_str, "--property=Linger", "--value"],
-        capture_output=True, text=True
-    )
-    if check.returncode == 0 and check.stdout.strip() == "yes":
-        return  # Already enabled
 
     result = subprocess.run(
         ["loginctl", "enable-linger", uid_str],
         capture_output=True, text=True
     )
-    if result.returncode == 0:
+    if result.returncode != 0:
+        raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
+
+    runtime_dir = Path(f"/run/user/{pw.pw_uid}")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if runtime_dir.is_dir():
+            log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
+            return
+        time.sleep(0.2)
+
+    # The manager didn't come up on its own in time — force it and check once
+    # more. The caller logs a warning on failure; boot is never blocked on this.
+    subprocess.run(["systemctl", "start", f"user@{uid_str}.service"],
+                   check=False, capture_output=True)
+    if runtime_dir.is_dir():
         log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
     else:
-        raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
+        raise RuntimeError(
+            f"linger enabled but /run/user/{pw.pw_uid} did not appear"
+        )
 
 
 def setup_vm_bridge(name: str, bridge: str):

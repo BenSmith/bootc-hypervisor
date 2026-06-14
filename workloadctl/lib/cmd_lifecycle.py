@@ -703,14 +703,33 @@ def cmd_disable(args, manager: WorkloadManager):
     print(f"  Stopping {config.service_name}...")
     subprocess.run(["systemctl", "stop", config.service_name], check=False)
 
+    # Stop and reset the workload's RemainAfterExit=yes oneshot helpers so they
+    # re-run on the next enable. They stay "active (exited)" after the umbrella
+    # service stops (Requires= does not propagate stop), so a same-name re-enable
+    # within one boot finds the Requires=d helper already satisfied and systemd
+    # SILENTLY SKIPS re-running it. For the setup service that means
+    # workload-ensure-user (linger, subuid/subgid, volume dirs, EnvironmentFile)
+    # never re-runs: the workload comes up with no lingering user manager, so
+    # /run/user/<uid> only exists for the lifetime of each transient
+    # `sudo -u … podman` session and is GC'd in between — making every CLI podman
+    # call (health/images/status/logs/exec/cp) intermittently fail with
+    # "lstat /run/user/<uid>: no such file or directory".
+    helper_services = [f"workload-{config.name}-setup.service"]
     if config.is_vm:
-        # Stop and reset the build/setup oneshot services so they re-run on
-        # the next enable. Without this, --purge deletes the disk but the
-        # build service stays in "active exited" and systemd skips it.
-        for suffix in ("build", "setup"):
-            svc = f"workload-{config.name}-{suffix}.service"
-            subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True)
-            subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True)
+        helper_services.append(f"workload-{config.name}-build.service")
+    else:
+        # Pod/bridge helper oneshots + per-container sub-services share the same
+        # RemainAfterExit staleness; stopping absent units is a harmless no-op.
+        helper_services.append(f"workload-{config.name}-pod.service")
+        helper_services.append(f"workload-{config.name}-net.service")
+        if config.is_multi:
+            helper_services += [
+                f"workload-{config.name}-{cname}.service"
+                for cname in config.container_names()
+            ]
+    for svc in helper_services:
+        subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True)
+        subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True)
 
     # Run host setup teardown if configured
     _run_host_setup(config, "disable")
