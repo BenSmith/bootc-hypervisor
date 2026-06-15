@@ -59,33 +59,6 @@
 
 ---
 
-### cloud-init ISO in tmpfs (S2 follow-up)
-
-**Why:** VM cloud-init template mode decrypts secrets and renders them into
-`cloud-init.iso`, which lives at `/var/lib/workloads/<name>/cloud-init.iso`
-(0640, inside a 0700 home). The cheap fix (2026-06-11) tightened the seed
-dir perms and deleted it after ISO build, so the persistent risk is just the
-ISO itself. Threat: offline disk read of `/var` without TPM.
-
-**Proposal:** Point the QEMU cdrom at `/run/workloads/<name>/cloud-init.iso`
-instead of the home dir. `workload-ensure-user` already runs at `ExecStartPre`
-(service start), so it rebuilds the ISO into tmpfs each boot — no plaintext
-on persistent disk. The fingerprint check still avoids unnecessary rebuilds
-(fingerprint file stays in the home dir).
-
-**Changes needed:**
-- Generator: emit cdrom path as `/run/workloads/<name>/cloud-init.iso`
-- `workload-ensure-user`: write ISO there instead of home; create the `/run`
-  dir if absent (tmpfiles.d or ensure-user itself)
-- Update unit snapshot tests
-
-**Effort:** Small-medium (~20-40 lines across two files + snapshots).
-**Value:** Eliminates persistent plaintext ISO for template-mode VMs.
-**Prerequisite:** Only worth doing if the threat model includes offline disk
-access without TPM.
-
----
-
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*
