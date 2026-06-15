@@ -581,7 +581,20 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
 
 
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):
-    """Build cloud-init seed ISO (meta-data + user-data) into workload home.
+    """Build cloud-init seed ISO (meta-data + user-data) into the runtime dir.
+
+    The ISO is written to the tmpfs runtime dir /run/workload-vm/{name}/ rather
+    than the persistent workload home: in template mode it embeds decrypted
+    secrets in plaintext, so keeping it on tmpfs means it never survives a
+    reboot at rest (the threat being an offline disk read without the TPM).
+    The setup service (setup_vm_socket_dir, run earlier in this same invocation)
+    has already created the dir; the main VM service later adopts it via
+    RuntimeDirectory + RuntimeDirectoryPreserve=yes, which preserves this file.
+
+    The fingerprint stays in the persistent home, so after a reboot it still
+    matches but the tmpfs ISO is gone — iso_path.exists() is False, the skip is
+    bypassed, and we rebuild (re-decrypting secrets fresh). Within a single boot
+    the ISO is preserved, the fingerprint matches, and we skip the rebuild.
 
     Refuses to build if the SSH pubkey is missing: an authorized_keys-less
     ISO would produce a VM that `workloadctl exec` cannot reach.
@@ -603,8 +616,28 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
       inject. No YAML parsing — the user owns the file's structure.
     """
     home_path = Path(pw.pw_dir)
-    iso_path = home_path / "cloud-init.iso"
+    # The ISO lives on tmpfs (the VM runtime dir), never the persistent home —
+    # it can embed decrypted secrets. setup_vm_socket_dir() created this dir
+    # earlier in the same invocation; recreate it defensively in case this is
+    # called out of order (e.g. tests).
+    runtime_dir = VM_SOCKET_DIR / name
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(runtime_dir, pw.pw_uid, pw.pw_gid)
+    os.chmod(runtime_dir, 0o750)
+    iso_path = runtime_dir / "cloud-init.iso"
     seed_dir = home_path / ".cloud-init-seed"
+
+    # Migration: older builds wrote the ISO into the persistent home. It can
+    # embed plaintext secrets, so remove any stale copy left there — the live
+    # ISO is now the tmpfs one above.
+    legacy_iso = home_path / "cloud-init.iso"
+    try:
+        legacy_iso.unlink()
+        log(f"  Removed legacy on-disk cloud-init ISO: {legacy_iso}")
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"  WARNING: could not remove legacy ISO {legacy_iso}: {e}")
 
     vm_cfg = config.get("vm", {})
     guest_user = vm_cfg.get("user", "workload")

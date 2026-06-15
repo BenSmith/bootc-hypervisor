@@ -30,7 +30,7 @@ ExecStart=/usr/libexec/workloadctl/workload-vm-notify "virtual-forgejo" \
         -drive if=pflash,format=raw,file=/var/lib/workloads/virtual-forgejo/nvram.fd \
         -drive file=/var/lib/workloads/virtual-forgejo/system.qcow2,if=virtio,format=qcow2,id=system \
         -drive file=/var/lib/workloads/virtual-forgejo/data.qcow2,if=virtio,format=qcow2,id=data \
-        -drive file=/var/lib/workloads/virtual-forgejo/cloud-init.iso,if=virtio,format=raw,readonly=on,media=cdrom,id=cloudinit \
+        -drive file=/run/workload-vm/virtual-forgejo/cloud-init.iso,if=virtio,format=raw,readonly=on,media=cdrom,id=cloudinit \
         -netdev bridge,id=net0,br=_workload-br \
         -device virtio-net-pci,netdev=net0,mac=0e:d1:bb:0c:8a:39 \
         -device virtio-balloon-pci \

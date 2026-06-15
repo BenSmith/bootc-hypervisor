@@ -68,10 +68,13 @@ enabled = false
 #                         see rollback_keep below)
 #   data.qcow2          - Optional second disk (formatted by cloud-init)
 #   nvram.fd            - Per-VM UEFI NVRAM (copy of OVMF_VARS.fd)
-#   cloud-init.iso      - Seed ISO with SSH key and virtiofs fstab (rebuilt
-#                         when the SSH pubkey changes)
 #   .ssh/id_ed25519     - Per-workload SSH key (generated once)
 #   .image-cache/       - Downloaded cloud images (deduplicates re-enables)
+#
+# Runtime-only (tmpfs, under /run/workload-vm/{name}, rebuilt every boot):
+#   cloud-init.iso      - Seed ISO with SSH key + virtiofs fstab. On tmpfs (not
+#                         the home) because it can embed rendered secrets; the
+#                         rebuild fingerprint persists in the home.
 #
 # virtiofs:
 #   Each volume declared in vm.volumes gets a virtiofsd sidecar service.

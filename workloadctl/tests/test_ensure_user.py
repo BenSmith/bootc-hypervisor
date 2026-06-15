@@ -138,6 +138,11 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         )
         self.config_dir = Path(self.tmp) / "cfg"
         self.config_dir.mkdir()
+        # The ISO is built into VM_SOCKET_DIR/{name} (tmpfs in production);
+        # redirect it under tmp so the build can mkdir/chmod it as a non-root
+        # test user instead of touching the real /run/workload-vm.
+        self.runtime = Path(self.tmp) / "run"
+        self.runtime.mkdir()
         self.pw = _fake_pw(self.home)
 
     def tearDown(self):
@@ -157,6 +162,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def _run_build(self, config: dict, name: str = "myvm"):
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -166,6 +172,9 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 self.pw, config, name,
                 config_path=self.config_dir / f"{name}.toml",
             )
+
+    def _iso_path(self, name: str = "myvm") -> Path:
+        return self.runtime / name / "cloud-init.iso"
 
     def _read_user_data(self) -> str:
         return (self.home / ".cloud-init-seed" / "user-data").read_text()
@@ -291,11 +300,11 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         }}}
         self._run_build(cfg)
         fp_first = (self.home / ".cloud-init-fingerprint").read_text()
-        iso_mtime_first = (self.home / "cloud-init.iso").stat().st_mtime_ns
+        iso_mtime_first = self._iso_path().stat().st_mtime_ns
 
         self._run_build(cfg)
         fp_second = (self.home / ".cloud-init-fingerprint").read_text()
-        iso_mtime_second = (self.home / "cloud-init.iso").stat().st_mtime_ns
+        iso_mtime_second = self._iso_path().stat().st_mtime_ns
         self.assertEqual(fp_first, fp_second)
         self.assertEqual(iso_mtime_first, iso_mtime_second)
 
@@ -305,6 +314,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -325,6 +335,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         rmtree_calls = []
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"

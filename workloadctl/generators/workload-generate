@@ -1415,9 +1415,12 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
         )
 
     # Cloud-init seed (always present; removed from command after first boot
-    # would require rebuild — keep it; cloud-init runs once per instance-id)
+    # would require rebuild — keep it; cloud-init runs once per instance-id).
+    # Lives on tmpfs (the runtime dir) not the persistent home: in template
+    # mode the ISO embeds decrypted secrets, so it must not survive a reboot at
+    # rest. The setup service rebuilds it into this dir every boot.
     qemu_args.append(
-        f"-drive file={home_dir}/cloud-init.iso,if=virtio,format=raw,readonly=on,media=cdrom,id=cloudinit"
+        f"-drive file={socket_dir}/cloud-init.iso,if=virtio,format=raw,readonly=on,media=cdrom,id=cloudinit"
     )
 
     # Network (bridge via qemu-bridge-helper)

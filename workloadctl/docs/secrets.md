@@ -934,19 +934,29 @@ Each machine has a different auth key, but the workload config is the same acros
 
 ---
 
-## VM workloads: cloud-init.iso residual risk
+## VM workloads: cloud-init.iso lives on tmpfs
 
 For VM workloads, `workload-ensure-user` renders `${SECRET:...}` references from
 `[vm.cloud_init].user_data_file` into a `user-data` file and packages it into a
-`cloud-init.iso` in the workload home. The staging directory (`~/.cloud-init-seed/`)
-is removed immediately after ISO creation. The ISO itself (`~/cloud-init.iso`) is
-kept at mode 0640 (root + workload group) for QEMU to read on every boot.
+`cloud-init.iso`. The staging directory (`~/.cloud-init-seed/`) is removed
+immediately after ISO creation.
 
-**Accepted residual risk:** `cloud-init.iso` contains rendered secrets in plaintext
-at 0640. It is only readable by root and the workload system user, and it lives on
-the host filesystem rather than a shareable location. The guest reads it once per
-cloud-init run. Encrypting the ISO would require a guest key exchange that
-complicates bootstrap; this is accepted scope for the current design.
+The ISO itself is written to the **tmpfs runtime directory**
+`/run/workload-vm/{name}/cloud-init.iso` (mode 0640, owned by the workload user),
+*not* the persistent workload home. Because it can embed rendered secrets in
+plaintext, keeping it on tmpfs means it never survives a reboot at rest — there is
+no plaintext secret on disk for an offline read (e.g. without the TPM) to recover.
+The setup service rebuilds it into this dir on every boot before the VM starts;
+the rebuild fingerprint stays in the persistent home, so the regenerated ISO is
+content-stable but the bytes are gone after poweroff. (The runtime dir is the VM's
+`RuntimeDirectory` with `RuntimeDirectoryPreserve=yes`, so the ISO the setup
+service pre-creates survives into the main VM service's start within a boot.)
+
+This also keeps the secret-bearing ISO out of `workloadctl backup`, which captures
+the workload home and never reaches `/run`.
+
+The guest reads the ISO once per cloud-init run. Encrypting the ISO would require a
+guest key exchange that complicates bootstrap; tmpfs-at-rest is the chosen design.
 
 ---
 
