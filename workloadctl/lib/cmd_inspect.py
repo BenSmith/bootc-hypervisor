@@ -870,10 +870,9 @@ def _stats_one(config, manager, target_names, *, json_out, follow):
     """Run podman stats for one workload's containers via ContainerSubstrate."""
     substrate = get_substrate(config, manager)
     try:
-        substrate.resource_usage(
+        return substrate.resource_usage(
             target_names, json_out=json_out, follow=follow,
         )
-        return getattr(substrate, "_last_stats_result", None)
     except NotApplicable as e:
         print(f"stats: not applicable for {config.name} — {e.reason}", file=sys.stderr)
         return None
@@ -909,7 +908,7 @@ def cmd_stats(args, manager: WorkloadManager):
         )
 
         try:
-            substrate.resource_usage(
+            result = substrate.resource_usage(
                 target_names, json_out=args.json, follow=args.follow,
             )
         except NotApplicable as e:
@@ -917,7 +916,6 @@ def cmd_stats(args, manager: WorkloadManager):
             sys.exit(0)
 
         if args.json:
-            result = getattr(substrate, "_last_stats_result", None)
             stats_list = []
             if result is not None and result.returncode == 0 and result.stdout.strip():
                 raw = json.loads(result.stdout)
@@ -957,10 +955,9 @@ def cmd_stats(args, manager: WorkloadManager):
             for config, target_names in running:
                 substrate = get_substrate(config, manager)
                 try:
-                    substrate.resource_usage(target_names, json_out=True)
+                    result = substrate.resource_usage(target_names, json_out=True)
                 except NotApplicable:
                     continue
-                result = getattr(substrate, "_last_stats_result", None)
                 if result is not None and result.returncode == 0 and result.stdout.strip():
                     raw = json.loads(result.stdout)
                     for row in (raw if isinstance(raw, list) else [raw]):
