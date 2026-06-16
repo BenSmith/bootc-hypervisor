@@ -16,20 +16,20 @@ Group=_wl-avahi
 Environment="HOME=/var/lib/workloads/avahi"
 EnvironmentFile=-/run/workload-env/workload-avahi.env
 
-# Resource limits and constraints
-CPUQuota=50%
-MemoryMax=64M
-MemoryHigh=32M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --env HOST_IP=${HOST_IP} --env ALIASES='zot registry' --health-cmd "avahi-daemon --check" --health-interval=30s --health-timeout=5s --health-retries=3 --health-start-period=10s --health-on-failure=kill "localhost/avahi:latest"
+ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.5 --network="host" --env HOST_IP=${HOST_IP} --env ALIASES='zot registry' --health-cmd "avahi-daemon --check" --health-interval=60s --health-timeout=35s --health-retries=3 --health-start-period=10s --health-on-failure=kill "localhost/avahi:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-avahi"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-avahi"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-avahi
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/avahi" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

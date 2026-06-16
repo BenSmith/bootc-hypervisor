@@ -16,20 +16,20 @@ Group=_wl-caddy
 Environment="HOME=/var/lib/workloads/caddy"
 EnvironmentFile=-/run/workload-env/workload-caddy.env
 
-# Resource limits and constraints
-CPUQuota=100%
-MemoryMax=256M
-MemoryHigh=128M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-caddy" --hostname "caddy" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/caddy/Caddyfile":/etc/caddy/Caddyfile:ro --volume "/var/lib/workloads/caddy/data":/var/lib/caddy --volume "/var/lib/workloads/caddy/config":/etc/caddy/config --env HOST_IP=${HOST_IP} --health-cmd "curl -sS --max-time 5 -o /dev/null http://localhost:80/" --health-interval=30s --health-timeout=10s --health-retries=3 --health-start-period=15s --health-on-failure=kill "localhost/caddy:latest"
+ExecStart=/usr/bin/podman run --name "workload-caddy" --hostname "caddy" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=256M --cpus=1.0 --network="host" --volume "/var/lib/workloads/caddy/Caddyfile":/etc/caddy/Caddyfile:ro --volume "/var/lib/workloads/caddy/data":/var/lib/caddy --volume "/var/lib/workloads/caddy/config":/etc/caddy/config --volume "/var/lib/workloads/caddy/homelab-root.crt":/etc/caddy/homelab-root.crt:ro --volume "/var/lib/workloads/caddy/homelab-root.key":/etc/caddy/homelab-root.key:ro --env HOST_IP=${HOST_IP} --health-cmd "curl -sS --max-time 5 -o /dev/null http://localhost:80/" --health-interval=30s --health-timeout=10s --health-retries=3 --health-start-period=15s --health-on-failure=kill "localhost/caddy:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-caddy"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-caddy"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-caddy
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/caddy" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

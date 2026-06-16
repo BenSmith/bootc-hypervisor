@@ -76,13 +76,16 @@ backend is silent. The 404 makes "you didn't configure this name" obvious.
 ```bash
 # Local test, no DNS needed — -k trusts the local CA, --resolve fakes the name:
 curl -k --resolve zot.local:443:127.0.0.1 https://zot.local/v2/
-curl -kL http://zot.local/v2/                          # full path: DNS + 80->443 redirect + backend
+curl -kL http://grafana.local/                         # full path: DNS + 80->443 redirect + backend
+curl http://zot.local/v2/                              # registry API over plain HTTP: expect 404, NOT a redirect
 workloadctl logs caddy | tail                          # access + error log
 ```
 
 Named sites are served over HTTPS; `http://<name>` 308-redirects to
 `https://<name>`, so use `-L` (follow redirects) and `-k` (trust Caddy's
-internal CA) when testing with `curl`.
+internal CA) when testing with `curl`. The one exception is the registry API:
+`http://<name>/v2*` must return 404 (see "Stopping the redirect" below) — if
+it 308s, image signing will break.
 
 ## Troubleshooting
 
@@ -171,11 +174,24 @@ the global block in the Caddyfile with `{ auto_https off }`.
 
 ### Stopping the http://name -> https://name redirect
 
-Caddy redirects HTTP to HTTPS by default once a site has a cert, so the sample
-Caddyfile lets `http://<name>` 308-redirect to `https://<name>`. That is the
-intended behavior — clients reach the same place either way. To serve plain
-HTTP *without* the redirect, add `auto_https disable_redirects` to the global
-block; to drop HTTPS entirely, replace the global block with `{ auto_https off }`.
+Caddy redirects HTTP to HTTPS by default once a site has a cert. The sample
+Caddyfile *disables* that (`auto_https disable_redirects`) and reimplements
+the redirect inside the `:80` catchall, so `http://<name>` still 308-redirects
+to `https://<name>` for any `*.local` Host — with one deliberate carve-out:
+
+**the registry API (`/v2*`) is never redirected, on any host.** cosign's
+registry client treats `*.local` names as possibly-http and races http vs
+https on its first ping; if the http probe wins via a followed redirect,
+every later request gets pinned to http and loops on the 308 until cosign
+fails with "stopped after 10 redirects". The `:80` block hard-404s `/v2*`
+instead, so the http probe always loses. The rule is path-based on purpose —
+it protects any current or future registry behind this proxy without
+maintaining a hostname list. See `docs/cosign-local-redirect-loop.md` for the
+full failure analysis.
+
+To serve plain HTTP *without* any redirect, drop the `@dotlocal` redirect
+from the `:80` block; to drop HTTPS entirely, replace the global block with
+`{ auto_https off }`.
 
 ### `curl: (35) ... tlsv1 alert internal error` on an unknown name
 
@@ -234,4 +250,67 @@ restart, breaking clients that previously trusted it.
 Setting `XDG_DATA_HOME=/var/lib/caddy` (and `XDG_CONFIG_HOME=/etc/caddy/config`)
 forces the storage into the bind-mounted volumes so certs and state
 persist across restarts. The CA root referenced in the TLS section above
-lives at `/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt`.
+lives at `/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt`
+(self-signed CA only; with the shared CA below, only `intermediate.crt`/`.key`
+live there and the root is the mounted file).
+
+## Shared homelab CA
+
+By default each host's Caddy generates its own self-signed root, so clients must
+trust a different root per host — and they are all confusingly named
+`Caddy Local Authority`, which makes a mismatched one fail with
+`SEC_ERROR_BAD_SIGNATURE` rather than a clear "untrusted" error. To trust ONE
+root for every host's `*.local` services, point every Caddy at a shared homelab
+root via the `pki` block (already wired into the sample `Caddyfile` and
+`caddy.toml`):
+
+- **Public root cert** — provided by the image trust store. The Forgejo build
+  injects it from the `HOMELAB_ROOT_CA` secret into
+  `/etc/pki/ca-trust/source/anchors/homelab-root.crt` (see `ca-trust-inject/` at
+  the repo root). `[setup] required_files` copies it from there into the workload
+  dir as `./homelab-root.crt` so it gets a `container_file_t` label the container
+  can read — mounting the trust anchor directly fails (`cert_t` is SELinux-denied
+  to `container_t`, surfacing as `open …homelab-root.crt: permission denied`).
+- **Private root key** — a per-host `0400` file at
+  `/var/lib/workloads/caddy/homelab-root.key`, owned by the workload user. Never
+  shipped in the image or committed. caddy runs as that user under `keep-id`, so
+  it can read it (no `userns=host` needed).
+
+Each Caddy still mints its own intermediate signed by the shared root, so leaf
+certs rotate normally; only the root is shared.
+
+### One-time CA generation (once for the whole homelab)
+```
+openssl ecparam -name prime256v1 -genkey -noout -out homelab-root.key
+openssl req -x509 -new -key homelab-root.key -sha256 -days 3650 \
+    -subj "/CN=Homelab Root CA/O=miniverse" -out homelab-root.crt
+```
+Set the Forgejo `HOMELAB_ROOT_CA` secret to the contents of `homelab-root.crt`,
+and back up `homelab-root.key` offline — it is the homelab CA key.
+
+### Per host
+```
+sudo install -m 0400 -o _wl-caddy -g _wl-caddy homelab-root.key \
+    /var/lib/workloads/caddy/homelab-root.key
+sudo workloadctl recreate caddy
+```
+
+### Switching an existing self-signed Caddy to the shared root
+Caddy reuses an existing on-disk `local` CA in preference to the configured
+root, so clear the stale authority + cached leaf certs first or it keeps serving
+the old root:
+```
+sudo systemctl stop workload-caddy.service
+sudo rm -rf /var/lib/workloads/caddy/data/caddy/pki/authorities/local \
+            /var/lib/workloads/caddy/data/caddy/certificates
+sudo systemctl start workload-caddy.service
+# served chain should now be issued by "Homelab - ECC Intermediate":
+echo | openssl s_client -connect zot.local:443 -servername zot.local 2>/dev/null | grep ^issuer=
+```
+
+### Clients
+Hosts built from the internal image already trust the root (CI-injected). Other
+machines trust it once: put `homelab-root.crt` in
+`/etc/pki/ca-trust/source/anchors/` and run `update-ca-trust`. Firefox uses its
+own store — import the root under Authorities (trust for websites), or set
+`security.enterprise_roots.enabled`.

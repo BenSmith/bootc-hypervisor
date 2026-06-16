@@ -1,0 +1,307 @@
+"""
+conftest.py — pytest configuration for the CLI-surface acceptance harness.
+
+Options:
+  --target  SSH destination (e.g. user@host) or "local" — required
+  --deploy  rsync+rpm-install the local workloadctl tree before testing
+  --key-type  secret key type: auto (default), tpm2, host
+"""
+
+import json
+import subprocess
+import time
+
+import pytest
+
+from target import Target
+
+
+# Register the workload-provisioning fixtures. pytest only auto-discovers
+# fixtures in conftest.py, test modules, and plugins — a bare fixtures.py is
+# never imported on its own. Star-importing it here pulls every clitest_*
+# fixture into the conftest namespace, where pytest registers them. fixtures.py
+# is self-contained (it does NOT import from conftest) so there is no cycle;
+# the skip helpers it defines are re-exported below for tests that import them.
+from fixtures import *  # noqa: E402,F401,F403
+
+
+# ---------------------------------------------------------------------------
+# CLI options
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--target",
+        default=None,
+        help="SSH destination of the system under test (e.g. user@host), or 'local'. "
+             "Required to run tests; collection/introspection works without it.",
+    )
+    parser.addoption(
+        "--deploy",
+        action="store_true",
+        default=False,
+        help="Rsync workloadctl tree to target and rpm-install before testing",
+    )
+    parser.addoption(
+        "--key-type",
+        default="auto",
+        choices=["auto", "tpm2", "host", "host+tpm2"],
+        help="Secret encryption key type (default: auto = tpm2 if available, else host)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Markers
+# ---------------------------------------------------------------------------
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "container: tests that exercise the container substrate")
+    config.addinivalue_line("markers", "vm: tests that require VM substrate (needs has_kvm)")
+    config.addinivalue_line("markers", "slow: tests that take a long time (VM boot, image pull)")
+    config.addinivalue_line("markers", "interactive: tests that exercise interactive/pty verbs (smoke-grade)")
+    config.addinivalue_line("markers", "mutating: tests that modify workload state")
+    config.addinivalue_line("markers", "destructive: tests that permanently remove state")
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped Target fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def target(request) -> Target:
+    """Construct and yield the Target; handle optional --deploy."""
+    dest = request.config.getoption("--target")
+    if not dest:
+        pytest.exit(
+            "--target is required to run the CLI-surface harness "
+            "(e.g. --target=user@host or --target=local).",
+            returncode=3,
+        )
+    t = Target.from_dest(dest)
+
+    # Validate connectivity
+    r = t.run(["echo", "ping"], sudo=False, check=False)
+    if r.rc != 0:
+        pytest.exit(
+            f"Cannot reach target {dest!r}: {r.stderr.strip()}\n"
+            "Check that SSH works and the target is reachable.",
+            returncode=3,
+        )
+
+    # Optional deploy step
+    if request.config.getoption("--deploy"):
+        _deploy_workloadctl(t)
+
+    yield t
+    t.close()
+
+
+def _deploy_workloadctl(t: Target):
+    """Rsync the local workloadctl tree to ~/clitest-src/workloadctl/ and rpm-install."""
+    import os
+    from pathlib import Path
+
+    # Find repo root relative to this file
+    harness_dir = Path(__file__).parent
+    repo_root = harness_dir.parents[2]  # cli_surface -> tests -> workloadctl -> repo
+    workloadctl_src = repo_root / "workloadctl"
+
+    if not workloadctl_src.exists():
+        pytest.exit(f"Could not find workloadctl source at {workloadctl_src}", returncode=3)
+
+    dest = t.dest
+    target_dir = "~/clitest-src/workloadctl/"
+
+    print(f"\nDeploying workloadctl to {dest}:{target_dir} ...")
+    rsync_cmd = [
+        "rsync", "-av", "--delete",
+        "--exclude=rpmbuild/",
+        "--exclude=__pycache__/",
+        "--exclude=*.pyc",
+        "--exclude=.pytest_cache/",
+        "--exclude=tests/cli_surface/",  # don't rsync ourselves into clitest-src
+        str(workloadctl_src) + "/",
+        f"{dest}:{target_dir}",
+    ]
+    result = subprocess.run(rsync_cmd, capture_output=False)
+    if result.returncode != 0:
+        pytest.exit("rsync failed", returncode=3)
+
+    print("Running just rpm-install on target ...")
+    r = t.run(
+        ["bash", "-c", "cd ~/clitest-src/workloadctl && just rpm-install"],
+        sudo=False, check=False, timeout=300,
+    )
+    if r.rc != 0:
+        pytest.exit(f"rpm-install failed: {r.stderr[:1000]}", returncode=3)
+    print("Deploy complete.")
+
+
+# ---------------------------------------------------------------------------
+# Secret key type
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def key_type(request, target) -> str:
+    """Resolve the --key-type option (auto → tpm2 if available, else host)."""
+    kt = request.config.getoption("--key-type")
+    if kt == "auto":
+        return "tpm2" if target.capabilities["has_tpm2"] else "host"
+    return kt
+
+
+# ---------------------------------------------------------------------------
+# Session-start purge (idempotency)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def purge_stray_clitest_workloads(target):
+    """Purge any clitest-* workloads left over from prior runs.
+
+    Runs once at session start so back-to-back runs are clean.
+    """
+    _purge_all_clitest(target)
+    yield
+    # Also purge at session end so no residue is left
+    _purge_all_clitest(target)
+
+
+def _purge_all_clitest(target: Target):
+    """Disable --purge all clitest-* workloads and remove their TOML files."""
+    # List currently configured clitest workloads
+    r = target.wl("list --json", check=False)
+    if r.rc != 0 or not r.stdout.strip():
+        # workloadctl not installed or no workloads — still try to clean files
+        _remove_clitest_tomls(target)
+        return
+
+    try:
+        data = json.loads(r.stdout)
+        workloads = data.get("workloads", [])
+    except (json.JSONDecodeError, KeyError):
+        workloads = []
+
+    clitest = [w["name"] for w in workloads if w["name"].startswith("clitest-")]
+
+    for name in clitest:
+        # Stop service first (ignore errors)
+        target.wl(f"disable --purge {name}", check=False)
+        time.sleep(0.5)
+
+    _remove_clitest_tomls(target)
+
+
+def _remove_clitest_tomls(target: Target):
+    """Remove any leftover /etc/workloads.d/clitest-*.toml files."""
+    r = target.run(
+        ["bash", "-c", "ls /etc/workloads.d/clitest-*.toml 2>/dev/null || true"],
+        sudo=False, check=False,
+    )
+    files = [f.strip() for f in r.stdout.strip().splitlines() if f.strip()]
+    for f in files:
+        target.run(["rm", "-f", f], sudo=True, check=False)
+
+
+# Capability-gate skip helpers (skip_if_no_kvm / skip_if_no_br0) live in
+# fixtures.py and are re-exported into this namespace via `from fixtures import
+# *` above, so `from conftest import skip_if_no_kvm` keeps working.
+
+
+# ---------------------------------------------------------------------------
+# Matrix tracking (record_property integration)
+# ---------------------------------------------------------------------------
+
+# Each item stores (cell, outcome) where cell = "verb/substrate"
+_MATRIX: list[tuple[str, str]] = []
+
+
+@pytest.fixture(autouse=True)
+def _record_matrix_cell(request, record_property):
+    """After each test, record its cell(s) and outcome in the global matrix."""
+    yield
+    # A test declares its cell(s) via record_property("cell", "verb/substrate").
+    # A single test may legitimately span more than one cell (e.g. the VM
+    # update→rollback test), so record every declared cell, not just the last.
+    cells = [val for key, val in request.node.user_properties if key == "cell"]
+    if not cells:
+        return
+
+    rep = request.node.rep_call if hasattr(request.node, "rep_call") else None
+    if rep is None:
+        outcome = "SKIP"
+    elif rep.passed:
+        outcome = "PASS"
+    elif rep.skipped:
+        outcome = "SKIP"
+    else:
+        outcome = "FAIL"
+
+    for cell in cells:
+        _MATRIX.append((cell, outcome))
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Attach the call report to the node for access in fixtures."""
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, f"rep_{rep.when}", rep)
+
+
+# ---------------------------------------------------------------------------
+# Terminal summary: verb × substrate matrix + findings
+# ---------------------------------------------------------------------------
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print verb × substrate matrix at the end of the session."""
+    if not _MATRIX:
+        return
+
+    # Collect all verbs and substrates
+    verbs_set = set()
+    subs_set = set()
+    results: dict[tuple, str] = {}
+
+    for cell, outcome in _MATRIX:
+        if "/" in cell:
+            verb, sub = cell.split("/", 1)
+        else:
+            verb, sub = cell, "unknown"
+        verbs_set.add(verb)
+        subs_set.add(sub)
+        # Last outcome wins (in case of reruns)
+        results[(verb, sub)] = outcome
+
+    verbs = sorted(verbs_set)
+    subs = sorted(subs_set)
+
+    # Print matrix
+    terminalreporter.write_sep("=", "verb × substrate matrix")
+    verb_w = max(len(v) for v in verbs) + 2
+    col_w = 8
+
+    header = f"{'VERB':<{verb_w}}" + "".join(f"{s:<{col_w}}" for s in subs)
+    terminalreporter.write_line(header)
+    terminalreporter.write_line("-" * len(header))
+
+    for verb in verbs:
+        row = f"{verb:<{verb_w}}"
+        for sub in subs:
+            outcome = results.get((verb, sub), "—")
+            row += f"{outcome:<{col_w}}"
+        terminalreporter.write_line(row)
+
+    # Print findings
+    findings = [
+        (cell, outcome)
+        for cell, outcome in _MATRIX
+        if outcome == "FAIL"
+    ]
+    if findings:
+        terminalreporter.write_sep("=", "findings (workloadctl bugs / unexpected failures)")
+        for cell, outcome in findings:
+            terminalreporter.write_line(f"  FAIL: {cell}")
+        terminalreporter.write_line(
+            "\n  Review each FAIL above — it may indicate a workloadctl bug "
+            "(e.g. an unguarded verb crashing on the wrong substrate)."
+        )

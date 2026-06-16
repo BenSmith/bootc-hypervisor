@@ -48,7 +48,9 @@ jobs:
   publish:
     needs: test
     runs-on: native
-    if: github.ref == 'refs/heads/internal'
+    # Auto-publish on internal pushes; also allow publishing from any branch via
+    # a manual workflow_dispatch (for testing a branch's RPM before merge).
+    if: github.ref == 'refs/heads/internal' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Publish to Forgejo package registry
         env:

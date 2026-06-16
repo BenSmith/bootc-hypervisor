@@ -58,6 +58,14 @@ jobs:
   # base + variant jobs, so F44's variants only need F44's base
   build:
     needs: setup
+    # Do NOT add `runs-on:` to this job. It's a reusable-workflow call (`uses:`),
+    # and Forgejo's server-side expander (expandForJob) silently SKIPS any `uses:`
+    # job that carries a runs-on label — the whole matrix is marked skipped and
+    # nothing builds. The expansion runs base+variant server-side without it.
+    # Trade-off: server-side expansion evaluates the `with:` expressions without
+    # the dispatch inputs context, so a manual workflow_dispatch variant selection
+    # (none / single variant) is ignored and all variants build. The scheduled and
+    # workflow_run paths want all variants anyway, so that's acceptable.
     strategy:
       fail-fast: false
       matrix:

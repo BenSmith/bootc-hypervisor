@@ -16,20 +16,20 @@ Group=_wl-zot-registry
 Environment="HOME=/var/lib/workloads/zot-registry"
 EnvironmentFile=-/run/workload-env/workload-zot-registry.env
 
-# Resource limits and constraints
-CPUQuota=100%
-MemoryMax=1G
-MemoryHigh=768M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 5050:5000 --volume "/var/lib/workloads/zot-registry/config.json":/etc/zot/config.json:ro --volume "/var/lib/workloads/zot-registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/zot-registry:latest"
+ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=1G --cpus=1.0 --network="host" --volume "/var/lib/workloads/zot-registry/config.json":/etc/zot/config.json:ro --volume "/var/lib/workloads/zot-registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/zot-registry:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-zot-registry"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-zot-registry"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-zot-registry
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/zot-registry" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

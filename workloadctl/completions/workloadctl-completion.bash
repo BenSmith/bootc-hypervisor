@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="attach backup cleanup cp create disable edit enable exec health images info list logs network ports ps reboot recreate restore rollback secret shell start stats status stop update uid-map validate verify help"
+    local commands="attach backup cleanup cp create disable drift edit enable exec health images info list logs network ports ps reboot recreate restore rollback secret shell start stats status stop update uid-map validate verify help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
 
@@ -125,7 +125,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        status)
+        status|drift)
             # Complete with --json or workload names (workload is optional)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
@@ -257,10 +257,12 @@ _workload_ctl_completion() {
                         COMPREPLY=( $(compgen -W "--json" -- "$cur") )
                         ;;
                     export)
-                        # Complete with credential names or --output
+                        # Complete with credential names, --output, or passphrase flags
                         if [[ "$cur" == -* ]]; then
-                            COMPREPLY=( $(compgen -W "--output" -- "$cur") )
+                            COMPREPLY=( $(compgen -W "--output --passphrase-file --passphrase-stdin" -- "$cur") )
                         elif [[ "$prev" == "--output" || "$prev" == "-o" ]]; then
+                            _filedir
+                        elif [[ "$prev" == "--passphrase-file" ]]; then
                             _filedir
                         else
                             COMPREPLY=( $(compgen -W "$credentials" -- "$cur") )
@@ -269,9 +271,11 @@ _workload_ctl_completion() {
                     import)
                         # Complete with credential name, then file, or flags
                         if [[ "$cur" == -* ]]; then
-                            COMPREPLY=( $(compgen -W "--force --key-type" -- "$cur") )
+                            COMPREPLY=( $(compgen -W "--force --key-type --passphrase-file --passphrase-stdin" -- "$cur") )
                         elif [[ "$prev" == "--key-type" ]]; then
                             COMPREPLY=( $(compgen -W "tpm2 host host+tpm2" -- "$cur") )
+                        elif [[ "$prev" == "--passphrase-file" ]]; then
+                            _filedir
                         elif [[ $cword -eq 4 ]]; then
                             _filedir secret
                         fi

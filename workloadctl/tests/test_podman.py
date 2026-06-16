@@ -5,7 +5,7 @@ import os
 import sys
 import unittest
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from podman import Podman, PodmanError
@@ -105,6 +105,83 @@ class PodmanWrapperTests(unittest.TestCase):
         self.p.list_containers()
         cmd = mock_run.call_args.args[0]
         self.assertIn("--log-level=error", cmd)
+
+
+class RuntimeDirRetryTests(unittest.TestCase):
+    """Tests for the self-healing retry on /run/user/<uid> missing."""
+
+    def setUp(self):
+        # UID 5001 matches the XDG_RUNTIME_DIR in _build_cmd
+        self.p = Podman.for_user("_wl-test", 5001, "/var/lib/workloads/test")
+
+    def _runtime_dir_error(self, uid=5001):
+        return _fail(
+            f"Failed to obtain podman configuration: "
+            f"lstat /run/user/{uid}: no such file or directory",
+            code=1,
+        )
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_retry_on_runtime_dir_missing(self, mock_run, mock_ensure):
+        """First call fails with runtime-dir error; retry succeeds."""
+        ok = _ok(stdout=json.dumps([{"Id": "sha256:abcd"}]))
+        mock_run.side_effect = [self._runtime_dir_error(), ok]
+        result = self.p.image_id("ref")
+        self.assertEqual(result, "sha256:abcd")
+        mock_ensure.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_retry_still_fails_raises_podman_error(self, mock_run, mock_ensure):
+        """Both calls fail with runtime-dir error — raises PodmanError."""
+        err = self._runtime_dir_error()
+        mock_run.side_effect = [err, err]
+        with self.assertRaises(PodmanError):
+            self.p.image_id("ref")
+        mock_ensure.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_no_retry_for_root_podman(self, mock_run, mock_ensure):
+        """Root podman (username=None) does not trigger the retry path."""
+        p_root = Podman.for_root()
+        mock_run.return_value = self._runtime_dir_error()
+        with self.assertRaises(PodmanError):
+            p_root.image_id("ref")
+        mock_ensure.assert_not_called()
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_no_retry_for_different_uid(self, mock_run, mock_ensure):
+        """Runtime-dir error for a different UID does not trigger retry."""
+        mock_run.return_value = self._runtime_dir_error(uid=9999)
+        with self.assertRaises(PodmanError):
+            self.p.image_id("ref")
+        mock_ensure.assert_not_called()
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_no_retry_for_unrelated_error(self, mock_run, mock_ensure):
+        """Unrelated podman failure is raised immediately, no retry."""
+        mock_run.return_value = _fail("sudo: a password is required", code=1)
+        with self.assertRaises(PodmanError):
+            self.p.image_id("ref")
+        mock_ensure.assert_not_called()
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("podman.Podman._ensure_runtime_dir")
+    @patch("subprocess.run")
+    def test_allow_missing_not_affected_by_retry(self, mock_run, mock_ensure):
+        """allow_missing=True still returns empty-string for not-found errors (no retry)."""
+        mock_run.return_value = _fail("Error: image not known")
+        result = self.p.image_id("ref")
+        self.assertEqual(result, "")
+        mock_ensure.assert_not_called()
 
 
 if __name__ == "__main__":

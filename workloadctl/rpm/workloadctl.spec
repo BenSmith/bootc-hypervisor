@@ -10,6 +10,14 @@ URL:            https://github.com/BenSmith/bootc-hypervisor
 
 BuildArch:      noarch
 
+# %{_unitdir} (used in %install and %files for the exporter unit + slice) is
+# defined by systemd-rpm-macros. Without it rpmbuild emits the literal
+# "%{_unitdir}/..." and fails with: File must begin with "/".
+BuildRequires:  systemd-rpm-macros
+# Likewise %{python3_sitelib} (the workloadctl.pth drop) comes from
+# python3-rpm-macros, which rpm-build does not pull in on its own.
+BuildRequires:  python3-rpm-macros
+
 Requires:       python3 >= 3.11
 Requires:       podman >= 5.3
 Requires:       systemd
@@ -21,8 +29,12 @@ Suggests:       bash-completion
 # would relabel the tree back to var_lib_t and break every container.
 Requires:       policycoreutils
 Requires:       policycoreutils-python-utils
-# checkpolicy only compiles the optional per-workload .te policy modules.
-Suggests:       checkpolicy
+# Per-workload SELinux policy ships as udica-style CIL (e.g. alloy.cil) that
+# inherits base container templates from /usr/share/udica/templates (shipped by
+# container-selinux, not udica) and loads via semodule. The udica binary itself
+# is an authoring-only tool; it is not invoked at runtime.
+Requires:       container-selinux
+Recommends:     udica
 # VM workloads require the bridge networking stack and a hypervisor.
 Requires:       dnsmasq
 Requires:       nftables
@@ -45,13 +57,15 @@ UID/subuid namespace, home directory, and rootless podman instance.
 %install
 install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadctl
 
-# Private library — kept under %{_libexecdir} instead of %{python3_sitelib}
-# to avoid implying a public, importable Python API.
-install -Dpm 0644 %{_sourcedir}/lib/workload_lib.py \
-    %{buildroot}%{_libexecdir}/workloadctl/workload_lib.py
-install -Dpm 0644 %{_sourcedir}/lib/podman.py \
-    %{buildroot}%{_libexecdir}/workloadctl/podman.py
-
+# Private library modules under %{_libexecdir}/workloadctl/.
+# A .pth file in %{python3_sitelib} makes them importable by all workloadctl
+# scripts without any sys.path manipulation.
+install -dm 0755 %{buildroot}%{_libexecdir}/workloadctl
+for _f in %{_sourcedir}/lib/*.py; do
+    install -pm 0644 "$_f" %{buildroot}%{_libexecdir}/workloadctl/
+done
+install -dm 0755 %{buildroot}%{python3_sitelib}
+echo '%{_libexecdir}/workloadctl' > %{buildroot}%{python3_sitelib}/workloadctl.pth
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
@@ -69,6 +83,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-shutdown
 
 install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
     %{buildroot}%{_unitdir}/workload-exporter.service
@@ -111,16 +127,6 @@ install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloa
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
-install -dm 0755 %{buildroot}%{_sysconfdir}/yum.repos.d
-cat > %{buildroot}%{_sysconfdir}/yum.repos.d/workloadctl.repo << 'EOF'
-[workloadctl]
-name=workloadctl
-baseurl=https://git.local/api/packages/ben/rpm
-enabled=1
-gpgcheck=0
-sslverify=false
-EOF
-
 %post
 %systemd_post workload-exporter.service
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
@@ -130,14 +136,27 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 
 %postun
 %systemd_postun_with_restart workload-exporter.service
+# On full uninstall ($1 == 0, not upgrade) reverse the host-global state that
+# workload-ensure-user accretes but never per-workload teardown can safely
+# remove (it's shared across workloads while the package is installed):
+#   - the semanage fcontext rule for /var/lib/workloads
+#   - the managed VM bridge's allow line in qemu-bridge-helper's allowlist
+# A custom/admin bridge (e.g. allow br0) is intentionally left alone — the admin
+# owns it and may rely on it outside workloadctl.
+if [ $1 -eq 0 ]; then
+    semanage fcontext -d '/var/lib/workloads(/.*)?' 2>/dev/null || :
+    if [ -f /etc/qemu/bridge.conf ]; then
+        sed -i '/^allow _workload-br$/d' /etc/qemu/bridge.conf 2>/dev/null || :
+    fi
+fi
 
 %files
 %{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
-%{_libexecdir}/workloadctl/workload_lib.py
-%{_libexecdir}/workloadctl/podman.py
+%{python3_sitelib}/workloadctl.pth
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
+%{_libexecdir}/workloadctl/*.py
 %{_libexecdir}/workloadctl/workload-generate
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
@@ -145,6 +164,7 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_libexecdir}/workloadctl/workload-vm-build-disk
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-qmp
+%{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_unitdir}/workload-exporter.service
 %{_unitdir}/workloads.slice
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
@@ -153,6 +173,5 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/
 %dir %{_sysconfdir}/workloads.d
-%config(noreplace) %{_sysconfdir}/yum.repos.d/workloadctl.repo
 
 %changelog

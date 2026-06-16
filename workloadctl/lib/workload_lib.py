@@ -9,6 +9,7 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 import hashlib
 import json
 import os
+import pwd
 import re
 import socket
 import time
@@ -25,6 +26,10 @@ WORKLOADS_BASE = Path("/var/lib/workloads")
 
 # Username prefix for workload system users
 USERNAME_PREFIX = "_wl-"
+
+# UID range reserved for workload users.
+UID_MIN = 10000
+UID_MAX = 52948
 
 # Maximum workload name length (32-char Linux username limit - 4-char prefix - 1)
 MAX_NAME_LENGTH = 27
@@ -96,7 +101,7 @@ def infer_workload_kind(config: dict) -> str:
 
 def vm_mac_address(name: str) -> str:
     """Derive a stable, locally-administered unicast MAC from the workload name."""
-    h = hashlib.md5(f"wl-vm-{name}".encode()).digest()
+    h = hashlib.md5(f"wl-vm-{name}".encode(), usedforsecurity=False).digest()
     first = (h[0] & 0xFE) | 0x02  # locally administered, unicast
     return ":".join(f"{b:02x}" for b in [first, h[1], h[2], h[3], h[4], h[5]])
 
@@ -280,6 +285,32 @@ def workload_username(name: str) -> str:
     return f"{USERNAME_PREFIX}{name}"
 
 
+# Per-run tracking set: `get_next_uid` records UIDs allocated during this
+# process invocation so multiple workloads enabled in the same run don't race.
+_allocated_uids: set[int] = set()
+
+
+def get_next_uid() -> int:
+    """Return the next free UID in the workload range [UID_MIN, UID_MAX].
+
+    Combines the live /etc/passwd snapshot with UIDs already allocated in this
+    process invocation.  Caller holds /run/lock/workload-subid.lock to prevent
+    concurrent processes from picking the same slot.
+    """
+    used = set(_allocated_uids)
+    try:
+        for pw in pwd.getpwall():
+            if UID_MIN <= pw.pw_uid <= UID_MAX:
+                used.add(pw.pw_uid)
+    except Exception:
+        pass
+    for uid in range(UID_MIN, UID_MAX + 1):
+        if uid not in used:
+            _allocated_uids.add(uid)
+            return uid
+    raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
+
+
 def workload_service_name(name: str) -> str:
     """Return the systemd service name for a workload."""
     return f"workload-{name}.service"
@@ -409,6 +440,18 @@ def validate_vm_config(config: dict) -> list[str]:
     if not isinstance(rollback_keep, int) or rollback_keep < 1:
         errors.append(f"[vm].rollback_keep must be a positive integer, got {rollback_keep!r}")
 
+    # Restart policy for the VM service. "always" (default) treats a guest
+    # reboot — which QEMU's -no-reboot turns into a clean exit — as a reason to
+    # relaunch; "on-failure" keeps the VM down on a clean exit; "on-reboot" is
+    # reserved for reason-aware restart (not implemented yet; falls back to
+    # "always"). See generate_vm_service.
+    restart = vm.get("restart", "always")
+    if restart not in ("always", "on-failure", "on-reboot"):
+        errors.append(
+            "[vm].restart must be one of 'always', 'on-failure', 'on-reboot', "
+            f"got {restart!r}"
+        )
+
     # [vm.network].bridge — defaults to _workload-br (managed NAT bridge); set to e.g.
     # "br0" to attach to a pre-existing LAN bridge instead.
     bridge = vm.get("network", {}).get("bridge", VM_BRIDGE_NAME)
@@ -533,6 +576,21 @@ def validate_workload_config(config: dict) -> list[str]:
     except ValueError as e:
         errors.append(str(e))
 
+    # [workload].requires / .after — must be lists of valid workload name strings
+    wl = config.get("workload", {})
+    for key in ("requires", "after"):
+        val = wl.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, list) or not all(isinstance(n, str) for n in val):
+            errors.append(f"[workload].{key} must be a list of workload name strings")
+        else:
+            for n in val:
+                try:
+                    validate_workload_name(n)
+                except ValueError as e:
+                    errors.append(f"[workload].{key}: {e}")
+
     return errors
 
 
@@ -547,6 +605,30 @@ def validate_workload_name(name: str):
             "Workload name must start with a letter and contain only "
             "lowercase letters, numbers, and hyphens"
         )
+
+
+# --- Per-workload SELinux identifiers ---
+#
+# Each workload that ships extra rights gets its own name-keyed type instead of
+# widening the shared container_t: a CIL module `wl_<name>` defining the process
+# domain `wl_<name>.process`. The CLI (which loads the policy) and the generator
+# (which labels the container) both derive identifiers through these functions
+# so they can't drift. See llms.txt "SELinux confinement" for the rationale.
+#
+# hyphen->underscore is injective: NAME_PATTERN forbids underscores, so two
+# distinct workload names can never collide on the same type.
+
+def selinux_module_name(name: str) -> str:
+    """SELinux/CIL module (block) name for a workload, e.g. 'wl_wayfire_bob'."""
+    return "wl_" + name.replace("-", "_")
+
+
+def selinux_type_name(name: str) -> str:
+    """SELinux process type for a workload, e.g. 'wl_wayfire_bob.process'.
+
+    Passed to `podman --security-opt label=type:`.
+    """
+    return selinux_module_name(name) + ".process"
 
 
 # --- Volume path expansion ---

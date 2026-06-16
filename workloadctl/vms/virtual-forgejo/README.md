@@ -27,9 +27,9 @@ template vars.
 
 1. **(Optional) override defaults** in `virtual-forgejo.toml`:
 
-   - `[vm.network].bridge` — defaults to `wlbr0`. Set to your LAN bridge
+   - `[vm.network].bridge` — defaults to `_workload-br`. Set to your LAN bridge
      (e.g. `br0`) if you want Forgejo on the LAN. `workload-bridge.service`
-     is only generated when you stay on `wlbr0`.
+     is only generated when you stay on `_workload-br`.
    - `[vm.cloud_init.template_vars]`:
      - `HYPERVISOR_REPO_URL`, `RUNNER_VERSION` — usually leave alone.
      - `FORGEJO_URL` — runner registers against this URL. Defaults to the
@@ -66,6 +66,27 @@ template vars.
    credstore entry absent is fine when `REGISTER_RUNNER="false"` —
    the optional-secret form resolves to an empty string and the
    bootstrap skips the registration block.
+
+2b. **(Optional) shared homelab CA.** By default the VM's Caddy uses its
+   own self-signed per-host CA, so clients must import the cert it serves
+   at `https://${FORGEJO_HOSTNAME}/caddy-root.crt`. To instead have Caddy
+   mint its cert under the **shared homelab root** (so any client that
+   already trusts that one root trusts the forge), seed both the public
+   cert and the private key as base64 credstore secrets — a multi-line PEM
+   breaks YAML `write_files`, so store `base64 -w0`:
+
+   ```sh
+   base64 -w0 homelab-root.crt | sudo systemd-creds encrypt \
+     --name=homelab-root-crt - /etc/credstore.encrypted/homelab-root-crt
+   base64 -w0 homelab-root.key | sudo systemd-creds encrypt \
+     --name=homelab-root-key - /etc/credstore.encrypted/homelab-root-key
+   sudo chmod 0600 /etc/credstore.encrypted/homelab-root-{crt,key}
+   ```
+
+   (or `workloadctl secret create homelab-root-crt < <(base64 -w0 …)`).
+   Both present → step 7 configures Caddy's `pki` to root at the shared
+   CA, mounts the cert/key, trusts the root in the guest, and serves the
+   shared root at `/caddy-root.crt`. Either absent → self-signed fallback.
 
 3. **Enable the workload**:
 

@@ -68,10 +68,13 @@ enabled = false
 #                         see rollback_keep below)
 #   data.qcow2          - Optional second disk (formatted by cloud-init)
 #   nvram.fd            - Per-VM UEFI NVRAM (copy of OVMF_VARS.fd)
-#   cloud-init.iso      - Seed ISO with SSH key and virtiofs fstab (rebuilt
-#                         when the SSH pubkey changes)
 #   .ssh/id_ed25519     - Per-workload SSH key (generated once)
 #   .image-cache/       - Downloaded cloud images (deduplicates re-enables)
+#
+# Runtime-only (tmpfs, under /run/workload-vm/{name}, rebuilt every boot):
+#   cloud-init.iso      - Seed ISO with SSH key + virtiofs fstab. On tmpfs (not
+#                         the home) because it can embed rendered secrets; the
+#                         rebuild fingerprint persists in the home.
 #
 # virtiofs:
 #   Each volume declared in vm.volumes gets a virtiofsd sidecar service.
@@ -124,6 +127,22 @@ enabled = false
 # Type: integer >= 1
 # Default: 2
 # rollback_keep = 2
+#
+# Optional: systemd restart policy for the VM service.
+#   "always"     - (default) relaunch QEMU on any unexpected exit. QEMU runs
+#                  with -no-reboot, so a guest reboot becomes a clean exit;
+#                  "always" turns that into a fresh boot (e.g. the first-boot
+#                  kernel-upgrade reboot). StartLimitBurst still bounds a
+#                  boot-loop, and `workloadctl stop`/`disable` (which goes via
+#                  ExecStop) is never auto-restarted regardless.
+#   "on-failure" - leave the VM down on a clean exit (incl. a guest reboot);
+#                  relaunch only on a non-zero QEMU exit (a crash).
+#   "on-reboot"  - reserved: restart only on a guest reboot while honoring an
+#                  in-guest poweroff. Not implemented yet — currently falls
+#                  back to "always" with a warning.
+# Type: string ("always" | "on-failure" | "on-reboot")
+# Default: "always"
+# restart = "always"
 #
 # Optional: Attach a virtio-balloon device so the host can reclaim idle guest
 # memory at runtime. Has no effect if the guest kernel lacks virtio_balloon
@@ -427,25 +446,29 @@ image = "ghcr.io/example/workload:latest"
 # ============================================================================
 # LOGGING
 # ============================================================================
-# Container logs are sent to the host's systemd journal using the journald
-# log driver (--log-driver=journald). This provides:
+# Container stdout/stderr go straight into the host's systemd journal via the
+# passthrough log driver (--log-driver=passthrough): podman hands the unit's
+# journal stream fds to the container, so every line is stored exactly once.
+# (The journald driver kept a second, untagged copy of each line via the
+# unit's stdout relay.) The stream is named after the container with
+# SyslogIdentifier=, so lines read:
 #
-# - Integration with journalctl for querying logs
-# - Automatic log rotation via systemd journal settings (journald.conf)
-# - Structured metadata (container name, ID, etc.)
-# - No additional configuration needed
+#   workload-{name}[pid]: message         # single mode
+#   workload-{wl}-{ctr}[pid]: message     # pod/bridge member containers
+#
+# Podman's own messages (image pulls, errors) share the same identifier.
 #
 # View logs:
-#   journalctl -u workload-{name}.service      # Service and container logs
-#   journalctl CONTAINER_NAME=workload-{name}  # Container logs only
-#   journalctl -f CONTAINER_NAME=workload-{name}  # Follow container logs
+#   workloadctl logs {name}                 # wraps journalctl
+#   journalctl -u workload-{name}.service   # service lifecycle + container
+#   journalctl -t workload-{name}           # container output only
+#   journalctl -ft workload-{name}          # follow container output
 #
-# For systemd containers (containers running systemd inside):
-#   - Internal journal entries appear in host journal automatically
-#   - Filter by process: journalctl CONTAINER_NAME=... | grep sshd
+# For systemd containers (containers running systemd inside), console output
+# forwarded by the guest systemd lands in the same stream.
 #
-# Alternative: Use podman logs command
-#   sudo -u _wl-{name} -E XDG_RUNTIME_DIR=/run/user/{uid} podman logs {container}
+# Note: `podman logs` does NOT work with the passthrough driver — podman never
+# stores its own copy. Use journalctl (or `workloadctl logs`) instead.
 #
 # This is not configurable per-workload. Log rotation is managed by journald.
 # ============================================================================
@@ -495,11 +518,26 @@ image = "ghcr.io/example/workload:latest"
 # Default: "none"
 # Options:
 #   "none"    - Only mark as unhealthy (visible in podman inspect / metrics)
-#   "kill"    - Kill the container (systemd will restart it via Restart=on-failure)
-#   "restart" - Restart the container (podman-level restart, not systemd)
-#   "stop"    - Stop the container (systemd will restart it via Restart=on-failure)
-# Recommended: "kill" or "stop" — lets systemd handle the restart and track it
-#   in NRestarts, which surfaces in monitoring.
+#   "kill"    - Restart the workload unit (systemctl restart)
+#   "restart" - Restart the workload unit (systemctl restart)
+#   "stop"    - Stop the workload unit (systemctl stop); it stays down
+# Recommended: "kill" — restart the workload and track it in NRestarts, which
+#   surfaces in monitoring. Use "stop" only when a failing workload should stay
+#   down rather than flap.
+#
+# How the action fires: podman's native healthcheck timer runs inside the user
+# manager (ADR 001 option 1b topology) for all modes — single, bridge, and pod.
+# There is no separate system-manager timer or workload-healthcheck shim.
+# "restart" — podman restarts the container in place (container-level restart,
+#             not a full unit restart; the unit stays active).
+# "kill"    — podman kills the container; the unit's Restart=on-failure then
+#             recovers the workload (unit-level restart). This is the recommended
+#             pattern for systemd-managed containers: the unit RestartSec=5s
+#             prevents flapping and surfaces NRestarts in monitoring.
+# "stop"    — podman stops the container; the unit also stops and stays down
+#             (Restart=on-failure does not re-trigger on an explicit stop).
+# "none"    — only marks the container unhealthy (visible in podman inspect /
+#             metrics); no automatic action.
 # on_failure = "none"
 
 [container.environment]
@@ -696,6 +734,32 @@ virtualization = true
 #
 # security_opt = []
 
+# Optional: Ship a per-workload SELinux type
+# Type: bool OR string
+# Default: false
+# When true, `enable` loads the bundle's udica-style CIL policy
+# (containers/<bundle>/<bundle>.cil) as a name-keyed module (wl_<name>) and the
+# generator labels the container with type wl_<name>.process; `disable` removes
+# it.
+#
+# The bundle dir defaults to the workload name (true → containers/<name>/). Set
+# a string to source the CIL from a differently-named bundle instead — e.g.
+# `selinux_policy = "vncdesktop-sway"` loads containers/vncdesktop-sway/
+# vncdesktop-sway.cil. This decouples the policy source from the workload name,
+# so a renamed workload can keep using its original bundle (the loaded module
+# and label stay wl_<name>.process regardless). The string must be a valid
+# workload-style name ([a-z][a-z0-9-]*).
+#
+# The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted
+# at enable time), e.g.:
+#     (block __WL_MODULE__
+#         (blockinherit container)        ; required — full container domain
+#         (blockinherit net_container)    ; if the workload needs the network
+#         (allow process <target_type> (<class> (<perms>))))
+# Author new policy with `udica` against a running container. See
+# docs/workload-bundles.md and llms.txt "SELinux confinement" for the rationale.
+# selinux_policy = false
+
 # Optional: Additional system groups for the workload user
 # Type: array of strings
 # Default: [] (no additional groups)
@@ -836,8 +900,20 @@ ports = ["8080:80", "8443:443"]
 # - Use simple percentage/size strings for convenience ("50%", "2G")
 # - Use escape hatches for fine-grained control (custom systemd directives)
 #
-# All resource limits use systemd cgroup v2 controls applied at the service level.
-# This works seamlessly with rootless podman and provides comprehensive isolation.
+# All resource limits use systemd cgroup v2 controls (ADR 001 option 1b).
+#
+# WORKLOAD-LEVEL CAPS (MemoryMax, MemoryHigh, CPUWeight, IOWeight, etc.): go on the
+# user@<uid>.service drop-in emitted by the generator; they bind the entire
+# workload subtree including all its containers.
+#
+# PER-CONTAINER CAPS (memory_max, cpu_quota, pids_max, etc.): passed as podman
+# flags (--memory, --cpus, --pids-limit, --device-read-bps, --device-write-bps)
+# and bind natively via the user manager's delegated cgroup subtree. All modes
+# (single, pod, bridge) are enforced equally — there is no pod-mode exception.
+#
+# NOTE: per-container MemoryHigh has no podman equivalent (--memory-reservation
+# maps to memory.low, not memory.high). Use the workload-level memory_high
+# directive for throttle-before-kill semantics.
 
 # Optional: systemd slice for cgroup grouping
 # Type: string (systemd slice unit name)
@@ -1026,6 +1102,10 @@ ports = ["8080:80", "8443:443"]
 # Purpose: How long to wait for graceful shutdown before force-killing
 # Use case: Increase for applications with long shutdown procedures
 # Systemd directive: TimeoutStopSec=
+# Note: also raises `podman stop -t` (the container's drain grace) to this
+#   value minus a 5s margin, so a longer drain actually reaches the container
+#   instead of being cut off by podman's default 10s. A systemd timespan
+#   (e.g. "2min") keeps podman's grace at the 10s default. (integer seconds)
 # timeout_stop_sec = 30
 
 # ============================================================================

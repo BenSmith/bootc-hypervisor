@@ -1,0 +1,20 @@
+# clitest-vm — minimal VM fixture on the workloadctl-managed NAT bridge.
+# Uses the Fedora 44 Cloud image.  cloud-init enables sshd, creates the
+# workload user, and touches /var/lib/clitest-vm-ready as a readiness marker.
+# Gate: has_kvm.
+
+[workload]
+name = "clitest-vm"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "1024M"
+system_disk_size = "10G"
+user = "workload"
+rollback_keep = 1
+
+[vm.network]
+# Default: _workload-br (workloadctl-managed NAT bridge)

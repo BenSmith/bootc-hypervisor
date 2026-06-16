@@ -368,6 +368,11 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
             "/usr/libexec/workloadctl/workload-ensure-user", "/bin/true")
         patched = patched.replace(
             "/usr/libexec/workloadctl/workload-write-env", "/bin/true")
+        # Dev containers don't ship podman; systemd-analyze fails the unit on a
+        # non-executable ExecStart. Patch only when actually absent so real
+        # hosts keep strict verify.
+        if not os.path.exists("/usr/bin/podman"):
+            patched = patched.replace("/usr/bin/podman", "/bin/true")
         # sysusers conf is now in services_dir (generator output) — no patching needed
         # EnvironmentFile already has - prefix (optional) — no patching needed
         service_path.write_text(patched)

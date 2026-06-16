@@ -41,6 +41,7 @@ capabilities = [
 extra_groups = ["video", "render"]
 extra_uidmaps = ["+0:@{UID}:1"]
 extra_gidmaps = ["+0:@{GID}:1"]
+selinux_policy = true
 
 [storage]
 volumes = [
@@ -51,9 +52,6 @@ volumes = [
 
 [network]
 mode = "host"
-
-[host]
-setup = "setup.sh"
 
 [resources]
 shm_size = "2G"

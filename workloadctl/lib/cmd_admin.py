@@ -1,0 +1,945 @@
+"""
+cmd_admin — workload admin commands: create, edit, validate, verify, uid-map.
+"""
+
+import argparse
+import grp
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from workload_lib import (
+    expand_volume_path,
+    GENERATOR_OWNED_DIRECTIVES,
+    selinux_module_name,
+    selinux_type_name,
+    validate_workload_name,
+)
+from workloadctl_core import (
+    WorkloadConfig,
+    WorkloadManager,
+    WorkloadUserNotFound,
+    restart_workload_service,
+    require_root,
+    toml_string,
+    WORKLOAD_DIR,
+)
+
+
+# ---------------------------------------------------------------------------
+# validate_single (shared by create, edit, validate)
+# ---------------------------------------------------------------------------
+
+def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=False) -> dict:
+    """Validate a single workload config. Returns dict with validation results."""
+    errors = 0
+    warnings = 0
+    checks = []
+
+    checks.append({
+        "check": "required_fields",
+        "passed": True,
+        "severity": "ok",
+        "message": f"Required fields present: name={config.name}"
+    })
+
+    username_len = len(config.username)
+    if username_len >= 32:
+        checks.append({
+            "check": "username_length",
+            "passed": False,
+            "severity": "error",
+            "message": f"Username too long: {config.username} ({username_len} chars, max 31)",
+            "fix": "Use shorter workload name"
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "username_length",
+            "passed": True,
+            "severity": "ok",
+            "message": f"Username length OK ({username_len} chars)"
+        })
+
+    # Check if UID has been assigned
+    try:
+        uid = config.uid
+        if uid < 10000 or uid > 52948:
+            checks.append({
+                "check": "uid_range",
+                "passed": False,
+                "severity": "error",
+                "message": f"UID out of range: {uid} (should be 10000-52948)"
+            })
+            errors += 1
+        else:
+            checks.append({
+                "check": "uid_range",
+                "passed": True,
+                "severity": "ok",
+                "message": f"UID in valid range: {uid} (10000-52948)"
+            })
+    except WorkloadUserNotFound:
+        checks.append({
+            "check": "uid_assigned",
+            "passed": True,
+            "severity": "ok",
+            "message": "UID not yet assigned (will be assigned on first enable)"
+        })
+
+    # Check name uniqueness (workload names must be unique)
+    all_configs = manager.get_all_configs()
+    conflicts = [c for c in all_configs
+                 if c.name == config.name and c.filename != config.filename]
+    if conflicts:
+        checks.append({
+            "check": "name_uniqueness",
+            "passed": False,
+            "severity": "error",
+            "message": f"Name conflict: '{config.name}' also used in {conflicts[0].filename}"
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "name_uniqueness",
+            "passed": True,
+            "severity": "ok",
+            "message": "Name is unique"
+        })
+
+    required_file_paths = {e["path"] for e in config.get_required_files()}
+    for vol in config.get_volumes():
+        expanded_vol = expand_volume_path(vol, str(config.home_dir))
+        host_path = expanded_vol.split(':')[0]
+        if Path(host_path).exists():
+            checks.append({
+                "check": "volume_path",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Volume path exists: {host_path}",
+                "path": host_path
+            })
+        elif host_path in required_file_paths:
+            checks.append({
+                "check": "volume_path",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Volume path listed in required_files (setup needed): {host_path}",
+                "path": host_path
+            })
+        else:
+            checks.append({
+                "check": "volume_path",
+                "passed": False,
+                "severity": "error",
+                "message": f"Volume path does not exist: {host_path}",
+                "path": host_path,
+                "fix": f"mkdir -p {host_path}"
+            })
+            errors += 1
+
+    for group in config.get_extra_groups():
+        try:
+            grp.getgrnam(group)
+            checks.append({
+                "check": "group_exists",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Group exists: {group}",
+                "group": group
+            })
+        except KeyError:
+            checks.append({
+                "check": "group_exists",
+                "passed": False,
+                "severity": "error",
+                "message": f"Group does not exist: {group}",
+                "group": group
+            })
+            errors += 1
+
+    # Warn if custom_directives overrides something the generator already sets.
+    custom_directives = config.config.get("resources", {}).get("custom_directives", {})
+    for directive in custom_directives:
+        if directive in GENERATOR_OWNED_DIRECTIVES:
+            checks.append({
+                "check": "custom_directives_conflict",
+                "passed": True,
+                "severity": "warning",
+                "message": f"custom_directives overrides '{directive}' which is managed by the generator — may have no effect or cause unexpected behaviour",
+            })
+            warnings += 1
+
+    passed = errors == 0
+    result = {
+        "workload": config.filename,
+        "passed": passed,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks
+    }
+
+    # Human-readable output if not JSON mode
+    if not json_mode:
+        print(f"Validating: {config.filename}")
+        print()
+
+        for check in checks:
+            severity = check.get("severity", "ok" if check["passed"] else "error")
+            if severity == "error":
+                symbol = "✗"
+            elif severity == "warning":
+                symbol = "⚠"
+            else:
+                symbol = "✓"
+            print(f"{symbol} {check['message']}")
+            if "fix" in check:
+                print(f"  Suggested fix: {check['fix']}")
+
+        print()
+        if passed:
+            if warnings == 0:
+                print("✓ Validation passed")
+            else:
+                print(f"⚠ Validation passed with {warnings} warning(s)")
+        else:
+            print(f"✗ Validation failed with {errors} error(s) and {warnings} warning(s)")
+            print("  Fix errors before enabling workload")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# cmd_create
+# ---------------------------------------------------------------------------
+
+def cmd_create(args, manager: WorkloadManager):
+    """Create a new workload configuration"""
+    require_root()
+
+    name = args.name
+    image = args.image
+
+    try:
+        validate_workload_name(name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if config already exists
+    config_path = WORKLOAD_DIR / f"{name}.toml"
+    if config_path.exists():
+        print(f"Error: Workload config already exists: {config_path}", file=sys.stderr)
+        print(f"Use 'workloadctl edit {name}' to modify it", file=sys.stderr)
+        sys.exit(1)
+
+    # Build configuration
+    config_lines = [
+        "[workload]",
+        f"name = {toml_string(name)}",
+        "enabled = false",
+    ]
+
+    config_lines.extend([
+        "",
+        "[container]",
+        f"image = {toml_string(image)}",
+    ])
+
+    if args.systemd:
+        config_lines.append(f"systemd = {toml_string(args.systemd)}")
+
+    # Add optional sections
+    if args.groups:
+        groups_list = ", ".join([toml_string(g) for g in args.groups])
+        config_lines.extend([
+            "",
+            "[security]",
+            f"extra_groups = [{groups_list}]",
+        ])
+
+    # Devices section - add if any devices specified
+    if args.device or args.gpu or args.input or args.audio or args.virtualization:
+        config_lines.extend(["", "[devices]"])
+
+        # Generic device passthrough
+        if args.device:
+            devices_list = ", ".join([toml_string(d) for d in args.device])
+            config_lines.append(f"devices = [{devices_list}]")
+
+        # Convenience flags
+        if args.gpu:
+            config_lines.append(f"gpu = {toml_string(args.gpu)}")
+
+        if args.input:
+            config_lines.append("input = true")
+
+        if args.audio:
+            config_lines.append("audio = true")
+
+        if args.virtualization:
+            config_lines.append("virtualization = true")
+
+    if args.network or args.ports:
+        config_lines.extend(["", "[network]"])
+
+        if args.network:
+            config_lines.append(f"mode = {toml_string(args.network)}")
+        elif args.ports:
+            # If ports specified but no mode, default to pasta
+            config_lines.append('mode = "pasta"')
+
+        # Add ports if specified and mode supports them (not host or none)
+        if args.ports:
+            mode = args.network if args.network else "pasta"
+            if mode not in ["host", "none"]:
+                ports_list = ", ".join([toml_string(p) for p in args.ports])
+                config_lines.append(f"ports = [{ports_list}]")
+
+    if args.volumes:
+        volumes_list = ", ".join([toml_string(v) for v in args.volumes])
+        config_lines.extend([
+            "",
+            "[storage]",
+            f"volumes = [{volumes_list}]",
+        ])
+
+    has_resources = any([
+        args.cpu_quota, args.cpu_weight, args.memory_max, args.memory_high,
+        args.memory_swap_max, args.io_weight, args.tasks_max, args.shm_size
+    ])
+
+    if has_resources:
+        config_lines.extend(["", "[resources]"])
+
+        if args.shm_size:
+            config_lines.append(f"shm_size = {toml_string(args.shm_size)}")
+
+        if args.cpu_quota:
+            config_lines.append(f"cpu_quota = {toml_string(args.cpu_quota)}")
+
+        if args.cpu_weight:
+            config_lines.append(f"cpu_weight = {args.cpu_weight}")
+
+        if args.memory_max:
+            config_lines.append(f"memory_max = {toml_string(args.memory_max)}")
+
+        if args.memory_high:
+            config_lines.append(f"memory_high = {toml_string(args.memory_high)}")
+
+        if args.memory_swap_max:
+            config_lines.append(f"memory_swap_max = {toml_string(args.memory_swap_max)}")
+
+        if args.io_weight:
+            config_lines.append(f"io_weight = {args.io_weight}")
+
+        if args.tasks_max:
+            config_lines.append(f"tasks_max = {args.tasks_max}")
+
+    # Write config file
+    config_content = "\n".join(config_lines) + "\n"
+
+    print(f"Creating workload: {name}")
+    print(f"  Config: {config_path}")
+    print(f"  Image:  {image}")
+    print(f"  User:   _wl-{name} (UID assigned on first enable)")
+    print()
+
+    config_path.write_text(config_content)
+    print(f"✓ Created {config_path}")
+
+    # Validate the new config
+    print()
+    print("Validating configuration...")
+    print()
+    try:
+        config = WorkloadConfig(name)
+        result = validate_single(config, manager, json_mode=False)
+        if not result["passed"]:
+            print()
+            print("Warning: Validation found issues. Fix them before enabling.", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error: Failed to validate config: {e}", file=sys.stderr)
+        config_path.unlink()
+        sys.exit(1)
+
+    if args.enable:
+        print()
+        print("Enabling workload...")
+        # Import here to avoid circular; cmd_lifecycle imports cmd_admin
+        from cmd_lifecycle import cmd_enable
+        enable_args = argparse.Namespace(workload=name)
+        cmd_enable(enable_args, manager)
+    else:
+        print()
+        print("Next steps:")
+        print(f"  Edit config:  workloadctl edit {name}")
+        print(f"  Enable:       workloadctl enable {name}")
+
+
+# ---------------------------------------------------------------------------
+# cmd_validate
+# ---------------------------------------------------------------------------
+
+def cmd_validate(args, manager: WorkloadManager):
+    """Validate workload configuration"""
+    if args.all:
+        configs = manager.get_all_configs()
+        results = []
+        success = True
+        for config in configs:
+            result = validate_single(config, manager, json_mode=args.json)
+            results.append(result)
+            if not result["passed"]:
+                success = False
+            if not args.json:
+                print()
+
+        if args.json:
+            print(json.dumps({"validation_results": results, "all_passed": success}, indent=2))
+        sys.exit(0 if success else 1)
+    else:
+        if not args.workload:
+            print("Error: Workload name required (or use --all)", file=sys.stderr)
+            sys.exit(1)
+        config = WorkloadConfig(args.workload)
+        result = validate_single(config, manager, json_mode=args.json)
+
+        if args.json:
+            print(json.dumps(result, indent=2))
+        sys.exit(0 if result["passed"] else 1)
+
+
+# ---------------------------------------------------------------------------
+# cmd_verify
+# ---------------------------------------------------------------------------
+
+def cmd_verify(args, manager: WorkloadManager):
+    """Verify workload setup and diagnose issues"""
+    require_root()
+    config = WorkloadConfig(args.workload)
+
+    checks = []
+
+    def _check(name, passed, message, fix=None):
+        entry = {"check": name, "passed": passed, "message": message}
+        if fix:
+            entry["fix"] = fix
+        checks.append(entry)
+
+    # Check 1: User exists
+    user_exists = manager.user_exists(config)
+    if user_exists:
+        _check("user_exists", True, f"User exists: {config.username} (UID {config.uid})")
+    else:
+        _check("user_exists", False, f"User does not exist: {config.username}",
+               fix="sudo workloadctl enable " + config.name)
+
+    # Check 2: Subuid/subgid configured
+    if user_exists:
+        subuid_exists = False
+        subgid_exists = False
+        try:
+            with open("/etc/subuid", "r") as f:
+                if any(line.startswith(f"{config.username}:") for line in f):
+                    subuid_exists = True
+        except FileNotFoundError:
+            pass
+        try:
+            with open("/etc/subgid", "r") as f:
+                if any(line.startswith(f"{config.username}:") for line in f):
+                    subgid_exists = True
+        except FileNotFoundError:
+            pass
+
+        if subuid_exists and subgid_exists:
+            _check("subid_configured", True, "Subuid/subgid configured")
+        else:
+            _check("subid_configured", False, "Subuid/subgid not configured",
+                   fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+    # Check 3: Linger enabled
+    if user_exists:
+        linger_result = subprocess.run(
+            ["loginctl", "show-user", str(config.uid), "--property=Linger", "--value"],
+            capture_output=True, text=True
+        )
+        linger_enabled = linger_result.returncode == 0 and linger_result.stdout.strip() == "yes"
+        if linger_enabled:
+            _check("linger_enabled", True, "Linger enabled")
+        else:
+            _check("linger_enabled", False, "Linger not enabled",
+                   fix=f"sudo loginctl enable-linger {config.uid}")
+
+    # Check: per-workload SELinux module loaded (only if the workload ships one)
+    if config.selinux_policy:
+        module = selinux_module_name(config.name)
+        if not shutil.which("semodule"):
+            _check("selinux_module", False,
+                   "SELinux tooling (semodule) not found",
+                   fix="sudo dnf install policycoreutils")
+        else:
+            loaded = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
+            if module in loaded.stdout.split():
+                _check("selinux_module", True,
+                       f"SELinux module loaded: {module} "
+                       f"(type {selinux_type_name(config.name)})")
+            else:
+                _check("selinux_module", False,
+                       f"SELinux module not loaded: {module}",
+                       fix=f"sudo workloadctl enable {config.name}")
+
+    # Check 4: Runtime directory exists
+    if user_exists:
+        runtime_dir = Path(f"/run/user/{config.uid}")
+        if runtime_dir.exists():
+            _check("runtime_dir", True, f"Runtime directory exists: {runtime_dir}")
+        else:
+            _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
+                   fix="Enable linger to create runtime directory")
+
+    # Check 5: Home directory exists
+    if user_exists:
+        home_dir = config.home_dir
+        if home_dir.exists():
+            _check("home_dir", True, f"Home directory exists: {home_dir}")
+        else:
+            _check("home_dir", False, f"Home directory missing: {home_dir}",
+                   fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+    # Check 6: Image(s) exist locally
+    if user_exists:
+        if config.is_multi:
+            for cname, img in config.container_images():
+                iid = manager.podman(config).image_id(img)
+                if iid:
+                    _check(f"image_available[{cname}]", True,
+                           f"Image available for {cname}: {img} ({iid[:12]})")
+                else:
+                    _check(f"image_available[{cname}]", False,
+                           f"Image not available for {cname}: {img}",
+                           fix="Image will be pulled on first start")
+        else:
+            image_id = manager.get_image_id(config)
+            if image_id:
+                _check("image_available", True, f"Image available: {config.image} ({image_id[:12]})")
+            else:
+                pull_policy = config.config.get("container", {}).get("pull", "missing")
+                if pull_policy == "never":
+                    build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+                    fix = (f"Build it: {build_script}" if build_script.exists()
+                           else f"Build or provide: {config.image}")
+                else:
+                    fix = "Image will be pulled on first start"
+                _check("image_available", False, f"Image not available: {config.image}", fix=fix)
+
+    # Check 7: Service file(s) exist
+    service_file = Path(f"/run/systemd/system/{config.service_name}")
+    if service_file.exists():
+        _check("service_file", True, f"Service file exists: {service_file}")
+    else:
+        _check("service_file", False, f"Service file missing: {service_file}",
+               fix="sudo systemctl daemon-reload")
+
+    if config.is_multi:
+        for unit in config.sub_service_names():
+            sub_file = Path(f"/run/systemd/system/{unit}")
+            if sub_file.exists():
+                _check(f"service_file[{unit}]", True, f"Sub-service file exists: {unit}")
+            else:
+                _check(f"service_file[{unit}]", False, f"Sub-service file missing: {unit}",
+                       fix="sudo systemctl daemon-reload")
+
+    # Check 8: Service enabled
+    result = subprocess.run(
+        ["systemctl", "is-enabled", config.service_name],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        _check("service_enabled", True, "Service enabled")
+    else:
+        _check("service_enabled", False, "Service not enabled",
+               fix="Service should be auto-enabled via generator")
+
+    # Check 9: Service active
+    result = subprocess.run(
+        ["systemctl", "is-active", config.service_name],
+        capture_output=True, text=True
+    )
+    service_state = result.stdout.strip()
+    if result.returncode == 0:
+        _check("service_active", True, f"Service active: {service_state}")
+    else:
+        fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"
+               if config.enabled else "Workload is disabled in config")
+        _check("service_active", False, f"Service not active: {service_state}", fix=fix)
+
+    # Check 10: Container(s) running
+    if user_exists:
+        if config.is_multi:
+            for cname in config.container_names():
+                pn = config.podman_container_name(cname)
+                cs = manager.podman(config).container_status(pn)
+                if cs:
+                    _check(f"container_running[{cname}]", True,
+                           f"Container running: {pn} ({cs})")
+                else:
+                    _check(f"container_running[{cname}]", False,
+                           f"Container not running: {pn}",
+                           fix=f"Check logs: sudo journalctl -u workload-{config.name}-{cname}.service -n 50")
+        else:
+            container_status = manager.podman(config).container_status(config.container_name)
+            if container_status:
+                _check("container_running", True, f"Container running: {container_status}")
+            else:
+                _check("container_running", False, "Container not running",
+                       fix=f"Check logs: sudo journalctl -u {config.service_name} -n 50")
+
+    # Check 11: Volume paths exist
+    volumes = config.get_volumes()
+    if volumes:
+        missing_volumes = []
+        for vol_spec in volumes:
+            expanded_spec = expand_volume_path(vol_spec, str(config.home_dir))
+            host_path = expanded_spec.split(':')[0]
+            if not Path(host_path).exists():
+                missing_volumes.append(host_path)
+
+        if not missing_volumes:
+            _check("volume_paths", True, f"All volume paths exist ({len(volumes)} volumes)")
+        else:
+            _check("volume_paths", False,
+                   f"Missing volume paths: {', '.join(missing_volumes)}",
+                   fix="sudo mkdir -p " + " ".join(missing_volumes))
+
+    # Check 12: UID mapping (for userns=host)
+    userns_mode = config.config.get("security", {}).get("userns", "keep-id")
+    if userns_mode == "host" and user_exists:
+        try:
+            with open("/etc/subuid", "r") as f:
+                for line in f:
+                    if line.startswith(f"{config.username}:"):
+                        parts = line.strip().split(':')
+                        if len(parts) == 3:
+                            subuid_start = int(parts[1])
+                            subuid_count = int(parts[2])
+                            subuid_end = subuid_start + subuid_count - 1
+                            _check("uid_mapping", True,
+                                   f"UID mapping configured: container UIDs 1-{subuid_count} → host UIDs {subuid_start}-{subuid_end}")
+                            break
+                else:
+                    _check("uid_mapping", False, "Cannot calculate UID mapping (subuid not found)",
+                           fix="Check /etc/subuid configuration")
+        except Exception as e:
+            _check("uid_mapping", False, f"Error reading subuid: {e}")
+
+    checks_passed = sum(1 for c in checks if c["passed"])
+    checks_total = len(checks)
+    passed = all(c["passed"] for c in checks)
+
+    if args.json:
+        print(json.dumps({
+            "workload": config.name,
+            "passed": passed,
+            "checks_passed": checks_passed,
+            "checks_total": checks_total,
+            "checks": checks
+        }, indent=2))
+        sys.exit(0 if passed else 1)
+
+    print(f"Verifying workload: {config.name}")
+    print()
+    for c in checks:
+        symbol = "✓" if c["passed"] else "✗"
+        print(f"{symbol} {c['message']}")
+        if "fix" in c and not c["passed"]:
+            print(f"  Fix: {c['fix']}")
+
+    print()
+    print(f"Checks: {checks_passed}/{checks_total} passed")
+    print()
+
+    if not passed:
+        print("Issues found:")
+        for i, c in enumerate((c for c in checks if not c["passed"]), 1):
+            print(f"  {i}. {c['message']}")
+            if "fix" in c:
+                print(f"     {c['fix']}")
+        print()
+        sys.exit(1)
+    else:
+        print("✓ All checks passed - workload is healthy")
+        sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# cmd_edit
+# ---------------------------------------------------------------------------
+
+def _ask_yes_no(prompt: str) -> bool:
+    """Prompt for y/N. Treat EOF (non-interactive stdin) as 'no' rather than
+    crashing with `EOFError: EOF when reading a line`."""
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        print()
+        return False
+
+
+def cmd_edit(args, manager: WorkloadManager):
+    """Edit config and apply changes"""
+    require_root()
+
+    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Create backup using mkstemp to avoid TOCTOU race
+    backup_fd, backup_str = tempfile.mkstemp(prefix=f"workload-{args.workload}-", suffix=".toml")
+    os.close(backup_fd)
+    backup_path = Path(backup_str)
+    shutil.copy2(config_path, backup_path)
+
+    editor = os.environ.get("EDITOR", "nano")
+
+    # Open editor
+    result = subprocess.run([editor, str(config_path)])
+    if result.returncode != 0:
+        print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
+        backup_path.unlink()
+        sys.exit(1)
+
+    # Check if file changed
+    if config_path.read_text() == backup_path.read_text():
+        print("No changes made")
+        backup_path.unlink()
+        return
+
+    print()
+    print("Config changed. Validating...")
+    print()
+
+    try:
+        config = WorkloadConfig(args.workload)
+        result = validate_single(config, manager, json_mode=False)
+        if not result["passed"]:
+            print()
+            if _ask_yes_no("Validation failed. Restore backup? [y/N] "):
+                shutil.copy2(backup_path, config_path)
+                print("Backup restored")
+            else:
+                print("Config saved with errors - fix before enabling")
+            backup_path.unlink()
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        if _ask_yes_no("Restore backup? [y/N] "):
+            shutil.copy2(backup_path, config_path)
+            print("Backup restored")
+        backup_path.unlink()
+        sys.exit(1)
+
+    print()
+    print("Validation passed. Changes:")
+    print()
+    subprocess.run(["diff", "-u", str(backup_path), str(config_path)])
+    print()
+
+    if config.enabled:
+        if getattr(args, "yes", False):
+            print("Apply changes and restart workload? [y/N] y")
+            apply = True
+        else:
+            apply = _ask_yes_no("Apply changes and restart workload? [y/N] ")
+        if apply:
+            # daemon-reload alone won't regenerate per-workload unit files —
+            # only the systemd shell-generator re-runs, and it just emits a
+            # oneshot that doesn't fire until next boot. Run workload-generate
+            # explicitly so [container.environment] and other inlined values
+            # actually take effect.
+            subprocess.run(
+                ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+                check=True,
+            )
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            if config.is_vm:
+                # VM cloud-init/nvram are built by the setup oneshot
+                # (RemainAfterExit=yes); restart it so edits to [vm.cloud_init]
+                # / template_vars are re-rendered into a fresh seed before the
+                # main service reboots QEMU onto it.
+                subprocess.run(
+                    ["systemctl", "restart", f"workload-{config.name}-setup.service"],
+                    check=True,
+                )
+                subprocess.run(["systemctl", "restart", config.service_name], check=True)
+            elif manager.user_exists(config):
+                # Container: self-healing restart (re-pin runtime dir + clear
+                # start-limit thrash) rather than a bare systemctl restart.
+                restart_workload_service(config.uid, config.service_name)
+            else:
+                subprocess.run(["systemctl", "restart", config.service_name], check=True)
+            print("✓ Changes applied and service restarted")
+        else:
+            print(f"Changes saved but not applied. Run 'sudo workloadctl recreate {args.workload}' to apply.")
+    else:
+        print("✓ Changes saved (workload is disabled)")
+
+    backup_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# cmd_uid_map
+# ---------------------------------------------------------------------------
+
+def cmd_uid_map(args, manager: WorkloadManager):
+    """Show UID/GID mapping for a workload"""
+    import pwd as _pwd
+    config = WorkloadConfig(args.workload)
+
+    if not manager.user_exists(config):
+        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
+        print("Enable the workload first to create the user.", file=sys.stderr)
+        sys.exit(1)
+
+    pw = _pwd.getpwnam(config.username)
+    uid = pw.pw_uid
+    gid = pw.pw_gid
+
+    subuid_start = None
+    subuid_count = None
+    subgid_start = None
+    subgid_count = None
+
+    try:
+        with open("/etc/subuid", "r") as f:
+            for line in f:
+                if line.startswith(f"{config.username}:"):
+                    parts = line.strip().split(':')
+                    if len(parts) == 3:
+                        subuid_start = int(parts[1])
+                        subuid_count = int(parts[2])
+                    break
+    except FileNotFoundError:
+        pass
+
+    try:
+        with open("/etc/subgid", "r") as f:
+            for line in f:
+                if line.startswith(f"{config.username}:"):
+                    parts = line.strip().split(':')
+                    if len(parts) == 3:
+                        subgid_start = int(parts[1])
+                        subgid_count = int(parts[2])
+                    break
+    except FileNotFoundError:
+        pass
+
+    userns_mode = config.config.get("security", {}).get("userns", "keep-id")
+
+    # Compute mapped_uid/mapped_gid
+    if userns_mode.startswith("keep-id"):
+        mapped_uid = uid
+        mapped_gid = gid
+        if ":" in userns_mode:
+            for param in userns_mode.split(":", 1)[1].split(","):
+                key, _, value = param.partition("=")
+                if key == "uid":
+                    mapped_uid = int(value)
+                elif key == "gid":
+                    mapped_gid = int(value)
+    else:
+        mapped_uid = uid
+        mapped_gid = gid
+
+    if args.json:
+        print(json.dumps({
+            "workload": config.name,
+            "username": config.username,
+            "host_uid": uid,
+            "host_gid": gid,
+            "subuid": {"start": subuid_start, "count": subuid_count},
+            "subgid": {"start": subgid_start, "count": subgid_count},
+            "userns_mode": userns_mode,
+            "mapped_uid": mapped_uid,
+            "mapped_gid": mapped_gid
+        }, indent=2))
+        return
+
+    print(f"Workload: {config.name}")
+    print(f"User: {config.username}")
+    print(f"Host UID: {uid}")
+    print(f"Host GID: {gid}")
+    print()
+
+    if subuid_start is not None:
+        print(f"Subuid range: {subuid_start}-{subuid_start + subuid_count - 1} ({subuid_count} UIDs)")
+    else:
+        print("Subuid range: NOT CONFIGURED")
+        print(f"  Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+    if subgid_start is not None:
+        print(f"Subgid range: {subgid_start}-{subgid_start + subgid_count - 1} ({subgid_count} GIDs)")
+    else:
+        print("Subgid range: NOT CONFIGURED")
+        print(f"  Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+    print()
+    print(f"User namespace mode: {userns_mode}")
+    print()
+
+    if userns_mode.startswith("keep-id"):
+        print(f"UID/GID Mapping (keep-id mode):")
+        if mapped_uid != uid:
+            print(f"  Container UID {mapped_uid} → Host UID {uid} (workload user, remapped)")
+        else:
+            print(f"  Container UID {uid} → Host UID {uid} (workload user)")
+        if subuid_start is not None:
+            print(f"  Container UID 0   → Host UID {subuid_start} (mapped root)")
+            print(f"  Container UID 1   → Host UID {subuid_start + 1}")
+            print(f"  Container UID N   → Host UID (subuid_start + N) for N ≠ {mapped_uid}")
+        else:
+            print("  Container UID 0   → Host UID (unknown - subuid not configured)")
+        print()
+        if mapped_uid != uid:
+            print(f"Note: keep-id remaps workload user (host UID {uid}) to container UID {mapped_uid}.")
+            print(f"      Container processes running as UID {mapped_uid} are the workload user on the host.")
+        else:
+            print("Note: In keep-id mode, the container's UID matches the workload user's UID.")
+            print("      Other container UIDs are mapped to the subuid range.")
+
+    elif userns_mode == "host":
+        print("UID/GID Mapping (host mode):")
+        if subuid_start is not None:
+            print(f"  Container UID 0       → Host UID {subuid_start} (mapped root)")
+            print(f"  Container UID 1       → Host UID {subuid_start + 1}")
+            print(f"  Container UID {uid}  → Host UID {subuid_start + uid}")
+            print(f"  Container UID N       → Host UID (subuid_start + N) for any N")
+        else:
+            print("  Container UID 0       → Host UID (unknown - subuid not configured)")
+        print()
+        print("IMPORTANT: With userns=host:")
+        print("  - Container files owned by UID N appear as host UID (subuid_start + N)")
+        print("  - Example: Container UID 10008 files owned by host UID", end="")
+        if subuid_start is not None:
+            print(f" {subuid_start + config.uid}")
+        else:
+            print(" (unknown - subuid not configured)")
+        print()
+        print("To fix file ownership for userns=host workloads:")
+        if subuid_start is not None and subgid_start is not None:
+            print(f"  sudo chown -R {subuid_start + config.uid}:{subgid_start + gid} /path/to/files")
+        else:
+            print("  First configure subuid/subgid ranges")
+
+    print()
+    print("Useful commands:")
+    print(f"  Check subuid: grep {config.username} /etc/subuid")
+    print(f"  Check subgid: grep {config.username} /etc/subgid")
+    print(f"  Podman unshare: sudo -u {config.username} -E XDG_RUNTIME_DIR=/run/user/{uid} podman unshare cat /proc/self/uid_map")

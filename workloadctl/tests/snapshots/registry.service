@@ -16,20 +16,20 @@ Group=_wl-registry
 Environment="HOME=/var/lib/workloads/registry"
 EnvironmentFile=-/run/workload-env/workload-registry.env
 
-# Resource limits and constraints
-CPUQuota=50%
-MemoryMax=256M
-MemoryHigh=192M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --init --sdnotify=ignore --pull=missing --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/registry:2"
+ExecStart=/usr/bin/podman run --name "workload-registry" --hostname "registry" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=256M --cpus=0.5 --network="pasta" --publish 5000:5000 --volume "/var/lib/workloads/registry/data":/var/lib/registry --env HOST_IP=${HOST_IP} --env REGISTRY_STORAGE_DELETE_ENABLED=true --env REGISTRY_LOG_LEVEL=info --health-cmd "wget -qO- http://localhost:5000/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "docker.io/library/registry:2"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-registry"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-registry"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-registry
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/registry" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

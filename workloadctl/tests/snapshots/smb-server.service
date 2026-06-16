@@ -16,20 +16,20 @@ Group=_wl-smb-server
 Environment="HOME=/var/lib/workloads/smb-server"
 EnvironmentFile=-/run/workload-env/workload-smb-server.env
 
-# Resource limits and constraints
-CPUQuota=50%
-MemoryMax=512M
-MemoryHigh=384M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-smb-server" --hostname "smb-server" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="host" --volume "/var/lib/workloads/smb-server/exports":/exports --volume "/var/lib/workloads/smb-server/samba-state":/var/lib/samba --volume "/var/lib/workloads/smb-server/samba-run":/run/samba --volume "/var/lib/workloads/smb-server/samba-logs":/var/log/samba --volume "/var/lib/workloads/smb-server/smb.conf":/etc/samba/smb.conf:ro --volume "/run/systemd/journal/socket":/run/systemd/journal/socket --env HOST_IP=${HOST_IP} --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/smb-server:latest"
+ExecStart=/usr/bin/podman run --name "workload-smb-server" --hostname "smb-server" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=512M --cpus=0.5 --network="host" --volume "/var/lib/workloads/smb-server/exports":/exports --volume "/var/lib/workloads/smb-server/samba-state":/var/lib/samba --volume "/var/lib/workloads/smb-server/samba-run":/run/samba --volume "/var/lib/workloads/smb-server/samba-logs":/var/log/samba --volume "/var/lib/workloads/smb-server/smb.conf":/etc/samba/smb.conf:ro --volume "/run/systemd/journal/socket":/run/systemd/journal/socket --env HOST_IP=${HOST_IP} --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/smb-server:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-smb-server"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-smb-server"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-smb-server
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/smb-server" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

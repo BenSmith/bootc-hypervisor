@@ -57,13 +57,14 @@ collection, then `sudo workloadctl recreate alloy`.
 ## Notes
 
 - **SELinux:** reading the host journal (`syslogd_var_run_t` / `var_log_t`) is
-  denied to `container_t` under SELinux enforcing, so without help
-  `loki.source.journal` silently collects nothing. The workload stays confined
-  as `container_t`; instead of `label=disable`, the `[host]` `setup.sh` script
-  installs a targeted policy module (`alloy.te`) on `enable` granting just
-  journal read access, and removes it on `disable`. If the host-metrics
-  collectors hit AVC denials, extend `alloy.te` via `audit2allow -a` rather
-  than disabling confinement.
+  denied to the stock container domain under SELinux enforcing, so without help
+  `loki.source.journal` silently collects nothing. Instead of `label=disable`,
+  `[security].selinux_policy = true` makes `enable` load a per-workload type
+  from `alloy.cil` (a udica CIL block inheriting the base container domain), so
+  alloy runs confined as its own `wl_alloy.process` with just journal read
+  access — no other container is widened — and `disable` removes it. If the
+  host-metrics collectors hit AVC denials, regenerate/extend `alloy.cil` with
+  `udica` / `audit2allow -a` rather than disabling confinement.
 - **Journal path:** `alloy-config.alloy` sets `loki.source.journal` `path` to
   `/var/log/journal` explicitly. sd_journal's default location keys off
   `/etc/machine-id`, which inside the container is the *container's* id — the

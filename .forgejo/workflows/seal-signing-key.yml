@@ -1,0 +1,60 @@
+# Operator-triggered, re-runnable: seal the image-signing key from Forgejo's
+# secret store into host-key-bound systemd credentials on the CI runner VM.
+# Build workflows then sign at push time (podman push
+# --sign-by-sigstore-private-key) by reading the runner service's credential
+# tmpfs — no Forgejo secrets in the build path at all.
+#
+# After a successful run (and the delayed runner restart), verify signing
+# with the next build, then DELETE COSIGN_SECRET and COSIGN_PASSWORD from
+# the Forgejo repo secrets. Re-run this workflow (re-adding the secrets
+# first) only when the runner VM is re-provisioned — the credentials are
+# sealed to the VM's /var/lib/systemd/credential.secret host key and don't
+# survive a rebuild. See docs/ci-image-signing.md.
+name: seal-signing-key
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  seal:
+    runs-on: native
+    steps:
+      - name: Seal signing key as systemd credentials
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_SECRET }}
+          # The key's passphrase. Empty (unset secret) is correct for a key
+          # generated without a password — an empty passphrase credential is
+          # still written so the build-side flags stay unconditional.
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "COSIGN_SECRET is not set in Forgejo secrets — nothing to seal."
+            exit 1
+          fi
+          sudo install -d -m 0700 /etc/forgejo-runner/creds
+          printf '%s' "${COSIGN_PRIVATE_KEY}" | sudo systemd-creds encrypt \
+            --with-key=host --name=cosign-key - /etc/forgejo-runner/creds/cosign-key.cred
+          printf '%s' "${COSIGN_PASSWORD:-}" | sudo systemd-creds encrypt \
+            --with-key=host --name=cosign-pass - /etc/forgejo-runner/creds/cosign-pass.cred
+
+          sudo install -d /etc/systemd/system/forgejo-runner.service.d
+          {
+            echo "# Decrypt the sealed signing key/passphrase into the service's"
+            echo "# credential tmpfs (/run/credentials/forgejo-runner.service/) at"
+            echo "# start. Build jobs run as root children of the runner and read"
+            echo "# them via podman push --sign-by-sigstore-private-key. Installed"
+            echo "# by the seal-signing-key workflow; see docs/ci-image-signing.md."
+            echo "[Service]"
+            echo "LoadCredentialEncrypted=cosign-key:/etc/forgejo-runner/creds/cosign-key.cred"
+            echo "LoadCredentialEncrypted=cosign-pass:/etc/forgejo-runner/creds/cosign-pass.cred"
+          } | sudo tee /etc/systemd/system/forgejo-runner.service.d/50-signing-creds.conf > /dev/null
+          sudo systemctl daemon-reload
+
+          # Restart the runner AFTER this job has reported success — an
+          # immediate restart would kill this very job. The restart aborts
+          # any concurrently running jobs, so run this workflow while the
+          # runner is otherwise idle.
+          sudo systemd-run --on-active=30 --collect systemctl restart forgejo-runner.service
+          echo "Sealed. Runner restarts in ~30s. Verify signing on the next" \
+               "build, then delete COSIGN_SECRET/COSIGN_PASSWORD from Forgejo."

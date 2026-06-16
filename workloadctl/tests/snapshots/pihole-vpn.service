@@ -16,20 +16,20 @@ Group=_wl-pihole-vpn
 Environment="HOME=/var/lib/workloads/pihole-vpn"
 EnvironmentFile=-/run/workload-env/workload-pihole-vpn.env
 
-# Resource limits and constraints
-CPUQuota=20%
-MemoryMax=256M
-MemoryHigh=192M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-pihole-vpn" --hostname "pihole-vpn" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --publish 53:53/udp --publish 53:53/tcp --publish 80:80/tcp --volume "/var/lib/workloads/pihole-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --volume "/var/lib/workloads/pihole-vpn/etc-pihole":/etc/pihole --volume "/var/lib/workloads/pihole-vpn/etc-dnsmasq.d":/etc/dnsmasq.d --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env WEBPASSWORD='' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=kill "localhost/pihole-vpn:latest"
+ExecStart=/usr/bin/podman run --name "workload-pihole-vpn" --hostname "pihole-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=256M --cpus=0.2 --network="pasta" --publish 53:53/udp --publish 53:53/tcp --publish 80:80/tcp --volume "/var/lib/workloads/pihole-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --volume "/var/lib/workloads/pihole-vpn/etc-pihole":/etc/pihole --volume "/var/lib/workloads/pihole-vpn/etc-dnsmasq.d":/etc/dnsmasq.d --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env WEBPASSWORD='' --health-cmd "dig +short +time=2 @127.0.0.1 pi.hole || exit 1" --health-interval=30s --health-start-period=60s --health-on-failure=kill "localhost/pihole-vpn:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-pihole-vpn"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-pihole-vpn"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-pihole-vpn
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/pihole-vpn" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

@@ -403,6 +403,8 @@ If a group from `extra_groups` doesn't exist on the host, the generator warns an
 
 Control CPU, memory, I/O, and process limits for workloads using systemd cgroup v2 controls. Resource limits prevent workloads from consuming excessive system resources and allow you to prioritize critical workloads.
 
+> **How enforcement works.** The generator redirects each workload's user manager (`user@<uid>.service`) into `workloads.slice` via a drop-in, so the container payload lands inside the aggregate slice. Workload-level caps (`memory_max`, `memory_high`, `cpu_weight`, etc.) become `[Service]` directives on that drop-in and bind the whole workload subtree. Per-container caps (`memory_max` on a `[[containers]]` entry, `cpu_quota`, `pids_max`, etc.) are passed as podman flags (`--memory`, `--cpus`, `--pids-limit`, …) and bind natively. All modes (single, pod, bridge) enforce equally. See [docs/adr/001-container-cgroup-placement.md](adr/001-container-cgroup-placement.md).
+
 #### Workloads Slice (aggregate protection)
 
 All workloads run inside `workloads.slice` by default, which provides aggregate resource limits that protect the host even if individual workloads have no limits set:
@@ -412,6 +414,7 @@ All workloads run inside `workloads.slice` by default, which provides aggregate 
 | `CPUWeight` | 80 | Workloads yield CPU to system services under contention |
 | `MemoryMax` | 90% | All workloads combined can never exceed 90% of system RAM |
 | `MemoryHigh` | 85% | Throttling begins at 85% to avoid hitting the hard limit |
+| `MemorySwapMax` | 90% | Workloads can use up to 90% of RAM worth of swap (prevents unbounded zram inflation) |
 | `IOWeight` | 80 | System I/O gets priority under contention |
 
 To override the slice for a specific workload:

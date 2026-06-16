@@ -14,6 +14,8 @@ cgroup queries return empty/defaults, so we test:
 """
 
 import http.client
+import importlib.machinery
+import importlib.util
 import os
 import shutil
 import socket
@@ -132,6 +134,29 @@ def parse_metric_value(prom_text, metric_name, labels=None):
             if parts[0] == metric_name:
                 return parts[1]
     return None
+
+
+def _exporter_get_enabled_workloads(config_dir):
+    """Load workload-exporter and call get_enabled_workloads against config_dir."""
+    if LIB_DIR not in sys.path:
+        sys.path.insert(0, LIB_DIR)
+    loader = importlib.machinery.SourceFileLoader(
+        "workload_exporter", EXPORTER_SCRIPT)
+    spec = importlib.util.spec_from_loader("workload_exporter", loader)
+    mod = importlib.util.module_from_spec(spec)
+    orig_env = os.environ.get("WORKLOAD_CONFIG_DIR")
+    orig_argv = sys.argv[:]
+    os.environ["WORKLOAD_CONFIG_DIR"] = str(config_dir)
+    sys.argv = [EXPORTER_SCRIPT]  # prevent PORT = int(sys.argv[1]) from failing
+    try:
+        loader.exec_module(mod)
+        return mod.get_enabled_workloads()
+    finally:
+        sys.argv = orig_argv
+        if orig_env is None:
+            os.environ.pop("WORKLOAD_CONFIG_DIR", None)
+        else:
+            os.environ["WORKLOAD_CONFIG_DIR"] = orig_env
 
 
 def parse_type_declarations(prom_text):
@@ -273,8 +298,8 @@ class TestMetricsDiscovery(unittest.TestCase):
         self.assertNotIn('workload="off1"', prom)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "2")
 
-    def test_default_enabled_true(self):
-        """Workload without explicit enabled= defaults to enabled."""
+    def test_default_enabled_false(self):
+        """Workload without explicit enabled= defaults to disabled (matches generator)."""
         write_config(self.config_dir, "implicit", """\
             [workload]
             name = "implicit"
@@ -284,8 +309,63 @@ class TestMetricsDiscovery(unittest.TestCase):
         """)
 
         prom = scrape(self.config_dir)
-        self.assertIn('workload="implicit"', prom)
-        self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
+        self.assertNotIn('workload="implicit"', prom)
+        self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "0")
+
+    def test_multi_container_health_detected(self):
+        """Health check on any [[containers]] member is detected."""
+        write_config(self.config_dir, "multi", """\
+            [workload]
+            name = "multi"
+            enabled = true
+
+            [[containers]]
+            name = "web"
+
+            [containers.container]
+            image = "nginx:latest"
+
+            [[containers]]
+            name = "db"
+
+            [containers.container]
+            image = "postgres:latest"
+
+            [containers.container.health]
+            cmd = "pg_isready"
+            interval = "30s"
+        """)
+
+        workloads = _exporter_get_enabled_workloads(self.config_dir)
+        self.assertEqual(len(workloads), 1)
+        name, has_health, is_vm = workloads[0]
+        self.assertEqual(name, "multi")
+        self.assertTrue(has_health)
+
+    def test_multi_container_no_health(self):
+        """[[containers]] with no health checks reports has_health=False."""
+        write_config(self.config_dir, "nohc", """\
+            [workload]
+            name = "nohc"
+            enabled = true
+
+            [[containers]]
+            name = "a"
+
+            [containers.container]
+            image = "alpine:latest"
+
+            [[containers]]
+            name = "b"
+
+            [containers.container]
+            image = "alpine:latest"
+        """)
+
+        workloads = _exporter_get_enabled_workloads(self.config_dir)
+        self.assertEqual(len(workloads), 1)
+        name, has_health, is_vm = workloads[0]
+        self.assertFalse(has_health)
 
 
 class TestMetricsFormat(unittest.TestCase):
@@ -320,6 +400,7 @@ class TestMetricsFormat(unittest.TestCase):
             "workload_memory_max_bytes": "gauge",
             "workload_pids_current": "gauge",
             "workload_health": "gauge",
+            "workload_disk_bytes": "gauge",
             "workload_enabled_total": "gauge",
             "workload_metrics_last_collect_timestamp_seconds": "gauge",
         }
@@ -372,6 +453,13 @@ class TestMetricsFormat(unittest.TestCase):
         # May be 0 or 1 depending on system — just check it exists and is valid
         if active is not None:
             self.assertIn(active, ("0", "1"))
+
+    def test_disk_bytes_gauge_declared(self):
+        """workload_disk_bytes gauge TYPE and HELP are always emitted."""
+        types = parse_type_declarations(self.prom)
+        self.assertIn("workload_disk_bytes", types)
+        self.assertEqual(types["workload_disk_bytes"], "gauge")
+        self.assertIn("# HELP workload_disk_bytes ", self.prom)
 
     def test_content_type_is_prometheus(self):
         """/metrics is served with the Prometheus exposition content type."""

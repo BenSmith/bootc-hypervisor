@@ -120,6 +120,11 @@ class TestWorkloadSnapshots(unittest.TestCase):
             env["WORKLOAD_CONFIG_DIR"] = str(cfg)
             env["SYSUSERS_DIR"] = str(sys_d)
             env["PYTHONPATH"] = str(LIB_DIR)
+            # Pin GPU auto-resolution so snapshots are host-independent: the
+            # generator otherwise reads the build host's PCI vendor IDs, so
+            # `gpu = "auto"` workloads would differ between an NVIDIA dev box and
+            # a GPU-less CI runner. NVIDIA is the canonical deployment target.
+            env["WORKLOAD_GPU_OVERRIDE"] = "nvidia"
             r = subprocess.run([sys.executable, str(GENERATOR), str(svc)],
                                capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)

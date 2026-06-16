@@ -10,7 +10,7 @@ image = "codeberg.org/forgejo/forgejo:15-rootless"
 pull = "missing"
 
 [container.health]
-cmd = "wget -qO- http://localhost:3000/api/healthz > /dev/null || exit 1"
+cmd = "curl -sf http://localhost:3000/api/healthz"
 interval = "30s"
 start_period = "30s"
 on_failure = "kill"
@@ -19,24 +19,19 @@ on_failure = "kill"
 volumes = [
     # ./data resolves to /var/lib/workloads/forgejo/data, which the
     # cloud-init mounts entry attaches to the data.qcow2 (ext4, label
-    # workloaddata). Forgejo's persistent state lives here so it survives
-    # system disk rebuilds.
+    # workloaddata). Forgejo's persistent state — including app.ini — lives
+    # here so it survives system disk rebuilds.
     "./data:/var/lib/gitea",
-    "./app.ini:/var/lib/gitea/custom/conf/app.ini",
 ]
 
 [security]
 userns = "keep-id:uid=1000,gid=1000"
 
 [network]
-# Use the VM's network namespace directly instead of pasta. The passt
-# 20260120 build that ships with the current Fedora cloud image
-# deterministically fails its sandbox setup ("Failed to mount empty tmpfs
-# for pivot_root()") from a rootless container userns; --network=host
-# avoids the userns + pasta interaction entirely. The VM is already on
-# the LAN bridge with its own IP, so Forgejo listens directly on :3000
-# (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on this
-# VM) reverse-proxies HTTPS:443 to localhost:3000.
+# Use the VM's network namespace directly instead of pasta. The VM is
+# already on the LAN bridge with its own IP, so Forgejo listens directly
+# on :3000 (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on
+# this VM) reverse-proxies HTTPS:443 to localhost:3000.
 mode = "host"
 
 [resources]

@@ -1,0 +1,18 @@
+# clitest-host — host-network single-container fixture.
+# Exercises the host-network code path. Uses a high-numbered port (19083)
+# to avoid conflicts with system services.
+
+[workload]
+name = "clitest-host"
+enabled = false
+
+[container]
+image = "docker.io/traefik/whoami:latest"
+command = ["--port", "19083"]
+
+[network]
+mode = "host"
+
+[resources]
+memory_max = "64M"
+memory_high = "48M"

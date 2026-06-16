@@ -1,0 +1,26 @@
+# clitest-pod — pod-mode multi-container fixture (shared netns).
+# Two containers sharing a network namespace. The "app" backend listens
+# on localhost:8081 and the "proxy" frontend proxies to it.
+# Port is published at the pod level.
+
+[workload]
+name = "clitest-pod"
+enabled = false
+mode = "pod"
+
+[[containers]]
+name = "app"
+
+[containers.container]
+image = "docker.io/traefik/whoami:latest"
+command = ["--port", "8081"]
+
+[[containers]]
+name = "proxy"
+
+[containers.container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "reverse-proxy", "--from", ":8080", "--to", "http://localhost:8081"]
+
+[network]
+ports = ["19081:8080"]

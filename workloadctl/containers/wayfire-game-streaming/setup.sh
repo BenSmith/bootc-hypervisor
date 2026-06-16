@@ -9,17 +9,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODULE_NAME="wayfire-devices"
 MODULES_LOAD="/etc/modules-load.d/uinput.conf"
 UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
 UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 RELAY_SERVICE="wayfire-udev-relay.service"
 RELAY_UNIT="/etc/systemd/system/${RELAY_SERVICE}"
 WORKLOAD_USER="_wl-wayfire-game-streaming"
-
-WORK_DIR=""
-cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
-trap cleanup EXIT
 
 enable() {
     echo "  [host] Configuring uinput kernel module..."
@@ -42,18 +37,6 @@ enable() {
 
     # Apply rule to already-loaded device
     udevadm trigger --action=change /sys/class/misc/uinput 2>/dev/null || true
-
-    echo "  [host] Installing SELinux policy module..."
-    TE_FILE="${SCRIPT_DIR}/${MODULE_NAME}.te"
-    if [ ! -f "$TE_FILE" ]; then
-        echo "  ERROR: SELinux policy source not found: $TE_FILE" >&2
-        return 1
-    fi
-    WORK_DIR=$(mktemp -d)
-    cp "$TE_FILE" "$WORK_DIR/"
-    checkmodule -M -m -o "$WORK_DIR/${MODULE_NAME}.mod" "$WORK_DIR/${MODULE_NAME}.te"
-    semodule_package -o "$WORK_DIR/${MODULE_NAME}.pp" -m "$WORK_DIR/${MODULE_NAME}.mod"
-    semodule -i "$WORK_DIR/${MODULE_NAME}.pp"
 
     # Host-side udev relay. The container's libudev drops the host udevd's
     # hotplug events (sender UID maps to "nobody" in the container user
@@ -102,13 +85,6 @@ disable() {
         systemctl disable --now "$RELAY_SERVICE" 2>/dev/null || true
         rm -f "$RELAY_UNIT"
         systemctl daemon-reload
-    fi
-
-    echo "  [host] Removing SELinux policy module..."
-    if semodule -l 2>/dev/null | grep -q "^${MODULE_NAME}"; then
-        semodule -r "$MODULE_NAME"
-    else
-        echo "  [host] SELinux module '${MODULE_NAME}' not installed"
     fi
 
     echo "  [host] Host teardown complete"

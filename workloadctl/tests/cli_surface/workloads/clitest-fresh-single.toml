@@ -1,0 +1,21 @@
+# clitest-fresh-single — single-container fixture for MUTATING tests.
+# Identical to clitest-single but with a distinct name + host port so a
+# per-test fresh instance can run alongside the session-shared clitest-single
+# without colliding on the workload name or the published port.
+# Do NOT enable this manually; it is managed by the test harness.
+
+[workload]
+name = "clitest-fresh-single"
+enabled = false
+
+[container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":8080"]
+
+[network]
+mode = "pasta"
+ports = ["19090:8080"]
+
+[resources]
+memory_max = "128M"
+memory_high = "96M"

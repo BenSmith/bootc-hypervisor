@@ -1,4 +1,12 @@
 ARG BASE_IMAGE=ghcr.io/bensmith/fedora-bootc-minimal:latest
+
+FROM fedora:latest AS rpm-builder
+COPY workloadctl/ /workloadctl/
+RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
+        rpm-build python3 just systemd-rpm-macros python3-rpm-macros && \
+    dnf clean all && \
+    cd /workloadctl && just test && just rpm-build
+
 FROM ${BASE_IMAGE}
 
 # Build argument for local development (enables passwordless sudo)
@@ -11,6 +19,21 @@ COPY policy.json /etc/containers/policy.json
 COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY registries.d/ghcr.io.yaml /etc/containers/registries.d/ghcr.io.yaml
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
+# Work around pasta's loopback splice() throughput regression (see the file's
+# header) — without this, large pulls through the Caddy->zot reverse proxy hang.
+COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d/10-pasta-no-splice.conf
+
+# CI-injectable trust anchors. The Forgejo pipeline drops the homelab root CA
+# (public cert) into ca-trust-inject/ from the HOMELAB_ROOT_CA secret before
+# building, so internal images trust the shared homelab CA. The dir is empty in
+# git and on the public GitHub pipeline, so this is a no-op there. Only *.crt
+# are installed; the README is ignored.
+COPY ca-trust-inject/ /tmp/ca-trust-inject/
+RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
+        cp /tmp/ca-trust-inject/*.crt /etc/pki/ca-trust/source/anchors/ && \
+        update-ca-trust && \
+        echo "Installed CI-injected trust anchors"; \
+    fi && rm -rf /tmp/ca-trust-inject
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
@@ -58,8 +81,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     hostname \
     htop \
     hwloc \
-    incus \
-    incus-tools \
     intel-audio-firmware \
     intel-gpu-firmware \
     iotop \
@@ -122,7 +143,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     rsync \
     samba-client \
     seatd \
-    selinux-policy-devel \
     setools-console \
     shim \
     skopeo \
@@ -138,6 +158,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     traceroute \
     tuned \
     tzdata \
+    udica \
     usbutils \
     virglrenderer \
     virtiofsd \
@@ -154,9 +175,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     rm -rf /boot && mkdir -p /boot && \
     systemctl unmask avahi-daemon avahi-daemon.socket && \
     systemctl enable avahi-daemon && \
+    systemctl enable fail2ban && \
     systemctl enable firewalld && \
     systemctl enable libvirtd && \
-    systemctl enable incus.socket && \
     systemctl enable seatd && \
     systemctl enable sshd && \
     systemctl enable tuned && \
@@ -167,7 +188,14 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
         -not -path '/var/lib/rpm/*' \
         -delete && \
     find /var -depth -type d -empty -delete && \
-    bootc container lint || echo "Note: Some /var warnings expected from gssproxy/pcp/rpm packages"
+    LINT_OUT=$(bootc container lint 2>&1) || { \
+        UNEXPECTED=$(echo "$LINT_OUT" | grep -i 'warning\|error' | \
+            grep -v 'gssproxy\|/var/lib/pcp\|rpm-state\|/var/lib/rpm'); \
+        if [ -n "$UNEXPECTED" ]; then \
+            echo "bootc container lint: unexpected warnings:" && \
+            echo "$LINT_OUT" && exit 1; \
+        fi; \
+    }; true
 
 # Ensure device access groups exist, propagate to /etc/group, set privileged port sysctl.
 # /usr/lib/group is immutable on bootc; /etc/group is mutable and needed for usermod.
@@ -181,16 +209,17 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     mkdir -p /etc/systemd/resolved.conf.d && \
     printf '[Resolve]\nMulticastDNS=resolve\n' > /etc/systemd/resolved.conf.d/10-mdns.conf
 
-# SELinux: allow containers to connect to host seatd socket (KMS desktop workloads)
-# and allow containers to access host devices (GPU, input)
+# SELinux: allow containers to access host devices (GPU, input)
 RUN setsebool -P container_use_devices on
 
-COPY security/seatd_container.te /tmp/seatd_container.te
+# SELinux: gate container access to the host seatd socket (KMS desktops) behind
+# the seatd_container_connect boolean, shipped OFF so the host-wide container_t
+# grant is inert until a KMS desktop is run:
+#   sudo setsebool -P seatd_container_connect on
+COPY security/seatd_container.cil security/pasta_sandbox.cil /tmp/
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
-    checkmodule -M -m -o /tmp/seatd_container.mod /tmp/seatd_container.te && \
-    semodule_package -o /tmp/seatd_container.pp -m /tmp/seatd_container.mod && \
-    semodule -i /tmp/seatd_container.pp && \
-    rm -f /tmp/seatd_container.te /tmp/seatd_container.mod /tmp/seatd_container.pp
+    semodule -i /tmp/seatd_container.cil /tmp/pasta_sandbox.cil && \
+    rm -f /tmp/seatd_container.cil /tmp/pasta_sandbox.cil
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true
@@ -199,19 +228,15 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
         chmod 0440 /etc/sudoers.d/wheel-nopasswd; \
     fi
 
-# Install workload provisioning system from the homelab RPM repo.
-# The repo is removed after install — git.local is not reachable outside
-# the homelab build environment. The RPM is also cached at a known path so
-# workload-ensure-user can bundle it into VM cloud-init ISOs at runtime.
-RUN printf '[workloadctl]\nname=workloadctl\nbaseurl=https://git.local/api/packages/ben/rpm\nenabled=1\ngpgcheck=0\nsslverify=false\n' \
-        > /etc/yum.repos.d/workloadctl.repo && \
-    dnf install -y workloadctl && \
-    mkdir -p /tmp/wl-rpms && \
-    dnf download --destdir /tmp/wl-rpms workloadctl && \
-    rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
+# Install workload provisioning system, built from source in the rpm-builder stage.
+# The RPM is also cached at a known path so workload-ensure-user can bundle it
+# into VM cloud-init ISOs at runtime.
+COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
+RUN rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
     test -f "$rpm" && \
+    dnf install -y "$rpm" && \
     install -Dpm 0644 "$rpm" /usr/share/workloadctl/workloadctl.rpm && \
-    rm -rf /tmp/wl-rpms /etc/yum.repos.d/workloadctl.repo && \
+    rm -rf /tmp/wl-rpms && \
     dnf clean all
 
 # Bootc-specific: emergency access, cosy

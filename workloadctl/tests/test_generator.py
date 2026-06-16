@@ -98,6 +98,42 @@ class TestGeneratorBasic(unittest.TestCase):
         sysusers = self.read_sysusers("web")
         self.assertIn("u _wl-web", sysusers)
 
+    def test_passthrough_logging_with_named_journal_stream(self):
+        """Container logs use --log-driver=passthrough (single journal copy via
+        the unit's stream) and the unit names that stream after the container
+        so lines read `workload-<name>[pid]: ...`. Members get the combined
+        workload-<wl>-<ctr> identifier."""
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+
+            [container]
+            image = "docker.io/nginx:latest"
+        """)
+        write_config(self.config_dir, "stack", """\
+            [workload]
+            name = "stack"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+        """)
+        result = self.run_gen()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        web = self.read_service("web")
+        self.assertIn("--log-driver=passthrough", web)
+        self.assertNotIn("--log-driver=journald", web)
+        self.assertIn("SyslogIdentifier=workload-web", web)
+
+        db = (Path(self.services_dir) / "workload-stack-db.service").read_text()
+        self.assertIn("--log-driver=passthrough", db)
+        self.assertIn("SyslogIdentifier=workload-stack-db", db)
+
     def test_disabled_workload_skipped(self):
         write_config(self.config_dir, "off", """\
             [workload]
@@ -142,6 +178,102 @@ class TestGeneratorBasic(unittest.TestCase):
         wants = Path(self.services_dir) / "multi-user.target.wants" / "workload-svc.service"
         self.assertTrue(wants.is_symlink())
         self.assertEqual(os.readlink(wants), "../workload-svc.service")
+
+    def test_requires_emits_wants(self):
+        """[workload].requires = ["caddy"] → Wants=workload-caddy.service."""
+        write_config(self.config_dir, "caddy", """\
+            [workload]
+            name = "caddy"
+            enabled = true
+            [container]
+            image = "docker.io/caddy:latest"
+        """)
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            requires = ["caddy"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("app")
+        self.assertIn("Wants=workload-caddy.service", service)
+
+    def test_after_emits_after(self):
+        """[workload].after = ["registry"] → After=workload-registry.service."""
+        write_config(self.config_dir, "registry", """\
+            [workload]
+            name = "registry"
+            enabled = true
+            [container]
+            image = "docker.io/registry:2"
+        """)
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+            enabled = true
+            after = ["registry"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("app")
+        self.assertIn("After=workload-registry.service", service)
+
+    def test_requires_and_after_combined(self):
+        """Both requires and after emit their respective systemd directives."""
+        for name in ("db", "cache"):
+            write_config(self.config_dir, name, f"""\
+                [workload]
+                name = "{name}"
+                enabled = true
+                [container]
+                image = "alpine"
+            """)
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+            requires = ["db"]
+            after = ["cache"]
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("web")
+        self.assertIn("Wants=workload-db.service", service)
+        self.assertIn("After=workload-cache.service", service)
+
+    def test_log_rate_limit_defaults_emitted(self):
+        """LogRateLimitIntervalSec and LogRateLimitBurst appear in generated units."""
+        write_config(self.config_dir, "svc2", """\
+            [workload]
+            name = "svc2"
+            enabled = true
+            [container]
+            image = "alpine"
+        """)
+        self.run_gen()
+        service = self.read_service("svc2")
+        self.assertIn("LogRateLimitIntervalSec=30", service)
+        self.assertIn("LogRateLimitBurst=250", service)
+
+    def test_log_rate_limit_overridable_via_custom_directives(self):
+        """Custom LogRateLimitIntervalSec suppresses the generator default."""
+        write_config(self.config_dir, "svc3", """\
+            [workload]
+            name = "svc3"
+            enabled = true
+            [container]
+            image = "alpine"
+            [resources]
+            custom_directives = {LogRateLimitIntervalSec = "0"}
+        """)
+        self.run_gen()
+        service = self.read_service("svc3")
+        self.assertNotIn("LogRateLimitIntervalSec=30", service)
+        self.assertIn("LogRateLimitIntervalSec=0", service)
 
 
 class TestGeneratorMultiContainer(unittest.TestCase):
@@ -200,6 +332,61 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         umbrella = (Path(self.services_dir) / "workload-app.service").read_text()
         self.assertIn("workload-app-net.service", umbrella)
         self.assertNotIn("workload-app-pod.service", umbrella)
+
+    def test_stale_pause_migrate_in_head_units_only(self):
+        """`podman system migrate` must run in each workload's first
+        podman-touching unit (single service, pod service, net service) and
+        never in pod/bridge member services — there it would kill the libpod
+        pause out from under the live pod infra / sibling containers.
+        Regresses the pasta restart-loop bug (stale pause pins a mount ns
+        whose PrivateTmp /tmp is deleted; pasta's sandbox mount gets ENOENT).
+        """
+        migrate = "ExecStartPre=-/usr/bin/podman system migrate"
+        write_config(self.config_dir, "solo", """\
+            [workload]
+            name = "solo"
+            enabled = true
+
+            [container]
+            image = "docker.io/nginx:latest"
+        """)
+        write_config(self.config_dir, "grp", """\
+            [workload]
+            name = "grp"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "db"
+            [containers.container]
+            image = "postgres:16"
+        """)
+        write_config(self.config_dir, "brg", """\
+            [workload]
+            name = "brg"
+            enabled = true
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        solo = (Path(self.services_dir) / "workload-solo.service").read_text()
+        self.assertIn(migrate, solo)
+
+        pod = (Path(self.services_dir) / "workload-grp-pod.service").read_text()
+        self.assertIn(migrate, pod)
+        pod_member = (Path(self.services_dir) / "workload-grp-db.service").read_text()
+        self.assertNotIn(migrate, pod_member)
+
+        net = (Path(self.services_dir) / "workload-brg-net.service").read_text()
+        self.assertIn(migrate, net)
+        net_member = (Path(self.services_dir) / "workload-brg-web.service").read_text()
+        self.assertNotIn(migrate, net_member)
 
     def test_per_container_environment_sibling_form(self):
         """[containers.environment] (sibling of [containers.container]) must
@@ -276,7 +463,7 @@ class TestGeneratorMultiContainer(unittest.TestCase):
 
     def test_per_container_health_sibling_form(self):
         """[containers.health] should render as --health-* flags on the
-        per-container service."""
+        per-container service using podman's native user-manager timer (1b)."""
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
@@ -299,7 +486,76 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertIn('--health-cmd "curl -f http://localhost/ || exit 1"', web)
         self.assertIn("--health-interval=10s", web)
         self.assertIn("--health-start-period=5s", web)
+        # Under option 1b podman's native user-manager healthcheck timer works:
+        # on_failure is passed through directly, no DISABLE_HC_SYSTEMD shim,
+        # no separate system-manager timer unit.
         self.assertIn("--health-on-failure=kill", web)
+        self.assertNotIn("--health-on-failure=none", web)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", web)
+        self.assertNotIn("Wants=workload-app-web-health.timer", web)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-app-web-health.timer").exists()
+        )
+
+    def test_native_healthcheck_single_mode(self):
+        """Under option 1b all modes use podman's native user-manager timer:
+        on_failure passes through, no DISABLE_HC_SYSTEMD shim, no separate
+        system-manager timer unit."""
+        write_config(self.config_dir, "hc", """\
+            [workload]
+            name = "hc"
+            enabled = true
+            mode = "single"
+
+            [container]
+            image = "myapp:latest"
+            [container.health]
+            cmd = "test -f /tmp/ok"
+            interval = "30s"
+            start_period = "15s"
+            on_failure = "restart"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        svc = (Path(self.services_dir) / "workload-hc.service").read_text()
+        # Health flags pass through directly
+        self.assertIn('--health-cmd "test -f /tmp/ok"', svc)
+        self.assertIn("--health-interval=30s", svc)
+        self.assertIn("--health-start-period=15s", svc)
+        self.assertIn("--health-on-failure=restart", svc)
+        # No split shim
+        self.assertNotIn("DISABLE_HC_SYSTEMD", svc)
+        self.assertNotIn("Wants=workload-hc-health.timer", svc)
+        # No separate system-manager timer/service files
+        self.assertFalse((Path(self.services_dir) / "workload-hc-health.service").exists())
+        self.assertFalse((Path(self.services_dir) / "workload-hc-health.timer").exists())
+
+    def test_pod_mode_keeps_podman_healthcheck(self):
+        """Pod-mode containers run in the user manager where podman's own
+        healthcheck timer works, so the generator must NOT suppress it or emit
+        its own timer."""
+        write_config(self.config_dir, "pm", """\
+            [workload]
+            name = "pm"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "web"
+            [containers.container]
+            image = "myapp:latest"
+            [containers.health]
+            cmd = "true"
+            on_failure = "kill"
+        """)
+        r = self.run_gen()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        web = (Path(self.services_dir) / "workload-pm-web.service").read_text()
+        self.assertIn("--health-on-failure=kill", web)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", web)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-pm-web-health.timer").exists()
+        )
 
     def test_per_container_secret_env_var(self):
         """${SECRET:name} inside a [containers.environment] block must trigger
@@ -544,6 +800,78 @@ class TestGeneratorSecrets(unittest.TestCase):
         )
         self.assertNotIn("/run/credentials/workload-multi-creds.service/", app_service)
 
+    def test_secret_files_do_not_clobber_workload_mode(self):
+        # Regression (B1): the secrets.files loop assigned its per-file mount
+        # mode ("ro"/"rw") to `mode`, shadowing generate_system_service()'s
+        # workload-mode parameter and corrupting every later mode check.
+        write_config(self.config_dir, "clobber", """\
+            [workload]
+            name = "clobber"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            API_KEY = "${SECRET:api-key}"
+
+            [secrets]
+            files = [
+                { credential = "tls-cert", path = "/etc/ssl/cert.pem", mode = "ro" }
+            ]
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-clobber.service").read_text()
+
+        # Single mode keeps the one-arg write-env form. The clobbered two-arg
+        # form wrote workload-clobber-clobber.secrets while --env-file pointed
+        # at workload-clobber.secrets → podman failed to start (missing file).
+        self.assertIn(
+            "ExecStartPre=+/usr/libexec/workloadctl/workload-write-env clobber\n",
+            service,
+        )
+        self.assertIn('--env-file "/run/workload-env/workload-clobber.secrets"', service)
+        # Single-mode unit keeps its [Install] block.
+        self.assertIn("WantedBy=multi-user.target", service)
+
+    def test_secret_files_do_not_clobber_pod_member_mode(self):
+        # Regression (B1), pod flavor: a member with secrets.files used to be
+        # treated as non-pod after the clobber — wrongly getting Delegate=yes
+        # and the split-healthcheck wiring (which pins on_failure to none).
+        write_config(self.config_dir, "podsec", """\
+            [workload]
+            name = "podsec"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+            [containers.container.health]
+            cmd = "curl -sf http://localhost/healthz"
+            on_failure = "kill"
+            [containers.secrets]
+            files = [
+                { credential = "tls-cert", path = "/etc/ssl/cert.pem", mode = "ro" }
+            ]
+
+            [[containers]]
+            name = "sidecar"
+            [containers.container]
+            image = "mysidecar"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        app = (Path(self.services_dir) / "workload-podsec-app.service").read_text()
+
+        self.assertNotIn("Delegate=yes", app)
+        self.assertNotIn("DISABLE_HC_SYSTEMD", app)
+        self.assertNotIn("-health.timer", app)
+        # Pod members keep podman's own healthcheck action.
+        self.assertIn("--health-on-failure=kill", app)
+
 
 class TestGeneratorVolumeExpansion(unittest.TestCase):
     def setUp(self):
@@ -637,6 +965,10 @@ class TestGeneratorResources(unittest.TestCase):
             shutil.rmtree(d)
 
     def test_cpu_and_memory_limits(self):
+        """Under option 1b, workload-level resource limits land in the
+        user@<uid>.service.d drop-in (cgroup directives) and as podman flags
+        on the container (per-container OOM scoping); not as service directives
+        on the workload unit itself."""
         write_config(self.config_dir, "limited", """\
             [workload]
             name = "limited"
@@ -654,9 +986,208 @@ class TestGeneratorResources(unittest.TestCase):
         run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         service = (Path(self.services_dir) / "workload-limited.service").read_text()
 
-        self.assertIn("CPUQuota=200%", service)
-        self.assertIn("MemoryMax=4G", service)
-        self.assertIn("TasksMax=100", service)
+        # Cgroup directives are NOT on the workload unit (payload is in user@<uid>.service)
+        self.assertNotIn("CPUQuota=200%", service)
+        self.assertNotIn("MemoryMax=4G", service)
+        self.assertNotIn("TasksMax=100", service)
+
+        # Per-container resource flags bind in the payload scope
+        self.assertIn("--cpus=2.0", service)
+        self.assertIn("--memory=4G", service)
+        self.assertIn("--pids-limit=100", service)
+
+        # Workload-level cgroup limits are in the user@<uid> drop-in
+        dropin = (Path(self.services_dir) / "user@10000.service.d" / "50-workload.conf").read_text()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("CPUQuota=200%", dropin)
+        self.assertIn("MemoryMax=4G", dropin)
+        self.assertIn("TasksMax=100", dropin)
+
+    def test_default_stop_grace_is_ten_seconds(self):
+        # No timeout_stop_sec → podman's -t grace stays the historical 10s and
+        # systemd's TimeoutStopSec defaults to 30 (comfortable margin above it).
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+            enabled = true
+
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-plain.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
+        self.assertIn("TimeoutStopSec=30", service)
+
+    def test_timeout_stop_sec_plumbs_into_podman_stop_grace(self):
+        # A longer drain must reach podman's -t, not just systemd: podman's
+        # grace tracks timeout_stop_sec minus a margin so systemd doesn't kill
+        # `podman stop` before podman can SIGKILL + reap the container.
+        write_config(self.config_dir, "slowdb", """\
+            [workload]
+            name = "slowdb"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [resources]
+            timeout_stop_sec = 60
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-slowdb.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 55 ", service)
+        self.assertIn("TimeoutStopSec=60", service)
+        # The old hardcoded 10s grace must not linger.
+        self.assertNotIn("podman stop -t 10 ", service)
+
+    def test_timeout_stop_sec_as_timespan_falls_back_to_default_grace(self):
+        # timeout_stop_sec accepts systemd timespans (e.g. "2min"); we can't
+        # safely turn that into a -t seconds value, so podman's grace falls back
+        # to 10s while TimeoutStopSec still passes the timespan through verbatim.
+        write_config(self.config_dir, "spanstop", """\
+            [workload]
+            name = "spanstop"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [resources]
+            timeout_stop_sec = "2min"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-spanstop.service").read_text()
+        self.assertIn("ExecStop=/usr/bin/podman stop -t 10 ", service)
+        self.assertIn("TimeoutStopSec=2min", service)
+
+
+class TestGeneratorUserDropin(unittest.TestCase):
+    """Tests for the user@<uid>.service.d/50-workload.conf drop-in (ADR 001 option 1b)."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _dropin(self, uid=10000):
+        return (Path(self.services_dir) / f"user@{uid}.service.d" / "50-workload.conf").read_text()
+
+    def test_dropin_emitted_for_single_mode(self):
+        """Every container workload gets a user@<uid> drop-in with Slice=workloads.slice."""
+        write_config(self.config_dir, "web", """\
+            [workload]
+            name = "web"
+            enabled = true
+            [container]
+            image = "nginx:latest"
+        """)
+        r = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("Workload web:", dropin)
+
+    def test_dropin_emitted_for_pod_mode(self):
+        """Pod-mode workloads also get a drop-in — placement is uniform across modes."""
+        write_config(self.config_dir, "pm", """\
+            [workload]
+            name = "pm"
+            enabled = true
+            mode = "pod"
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "nginx:latest"
+            [[containers]]
+            name = "b"
+            [containers.container]
+            image = "redis:latest"
+        """)
+        r = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+
+    def test_dropin_carries_workload_level_resources(self):
+        """Workload-level cgroup directives go into the drop-in, not the unit."""
+        write_config(self.config_dir, "capped", """\
+            [workload]
+            name = "capped"
+            enabled = true
+            [container]
+            image = "myapp"
+            [resources]
+            cpu_quota = "50%"
+            cpu_weight = 200
+            memory_max = "1G"
+            memory_high = "768M"
+            memory_swap_max = "500M"
+            tasks_max = 512
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertIn("CPUQuota=50%", dropin)
+        self.assertIn("CPUWeight=200", dropin)
+        self.assertIn("MemoryMax=1G", dropin)
+        self.assertIn("MemoryHigh=768M", dropin)
+        self.assertIn("MemorySwapMax=500M", dropin)
+        self.assertIn("TasksMax=512", dropin)
+        # Cgroup directives must NOT appear as [Service] directives on the unit
+        service = (Path(self.services_dir) / "workload-capped.service").read_text()
+        self.assertNotIn("CPUQuota=", service)
+        self.assertNotIn("MemoryMax=", service)
+        self.assertNotIn("MemoryHigh=", service)
+
+    def test_dropin_no_unconditional_cpu_io_weight_defaults(self):
+        """A workload without explicit cpu_weight/io_weight gets no default
+        in the drop-in (workloads.slice already carries CPUWeight=80/IOWeight=80)."""
+        write_config(self.config_dir, "plain", """\
+            [workload]
+            name = "plain"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        dropin = self._dropin()
+        self.assertIn("Slice=workloads.slice", dropin)
+        self.assertNotIn("CPUWeight=", dropin)
+        self.assertNotIn("IOWeight=", dropin)
+
+    def test_dropin_no_cgroup_split_or_delegate(self):
+        """The workload unit must not contain Delegate=yes or --cgroups=split."""
+        write_config(self.config_dir, "clean", """\
+            [workload]
+            name = "clean"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-clean.service").read_text()
+        self.assertNotIn("Delegate=yes", service)
+        self.assertNotIn("--cgroups=split", service)
+
+    def test_execstoppost_reaps_payload(self):
+        """Single and bridge containers get ExecStopPost to clean up the payload
+        (which is no longer in the unit's cgroup under option 1b)."""
+        write_config(self.config_dir, "rm", """\
+            [workload]
+            name = "rm"
+            enabled = true
+            [container]
+            image = "myapp"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-rm.service").read_text()
+        self.assertIn('ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-rm"', service)
 
 
 class TestGeneratorSlice(unittest.TestCase):
@@ -863,6 +1394,81 @@ class TestGeneratorUserns(unittest.TestCase):
         run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         service = (Path(self.services_dir) / "workload-badparam.service").read_text()
         self.assertIn("--userns=keep-id", service)
+
+
+class TestGeneratorSelinuxLabel(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def test_single_container_workload_level_label(self):
+        write_config(self.config_dir, "labeled", """\
+            [workload]
+            name = "labeled"
+            enabled = true
+
+            [container]
+            image = "myapp"
+
+            [security]
+            selinux_policy = true
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-labeled.service").read_text()
+        self.assertIn("--security-opt=label=type:wl_labeled.process", service)
+
+    def test_multi_container_workload_level_label_applied_to_all(self):
+        # selinux_policy in top-level [security] → label on every container
+        write_config(self.config_dir, "multi-sel", """\
+            [workload]
+            name = "multi-sel"
+            enabled = true
+            mode = "pod"
+
+            [security]
+            selinux_policy = true
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+
+            [[containers]]
+            name = "sidecar"
+            [containers.container]
+            image = "mysidecar"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        for cname in ("app", "sidecar"):
+            svc = (Path(self.services_dir) / f"workload-multi-sel-{cname}.service").read_text()
+            self.assertIn("--security-opt=label=type:wl_multi_sel.process", svc)
+
+    def test_multi_container_per_container_selinux_ignored_with_warning(self):
+        # selinux_policy under [containers.security] is ignored; warning emitted
+        write_config(self.config_dir, "bad-sel", """\
+            [workload]
+            name = "bad-sel"
+            enabled = true
+            mode = "pod"
+
+            [[containers]]
+            name = "app"
+            [containers.container]
+            image = "myapp"
+            [containers.security]
+            selinux_policy = true
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        svc = (Path(self.services_dir) / "workload-bad-sel-app.service").read_text()
+        self.assertNotIn("label=type:", svc)
+        self.assertIn("selinux_policy", result.stderr)
+        self.assertIn("top-level [security] block", result.stderr)
 
 
 class TestGeneratorServiceType(unittest.TestCase):
@@ -1111,6 +1717,31 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("-m 2048", svc)
         self.assertNotIn("-m 2048M", svc)
 
+    def test_vm_restart_defaults_to_always(self):
+        # QEMU runs with -no-reboot, so a guest reboot is a clean exit;
+        # the default must be Restart=always or the VM stays down after its
+        # first-boot kernel-upgrade reboot.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=always", svc)
+        self.assertNotIn("Restart=on-failure", svc)
+
+    def test_vm_restart_on_failure_override(self):
+        self._write_vm_config(extra='restart = "on-failure"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=on-failure", svc)
+        self.assertNotIn("Restart=always", svc)
+
+    def test_vm_restart_on_reboot_falls_back_to_always(self):
+        # "on-reboot" is reserved for reason-aware restart that isn't
+        # implemented yet; it must degrade to the safe always-on behavior.
+        self._write_vm_config(extra='restart = "on-reboot"')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("Restart=always", svc)
+
     def test_main_service_owns_runtime_dir_with_preserve(self):
         # The per-VM socket dir must be owned by the *main* VM service (so
         # virtiofsd sidecars don't yank console.sock/qmp.sock when they
@@ -1195,6 +1826,24 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("workload-fedora-vm-build.service", svc)
         self.assertIn("workload-bridge.service", svc)
         self.assertIn("workload-fedora-vm-setup.service", svc)
+
+    def test_execstop_waits_for_graceful_poweroff(self):
+        # ExecStop must call workload-vm-shutdown, which *blocks* until the
+        # guest powers off. A fire-and-forget `workload-vm-qmp system_powerdown`
+        # returns instantly, so systemd SIGTERM's QEMU within milliseconds and
+        # every stop becomes an unclean power-off (guest data corruption).
+        # TimeoutStopSec must still backstop a guest that ignores ACPI.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        exec_stops = [l for l in svc.splitlines() if l.startswith("ExecStop=")]
+        self.assertEqual(len(exec_stops), 1, exec_stops)
+        self.assertIn("workload-vm-shutdown", exec_stops[0])
+        self.assertIn("fedora-vm", exec_stops[0])
+        # Regression guard: the old fire-and-forget powerdown must be gone.
+        self.assertNotIn("workload-vm-qmp", svc)
+        self.assertNotIn("system_powerdown", svc)
+        self.assertIn("TimeoutStopSec=90", svc)
 
     def test_custom_bridge_overrides_qemu_netdev_and_skips_managed_bridge(self):
         # vm.network.bridge = "br0" → QEMU netdev uses br0, AND we don't

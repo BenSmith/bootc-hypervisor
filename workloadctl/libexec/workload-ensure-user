@@ -14,31 +14,19 @@ import hashlib
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from pathlib import Path
 
-# --- workloadctl lib bootstrap ---------------------------------------------
-# Keep this block byte-identical across bin/workloadctl, generators/workload-
-# generate, and libexec/workload-{ensure-user,write-env,exporter}. Locates
-# workload_lib.py (and its sibling podman.py) in: this script's own dir
-# (installed libexec scripts), <repo>/lib (dev checkout), or
-# /usr/libexec/workloadctl (installed /usr/bin entrypoint). First match wins;
-# insert(0) keeps it ahead of any PyPI package of the same name. True
-# centralization needs a packaging change (sitelib install or .pth file).
-_here = Path(__file__).resolve().parent
-for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
-    if (_libdir / "workload_lib.py").is_file():
-        sys.path.insert(0, str(_libdir))
-        break
-# --- end bootstrap ---------------------------------------------------------
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
-    virtiofs_tag, parse_volume_spec, substitute_template,
+    virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
 )
 
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
@@ -110,7 +98,10 @@ def configure_subuid_subgid(pw, config):
     if uid < base_uid:
         raise ValueError(f"UID {uid} is below minimum workload UID {base_uid}")
     uid_offset = uid - base_uid
-    subid_start = 100000 + (uid_offset * 100000)
+    # Place subid ranges above the Fedora useradd window (SUB_UID_MIN=524288).
+    # Old formula (100000 + offset*100000) collides with that window for low UIDs.
+    # New formula: 600100000 + (offset * 65536); max end ≈ 3.4G, within uint32.
+    subid_start = 600100000 + (uid_offset * 65536)
     count = 65536
 
     # Verify ranges fit within uint32 (max 4,294,967,295)
@@ -152,9 +143,18 @@ def configure_subuid_subgid(pw, config):
             except FileNotFoundError:
                 existing = ""
 
+            # Grandfather the main range: if the user already has any entry,
+            # keep it unchanged — shifting a UID mapping under a running
+            # container corrupts its namespace.
+            main_already_allocated = any(
+                line.startswith(f"{username}:") for line in existing.splitlines()
+            )
+            existing_lines = set(existing.splitlines())
             missing = []
             for entry in required_entries:
-                if entry not in existing:
+                if entry == main_entry and main_already_allocated:
+                    continue
+                if entry not in existing_lines:
                     missing.append(entry)
 
             if missing:
@@ -213,7 +213,14 @@ def setup_volume_directories(pw, config):
             path = str(home_path) + "/" + path[2:]
         required_file_paths.add(path)
 
-    for volume_spec in config.get("storage", {}).get("volumes", []):
+    # Gather volumes from all containers (single and multi-container shapes).
+    # Top-level storage.volumes only exists for single-container TOMLs;
+    # [[containers]] entries each carry their own storage.volumes.
+    all_volume_specs = []
+    for ctr in normalize_containers(config):
+        all_volume_specs.extend(ctr.get("storage", {}).get("volumes", []))
+
+    for volume_spec in all_volume_specs:
         expanded = expand_volume_path(volume_spec, str(home_path))
         host_path_str = expanded.split(":", 2)[0]
         if not host_path_str:
@@ -317,29 +324,76 @@ def write_environment_file(name, pw, config):
     log(f"  Wrote environment file {env_file}")
 
 
-def enable_linger(pw):
-    """Enable lingering for the workload user.
+def _linger_manager_active(uid_str):
+    """True iff the persistent user manager (user@<uid>.service) is running.
 
-    Creates persistent systemd user manager (user@UID.service) that
-    maintains /run/user/<uid> and provides D-Bus session for podman.
+    This — NOT the mere existence of /run/user/<uid> — is the real signal that
+    linger is effective. A transient `sudo -u … podman` login session makes
+    pam_systemd create /run/user/<uid> on session-open and tear it down on
+    session-close; that flapping dir can satisfy a naive "is the dir there?"
+    check while no lingering manager exists at all.
+    """
+    r = subprocess.run(
+        ["systemctl", "is-active", f"user@{uid_str}.service"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() == "active"
+
+
+def enable_linger(pw):
+    """Enable lingering for the workload user — effectively and synchronously.
+
+    Creates a persistent systemd user manager (user@UID.service) that maintains
+    /run/user/<uid> and the D-Bus session rootless podman needs.
+
+    We gate on `user@<uid>.service` being *active*, not on /run/user/<uid>
+    merely existing. A transient `sudo -u … podman` login session makes
+    pam_systemd create /run/user/<uid> on session-open and remove it on
+    session-close; under rapid UID recycling those flapping login-session dirs
+    can satisfy a naive existence check, so a dir-only wait would return
+    "success" while NO lingering manager is running. The dir then vanishes the
+    instant that transient session ends — GC'd out from under the workload's own
+    container (conmon: "/run/user/<uid>/…: No such file or directory") and
+    making CLI podman calls (health/images/status/logs/…) intermittently see an
+    empty store. Only a live user@<uid>.service keeps /run/user/<uid> pinned
+    across session churn.
+
+    We also do NOT short-circuit on `show-user … Linger=yes`: the linger marker
+    (/var/lib/systemd/linger/<name>) survives `userdel`, so logind can report
+    Linger=yes while user@<uid>.service is not actually running.
+
+    Re-issuing `enable-linger` sets the marker; we then explicitly *start*
+    user@<uid>.service (systemd serializes this after any in-flight stop of a
+    prior occupant of this recycled UID, so we never latch onto a dying
+    session's runtime dir) and wait for it to be genuinely active.
     """
     uid_str = str(pw.pw_uid)
-
-    check = subprocess.run(
-        ["loginctl", "show-user", uid_str, "--property=Linger", "--value"],
-        capture_output=True, text=True
-    )
-    if check.returncode == 0 and check.stdout.strip() == "yes":
-        return  # Already enabled
+    service = f"user@{uid_str}.service"
 
     result = subprocess.run(
         ["loginctl", "enable-linger", uid_str],
         capture_output=True, text=True
     )
-    if result.returncode == 0:
-        log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
-    else:
+    if result.returncode != 0:
         raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
+
+    # Explicitly start the persistent manager. Queued after any in-flight stop
+    # of this UID's previous occupant, so the wait below can't false-positive on
+    # a dying session's /run/user/<uid>.
+    subprocess.run(["systemctl", "start", service],
+                   check=False, capture_output=True, timeout=30)
+
+    runtime_dir = Path(f"/run/user/{pw.pw_uid}")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if _linger_manager_active(uid_str) and runtime_dir.is_dir():
+            log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
+            return
+        time.sleep(0.2)
+
+    raise RuntimeError(
+        f"linger enabled but {service} did not become active for {pw.pw_name}"
+    )
 
 
 def setup_vm_bridge(name: str, bridge: str):
@@ -527,7 +581,20 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
 
 
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):
-    """Build cloud-init seed ISO (meta-data + user-data) into workload home.
+    """Build cloud-init seed ISO (meta-data + user-data) into the runtime dir.
+
+    The ISO is written to the tmpfs runtime dir /run/workload-vm/{name}/ rather
+    than the persistent workload home: in template mode it embeds decrypted
+    secrets in plaintext, so keeping it on tmpfs means it never survives a
+    reboot at rest (the threat being an offline disk read without the TPM).
+    The setup service (setup_vm_socket_dir, run earlier in this same invocation)
+    has already created the dir; the main VM service later adopts it via
+    RuntimeDirectory + RuntimeDirectoryPreserve=yes, which preserves this file.
+
+    The fingerprint stays in the persistent home, so after a reboot it still
+    matches but the tmpfs ISO is gone — iso_path.exists() is False, the skip is
+    bypassed, and we rebuild (re-decrypting secrets fresh). Within a single boot
+    the ISO is preserved, the fingerprint matches, and we skip the rebuild.
 
     Refuses to build if the SSH pubkey is missing: an authorized_keys-less
     ISO would produce a VM that `workloadctl exec` cannot reach.
@@ -549,8 +616,28 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
       inject. No YAML parsing — the user owns the file's structure.
     """
     home_path = Path(pw.pw_dir)
-    iso_path = home_path / "cloud-init.iso"
+    # The ISO lives on tmpfs (the VM runtime dir), never the persistent home —
+    # it can embed decrypted secrets. setup_vm_socket_dir() created this dir
+    # earlier in the same invocation; recreate it defensively in case this is
+    # called out of order (e.g. tests).
+    runtime_dir = VM_SOCKET_DIR / name
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(runtime_dir, pw.pw_uid, pw.pw_gid)
+    os.chmod(runtime_dir, 0o750)
+    iso_path = runtime_dir / "cloud-init.iso"
     seed_dir = home_path / ".cloud-init-seed"
+
+    # Migration: older builds wrote the ISO into the persistent home. It can
+    # embed plaintext secrets, so remove any stale copy left there — the live
+    # ISO is now the tmpfs one above.
+    legacy_iso = home_path / "cloud-init.iso"
+    try:
+        legacy_iso.unlink()
+        log(f"  Removed legacy on-disk cloud-init ISO: {legacy_iso}")
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"  WARNING: could not remove legacy ISO {legacy_iso}: {e}")
 
     vm_cfg = config.get("vm", {})
     guest_user = vm_cfg.get("user", "workload")
@@ -638,7 +725,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     meta_data = f"instance-id: {instance_id}\nlocal-hostname: {name}\n"
     (seed_dir / "meta-data").write_text(meta_data)
 
-    (seed_dir / "user-data").write_text(user_data_text)
+    ud = seed_dir / "user-data"
+    fd = os.open(ud, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, user_data_text.encode())
+    finally:
+        os.close(fd)
 
     # For VM workloads: bundle the workloadctl RPM so the bootstrap can install
     # it directly from the cdrom instead of fetching it from a git repo.
@@ -685,6 +777,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
     fingerprint_file.write_text(current_fp)
     os.chown(fingerprint_file, pw.pw_uid, pw.pw_gid)
+
+    # Remove the seed staging directory — the rendered user-data contains
+    # secrets in plaintext and is no longer needed once the ISO is built.
+    shutil.rmtree(seed_dir, ignore_errors=True)
     log(f"  Built cloud-init ISO: {iso_path}")
 
 

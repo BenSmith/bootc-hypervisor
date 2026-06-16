@@ -6,33 +6,6 @@
 
 ---
 
-
-### Multi-Container Workload Support
-**Why:** Enable complex workloads (dev env + DB + cache, desktop + streaming)
-- **Effort:** Large (1-2 weeks)
-- **Value:** High (enables many use cases)
-- **Interest:** Medium
-
-**What it enables:**
-- Dev environments: app + postgres + redis + mailhog
-- Desktop streaming: compositor + desktop + sunshine
-- Service stacks: app + metrics + logs
-- Sidecars: any workload + helper containers
-
-**Implementation:**
-- Design pod TOML schema (`type = "pod"`, `[[pod.containers]]`)
-- Update generator to create podman pods
-- Update workloadctl for pod operations (shell, exec, logs per container)
-- Test and document
-
-**Notes:**
-**Decision:** Wait until actually blocked by specific use case
-**Status:** Not started
-
----
-
-## High Interest (Want to do)
-
 ### LLM Inference Workloads
 **Why:** It makes me sad to have unused fancy hardware
 - **Effort:** Small (just workload configs)
@@ -103,7 +76,6 @@
   Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
   Could add configurable schedule, notification on updates, and update log.
 - Workloads get LVM provisioned to cap or flex storage
-- consider python3-tomlkit for toml edits that preserve comments
 - make missing host setup script an error not a warning
 - put all control surfaces in wireguard/vpn
 - build all container workload images and host locally?
@@ -212,23 +184,3 @@ delivery, smaller per-workload but requires the domain decision.
 **Value:** Eliminates the "fetch the new CA over plain HTTP" dance
 on every new service, makes the fleet reachable from unmodified
 client devices, scales with N services instead of N^2 trust edges.
-
-### systemd Socket Family Restrictions in Generated Service Units
-**Why:** Kernel interfaces exposed to unprivileged users are a recurring LPE attack surface. CVE-2026-31431 exploited AF_ALG sockets available to any unprivileged user. `RestrictAddressFamilies=` in the generated unit files applies via inherited seccomp BPF to the entire process tree — the host `_wl-xxx` podman process and the container — making it more fundamental than the container-level seccomp profile.
-- **Effort:** Small
-- **Value:** High (reduces kernel attack surface for all workloads, covers host user directly)
-- **Interest:** Medium
-
-**What to restrict:**
-- `AF_ALG` (38): block unconditionally — no workload needs kernel crypto sockets
-- `AF_PACKET` (17): block unconditionally — no workload needs raw packet sockets
-- `AF_NETLINK` (16): block by default, auto-lift for workloads that declare `NET_ADMIN` capability (all WireGuard-based workloads need it for `wg`/`ip`; regular app workloads don't)
-
-**Implementation:**
-- In the generator, add `RestrictAddressFamilies=~AF_ALG AF_PACKET` unconditionally
-- Add `AF_NETLINK` to the restriction unless `NET_ADMIN` is in the workload's capabilities list
-- No new TOML schema needed — driven entirely by existing capability declarations
-
-**Note on syscall coverage:** `userfaultfd`, `bpf`, `perf_event_open`, and `io_uring` are already blocked inside containers by the seccomp baseline. The unique value of `SystemCallFilter=` at the service unit level is covering the host-level `_wl-xxx` podman process — the container seccomp doesn't apply there. If an attacker escapes to the host user, those protections disappear. AF_ALG is the specific gap: not blocked in the container seccomp at all, which is what made CVE-2026-31431 exploitable from within containers.
-
-**Status:** Not started

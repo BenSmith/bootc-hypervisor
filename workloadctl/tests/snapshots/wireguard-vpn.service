@@ -16,20 +16,20 @@ Group=_wl-wireguard-vpn
 Environment="HOME=/var/lib/workloads/wireguard-vpn"
 EnvironmentFile=-/run/workload-env/workload-wireguard-vpn.env
 
-# Resource limits and constraints
-CPUQuota=20%
-MemoryMax=128M
-MemoryHigh=96M
-
+ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-wireguard-vpn" --hostname "wireguard-vpn" --rm --init --sdnotify=ignore --pull=never --log-driver=journald --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --network="pasta" --volume "/var/lib/workloads/wireguard-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/wireguard-vpn:latest"
+ExecStart=/usr/bin/podman run --name "workload-wireguard-vpn" --hostname "wireguard-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.2 --network="pasta" --volume "/var/lib/workloads/wireguard-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/wireguard-vpn:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-wireguard-vpn"
+ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-wireguard-vpn"
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=workload-wireguard-vpn
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=250
 
 Restart=on-failure
 RestartSec=5s
@@ -38,6 +38,10 @@ RestartSec=5s
 ProtectSystem=strict
 ReadWritePaths="/var/lib/workloads/wireguard-vpn" /run/user/__UID__
 PrivateTmp=yes
+# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and
+# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list
+# (~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.
+RestrictAddressFamilies=~AF_ALG AF_PACKET
 TimeoutStartSec=300
 TimeoutStopSec=30
 

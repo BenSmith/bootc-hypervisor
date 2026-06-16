@@ -68,7 +68,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 ### Code layout (workloadctl/)
 
-- `bin/workloadctl` — the CLI (~4600 lines, argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
+- `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
 - `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (`VM_BRIDGE_NAME`, UID math).
 - `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics).
 - `workloads.d/` — real example/shipped workload TOMLs. `docs/schema-reference.toml` is the annotated full schema.
@@ -81,7 +81,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 ### VM workloads
 
-A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `wlbr0` bridge + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads.d/virtual-forgejo.toml` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads.d/virtual-forgejo.toml` is the live example; see `docs/schema-reference.toml` `[vm]` section.
 
 ## Secrets
 

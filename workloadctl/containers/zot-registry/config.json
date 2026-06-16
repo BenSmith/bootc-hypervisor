@@ -9,7 +9,7 @@
   },
   "http": {
     "address": "0.0.0.0",
-    "port": "5000"
+    "port": "5050"
   },
   "log": {
     "level": "info"
@@ -26,31 +26,31 @@
       "registries": [
         {
           "urls": ["https://registry-1.docker.io"],
-          "onDemand": true,
+          "onDemand": false,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://ghcr.io"],
-          "onDemand": true,
+          "onDemand": false,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://quay.io"],
-          "onDemand": true,
+          "onDemand": false,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://registry.fedoraproject.org"],
-          "onDemand": true,
+          "onDemand": false,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://codeberg.org"],
-          "onDemand": true,
+          "onDemand": false,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         }

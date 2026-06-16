@@ -6,8 +6,6 @@ the `dev <iface>` tokens it prints in the unfiltered form, so the MAC is not at
 a fixed column. The lookup must find it via the `lladdr` marker, not parts[4].
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import sys
 import tempfile
@@ -16,15 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-# Import workloadctl as a module (hyphenated filename requires importlib)
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
-_ctl_path = os.path.join(os.path.dirname(__file__), '..', 'bin', 'workloadctl')
-_loader = importlib.machinery.SourceFileLoader("workload_ctl", _ctl_path)
-_spec = importlib.util.spec_from_loader("workload_ctl", _loader)
-wctl = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(wctl)
+import cmd_interact
+from workload_lib import vm_mac_address
 
 
 def _completed(stdout="", returncode=0):
@@ -36,12 +30,12 @@ class TestVmGuestIpArp(unittest.TestCase):
 
     def setUp(self):
         self.name = "git"
-        self.mac = wctl.vm_mac_address(self.name)
+        self.mac = vm_mac_address(self.name)
         self.ip = "192.168.0.157"
         # No managed-bridge marker -> skip lease, go straight to ARP.
         marker = mock.MagicMock()
         marker.exists.return_value = False
-        self._path_patch = mock.patch.object(wctl, "Path", return_value=marker)
+        self._path_patch = mock.patch.object(cmd_interact, "Path", return_value=marker)
         self._path_patch.start()
         self.addCleanup(self._path_patch.stop)
 
@@ -56,16 +50,16 @@ class TestVmGuestIpArp(unittest.TestCase):
             f"{self.ip} lladdr {self.mac} REACHABLE\n"
             f"192.168.0.1 lladdr a0:63:91:2c:e5:ef STALE\n"
         )
-        with mock.patch.object(wctl.subprocess, "run",
+        with mock.patch.object(cmd_interact.subprocess, "run",
                                return_value=_completed(neigh)):
-            self.assertEqual(wctl._vm_guest_ip(self.name, "br0"), self.ip)
+            self.assertEqual(cmd_interact._vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_unfiltered_format_still_works(self):
         """<ip> dev <iface> lladdr <mac> <state> (6 fields) also resolves."""
         neigh = f"{self.ip} dev br0 lladdr {self.mac} REACHABLE\n"
-        with mock.patch.object(wctl.subprocess, "run",
+        with mock.patch.object(cmd_interact.subprocess, "run",
                                return_value=_completed(neigh)):
-            self.assertEqual(wctl._vm_guest_ip(self.name, "br0"), self.ip)
+            self.assertEqual(cmd_interact._vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_mac_mismatch_falls_through_to_mdns(self):
         """No matching MAC in ARP -> mDNS fallback supplies the IP."""
@@ -78,8 +72,8 @@ class TestVmGuestIpArp(unittest.TestCase):
                 return _completed(f"{self.ip} {self.name}.local\n", returncode=0)
             return _completed("", returncode=1)
 
-        with mock.patch.object(wctl.subprocess, "run", side_effect=fake_run):
-            self.assertEqual(wctl._vm_guest_ip(self.name, "br0"), self.ip)
+        with mock.patch.object(cmd_interact.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(cmd_interact._vm_guest_ip(self.name, "br0"), self.ip)
 
     def test_nothing_matches_returns_none(self):
         def fake_run(argv, *a, **k):
@@ -87,8 +81,8 @@ class TestVmGuestIpArp(unittest.TestCase):
                 return _completed("", returncode=2)
             return _completed("")  # empty ARP table
 
-        with mock.patch.object(wctl.subprocess, "run", side_effect=fake_run):
-            self.assertIsNone(wctl._vm_guest_ip(self.name, "br0"))
+        with mock.patch.object(cmd_interact.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(cmd_interact._vm_guest_ip(self.name, "br0"))
 
 
 class TestVmGuestIpLease(unittest.TestCase):
@@ -105,9 +99,9 @@ class TestVmGuestIpLease(unittest.TestCase):
             )
             marker = mock.MagicMock()
             marker.exists.return_value = True  # bridge-managed present
-            with mock.patch.object(wctl, "Path", return_value=marker), \
-                 mock.patch.object(wctl, "VM_DHCP_LEASE_FILE", lease):
-                self.assertEqual(wctl._vm_guest_ip(name), ip)
+            with mock.patch.object(cmd_interact, "Path", return_value=marker), \
+                 mock.patch.object(cmd_interact, "VM_DHCP_LEASE_FILE", lease):
+                self.assertEqual(cmd_interact._vm_guest_ip(name), ip)
 
 
 if __name__ == "__main__":

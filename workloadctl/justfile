@@ -2,6 +2,22 @@
 
 version := "0.1.0"
 
+# Run CLI-surface acceptance harness (all verbs, both substrates)
+test-cli target:
+  pytest tests/cli_surface/ --target={{target}} -v
+
+# CLI surface — container substrate only (no VM boot; much faster)
+test-cli-containers target:
+  pytest tests/cli_surface/ --target={{target}} -m "not vm and not slow" -v
+
+# CLI surface — VM substrate only (requires /dev/kvm on target)
+test-cli-vm target:
+  pytest tests/cli_surface/ --target={{target}} -m vm -v
+
+# CLI surface — deploy current tree to target first, then run all tests
+test-cli-deploy target:
+  pytest tests/cli_surface/ --target={{target}} --deploy -v
+
 # Run all unit tests
 test:
   PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v

@@ -27,6 +27,7 @@ capabilities = [
     "SYS_CHROOT", "SYS_NICE",
 ]
 extra_groups = ["video", "render", "input"]
+selinux_policy = true
 
 [storage]
 volumes = [
@@ -39,12 +40,13 @@ volumes = [
 [network]
 mode = "host"
 
-[host]
-setup = "setup.sh"
-
 [resources]
 shm_size = "2g"
 memory_max = "8G"
 memory_high = "6G"
 cpu_quota = "400%"
 tasks_max = 16384
+
+[host]
+# Host prerequisites: uinput kernel module + udev rule.
+setup = "setup.sh"

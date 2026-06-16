@@ -1,0 +1,48 @@
+; Per-workload SELinux policy for the vncdesktop-wayfire workload container.
+; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
+;
+; GTK4's glycin image loaders run inside a bwrap sandbox to decode SVGs (icon
+; themes). Without these rules, bwrap fails during namespace setup and every SVG
+; icon load fails, leaving wf-panel with a zero-size layer surface and no bar.
+;
+; The container runs systemd (--systemd=always), so the type is attributed into
+; container_init_domain — systemd-as-PID1 will not boot without it. Everything
+; runs as this single type (no internal init transition), so the rules below
+; apply to it directly.
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+    (typeattributeset container_init_domain (process))
+
+    ; bwrap mounts a tmpfs for the sandbox's /tmp-home and /tmp-run.
+    (allow process tmpfs_t (filesystem (mount remount)))
+    ; bwrap mounts a fresh devpts inside the sandbox.
+    (allow process devpts_t (filesystem (mount)))
+    ; bwrap bind-mounts over existing sockets while composing the sandbox root.
+    (allow process container_file_t (sock_file (mounton)))
+    (allow process user_tmp_t (sock_file (mounton)))
+
+    ; bwrap populates the sandbox root on the tmpfs above: create/mount its
+    ; dirs, stage and exec the glycin loaders (execute+map => running code
+    ; mmap'd from tmpfs), create its symlinks, and unmount the bind-mounted
+    ; container_file_t mounts on teardown. Granted directly to container_init_t
+    ; by container-selinux's base policy, but not inherited by a per-workload
+    ; type, so they must be enumerated here.
+    (allow process tmpfs_t (dir (create mounton)))
+    (allow process tmpfs_t (file (create open mounton execute map)))
+    (allow process tmpfs_t (lnk_file (create)))
+    (allow process container_file_t (filesystem (unmount)))
+    ; ioctl on a /proc file; write the journald/syslog socket.
+    (allow process proc_t (file (ioctl)))
+    (allow process syslogd_var_run_t (sock_file (write)))
+
+    ; Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
+    (allow process udev_var_run_t (dir (read)))
+    (allow process udev_var_run_t (file (getattr open read)))
+
+    ; Wayfire launches Xwayland on demand for X11 clients.
+    (allow process xserver_exec_t (file (execute execute_no_trans getattr map open read)))
+    (allow process xserver_misc_device_t (chr_file (setattr)))
+    (allow process xserver_t (unix_stream_socket (connectto)))
+    (allow process var_run_t (sock_file (getattr write))))

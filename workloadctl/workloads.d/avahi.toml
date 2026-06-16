@@ -55,8 +55,8 @@ ALIASES = "zot registry"
 
 [container.health]
 cmd = "avahi-daemon --check"
-interval = "30s"
-timeout = "5s"
+interval = "60s"
+timeout = "35s"
 retries = 3
 start_period = "10s"
 on_failure = "kill"
@@ -76,6 +76,6 @@ mode = "host"
 
 [resources]
 service_type = "simple"
-memory_max = "64M"
-memory_high = "32M"
+memory_max = "128M"
+memory_high = "96M"
 cpu_quota = "50%"

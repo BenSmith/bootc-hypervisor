@@ -11,11 +11,24 @@ set -euo pipefail
 ALIASES="${ALIASES:-}"
 
 if [[ -z "${HOST_IP:-}" ]]; then
+    # Fall back to routing-based detection when HOST_IP isn't supplied.
+    # This requires a default route to exist — only reliable after network-online.
     HOST_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
 fi
 if [[ -z "$HOST_IP" ]]; then
     echo "avahi: could not detect host IP (set HOST_IP env var to override)" >&2
     exit 1
+fi
+
+# Restrict avahi to the LAN interface so transient container interfaces
+# (podman0, veth*, etc.) don't cause mDNS multicast churn.
+# Use ip-addr (no route needed) so this works at early boot before the
+# default route is configured. If detection fails, avahi runs on all
+# interfaces — acceptable but causes more multicast churn.
+_iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$HOST_IP" '$4 ~ "^" ip "/" {print $2; exit}')"
+if [[ -n "$_iface" ]]; then
+    sed -i "s/^#*allow-interfaces=.*/allow-interfaces=$_iface/" /etc/avahi/avahi-daemon.conf
+    echo "avahi: restricting mDNS to interface $_iface"
 fi
 
 ALIAS_NAMES=()

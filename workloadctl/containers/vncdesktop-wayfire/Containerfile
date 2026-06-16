@@ -40,6 +40,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     nano \
     neovim \
     procps-ng \
+    rsync \
     slurp \
     sudo \
     swappy \
@@ -542,6 +543,17 @@ RUN mkdir -p /etc/systemd/system && \
 # single-request serialises A/AAAA queries so an unreachable IPv6 upstream
 # can't stall every lookup for 15 s.
 RUN printf 'nameserver 127.0.0.53\noptions single-request ndots:1\n' > /etc/resolv.conf
+
+# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
+# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
+# which breaks apps with a bundled TLS stack that read the bundle *file*
+# ("unable to load trusted SSL root certificates"). Restore the legacy names as
+# symlinks to the stable extracted bundle (Fedora's documented permanent fix).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]

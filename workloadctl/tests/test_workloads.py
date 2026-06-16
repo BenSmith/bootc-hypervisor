@@ -12,6 +12,7 @@ These tests catch regressions from editing workload configs or the generator.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -377,24 +378,41 @@ class TestWorkloadGeneration(unittest.TestCase):
                     self.assertIn(f"--cap-add={cap}", service,
                                   f"Capability {cap} not added for {name}")
 
+    def _read_dropin(self, name):
+        """Read the user@<uid>.service.d/50-workload.conf for a workload by name."""
+        for dropin in Path(self.services_dir).glob("user@*.service.d/50-workload.conf"):
+            text = dropin.read_text()
+            if f"Workload {name}:" in text:
+                return text
+        return ""
+
     def test_resource_limits_applied(self):
-        """Resource limits from config appear in the [Service] section."""
+        """Under option 1b: cgroup limits land in the user@ drop-in (not the
+        workload unit); per-container OOM limits appear as podman flags."""
         for filename, config in self.configs.items():
+            if "vm" in config:
+                continue  # VM workloads use system-unit resource directives directly
             name = config["workload"]["name"]
             resources = config.get("resources", {})
             with self.subTest(workload=name):
                 service = self._read_service(name)
+                dropin = self._read_dropin(name)
                 if "cpu_quota" in resources:
-                    self.assertIn(f"CPUQuota={resources['cpu_quota']}", service)
+                    # Drop-in carries the cgroup directive; service carries the podman flag
+                    self.assertIn(f"CPUQuota={resources['cpu_quota']}", dropin)
+                    self.assertNotIn(f"CPUQuota={resources['cpu_quota']}", service)
                 if "memory_max" in resources:
-                    self.assertIn(f"MemoryMax={resources['memory_max']}", service)
+                    self.assertIn(f"MemoryMax={resources['memory_max']}", dropin)
+                    self.assertNotIn(f"MemoryMax={resources['memory_max']}", service)
+                    self.assertIn(f"--memory={resources['memory_max']}", service)
                 if "memory_high" in resources:
-                    self.assertIn(f"MemoryHigh={resources['memory_high']}", service)
+                    self.assertIn(f"MemoryHigh={resources['memory_high']}", dropin)
                 if "tasks_max" in resources:
-                    self.assertIn(f"TasksMax={resources['tasks_max']}", service)
+                    self.assertIn(f"TasksMax={resources['tasks_max']}", dropin)
+                    self.assertIn(f"--pids-limit={resources['tasks_max']}", service)
                 if "memory_swap_max" in resources:
                     self.assertIn(
-                        f"MemorySwapMax={resources['memory_swap_max']}", service)
+                        f"MemorySwapMax={resources['memory_swap_max']}", dropin)
 
     def test_environment_variables(self):
         """Plain (non-secret) env vars appear as --env args."""
@@ -509,13 +527,30 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
 
         run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
 
-        # Patch helper paths for verify (not present on dev machines)
+        # Patch helper paths for verify: workloadctl's libexec helpers live in
+        # the installed package, not the test env (dev box or CI). systemd-analyze
+        # verify only needs each Exec* binary to exist and be executable, so swap
+        # every /usr/libexec/workloadctl/<helper> for /bin/true. Done generically
+        # (not per-helper) so adding a new helper — e.g. workload-vm-shutdown —
+        # never silently breaks verify again.
+        # Same idea for podman itself: dev containers don't ship it, and
+        # systemd-analyze fails the whole unit on a non-executable ExecStart.
+        # Only patched when actually absent so real hosts keep strict verify.
+        patch_podman = not os.path.exists("/usr/bin/podman")
+
+        # GPU workloads Require= nvidia-cdi-generator.service, shipped by the
+        # hypervisor image. Stub it next to the units (systemd-analyze resolves
+        # references from the unit's own directory) when the host lacks it.
+        if not os.path.exists("/usr/lib/systemd/system/nvidia-cdi-generator.service"):
+            (Path(cls.services_dir) / "nvidia-cdi-generator.service").write_text(
+                "[Unit]\nDescription=verify stub\n"
+                "[Service]\nType=oneshot\nExecStart=/bin/true\n"
+            )
         for service_path in Path(cls.services_dir).glob("workload-*.service"):
             content = service_path.read_text()
-            content = content.replace(
-                "/usr/libexec/workloadctl/workload-ensure-user", "/bin/true")
-            content = content.replace(
-                "/usr/libexec/workloadctl/workload-write-env", "/bin/true")
+            content = re.sub(r"/usr/libexec/workloadctl/[\w-]+", "/bin/true", content)
+            if patch_podman:
+                content = content.replace("/usr/bin/podman", "/bin/true")
             service_path.write_text(content)
 
     @classmethod

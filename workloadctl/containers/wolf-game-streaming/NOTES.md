@@ -132,10 +132,11 @@ in-container uid rather than hardcoding the host UID.
 ## SELinux: wolf is non-systemd → container_t only
 
 Wolf's entrypoint is a bash script — there is no systemd in this
-container. All processes (Wolf, gamescope, Steam, bwrap, the game) run as
-`container_t`.
+container. All processes (Wolf, gamescope, Steam, bwrap, the game) run as the
+workload's own type `wl_wolf_game_streaming.process` (set via
+`[security].selinux_policy`), not the shared `container_t`.
 
-`wolf-devices.te` allows `container_t` to:
+`wolf-game-streaming.cil` allows that type to:
 
 - **Input devices**: read/write/ioctl on `event_device_t` (covers
   `/dev/uinput` for virtual device creation and `/dev/input/event*` for

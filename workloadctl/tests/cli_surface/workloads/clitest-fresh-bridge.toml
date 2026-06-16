@@ -1,0 +1,35 @@
+# clitest-fresh-bridge — bridge-mode fixture for MUTATING tests.
+# Identical in shape to clitest-bridge but with a distinct name + host port so
+# a per-test fresh instance can run alongside the session-shared clitest-bridge
+# without colliding on the workload name or the published port.
+# Do NOT enable this manually; it is managed by the test harness.
+
+[workload]
+name = "clitest-fresh-bridge"
+enabled = false
+mode = "bridge"
+
+[[containers]]
+name = "app"
+
+[containers.container]
+image = "docker.io/traefik/whoami:latest"
+command = ["--port", "8080"]
+
+[containers.resources]
+memory_max = "64M"
+memory_high = "48M"
+
+[[containers]]
+name = "proxy"
+
+[containers.container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "reverse-proxy", "--from", ":8080", "--to", "http://app:8080"]
+
+[containers.network]
+ports = ["19092:8080"]
+
+[containers.resources]
+memory_max = "128M"
+memory_high = "96M"

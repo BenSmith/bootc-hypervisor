@@ -1,0 +1,79 @@
+; Per-workload SELinux policy for the wayfire-game-streaming workload container.
+; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
+;
+; The container runs systemd (--systemd=always), so the type is attributed into
+; container_init_domain — systemd-as-PID1 will not boot without it. Everything
+; runs as this single type (no internal init transition). Grants:
+;   /dev/uinput + /dev/input/*  — create virtual input devices, read evdev
+;   /dev/snd                    — audio capture
+;   /run/udev                   — device property lookups (libdrm, mesa, ALSA)
+;   filesystem mount/remount    — Steam's bubblewrap sandbox (srt-bwrap)
+;   Wine/Proton                 — execheap, mmap_zero, execmod for Windows PE
+;   Steam IPC                   — /tmp socket and file operations
+
+(block __WL_MODULE__
+    (blockinherit container)
+    (blockinherit net_container)
+    (typeattributeset container_init_domain (process))
+
+    ; Input devices: /dev/uinput + /dev/input/event* (event_device_t on Fedora).
+    (allow process event_device_t (chr_file (open read write ioctl getattr)))
+    (allow process event_device_t (dir (open read search getattr)))
+
+    ; Audio device (/dev/snd).
+    (allow process sound_device_t (chr_file (getattr read write)))
+
+    ; Udev runtime database (libdrm, mesa, ALSA).
+    (allow process udev_var_run_t (dir (open read search getattr)))
+    (allow process udev_var_run_t (file (open read getattr)))
+    (allow process udev_var_run_t (lnk_file (read getattr)))
+    (allow process udev_var_run_t (sock_file (getattr)))
+
+    ; GPU/driver sysfs writes.
+    (allow process sysfs_t (file (write)))
+
+    ; Steam bwrap sandbox (srt-bwrap / pressure-vessel) remounts/mounts, and
+    ; unmounts its bind mounts on teardown.
+    (allow process bpf_t (filesystem (remount)))
+    (allow process cgroup_t (filesystem (remount)))
+    (allow process pstore_t (filesystem (remount)))
+    (allow process tmpfs_t (filesystem (remount)))
+    (allow process device_t (filesystem (remount)))
+    (allow process devpts_t (filesystem (mount)))
+    (allow process container_file_t (filesystem (unmount)))
+    (allow process container_file_t (sock_file (mounton)))
+    (allow process user_tmp_t (sock_file (mounton)))
+
+    ; Steam IPC: /tmp sockets and temp files (user_tmp_t).
+    (allow process user_tmp_t (dir (open read write search getattr add_name remove_name ioctl lock)))
+    (allow process user_tmp_t (file (open read write create getattr unlink lock map)))
+    (allow process user_tmp_t (sock_file (create write getattr setattr unlink)))
+
+    ; Captured at runtime (audit2allow). The bwrap/pressure-vessel sandbox
+    ; builds its root on a tmpfs: create/mount/setattr/watch dirs, and fully
+    ; manage files there (create, mmap+exec staged binaries, link/rename/unlink,
+    ; bind-mount over them) plus its symlinks; associate a proc mount. Plus:
+    ; ioctl on a /proc file, create entries in a self-owned dir, write the
+    ; journald/syslog socket, getattr a /run socket, and Xwayland setattr's an
+    ; X DRI/input device node.
+    (allow process tmpfs_t (dir (create mounton setattr watch)))
+    (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
+    (allow process tmpfs_t (lnk_file (create unlink)))
+    (allow process proc_t (file (ioctl)))
+    (allow process proc_t (filesystem (associate)))
+    (allow process self (dir (write add_name)))
+    (allow process self (file (create)))
+    (allow process syslogd_var_run_t (sock_file (write)))
+    (allow process var_run_t (sock_file (getattr write)))
+    (allow process xserver_misc_device_t (chr_file (setattr)))
+    ; Xwayland: connect to the X server's /tmp/.X11-unix socket.
+    (allow process xserver_t (unix_stream_socket (connectto)))
+
+    ; Wine/Proton PE loader: executable heap, NULL-page map, text relocations.
+    (allow process container_file_t (file (execmod)))
+    ; mmap_zero is neverallow'd for normal domains; refpolicy's exempt set is
+    ; the mmap_low_domain_type attribute. Join it so the allow below is legal
+    ; even when neverallow checking is on (host runs expand-check=0 today).
+    (typeattributeset mmap_low_domain_type (process))
+    (allow process self (memprotect (mmap_zero)))
+    (allow process self (process (execheap))))

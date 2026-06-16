@@ -42,6 +42,12 @@ enabled = false
 [setup]
 required_files = [
     { path = "./Caddyfile", hint = "/usr/share/workloadctl/containers/caddy/Caddyfile" },
+    # Shared homelab CA public root: copied from the image trust store (where the
+    # Forgejo build injects it) into the workload dir so it gets a container_file_t
+    # label and the container can read it — a direct mount of the trust anchor is
+    # cert_t and SELinux-denied. Drop this (and the pki bits below) for a per-host
+    # self-signed CA. See README "Shared homelab CA".
+    { path = "./homelab-root.crt", hint = "/etc/pki/ca-trust/source/anchors/homelab-root.crt" },
 ]
 
 [container]
@@ -64,6 +70,15 @@ volumes = [
     "./Caddyfile:/etc/caddy/Caddyfile:ro",
     "./data:/var/lib/caddy",
     "./config:/etc/caddy/config",
+    # Shared homelab CA (see README "Shared homelab CA"). Both files live in the
+    # workload dir so they carry a container_file_t label caddy can read under
+    # keep-id. The public root (./homelab-root.crt) is copied from the image
+    # trust store by [setup] required_files above; the private key
+    # (./homelab-root.key) is a per-host 0400 file you place yourself, owned by
+    # the workload user — NOT shipped in the image or repo. Remove these two lines
+    # and the Caddyfile pki block to use a per-host self-signed CA instead.
+    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",
+    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",
 ]
 
 [security]
