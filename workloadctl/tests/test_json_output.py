@@ -359,6 +359,26 @@ class TestPortsJson(unittest.TestCase):
             data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
         self.assertEqual(data['accessible_at'], [])
 
+    def test_three_part_ip_host_container(self):
+        toml = """\
+[workload]
+name = "test-wl"
+enabled = true
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+mode = "pasta"
+ports = ["127.0.0.1:4317:4317"]
+"""
+        with _WorkloadDir(toml, 'test-wl'):
+            args = _args(workload='test-wl', json=True)
+            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
+        entry = data['accessible_at'][0]
+        self.assertEqual(entry['host'], '127.0.0.1:4317')
+        self.assertEqual(entry['container'], '4317')
+
     def test_host_network_includes_ip_variants(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)

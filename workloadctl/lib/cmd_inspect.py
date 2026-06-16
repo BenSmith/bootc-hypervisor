@@ -390,17 +390,28 @@ def cmd_ports(args, manager: WorkloadManager):
             port_data["note"] = "Host networking - container ports directly accessible on host"
         else:
             for port_spec in ports:
-                parts = port_spec.split(':')
-                if len(parts) >= 2:
-                    host_port = parts[0]
-                    container_port = parts[1].split('/')[0]
+                parts = port_spec.split('/')[0].split(':')  # drop /tcp,/udp proto
+                if len(parts) == 3:
+                    # ip:hostPort:containerPort (empty hostPort => dynamic)
+                    ip, host_port, container_port = parts
+                    host = ip or "localhost"
+                    host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
                     port_data["accessible_at"].append({
-                        "host": f"localhost:{host_port}",
-                        "container": container_port
+                        "host": host_disp,
+                        "container": container_port,
+                    })
+                elif len(parts) == 2:
+                    host_port, container_port = parts
+                    host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
+                    port_data["accessible_at"].append({
+                        "host": host_disp,
+                        "container": container_port,
                     })
                 else:
-                    port = parts[0].split('/')[0]
-                    port_data["accessible_at"].append({"host": f"localhost:{port}", "container": None})
+                    port_data["accessible_at"].append({
+                        "host": f"localhost:{parts[0]}",
+                        "container": None,
+                    })
 
     if args.json:
         print(json.dumps(port_data, indent=2))
@@ -434,14 +445,18 @@ def cmd_ports(args, manager: WorkloadManager):
         print("Note: Host networking - container ports directly accessible on host")
     else:
         for port_spec in ports:
-            parts = port_spec.split(':')
-            if len(parts) >= 2:
-                host_port = parts[0]
-                container_port = parts[1].split('/')[0]
-                print(f"  localhost:{host_port} → container:{container_port}")
+            parts = port_spec.split('/')[0].split(':')  # drop /tcp,/udp proto
+            if len(parts) == 3:
+                ip, host_port, container_port = parts
+                host = ip or "localhost"
+                host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
+                print(f"  {host_disp} → container:{container_port}")
+            elif len(parts) == 2:
+                host_port, container_port = parts
+                host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
+                print(f"  {host_disp} → container:{container_port}")
             else:
-                port = parts[0].split('/')[0]
-                print(f"  localhost:{port}")
+                print(f"  localhost:{parts[0]}")
 
 
 # ---------------------------------------------------------------------------
