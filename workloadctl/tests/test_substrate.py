@@ -250,6 +250,122 @@ class TestIgnoreVMRebuild(unittest.TestCase):
         self.assertNotIn('system.qcow2', skipped)
 
 
+# ── ContainerSubstrate.liveness() multi-container semantics ──────────────────
+
+SINGLE_TOML = """\
+[workload]
+name = "test-wl"
+enabled = true
+
+[container]
+image = "example.com/test:latest"
+"""
+
+POD_TOML = """\
+[workload]
+name = "test-pod"
+mode = "pod"
+enabled = true
+
+[[containers]]
+name = "web"
+image = "example.com/web:latest"
+
+[[containers]]
+name = "db"
+image = "example.com/db:latest"
+"""
+
+
+def _make_config(toml, name):
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d)
+        (p / f'{name}.toml').write_text(toml)
+        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+            return workloadctl_core.WorkloadConfig(name)
+
+
+class TestContainerLiveness(unittest.TestCase):
+
+    def _substrate(self, toml, name, statuses):
+        """Build a ContainerSubstrate whose container_status() returns from `statuses`.
+
+        `statuses` maps container_status() argument → returned status string
+        (or None for not-running).
+        """
+        config = _make_config(toml, name)
+        manager = MagicMock()
+        manager.user_exists.return_value = True
+        manager.podman.return_value.container_status.side_effect = (
+            lambda cname: statuses.get(cname)
+        )
+        return ContainerSubstrate(config, manager)
+
+    def test_single_running_is_healthy(self):
+        substrate = self._substrate(SINGLE_TOML, 'test-wl', {'workload-test-wl': 'running'})
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            live = substrate.liveness()
+        self.assertTrue(live['healthy'])
+        self.assertTrue(live['container_running'])
+        self.assertEqual(live['container_status'], 'running')
+
+    def test_single_stopped_is_unhealthy(self):
+        substrate = self._substrate(SINGLE_TOML, 'test-wl', {'workload-test-wl': None})
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            live = substrate.liveness()
+        self.assertFalse(live['healthy'])
+        self.assertFalse(live['container_running'])
+
+    def test_multi_all_running_is_healthy(self):
+        statuses = {'workload-test-pod-web': 'running', 'workload-test-pod-db': 'running'}
+        substrate = self._substrate(POD_TOML, 'test-pod', statuses)
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            live = substrate.liveness()
+        self.assertTrue(live['healthy'])
+        self.assertTrue(live['container_running'])
+
+    def test_multi_partial_down_is_unhealthy(self):
+        """A pod with one container down must NOT report healthy."""
+        statuses = {'workload-test-pod-web': 'running', 'workload-test-pod-db': None}
+        substrate = self._substrate(POD_TOML, 'test-pod', statuses)
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            live = substrate.liveness()
+        self.assertFalse(live['healthy'])
+        self.assertFalse(live['container_running'])
+        # Still surfaces the running container's status for display.
+        self.assertEqual(live['container_status'], 'running')
+
+    def test_service_inactive_skips_podman(self):
+        substrate = self._substrate(SINGLE_TOML, 'test-wl', {'workload-test-wl': 'running'})
+        with patch('subprocess.run', return_value=_ok(stdout='inactive\n', returncode=3)):
+            live = substrate.liveness()
+        self.assertFalse(live['service_active'])
+        self.assertFalse(live['healthy'])
+        substrate.manager.podman.assert_not_called()
+
+
+class TestContainerResourceUsage(unittest.TestCase):
+
+    def _substrate(self, run_result):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.run.return_value = run_result
+        return ContainerSubstrate(config, manager)
+
+    def test_json_returns_result(self):
+        """json_out path returns the raw subprocess result to the caller."""
+        result = _ok(stdout='[]')
+        substrate = self._substrate(result)
+        returned = substrate.resource_usage(['test-wl'], json_out=True)
+        self.assertIs(returned, result)
+
+    def test_stream_returns_none(self):
+        """Non-json (streaming) path returns None."""
+        substrate = self._substrate(_ok())
+        returned = substrate.resource_usage(['test-wl'])
+        self.assertIsNone(returned)
+
+
 # ── cmd_drift ─────────────────────────────────────────────────────────────────
 
 class TestCmdDrift(unittest.TestCase):

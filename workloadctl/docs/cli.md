@@ -414,6 +414,15 @@ Restore a workload from a backup archive created by `backup`.
 sudo workloadctl restore <archive>
 ```
 
+> **DR caveat — secrets are host-bound.** A backup archives the encrypted
+> credential blobs from `/etc/credstore` but not the unlock material. Secrets
+> are sealed to this host (TPM2 binding, or `/var/lib/systemd/credential.secret`
+> for the host-key fallback). An in-place restore on the same machine decrypts
+> normally; a restore on different hardware — or after a TPM reset — cannot
+> decrypt them. For cross-host DR, also preserve `/var/lib/systemd/credential.secret`
+> (host-key case), or re-encrypt the affected secrets on the target with
+> `workloadctl secret`.
+
 ---
 
 ## Networking

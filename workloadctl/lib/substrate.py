@@ -82,8 +82,11 @@ class Substrate(ABC):
         no_stream: bool = True,
         json_out: bool = False,
         follow: bool = False,
-    ) -> None:
+    ):
         """Display or stream resource usage.
+
+        For json_out, returns the raw subprocess result (CompletedProcess) for
+        the caller to parse; otherwise streams to the terminal and returns None.
 
         Raises NotApplicable if the substrate does not expose resource metrics
         through this primitive.
@@ -126,14 +129,18 @@ class ContainerSubstrate(Substrate):
         if service_active and self.manager.user_exists(self.config):
             podman = self.manager.podman(self.config)
             names = self.config.container_names() if self.config.is_multi else [self.config.container_name]
+            statuses = []
             for cname in names:
                 status = podman.container_status(
                     f"workload-{self.config.name}-{cname}" if self.config.is_multi else cname
                 )
-                if status:
-                    container_running = True
-                    container_status_str = status
-                    break
+                statuses.append(status)
+            # For multi-container workloads, "running" means every named
+            # container is up — a partially-down pod is not healthy. For a
+            # single container, this collapses to that one's status.
+            container_running = bool(statuses) and all(statuses)
+            # Surface the first running container's status string for display.
+            container_status_str = next((s for s in statuses if s), None)
 
         healthy = service_active and container_running
         return {
@@ -151,19 +158,19 @@ class ContainerSubstrate(Substrate):
         no_stream: bool = True,
         json_out: bool = False,
         follow: bool = False,
-    ) -> None:
+    ):
         podman = self.manager.podman(self.config)
         if json_out:
-            result = podman.run(
+            # Return the raw result for the caller to parse/print.
+            return podman.run(
                 "stats", "--no-stream", "--format", "json",
                 *target_names, capture_output=True,
             )
-            # Return raw result for the caller to parse/print
-            self._last_stats_result = result
         elif follow:
             podman.run("stats", *target_names, check=True)
         else:
             podman.run("stats", "--no-stream", *target_names, check=True)
+        return None
 
     def capture(
         self,
@@ -204,7 +211,7 @@ class VMSubstrate(Substrate):
         no_stream: bool = True,
         json_out: bool = False,
         follow: bool = False,
-    ) -> None:
+    ):
         raise NotApplicable(
             "VMs do not expose container-level resource metrics; "
             "check systemd cgroup stats or host monitoring tools instead"
