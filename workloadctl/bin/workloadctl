@@ -9,12 +9,12 @@ running as system services with rootless podman.
 import argparse
 import sys
 
-from cmd_admin import cmd_create, cmd_edit, cmd_uid_map, cmd_validate, cmd_verify
+from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_drift import cmd_drift
 from cmd_inspect import (
     cmd_health, cmd_images, cmd_info, cmd_list, cmd_network,
-    cmd_ports, cmd_ps, cmd_stats, cmd_status,
+    cmd_stats, cmd_status,
 )
 from cmd_interact import cmd_attach, cmd_cp, cmd_exec, cmd_logs, cmd_shell
 from cmd_lifecycle import (
@@ -154,13 +154,6 @@ def main():
     network_parser.add_argument("subcommand", choices=["create"], help="Subcommand (create)")
     network_parser.add_argument("workload", help="Workload to create network for")
 
-    ports_parser = subparsers.add_parser("ports", help="Show port information")
-    ports_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-    ports_parser.add_argument("workload", help="Workload name")
-
-    ps_parser = subparsers.add_parser("ps", help="Show all running workload containers")
-    ps_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-
     reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
     reboot_parser.add_argument("workload", help="Workload name")
 
@@ -241,10 +234,6 @@ def main():
     stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
     stop_parser.add_argument("workload", help="Workload name")
 
-    uid_map_parser = subparsers.add_parser("uid-map", help="Show UID/GID mapping for a workload")
-    uid_map_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-    uid_map_parser.add_argument("workload", help="Workload name")
-
     update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
     update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
@@ -255,9 +244,9 @@ def main():
     validate_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     validate_parser.add_argument("workload", nargs="?", help="Workload name")
 
-    verify_parser = subparsers.add_parser("verify", help="Verify workload setup and diagnose issues")
-    verify_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-    verify_parser.add_argument("workload", help="Workload name")
+    diagnose_parser = subparsers.add_parser("diagnose", help="Diagnose workload runtime setup (user, subids, linger, SELinux)")
+    diagnose_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    diagnose_parser.add_argument("workload", help="Workload name")
 
     args = parser.parse_args()
 
@@ -270,6 +259,7 @@ def main():
         "cleanup": cmd_cleanup,
         "cp": cmd_cp,
         "create": cmd_create,
+        "diagnose": cmd_diagnose,
         "disable": cmd_disable,
         "edit": cmd_edit,
         "enable": cmd_enable,
@@ -280,8 +270,6 @@ def main():
         "list": cmd_list,
         "logs": cmd_logs,
         "network": cmd_network,
-        "ports": cmd_ports,
-        "ps": cmd_ps,
         "reboot": cmd_reboot,
         "recreate": cmd_recreate,
         "restore": cmd_restore,
@@ -293,10 +281,8 @@ def main():
         "stop": cmd_stop,
         "rollback": cmd_rollback,
         "drift": cmd_drift,
-        "uid-map": cmd_uid_map,
         "update": cmd_update,
         "validate": cmd_validate,
-        "verify": cmd_verify,
     }
 
     handler = command_map.get(args.command)

@@ -323,41 +323,50 @@ class TestInfoJson(unittest.TestCase):
         for key in ('name', 'state', 'active_since'):
             self.assertIn(key, svc, f'service section missing key: {key}')
 
+    def test_user_section_has_subuid_subgid(self):
+        data = self._run()
+        self.assertIn('subuid', data['user'])
+        self.assertIn('subgid', data['user'])
+        self.assertIn('start', data['user']['subuid'])
+        self.assertIn('count', data['user']['subuid'])
 
-# ── Task 1.4 — ports accessible_at always dicts ──────────────────────────────
+    def test_network_section_has_accessible_at(self):
+        data = self._run()
+        self.assertIn('accessible_at', data['network'])
+        self.assertIsInstance(data['network']['accessible_at'], list)
+
+
+# ── Task 1.4 — _accessible_at always dicts (ports folded into info) ──────────
 
 class TestPortsJson(unittest.TestCase):
+    """Tests for _accessible_at(), the port endpoint helper used by cmd_info."""
 
     def test_bridge_entry_is_dict_with_host_and_container(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        entry = data['accessible_at'][0]
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        self.assertEqual(len(result), 1)
+        entry = result[0]
         self.assertIsInstance(entry, dict)
         self.assertEqual(entry['host'], 'localhost:8080')
         self.assertEqual(entry['container'], '80')
 
     def test_bridge_entry_not_a_string(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        for entry in data['accessible_at']:
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        for entry in result:
             self.assertNotIsInstance(entry, str)
 
     def test_host_network_container_field_is_null(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            with patch('subprocess.run', return_value=_ok(stdout='192.168.1.1\n')):
-                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        for entry in data['accessible_at']:
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        for entry in result:
             self.assertIn('container', entry)
             self.assertIsNone(entry['container'])
 
     def test_no_ports_gives_empty_accessible_at(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        self.assertEqual(data['accessible_at'], [])
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        self.assertEqual(result, [])
 
     def test_three_part_ip_host_container(self):
         toml = """\
@@ -373,21 +382,16 @@ mode = "pasta"
 ports = ["127.0.0.1:4317:4317"]
 """
         with _WorkloadDir(toml, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        entry = data['accessible_at'][0]
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        entry = result[0]
         self.assertEqual(entry['host'], '127.0.0.1:4317')
         self.assertEqual(entry['container'], '4317')
 
-    def test_host_network_includes_ip_variants(self):
+    def test_host_network_localhost_entry(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            with patch('subprocess.run', return_value=_ok(stdout='10.0.0.1 192.168.1.1\n')):
-                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        hosts = [e['host'] for e in data['accessible_at']]
+            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+        hosts = [e['host'] for e in result]
         self.assertIn('localhost:8080', hosts)
-        self.assertIn('10.0.0.1:8080', hosts)
-        self.assertIn('192.168.1.1:8080', hosts)
 
 
 # ── Task 1.5 — images list raw values ────────────────────────────────────────
@@ -615,103 +619,67 @@ class TestSecretListJson(unittest.TestCase):
         self.assertEqual(data['credentials'][0]['size'], 100)
 
 
-# ── Task 2.3 — uid-map --json ────────────────────────────────────────────────
+# ── Task 2.3 — _read_subid (uid/subid data folded into info) ─────────────────
 
-class TestUidMapJson(unittest.TestCase):
+class TestReadSubid(unittest.TestCase):
+    """Tests for _read_subid(), the subuid/subgid file parser used by cmd_info."""
 
-    def _fake_open(self, username, subuid_start=100000, subuid_count=65536):
+    def _fake_open(self, username, start=100000, count=65536):
         import builtins
         real_open = builtins.open
 
         def fake(path, *args, **kwargs):
             if str(path) == '/etc/subuid':
-                return io.StringIO(f'{username}:{subuid_start}:{subuid_count}\n')
+                return io.StringIO(f'{username}:{start}:{count}\n')
             if str(path) == '/etc/subgid':
-                return io.StringIO(f'{username}:{subuid_start}:{subuid_count}\n')
+                return io.StringIO(f'{username}:{start}:{count}\n')
             return real_open(path, *args, **kwargs)
 
         return fake
 
-    def _mock_pw(self, uid=20001, gid=20001):
-        pw = MagicMock()
-        pw.pw_uid = uid
-        pw.pw_gid = gid
-        return pw
+    def test_returns_start_and_count(self):
+        with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl', 100000, 65536)):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertEqual(start, 100000)
+        self.assertEqual(count, 65536)
 
-    def test_shape(self):
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        for key in ('workload', 'username', 'host_uid', 'host_gid',
-                    'subuid', 'subgid', 'userns_mode', 'mapped_uid', 'mapped_gid'):
-            self.assertIn(key, data, f'missing key: {key}')
-
-    def test_default_keep_id_mapped_uid_equals_host_uid(self):
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw(uid=20001, gid=20001)):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        self.assertEqual(data['host_uid'], 20001)
-        self.assertEqual(data['mapped_uid'], 20001)
-        self.assertEqual(data['subuid'], {'start': 100000, 'count': 65536})
-
-    def test_keep_id_with_uid_gid_override(self):
-        toml = """\
-[workload]
-name = "test-wl"
-enabled = false
-
-[container]
-image = "example.com/test:latest"
-
-[security]
-userns = "keep-id:uid=999,gid=888"
-"""
-        with _WorkloadDir(toml, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        self.assertEqual(data['mapped_uid'], 999)
-        self.assertEqual(data['mapped_gid'], 888)
-        self.assertEqual(data['userns_mode'], 'keep-id:uid=999,gid=888')
-
-    def test_subuid_null_when_not_configured(self):
+    def test_returns_none_none_when_no_entry(self):
         import builtins
         real_open = builtins.open
 
-        def no_subuid(path, *args, **kwargs):
+        def no_entry(path, *args, **kwargs):
             if str(path) in ('/etc/subuid', '/etc/subgid'):
                 return io.StringIO('')
             return real_open(path, *args, **kwargs)
 
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=no_subuid):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
+        with patch('builtins.open', side_effect=no_entry):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
+        self.assertIsNone(count)
 
-        self.assertIsNone(data['subuid']['start'])
-        self.assertIsNone(data['subuid']['count'])
+    def test_returns_none_none_when_file_missing(self):
+        with patch('builtins.open', side_effect=FileNotFoundError):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
+        self.assertIsNone(count)
+
+    def test_ignores_other_users(self):
+        import builtins
+        real_open = builtins.open
+
+        def other_user(path, *args, **kwargs):
+            if str(path) == '/etc/subuid':
+                return io.StringIO('other-user:200000:65536\n')
+            return real_open(path, *args, **kwargs)
+
+        with patch('builtins.open', side_effect=other_user):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
 
 
-# ── Task 2.4 — verify --json ─────────────────────────────────────────────────
+# ── Task 2.4 — diagnose --json ───────────────────────────────────────────────
 
-class TestVerifyJson(unittest.TestCase):
+class TestDiagnoseJson(unittest.TestCase):
 
     def _run_no_user(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
@@ -729,7 +697,7 @@ class TestVerifyJson(unittest.TestCase):
 
             with patch.object(cmd_admin, 'require_root'):
                 with patch('subprocess.run', side_effect=fake_run):
-                    return _capture_json_exitok(lambda: cmd_admin.cmd_verify(args, m))
+                    return _capture_json_exitok(lambda: cmd_admin.cmd_diagnose(args, m))
 
     def test_top_level_shape(self):
         data = self._run_no_user()

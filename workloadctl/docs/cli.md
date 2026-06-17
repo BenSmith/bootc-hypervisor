@@ -24,7 +24,7 @@ workloadctl health myapp           # per-container health table
 
 For multi-container workloads, `exec` and `shell` **require** the `<workload>/<container>` form — a bare `<workload>` errors and lists the available containers. `logs` and `health` accept both forms.
 
-Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `ps`, `ports`, `stats`, `attach`, `cp` likewise take a bare workload name.
+Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `stats`, `attach`, `cp` likewise take a bare workload name.
 
 ---
 
@@ -208,7 +208,7 @@ workloadctl status [--json] <workload>
 
 ### `info`
 
-Show detailed workload information: config, user, UID, home directory, image, ports, volumes.
+Show detailed workload information: config, user, UID, subuid/subgid ranges, home directory, image, ports, volumes.
 
 ```
 workloadctl info [--json] <workload>
@@ -227,22 +227,6 @@ workloadctl logs [-f] [-n N] [--since TIME] <workload>[/<container>] [extra jour
 | `-f` / `--follow` | Stream live log output |
 | `-n N` / `--lines N` | Show last N lines |
 | `--since TIME` | Show logs since TIME (journalctl format, e.g., `"1 hour ago"`) |
-
-### `ps`
-
-Show all currently running workload containers.
-
-```
-workloadctl ps [--json]
-```
-
-### `ports`
-
-Show port mappings for a workload.
-
-```
-workloadctl ports [--json] <workload>
-```
 
 ### `stats`
 
@@ -272,18 +256,6 @@ List or prune container images for workload users.
 ```
 workloadctl images [--json] [list|prune]
 ```
-
-### `uid-map`
-
-Show the UID/GID mapping for a workload (host UID → container UID via user namespace).
-
-```
-workloadctl uid-map [--json] <workload>
-```
-
-| Option | Description |
-|---|---|
-| `--json` | Output host UIDs, subuid ranges, and mapped container UIDs as JSON |
 
 ---
 
@@ -360,12 +332,12 @@ workloadctl validate [--all] [--json] [<workload>]
 | `--all` | Validate all workload configs |
 | `--json` | Output results as JSON |
 
-### `verify`
+### `diagnose`
 
-Verify a workload's runtime setup: user exists, subuid configured, linger active, image present, service file generated.
+Diagnose a workload's runtime setup: user exists, subuid/subgid configured, linger active, SELinux label correct.
 
 ```
-workloadctl verify [--json] <workload>
+workloadctl diagnose [--json] <workload>
 ```
 
 | Option | Description |

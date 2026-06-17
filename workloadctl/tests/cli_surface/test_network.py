@@ -35,12 +35,12 @@ class TestNetworkCreate:
 
         # Verify the network exists for the workload user
         # Get the workload's UID
-        uid_r = target.wl(f"uid-map --json {fresh_single}", check=False)
+        uid_r = target.wl(f"info --json {fresh_single}", check=False)
         uid = None
         if uid_r.rc == 0:
             try:
                 data = json.loads(uid_r.stdout)
-                uid_val = data.get("host_uid")
+                uid_val = data.get("user", {}).get("uid")
                 if uid_val:
                     uid = int(uid_val)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):

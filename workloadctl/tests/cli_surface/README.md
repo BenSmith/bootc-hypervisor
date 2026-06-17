@@ -83,8 +83,9 @@ workloadctl/tests/cli_surface/
   target.py               Target abstraction (run/put/capabilities)
   fixtures.py             workload-provisioning pytest fixtures
   workloads/              fixture TOMLs (clitest-*.toml)
-  test_introspect.py      list, ps, info, status, ports, health, uid-map,
-                          verify, validate, drift, logs, stats, images
+  test_introspect.py      list, info, status, health, diagnose, validate,
+                          drift, logs, stats, images
+                          (ports/uid-map data tested via info --json)
   test_lifecycle.py       create, enable, start, stop, disable(+--purge),
                           edit, reboot, recreate
   test_exec.py            exec, cp, attach, shell

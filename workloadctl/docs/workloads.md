@@ -132,10 +132,8 @@ Workloads with `enabled = true` will be provisioned automatically on first boot.
 | **Validate config** | `workloadctl validate NAME` |
 | **Edit config** | `sudo workloadctl edit NAME` |
 | **Monitor resources** | `workloadctl stats [-f] [NAME]` |
-| **Show ports** | `workloadctl ports NAME` |
 | **Check health** | `workloadctl health NAME` |
 | **Copy files** | `workloadctl cp SRC DEST` |
-| **List containers** | `workloadctl ps` |
 | **Manage images** | `workloadctl images list\|prune` |
 | **Manage secrets** | `sudo workloadctl secret create\|list\|show\|rotate\|delete NAME` |
 | **Export/import secrets** | `sudo workloadctl secret export\|import NAME` |
@@ -1144,11 +1142,9 @@ sudo workloadctl update --all         # Update all enabled workloads (skips pull
 
 **Show detailed information:**
 ```bash
-workloadctl info NAME                 # Comprehensive workload info
-workloadctl ports NAME                # Port information
+workloadctl info NAME                 # Comprehensive workload info (ports, subids, …)
 workloadctl stats NAME                # Resource usage
 workloadctl stats -f                  # All workloads, live updating
-workloadctl ps                        # List all running containers
 ```
 
 **Configuration management:**
@@ -1679,10 +1675,6 @@ workloadctl exec NAME ps aux
 
 # Monitor resources
 workloadctl stats NAME
-workloadctl ps                       # All running containers
-
-# Check ports
-workloadctl ports NAME
 ```
 
 ### Common Issues and Solutions
@@ -1724,7 +1716,7 @@ sudo ss -tlnp | grep :8080
 
 # Check all workload ports
 workloadctl list
-workloadctl ports NAME
+workloadctl info NAME
 
 # Either change the port in config or stop conflicting service
 sudo workloadctl edit NAME  # Change port mapping

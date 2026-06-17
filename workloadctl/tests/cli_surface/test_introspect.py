@@ -1,10 +1,9 @@
 """
 test_introspect.py — read-only introspection verbs.
 
-Covers: list, ps, info, status, ports, health, uid-map, verify, validate, drift, logs, stats.
-
-Each verb is exercised against every applicable topology; VM substrate cells
-are gated on has_kvm and marked slow.
+Covers: list, info, status, health, diagnose, validate, drift, logs, stats.
+Port and uid-map data are tested via `info --json` (network.accessible_at,
+user.subuid). VM substrate cells are gated on has_kvm and marked slow.
 """
 
 import json
@@ -74,33 +73,6 @@ class TestList:
         assert clitest_single in names
 
 
-# ---------------------------------------------------------------------------
-# ps
-# ---------------------------------------------------------------------------
-
-class TestPs:
-    def test_ps_plain(self, target, clitest_single, record_property):
-        record_property("cell", "ps/container")
-        r = target.wl("ps", sudo=False, check=True)
-        assert r.rc == 0
-
-    def test_ps_json(self, target, clitest_single, record_property):
-        record_property("cell", "ps/container")
-        r = target.wl("ps --json", sudo=False, check=True)
-        assert r.rc == 0
-        data = json.loads(r.stdout)
-        assert "containers" in data
-        assert isinstance(data["containers"], list)
-
-    def test_ps_shows_running_container(self, target, clitest_single, record_property):
-        record_property("cell", "ps/container")
-        r = target.wl("ps --json", sudo=False, check=True)
-        data = json.loads(r.stdout)
-        # At least one container should be running for our enabled workload
-        running_names = [c.get("name", "") for c in data["containers"]]
-        assert any(clitest_single in n for n in running_names), (
-            f"Expected running container for {clitest_single!r}, got: {running_names}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -210,46 +182,47 @@ class TestInfo:
 
 
 # ---------------------------------------------------------------------------
-# ports
+# ports (via info)
 # ---------------------------------------------------------------------------
 
 class TestPorts:
-    def test_ports_plain(self, target, clitest_single, record_property):
-        record_property("cell", "ports/container")
-        r = target.wl(f"ports {clitest_single}", sudo=False, check=True)
-        assert r.rc == 0
-        assert "19080" in r.stdout
+    """Port data is surfaced through `info --json` under network.ports / network.accessible_at."""
 
-    def test_ports_json(self, target, clitest_single, record_property):
+    def test_ports_in_info_json(self, target, clitest_single, record_property):
         record_property("cell", "ports/container")
-        r = target.wl(f"ports --json {clitest_single}", sudo=False, check=True)
+        r = target.wl(f"info --json {clitest_single}", sudo=False, check=True)
         assert r.rc == 0
         data = json.loads(r.stdout)
-        assert "ports" in data
-        assert "workload" in data
+        assert "network" in data
+        assert "ports" in data["network"]
+        assert "accessible_at" in data["network"]
+        assert any("19080" in p for p in data["network"]["ports"])
+
+    def test_ports_accessible_at(self, target, clitest_single, record_property):
+        record_property("cell", "ports/container")
+        r = target.wl(f"info --json {clitest_single}", sudo=False, check=True)
+        data = json.loads(r.stdout)
+        accessible = data["network"]["accessible_at"]
+        assert isinstance(accessible, list)
+        assert len(accessible) > 0
+        assert "host" in accessible[0]
 
     def test_ports_host_mode(self, target, clitest_host, record_property):
-        """host-mode workload: ports verb returns correct network_mode."""
+        """host-mode workload: info reports host network_mode with no mapped ports."""
         record_property("cell", "ports/container/host")
-        r = target.wl(f"ports --json {clitest_host}", sudo=False, check=True)
+        r = target.wl(f"info --json {clitest_host}", sudo=False, check=True)
         assert r.rc == 0
         data = json.loads(r.stdout)
-        assert data["network_mode"] == "host"
+        assert data["network"]["mode"] == "host"
 
     @pytest.mark.vm
     @pytest.mark.slow
     def test_ports_vm(self, target, clitest_vm, record_property):
-        """ports on a VM — exits 0 (no crash), returns a parseable result.
-
-        VMs don't have published ports in the container sense; the verb reads
-        the TOML and returns an empty ports list. It must not crash.
-        """
+        """info on a VM includes a network section (ports list may be empty — no crash)."""
         record_property("cell", "ports/vm")
-        r = target.wl(f"ports --json {clitest_vm}", check=False)
-        assert r.rc == 0, f"ports crashed on VM (rc={r.rc}): {r.stderr}"
-        assert "Traceback" not in r.stderr, "ports raised an unhandled exception on VM"
-        data = json.loads(r.stdout)
-        assert "workload" in data
+        r = target.wl(f"info --json {clitest_vm}", check=False)
+        assert r.rc == 0, f"info crashed on VM (rc={r.rc}): {r.stderr}"
+        assert "Traceback" not in r.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -286,24 +259,29 @@ class TestHealth:
 
 
 # ---------------------------------------------------------------------------
-# uid-map
+# uid-map (via info)
 # ---------------------------------------------------------------------------
 
 class TestUidMap:
-    def test_uid_map_plain(self, target, clitest_single, record_property):
-        record_property("cell", "uid-map/container")
-        r = target.wl(f"uid-map {clitest_single}", check=True)
-        assert r.rc == 0
+    """UID/subuid data is surfaced through `info --json` under user.uid / user.subuid."""
 
-    def test_uid_map_json(self, target, clitest_single, record_property):
+    def test_uid_in_info_json(self, target, clitest_single, record_property):
         record_property("cell", "uid-map/container")
-        r = target.wl(f"uid-map --json {clitest_single}", check=True)
+        r = target.wl(f"info --json {clitest_single}", check=True)
         assert r.rc == 0
         data = json.loads(r.stdout)
-        assert "workload" in data
-        assert "username" in data
-        assert "host_uid" in data
-        assert data["host_uid"] is not None
+        assert "user" in data
+        assert "uid" in data["user"]
+        assert data["user"]["uid"] is not None
+
+    def test_subuid_in_info_json(self, target, clitest_single, record_property):
+        record_property("cell", "uid-map/container")
+        r = target.wl(f"info --json {clitest_single}", check=True)
+        assert r.rc == 0
+        data = json.loads(r.stdout)
+        assert "subuid" in data["user"]
+        assert "subgid" in data["user"]
+        assert data["user"]["subuid"]["start"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -347,28 +325,27 @@ class TestValidate:
 
 
 # ---------------------------------------------------------------------------
-# verify
+# diagnose
 # ---------------------------------------------------------------------------
 
-class TestVerify:
-    def test_verify_single(self, target, clitest_single, record_property):
-        record_property("cell", "verify/container")
-        r = target.wl(f"verify {clitest_single}", check=False)
-        # verify may exit nonzero (not fully provisioned), but must not crash
+class TestDiagnose:
+    def test_diagnose_single(self, target, clitest_single, record_property):
+        record_property("cell", "diagnose/container")
+        r = target.wl(f"diagnose {clitest_single}", check=False)
+        # diagnose may exit nonzero (not fully provisioned), but must not crash
         assert "Traceback" not in r.stderr
 
-    def test_verify_json(self, target, clitest_single, record_property):
-        record_property("cell", "verify/container")
-        r = target.wl(f"verify --json {clitest_single}", check=False)
+    def test_diagnose_json(self, target, clitest_single, record_property):
+        record_property("cell", "diagnose/container")
+        r = target.wl(f"diagnose --json {clitest_single}", check=False)
         assert "Traceback" not in r.stderr
         data = json.loads(r.stdout)
-        # verify returns a dict with checks
         assert isinstance(data, dict)
 
-    def test_verify_broken(self, target, clitest_broken, record_property):
-        """verify on broken TOML must fail cleanly."""
-        record_property("cell", "verify/broken")
-        r = target.wl(f"verify {clitest_broken}", check=False)
+    def test_diagnose_broken(self, target, clitest_broken, record_property):
+        """diagnose on broken TOML must fail cleanly."""
+        record_property("cell", "diagnose/broken")
+        r = target.wl(f"diagnose {clitest_broken}", check=False)
         assert "Traceback" not in r.stderr
 
 
