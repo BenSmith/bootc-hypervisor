@@ -38,6 +38,7 @@ from workloadctl_core import (
 )
 from cmd_admin import validate_single
 from cmd_backup import BACKUP_DIR
+from substrate import get_substrate
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -56,15 +57,8 @@ _WORKLOAD_SECTION_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 def _gating_units(config):
-    """Units that must succeed before the main service can start. VMs split
-    user/cloud-init setup and the system-disk build into their own units; a
-    failure there leaves the main service merely 'inactive' (dependency not
-    met), hiding the real cause. Container workloads run their setup as an
-    ExecStartPre of the main unit, so a failure already surfaces there."""
-    if config.is_vm:
-        return [f"workload-{config.name}-setup.service",
-                f"workload-{config.name}-build.service"]
-    return []
+    """Units that must succeed before the main service can start."""
+    return get_substrate(config, None).gating_units()
 
 
 def _effective_state(config):
@@ -930,20 +924,8 @@ def cmd_start(args, manager: WorkloadManager):
 
     config = WorkloadConfig(args.workload)
     print(f"Starting {config.service_name}...")
-    # Containers: re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
-    # thrash (a bare `systemctl start` doesn't re-run the setup oneshot, so a
-    # GC'd runtime dir fails ExecStart with 226/NAMESPACE, and a recycled unit
-    # name may carry a start-limit lockout). `action="start"` keeps start-only
-    # semantics (won't bounce an already-running unit). VMs have no runtime dir.
-    if not config.is_vm and manager.user_exists(config):
-        try:
-            restart_workload_service(config.uid, config.service_name, action="start")
-        except subprocess.CalledProcessError as e:
-            sys.exit(e.returncode or 1)
-    else:
-        result = subprocess.run(["systemctl", "start", config.service_name])
-        if result.returncode != 0:
-            sys.exit(result.returncode)
+    substrate = get_substrate(config, manager)
+    substrate.start()
     print(f"✓ Workload '{args.workload}' started")
 
 
@@ -988,23 +970,8 @@ def cmd_recreate(args, manager: WorkloadManager):
         ["systemctl", "reset-failed", config.service_name],
         check=False, capture_output=True,
     )
-    if config.is_vm:
-        # The cloud-init ISO and nvram are built by the setup oneshot
-        # (RemainAfterExit=yes), which a plain main-service restart does NOT
-        # re-run. Restart it first so config edits (template_vars, volumes, …)
-        # are re-rendered into a fresh seed before QEMU boots onto it.
-        subprocess.run(
-            ["systemctl", "restart", f"workload-{config.name}-setup.service"],
-            check=True,
-        )
-        subprocess.run(["systemctl", "restart", config.service_name], check=True)
-    elif manager.user_exists(config):
-        # Container restart: the setup oneshot stays active-exited and won't
-        # re-create /run/user/<uid> if it was GC'd, so re-pin it (and tolerate
-        # start-limit thrash) via the self-healing restart helper.
-        restart_workload_service(config.uid, config.service_name)
-    else:
-        subprocess.run(["systemctl", "restart", config.service_name], check=True)
+    substrate = get_substrate(config, manager)
+    substrate.recreate()
     print(f"✓ Workload '{args.workload}' recreated")
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
@@ -1015,7 +982,6 @@ def cmd_reboot(args, manager: WorkloadManager):
     Containers: `systemctl soft-reboot` in the container. VMs: the same
     soft-reboot inside the guest over SSH (a container `podman exec` is
     meaningless for a VM, which has no container)."""
-    from cmd_interact import _vm_guest_ip, _vm_ssh_command
     config = WorkloadConfig(args.workload)
 
     if not manager.user_exists(config):
@@ -1024,44 +990,8 @@ def cmd_reboot(args, manager: WorkloadManager):
         sys.exit(1)
 
     print(f"Soft-rebooting workload: {args.workload}")
-
-    if config.is_vm:
-        guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
-        if not guest_ip:
-            from workload_lib import VM_DHCP_LEASE_FILE
-            print(f"Error: could not determine IP for VM '{args.workload}'", file=sys.stderr)
-            print(f"  Check {VM_DHCP_LEASE_FILE} or use 'workloadctl shell {args.workload}' (console).",
-                  file=sys.stderr)
-            sys.exit(1)
-        # Fire the soft-reboot detached via systemd-run --no-block: a direct
-        # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
-        # connection drops and ssh exits nonzero *even on success*. Running it
-        # in a transient unit lets the SSH command return cleanly (0) before
-        # teardown; --collect reaps the unit. (`sudo` failures are still caught
-        # here; an unsupported soft-reboot on systemd <254 fails async.)
-        ssh_cmd = _vm_ssh_command(
-            config, guest_ip,
-            exec_args=["sudo", "systemd-run", "--collect", "--no-block",
-                       "systemctl", "soft-reboot"],
-            connect_timeout=5,
-        )
-        result = subprocess.run(ssh_cmd)
-        if result.returncode != 0:
-            print("Error: could not initiate guest soft-reboot.", file=sys.stderr)
-            print("  Needs passwordless sudo and systemd 254+ in the guest. To "
-                  "power-cycle the VM regardless of its init system (disk "
-                  "preserved), run:", file=sys.stderr)
-            print(f"    sudo systemctl restart {config.service_name}", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ VM '{args.workload}' soft-reboot initiated (disk preserved)")
-        return
-
-    result = manager.run_podman_exec(config,
-                                     [config.container_name, "systemctl", "soft-reboot"])
-    if result.returncode != 0:
-        print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
-        sys.exit(1)
-    print(f"✓ Workload '{args.workload}' soft-rebooted (overlay preserved)")
+    substrate = get_substrate(config, manager)
+    substrate.soft_reboot()
 
 
 def cmd_cleanup(args, manager: WorkloadManager):

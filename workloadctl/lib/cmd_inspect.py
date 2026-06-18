@@ -310,11 +310,12 @@ def cmd_status(args, manager: WorkloadManager):
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
-    if config.is_vm:
-        # Show the setup + system-disk build units alongside the main one: when
-        # a VM fails to start the cause is almost always one of these, and the
-        # main unit only reports a bland 'dependency failed'.
-        units = _gating_units(config) + [config.service_name]
+    gating = get_substrate(config, None).gating_units()
+    if gating:
+        # Show setup/build units alongside the main one: when a workload fails
+        # to start the cause is often in a gating unit, and the main unit only
+        # reports a bland 'dependency failed'.
+        units = gating + [config.service_name]
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 

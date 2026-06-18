@@ -6,24 +6,24 @@ import subprocess
 import sys
 import time
 
-from podman import PodmanError
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
-    ensure_runtime_dir,
     require_root,
     restart_workload_service,
+)
+from substrate import (
+    get_substrate,
+    VMSubstrate,
+    ProvisionFailed,
+    NotApplicable,
+    rollback_tag,  # re-exported so existing callers (tests) still find it here
 )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def rollback_tag(name: str, container: str | None = None) -> str:
-    """Return the rollback image tag for a workload (or one of its containers)."""
-    suffix = f"-{container}" if container else ""
-    return f"localhost/workload-rollback/{name}{suffix}:latest"
 
 
 def _parse_duration(s: str) -> int:
@@ -62,92 +62,6 @@ def _do_rollback(config: WorkloadConfig, manager: WorkloadManager, old_ids: dict
     restart_workload_service(config.uid, config.service_name)
     print(f"  ✗ {config.name}: rolled back to previous image(s)")
 
-
-def _pull_and_restart(config: WorkloadConfig, manager: WorkloadManager, force: bool):
-    """Pull image(s) and restart if any changed. Returns (config, old_ids) or None.
-
-    old_ids maps each container name to its previous image id (for rollback).
-    """
-    specs = config.container_specs()
-
-    if all(pull == "never" for _, _, pull in specs):
-        print(f"Error: {config.name} uses pull=never (local image). Build it manually.", file=sys.stderr)
-        return None
-
-    print(f"Updating {config.name}...")
-
-    if not manager.user_exists(config):
-        print(f"  Skipping: user {config.username} does not exist (workload not enabled?)")
-        return None
-
-    pod = manager.podman(config)
-    old_ids: dict[str, str] = {}
-    changed = False
-
-    for cname, image, pull in specs:
-        old_id = pod.image_id(image)
-        if not old_id:
-            # A just-(re)started rootless store can transiently report an empty
-            # `inspect` (mid `podman system migrate`, or while a recycled UID's
-            # runtime dir is being re-pinned) even though the image is present
-            # — losing the rollback point. Re-pin and retry briefly before
-            # giving up; a genuinely-absent image just falls through with "".
-            ensure_runtime_dir(config.uid)
-            for _ in range(10):
-                time.sleep(0.5)
-                old_id = pod.image_id(image)
-                if old_id:
-                    break
-        old_ids[cname] = old_id
-        if pull == "never":
-            continue
-        try:
-            pod.pull(image)
-        except PodmanError as e:
-            print(f"  ✗ Failed to pull {image}: {e.stderr}", file=sys.stderr)
-            return None
-        new_id = pod.image_id(image)
-        if old_id != new_id:
-            changed = True
-            label = f"{config.name}/{cname}" if config.is_multi else config.name
-            print(f"  {label}: {(old_id or 'none')[:12]} → {(new_id or 'unknown')[:12]}")
-
-    if not changed and not force:
-        print(f"  ✓ Already up to date")
-        return None
-
-    # Tag old images for rollback before restarting
-    for cname, image, pull in specs:
-        old_id = old_ids.get(cname)
-        if old_id:
-            pod.tag(old_id, rollback_tag(config.name, cname if config.is_multi else None))
-
-    restart_workload_service(config.uid, config.service_name)
-    print(f"  ✓ {config.name}: restarted")
-
-    return (config, old_ids)
-
-
-def _vm_rebuild_and_restart(config: WorkloadConfig):
-    """Rebuild a VM's system disk (--update) and restart its service.
-
-    Returns True on success, False if the disk rebuild or the restart failed.
-    Never raises, so a single VM failure doesn't abort an `update --all` run.
-    """
-    print(f"Updating VM workload {config.name}...")
-    result = subprocess.run(
-        ["/usr/libexec/workloadctl/workload-vm-build-disk", config.name, "--update"],
-        check=False,
-    )
-    if result.returncode != 0:
-        print(f"  ✗ Disk rebuild failed for {config.name}", file=sys.stderr)
-        return False
-    restart = subprocess.run(["systemctl", "restart", config.service_name], check=False)
-    if restart.returncode != 0:
-        print(f"  ✗ Restart failed for {config.name}", file=sys.stderr)
-        return False
-    print(f"  ✓ {config.name}: rebuilt and restarted")
-    return True
 
 
 def _verify_all(updated: list, manager: WorkloadManager) -> int:
@@ -251,27 +165,28 @@ def cmd_update(args, manager: WorkloadManager):
             print("No enabled workloads found")
             return
 
-        # Phase 1: Pull/rebuild and restart all
-        updated = []  # (config, old_id) tuples
+        # Phase 1: Reprovision all workloads
+        updated = []  # (config, old_ids) tuples — containers only, for verification
         skipped = 0
         vm_total = 0
         vm_failed = 0
         for config in configs:
-            if config.is_vm:
+            substrate = get_substrate(config, manager)
+            is_vm = isinstance(substrate, VMSubstrate)
+            if is_vm:
                 vm_total += 1
-                if not _vm_rebuild_and_restart(config):
-                    vm_failed += 1
-                print()
-                continue
-            if all(pull == "never" for _, _, pull in config.container_specs()):
+            try:
+                result = substrate.reprovision(force=args.force)
+                if result is not None:
+                    updated.append(result)
+            except NotApplicable:
                 skipped += 1
-                continue
-            result = _pull_and_restart(config, manager, args.force)
-            if result:
-                updated.append(result)
+            except ProvisionFailed:
+                if is_vm:
+                    vm_failed += 1
             print()
 
-        # Phase 2: One wait, verify all (containers only)
+        # Phase 2: Verify + rollback containers only
         rolled_back = 0
         if updated:
             rolled_back = _verify_all(updated, manager)
@@ -288,15 +203,15 @@ def cmd_update(args, manager: WorkloadManager):
             print("Error: Workload name required (or use --all)", file=sys.stderr)
             sys.exit(1)
         config = WorkloadConfig(args.workload)
-        if config.is_vm:
-            if not _vm_rebuild_and_restart(config):
-                sys.exit(1)
-            return
-        if all(pull == "never" for _, _, pull in config.container_specs()):
-            print(f"Error: {config.name} uses pull=never (local image). Build it manually.", file=sys.stderr)
+        substrate = get_substrate(config, manager)
+        try:
+            result = substrate.reprovision(force=args.force)
+        except NotApplicable as e:
+            print(f"Error: {e.reason}", file=sys.stderr)
             sys.exit(1)
-        result = _pull_and_restart(config, manager, args.force)
-        if result:
+        except ProvisionFailed:
+            sys.exit(1)
+        if result is not None:
             _verify_all([result], manager)
 
 
@@ -309,68 +224,5 @@ def cmd_rollback(args, manager: WorkloadManager):
         print(f"Error: user {config.username} does not exist (workload not enabled?)", file=sys.stderr)
         sys.exit(1)
 
-    if config.is_vm:
-        home_dir = config.home_dir
-        system_disk = home_dir / "system.qcow2"
-        gens = sorted(
-            int(p.suffix[5:])
-            for p in home_dir.glob("system.qcow2.gen-*")
-            if p.suffix[5:].isdigit()
-        )
-        if not gens:
-            print(f"Error: No rollback generation found for VM '{config.name}'", file=sys.stderr)
-            print(f"  (generations are created automatically by 'workloadctl update')", file=sys.stderr)
-            sys.exit(1)
-        latest_gen = max(gens)
-        gen_path = home_dir / f"system.qcow2.gen-{latest_gen}"
-        print(f"Rolling back VM '{config.name}':")
-        print(f"  system.qcow2.gen-{latest_gen} → system.qcow2")
-        # Stop the VM before swapping disks: QEMU holds the active qcow2
-        # open, and renaming a file out from under it leaves the running
-        # guest writing to an unlinked inode while the new disk is mounted
-        # by the next start. Path.replace is atomic so the rename either
-        # succeeds entirely or leaves system_disk gone (and we surface that).
-        subprocess.run(["systemctl", "stop", config.service_name], check=False)
-        gen_path.replace(system_disk)
-        subprocess.run(["systemctl", "start", config.service_name], check=True)
-        print(f"✓ Rolled back {config.name} to generation {latest_gen}")
-        return
-
-    pod = manager.podman(config)
-
-    # Build the rollback plan: one entry per container that has a rollback
-    # image differing from what it currently runs.
-    plan = []          # (label, image, tag, current_id, rollback_id)
-    have_any_tag = False
-    for cname, image in config.container_images():
-        tag = rollback_tag(config.name, cname if config.is_multi else None)
-        rollback_id = pod.image_id(tag)
-        if not rollback_id:
-            continue
-        have_any_tag = True
-        current_id = pod.image_id(image)
-        if current_id == rollback_id:
-            continue
-        label = f"{config.name}/{cname}" if config.is_multi else config.name
-        plan.append((label, image, tag, current_id, rollback_id))
-
-    if not have_any_tag:
-        print(f"Error: No rollback image found for {config.name}", file=sys.stderr)
-        print(f"  (rollback images are created automatically by 'workloadctl update')", file=sys.stderr)
-        sys.exit(1)
-
-    if not plan:
-        print(f"Already running the rollback image(s) for {config.name}")
-        return
-
-    # Retag each rollback image as the container's working image
-    for label, image, tag, current_id, rollback_id in plan:
-        try:
-            pod.tag(tag, image)
-        except PodmanError as e:
-            print(f"Error: Failed to retag rollback image for {label}: {e.stderr}", file=sys.stderr)
-            sys.exit(1)
-        print(f"  {label}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}")
-
-    restart_workload_service(config.uid, config.service_name)
-    print(f"✓ Rolled back {config.name}")
+    substrate = get_substrate(config, manager)
+    substrate.rollback()
