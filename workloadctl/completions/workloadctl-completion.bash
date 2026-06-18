@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="attach backup cleanup cp create disable drift edit enable exec health images info list logs network ports ps reboot recreate restore rollback secret shell start stats status stop update uid-map validate verify help"
+    local commands="attach backup cleanup cp create diagnose disable drift edit enable exec health images info list logs network reboot recreate restore rollback secret shell start stats status stop update validate help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
 
@@ -70,7 +70,7 @@ _workload_ctl_completion() {
             COMPREPLY=( $(compgen -W "--apply --json" -- "$cur") )
             return 0
             ;;
-        uid-map|verify)
+        diagnose)
             # Complete with --json or workload names
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
@@ -116,7 +116,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        info|ports)
+        info)
             # Complete with --json or workload names
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
@@ -188,7 +188,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        ps|list)
+        list)
             # Complete with --json flag
             COMPREPLY=( $(compgen -W "--json" -- "$cur") )
             return 0

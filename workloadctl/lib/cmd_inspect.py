@@ -34,7 +34,7 @@ from workloadctl_core import (
     resolve_container_target,
     WORKLOAD_DIR,
 )
-from cmd_lifecycle import _effective_state, _gating_units
+from cmd_lifecycle import _effective_state
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +456,7 @@ def _vm_qmp_status(name: str) -> str | None:
 
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
-    from cmd_interact import _vm_guest_ip
+    from substrate import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
     user_exists = manager.user_exists(config)

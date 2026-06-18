@@ -168,6 +168,7 @@ def cmd_update(args, manager: WorkloadManager):
         # Phase 1: Reprovision all workloads
         updated = []  # (config, old_ids) tuples — containers only, for verification
         skipped = 0
+        container_failed = 0
         vm_total = 0
         vm_failed = 0
         for config in configs:
@@ -184,6 +185,8 @@ def cmd_update(args, manager: WorkloadManager):
             except ProvisionFailed:
                 if is_vm:
                     vm_failed += 1
+                else:
+                    container_failed += 1
             print()
 
         # Phase 2: Verify + rollback containers only
@@ -191,12 +194,16 @@ def cmd_update(args, manager: WorkloadManager):
         if updated:
             rolled_back = _verify_all(updated, manager)
 
-        print(f"Done: {len(updated) - rolled_back} updated, {rolled_back} rolled back, {skipped} skipped (pull=never)")
+        done = f"Done: {len(updated) - rolled_back} updated, {rolled_back} rolled back, {skipped} skipped (pull=never)"
+        if container_failed:
+            done += f", {container_failed} failed"
+        print(done)
         if vm_total:
             print(f"VMs: {vm_total - vm_failed} rebuilt, {vm_failed} failed")
-        # VMs have no auto-rollback safety net, so a failed VM update must not
-        # be silently reported as success — exit nonzero for scripted callers.
-        if vm_failed:
+        # A failed update (VM rebuild, or a container pull/restart) must not be
+        # silently reported as success — exit nonzero for scripted callers. VMs
+        # additionally have no auto-rollback safety net.
+        if vm_failed or container_failed:
             sys.exit(1)
     else:
         if not args.workload:
