@@ -17,7 +17,7 @@ from substrate import (
     VMSubstrate,
     ProvisionFailed,
     NotApplicable,
-    rollback_tag,  # re-exported so existing callers (tests) still find it here
+    rollback_tag,
 )
 
 

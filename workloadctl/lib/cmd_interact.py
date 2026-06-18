@@ -17,16 +17,7 @@ from workloadctl_core import (
     parse_workload_ref,
     resolve_container_target,
 )
-from substrate import (
-    get_substrate,
-    # Re-exported for test_vm_guest_ip.py and any other callers
-    _vm_guest_ip,
-    _vm_ssh_command,
-    _vm_ssh_key,
-    _vm_guest_user,
-    _vm_console_sock,
-    _interactive_exec_flags,
-)
+from substrate import get_substrate
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ sys.path.insert(0, LIB_DIR)
 
 import cmd_lifecycle
 import cmd_update
+from substrate import rollback_tag
 from workloadctl_core import WorkloadConfig
 
 
@@ -38,24 +39,24 @@ class TestParseDuration(unittest.TestCase):
 class TestRollbackTag(unittest.TestCase):
     def test_format(self):
         self.assertEqual(
-            cmd_update.rollback_tag("pihole"),
+            rollback_tag("pihole"),
             "localhost/workload-rollback/pihole:latest"
         )
 
     def test_hyphenated_name(self):
         self.assertEqual(
-            cmd_update.rollback_tag("smb-server"),
+            rollback_tag("smb-server"),
             "localhost/workload-rollback/smb-server:latest"
         )
 
     def test_per_container_tag(self):
         self.assertEqual(
-            cmd_update.rollback_tag("stack", "web"),
+            rollback_tag("stack", "web"),
             "localhost/workload-rollback/stack-web:latest"
         )
 
     def test_none_container_matches_workload_tag(self):
-        self.assertEqual(cmd_update.rollback_tag("stack", None), cmd_update.rollback_tag("stack"))
+        self.assertEqual(rollback_tag("stack", None), rollback_tag("stack"))
 
 
 class TestContainerSpecs(unittest.TestCase):

@@ -61,8 +61,7 @@ class ProvisionFailed(Exception):
 
 
 # ---------------------------------------------------------------------------
-# VM infrastructure helpers (module-level so they can be re-exported by
-# cmd_interact for any callers that still import them from there)
+# VM infrastructure helpers
 # ---------------------------------------------------------------------------
 
 def _vm_console_sock(name: str) -> Path:
