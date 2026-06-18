@@ -1,5 +1,5 @@
 """
-cmd_interact — interactive/exec commands: shell, exec, logs, cp, attach.
+cmd_interact — interactive/exec commands: shell, exec, logs, cp, incant.
 """
 
 import contextlib
@@ -272,8 +272,28 @@ def _cp_from_container(pod, config, target, container_path, host_path):
         _chown_tree(final, 0, 0)
 
 
-def cmd_attach(args, manager: WorkloadManager):
-    """Attach to container process"""
+def cmd_incant(args, manager: WorkloadManager):
+    """Run a raw control-plane command against a workload (escape hatch).
+
+    For container workloads this runs ``podman <argv>`` as the owning
+    ``_wl-<name>`` user with the correct rootless environment — you never
+    have to hand-build the sudo/XDG_RUNTIME_DIR invocation yourself.
+
+    For VM workloads this sends a QMP command to the QEMU monitor (qmp.sock).
+    The first token after ``--`` is the QMP command name; additional
+    ``key=value`` tokens become the arguments dict.
+
+    This verb bypasses the declarative TOML → units model.  Prefer the
+    purpose-built verbs (update, rollback, shell, exec, …) when they cover your
+    use case; use incant only when they do not.
+
+    Examples::
+
+        workloadctl incant webproxy -- network create mynet
+        workloadctl incant webproxy -- volume ls
+        workloadctl incant git -- system_powerdown
+        workloadctl incant git -- query-status
+    """
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
 
@@ -282,9 +302,13 @@ def cmd_attach(args, manager: WorkloadManager):
         print("Is the workload enabled and running?", file=sys.stderr)
         sys.exit(1)
 
-    target = resolve_container_target(config, container, workload)
-    print(f"Attaching to {target}...")
-    print("(Press Ctrl+C to detach)")
-    print()
+    # argparse.REMAINDER keeps a literal `--` separator; drop it.
+    argv = args.argv
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        print("Error: no command given to incant", file=sys.stderr)
+        sys.exit(2)
 
-    manager.podman(config).run("attach", target, check=True)
+    substrate = get_substrate(config, manager)
+    sys.exit(substrate.control(argv))

@@ -112,6 +112,27 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "message": "Name is unique"
         })
 
+    _valid_lifecycles = {"pet", "cattle"}
+    if config.lifecycle not in _valid_lifecycles:
+        checks.append({
+            "check": "lifecycle",
+            "passed": False,
+            "severity": "error",
+            "message": (
+                f"Invalid lifecycle value: {config.lifecycle!r}. "
+                f"Must be one of: {', '.join(sorted(_valid_lifecycles))}"
+            ),
+            "fix": 'Set [workload] lifecycle = "pet" or "cattle" (or omit for the default "cattle")'
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "lifecycle",
+            "passed": True,
+            "severity": "ok",
+            "message": f"Lifecycle policy: {config.lifecycle}"
+        })
+
     required_file_paths = {e["path"] for e in config.get_required_files()}
     for vol in config.get_volumes():
         expanded_vol = expand_volume_path(vol, str(config.home_dir))

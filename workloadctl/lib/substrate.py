@@ -32,6 +32,7 @@ Optional primitives (auto-raise ``NotApplicable`` when absent):
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -44,6 +45,7 @@ from pathlib import Path
 
 from workload_lib import (
     auto_detect_credentials,
+    QMPClient,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
@@ -262,7 +264,7 @@ class Substrate(ABC):
 
     Required primitives (abstract, always present):
         liveness, gating_units, capture, exec, open_shell,
-        lifecycle, rollback_targets, rollback_to
+        lifecycle, rollback_targets, rollback_to, control
 
     Optional primitives (auto-raise when absent from PRIMITIVES):
         resource_usage, endpoints, reprovision
@@ -403,6 +405,25 @@ class Substrate(ABC):
 
         For containers: retag the saved rollback image as the working image.
         For VMs: stop the VM, swap in the generation snapshot, restart.
+        """
+        ...
+
+    @abstractmethod
+    def control(self, argv: list[str]) -> int:
+        """Send a raw command to the workload's runtime control plane.
+
+        This is the ``incant`` escape hatch — it reaches the *manager* of the
+        runtime (podman for containers, the QEMU monitor for VMs), not the
+        workload interior.  The fiddly invocation (sudo env, QMP framing) is
+        supplied automatically so callers never hand-build it.
+
+        For containers: runs ``podman <argv>`` as ``_wl-<name>`` via the
+            existing rootless-podman wrapper (correct XDG_RUNTIME_DIR/HOME).
+        For VMs: sends the first token of ``argv`` as a QMP command name to
+            the QEMU monitor (qmp.sock), with remaining ``key=value`` tokens
+            parsed as command arguments.  Prints the JSON reply.
+
+        Returns an exit code (0 on success).
         """
         ...
 
@@ -653,6 +674,29 @@ class ContainerSubstrate(Substrate):
         """Return published port endpoints from the TOML declaration."""
         return _accessible_at_config(self.config)
 
+    def _pet_snapshot_and_remove(self, pod, container_name: str) -> None:
+        """Commit the pet container's overlay to a timestamped local snapshot,
+        then remove the container so the next start rebuilds it from the image.
+
+        The snapshot is saved under ``localhost/workload-snapshot/<name>`` with
+        a UTC-timestamp tag so it is easy to identify and prune manually.
+        A failure to commit (e.g. container not running / never started) is
+        non-fatal — we log and continue so the destroy still proceeds.
+        """
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snapshot_ref = f"localhost/workload-snapshot/{self.config.name}:{ts}"
+        try:
+            pod.commit(container_name, snapshot_ref)
+            print(f"  ✓ Pet snapshot saved: {snapshot_ref}")
+        except Exception as exc:
+            print(
+                f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}",
+                file=sys.stderr,
+            )
+        # Remove the container so the service's ExecStartPre=-podman create
+        # runs fresh on next start, picking up the (possibly new) image.
+        pod.run("rm", "-f", container_name)
+
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         from workloadctl_core import restart_workload_service, ensure_runtime_dir
         from podman import PodmanError
@@ -660,6 +704,15 @@ class ContainerSubstrate(Substrate):
         if recreate:
             # recreate path: skip pull, just restart to recreate the overlay.
             print(f"Recreating {self.config.name}...")
+            # pet honoring is single-mode only — the generator falls back to
+            # cattle units for pod/bridge, so the substrate must too (otherwise
+            # we'd commit/rm a container name that doesn't exist for multi).
+            if (self.config.lifecycle == "pet" and not self.config.is_multi
+                    and self.manager.user_exists(self.config)):
+                # For pet: snapshot the overlay then remove the container so the
+                # next start re-creates it from the image.
+                pod = self.manager.podman(self.config)
+                self._pet_snapshot_and_remove(pod, self.config.container_name)
             if self.manager.user_exists(self.config):
                 restart_workload_service(self.config.uid, self.config.service_name)
             else:
@@ -725,6 +778,12 @@ class ContainerSubstrate(Substrate):
                     old_id,
                     rollback_tag(self.config.name, cname if self.config.is_multi else None),
                 )
+
+        if self.config.lifecycle == "pet" and not self.config.is_multi:
+            # Snapshot and remove the pet container so the restart picks up the
+            # new image (ExecStartPre=-podman create rebuilds from the new pull).
+            # Single-mode only, matching the generator's pet fallback.
+            self._pet_snapshot_and_remove(pod, self.config.container_name)
 
         restart_workload_service(self.config.uid, self.config.service_name)
         print(f"  ✓ {self.config.name}: restarted")
@@ -801,6 +860,11 @@ class ContainerSubstrate(Substrate):
 
         restart_workload_service(self.config.uid, self.config.service_name)
         print(f"✓ Rolled back {self.config.name}")
+
+    def control(self, argv: list[str]) -> int:
+        """Run ``podman <argv>`` as the workload user via the rootless wrapper."""
+        result = self.manager.run_podman(self.config, *argv)
+        return result.returncode
 
     def _has_any_rollback_tag(self) -> bool:
         """Return True if any rollback tag exists (even if already applied)."""
@@ -997,12 +1061,30 @@ class VMSubstrate(Substrate):
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         if recreate:
             # recreate path: re-render cloud-init seed and restart QEMU.
+            # For pet VMs this is safe — it does not touch system.qcow2.
             print(f"Recreating VM workload {self.config.name}...")
             subprocess.run(
                 ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
                 check=True,
             )
             subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+            return None
+
+        if self.config.lifecycle == "pet":
+            # Pet VMs: do not rebuild or rotate system.qcow2 — the durable disk
+            # is preserved.  Only restart QEMU so config-level changes (e.g.
+            # memory, cpu) in the unit file are picked up.
+            print(
+                f"  ℹ {self.config.name} is a pet VM — skipping system disk rebuild "
+                f"and generation rotation to preserve durable disk."
+            )
+            restart = subprocess.run(
+                ["systemctl", "restart", self.config.service_name], check=False
+            )
+            if restart.returncode != 0:
+                print(f"  ✗ Restart failed for {self.config.name}", file=sys.stderr)
+                raise ProvisionFailed(f"restart failed for {self.config.name}")
+            print(f"  ✓ {self.config.name}: restarted (disk unchanged)")
             return None
 
         print(f"Updating VM workload {self.config.name}...")
@@ -1058,8 +1140,62 @@ class VMSubstrate(Substrate):
         subprocess.run(["systemctl", "start", self.config.service_name], check=True)
         print(f"✓ Rolled back {self.config.name} to generation {gen}")
 
+    def control(self, argv: list[str]) -> int:
+        """Send a QMP command to the QEMU monitor for this VM.
+
+        The first token of ``argv`` is the QMP command name; remaining tokens
+        must be ``key=value`` pairs that become the command arguments dict.
+        The JSON reply is printed to stdout.  Follows the same pattern as
+        ``libexec/workload-vm-qmp``.
+        """
+        if not argv:
+            print("Error: incant requires a QMP command name", file=sys.stderr)
+            return 2
+        command = argv[0]
+        arguments: dict = {}
+        for kv in argv[1:]:
+            if "=" in kv:
+                k, _, v = kv.partition("=")
+                arguments[k] = v
+            else:
+                print(
+                    f"Error: VM incant arguments must be key=value pairs, got: {kv!r}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        sock_path = VM_SOCKET_DIR / self.config.name / "qmp.sock"
+        if not sock_path.exists():
+            print(f"Error: QMP socket not found: {sock_path}", file=sys.stderr)
+            print(f"Is workload '{self.config.name}' running?", file=sys.stderr)
+            return 1
+
+        qmp = QMPClient()
+        try:
+            qmp.connect(str(sock_path))
+            qmp.negotiate()
+            reply = qmp.execute(command, arguments or None)
+            print(json.dumps(reply, indent=2))
+            return 0 if "return" in reply else 1
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            print(f"Error: QMP command failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            qmp.close()
+
     def rollback(self) -> None:
         """Roll back to the latest generation snapshot."""
+        if self.config.lifecycle == "pet":
+            print(
+                f"Error: VM '{self.config.name}' is a pet — system.qcow2 is never "
+                f"rotated, so there are no generation snapshots to roll back to.",
+                file=sys.stderr,
+            )
+            print(
+                "  Use 'workloadctl update' to restart the VM without touching the disk.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         targets = self.rollback_targets()
         if not targets:
             print(

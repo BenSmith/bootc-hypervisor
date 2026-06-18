@@ -295,31 +295,6 @@ def cmd_status(args, manager: WorkloadManager):
 
 
 # ---------------------------------------------------------------------------
-# cmd_network
-# ---------------------------------------------------------------------------
-
-def cmd_network(args, manager: WorkloadManager):
-    """Manage podman networks"""
-    from podman import PodmanError
-    if args.subcommand == "create":
-        # Get workload config
-        config = WorkloadConfig(args.workload)
-        network_name = args.network_name
-
-        print(f"Creating network '{network_name}' for user {config.username} (UID {config.uid})...")
-
-        try:
-            manager.podman(config).network_create(network_name)
-        except PodmanError as e:
-            print(f"Error creating network: {e.stderr}", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ Network '{network_name}' created successfully")
-        print("\nTo use this network in a workload, add to your TOML config:")
-        print("  [network]")
-        print(f"  mode = \"{network_name}\"")
-
-
-# ---------------------------------------------------------------------------
 # cmd_images
 # ---------------------------------------------------------------------------
 

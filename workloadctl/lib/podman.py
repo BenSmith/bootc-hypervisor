@@ -258,6 +258,10 @@ class Podman:
     def tag(self, src: str, dst: str) -> None:
         self._run("tag", src, dst)
 
+    def commit(self, container: str, image_ref: str) -> None:
+        """Commit a container's writable layer to a local image snapshot."""
+        self._run("commit", container, image_ref)
+
     def pull(self, ref: str) -> None:
         self._run("pull", ref)
 

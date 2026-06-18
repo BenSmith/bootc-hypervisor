@@ -13,10 +13,10 @@ from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_drift import cmd_drift
 from cmd_inspect import (
-    cmd_health, cmd_images, cmd_info, cmd_list, cmd_network,
+    cmd_health, cmd_images, cmd_info, cmd_list,
     cmd_stats, cmd_status,
 )
-from cmd_interact import cmd_attach, cmd_cp, cmd_exec, cmd_logs, cmd_shell
+from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
     cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
     cmd_recreate, cmd_start, cmd_stop,
@@ -38,9 +38,6 @@ def main():
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
-
-    attach_parser = subparsers.add_parser("attach", help="Attach to container process")
-    attach_parser.add_argument("workload", help="Workload name")
 
     cp_parser = subparsers.add_parser("cp", help="Copy files to/from container")
     cp_parser.add_argument("source", help="Source (workload:path or path)")
@@ -130,6 +127,28 @@ def main():
     health_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                                help="Workload, or workload/container for multi-container workloads")
 
+    incant_parser = subparsers.add_parser(
+        "incant",
+        help="Raw control-plane passthrough (escape hatch — bypasses the declarative model)",
+        description=(
+            "Send a raw command to the workload's runtime control plane as the owning identity, "
+            "with the fiddly invocation (sudo env, QMP framing) supplied automatically.\n\n"
+            "For containers: runs `podman <argv>` as `_wl-<name>` via the rootless wrapper.\n"
+            "For VMs: sends a QMP command to the QEMU monitor (first token = command name, "
+            "remaining `key=value` tokens = arguments).\n\n"
+            "This bypasses the declarative TOML → units model. Prefer the purpose-built verbs "
+            "when they cover your use case."
+        ),
+    )
+    incant_parser.add_argument(
+        "workload", metavar="WORKLOAD[/CONTAINER]",
+        help="Workload, or workload/container for multi-container workloads",
+    )
+    incant_parser.add_argument(
+        "argv", metavar="CMD", nargs=argparse.REMAINDER,
+        help="Command to pass to the control plane (a leading -- is optional)",
+    )
+
     info_parser = subparsers.add_parser("info", help="Show detailed workload information")
     info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     info_parser.add_argument("workload", help="Workload name")
@@ -148,11 +167,6 @@ def main():
     logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
     logs_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                              help="Workload, or workload/container for multi-container workloads")
-
-    network_parser = subparsers.add_parser("network", help="Manage podman networks")
-    network_parser.add_argument("network_name", help="Network name")
-    network_parser.add_argument("subcommand", choices=["create"], help="Subcommand (create)")
-    network_parser.add_argument("workload", help="Workload to create network for")
 
     reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
     reboot_parser.add_argument("workload", help="Workload name")
@@ -255,33 +269,32 @@ def main():
     manager = WorkloadManager()
 
     command_map = {
-        "attach": cmd_attach,
         "backup": cmd_backup,
         "cleanup": cmd_cleanup,
         "cp": cmd_cp,
         "create": cmd_create,
         "diagnose": cmd_diagnose,
         "disable": cmd_disable,
+        "drift": cmd_drift,
         "edit": cmd_edit,
         "enable": cmd_enable,
         "exec": cmd_exec,
         "health": cmd_health,
         "images": cmd_images,
+        "incant": cmd_incant,
         "info": cmd_info,
         "list": cmd_list,
         "logs": cmd_logs,
-        "network": cmd_network,
         "reboot": cmd_reboot,
         "recreate": cmd_recreate,
         "restore": cmd_restore,
+        "rollback": cmd_rollback,
         "secret": cmd_secret,
         "shell": cmd_shell,
         "start": cmd_start,
         "stats": cmd_stats,
         "status": cmd_status,
         "stop": cmd_stop,
-        "rollback": cmd_rollback,
-        "drift": cmd_drift,
         "update": cmd_update,
         "validate": cmd_validate,
     }

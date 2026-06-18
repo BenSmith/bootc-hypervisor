@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="attach backup cleanup cp create diagnose disable drift edit enable exec health images info list logs network reboot recreate restore rollback secret shell start stats status stop update validate help"
+    local commands="backup cleanup cp create diagnose disable drift edit enable exec health images incant info list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
 
@@ -79,9 +79,16 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        attach|edit|reboot|recreate)
+        edit|reboot|recreate)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            return 0
+            ;;
+        incant)
+            # cword 2: <workload> or <workload>/<container>; then passthrough args
+            if [[ $cword -eq 2 ]]; then
+                _workloadctl_ref_complete "$cur"
+            fi
             return 0
             ;;
         rollback)
@@ -211,15 +218,6 @@ _workload_ctl_completion() {
                 COMPREPLY=( $(compgen -W "always true false" -- "$cur") )
             elif [[ "$prev" == "--network" ]]; then
                 COMPREPLY=( $(compgen -W "host pasta none" -- "$cur") )
-            fi
-            return 0
-            ;;
-        network)
-            # Positional args: subcommand network_name workload
-            if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "create" -- "$cur") )
-            elif [[ $cword -eq 4 ]]; then
-                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
             return 0
             ;;

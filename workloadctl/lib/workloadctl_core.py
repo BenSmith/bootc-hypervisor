@@ -380,6 +380,19 @@ class WorkloadConfig:
         return self.config.get("workload", {}).get("enabled", False)
 
     @property
+    def lifecycle(self) -> str:
+        """Lifecycle policy: "pet" or "cattle" (default).
+
+        "cattle" (the default) means the container overlay is ephemeral —
+        destroyed on every stop/start via ``--rm``.  "pet" preserves the
+        writable overlay across reboots and bootc updates by using a
+        create-once / start-stop pattern (no ``--rm``).  A "pet" VM skips
+        system.qcow2 generation rotation so the durable disk is never
+        replaced by workloadctl update/reprovision.
+        """
+        return self.config.get("workload", {}).get("lifecycle", "cattle")
+
+    @property
     def selinux_policy(self) -> bool:
         """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
 

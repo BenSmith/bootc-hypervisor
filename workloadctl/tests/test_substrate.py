@@ -1139,5 +1139,219 @@ class TestCmdRollbackList(unittest.TestCase):
         self.assertNotEqual(cm.exception.code, 0)
 
 
+# ── control() primitive — incant ──────────────────────────────────────────────
+
+class TestContainerControl(unittest.TestCase):
+    """ContainerSubstrate.control() delegates to manager.run_podman with argv."""
+
+    def _substrate(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.run_podman.return_value = _ok(returncode=0)
+        return ContainerSubstrate(config, manager), manager
+
+    def test_control_delegates_to_run_podman(self):
+        substrate, manager = self._substrate()
+        rc = substrate.control(["volume", "ls"])
+        manager.run_podman.assert_called_once_with(substrate.config, "volume", "ls")
+        self.assertEqual(rc, 0)
+
+    def test_control_propagates_nonzero_returncode(self):
+        substrate, manager = self._substrate()
+        manager.run_podman.return_value = _ok(returncode=1)
+        rc = substrate.control(["network", "create", "mynet"])
+        self.assertEqual(rc, 1)
+        manager.run_podman.assert_called_once_with(
+            substrate.config, "network", "create", "mynet"
+        )
+
+    def test_control_passes_all_argv_tokens(self):
+        substrate, manager = self._substrate()
+        substrate.control(["system", "df", "--format", "json"])
+        manager.run_podman.assert_called_once_with(
+            substrate.config, "system", "df", "--format", "json"
+        )
+
+
+class TestVMControl(unittest.TestCase):
+    """VMSubstrate.control() sends a QMP command via QMPClient."""
+
+    def _substrate(self):
+        config = _make_vm_config()
+        return VMSubstrate(config, None)
+
+    def test_control_sends_qmp_command(self):
+        from substrate import VM_SOCKET_DIR as _VM_SOCKET_DIR
+        substrate = self._substrate()
+        mock_qmp = MagicMock()
+        mock_qmp.execute.return_value = {"return": {}}
+        sock_path = _VM_SOCKET_DIR / substrate.config.name / "qmp.sock"
+        with patch('substrate.QMPClient', return_value=mock_qmp), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('builtins.print'):
+            rc = substrate.control(["query-status"])
+        mock_qmp.connect.assert_called_once_with(str(sock_path))
+        mock_qmp.negotiate.assert_called_once()
+        mock_qmp.execute.assert_called_once_with("query-status", None)
+        self.assertEqual(rc, 0)
+
+    def test_control_parses_key_value_args(self):
+        substrate = self._substrate()
+        mock_qmp = MagicMock()
+        mock_qmp.execute.return_value = {"return": {}}
+        with patch('substrate.QMPClient', return_value=mock_qmp), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('builtins.print'):
+            substrate.control(["migrate", "uri=tcp:0:4444"])
+        mock_qmp.execute.assert_called_once_with("migrate", {"uri": "tcp:0:4444"})
+
+    def test_control_returns_1_on_qmp_error_reply(self):
+        substrate = self._substrate()
+        mock_qmp = MagicMock()
+        mock_qmp.execute.return_value = {"error": {"class": "CommandNotFound", "desc": "no such"}}
+        with patch('substrate.QMPClient', return_value=mock_qmp), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('builtins.print'):
+            rc = substrate.control(["badcmd"])
+        self.assertEqual(rc, 1)
+
+    def test_control_missing_socket_returns_1(self):
+        substrate = self._substrate()
+        buf = io.StringIO()
+        with patch('pathlib.Path.exists', return_value=False), \
+             patch('sys.stderr', buf):
+            rc = substrate.control(["query-status"])
+        self.assertEqual(rc, 1)
+        self.assertIn("QMP socket not found", buf.getvalue())
+
+    def test_control_empty_argv_returns_2(self):
+        substrate = self._substrate()
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            rc = substrate.control([])
+        self.assertEqual(rc, 2)
+
+    def test_control_bad_arg_format_returns_2(self):
+        substrate = self._substrate()
+        buf = io.StringIO()
+        with patch('pathlib.Path.exists', return_value=True), \
+             patch('sys.stderr', buf):
+            rc = substrate.control(["cmd", "notakeyvaluepair"])
+        self.assertEqual(rc, 2)
+        self.assertIn("key=value", buf.getvalue())
+
+
+# ── cmd_incant arg parsing + dispatch ─────────────────────────────────────────
+
+class TestCmdIncant(unittest.TestCase):
+    """cmd_incant arg parsing, workload-ref parsing, and substrate.control dispatch."""
+
+    def _make_manager(self, *, user_exists=True):
+        manager = MagicMock()
+        manager.user_exists.return_value = user_exists
+        return manager
+
+    def test_incant_dispatches_to_control(self):
+        import cmd_interact
+        config_toml = SINGLE_TOML
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(config_toml)
+            manager = self._make_manager()
+            manager.run_podman.return_value = _ok(returncode=0)
+
+            args = types.SimpleNamespace(workload='test-wl', argv=['--', 'volume', 'ls'])
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch('sys.exit') as mock_exit:
+                cmd_interact.cmd_incant(args, manager)
+        mock_exit.assert_called_once_with(0)
+        manager.run_podman.assert_called_once()
+
+    def test_incant_workload_ref_slash_container(self):
+        """<wl>/<ctr> form is parsed correctly (container arg passed to control)."""
+        import cmd_interact
+        # For a single-container workload, parse_workload_ref splits the ref but
+        # ContainerSubstrate.control doesn't use the container arg — the
+        # important thing is that parse_workload_ref doesn't crash.
+        config_toml = SINGLE_TOML
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(config_toml)
+            manager = self._make_manager()
+            manager.run_podman.return_value = _ok(returncode=0)
+
+            args = types.SimpleNamespace(workload='test-wl/mycontainer', argv=['volume', 'ls'])
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch('sys.exit'):
+                cmd_interact.cmd_incant(args, manager)
+        manager.run_podman.assert_called_once()
+
+    def test_incant_user_not_found_exits(self):
+        import cmd_interact
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            manager = self._make_manager(user_exists=False)
+            args = types.SimpleNamespace(workload='test-wl', argv=['volume', 'ls'])
+            buf = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch('sys.stderr', buf):
+                with self.assertRaises(SystemExit) as cm:
+                    cmd_interact.cmd_incant(args, manager)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn("does not exist", buf.getvalue())
+
+    def test_incant_empty_argv_exits(self):
+        import cmd_interact
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            manager = self._make_manager()
+            args = types.SimpleNamespace(workload='test-wl', argv=[])
+            buf = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch('sys.stderr', buf):
+                with self.assertRaises(SystemExit) as cm:
+                    cmd_interact.cmd_incant(args, manager)
+        self.assertEqual(cm.exception.code, 2)
+
+
+# ── attach/network removed from parser ───────────────────────────────────────
+
+class TestRemovedVerbs(unittest.TestCase):
+    """attach and network are no longer accepted by the CLI parser."""
+
+    def _invoke(self, argv):
+        """Run bin/workloadctl with the given argv list; return (stdout, stderr, exitcode)."""
+        import subprocess
+        wctl = str(Path(__file__).parent.parent / 'bin' / 'workloadctl')
+        result = subprocess.run(
+            ['python3', wctl, *argv],
+            capture_output=True, text=True,
+            env={**__import__('os').environ, 'PYTHONPATH': str(Path(__file__).parent.parent / 'lib')},
+        )
+        return result.stdout, result.stderr, result.returncode
+
+    def test_attach_not_in_help(self):
+        stdout, _, _ = self._invoke(['--help'])
+        self.assertNotIn('attach', stdout)
+
+    def test_network_not_in_help(self):
+        stdout, _, _ = self._invoke(['--help'])
+        self.assertNotIn('network', stdout)
+
+    def test_incant_in_help(self):
+        stdout, _, _ = self._invoke(['--help'])
+        self.assertIn('incant', stdout)
+
+    def test_attach_verb_rejected(self):
+        _, stderr, rc = self._invoke(['attach', 'somewl'])
+        self.assertNotEqual(rc, 0)
+
+    def test_network_verb_rejected(self):
+        _, stderr, rc = self._invoke(['network', 'testnet', 'create', 'somewl'])
+        self.assertNotEqual(rc, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

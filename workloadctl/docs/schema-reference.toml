@@ -25,6 +25,26 @@ name = "schema-reference"
 # Set to false to disable without deleting the config file
 enabled = false
 
+# Optional: Lifecycle policy — how the workload's writable state is treated.
+# Type: string
+# Default: "cattle"
+# Options:
+#   "cattle" - Ephemeral overlay: `--rm` destroys and rebuilds the container's
+#              writable layer on every start.  Plain reboots wipe any in-container
+#              changes that were not declared in the image or as explicit volumes.
+#              This is the safe, reproducible default.
+#   "pet"    - Durable overlay: the container is created once and started/stopped
+#              rather than re-run, so the writable layer (graphroot under /var)
+#              survives reboots and bootc updates.  Before any destructive verb
+#              (update, recreate) workloadctl commits the overlay to a local
+#              snapshot image so deliberate rebuilds are recoverable.
+#              For VMs: `update`/`reprovision` will NOT rotate system.qcow2 —
+#              the durable disk is kept in place instead of being replaced.
+#              NOTE: containers accumulating packages or root-fs state are better
+#              served by a [vm] workload for full fidelity.
+#              TODO (P3): pet reclassifies home/ as backup-included.
+# lifecycle = "cattle"
+
 # Optional: Workload mode — how many containers and how they network.
 # Type: string
 # Default: inferred — "single" for a [container] block, "pod" for [[containers]].
