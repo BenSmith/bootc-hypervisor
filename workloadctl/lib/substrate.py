@@ -13,6 +13,21 @@ Usage pattern:
     except NotApplicable as e:
         print(f"stats: not applicable — {e.reason}")
         sys.exit(0)
+
+Capability matrix
+-----------------
+Each concrete substrate declares a frozenset ``PRIMITIVES`` naming the
+primitives it actually implements.  Optional primitives in the ABC base
+class auto-raise ``NotApplicable`` with a generated reason when the
+subclass does not list them in ``PRIMITIVES``.  This makes unsupported
+combinations structurally impossible to miss at author time.
+
+Required primitives (always present, ``@abstractmethod``):
+    liveness, gating_units, capture, exec, open_shell, lifecycle,
+    rollback_targets, rollback_to
+
+Optional primitives (auto-raise ``NotApplicable`` when absent):
+    resource_usage, logs, endpoints, reprovision
 """
 
 from __future__ import annotations
@@ -184,24 +199,92 @@ def rollback_tag(name: str, container: str | None = None) -> str:
 # Substrate ABC
 # ---------------------------------------------------------------------------
 
-class Substrate(ABC):
-    """Per-substrate primitive port.
+# ---------------------------------------------------------------------------
+# Endpoint helpers (shared by ContainerSubstrate.endpoints() and cmd_inspect)
+# ---------------------------------------------------------------------------
 
-    All substrate-variant verbs (stats, health, backup, exec, shell, start,
-    reboot, update, rollback, …) delegate their substrate-specific delta here.
+def _accessible_at_config(config) -> list:
+    """Compute accessible host:port → container:port endpoint list from TOML ports.
+
+    Returns a list of dicts with keys ``host`` (display string) and
+    ``container`` (container port string or None for host-network workloads).
+    """
+    ports = config.get_ports()
+    network_mode = config.get_network_mode()
+    result = []
+    if not ports:
+        return result
+    if network_mode == "host":
+        for port_spec in ports:
+            port = port_spec.split(":")[-1].split("/")[0]
+            result.append({"host": f"localhost:{port}", "container": None})
+    else:
+        for port_spec in ports:
+            parts = port_spec.split("/")[0].split(":")
+            if len(parts) == 3:
+                ip, host_port, container_port = parts
+                host = ip or "localhost"
+                host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
+                result.append({"host": host_disp, "container": container_port})
+            elif len(parts) == 2:
+                host_port, container_port = parts
+                host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
+                result.append({"host": host_disp, "container": container_port})
+            else:
+                result.append({"host": f"localhost:{parts[0]}", "container": None})
+    return result
+
+
+# Names of optional primitives — those for which a substrate may declare
+# non-support by omitting them from PRIMITIVES.  The base class provides a
+# default implementation for each that auto-raises NotApplicable.
+_OPTIONAL_PRIMITIVES = frozenset({
+    "resource_usage",
+    "endpoints",
+    "reprovision",
+})
+
+
+class Substrate(ABC):
+    """Per-substrate primitive port (step-3 narrow waist).
+
+    All substrate-variant verbs delegate their substrate-specific delta here.
     Substrate-invariant verbs (create, list, validate, secret, …) bypass
     this layer entirely.
 
-    Step-2 design: one method per verb or verb-group, "almost verbatim" lift.
-    Refine toward a narrower waist in step 3 once the shared scaffolding is
-    visible across both substrates.
+    Each concrete subclass declares::
+
+        PRIMITIVES: frozenset[str]
+
+    listing the optional primitives it actually implements.  Optional
+    primitives absent from ``PRIMITIVES`` auto-raise ``NotApplicable`` with an
+    auto-generated reason — no hand-maintained per-method guard needed.
+
+    Required primitives (abstract, always present):
+        liveness, gating_units, capture, exec, open_shell,
+        lifecycle, rollback_targets, rollback_to
+
+    Optional primitives (auto-raise when absent from PRIMITIVES):
+        resource_usage, endpoints, reprovision
     """
+
+    # Concrete subclasses override this.
+    PRIMITIVES: frozenset[str] = frozenset()
 
     def __init__(self, config, manager):
         self.config = config
         self.manager = manager
 
-    # ── already-landed primitives (step 1) ───────────────────────────────────
+    def _check_primitive(self, name: str) -> None:
+        """Raise NotApplicable if *name* is not in this substrate's PRIMITIVES."""
+        if name not in self.PRIMITIVES:
+            substrate_kind = "containers" if not self.config.is_vm else "VMs"
+            raise NotApplicable(
+                f"{name}: not applicable for {substrate_kind} "
+                f"(no {name} primitive)"
+            )
+
+    # ── required primitives (abstract) ───────────────────────────────────────
 
     @abstractmethod
     def liveness(self) -> dict:
@@ -211,25 +294,6 @@ class Substrate(ABC):
             service_active  bool
             service_state   str   (systemctl is-active output)
             healthy         bool  (substrate-defined readiness)
-        """
-        ...
-
-    @abstractmethod
-    def resource_usage(
-        self,
-        target_names: list[str],
-        *,
-        no_stream: bool = True,
-        json_out: bool = False,
-        follow: bool = False,
-    ):
-        """Display or stream resource usage.
-
-        For json_out, returns the raw subprocess result (CompletedProcess) for
-        the caller to parse; otherwise streams to the terminal and returns None.
-
-        Raises NotApplicable if the substrate does not expose resource metrics
-        through this primitive.
         """
         ...
 
@@ -248,8 +312,6 @@ class Substrate(ABC):
         """
         ...
 
-    # ── step-2 primitives ────────────────────────────────────────────────────
-
     @abstractmethod
     def gating_units(self) -> list[str]:
         """Systemd units that must succeed before the main service starts.
@@ -262,7 +324,7 @@ class Substrate(ABC):
         ...
 
     @abstractmethod
-    def exec_command(
+    def exec(
         self,
         argv: list[str],
         *,
@@ -271,9 +333,13 @@ class Substrate(ABC):
         """Execute a command inside the workload.  Returns the exit code.
 
         For VMs: runs via SSH into the guest.
-        For containers: runs via `podman exec` into the named (or default) container.
+        For containers: runs via ``podman exec`` into the named (or default) container.
         """
         ...
+
+    # Backward-compat alias — callers that use exec_command still work.
+    def exec_command(self, argv: list[str], *, container: str | None = None) -> int:
+        return self.exec(argv, container=container)
 
     @abstractmethod
     def open_shell(
@@ -287,42 +353,100 @@ class Substrate(ABC):
         For VMs: prefers SSH; falls back to the serial console (or uses it
         directly when console=True).  ContainerSubstrate raises NotApplicable
         for console=True.
-        For containers: `podman exec` into the named (or default) container.
+        For containers: ``podman exec`` into the named (or default) container.
         """
         ...
 
     @abstractmethod
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle primitive: start / stop / restart / reboot.
+
+        action must be one of: ``"start"``, ``"stop"``, ``"restart"``,
+        ``"reboot"`` (soft-reboot the workload's init system).
+
+        Callers that used the old ``start()`` / ``soft_reboot()`` / ``recreate()``
+        methods now go through ``lifecycle()``.
+        """
+        ...
+
+    # Backward-compat shims — callers that used the old split methods still work.
     def start(self) -> None:
-        """Start the workload service.
+        self.lifecycle("start")
 
-        Container substrates re-pin the runtime dir and tolerate start-limit
-        thrash via restart_workload_service.  VM substrates issue a plain
-        `systemctl start`.
-        """
-        ...
-
-    @abstractmethod
     def soft_reboot(self) -> None:
-        """Initiate a soft-reboot of the workload's init system.
+        self.lifecycle("reboot")
 
-        VMs: SSH + `systemd-run --no-block systemctl soft-reboot`.
-        Containers: `podman exec systemctl soft-reboot` in the main container.
-        """
-        ...
-
-    @abstractmethod
     def recreate(self) -> None:
         """Recreate the workload from current config/image.
 
-        Assumes the caller has already re-run the generator and daemon-reloaded.
-        VMs: restart the RemainAfterExit setup oneshot before the main service
-        so config edits are re-rendered into a fresh cloud-init seed.
-        Containers: use restart_workload_service to re-pin the runtime dir.
+        Delegates to reprovision(recreate=True) so the recreate path is
+        substrate-specific without duplicating the surrounding verb logic.
+        """
+        self.reprovision(recreate=True)
+
+    @abstractmethod
+    def rollback_targets(self) -> list:
+        """Enumerate available rollback targets.
+
+        Containers: list of ``{"label": ..., "tag": ..., "id": ...}`` dicts
+            (one per container with a saved rollback image).
+        VMs: list of ``{"label": ..., "gen": N, "path": ...}`` dicts
+            (one per ``system.qcow2.gen-N`` snapshot found).
+
+        Returns an empty list when no rollback is available.
         """
         ...
 
     @abstractmethod
-    def reprovision(self, *, force: bool = False):
+    def rollback_to(self, target) -> None:
+        """Apply a single rollback target returned by ``rollback_targets()``.
+
+        For containers: retag the saved rollback image as the working image.
+        For VMs: stop the VM, swap in the generation snapshot, restart.
+        """
+        ...
+
+    # ── optional primitives (auto-raise when absent from PRIMITIVES) ──────────
+
+    def resource_usage(
+        self,
+        target_names: list[str],
+        *,
+        no_stream: bool = True,
+        json_out: bool = False,
+        follow: bool = False,
+    ):
+        """Display or stream resource usage.
+
+        For json_out, returns the raw subprocess result (CompletedProcess) for
+        the caller to parse; otherwise streams to the terminal and returns None.
+
+        Raises NotApplicable if the substrate does not expose resource metrics
+        through this primitive.
+        """
+        self._check_primitive("resource_usage")
+
+    def logs(self, cmd_parts: list[str]) -> None:
+        """Stream workload logs using the given journalctl argv.
+
+        ``cmd_parts`` is the full ``journalctl`` command list already built by
+        ``cmd_logs``.  Both substrates' service journals land on the host journal
+        (a container's service *and* the VM's QEMU unit), so the default runs the
+        command directly; a substrate only overrides this if it needs a wrapper.
+        """
+        subprocess.run(cmd_parts)
+
+    def endpoints(self) -> list:
+        """Return the list of host-accessible endpoint dicts for this workload.
+
+        Each dict has at least ``{"host": "<host>:<port>", "container": <port or None>}``.
+        Returns an empty list when no ports are published.
+
+        Raises NotApplicable if the substrate cannot determine endpoints.
+        """
+        self._check_primitive("endpoints")
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
         """Update / reprovision the workload to its latest version.
 
         Container substrates: pull image(s) and restart if any changed.
@@ -331,21 +455,14 @@ class Substrate(ABC):
         up to date.  Raises NotApplicable if all containers have pull=never.
         Raises ProvisionFailed if a pull or restart step fails.
 
+        When ``recreate=True``: skip the pull phase, destroy and restart using
+        the current image (containers: restart service to recreate overlay;
+        VMs: re-render cloud-init seed and restart QEMU).
+
         VM substrates: rebuild the system disk and restart.  Returns None
         (no verification phase).  Raises ProvisionFailed on build/restart error.
         """
-        ...
-
-    @abstractmethod
-    def rollback(self) -> None:
-        """Roll back the workload to its previous version.
-
-        Container substrates: retag the saved rollback image as the working
-        image and restart.  Raises SystemExit if no rollback image is found.
-        VM substrates: swap the most recent system.qcow2.gen-N back as the
-        live disk.  Raises SystemExit if no generation snapshot exists.
-        """
-        ...
+        self._check_primitive("reprovision")
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +472,13 @@ class Substrate(ABC):
 class ContainerSubstrate(Substrate):
     """Substrate for single / pod / bridge container workloads."""
 
-    # ── step-1 primitives ────────────────────────────────────────────────────
+    PRIMITIVES: frozenset[str] = frozenset({
+        "resource_usage",
+        "endpoints",
+        "reprovision",
+    })
+
+    # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
         svc = subprocess.run(
@@ -427,7 +550,7 @@ class ContainerSubstrate(Substrate):
     def gating_units(self) -> list[str]:
         return []
 
-    def exec_command(
+    def exec(
         self,
         argv: list[str],
         *,
@@ -484,46 +607,66 @@ class ContainerSubstrate(Substrate):
         if result.returncode == 127:
             self.manager.run_podman_exec(self.config, [*exec_opts, target, "/bin/sh"], check=True)
 
-    def start(self) -> None:
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle for containers: start / stop / restart / reboot."""
         from workloadctl_core import restart_workload_service
-        # Containers: re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
-        # thrash (a bare `systemctl start` doesn't re-run the setup oneshot, so a
-        # GC'd runtime dir fails ExecStart with 226/NAMESPACE, and a recycled unit
-        # name may carry a start-limit lockout).
-        if self.manager.user_exists(self.config):
-            try:
-                restart_workload_service(
-                    self.config.uid, self.config.service_name, action="start"
-                )
-            except subprocess.CalledProcessError as e:
-                sys.exit(e.returncode or 1)
-        else:
-            result = subprocess.run(["systemctl", "start", self.config.service_name])
+        if action == "start":
+            # Re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
+            # thrash (a bare `systemctl start` doesn't re-run the setup oneshot,
+            # so a GC'd runtime dir fails ExecStart with 226/NAMESPACE, and a
+            # recycled unit name may carry a start-limit lockout).
+            if self.manager.user_exists(self.config):
+                try:
+                    restart_workload_service(
+                        self.config.uid, self.config.service_name, action="start"
+                    )
+                except subprocess.CalledProcessError as e:
+                    sys.exit(e.returncode or 1)
+            else:
+                result = subprocess.run(["systemctl", "start", self.config.service_name])
+                if result.returncode != 0:
+                    sys.exit(result.returncode)
+        elif action == "stop":
+            result = subprocess.run(["systemctl", "stop", self.config.service_name])
             if result.returncode != 0:
                 sys.exit(result.returncode)
-
-    def soft_reboot(self) -> None:
-        result = self.manager.run_podman_exec(
-            self.config,
-            [self.config.container_name, "systemctl", "soft-reboot"],
-        )
-        if result.returncode != 0:
-            print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
-
-    def recreate(self) -> None:
-        from workloadctl_core import restart_workload_service
-        if self.manager.user_exists(self.config):
-            restart_workload_service(self.config.uid, self.config.service_name)
-        else:
-            subprocess.run(
-                ["systemctl", "restart", self.config.service_name], check=True
+        elif action == "restart":
+            if self.manager.user_exists(self.config):
+                restart_workload_service(self.config.uid, self.config.service_name)
+            else:
+                subprocess.run(
+                    ["systemctl", "restart", self.config.service_name], check=True
+                )
+        elif action == "reboot":
+            result = self.manager.run_podman_exec(
+                self.config,
+                [self.config.container_name, "systemctl", "soft-reboot"],
             )
+            if result.returncode != 0:
+                print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
+        else:
+            raise ValueError(f"Unknown lifecycle action: {action!r}")
 
-    def reprovision(self, *, force: bool = False):
+    def endpoints(self) -> list:
+        """Return published port endpoints from the TOML declaration."""
+        return _accessible_at_config(self.config)
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
         from workloadctl_core import restart_workload_service, ensure_runtime_dir
         from podman import PodmanError
+
+        if recreate:
+            # recreate path: skip pull, just restart to recreate the overlay.
+            print(f"Recreating {self.config.name}...")
+            if self.manager.user_exists(self.config):
+                restart_workload_service(self.config.uid, self.config.service_name)
+            else:
+                subprocess.run(
+                    ["systemctl", "restart", self.config.service_name], check=True
+                )
+            return None
 
         specs = self.config.container_specs()
         if all(pull == "never" for _, _, pull in specs):
@@ -588,14 +731,10 @@ class ContainerSubstrate(Substrate):
 
         return (self.config, old_ids)
 
-    def rollback(self) -> None:
-        from workloadctl_core import restart_workload_service
-        from podman import PodmanError
-
+    def rollback_targets(self) -> list:
+        """Return available container rollback targets (saved image tags)."""
         pod = self.manager.podman(self.config)
-
-        plan = []
-        have_any_tag = False
+        targets = []
         for cname, image in self.config.container_images():
             tag = rollback_tag(
                 self.config.name, cname if self.config.is_multi else None
@@ -603,15 +742,44 @@ class ContainerSubstrate(Substrate):
             rollback_id = pod.image_id(tag)
             if not rollback_id:
                 continue
-            have_any_tag = True
             current_id = pod.image_id(image)
-            if current_id == rollback_id:
-                continue
             label = (
                 f"{self.config.name}/{cname}" if self.config.is_multi
                 else self.config.name
             )
-            plan.append((label, image, tag, current_id, rollback_id))
+            targets.append({
+                "label": label,
+                "tag": tag,
+                "image": image,
+                "current_id": current_id,
+                "rollback_id": rollback_id,
+            })
+        return targets
+
+    def rollback_to(self, target: dict) -> None:
+        """Apply a single rollback target from rollback_targets()."""
+        from podman import PodmanError
+        pod = self.manager.podman(self.config)
+        try:
+            pod.tag(target["tag"], target["image"])
+        except PodmanError as e:
+            print(
+                f"Error: Failed to retag rollback image for {target['label']}: {e.stderr}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        current_id = target.get("current_id")
+        rollback_id = target["rollback_id"]
+        print(
+            f"  {target['label']}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}"
+        )
+
+    def rollback(self) -> None:
+        """Roll back all containers to their previous images and restart."""
+        from workloadctl_core import restart_workload_service
+
+        targets = self.rollback_targets()
+        have_any_tag = bool(targets) or self._has_any_rollback_tag()
 
         if not have_any_tag:
             print(
@@ -624,25 +792,26 @@ class ContainerSubstrate(Substrate):
             )
             sys.exit(1)
 
-        if not plan:
+        if not targets:
             print(f"Already running the rollback image(s) for {self.config.name}")
             return
 
-        for label, image, tag, current_id, rollback_id in plan:
-            try:
-                pod.tag(tag, image)
-            except PodmanError as e:
-                print(
-                    f"Error: Failed to retag rollback image for {label}: {e.stderr}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print(
-                f"  {label}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}"
-            )
+        for target in targets:
+            self.rollback_to(target)
 
         restart_workload_service(self.config.uid, self.config.service_name)
         print(f"✓ Rolled back {self.config.name}")
+
+    def _has_any_rollback_tag(self) -> bool:
+        """Return True if any rollback tag exists (even if already applied)."""
+        pod = self.manager.podman(self.config)
+        for cname, _image in self.config.container_images():
+            tag = rollback_tag(
+                self.config.name, cname if self.config.is_multi else None
+            )
+            if pod.image_id(tag):
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +821,12 @@ class ContainerSubstrate(Substrate):
 class VMSubstrate(Substrate):
     """Substrate for VM workloads ([vm] section in TOML)."""
 
-    # ── step-1 primitives ────────────────────────────────────────────────────
+    PRIMITIVES: frozenset[str] = frozenset({
+        "reprovision",
+    })
+    # VMs do not implement: resource_usage, logs, endpoints
+
+    # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
         svc = subprocess.run(
@@ -669,18 +843,7 @@ class VMSubstrate(Substrate):
             "healthy": service_active,
         }
 
-    def resource_usage(
-        self,
-        target_names: list[str],
-        *,
-        no_stream: bool = True,
-        json_out: bool = False,
-        follow: bool = False,
-    ):
-        raise NotApplicable(
-            "VMs do not expose container-level resource metrics; "
-            "check systemd cgroup stats or host monitoring tools instead"
-        )
+    # resource_usage, logs, endpoints: inherited base auto-raises NotApplicable.
 
     def capture(
         self,
@@ -699,15 +862,13 @@ class VMSubstrate(Substrate):
             sys.exit(1)
         return _backup_vm(self.config, output, quiet=quiet)
 
-    # ── step-2 primitives ────────────────────────────────────────────────────
-
     def gating_units(self) -> list[str]:
         return [
             f"workload-{self.config.name}-setup.service",
             f"workload-{self.config.name}-build.service",
         ]
 
-    def exec_command(
+    def exec(
         self,
         argv: list[str],
         *,
@@ -771,62 +932,79 @@ class VMSubstrate(Substrate):
         )
         # execvp replaces the process; unreachable
 
-    def start(self) -> None:
-        result = subprocess.run(["systemctl", "start", self.config.service_name])
-        if result.returncode != 0:
-            sys.exit(result.returncode)
-
-    def soft_reboot(self) -> None:
-        guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
-        if not guest_ip:
-            print(
-                f"Error: could not determine IP for VM '{self.config.name}'",
-                file=sys.stderr,
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle for VMs: start / stop / restart / reboot."""
+        if action == "start":
+            result = subprocess.run(["systemctl", "start", self.config.service_name])
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+        elif action == "stop":
+            result = subprocess.run(["systemctl", "stop", self.config.service_name])
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+        elif action == "restart":
+            # recreate: re-render cloud-init seed then restart QEMU.
+            # The cloud-init ISO and nvram are built by the setup oneshot
+            # (RemainAfterExit=yes), which a plain main-service restart does NOT
+            # re-run. Restart it first so config edits (template_vars, volumes, …)
+            # are re-rendered into a fresh seed before QEMU boots onto it.
+            subprocess.run(
+                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                check=True,
             )
-            print(
-                f"  Check {VM_DHCP_LEASE_FILE} or use "
-                f"'workloadctl shell {self.config.name}' (console).",
-                file=sys.stderr,
+            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+        elif action == "reboot":
+            guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+            if not guest_ip:
+                print(
+                    f"Error: could not determine IP for VM '{self.config.name}'",
+                    file=sys.stderr,
+                )
+                print(
+                    f"  Check {VM_DHCP_LEASE_FILE} or use "
+                    f"'workloadctl shell {self.config.name}' (console).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Fire the soft-reboot detached via systemd-run --no-block: a direct
+            # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
+            # connection drops and ssh exits nonzero *even on success*. Running it
+            # in a transient unit lets the SSH command return cleanly (0) before
+            # teardown; --collect reaps the unit.
+            ssh_cmd = _vm_ssh_command(
+                self.config, guest_ip,
+                exec_args=[
+                    "sudo", "systemd-run", "--collect", "--no-block",
+                    "systemctl", "soft-reboot",
+                ],
+                connect_timeout=5,
             )
-            sys.exit(1)
-        # Fire the soft-reboot detached via systemd-run --no-block: a direct
-        # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
-        # connection drops and ssh exits nonzero *even on success*. Running it
-        # in a transient unit lets the SSH command return cleanly (0) before
-        # teardown; --collect reaps the unit.
-        ssh_cmd = _vm_ssh_command(
-            self.config, guest_ip,
-            exec_args=[
-                "sudo", "systemd-run", "--collect", "--no-block",
-                "systemctl", "soft-reboot",
-            ],
-            connect_timeout=5,
-        )
-        result = subprocess.run(ssh_cmd)
-        if result.returncode != 0:
-            print("Error: could not initiate guest soft-reboot.", file=sys.stderr)
-            print(
-                "  Needs passwordless sudo and systemd 254+ in the guest. To "
-                "power-cycle the VM regardless of its init system (disk "
-                "preserved), run:",
-                file=sys.stderr,
+            result = subprocess.run(ssh_cmd)
+            if result.returncode != 0:
+                print("Error: could not initiate guest soft-reboot.", file=sys.stderr)
+                print(
+                    "  Needs passwordless sudo and systemd 254+ in the guest. To "
+                    "power-cycle the VM regardless of its init system (disk "
+                    "preserved), run:",
+                    file=sys.stderr,
+                )
+                print(f"    sudo systemctl restart {self.config.service_name}", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ VM '{self.config.name}' soft-reboot initiated (disk preserved)")
+        else:
+            raise ValueError(f"Unknown lifecycle action: {action!r}")
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
+        if recreate:
+            # recreate path: re-render cloud-init seed and restart QEMU.
+            print(f"Recreating VM workload {self.config.name}...")
+            subprocess.run(
+                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                check=True,
             )
-            print(f"    sudo systemctl restart {self.config.service_name}", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ VM '{self.config.name}' soft-reboot initiated (disk preserved)")
+            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+            return None
 
-    def recreate(self) -> None:
-        # The cloud-init ISO and nvram are built by the setup oneshot
-        # (RemainAfterExit=yes), which a plain main-service restart does NOT
-        # re-run. Restart it first so config edits (template_vars, volumes, …)
-        # are re-rendered into a fresh seed before QEMU boots onto it.
-        subprocess.run(
-            ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
-            check=True,
-        )
-        subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
-
-    def reprovision(self, *, force: bool = False):
         print(f"Updating VM workload {self.config.name}...")
         result = subprocess.run(
             [
@@ -847,15 +1025,43 @@ class VMSubstrate(Substrate):
         print(f"  ✓ {self.config.name}: rebuilt and restarted")
         return None  # no verification phase for VMs
 
-    def rollback(self) -> None:
+    def rollback_targets(self) -> list:
+        """Return available VM rollback targets (system.qcow2.gen-N snapshots)."""
         home_dir = self.config.home_dir
-        system_disk = home_dir / "system.qcow2"
         gens = sorted(
             int(p.suffix[5:])
             for p in home_dir.glob("system.qcow2.gen-*")
             if p.suffix[5:].isdigit()
         )
-        if not gens:
+        return [
+            {
+                "label": f"system.qcow2.gen-{g}",
+                "gen": g,
+                "path": home_dir / f"system.qcow2.gen-{g}",
+            }
+            for g in gens
+        ]
+
+    def rollback_to(self, target: dict) -> None:
+        """Apply a single VM rollback target from rollback_targets()."""
+        home_dir = self.config.home_dir
+        system_disk = home_dir / "system.qcow2"
+        gen_path = Path(target["path"])
+        gen = target["gen"]
+        print(f"Rolling back VM '{self.config.name}':")
+        print(f"  system.qcow2.gen-{gen} → system.qcow2")
+        # Stop the VM before swapping disks: QEMU holds the active qcow2 open,
+        # and renaming a file out from under it leaves the running guest writing
+        # to an unlinked inode while the new disk is mounted by the next start.
+        subprocess.run(["systemctl", "stop", self.config.service_name], check=False)
+        gen_path.replace(system_disk)
+        subprocess.run(["systemctl", "start", self.config.service_name], check=True)
+        print(f"✓ Rolled back {self.config.name} to generation {gen}")
+
+    def rollback(self) -> None:
+        """Roll back to the latest generation snapshot."""
+        targets = self.rollback_targets()
+        if not targets:
             print(
                 f"Error: No rollback generation found for VM '{self.config.name}'",
                 file=sys.stderr,
@@ -865,17 +1071,9 @@ class VMSubstrate(Substrate):
                 file=sys.stderr,
             )
             sys.exit(1)
-        latest_gen = max(gens)
-        gen_path = home_dir / f"system.qcow2.gen-{latest_gen}"
-        print(f"Rolling back VM '{self.config.name}':")
-        print(f"  system.qcow2.gen-{latest_gen} → system.qcow2")
-        # Stop the VM before swapping disks: QEMU holds the active qcow2 open,
-        # and renaming a file out from under it leaves the running guest writing
-        # to an unlinked inode while the new disk is mounted by the next start.
-        subprocess.run(["systemctl", "stop", self.config.service_name], check=False)
-        gen_path.replace(system_disk)
-        subprocess.run(["systemctl", "start", self.config.service_name], check=True)
-        print(f"✓ Rolled back {self.config.name} to generation {latest_gen}")
+        # Apply the most recent (highest generation number) snapshot.
+        latest = targets[-1]
+        self.rollback_to(latest)
 
 
 # ---------------------------------------------------------------------------

@@ -336,14 +336,15 @@ class TestInfoJson(unittest.TestCase):
         self.assertIsInstance(data['network']['accessible_at'], list)
 
 
-# ── Task 1.4 — _accessible_at always dicts (ports folded into info) ──────────
+# ── Task 1.4 — endpoint helper always returns dicts (ports folded into info) ──
 
 class TestPortsJson(unittest.TestCase):
-    """Tests for _accessible_at(), the port endpoint helper used by cmd_info."""
+    """Tests for substrate._accessible_at_config(), the endpoint helper behind
+    ContainerSubstrate.endpoints() / cmd_info's network section."""
 
     def test_bridge_entry_is_dict_with_host_and_container(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         self.assertEqual(len(result), 1)
         entry = result[0]
         self.assertIsInstance(entry, dict)
@@ -352,20 +353,20 @@ class TestPortsJson(unittest.TestCase):
 
     def test_bridge_entry_not_a_string(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertNotIsInstance(entry, str)
 
     def test_host_network_container_field_is_null(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertIn('container', entry)
             self.assertIsNone(entry['container'])
 
     def test_no_ports_gives_empty_accessible_at(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         self.assertEqual(result, [])
 
     def test_three_part_ip_host_container(self):
@@ -382,14 +383,14 @@ mode = "pasta"
 ports = ["127.0.0.1:4317:4317"]
 """
         with _WorkloadDir(toml, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         entry = result[0]
         self.assertEqual(entry['host'], '127.0.0.1:4317')
         self.assertEqual(entry['container'], '4317')
 
     def test_host_network_localhost_entry(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            result = cmd_inspect._accessible_at(WorkloadConfig('test-wl'))
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         hosts = [e['host'] for e in result]
         self.assertIn('localhost:8080', hosts)
 

@@ -749,5 +749,395 @@ class TestCmdHealthPlacement(unittest.TestCase):
         self.assertIsNone(placement)
 
 
+# ── Capability matrix: optional primitives auto-raise NotApplicable ──────────
+
+class TestCapabilityMatrix(unittest.TestCase):
+    """Verify that absent optional primitives auto-raise NotApplicable with a
+    generated reason, not a hand-written one."""
+
+    def _vm_config(self):
+        return _make_vm_config()
+
+    def _container_config(self):
+        return _make_config(SINGLE_TOML, 'test-wl')
+
+    # VMSubstrate: resource_usage absent → NotApplicable
+    def test_vm_resource_usage_raises_not_applicable(self):
+        substrate = VMSubstrate(self._vm_config(), None)
+        with self.assertRaises(NotApplicable) as cm:
+            substrate.resource_usage([])
+        self.assertIn('resource_usage', cm.exception.reason)
+        self.assertIn('VMs', cm.exception.reason)
+
+    # VMSubstrate: logs runs the host-journal command directly (a VM's QEMU
+    # service journal is on the host journal, same as a container's service).
+    def test_vm_logs_invokes_subprocess(self):
+        substrate = VMSubstrate(self._vm_config(), None)
+        with patch('subprocess.run') as mock_run:
+            substrate.logs(["journalctl", "-u", "workload-test-vm.service"])
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0][0], "journalctl")
+
+    # VMSubstrate: endpoints absent → NotApplicable
+    def test_vm_endpoints_raises_not_applicable(self):
+        substrate = VMSubstrate(self._vm_config(), None)
+        with self.assertRaises(NotApplicable) as cm:
+            substrate.endpoints()
+        self.assertIn('endpoints', cm.exception.reason)
+
+    # ContainerSubstrate: resource_usage present → no NotApplicable
+    def test_container_resource_usage_does_not_raise(self):
+        manager = MagicMock()
+        manager.podman.return_value.run.return_value = _ok(stdout='[]')
+        substrate = ContainerSubstrate(self._container_config(), manager)
+        # Should not raise NotApplicable
+        result = substrate.resource_usage(['x'], json_out=True)
+        self.assertIsNotNone(result)
+
+    # ContainerSubstrate: logs present → delegates to subprocess
+    def test_container_logs_invokes_subprocess(self):
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with patch('subprocess.run') as mock_run:
+            substrate.logs(["journalctl", "-u", "test.service"])
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        self.assertEqual(call_args[0], "journalctl")
+
+    # ContainerSubstrate: endpoints present → returns list
+    def test_container_endpoints_returns_list(self):
+        toml_with_ports = """\
+[workload]
+name = "test-ep"
+enabled = true
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+ports = ["8080:80"]
+"""
+        config = _make_config(toml_with_ports, 'test-ep')
+        substrate = ContainerSubstrate(config, MagicMock())
+        eps = substrate.endpoints()
+        self.assertIsInstance(eps, list)
+        self.assertTrue(any('8080' in ep.get('host', '') for ep in eps))
+
+    # ContainerSubstrate: endpoints empty when no ports
+    def test_container_endpoints_empty_when_no_ports(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        substrate = ContainerSubstrate(config, MagicMock())
+        self.assertEqual(substrate.endpoints(), [])
+
+    # NotApplicable reason always names the primitive
+    def test_auto_reason_names_primitive(self):
+        substrate = VMSubstrate(self._vm_config(), None)
+        cases = [
+            ('resource_usage', lambda s: s.resource_usage([])),
+            ('endpoints', lambda s: s.endpoints()),
+        ]
+        for prim, call in cases:
+            with self.assertRaises(NotApplicable) as cm:
+                call(substrate)
+            self.assertIn(prim, cm.exception.reason, f"reason for {prim!r} missing primitive name")
+
+
+# ── rollback_targets / rollback_to ────────────────────────────────────────────
+
+class TestContainerRollbackTargets(unittest.TestCase):
+
+    def _substrate(self, image_ids: dict):
+        """image_ids maps tag/image → id (or None for absent)."""
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.image_id.side_effect = lambda tag: image_ids.get(tag)
+        return ContainerSubstrate(config, manager)
+
+    def test_returns_empty_when_no_rollback_image(self):
+        substrate = self._substrate({})
+        targets = substrate.rollback_targets()
+        self.assertEqual(targets, [])
+
+    def test_returns_target_when_rollback_image_exists(self):
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        substrate = self._substrate({
+            tag: 'abc123',
+            'example.com/test:latest': 'def456',
+        })
+        targets = substrate.rollback_targets()
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]['rollback_id'], 'abc123')
+        self.assertEqual(targets[0]['current_id'], 'def456')
+
+    def test_rollback_to_calls_tag(self):
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.image_id.side_effect = lambda t: 'abc' if t == tag else 'def'
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        substrate = ContainerSubstrate(config, manager)
+        target = {
+            'label': 'test-wl',
+            'tag': tag,
+            'image': 'example.com/test:latest',
+            'current_id': 'def456de',
+            'rollback_id': 'abc123ab',
+        }
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            substrate.rollback_to(target)
+        manager.podman.return_value.tag.assert_called_once_with(tag, 'example.com/test:latest')
+        self.assertIn('def456de', buf.getvalue())
+        self.assertIn('abc123ab', buf.getvalue())
+
+
+class TestVMRollbackTargets(unittest.TestCase):
+
+    def _vm_substrate_with_gens(self, home: Path, gen_numbers):
+        """Create a VMSubstrate whose home dir has the given gen-N files."""
+        config = _make_vm_config()
+        for n in gen_numbers:
+            (home / f"system.qcow2.gen-{n}").touch()
+        substrate = VMSubstrate(config, None)
+        with patch.object(type(config), 'home_dir', new_callable=lambda: property(lambda self: home)):
+            targets = substrate.rollback_targets()
+        return targets
+
+    def test_returns_empty_when_no_gens(self):
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._vm_substrate_with_gens(Path(d), [])
+        self.assertEqual(targets, [])
+
+    def test_returns_sorted_gens(self):
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._vm_substrate_with_gens(Path(d), [3, 1, 2])
+        gens = [t['gen'] for t in targets]
+        self.assertEqual(gens, [1, 2, 3])
+
+    def test_target_has_expected_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            targets = self._vm_substrate_with_gens(Path(d), [1])
+        self.assertEqual(len(targets), 1)
+        t = targets[0]
+        self.assertIn('label', t)
+        self.assertIn('gen', t)
+        self.assertIn('path', t)
+        self.assertEqual(t['gen'], 1)
+
+    def test_rollback_to_stops_swaps_starts(self):
+        config = _make_vm_config()
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _ok()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            system_disk = home / "system.qcow2"
+            system_disk.touch()
+            gen_path = home / "system.qcow2.gen-1"
+            gen_path.touch()
+            substrate = VMSubstrate(config, None)
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1, 'path': gen_path}
+            buf = io.StringIO()
+            with patch.object(type(config), 'home_dir', new_callable=lambda: property(lambda self: home)), \
+                 patch('subprocess.run', side_effect=fake_run), \
+                 patch('sys.stdout', buf):
+                substrate.rollback_to(target)
+        stop_cmds = [c for c in calls if 'stop' in c]
+        start_cmds = [c for c in calls if 'start' in c]
+        self.assertTrue(stop_cmds, "stop should be called before swapping disk")
+        self.assertTrue(start_cmds, "start should be called after swapping disk")
+        self.assertFalse(gen_path.exists(), "gen file should be renamed/removed after rollback_to")
+
+
+# ── lifecycle() primitive ──────────────────────────────────────────────────────
+
+class TestContainerLifecycle(unittest.TestCase):
+
+    def _substrate(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.user_exists.return_value = False
+        return ContainerSubstrate(config, manager)
+
+    def test_start_calls_systemctl_start(self):
+        substrate = self._substrate()
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            substrate.lifecycle("start")
+        cmds = [call[0][0] for call in mock_run.call_args_list]
+        self.assertTrue(any('start' in c for c in cmds), f"start not found in {cmds}")
+
+    def test_stop_calls_systemctl_stop(self):
+        substrate = self._substrate()
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            substrate.lifecycle("stop")
+        cmds = [call[0][0] for call in mock_run.call_args_list]
+        self.assertTrue(any('stop' in c for c in cmds), f"stop not found in {cmds}")
+
+    def test_unknown_action_raises_value_error(self):
+        substrate = self._substrate()
+        with self.assertRaises(ValueError):
+            substrate.lifecycle("bogus")
+
+    def test_start_shim_delegates_to_lifecycle(self):
+        substrate = self._substrate()
+        with patch.object(substrate, 'lifecycle') as mock_lc:
+            substrate.start()
+        mock_lc.assert_called_once_with("start")
+
+    def test_soft_reboot_shim_delegates_to_lifecycle(self):
+        substrate = self._substrate()
+        with patch.object(substrate, 'lifecycle') as mock_lc:
+            substrate.soft_reboot()
+        mock_lc.assert_called_once_with("reboot")
+
+
+class TestVMLifecycle(unittest.TestCase):
+
+    def _substrate(self):
+        config = _make_vm_config()
+        return VMSubstrate(config, None)
+
+    def test_start_calls_systemctl_start(self):
+        substrate = self._substrate()
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            substrate.lifecycle("start")
+        combined = ' '.join(str(c) for call in mock_run.call_args_list for c in call[0][0])
+        self.assertIn('start', combined)
+
+    def test_stop_calls_systemctl_stop(self):
+        substrate = self._substrate()
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            substrate.lifecycle("stop")
+        combined = ' '.join(str(c) for call in mock_run.call_args_list for c in call[0][0])
+        self.assertIn('stop', combined)
+
+    def test_unknown_action_raises_value_error(self):
+        substrate = self._substrate()
+        with self.assertRaises(ValueError):
+            substrate.lifecycle("bogus")
+
+
+# ── reprovision(recreate=True) ─────────────────────────────────────────────────
+
+class TestContainerReprovisionRecreate(unittest.TestCase):
+
+    def test_recreate_skips_pull_restarts_service(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.user_exists.return_value = False
+        substrate = ContainerSubstrate(config, manager)
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            result = substrate.reprovision(recreate=True)
+        self.assertIsNone(result)
+        cmds = [call[0][0] for call in mock_run.call_args_list]
+        self.assertTrue(any('restart' in c for c in cmds),
+                        f"restart expected in {cmds}")
+        # pull must NOT have been called
+        manager.podman.return_value.pull.assert_not_called()
+
+    def test_recreate_shim_calls_reprovision_recreate(self):
+        """Substrate.recreate() shim calls reprovision(recreate=True)."""
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.user_exists.return_value = False
+        substrate = ContainerSubstrate(config, manager)
+        with patch.object(substrate, 'reprovision') as mock_reprov:
+            substrate.recreate()
+        mock_reprov.assert_called_once_with(recreate=True)
+
+
+class TestVMReprovisionRecreate(unittest.TestCase):
+
+    def test_recreate_restarts_setup_and_service(self):
+        config = _make_vm_config()
+        substrate = VMSubstrate(config, None)
+        calls = []
+        with patch('subprocess.run', side_effect=lambda cmd, **kw: calls.append(cmd) or _ok()):
+            result = substrate.reprovision(recreate=True)
+        self.assertIsNone(result)
+        combined = ' '.join(str(t) for c in calls for t in c)
+        self.assertIn('restart', combined)
+        self.assertIn('setup', combined)
+
+
+# ── rollback --list (cmd_rollback) ────────────────────────────────────────────
+
+class TestCmdRollbackList(unittest.TestCase):
+
+    def test_rollback_list_prints_targets(self):
+        """rollback --list prints available targets and returns without rolling back."""
+        import cmd_update
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+
+            from substrate import rollback_tag
+            tag = rollback_tag('test-wl')
+            manager = MagicMock()
+            manager.user_exists.return_value = True
+            # Simulate a saved rollback image
+            manager.podman.return_value.image_id.side_effect = (
+                lambda t: 'abc123' if t == tag else 'def456'
+            )
+
+            args = types.SimpleNamespace(workload='test-wl', list=True)
+            buf = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch.object(cmd_update, 'require_root'), \
+                 patch('sys.stdout', buf):
+                cmd_update.cmd_rollback(args, manager)
+
+        output = buf.getvalue()
+        self.assertIn('test-wl', output)
+        # Must NOT call rollback
+        manager.podman.return_value.tag.assert_not_called()
+
+    def test_rollback_list_no_targets_prints_message(self):
+        """rollback --list with no saved images prints a friendly message."""
+        import cmd_update
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+
+            manager = MagicMock()
+            manager.user_exists.return_value = True
+            manager.podman.return_value.image_id.return_value = None
+
+            args = types.SimpleNamespace(workload='test-wl', list=True)
+            buf = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch.object(cmd_update, 'require_root'), \
+                 patch('sys.stdout', buf):
+                cmd_update.cmd_rollback(args, manager)
+
+        self.assertIn('No rollback', buf.getvalue())
+
+    def test_rollback_without_list_still_rolls_back(self):
+        """rollback with no --list flag calls rollback() as before."""
+        import cmd_update
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+
+            manager = MagicMock()
+            manager.user_exists.return_value = True
+            # No rollback images — will sys.exit(1) via rollback()
+            manager.podman.return_value.image_id.return_value = None
+
+            args = types.SimpleNamespace(workload='test-wl', list=False)
+            buf_err = io.StringIO()
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+                 patch.object(cmd_update, 'require_root'), \
+                 patch('sys.stderr', buf_err):
+                with self.assertRaises(SystemExit) as cm:
+                    cmd_update.cmd_rollback(args, manager)
+        # Should exit non-zero (no rollback image found)
+        self.assertNotEqual(cm.exception.code, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

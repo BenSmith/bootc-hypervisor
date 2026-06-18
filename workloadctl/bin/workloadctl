@@ -169,6 +169,7 @@ def main():
 
     rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
     rollback_parser.add_argument("workload", help="Workload name")
+    rollback_parser.add_argument("--list", action="store_true", help="List available rollback targets instead of rolling back")
 
     secret_parser = subparsers.add_parser("secret", help="Manage secrets (systemd credentials)")
     secret_subparsers = secret_parser.add_subparsers(dest="subcommand", required=True, help="Secret operation")

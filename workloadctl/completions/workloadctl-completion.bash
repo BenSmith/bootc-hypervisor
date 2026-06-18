@@ -79,9 +79,17 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        attach|edit|reboot|recreate|rollback)
+        attach|edit|reboot|recreate)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            return 0
+            ;;
+        rollback)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--list" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
             return 0
             ;;
         shell)

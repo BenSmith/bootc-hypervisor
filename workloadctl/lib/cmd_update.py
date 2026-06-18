@@ -223,7 +223,7 @@ def cmd_update(args, manager: WorkloadManager):
 
 
 def cmd_rollback(args, manager: WorkloadManager):
-    """Roll back to the previous image"""
+    """Roll back to the previous image (or list available rollback targets)"""
     require_root()
     config = WorkloadConfig(args.workload)
 
@@ -232,4 +232,15 @@ def cmd_rollback(args, manager: WorkloadManager):
         sys.exit(1)
 
     substrate = get_substrate(config, manager)
+
+    if getattr(args, "list", False):
+        targets = substrate.rollback_targets()
+        if not targets:
+            print(f"No rollback targets available for '{config.name}'.")
+            return
+        print(f"Rollback targets for '{config.name}':")
+        for t in targets:
+            print(f"  {t['label']}")
+        return
+
     substrate.rollback()

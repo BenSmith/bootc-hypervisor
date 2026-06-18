@@ -66,6 +66,8 @@ def cmd_logs(args, manager: WorkloadManager):
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
 
+    # Build the journalctl command (substrate-agnostic: the substrate's logs()
+    # primitive handles any substrate-specific wrapping around this argv).
     if container is not None:
         if container not in config.container_names():
             print(f"Error: container '{container}' not in workload '{workload}'. "
@@ -104,7 +106,8 @@ def cmd_logs(args, manager: WorkloadManager):
     if args.extra_args:
         cmd.extend(args.extra_args)
 
-    subprocess.run(cmd)
+    substrate = get_substrate(config, manager)
+    substrate.logs(cmd)
 
 
 def cmd_cp(args, manager: WorkloadManager):

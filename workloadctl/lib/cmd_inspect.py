@@ -73,34 +73,6 @@ def _read_subid(username: str, path: str) -> tuple:
     return None, None
 
 
-def _accessible_at(config) -> list:
-    """Compute accessible host:port → container:port endpoint list from TOML ports."""
-    ports = config.get_ports()
-    network_mode = config.get_network_mode()
-    result = []
-    if not ports:
-        return result
-    if network_mode == "host":
-        for port_spec in ports:
-            port = port_spec.split(":")[-1].split("/")[0]
-            result.append({"host": f"localhost:{port}", "container": None})
-    else:
-        for port_spec in ports:
-            parts = port_spec.split("/")[0].split(":")
-            if len(parts) == 3:
-                ip, host_port, container_port = parts
-                host = ip or "localhost"
-                host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
-                result.append({"host": host_disp, "container": container_port})
-            elif len(parts) == 2:
-                host_port, container_port = parts
-                host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
-                result.append({"host": host_disp, "container": container_port})
-            else:
-                result.append({"host": f"localhost:{parts[0]}", "container": None})
-    return result
-
-
 # ---------------------------------------------------------------------------
 # cmd_list
 # ---------------------------------------------------------------------------
@@ -672,7 +644,7 @@ def cmd_info(args, manager: WorkloadManager):
         "network": {
             "mode": config.get_network_mode(),
             "ports": config.get_ports(),
-            "accessible_at": _accessible_at(config),
+            "accessible_at": get_substrate(config, manager).endpoints(),
         },
         "storage": {
             "home": storage_home,

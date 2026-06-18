@@ -925,7 +925,7 @@ def cmd_start(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
     print(f"Starting {config.service_name}...")
     substrate = get_substrate(config, manager)
-    substrate.start()
+    substrate.lifecycle("start")
     print(f"✓ Workload '{args.workload}' started")
 
 
@@ -971,7 +971,7 @@ def cmd_recreate(args, manager: WorkloadManager):
         check=False, capture_output=True,
     )
     substrate = get_substrate(config, manager)
-    substrate.recreate()
+    substrate.reprovision(recreate=True)
     print(f"✓ Workload '{args.workload}' recreated")
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
@@ -991,7 +991,7 @@ def cmd_reboot(args, manager: WorkloadManager):
 
     print(f"Soft-rebooting workload: {args.workload}")
     substrate = get_substrate(config, manager)
-    substrate.soft_reboot()
+    substrate.lifecycle("reboot")
 
 
 def cmd_cleanup(args, manager: WorkloadManager):
