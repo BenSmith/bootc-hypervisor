@@ -55,9 +55,11 @@ _workload_ctl_completion() {
     # Second argument: depends on the command
     case "${words[1]}" in
         backup)
-            # Complete with --all, --output, --no-stop, --json, or workload names
+            # Complete with --all, --output, --consistency, --json, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--all --output --no-stop --json" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--all --output --consistency --json" -- "$cur") )
+            elif [[ "$prev" == "--consistency" ]]; then
+                COMPREPLY=( $(compgen -W "cold crash" -- "$cur") )
             elif [[ "$prev" == "--output" || "$prev" == "-o" ]]; then
                 _filedir
             else

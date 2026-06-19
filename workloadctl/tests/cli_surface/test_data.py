@@ -85,18 +85,18 @@ class TestBackupContainer:
             target.run(["rm", "-f", output_path], sudo=True, check=False)
 
     @pytest.mark.mutating
-    def test_backup_no_stop(self, target, fresh_single, record_property):
-        """backup --no-stop creates archive without stopping the service."""
+    def test_backup_crash_consistency(self, target, fresh_single, record_property):
+        """backup --consistency crash creates archive without stopping the service."""
         record_property("cell", "backup/container")
-        # Service must remain active
-        r = target.wl(f"backup --no-stop {fresh_single}", check=True, timeout=120)
+        # Service must remain active during a crash-consistent backup
+        r = target.wl(f"backup --consistency crash {fresh_single}", check=True, timeout=120)
         assert r.rc == 0
         # Service still running
         svc_r = target.run(
             ["systemctl", "is-active", f"workload-{fresh_single}.service"],
             sudo=False, check=False,
         )
-        assert svc_r.stdout.strip() == "active", "Service stopped during --no-stop backup"
+        assert svc_r.stdout.strip() == "active", "Service stopped during crash-consistent backup"
 
     @pytest.mark.mutating
     def test_backup_all(self, target, fresh_single, record_property):
@@ -130,12 +130,14 @@ class TestBackupVM:
 
         # fresh_vm is torn down by its fixture finalizer; no need to restart
 
-    def test_backup_vm_no_stop_rejected(self, target, clitest_vm, record_property):
-        """backup --no-stop on a VM must be rejected (unsafe)."""
-        record_property("cell", "backup_no_stop/vm")
-        r = target.wl(f"backup --no-stop {clitest_vm}", check=False, timeout=30)
-        assert r.rc != 0, "--no-stop on VM should be rejected"
+    def test_backup_vm_crash_consistency(self, target, clitest_vm, record_property):
+        """backup --consistency crash on a running VM uses QMP-paused live copy."""
+        record_property("cell", "backup_crash/vm")
+        r = target.wl(f"backup --consistency crash {clitest_vm}", check=True, timeout=300)
+        assert r.rc == 0, f"crash-consistent VM backup failed: {r.stderr}"
         assert "Traceback" not in r.stderr
+        archive = _find_backup(target, clitest_vm)
+        assert archive, f"No backup archive for {clitest_vm} after crash-consistent backup"
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,12 @@ _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
 import workloadctl_core
+import substrate as _substrate_mod
 from substrate import (
     ContainerSubstrate,
     VMSubstrate,
     NotApplicable,
+    BackupError,
     get_substrate,
     _ignore_vm_rebuild,
 )
@@ -159,53 +161,340 @@ class TestVMStats(unittest.TestCase):
             self.assertIn('not applicable', output.lower())
 
 
-# ── VMSubstrate.capture() with --no-stop ─────────────────────────────────────
+# ── --consistency seam: VMSubstrate.capture() ────────────────────────────────
 
-class TestVMBackupNoStop(unittest.TestCase):
+class TestVMBackupConsistency(unittest.TestCase):
+    """Tests for the --consistency seam on VMSubstrate.capture()."""
 
     def _make_config(self):
         return _make_vm_config()
 
-    def test_no_stop_exits_nonzero(self):
+    def test_cold_routes_to_backup_vm(self):
+        """consistency='cold' calls _backup_vm (stop-then-backup path)."""
         config = self._make_config()
         substrate = VMSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            buf = io.StringIO()
-            with patch('sys.stderr', buf):
-                with self.assertRaises(SystemExit) as cm:
-                    substrate.capture(output, no_stop=True)
-        self.assertNotEqual(cm.exception.code, 0)
+            with patch.object(_substrate_mod, '_backup_vm', return_value=42) as mock_bvm, \
+                 patch.object(_substrate_mod, '_backup_vm_crash') as mock_crash:
+                result = substrate.capture(output, consistency='cold')
+        mock_bvm.assert_called_once_with(config, output, quiet=False)
+        mock_crash.assert_not_called()
+        self.assertEqual(result, 42)
 
-    def test_no_stop_error_message(self):
+    def test_default_consistency_is_cold(self):
+        """Omitting consistency= defaults to cold (backward-compat)."""
         config = self._make_config()
         substrate = VMSubstrate(config, None)
-        buf = io.StringIO()
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch('sys.stderr', buf):
-                with self.assertRaises(SystemExit):
-                    substrate.capture(output, no_stop=True)
-        self.assertIn('--no-stop', buf.getvalue())
+            with patch.object(_substrate_mod, '_backup_vm', return_value=99) as mock_bvm, \
+                 patch.object(_substrate_mod, '_backup_vm_crash') as mock_crash:
+                result = substrate.capture(output)
+        mock_bvm.assert_called_once()
+        mock_crash.assert_not_called()
+        self.assertEqual(result, 99)
 
-    def test_cmd_backup_vm_no_stop_exits_nonzero(self):
-        """cmd_backup --no-stop on a VM workload exits non-zero (VM guard, not require_root)."""
+    def test_crash_routes_to_backup_vm_crash(self):
+        """consistency='crash' calls _backup_vm_crash (QMP-paused live path)."""
+        config = self._make_config()
+        substrate = VMSubstrate(config, None)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch.object(_substrate_mod, '_backup_vm_crash', return_value=7) as mock_crash, \
+                 patch.object(_substrate_mod, '_backup_vm') as mock_bvm:
+                result = substrate.capture(output, consistency='crash')
+        mock_crash.assert_called_once_with(config, output, quiet=False)
+        mock_bvm.assert_not_called()
+        self.assertEqual(result, 7)
+
+
+# ── --consistency seam: ContainerSubstrate.capture() ─────────────────────────
+
+class TestContainerBackupConsistency(unittest.TestCase):
+    """Tests for the --consistency seam on ContainerSubstrate.capture()."""
+
+    def _make_config(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-vm.toml').write_text(VM_TOML)
-            args = _args(
-                workload='test-vm', all=False, no_stop=True, json=False, output=None,
-            )
-            manager = MagicMock()
-            buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
-                 patch.object(cmd_backup, 'require_root'), \
-                 patch('sys.stderr', buf_err):
-                with self.assertRaises(SystemExit) as cm:
-                    cmd_backup.cmd_backup(args, manager)
-            self.assertNotEqual(cm.exception.code, 0)
-            # Should mention the VM-specific reason, not a generic error
-            self.assertIn('vm', buf_err.getvalue().lower())
+            (p / 'test-wl.toml').write_text(MINIMAL_TOML)
+            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+                return workloadctl_core.WorkloadConfig('test-wl')
+
+    def test_cold_passes_no_stop_false(self):
+        """consistency='cold' calls _backup_container with no_stop=False."""
+        config = self._make_config()
+        substrate = ContainerSubstrate(config, None)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch.object(_substrate_mod, '_backup_container', return_value=10) as mock_bc:
+                result = substrate.capture(output, consistency='cold')
+        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        self.assertEqual(result, 10)
+
+    def test_crash_passes_no_stop_true(self):
+        """consistency='crash' calls _backup_container with no_stop=True (live copy)."""
+        config = self._make_config()
+        substrate = ContainerSubstrate(config, None)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch.object(_substrate_mod, '_backup_container', return_value=20) as mock_bc:
+                result = substrate.capture(output, consistency='crash')
+        mock_bc.assert_called_once_with(config, output, no_stop=True, quiet=False)
+        self.assertEqual(result, 20)
+
+    def test_default_consistency_is_cold(self):
+        """Omitting consistency= defaults to cold (backward-compat)."""
+        config = self._make_config()
+        substrate = ContainerSubstrate(config, None)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch.object(_substrate_mod, '_backup_container', return_value=5) as mock_bc:
+                result = substrate.capture(output)
+        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        self.assertEqual(result, 5)
+
+
+# ── VM crash-consistent backup: _backup_vm_crash ─────────────────────────────
+
+class TestBackupVMCrash(unittest.TestCase):
+    """Tests for the crash-consistent VM backup via QMP pause/resume."""
+
+    def _make_config(self):
+        return _make_vm_config()
+
+    def _make_qmp(self, stop_reply=None, cont_reply=None):
+        """Build a QMPClient mock with configurable stop/cont replies."""
+        qmp = MagicMock()
+        stop_reply = stop_reply or {"return": {}}
+        cont_reply = cont_reply or {"return": {}}
+        qmp.execute.side_effect = lambda cmd, *a, **kw: {
+            "stop": stop_reply,
+            "cont": cont_reply,
+        }[cmd]
+        return qmp
+
+    def test_inactive_vm_falls_back_to_cold(self):
+        """If the VM service is not active, fall back to the cold path."""
+        config = self._make_config()
+        inactive = MagicMock(return_value=MagicMock(returncode=1))
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch('substrate.subprocess.run', inactive), \
+                 patch.object(_substrate_mod, '_backup_vm', return_value=55) as mock_cold:
+                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+        mock_cold.assert_called_once_with(config, output, quiet=True)
+        self.assertEqual(result, 55)
+
+    def _patch_active_vm(self, config_name, d):
+        """Return a context-manager stack that makes the VM appear active + QMP socket present."""
+        import contextlib
+        # Create the fake qmp.sock path so Path.exists() returns True
+        sock_dir = Path(d) / config_name
+        sock_dir.mkdir(parents=True, exist_ok=True)
+        (sock_dir / "qmp.sock").touch()
+        return patch.object(_substrate_mod, 'VM_SOCKET_DIR', Path(d))
+
+    def test_crash_calls_qmp_stop_then_cont(self):
+        """Active VM: QMP 'stop' is issued before copy, 'cont' after."""
+        config = self._make_config()
+        qmp_mock = self._make_qmp()
+
+        with tempfile.TemporaryDirectory() as d:
+            output = MagicMock()
+            output.stat.return_value.st_size = 123
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl'):
+                _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
+        self.assertIn('stop', calls)
+        self.assertIn('cont', calls)
+        self.assertLess(calls.index('stop'), calls.index('cont'))
+
+    def test_cont_called_even_if_copy_raises(self):
+        """cont is issued in finally: copy failure must not leave vCPUs paused."""
+        config = self._make_config()
+
+        stop_called = []
+        cont_called = []
+
+        class FakeQMP:
+            def connect(self, *a, **kw): pass
+            def negotiate(self): pass
+            def execute(self, cmd, *a, **kw):
+                if cmd == "stop":
+                    stop_called.append(True)
+                elif cmd == "cont":
+                    cont_called.append(True)
+                return {"return": {}}
+            def close(self): pass
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', FakeQMP), \
+                 patch.object(_substrate_mod, '_backup_impl',
+                               side_effect=RuntimeError("copy failed")):
+                with self.assertRaises(RuntimeError):
+                    _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        self.assertTrue(stop_called, "QMP 'stop' was not called")
+        self.assertTrue(cont_called, "QMP 'cont' was NOT called after copy failure — vCPUs left paused")
+
+    def test_no_qmp_socket_raises_backup_error(self):
+        """If QMP socket is absent, raise BackupError (caught per-workload in
+        --all) rather than copying a live disk or aborting the whole run."""
+        config = self._make_config()
+
+        def fake_run(cmd, **kw):
+            return MagicMock(returncode=0)  # service active
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            # VM_SOCKET_DIR points to d but qmp.sock doesn't exist there
+            with patch('substrate.subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'VM_SOCKET_DIR', Path(d)):
+                buf = io.StringIO()
+                with patch('sys.stderr', buf):
+                    with self.assertRaises(BackupError):
+                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+        self.assertIn('cold', buf.getvalue())  # mentions --consistency cold fallback
+
+    def test_stop_error_raises_backup_error_without_resuming(self):
+        """A failed QMP 'stop' raises BackupError and does NOT issue 'cont'
+        (vCPUs were never paused, so there is nothing to resume)."""
+        config = self._make_config()
+        qmp_mock = self._make_qmp(stop_reply={"error": {"desc": "boom"}})
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+                with patch('sys.stderr', io.StringIO()):
+                    with self.assertRaises(BackupError):
+                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
+        self.assertIn('stop', calls)
+        self.assertNotIn('cont', calls)
+        mock_impl.assert_not_called()
+
+    def test_cont_error_reply_warns_but_does_not_raise(self):
+        """A QMP error *reply* to 'cont' (not an exception) must still warn that
+        the VM may be left paused — the backup itself succeeds."""
+        config = self._make_config()
+        qmp_mock = self._make_qmp(cont_reply={"error": {"desc": "cannot resume"}})
+
+        with tempfile.TemporaryDirectory() as d:
+            output = MagicMock()
+            output.stat.return_value.st_size = 123
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            buf = io.StringIO()
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl'), \
+                 patch('sys.stderr', buf):
+                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        self.assertEqual(result, 123)
+        self.assertIn('may remain paused', buf.getvalue())
+
+    def test_cont_valueerror_warns_but_does_not_escape(self):
+        """A malformed (non-OSError) reply to 'cont' must warn, not abort the
+        backup or escape un-isolated; the backup still succeeds."""
+        config = self._make_config()
+        qmp_mock = MagicMock()
+
+        def execute(cmd, *a, **kw):
+            if cmd == "cont":
+                raise ValueError("bad json from monitor")
+            return {"return": {}}
+        qmp_mock.execute.side_effect = execute
+
+        with tempfile.TemporaryDirectory() as d:
+            output = MagicMock()
+            output.stat.return_value.st_size = 77
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            buf = io.StringIO()
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl'), \
+                 patch('sys.stderr', buf):
+                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        self.assertEqual(result, 77)
+        self.assertIn('may remain paused', buf.getvalue())
+        qmp_mock.close.assert_called_once()
+
+    def test_stop_oserror_raises_backup_error_without_resuming(self):
+        """A protocol/socket fault on 'stop' becomes BackupError and never
+        issues 'cont' (vCPUs were never paused) nor copies."""
+        config = self._make_config()
+        qmp_mock = MagicMock()
+
+        def execute(cmd, *a, **kw):
+            if cmd == "stop":
+                raise OSError("socket reset")
+            return {"return": {}}
+        qmp_mock.execute.side_effect = execute
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl') as mock_impl, \
+                 patch('sys.stderr', io.StringIO()):
+                with self.assertRaises(BackupError):
+                    _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
+        self.assertIn('stop', calls)
+        self.assertNotIn('cont', calls)
+        mock_impl.assert_not_called()
+        qmp_mock.close.assert_called_once()
+
+    def test_negotiate_failure_closes_socket(self):
+        """If negotiate() raises after connect() opened the socket, close() must
+        still run (no leaked fd) and a BackupError is raised."""
+        config = self._make_config()
+        qmp_mock = MagicMock()
+        qmp_mock.negotiate.side_effect = OSError("greeting never arrived")
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            vm_sock_patch = self._patch_active_vm(config.name, d)
+            with patch('substrate.subprocess.run',
+                       return_value=MagicMock(returncode=0)), \
+                 vm_sock_patch, \
+                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+                with patch('sys.stderr', io.StringIO()):
+                    with self.assertRaises(BackupError):
+                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+
+        qmp_mock.close.assert_called_once()  # fd released despite the failure
+        # never paused, so nothing to copy or resume
+        qmp_mock.execute.assert_not_called()
+        mock_impl.assert_not_called()
 
 
 # ── _ignore_vm_rebuild ────────────────────────────────────────────────────────

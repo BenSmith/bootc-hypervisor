@@ -72,8 +72,11 @@ def main():
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
-    backup_parser.add_argument("--no-stop", action="store_true",
-                               help="Don't stop the service (live backup, may be inconsistent)")
+    # 'app' is the deferred ideas.md slot (guest fsfreeze / guest-agent channel);
+    # do NOT add it to choices until the vm-bootc-guest gate lands.
+    backup_parser.add_argument("--consistency", choices=["cold", "crash"], default="cold",
+                               help="Backup consistency level: cold (stop/backup/restart, default) "
+                                    "or crash (QMP-paused live copy for VMs; live for containers)")
     backup_parser.add_argument("--output", "-o", metavar="PATH",
                                help="Output path (file or directory)")
     backup_parser.add_argument("workload", nargs="?", help="Workload name")

@@ -2,7 +2,7 @@
 
 > Idea capture and planning. No commitment.
 
-**Last Updated:** 2026-05-07
+**Last Updated:** 2026-06-18
 
 ---
 
@@ -184,3 +184,32 @@ delivery, smaller per-workload but requires the domain decision.
 **Value:** Eliminates the "fetch the new CA over plain HTTP" dance
 on every new service, makes the fleet reachable from unmodified
 client devices, scales with N services instead of N^2 trust edges.
+
+### App-consistent online VM backup (guest fsfreeze + QMP quiesce)
+**Why:** The substrate-dispatch P3 work builds a *crash-consistent* live VM
+backup (QMP-only — pause vCPUs / `drive-backup` the durable disk, then copy;
+journaling FS recovers on boot). That's safe but apps with in-flight state
+(a DB mid-transaction) can still be torn. An *app-consistent* backup quiesces
+the guest first so the on-disk image is clean at the application layer — the
+real "online backup."
+
+- **Effort:** Medium-Large — spans host + guest + image chain.
+- **Value:** Medium (crash-consistent already closes the corruption hazard;
+  this is the upgrade for stateful guests).
+- **Interest:** Deferred until the bootc-guest migration lands.
+
+**Mechanism:** in `VMSubstrate.capture(consistency="app")` —
+`guest-fsfreeze-freeze` → QMP snapshot/copy of `data.qcow2` → `guest-fsfreeze-thaw`.
+
+**Blocked on two prerequisites (the reason it's parked):**
+1. **Host:** add an `org.qemu.guest_agent.0` virtio-serial channel to the QEMU
+   argv in the VM launch helper (`libexec/workload-vm-*`).
+2. **Guest:** `qemu-guest-agent` installed + enabled in the VM image — trivial
+   once the guest is a bootc image we control ([[project-vm-bootc-guest]]),
+   another bootstrap step on the current Fedora-Cloud+cloud-init guest.
+
+**When picked up:** add it as a third level to the existing
+`--consistency {cold,crash,app}` flag; the seam is already there from P3, so this
+is purely filling in the `app` branch + the guest-agent plumbing. Degrade to a
+clear error when the guest agent is absent. See
+`workloadctl/docs/wip/substrate-dispatch.md` P3.

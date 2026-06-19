@@ -40,7 +40,7 @@ def _fail(stderr='', returncode=1):
 def _args(**kwargs):
     defaults = dict(
         json=False, workload=None, follow=False, apply=False, all=False,
-        output=None, no_stop=False, subcommand=None,
+        output=None, consistency="cold", subcommand=None,
     )
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -936,7 +936,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=98304):
                         data = _capture_json(
@@ -954,7 +954,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=0):
                         data = _capture_json(
@@ -967,7 +967,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload=None, json=True, all=True,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=4096):
                         data = _capture_json(
@@ -980,7 +980,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=1024):
                         data = _capture_json(
@@ -990,40 +990,144 @@ class TestBackupJson(unittest.TestCase):
         self.assertTrue(archive.startswith(out_tmp))
         self.assertIn('test-wl', archive)
 
-    def test_vm_no_stop_single_refused(self):
-        # --no-stop on a VM risks a corrupt live qcow2 → hard refuse, no backup.
+    def test_vm_crash_consistency_accepted(self):
+        # --consistency crash on a VM is now valid (QMP-paused path).
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(VM_TOML, 'test-vm'):
-                args = _args(workload='test-vm', json=False, all=False,
-                             output=out_tmp, no_stop=True)
-                mock_backup = MagicMock(return_value=0)
+                args = _args(workload='test-vm', json=True, all=False,
+                             output=out_tmp, consistency='crash')
+                mock_backup = MagicMock(return_value=1024)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        with patch('sys.stderr', io.StringIO()):
-                            with self.assertRaises(SystemExit) as cm:
-                                cmd_backup.cmd_backup(args, WorkloadManager())
-        self.assertEqual(cm.exception.code, 1)
-        mock_backup.assert_not_called()
+                        data = _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+        mock_backup.assert_called_once()
+        # Verify consistency='crash' was threaded through
+        _, call_kwargs = mock_backup.call_args
+        self.assertEqual(call_kwargs.get('consistency') or mock_backup.call_args[0][2], 'crash')
 
-    def test_vm_no_stop_all_skips_vm_keeps_container(self):
-        # --no-stop --all: skip the VM (with a skipped[] entry) but still back up containers.
+    def test_vm_crash_all_backs_up_both(self):
+        # --consistency crash --all: both container and VM workloads are backed up.
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
                 (wdir / 'test-vm.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
-                             output=out_tmp, no_stop=True)
+                             output=out_tmp, consistency='crash')
                 mock_backup = MagicMock(return_value=4096)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        with patch('sys.stderr', io.StringIO()):
-                            data = _capture_json(
-                                lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+                        data = _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         backed_up = {b['workload'] for b in data['backups']}
         self.assertIn('test-wl', backed_up)
-        self.assertNotIn('test-vm', backed_up)
-        self.assertEqual(data.get('skipped'), ['test-vm'])
-        self.assertEqual(mock_backup.call_count, 1)
+        self.assertIn('test-vm', backed_up)
+        self.assertNotIn('skipped', data)
+        self.assertEqual(mock_backup.call_count, 2)
+
+    def test_all_isolates_backup_error(self):
+        # A BackupError on one workload (e.g. a VM with an unreachable QMP
+        # monitor) must NOT abort the whole --all run: the others still get
+        # backed up, the failure is reported under 'failed', and the command
+        # exits nonzero.
+        def fake_backup(config, output, consistency, quiet=False):
+            if config.name == 'test-vm':
+                raise substrate.BackupError("QMP unreachable for VM 'test-vm'")
+            return 4096
+
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=out_tmp, consistency='crash')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', side_effect=fake_backup):
+                        # cmd exits nonzero because one workload failed.
+                        data = _capture_json_exitok(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+
+        backed_up = {b['workload'] for b in data['backups']}
+        self.assertEqual(backed_up, {'test-wl'})  # the good one still ran
+        self.assertIn('failed', data)
+        failed = {f['workload'] for f in data['failed']}
+        self.assertEqual(failed, {'test-vm'})
+
+    def test_all_output_file_rejected(self):
+        # --all with --output pointing at an existing regular file must error
+        # (otherwise every workload would clobber the same archive).
+        with tempfile.TemporaryDirectory() as out_tmp:
+            out_file = Path(out_tmp) / "single.tar.zst"
+            out_file.write_text("")  # exists as a regular file, not a dir
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=str(out_file), consistency='cold')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=4096):
+                        with patch('sys.stderr', io.StringIO()):
+                            with self.assertRaises(SystemExit) as cm:
+                                cmd_backup.cmd_backup(args, WorkloadManager())
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_all_output_dir_gives_distinct_archives(self):
+        # --all with --output dir writes one distinct archive per workload.
+        seen = []
+
+        def fake_backup(config, output, consistency, quiet=False):
+            seen.append(str(output))
+            return 4096
+
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=out_tmp, consistency='cold')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', side_effect=fake_backup):
+                        _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(set(seen)), 2)  # distinct per-workload paths
+        for p in seen:
+            self.assertTrue(p.startswith(out_tmp))
+
+    def test_backup_one_normalizes_copy_fault(self):
+        # A cold-path copy fault (tar exits nonzero, disk full, permission) must
+        # be normalized to BackupError so the --all loop can isolate it instead
+        # of aborting the whole run with a traceback.
+        import subprocess
+        cfg = types.SimpleNamespace(name='test-wl')
+        sub = MagicMock()
+        sub.capture.side_effect = subprocess.CalledProcessError(2, ['tar'])
+        with patch.object(cmd_backup, 'get_substrate', return_value=sub):
+            with self.assertRaises(substrate.BackupError):
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'cold')
+
+    def test_backup_one_passes_through_backup_error(self):
+        # An existing BackupError (e.g. QMP unreachable) is re-raised unchanged,
+        # not re-wrapped.
+        cfg = types.SimpleNamespace(name='test-vm')
+        sub = MagicMock()
+        original = substrate.BackupError("QMP unreachable for VM 'test-vm'")
+        sub.capture.side_effect = original
+        with patch.object(cmd_backup, 'get_substrate', return_value=sub):
+            with self.assertRaises(substrate.BackupError) as cm:
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'crash')
+        self.assertIs(cm.exception, original)
+
+    def test_all_nonzero_exit_on_failure(self):
+        # The single-workload / --all failure path must signal nonzero exit.
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(VM_TOML, 'test-vm'):
+                args = _args(workload='test-vm', json=True, all=False,
+                             output=out_tmp, consistency='crash')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one',
+                                      side_effect=substrate.BackupError("boom")):
+                        with patch('sys.stdout', io.StringIO()):
+                            with self.assertRaises(SystemExit) as cm:
+                                cmd_backup.cmd_backup(args, WorkloadManager())
+        self.assertNotEqual(cm.exception.code, 0)
 
 
 class TestBackupImageStoreExclude(unittest.TestCase):
