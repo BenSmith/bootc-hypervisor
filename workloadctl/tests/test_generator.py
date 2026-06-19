@@ -51,6 +51,19 @@ def write_config(config_dir, name, toml_content):
     return path
 
 
+def read_dropin(services_dir):
+    """Read the single user@<uid>.service.d/50-workload.conf drop-in.
+
+    The generator allocates the workload UID from the live passwd database
+    (get_next_uid scans pwd.getpwall), so the exact slot isn't deterministic
+    across hosts — a CI runner with any existing UID in [10000, 52948] shifts
+    it off 10000. Glob for the one drop-in rather than assuming the slot.
+    """
+    matches = sorted(Path(services_dir).glob("user@*.service.d/50-workload.conf"))
+    assert len(matches) == 1, f"expected exactly one drop-in, found {matches}"
+    return matches[0].read_text()
+
+
 class TestGeneratorBasic(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
@@ -997,7 +1010,7 @@ class TestGeneratorResources(unittest.TestCase):
         self.assertIn("--pids-limit=100", service)
 
         # Workload-level cgroup limits are in the user@<uid> drop-in
-        dropin = (Path(self.services_dir) / "user@10000.service.d" / "50-workload.conf").read_text()
+        dropin = read_dropin(self.services_dir)
         self.assertIn("Slice=workloads.slice", dropin)
         self.assertIn("CPUQuota=200%", dropin)
         self.assertIn("MemoryMax=4G", dropin)
@@ -1075,8 +1088,8 @@ class TestGeneratorUserDropin(unittest.TestCase):
         for d in (self.config_dir, self.services_dir, self.sysusers_dir):
             shutil.rmtree(d)
 
-    def _dropin(self, uid=10000):
-        return (Path(self.services_dir) / f"user@{uid}.service.d" / "50-workload.conf").read_text()
+    def _dropin(self):
+        return read_dropin(self.services_dir)
 
     def test_dropin_emitted_for_single_mode(self):
         """Every container workload gets a user@<uid> drop-in with Slice=workloads.slice."""
