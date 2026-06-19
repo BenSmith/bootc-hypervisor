@@ -25,6 +25,19 @@ name = "schema-reference"
 # Set to false to disable without deleting the config file
 enabled = false
 
+# Optional: Bundle (kind) this workload draws shared control files from.
+# Type: string
+# Default: the workload name
+# The build context (Containerfile/build.sh), the [host].setup script, and the
+# SELinux CIL (policy.cil) are all looked up under
+# /usr/share/workloadctl/workloads/<bundle>/.  Defaults to the workload name, so
+# a single shipped instance needs no `bundle` field.  `workloadctl init <bundle>
+# --as <name>` and `workloadctl duplicate` set it so a copy shares one bundle's
+# control tree without copying it (sharing is just the absence of an override).
+# Goes straight into a filesystem path, so it must satisfy the same name rules as
+# `name` (lowercase letters, numbers, hyphen) — validated at config load.
+# bundle = "vncdesktop-wayfire"
+
 # Optional: Lifecycle policy — how the workload's writable state is treated.
 # Type: string
 # Default: "cattle"

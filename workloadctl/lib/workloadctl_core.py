@@ -393,34 +393,42 @@ class WorkloadConfig:
         return self.config.get("workload", {}).get("lifecycle", "cattle")
 
     @property
+    def bundle(self) -> str:
+        """The bundle (kind) this workload draws shared control files from.
+
+        Control-file lookups all resolve under
+        `/usr/share/workloadctl/workloads/<bundle>/`: the build context
+        (Containerfile/`build.sh`), the host `setup.sh` (`[host].setup`), and
+        the SELinux CIL (`policy.cil`). Defaults to the workload name, so a
+        single shipped instance needs no `bundle` field; `duplicate`/`init`
+        set it to the source's resolved bundle so a copy shares one control
+        tree without copying it. Goes straight into a filesystem path, so it
+        must satisfy NAME_PATTERN — validated at config load.
+        """
+        val = self.config.get("workload", {}).get("bundle")
+        return val if val else self.name
+
+    @property
     def selinux_policy(self) -> bool:
         """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
 
         When set, enable/disable load/remove the bundle's CIL policy
-        (`<bundle>.cil`) as a name-keyed module, and the generator labels the
-        container with the matching type. See docs/workload-bundles.md.
-
-        `selinux_policy` may be `true` (source the bundle named after this
-        workload) or a string naming the bundle directory to source the CIL
-        from — see `selinux_bundle`.
+        (`policy.cil`) as a name-keyed module, and the generator labels the
+        container with the matching type. Boolean-only — the bundle the CIL is
+        sourced from is the resolved `[workload] bundle` (see `selinux_bundle`),
+        which subsumes the old string form of this field.
         """
         return bool(self.config.get("security", {}).get("selinux_policy", False))
 
     @property
     def selinux_bundle(self) -> str | None:
-        """The `containers/<bundle>/` directory to source the CIL from.
+        """Bundle dir to source the CIL (`policy.cil`) from, or None if policy off.
 
-        `selinux_policy = true` keys off the workload name (the bundle is named
-        after the workload); a string value names the bundle explicitly, which
-        decouples the policy source from the (renameable) workload name so a
-        renamed workload can keep using its original bundle. None when policy is
-        disabled. The loaded module and label stay keyed to the workload name
-        (`wl_<name>.process`) regardless.
+        Sources from the resolved `bundle` (defaults to the workload name); the
+        loaded module and container label stay keyed to the workload *name*
+        (`wl_<name>.process`) so teardown is 1:1 per enabled instance.
         """
-        val = self.config.get("security", {}).get("selinux_policy", False)
-        if not val:
-            return None
-        return val if isinstance(val, str) else self.name
+        return self.bundle if self.selinux_policy else None
 
     @property
     def username(self) -> str:

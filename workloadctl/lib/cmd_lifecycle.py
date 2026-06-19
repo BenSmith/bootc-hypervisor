@@ -140,7 +140,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
         if pull == "never" and not Podman.for_root().image_id(image):
             print(f"  ✗ Image '{image}' not found locally and pull=never")
             # TODO: remove hardcoded path
-            build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
+            build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
             if build_script.exists():
                 print(f"    Build the image first:")
                 print(f"      sudo {build_script}")
@@ -388,7 +388,7 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
-        build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
+        build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
         if build_script.exists():
             print(f"Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
@@ -437,7 +437,7 @@ def _run_host_setup(config: WorkloadConfig, action: str):
     if setup_script.startswith("/"):
         script_path = Path(setup_script)
     else:
-        bundle_dir = Path(f"/usr/share/workloadctl/workloads/{config.name}")
+        bundle_dir = Path(f"/usr/share/workloadctl/workloads/{config.bundle}")
         script_path = bundle_dir / setup_script
 
     if not script_path.exists():
@@ -544,10 +544,10 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
-        print(f"  ERROR: invalid selinux_policy bundle {bundle!r} "
+        print(f"  ERROR: invalid [workload] bundle {bundle!r} "
               f"(must match {NAME_PATTERN.pattern})", file=sys.stderr)
         # Common footgun: users copy the SELinux *type* name (wl_foo_bar,
-        # underscores) into selinux_policy, but the bundle is a directory name
+        # underscores) into `bundle`, but the bundle is a directory name
         # and dirs are hyphenated. Suggest the hyphenated form.
         if "_" in bundle:
             print(f"         did you mean {bundle.replace('_', '-')!r}? "

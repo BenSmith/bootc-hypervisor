@@ -28,11 +28,53 @@ Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, 
 
 ---
 
-## Lifecycle Commands
+## Bundle Commands
+
+Shipped workloads live as **bundles** under `/usr/share/workloadctl/workloads/<bundle>/`,
+each co-locating a template `workload.toml` with its control files (Containerfile,
+`build.sh`, `setup.sh`, `policy.cil`, cloud-init seed). These verbs turn a bundle —
+or an existing workload — into a new authoritative declaration in `/etc/workloads.d/`.
+Control files are **not** copied: the new TOML's resolved `bundle` falls through to
+the shared `/usr` tree until you override something.
+
+### `catalog`
+
+List shippable bundles.
+
+```
+workloadctl catalog [--json]
+```
+
+### `init`
+
+Instantiate a catalog bundle into `/etc/workloads.d/<name>.toml`.
+
+```
+sudo workloadctl init <bundle> [--as <name>]
+```
+
+`--as` names the instance (default: the bundle name). When the instance name
+diverges from the bundle, `init` records `[workload] bundle = "<bundle>"` so the
+copy's control-file lookups still resolve to the source bundle's tree.
+
+### `duplicate` (alias `clone`)
+
+Copy a live workload's declaration under a new name.
+
+```
+sudo workloadctl duplicate <source> <new>
+```
+
+The copy's `[workload] bundle` is set to the source's **resolved** bundle
+(`source.bundle or source.name`), so a duplicate-of-a-duplicate still points at the
+original `/usr` bundle. Name uniqueness is the only hard requirement; `duplicate`
+**lints** (warns, never blocks) on host-global settings a verbatim copy inherits —
+published host ports, absolute volume paths, and a mutable image tag shared with
+another enabled workload — which you resolve by editing the copy before enabling it.
 
 ### `create`
 
-Generate a new workload config file at `/etc/workloads.d/<name>.toml`.
+Scaffold a from-scratch workload config (no bundle) at `/etc/workloads.d/<name>.toml`.
 
 ```
 workloadctl create <name> --image IMAGE [OPTIONS]

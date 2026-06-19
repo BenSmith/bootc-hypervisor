@@ -861,14 +861,18 @@ class TestCleanupJson(unittest.TestCase):
 # ── selinux_policy bool-or-string → selinux_bundle ───────────────────────────
 
 class TestSelinuxBundleResolution(unittest.TestCase):
-    """`selinux_policy` may be true (bundle == workload name) or a string naming
-    the bundle dir; `selinux_bundle` resolves the source, decoupled from the
-    (renameable) workload name."""
+    """`selinux_policy` is boolean; the CIL is sourced from the resolved
+    `[workload] bundle` (defaults to the workload name). `selinux_bundle`
+    surfaces that source, decoupled from the (renameable) workload name."""
 
-    def _config(self, security_block=''):
+    def _config(self, security_block='', bundle=None):
         # config dict + name are loaded in __init__, so the object is usable
         # after the temp dir is torn down (selinux_bundle does no file I/O).
-        with _WorkloadDir(MINIMAL_TOML + security_block, 'test-wl'):
+        workload = '[workload]\nname = "test-wl"\nenabled = false\n'
+        if bundle is not None:
+            workload += f'bundle = "{bundle}"\n'
+        toml = workload + '\n[container]\nimage = "example.com/test:latest"\n' + security_block
+        with _WorkloadDir(toml, 'test-wl'):
             return WorkloadConfig('test-wl')
 
     def test_true_keys_off_workload_name(self):
@@ -876,8 +880,8 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         self.assertTrue(cfg.selinux_policy)
         self.assertEqual(cfg.selinux_bundle, 'test-wl')
 
-    def test_string_names_bundle_explicitly(self):
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-sway"\n')
+    def test_bundle_field_names_source_explicitly(self):
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-sway')
         self.assertTrue(cfg.selinux_policy)
         self.assertEqual(cfg.selinux_bundle, 'vncdesktop-sway')
 
@@ -892,9 +896,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         self.assertIsNone(cfg.selinux_bundle)
 
     def test_apply_rejects_path_traversal_bundle(self):
-        # A bundle string goes straight into a filesystem path; a value that
-        # isn't a plain workload-style name must be rejected before lookup.
-        cfg = self._config('\n[security]\nselinux_policy = "../etc/evil"\n')
+        # `bundle` goes straight into a filesystem path; a value that isn't a
+        # plain workload-style name must be rejected before lookup.
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='../etc/evil')
         self.assertEqual(cfg.selinux_bundle, '../etc/evil')
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with self.assertRaises(SystemExit):
@@ -902,9 +906,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
 
     def test_underscore_bundle_suggests_hyphenated_form(self):
         # Footgun: users copy the SELinux *type* name (underscores) into
-        # selinux_policy, but the bundle is a hyphenated directory name. The
+        # `bundle`, but the bundle is a hyphenated directory name. The
         # invalid-bundle error should suggest the hyphenated form.
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop_wayfire"\n')
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop_wayfire')
         err = io.StringIO()
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with redirect_stderr(err):
@@ -915,7 +919,7 @@ class TestSelinuxBundleResolution(unittest.TestCase):
     def test_missing_bundle_lists_available(self):
         # A well-formed but nonexistent bundle should list the bundles that do
         # ship a CIL, plus a close-match suggestion.
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-wayfir"\n')
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-wayfir')
         err = io.StringIO()
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True), \
                 patch.object(cmd_lifecycle, '_available_bundles',

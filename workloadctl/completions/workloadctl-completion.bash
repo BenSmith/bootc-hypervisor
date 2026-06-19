@@ -5,9 +5,16 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="backup cleanup cp create diagnose disable drift edit enable exec health images incant info list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
+    local commands="backup catalog cleanup clone cp create diagnose disable drift duplicate edit enable exec health images incant info init list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
+    local bundles_dir="/usr/share/workloadctl/workloads"
+
+    # Shippable bundle names (a dir containing workload.toml)
+    local bundles=""
+    if [[ -d "$bundles_dir" ]]; then
+        bundles=$(cd "$bundles_dir" 2>/dev/null && for d in */; do [[ -f "${d}workload.toml" ]] && echo "${d%/}"; done)
+    fi
 
     # Get list of workload names (without .toml extension)
     local workloads=""
@@ -70,6 +77,24 @@ _workload_ctl_completion() {
         cleanup)
             # Complete with --apply or --json
             COMPREPLY=( $(compgen -W "--apply --json" -- "$cur") )
+            return 0
+            ;;
+        catalog)
+            COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            return 0
+            ;;
+        init)
+            # First arg: bundle name; then --as NAME
+            if [[ "$cur" == -* || "$prev" == "init" && $cword -gt 2 ]]; then
+                COMPREPLY=( $(compgen -W "--as" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$bundles" -- "$cur") )
+            fi
+            return 0
+            ;;
+        duplicate|clone)
+            # Source and destination are workload names
+            COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             return 0
             ;;
         diagnose)

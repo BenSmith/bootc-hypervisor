@@ -133,6 +133,30 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "message": f"Lifecycle policy: {config.lifecycle}"
         })
 
+    # `bundle` goes straight into a /usr/share/workloadctl/workloads/<bundle>/
+    # path for control-file lookups, so reject anything that isn't a plain
+    # workload-style name before any path is built. Only the explicit field is
+    # checked; the default (the workload name) is validated on its own.
+    raw_bundle = config.config.get("workload", {}).get("bundle")
+    if raw_bundle is not None:
+        try:
+            validate_workload_name(raw_bundle)
+            checks.append({
+                "check": "bundle",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Bundle: {config.bundle}",
+            })
+        except ValueError as e:
+            checks.append({
+                "check": "bundle",
+                "passed": False,
+                "severity": "error",
+                "message": f"Invalid bundle {raw_bundle!r}: {e}",
+                "fix": "bundle is a directory name (lowercase letters, digits, hyphens)",
+            })
+            errors += 1
+
     required_file_paths = {e["path"] for e in config.get_required_files()}
     for vol in config.get_volumes():
         expanded_vol = expand_volume_path(vol, str(config.home_dir))
@@ -553,7 +577,7 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
                 if pull_policy == "never":
-                    build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
+                    build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
                     fix = (f"Build it: {build_script}" if build_script.exists()
                            else f"Build or provide: {config.image}")
                 else:

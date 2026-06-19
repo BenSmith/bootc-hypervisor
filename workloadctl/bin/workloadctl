@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
+from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_drift import cmd_drift
 from cmd_inspect import (
@@ -68,6 +69,20 @@ def main():
     create_parser.add_argument("--memory-max", metavar="SIZE", help="Maximum memory (e.g., 512M, 2G, 4G)")
     create_parser.add_argument("--memory-swap-max", metavar="SIZE", help="Maximum swap usage (0 to disable, or size like 512M)")
     create_parser.add_argument("--tasks-max", type=int, metavar="NUM", help="Maximum number of tasks/threads")
+
+    catalog_parser = subparsers.add_parser("catalog", help="List shippable workload bundles")
+    catalog_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    init_parser = subparsers.add_parser(
+        "init", help="Instantiate a catalog bundle into /etc/workloads.d/")
+    init_parser.add_argument("bundle", help="Bundle name (see 'workloadctl catalog')")
+    init_parser.add_argument("--as", dest="as_name", metavar="NAME",
+                             help="Instance name (default: the bundle name)")
+
+    duplicate_parser = subparsers.add_parser(
+        "duplicate", aliases=["clone"], help="Copy a live workload under a new name")
+    duplicate_parser.add_argument("source", help="Existing workload to copy")
+    duplicate_parser.add_argument("new", help="Name for the copy")
 
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
@@ -273,13 +288,17 @@ def main():
 
     command_map = {
         "backup": cmd_backup,
+        "catalog": cmd_catalog,
         "cleanup": cmd_cleanup,
+        "clone": cmd_duplicate,
         "cp": cmd_cp,
         "create": cmd_create,
         "diagnose": cmd_diagnose,
         "disable": cmd_disable,
         "drift": cmd_drift,
+        "duplicate": cmd_duplicate,
         "edit": cmd_edit,
+        "init": cmd_init,
         "enable": cmd_enable,
         "exec": cmd_exec,
         "health": cmd_health,
