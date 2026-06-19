@@ -628,8 +628,22 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         service_type = "exec"
 
     container_name_quoted = dq(container_name)
+
+    # Lifecycle: "cattle" (default, byte-identical to the historic unit shape) or
+    # "pet" (durable overlay — create-once + start/stop, no --rm).
+    # pet is only supported for single mode today; pod/bridge fall back to cattle
+    # with a warning so a misconfigured TOML never blocks boot.
+    wl_lifecycle = workload["workload"].get("lifecycle", "cattle")
+    if wl_lifecycle == "pet" and mode != "single":
+        log_msg(
+            f"WARNING: {name}: lifecycle=pet is only supported in single mode "
+            f"(mode={mode!r}); falling back to cattle for this workload.",
+            level="warning",
+        )
+        wl_lifecycle = "cattle"
+
     podman_args = [
-        "/usr/bin/podman run",
+        "/usr/bin/podman run" if wl_lifecycle == "cattle" else "/usr/bin/podman create",
         f"--name {container_name_quoted}",
     ]
     # In pod mode the container joins the pod's UTS namespace, so it cannot
@@ -637,10 +651,11 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # own their UTS namespace and take a hostname normally.
     if mode != "pod":
         podman_args.append(f"--hostname {dq(name)}")
-    podman_args.append("--rm")
-    # --replace removes a same-named container leftover from an unclean shutdown
-    # (OOM kill, SIGKILL) before starting, breaking the "name already in use" loop.
-    podman_args.append("--replace")
+    if wl_lifecycle == "cattle":
+        podman_args.append("--rm")
+        # --replace removes a same-named container leftover from an unclean shutdown
+        # (OOM kill, SIGKILL) before starting, breaking the "name already in use" loop.
+        podman_args.append("--replace")
 
     # --init provides a minimal init process (tini) for signal handling.
     # Skip when container.systemd is set — the container either runs systemd
@@ -1035,10 +1050,23 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         lines.append("ExecStartPre=-/usr/bin/podman system migrate")
 
     lines.append("")
-    lines.append(f"# Image pulling handled by podman run --pull={pull_policy}")
-    lines.append("")
 
-    lines.append(f"ExecStart={podman_cmd}")
+    if wl_lifecycle == "pet":
+        # Pet lifecycle: create the container once; subsequent starts reuse the
+        # writable overlay.  The "-" prefix on create ignores "name already in
+        # use" so the unit starts cleanly after a plain reboot.
+        # --pull is honoured on the initial create; later starts use whatever
+        # image the overlay was originally built from.
+        lines.append(f"# Pet lifecycle: create-once + start (overlay survives stop/reboot)")
+        lines.append(f"ExecStartPre=-{podman_cmd}")
+        lines.append("")
+        lines.append(f"ExecStart=/usr/bin/podman start -a {container_name_quoted}")
+    else:
+        lines.append(f"# Image pulling handled by podman run --pull={pull_policy}")
+        lines.append("")
+        lines.append(f"ExecStart={podman_cmd}")
+
+    lines.append("")
 
     # podman's own container-stop grace (-t): how long the container gets to
     # exit on the stop signal before podman SIGKILLs it. Keep it a few seconds
@@ -1058,7 +1086,6 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         podman_stop_timeout = 10
 
     stop_lines = [
-        "",
         f"ExecStop=/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}",
     ]
     # Under option 1b payloads live in the user manager's cgroup, not the unit's
@@ -1066,7 +1093,8 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # any container that survived ExecStop (e.g. a SIGKILLed podman client).
     # Pod mode is excluded: the pod-create service already has ExecStop=podman pod rm
     # which tears down all member containers; per-container services don't need it.
-    if mode != "pod":
+    # Pet mode is excluded: the overlay must survive stop — never rm a pet container.
+    if mode != "pod" and wl_lifecycle != "pet":
         stop_lines.append(
             f"ExecStopPost=-/usr/bin/podman rm -f -t0 {container_name_quoted}"
         )

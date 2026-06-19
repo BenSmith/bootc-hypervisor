@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="attach backup cleanup cp create disable drift edit enable exec health images info list logs network ports ps reboot recreate restore rollback secret shell start stats status stop update uid-map validate verify help"
+    local commands="backup cleanup cp create diagnose disable drift edit enable exec health images incant info list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
 
@@ -55,9 +55,11 @@ _workload_ctl_completion() {
     # Second argument: depends on the command
     case "${words[1]}" in
         backup)
-            # Complete with --all, --output, --no-stop, --json, or workload names
+            # Complete with --all, --output, --consistency, --json, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--all --output --no-stop --json" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--all --output --consistency --json" -- "$cur") )
+            elif [[ "$prev" == "--consistency" ]]; then
+                COMPREPLY=( $(compgen -W "cold crash" -- "$cur") )
             elif [[ "$prev" == "--output" || "$prev" == "-o" ]]; then
                 _filedir
             else
@@ -70,7 +72,7 @@ _workload_ctl_completion() {
             COMPREPLY=( $(compgen -W "--apply --json" -- "$cur") )
             return 0
             ;;
-        uid-map|verify)
+        diagnose)
             # Complete with --json or workload names
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
@@ -79,9 +81,24 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        attach|edit|reboot|recreate|rollback)
+        edit|reboot|recreate)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            return 0
+            ;;
+        incant)
+            # cword 2: <workload> or <workload>/<container>; then passthrough args
+            if [[ $cword -eq 2 ]]; then
+                _workloadctl_ref_complete "$cur"
+            fi
+            return 0
+            ;;
+        rollback)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--list" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
             return 0
             ;;
         shell)
@@ -116,7 +133,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        info|ports)
+        info)
             # Complete with --json or workload names
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--json" -- "$cur") )
@@ -188,7 +205,7 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        ps|list)
+        list)
             # Complete with --json flag
             COMPREPLY=( $(compgen -W "--json" -- "$cur") )
             return 0
@@ -203,15 +220,6 @@ _workload_ctl_completion() {
                 COMPREPLY=( $(compgen -W "always true false" -- "$cur") )
             elif [[ "$prev" == "--network" ]]; then
                 COMPREPLY=( $(compgen -W "host pasta none" -- "$cur") )
-            fi
-            return 0
-            ;;
-        network)
-            # Positional args: subcommand network_name workload
-            if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "create" -- "$cur") )
-            elif [[ $cword -eq 4 ]]; then
-                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
             return 0
             ;;

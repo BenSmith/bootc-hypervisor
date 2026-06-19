@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 from pathlib import Path
 
 # Add lib to path for imports
@@ -940,8 +941,12 @@ class TestQMPClient(unittest.TestCase):
     def test_connect_times_out_when_socket_absent(self):
         missing = Path(tempfile.mkdtemp()) / "nope.sock"
         qmp = QMPClient()
-        with self.assertRaises(TimeoutError):
-            qmp.connect(missing, timeout=0.3, recv_timeout=0.3)
+        # Each retry must close its socket: a leaked fd raises ResourceWarning
+        # (promoted to an error here) when GC'd.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            with self.assertRaises(TimeoutError):
+                qmp.connect(missing, timeout=0.3, recv_timeout=0.3)
 
 
 if __name__ == "__main__":

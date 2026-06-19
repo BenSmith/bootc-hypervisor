@@ -6,6 +6,7 @@ workload-ensure-user, and workloadctl.
 Installed to /usr/libexec/workloadctl/workload_lib.py.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -183,18 +184,27 @@ class QMPClient:
         """
         deadline = time.monotonic() + timeout
         while True:
-            try:
+            # The socket is closed on the way out of this block unless the
+            # connect succeeds, in which case pop_all() detaches it so it
+            # survives as self._sock. This releases the fd on *any* failure in
+            # the attempt — not just the OSError below — so a retry loop against
+            # a not-yet-ready monitor can't leak descriptors.
+            with contextlib.ExitStack() as stack:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                stack.callback(s.close)
                 s.settimeout(recv_timeout)
-                s.connect(str(path))
+                try:
+                    s.connect(str(path))
+                except (OSError, ConnectionRefusedError):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"QMP socket not ready after {timeout:.0f}s: {path}"
+                        )
+                    time.sleep(0.2)
+                    continue
                 self._sock = s
+                stack.pop_all()  # success: keep the socket open
                 return
-            except (OSError, ConnectionRefusedError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"QMP socket not ready after {timeout:.0f}s: {path}"
-                    )
-                time.sleep(0.2)
 
     def _readline(self) -> dict:
         """Read one newline-delimited JSON object from the socket."""

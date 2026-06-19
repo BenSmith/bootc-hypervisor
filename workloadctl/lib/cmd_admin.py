@@ -1,5 +1,5 @@
 """
-cmd_admin — workload admin commands: create, edit, validate, verify, uid-map.
+cmd_admin — workload admin commands: create, edit, validate, diagnose.
 """
 
 import argparse
@@ -110,6 +110,27 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "passed": True,
             "severity": "ok",
             "message": "Name is unique"
+        })
+
+    _valid_lifecycles = {"pet", "cattle"}
+    if config.lifecycle not in _valid_lifecycles:
+        checks.append({
+            "check": "lifecycle",
+            "passed": False,
+            "severity": "error",
+            "message": (
+                f"Invalid lifecycle value: {config.lifecycle!r}. "
+                f"Must be one of: {', '.join(sorted(_valid_lifecycles))}"
+            ),
+            "fix": 'Set [workload] lifecycle = "pet" or "cattle" (or omit for the default "cattle")'
+        })
+        errors += 1
+    else:
+        checks.append({
+            "check": "lifecycle",
+            "passed": True,
+            "severity": "ok",
+            "message": f"Lifecycle policy: {config.lifecycle}"
         })
 
     required_file_paths = {e["path"] for e in config.get_required_files()}
@@ -417,11 +438,11 @@ def cmd_validate(args, manager: WorkloadManager):
 
 
 # ---------------------------------------------------------------------------
-# cmd_verify
+# cmd_diagnose
 # ---------------------------------------------------------------------------
 
-def cmd_verify(args, manager: WorkloadManager):
-    """Verify workload setup and diagnose issues"""
+def cmd_diagnose(args, manager: WorkloadManager):
+    """Diagnose workload runtime setup (user, subids, linger, SELinux)"""
     require_root()
     config = WorkloadConfig(args.workload)
 
@@ -653,7 +674,7 @@ def cmd_verify(args, manager: WorkloadManager):
         }, indent=2))
         sys.exit(0 if passed else 1)
 
-    print(f"Verifying workload: {config.name}")
+    print(f"Diagnosing workload: {config.name}")
     print()
     for c in checks:
         symbol = "✓" if c["passed"] else "✗"
@@ -794,152 +815,3 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path.unlink()
 
 
-# ---------------------------------------------------------------------------
-# cmd_uid_map
-# ---------------------------------------------------------------------------
-
-def cmd_uid_map(args, manager: WorkloadManager):
-    """Show UID/GID mapping for a workload"""
-    import pwd as _pwd
-    config = WorkloadConfig(args.workload)
-
-    if not manager.user_exists(config):
-        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
-        print("Enable the workload first to create the user.", file=sys.stderr)
-        sys.exit(1)
-
-    pw = _pwd.getpwnam(config.username)
-    uid = pw.pw_uid
-    gid = pw.pw_gid
-
-    subuid_start = None
-    subuid_count = None
-    subgid_start = None
-    subgid_count = None
-
-    try:
-        with open("/etc/subuid", "r") as f:
-            for line in f:
-                if line.startswith(f"{config.username}:"):
-                    parts = line.strip().split(':')
-                    if len(parts) == 3:
-                        subuid_start = int(parts[1])
-                        subuid_count = int(parts[2])
-                    break
-    except FileNotFoundError:
-        pass
-
-    try:
-        with open("/etc/subgid", "r") as f:
-            for line in f:
-                if line.startswith(f"{config.username}:"):
-                    parts = line.strip().split(':')
-                    if len(parts) == 3:
-                        subgid_start = int(parts[1])
-                        subgid_count = int(parts[2])
-                    break
-    except FileNotFoundError:
-        pass
-
-    userns_mode = config.config.get("security", {}).get("userns", "keep-id")
-
-    # Compute mapped_uid/mapped_gid
-    if userns_mode.startswith("keep-id"):
-        mapped_uid = uid
-        mapped_gid = gid
-        if ":" in userns_mode:
-            for param in userns_mode.split(":", 1)[1].split(","):
-                key, _, value = param.partition("=")
-                if key == "uid":
-                    mapped_uid = int(value)
-                elif key == "gid":
-                    mapped_gid = int(value)
-    else:
-        mapped_uid = uid
-        mapped_gid = gid
-
-    if args.json:
-        print(json.dumps({
-            "workload": config.name,
-            "username": config.username,
-            "host_uid": uid,
-            "host_gid": gid,
-            "subuid": {"start": subuid_start, "count": subuid_count},
-            "subgid": {"start": subgid_start, "count": subgid_count},
-            "userns_mode": userns_mode,
-            "mapped_uid": mapped_uid,
-            "mapped_gid": mapped_gid
-        }, indent=2))
-        return
-
-    print(f"Workload: {config.name}")
-    print(f"User: {config.username}")
-    print(f"Host UID: {uid}")
-    print(f"Host GID: {gid}")
-    print()
-
-    if subuid_start is not None:
-        print(f"Subuid range: {subuid_start}-{subuid_start + subuid_count - 1} ({subuid_count} UIDs)")
-    else:
-        print("Subuid range: NOT CONFIGURED")
-        print(f"  Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
-
-    if subgid_start is not None:
-        print(f"Subgid range: {subgid_start}-{subgid_start + subgid_count - 1} ({subgid_count} GIDs)")
-    else:
-        print("Subgid range: NOT CONFIGURED")
-        print(f"  Run: sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
-
-    print()
-    print(f"User namespace mode: {userns_mode}")
-    print()
-
-    if userns_mode.startswith("keep-id"):
-        print(f"UID/GID Mapping (keep-id mode):")
-        if mapped_uid != uid:
-            print(f"  Container UID {mapped_uid} → Host UID {uid} (workload user, remapped)")
-        else:
-            print(f"  Container UID {uid} → Host UID {uid} (workload user)")
-        if subuid_start is not None:
-            print(f"  Container UID 0   → Host UID {subuid_start} (mapped root)")
-            print(f"  Container UID 1   → Host UID {subuid_start + 1}")
-            print(f"  Container UID N   → Host UID (subuid_start + N) for N ≠ {mapped_uid}")
-        else:
-            print("  Container UID 0   → Host UID (unknown - subuid not configured)")
-        print()
-        if mapped_uid != uid:
-            print(f"Note: keep-id remaps workload user (host UID {uid}) to container UID {mapped_uid}.")
-            print(f"      Container processes running as UID {mapped_uid} are the workload user on the host.")
-        else:
-            print("Note: In keep-id mode, the container's UID matches the workload user's UID.")
-            print("      Other container UIDs are mapped to the subuid range.")
-
-    elif userns_mode == "host":
-        print("UID/GID Mapping (host mode):")
-        if subuid_start is not None:
-            print(f"  Container UID 0       → Host UID {subuid_start} (mapped root)")
-            print(f"  Container UID 1       → Host UID {subuid_start + 1}")
-            print(f"  Container UID {uid}  → Host UID {subuid_start + uid}")
-            print(f"  Container UID N       → Host UID (subuid_start + N) for any N")
-        else:
-            print("  Container UID 0       → Host UID (unknown - subuid not configured)")
-        print()
-        print("IMPORTANT: With userns=host:")
-        print("  - Container files owned by UID N appear as host UID (subuid_start + N)")
-        print("  - Example: Container UID 10008 files owned by host UID", end="")
-        if subuid_start is not None:
-            print(f" {subuid_start + config.uid}")
-        else:
-            print(" (unknown - subuid not configured)")
-        print()
-        print("To fix file ownership for userns=host workloads:")
-        if subuid_start is not None and subgid_start is not None:
-            print(f"  sudo chown -R {subuid_start + config.uid}:{subgid_start + gid} /path/to/files")
-        else:
-            print("  First configure subuid/subgid ranges")
-
-    print()
-    print("Useful commands:")
-    print(f"  Check subuid: grep {config.username} /etc/subuid")
-    print(f"  Check subgid: grep {config.username} /etc/subgid")
-    print(f"  Podman unshare: sudo -u {config.username} -E XDG_RUNTIME_DIR=/run/user/{uid} podman unshare cat /proc/self/uid_map")

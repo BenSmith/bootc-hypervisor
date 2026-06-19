@@ -13,24 +13,48 @@ Usage pattern:
     except NotApplicable as e:
         print(f"stats: not applicable — {e.reason}")
         sys.exit(0)
+
+Capability matrix
+-----------------
+Each concrete substrate declares a frozenset ``PRIMITIVES`` naming the
+primitives it actually implements.  Optional primitives in the ABC base
+class auto-raise ``NotApplicable`` with a generated reason when the
+subclass does not list them in ``PRIMITIVES``.  This makes unsupported
+combinations structurally impossible to miss at author time.
+
+Required primitives (always present, ``@abstractmethod``):
+    liveness, gating_units, capture, exec, open_shell, lifecycle,
+    rollback_targets, rollback_to
+
+Optional primitives (auto-raise ``NotApplicable`` when absent):
+    resource_usage, logs, endpoints, reprovision
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from workload_lib import auto_detect_credentials
+from workload_lib import (
+    auto_detect_credentials,
+    QMPClient,
+    VM_BRIDGE_NAME,
+    VM_DHCP_LEASE_FILE,
+    VM_SOCKET_DIR,
+    vm_mac_address,
+)
 
 
 # ---------------------------------------------------------------------------
-# NotApplicable — explicit "N/A cell" in the verb×substrate matrix
+# Exceptions
 # ---------------------------------------------------------------------------
 
 class NotApplicable(Exception):
@@ -44,24 +68,235 @@ class NotApplicable(Exception):
         super().__init__(reason)
 
 
+class ProvisionFailed(Exception):
+    """Raised by reprovision() when a build or restart step fails.
+
+    The caller is expected to print a diagnostic and either sys.exit(1)
+    (single-workload path) or increment a failure counter (--all path).
+    The error message has already been printed by the substrate method.
+    """
+
+
+class BackupError(Exception):
+    """Raised by capture() when a backup cannot be completed safely.
+
+    Same contract as ProvisionFailed: the substrate method prints the
+    diagnostic, then raises this so the caller can isolate the failure
+    per-workload (a single bad workload must not abort a --all run) and
+    exit nonzero at the end.
+    """
+
+
+# ---------------------------------------------------------------------------
+# VM infrastructure helpers
+# ---------------------------------------------------------------------------
+
+def _vm_console_sock(name: str) -> Path:
+    return VM_SOCKET_DIR / name / "console.sock"
+
+
+def _vm_ssh_key(config) -> Path:
+    return config.home_dir / ".ssh" / "id_ed25519"
+
+
+def _vm_guest_user(config) -> str:
+    return config.config.get("vm", {}).get("user", "workload")
+
+
+def _vm_ssh_command(
+    config,
+    guest_ip: str,
+    exec_args: list[str] | None = None,
+    connect_timeout: int | None = None,
+) -> list[str]:
+    """Build the ssh argv used to reach a VM workload's guest user."""
+    key_path = _vm_ssh_key(config)
+    guest_user = _vm_guest_user(config)
+    cmd = [
+        "ssh",
+        *(["-t"] if sys.stdout.isatty() else []),
+        "-i", str(key_path),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ]
+    if connect_timeout is not None:
+        cmd += ["-o", f"ConnectTimeout={connect_timeout}"]
+    cmd.append(f"{guest_user}@{guest_ip}")
+    if exec_args:
+        cmd += ["--", *exec_args]
+    return cmd
+
+
+def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
+    """Look up the VM's IP by hostname in dnsmasq leases, MAC via ARP, or mDNS.
+
+    The dnsmasq lease file is only authoritative when workload-bridge.service
+    actually manages a bridge it created (signalled by /run/workload-vm/
+    bridge-managed). On a pre-existing LAN bridge (e.g. br0) no dnsmasq runs
+    and any old lease entries are stale, so we go straight to ARP.
+
+    Falls back to mDNS ({name}.local) when avahi/nss-mdns are available.
+    """
+    if Path("/run/workload-vm/bridge-managed").exists():
+        lease_file = VM_DHCP_LEASE_FILE
+        if lease_file.exists():
+            try:
+                for line in lease_file.read_text().splitlines():
+                    parts = line.split()
+                    # dnsmasq lease format: <timestamp> <mac> <ip> <hostname> <client-id>
+                    if len(parts) >= 4 and parts[3] == name:
+                        return parts[2]
+            except OSError:
+                pass
+
+    # Pre-existing LAN bridge: no lease file.  Look up by the VM's stable MAC.
+    mac = vm_mac_address(name)
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show", "dev", bridge],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # `ip neigh show dev <iface>` omits the `dev <iface>` tokens it
+            # prints in the unfiltered form, so the MAC's column isn't fixed
+            # (`<ip> lladdr <mac> <state>` here vs `<ip> dev <iface> lladdr
+            # <mac> <state>` unfiltered). Find it by the `lladdr` marker, which
+            # is stable either way; parts[0] is always the IP.
+            if "lladdr" in parts:
+                mac_idx = parts.index("lladdr") + 1
+                if mac_idx < len(parts) and parts[mac_idx].lower() == mac.lower():
+                    return parts[0]
+    except OSError:
+        pass
+
+    # mDNS fallback: works when avahi + nss-mdns are installed on the host.
+    try:
+        result = subprocess.run(
+            ["getent", "hosts", f"{name}.local"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.split()
+            if parts:
+                return parts[0]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
+def _interactive_exec_flags() -> list[str]:
+    """Interactivity flags for `podman exec`: always keep stdin open (-i), but
+    only allocate a pseudo-TTY (-t) when stdin is a real terminal.
+
+    Passing -t without a TTY hangs on piped input. Without -t, scripted /
+    non-interactive callers use a plain no-pty exec path, which is robust.
+    """
+    return ["-i", "-t"] if sys.stdin.isatty() else ["-i"]
+
+
+# ---------------------------------------------------------------------------
+# Rollback image tag (shared between ContainerSubstrate and cmd_update helpers)
+# ---------------------------------------------------------------------------
+
+def rollback_tag(name: str, container: str | None = None) -> str:
+    """Return the rollback image tag for a workload (or one of its containers)."""
+    suffix = f"-{container}" if container else ""
+    return f"localhost/workload-rollback/{name}{suffix}:latest"
+
+
 # ---------------------------------------------------------------------------
 # Substrate ABC
 # ---------------------------------------------------------------------------
 
-class Substrate(ABC):
-    """Per-substrate primitive port.
+# ---------------------------------------------------------------------------
+# Endpoint helpers (shared by ContainerSubstrate.endpoints() and cmd_inspect)
+# ---------------------------------------------------------------------------
 
-    All substrate-variant verbs (stats, health, backup, …) delegate their
-    substrate-specific delta here.  Substrate-invariant verbs (create, list,
-    validate, secret, …) bypass this layer entirely.
+def _accessible_at_config(config) -> list:
+    """Compute accessible host:port → container:port endpoint list from TOML ports.
 
-    First-cut design: primitives are coarse (one per parity gap), not yet the
-    narrow-waist ten.  Refine as duplication between substrates becomes visible.
+    Returns a list of dicts with keys ``host`` (display string) and
+    ``container`` (container port string or None for host-network workloads).
     """
+    ports = config.get_ports()
+    network_mode = config.get_network_mode()
+    result = []
+    if not ports:
+        return result
+    if network_mode == "host":
+        for port_spec in ports:
+            port = port_spec.split(":")[-1].split("/")[0]
+            result.append({"host": f"localhost:{port}", "container": None})
+    else:
+        for port_spec in ports:
+            parts = port_spec.split("/")[0].split(":")
+            if len(parts) == 3:
+                ip, host_port, container_port = parts
+                host = ip or "localhost"
+                host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
+                result.append({"host": host_disp, "container": container_port})
+            elif len(parts) == 2:
+                host_port, container_port = parts
+                host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
+                result.append({"host": host_disp, "container": container_port})
+            else:
+                result.append({"host": f"localhost:{parts[0]}", "container": None})
+    return result
+
+
+# Names of optional primitives — those for which a substrate may declare
+# non-support by omitting them from PRIMITIVES.  The base class provides a
+# default implementation for each that auto-raises NotApplicable.
+_OPTIONAL_PRIMITIVES = frozenset({
+    "resource_usage",
+    "endpoints",
+    "reprovision",
+})
+
+
+class Substrate(ABC):
+    """Per-substrate primitive port (step-3 narrow waist).
+
+    All substrate-variant verbs delegate their substrate-specific delta here.
+    Substrate-invariant verbs (create, list, validate, secret, …) bypass
+    this layer entirely.
+
+    Each concrete subclass declares::
+
+        PRIMITIVES: frozenset[str]
+
+    listing the optional primitives it actually implements.  Optional
+    primitives absent from ``PRIMITIVES`` auto-raise ``NotApplicable`` with an
+    auto-generated reason — no hand-maintained per-method guard needed.
+
+    Required primitives (abstract, always present):
+        liveness, gating_units, capture, exec, open_shell,
+        lifecycle, rollback_targets, rollback_to, control
+
+    Optional primitives (auto-raise when absent from PRIMITIVES):
+        resource_usage, endpoints, reprovision
+    """
+
+    # Concrete subclasses override this.
+    PRIMITIVES: frozenset[str] = frozenset()
 
     def __init__(self, config, manager):
         self.config = config
         self.manager = manager
+
+    def _check_primitive(self, name: str) -> None:
+        """Raise NotApplicable if *name* is not in this substrate's PRIMITIVES."""
+        if name not in self.PRIMITIVES:
+            substrate_kind = "containers" if not self.config.is_vm else "VMs"
+            raise NotApplicable(
+                f"{name}: not applicable for {substrate_kind} "
+                f"(no {name} primitive)"
+            )
+
+    # ── required primitives (abstract) ───────────────────────────────────────
 
     @abstractmethod
     def liveness(self) -> dict:
@@ -75,6 +310,115 @@ class Substrate(ABC):
         ...
 
     @abstractmethod
+    def capture(
+        self,
+        output: Path,
+        *,
+        consistency: str = "cold",
+        quiet: bool = False,
+    ) -> int:
+        """Create a backup archive.  Returns archive size in bytes.
+
+        consistency: "cold" — stop service, copy, restart (always safe, default).
+                     "crash" — live copy without stopping service.
+                       Containers: copy while running (old --no-stop path).
+                       VMs: pause vCPUs via QMP, copy, resume (crash-consistent).
+        """
+        ...
+
+    @abstractmethod
+    def gating_units(self) -> list[str]:
+        """Systemd units that must succeed before the main service starts.
+
+        Empty for container substrates (setup is an ExecStartPre of the main
+        unit). VMs use separate RemainAfterExit=yes setup and build units; a
+        failure there is otherwise hidden behind a bland 'inactive' on the
+        main service.
+        """
+        ...
+
+    @abstractmethod
+    def exec(
+        self,
+        argv: list[str],
+        *,
+        container: str | None = None,
+    ) -> int:
+        """Execute a command inside the workload.  Returns the exit code.
+
+        For VMs: runs via SSH into the guest.
+        For containers: runs via ``podman exec`` into the named (or default) container.
+        """
+        ...
+
+    @abstractmethod
+    def open_shell(
+        self,
+        *,
+        container: str | None = None,
+        console: bool = False,
+    ) -> None:
+        """Open an interactive shell in the workload.  Does not return on success.
+
+        For VMs: prefers SSH; falls back to the serial console (or uses it
+        directly when console=True).  ContainerSubstrate raises NotApplicable
+        for console=True.
+        For containers: ``podman exec`` into the named (or default) container.
+        """
+        ...
+
+    @abstractmethod
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle primitive: start / stop / restart / reboot.
+
+        action must be one of: ``"start"``, ``"stop"``, ``"restart"``,
+        ``"reboot"`` (soft-reboot the workload's init system).
+        """
+        ...
+
+    @abstractmethod
+    def rollback_targets(self) -> list:
+        """Enumerate available rollback targets.
+
+        Containers: list of ``{"label": ..., "tag": ..., "id": ...}`` dicts
+            (one per container with a saved rollback image).
+        VMs: list of ``{"label": ..., "gen": N, "path": ...}`` dicts
+            (one per ``system.qcow2.gen-N`` snapshot found).
+
+        Returns an empty list when no rollback is available.
+        """
+        ...
+
+    @abstractmethod
+    def rollback_to(self, target) -> None:
+        """Apply a single rollback target returned by ``rollback_targets()``.
+
+        For containers: retag the saved rollback image as the working image.
+        For VMs: stop the VM, swap in the generation snapshot, restart.
+        """
+        ...
+
+    @abstractmethod
+    def control(self, argv: list[str]) -> int:
+        """Send a raw command to the workload's runtime control plane.
+
+        This is the ``incant`` escape hatch — it reaches the *manager* of the
+        runtime (podman for containers, the QEMU monitor for VMs), not the
+        workload interior.  The fiddly invocation (sudo env, QMP framing) is
+        supplied automatically so callers never hand-build it.
+
+        For containers: runs ``podman <argv>`` as ``_wl-<name>`` via the
+            existing rootless-podman wrapper (correct XDG_RUNTIME_DIR/HOME).
+        For VMs: sends the first token of ``argv`` as a QMP command name to
+            the QEMU monitor (qmp.sock), with remaining ``key=value`` tokens
+            parsed as command arguments.  Prints the JSON reply.
+
+        Returns an exit code (0 on success).
+        """
+        ...
+
+    # ── optional primitives (auto-raise when absent from PRIMITIVES) ──────────
+
     def resource_usage(
         self,
         target_names: list[str],
@@ -91,22 +435,45 @@ class Substrate(ABC):
         Raises NotApplicable if the substrate does not expose resource metrics
         through this primitive.
         """
-        ...
+        self._check_primitive("resource_usage")
 
-    @abstractmethod
-    def capture(
-        self,
-        output: Path,
-        *,
-        no_stop: bool,
-        quiet: bool = False,
-    ) -> int:
-        """Create a backup archive.  Returns archive size in bytes.
+    def logs(self, cmd_parts: list[str]) -> None:
+        """Stream workload logs using the given journalctl argv.
 
-        Raises SystemExit on unsafe operations the substrate cannot handle
-        (e.g. --no-stop on a VM with a live disk).
+        ``cmd_parts`` is the full ``journalctl`` command list already built by
+        ``cmd_logs``.  Both substrates' service journals land on the host journal
+        (a container's service *and* the VM's QEMU unit), so the default runs the
+        command directly; a substrate only overrides this if it needs a wrapper.
         """
-        ...
+        subprocess.run(cmd_parts)
+
+    def endpoints(self) -> list:
+        """Return the list of host-accessible endpoint dicts for this workload.
+
+        Each dict has at least ``{"host": "<host>:<port>", "container": <port or None>}``.
+        Returns an empty list when no ports are published.
+
+        Raises NotApplicable if the substrate cannot determine endpoints.
+        """
+        self._check_primitive("endpoints")
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
+        """Update / reprovision the workload to its latest version.
+
+        Container substrates: pull image(s) and restart if any changed.
+        Returns (config, old_ids) if an update was applied (so the caller can
+        run the post-update verification+rollback phase), or None if already
+        up to date.  Raises NotApplicable if all containers have pull=never.
+        Raises ProvisionFailed if a pull or restart step fails.
+
+        When ``recreate=True``: skip the pull phase, destroy and restart using
+        the current image (containers: restart service to recreate overlay;
+        VMs: re-render cloud-init seed and restart QEMU).
+
+        VM substrates: rebuild the system disk and restart.  Returns None
+        (no verification phase).  Raises ProvisionFailed on build/restart error.
+        """
+        self._check_primitive("reprovision")
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +482,14 @@ class Substrate(ABC):
 
 class ContainerSubstrate(Substrate):
     """Substrate for single / pod / bridge container workloads."""
+
+    PRIMITIVES: frozenset[str] = frozenset({
+        "resource_usage",
+        "endpoints",
+        "reprovision",
+    })
+
+    # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
         svc = subprocess.run(
@@ -176,10 +551,323 @@ class ContainerSubstrate(Substrate):
         self,
         output: Path,
         *,
-        no_stop: bool,
+        consistency: str = "cold",
         quiet: bool = False,
     ) -> int:
+        # cold → stop service before copy; crash → copy while running (no stop).
+        no_stop = consistency == "crash"
         return _backup_container(self.config, output, no_stop=no_stop, quiet=quiet)
+
+    # ── step-2 primitives ────────────────────────────────────────────────────
+
+    def gating_units(self) -> list[str]:
+        return []
+
+    def exec(
+        self,
+        argv: list[str],
+        *,
+        container: str | None = None,
+    ) -> int:
+        from workloadctl_core import resolve_container_target
+        target = resolve_container_target(self.config, container, self.config.name)
+        result = self.manager.run_podman_exec(
+            self.config, [*_interactive_exec_flags(), target, *argv]
+        )
+        return result.returncode
+
+    def open_shell(
+        self,
+        *,
+        container: str | None = None,
+        console: bool = False,
+    ) -> None:
+        if console:
+            raise NotApplicable(
+                "containers have no serial console; use 'shell' or 'exec' instead"
+            )
+
+        from workloadctl_core import resolve_container_target
+        target = resolve_container_target(self.config, container, self.config.name)
+
+        env = self.config.config.get("container", {}).get("environment", {})
+        container_user = env.get("CONTAINER_USER")
+        container_uid = env.get("CONTAINER_UID")
+
+        exec_opts = _interactive_exec_flags()
+        if container_user:
+            uid = container_uid or "1000"
+            home = f"/home/{container_user}"
+            exec_opts.extend([
+                "--user", container_user, "--workdir", home,
+                "--env", f"HOME={home}",
+                "--env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                "--env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+            ])
+        elif container_uid:
+            exec_opts.extend([
+                "--user", container_uid,
+                "--env", f"XDG_RUNTIME_DIR=/run/user/{container_uid}",
+                "--env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{container_uid}/bus",
+            ])
+
+        print(f"Opening shell in {target}...")
+        print()
+        # Try bash first, fall back to sh only if bash isn't available in the image.
+        # 127 = command not found; any other non-zero is propagated from the user's
+        # last command (e.g. 130 after ^C), not a reason to relaunch.
+        result = self.manager.run_podman_exec(self.config, [*exec_opts, target, "/bin/bash"])
+        if result.returncode == 127:
+            self.manager.run_podman_exec(self.config, [*exec_opts, target, "/bin/sh"], check=True)
+
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle for containers: start / stop / restart / reboot."""
+        from workloadctl_core import restart_workload_service
+        if action == "start":
+            # Re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
+            # thrash (a bare `systemctl start` doesn't re-run the setup oneshot,
+            # so a GC'd runtime dir fails ExecStart with 226/NAMESPACE, and a
+            # recycled unit name may carry a start-limit lockout).
+            if self.manager.user_exists(self.config):
+                try:
+                    restart_workload_service(
+                        self.config.uid, self.config.service_name, action="start"
+                    )
+                except subprocess.CalledProcessError as e:
+                    sys.exit(e.returncode or 1)
+            else:
+                result = subprocess.run(["systemctl", "start", self.config.service_name])
+                if result.returncode != 0:
+                    sys.exit(result.returncode)
+        elif action == "stop":
+            result = subprocess.run(["systemctl", "stop", self.config.service_name])
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+        elif action == "restart":
+            if self.manager.user_exists(self.config):
+                restart_workload_service(self.config.uid, self.config.service_name)
+            else:
+                subprocess.run(
+                    ["systemctl", "restart", self.config.service_name], check=True
+                )
+        elif action == "reboot":
+            result = self.manager.run_podman_exec(
+                self.config,
+                [self.config.container_name, "systemctl", "soft-reboot"],
+            )
+            if result.returncode != 0:
+                print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
+        else:
+            raise ValueError(f"Unknown lifecycle action: {action!r}")
+
+    def endpoints(self) -> list:
+        """Return published port endpoints from the TOML declaration."""
+        return _accessible_at_config(self.config)
+
+    def _pet_snapshot_and_remove(self, pod, container_name: str) -> None:
+        """Commit the pet container's overlay to a timestamped local snapshot,
+        then remove the container so the next start rebuilds it from the image.
+
+        The snapshot is saved under ``localhost/workload-snapshot/<name>`` with
+        a UTC-timestamp tag so it is easy to identify and prune manually.
+        A failure to commit (e.g. container not running / never started) is
+        non-fatal — we log and continue so the destroy still proceeds.
+        """
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snapshot_ref = f"localhost/workload-snapshot/{self.config.name}:{ts}"
+        try:
+            pod.commit(container_name, snapshot_ref)
+            print(f"  ✓ Pet snapshot saved: {snapshot_ref}")
+        except Exception as exc:
+            print(
+                f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}",
+                file=sys.stderr,
+            )
+        # Remove the container so the service's ExecStartPre=-podman create
+        # runs fresh on next start, picking up the (possibly new) image.
+        pod.run("rm", "-f", container_name)
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
+        from workloadctl_core import restart_workload_service, ensure_runtime_dir
+        from podman import PodmanError
+
+        if recreate:
+            # recreate path: skip pull, just restart to recreate the overlay.
+            print(f"Recreating {self.config.name}...")
+            # pet honoring is single-mode only — the generator falls back to
+            # cattle units for pod/bridge, so the substrate must too (otherwise
+            # we'd commit/rm a container name that doesn't exist for multi).
+            if (self.config.lifecycle == "pet" and not self.config.is_multi
+                    and self.manager.user_exists(self.config)):
+                # For pet: snapshot the overlay then remove the container so the
+                # next start re-creates it from the image.
+                pod = self.manager.podman(self.config)
+                self._pet_snapshot_and_remove(pod, self.config.container_name)
+            if self.manager.user_exists(self.config):
+                restart_workload_service(self.config.uid, self.config.service_name)
+            else:
+                subprocess.run(
+                    ["systemctl", "restart", self.config.service_name], check=True
+                )
+            return None
+
+        specs = self.config.container_specs()
+        if all(pull == "never" for _, _, pull in specs):
+            raise NotApplicable(
+                f"{self.config.name} uses pull=never (local image) — build it manually"
+            )
+
+        print(f"Updating {self.config.name}...")
+
+        if not self.manager.user_exists(self.config):
+            print(f"  Skipping: user {self.config.username} does not exist (workload not enabled?)")
+            return None
+
+        pod = self.manager.podman(self.config)
+        old_ids: dict[str, str] = {}
+        changed = False
+
+        for cname, image, pull in specs:
+            old_id = pod.image_id(image)
+            if not old_id:
+                # A just-(re)started rootless store can transiently report an empty
+                # inspect even though the image is present — re-pin and retry briefly
+                # before giving up.
+                ensure_runtime_dir(self.config.uid)
+                for _ in range(10):
+                    time.sleep(0.5)
+                    old_id = pod.image_id(image)
+                    if old_id:
+                        break
+            old_ids[cname] = old_id
+            if pull == "never":
+                continue
+            try:
+                pod.pull(image)
+            except PodmanError as e:
+                print(f"  ✗ Failed to pull {image}: {e.stderr}", file=sys.stderr)
+                raise ProvisionFailed(f"pull failed for {image}")
+            new_id = pod.image_id(image)
+            if old_id != new_id:
+                changed = True
+                label = (
+                    f"{self.config.name}/{cname}" if self.config.is_multi
+                    else self.config.name
+                )
+                print(f"  {label}: {(old_id or 'none')[:12]} → {(new_id or 'unknown')[:12]}")
+
+        if not changed and not force:
+            print(f"  ✓ Already up to date")
+            return None
+
+        # Tag old images for rollback before restarting
+        for cname, image, pull in specs:
+            old_id = old_ids.get(cname)
+            if old_id:
+                pod.tag(
+                    old_id,
+                    rollback_tag(self.config.name, cname if self.config.is_multi else None),
+                )
+
+        if self.config.lifecycle == "pet" and not self.config.is_multi:
+            # Snapshot and remove the pet container so the restart picks up the
+            # new image (ExecStartPre=-podman create rebuilds from the new pull).
+            # Single-mode only, matching the generator's pet fallback.
+            self._pet_snapshot_and_remove(pod, self.config.container_name)
+
+        restart_workload_service(self.config.uid, self.config.service_name)
+        print(f"  ✓ {self.config.name}: restarted")
+
+        return (self.config, old_ids)
+
+    def rollback_targets(self) -> list:
+        """Return available container rollback targets (saved image tags)."""
+        pod = self.manager.podman(self.config)
+        targets = []
+        for cname, image in self.config.container_images():
+            tag = rollback_tag(
+                self.config.name, cname if self.config.is_multi else None
+            )
+            rollback_id = pod.image_id(tag)
+            if not rollback_id:
+                continue
+            current_id = pod.image_id(image)
+            label = (
+                f"{self.config.name}/{cname}" if self.config.is_multi
+                else self.config.name
+            )
+            targets.append({
+                "label": label,
+                "tag": tag,
+                "image": image,
+                "current_id": current_id,
+                "rollback_id": rollback_id,
+            })
+        return targets
+
+    def rollback_to(self, target: dict) -> None:
+        """Apply a single rollback target from rollback_targets()."""
+        from podman import PodmanError
+        pod = self.manager.podman(self.config)
+        try:
+            pod.tag(target["tag"], target["image"])
+        except PodmanError as e:
+            print(
+                f"Error: Failed to retag rollback image for {target['label']}: {e.stderr}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        current_id = target.get("current_id")
+        rollback_id = target["rollback_id"]
+        print(
+            f"  {target['label']}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}"
+        )
+
+    def rollback(self) -> None:
+        """Roll back all containers to their previous images and restart."""
+        from workloadctl_core import restart_workload_service
+
+        targets = self.rollback_targets()
+        have_any_tag = bool(targets) or self._has_any_rollback_tag()
+
+        if not have_any_tag:
+            print(
+                f"Error: No rollback image found for {self.config.name}",
+                file=sys.stderr,
+            )
+            print(
+                "  (rollback images are created automatically by 'workloadctl update')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if not targets:
+            print(f"Already running the rollback image(s) for {self.config.name}")
+            return
+
+        for target in targets:
+            self.rollback_to(target)
+
+        restart_workload_service(self.config.uid, self.config.service_name)
+        print(f"✓ Rolled back {self.config.name}")
+
+    def control(self, argv: list[str]) -> int:
+        """Run ``podman <argv>`` as the workload user via the rootless wrapper."""
+        result = self.manager.run_podman(self.config, *argv)
+        return result.returncode
+
+    def _has_any_rollback_tag(self) -> bool:
+        """Return True if any rollback tag exists (even if already applied)."""
+        pod = self.manager.podman(self.config)
+        for cname, _image in self.config.container_images():
+            tag = rollback_tag(
+                self.config.name, cname if self.config.is_multi else None
+            )
+            if pod.image_id(tag):
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +876,13 @@ class ContainerSubstrate(Substrate):
 
 class VMSubstrate(Substrate):
     """Substrate for VM workloads ([vm] section in TOML)."""
+
+    PRIMITIVES: frozenset[str] = frozenset({
+        "reprovision",
+    })
+    # VMs do not implement: resource_usage, logs, endpoints
+
+    # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
         svc = subprocess.run(
@@ -204,35 +899,304 @@ class VMSubstrate(Substrate):
             "healthy": service_active,
         }
 
-    def resource_usage(
-        self,
-        target_names: list[str],
-        *,
-        no_stream: bool = True,
-        json_out: bool = False,
-        follow: bool = False,
-    ):
-        raise NotApplicable(
-            "VMs do not expose container-level resource metrics; "
-            "check systemd cgroup stats or host monitoring tools instead"
-        )
+    # resource_usage, logs, endpoints: inherited base auto-raises NotApplicable.
 
     def capture(
         self,
         output: Path,
         *,
-        no_stop: bool,
+        consistency: str = "cold",
         quiet: bool = False,
     ) -> int:
-        if no_stop:
+        if consistency == "crash":
+            return _backup_vm_crash(self.config, output, quiet=quiet)
+        # cold (default) — stop service, copy, restart.
+        return _backup_vm(self.config, output, quiet=quiet)
+
+    def gating_units(self) -> list[str]:
+        return [
+            f"workload-{self.config.name}-setup.service",
+            f"workload-{self.config.name}-build.service",
+        ]
+
+    def exec(
+        self,
+        argv: list[str],
+        *,
+        container: str | None = None,
+    ) -> int:
+        guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+        if not guest_ip:
             print(
-                "Error: --no-stop is unsafe for VM workloads. "
-                "A live qcow2 copy may be internally inconsistent. "
-                "Stop the workload first, or omit --no-stop.",
+                f"Error: could not determine IP for VM '{self.config.name}'",
+                file=sys.stderr,
+            )
+            print(
+                f"  Check {VM_DHCP_LEASE_FILE} or use "
+                f"'workloadctl shell {self.config.name}' (console).",
                 file=sys.stderr,
             )
             sys.exit(1)
-        return _backup_vm(self.config, output, quiet=quiet)
+        ssh_cmd = _vm_ssh_command(self.config, guest_ip, exec_args=argv)
+        return subprocess.run(ssh_cmd).returncode
+
+    def open_shell(
+        self,
+        *,
+        container: str | None = None,
+        console: bool = False,
+    ) -> None:
+        # Prefer SSH so the guest tty inherits the host's window size and
+        # signal handling. The serial console (socat below) is reserved as
+        # an explicit recovery path when --console is passed or SSH can't
+        # reach the VM (no lease, no network, sshd down).
+        if not console:
+            guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+            if guest_ip:
+                ssh_cmd = _vm_ssh_command(self.config, guest_ip, connect_timeout=5)
+                result = subprocess.run(ssh_cmd)
+                # 255 = ssh transport failure (host unreachable, auth, etc.);
+                # anything else came from the remote shell and should propagate.
+                if result.returncode != 255:
+                    sys.exit(result.returncode)
+                print(
+                    f"SSH to '{self.config.name}' failed; falling back to serial console.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"No IP found for VM '{self.config.name}'; falling back to serial console.",
+                    file=sys.stderr,
+                )
+
+        # Connect to the VM serial console via the socat multiplexer.
+        console_sock = _vm_console_sock(self.config.name)
+        if not console_sock.exists():
+            print(f"Error: console socket not found: {console_sock}", file=sys.stderr)
+            print(f"Is workload '{self.config.name}' running?", file=sys.stderr)
+            sys.exit(1)
+        print(f"Connecting to {self.config.name} console (Ctrl-] to disconnect)...")
+        print()
+        os.execvp(
+            "socat",
+            ["socat", "STDIO,raw,echo=0,escape=0x1d", f"UNIX-CONNECT:{console_sock}"],
+        )
+        # execvp replaces the process; unreachable
+
+    def lifecycle(self, action: str) -> None:
+        """Unified lifecycle for VMs: start / stop / restart / reboot."""
+        if action == "start":
+            result = subprocess.run(["systemctl", "start", self.config.service_name])
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+        elif action == "stop":
+            result = subprocess.run(["systemctl", "stop", self.config.service_name])
+            if result.returncode != 0:
+                sys.exit(result.returncode)
+        elif action == "restart":
+            # recreate: re-render cloud-init seed then restart QEMU.
+            # The cloud-init ISO and nvram are built by the setup oneshot
+            # (RemainAfterExit=yes), which a plain main-service restart does NOT
+            # re-run. Restart it first so config edits (template_vars, volumes, …)
+            # are re-rendered into a fresh seed before QEMU boots onto it.
+            subprocess.run(
+                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                check=True,
+            )
+            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+        elif action == "reboot":
+            guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+            if not guest_ip:
+                print(
+                    f"Error: could not determine IP for VM '{self.config.name}'",
+                    file=sys.stderr,
+                )
+                print(
+                    f"  Check {VM_DHCP_LEASE_FILE} or use "
+                    f"'workloadctl shell {self.config.name}' (console).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Fire the soft-reboot detached via systemd-run --no-block: a direct
+            # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
+            # connection drops and ssh exits nonzero *even on success*. Running it
+            # in a transient unit lets the SSH command return cleanly (0) before
+            # teardown; --collect reaps the unit.
+            ssh_cmd = _vm_ssh_command(
+                self.config, guest_ip,
+                exec_args=[
+                    "sudo", "systemd-run", "--collect", "--no-block",
+                    "systemctl", "soft-reboot",
+                ],
+                connect_timeout=5,
+            )
+            result = subprocess.run(ssh_cmd)
+            if result.returncode != 0:
+                print("Error: could not initiate guest soft-reboot.", file=sys.stderr)
+                print(
+                    "  Needs passwordless sudo and systemd 254+ in the guest. To "
+                    "power-cycle the VM regardless of its init system (disk "
+                    "preserved), run:",
+                    file=sys.stderr,
+                )
+                print(f"    sudo systemctl restart {self.config.service_name}", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ VM '{self.config.name}' soft-reboot initiated (disk preserved)")
+        else:
+            raise ValueError(f"Unknown lifecycle action: {action!r}")
+
+    def reprovision(self, *, force: bool = False, recreate: bool = False):
+        if recreate:
+            # recreate path: re-render cloud-init seed and restart QEMU.
+            # For pet VMs this is safe — it does not touch system.qcow2.
+            print(f"Recreating VM workload {self.config.name}...")
+            subprocess.run(
+                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                check=True,
+            )
+            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+            return None
+
+        if self.config.lifecycle == "pet":
+            # Pet VMs: do not rebuild or rotate system.qcow2 — the durable disk
+            # is preserved.  Only restart QEMU so config-level changes (e.g.
+            # memory, cpu) in the unit file are picked up.
+            print(
+                f"  ℹ {self.config.name} is a pet VM — skipping system disk rebuild "
+                f"and generation rotation to preserve durable disk."
+            )
+            restart = subprocess.run(
+                ["systemctl", "restart", self.config.service_name], check=False
+            )
+            if restart.returncode != 0:
+                print(f"  ✗ Restart failed for {self.config.name}", file=sys.stderr)
+                raise ProvisionFailed(f"restart failed for {self.config.name}")
+            print(f"  ✓ {self.config.name}: restarted (disk unchanged)")
+            return None
+
+        print(f"Updating VM workload {self.config.name}...")
+        result = subprocess.run(
+            [
+                "/usr/libexec/workloadctl/workload-vm-build-disk",
+                self.config.name, "--update",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"  ✗ Disk rebuild failed for {self.config.name}", file=sys.stderr)
+            raise ProvisionFailed(f"disk rebuild failed for {self.config.name}")
+        restart = subprocess.run(
+            ["systemctl", "restart", self.config.service_name], check=False
+        )
+        if restart.returncode != 0:
+            print(f"  ✗ Restart failed for {self.config.name}", file=sys.stderr)
+            raise ProvisionFailed(f"restart failed for {self.config.name}")
+        print(f"  ✓ {self.config.name}: rebuilt and restarted")
+        return None  # no verification phase for VMs
+
+    def rollback_targets(self) -> list:
+        """Return available VM rollback targets (system.qcow2.gen-N snapshots)."""
+        home_dir = self.config.home_dir
+        gens = sorted(
+            int(p.suffix[5:])
+            for p in home_dir.glob("system.qcow2.gen-*")
+            if p.suffix[5:].isdigit()
+        )
+        return [
+            {
+                "label": f"system.qcow2.gen-{g}",
+                "gen": g,
+                "path": home_dir / f"system.qcow2.gen-{g}",
+            }
+            for g in gens
+        ]
+
+    def rollback_to(self, target: dict) -> None:
+        """Apply a single VM rollback target from rollback_targets()."""
+        home_dir = self.config.home_dir
+        system_disk = home_dir / "system.qcow2"
+        gen_path = Path(target["path"])
+        gen = target["gen"]
+        print(f"Rolling back VM '{self.config.name}':")
+        print(f"  system.qcow2.gen-{gen} → system.qcow2")
+        # Stop the VM before swapping disks: QEMU holds the active qcow2 open,
+        # and renaming a file out from under it leaves the running guest writing
+        # to an unlinked inode while the new disk is mounted by the next start.
+        subprocess.run(["systemctl", "stop", self.config.service_name], check=False)
+        gen_path.replace(system_disk)
+        subprocess.run(["systemctl", "start", self.config.service_name], check=True)
+        print(f"✓ Rolled back {self.config.name} to generation {gen}")
+
+    def control(self, argv: list[str]) -> int:
+        """Send a QMP command to the QEMU monitor for this VM.
+
+        The first token of ``argv`` is the QMP command name; remaining tokens
+        must be ``key=value`` pairs that become the command arguments dict.
+        The JSON reply is printed to stdout.  Follows the same pattern as
+        ``libexec/workload-vm-qmp``.
+        """
+        if not argv:
+            print("Error: incant requires a QMP command name", file=sys.stderr)
+            return 2
+        command = argv[0]
+        arguments: dict = {}
+        for kv in argv[1:]:
+            if "=" in kv:
+                k, _, v = kv.partition("=")
+                arguments[k] = v
+            else:
+                print(
+                    f"Error: VM incant arguments must be key=value pairs, got: {kv!r}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        sock_path = VM_SOCKET_DIR / self.config.name / "qmp.sock"
+        if not sock_path.exists():
+            print(f"Error: QMP socket not found: {sock_path}", file=sys.stderr)
+            print(f"Is workload '{self.config.name}' running?", file=sys.stderr)
+            return 1
+
+        qmp = QMPClient()
+        try:
+            qmp.connect(str(sock_path))
+            qmp.negotiate()
+            reply = qmp.execute(command, arguments or None)
+            print(json.dumps(reply, indent=2))
+            return 0 if "return" in reply else 1
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            print(f"Error: QMP command failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            qmp.close()
+
+    def rollback(self) -> None:
+        """Roll back to the latest generation snapshot."""
+        if self.config.lifecycle == "pet":
+            print(
+                f"Error: VM '{self.config.name}' is a pet — system.qcow2 is never "
+                f"rotated, so there are no generation snapshots to roll back to.",
+                file=sys.stderr,
+            )
+            print(
+                "  Use 'workloadctl update' to restart the VM without touching the disk.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        targets = self.rollback_targets()
+        if not targets:
+            print(
+                f"Error: No rollback generation found for VM '{self.config.name}'",
+                file=sys.stderr,
+            )
+            print(
+                "  (generations are created automatically by 'workloadctl update')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Apply the most recent (highest generation number) snapshot.
+        latest = targets[-1]
+        self.rollback_to(latest)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +1269,121 @@ def _backup_container(config, output: Path, *, no_stop: bool, quiet: bool) -> in
 def _backup_vm(config, output: Path, *, quiet: bool) -> int:
     """Backup a VM workload (always stopped).  Returns archive size in bytes."""
     _backup_impl(config, output, no_stop=False, quiet=quiet, vm=True)
+    size = output.stat().st_size
+    if not quiet:
+        _print_backup_size(output, size)
+    return size
+
+
+def _backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
+    """Crash-consistent VM backup: pause vCPUs via QMP, copy, resume.
+
+    If the VM service is not active, falls back to the cold copy (nothing to
+    pause).  If QMP is unreachable, errors clearly rather than copying an
+    unpaused live disk — a copy of an unpaused qcow2 is torn and not safe.
+
+    The vCPUs are paused for the entire copy duration (simple first cut).
+    A future improvement would use QMP 'drive-backup' / 'blockdev-backup' to
+    issue a copy-on-write snapshot job so the pause window is just the initial
+    COW setup, not the full copy — see docs/ideas.md for the drive-backup
+    follow-up.
+
+    RESUME SAFETY: the QMP 'cont' command is issued in a finally block so
+    a failed or interrupted copy never leaves the guest permanently paused.
+    """
+    service_name = config.service_name
+    service_was_active = subprocess.run(
+        ["systemctl", "is-active", "--quiet", service_name],
+    ).returncode == 0
+
+    if not service_was_active:
+        # Nothing running — fall back to cold copy (identical result, no QMP
+        # needed).
+        if not quiet:
+            print(f"  VM '{config.name}' is not active; using cold backup path.")
+        return _backup_vm(config, output, quiet=quiet)
+
+    # VM is running — pause vCPUs, copy durable disk + home, then resume.
+    sock_path = VM_SOCKET_DIR / config.name / "qmp.sock"
+    if not sock_path.exists():
+        print(
+            f"Error: QMP socket not found at {sock_path}. "
+            f"Cannot safely copy a live qcow2 without pausing vCPUs. "
+            f"Use --consistency cold to stop the VM first.",
+            file=sys.stderr,
+        )
+        raise BackupError(f"QMP socket not found for VM '{config.name}'")
+
+    qmp = QMPClient()
+    # The outer finally guarantees qmp.close() on every exit path — including a
+    # failure in negotiate() after connect() already opened the socket — so an
+    # error here can't leak the descriptor.
+    try:
+        try:
+            qmp.connect(str(sock_path))
+            qmp.negotiate()
+        except (OSError, ValueError) as exc:
+            # TimeoutError/ConnectionError are OSError subclasses; ValueError
+            # covers a malformed JSON greeting from the monitor.
+            print(
+                f"Error: Could not connect to QMP for VM '{config.name}': {exc}. "
+                f"Cannot safely copy a live qcow2 without pausing vCPUs. "
+                f"Use --consistency cold to stop the VM first.",
+                file=sys.stderr,
+            )
+            raise BackupError(f"QMP unreachable for VM '{config.name}': {exc}")
+
+        if not quiet:
+            print(f"  Pausing vCPUs for '{config.name}'...")
+        try:
+            stop_reply = qmp.execute("stop")
+        except (OSError, ValueError) as exc:
+            # A protocol/socket fault here means the vCPUs were never paused, so
+            # there is nothing to resume — fail the backup cleanly.
+            print(
+                f"Error: QMP 'stop' failed for VM '{config.name}': {exc}. "
+                f"Use --consistency cold to stop the VM first.",
+                file=sys.stderr,
+            )
+            raise BackupError(f"QMP 'stop' failed for VM '{config.name}': {exc}")
+        if "error" in stop_reply:
+            print(
+                f"Error: QMP 'stop' failed for VM '{config.name}': {stop_reply['error']}. "
+                f"Use --consistency cold to stop the VM first.",
+                file=sys.stderr,
+            )
+            raise BackupError(
+                f"QMP 'stop' failed for VM '{config.name}': {stop_reply['error']}"
+            )
+
+        try:
+            # no_stop=True: copy durable disk + home WITHOUT stopping the
+            # systemd service (vCPUs are already paused by QMP above).
+            _backup_impl(config, output, no_stop=True, quiet=quiet, vm=True)
+        finally:
+            # CRITICAL: always resume vCPUs, even if the copy raised.
+            if not quiet:
+                print(f"  Resuming vCPUs for '{config.name}'...")
+            try:
+                cont_reply = qmp.execute("cont")
+                if "error" in cont_reply:
+                    print(
+                        f"Warning: QMP 'cont' failed for '{config.name}': {cont_reply['error']}. "
+                        f"The VM may remain paused — check with 'workloadctl status {config.name}'.",
+                        file=sys.stderr,
+                    )
+            except (OSError, ValueError) as exc:
+                # OSError covers ConnectionError; ValueError covers a malformed
+                # reply. Resume is best-effort — warn, never mask the backup or
+                # escape un-isolated.
+                print(
+                    f"Warning: Failed to resume vCPUs for '{config.name}': {exc}. "
+                    f"The VM may remain paused — check with 'workloadctl status {config.name}'.",
+                    file=sys.stderr,
+                )
+    finally:
+        qmp.close()
+
     size = output.stat().st_size
     if not quiet:
         _print_backup_size(output, size)

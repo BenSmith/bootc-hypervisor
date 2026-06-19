@@ -40,7 +40,7 @@ def _fail(stderr='', returncode=1):
 def _args(**kwargs):
     defaults = dict(
         json=False, workload=None, follow=False, apply=False, all=False,
-        output=None, no_stop=False, subcommand=None,
+        output=None, consistency="cold", subcommand=None,
     )
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -323,41 +323,51 @@ class TestInfoJson(unittest.TestCase):
         for key in ('name', 'state', 'active_since'):
             self.assertIn(key, svc, f'service section missing key: {key}')
 
+    def test_user_section_has_subuid_subgid(self):
+        data = self._run()
+        self.assertIn('subuid', data['user'])
+        self.assertIn('subgid', data['user'])
+        self.assertIn('start', data['user']['subuid'])
+        self.assertIn('count', data['user']['subuid'])
 
-# ── Task 1.4 — ports accessible_at always dicts ──────────────────────────────
+    def test_network_section_has_accessible_at(self):
+        data = self._run()
+        self.assertIn('accessible_at', data['network'])
+        self.assertIsInstance(data['network']['accessible_at'], list)
+
+
+# ── Task 1.4 — endpoint helper always returns dicts (ports folded into info) ──
 
 class TestPortsJson(unittest.TestCase):
+    """Tests for substrate._accessible_at_config(), the endpoint helper behind
+    ContainerSubstrate.endpoints() / cmd_info's network section."""
 
     def test_bridge_entry_is_dict_with_host_and_container(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        entry = data['accessible_at'][0]
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        self.assertEqual(len(result), 1)
+        entry = result[0]
         self.assertIsInstance(entry, dict)
         self.assertEqual(entry['host'], 'localhost:8080')
         self.assertEqual(entry['container'], '80')
 
     def test_bridge_entry_not_a_string(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        for entry in data['accessible_at']:
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        for entry in result:
             self.assertNotIsInstance(entry, str)
 
     def test_host_network_container_field_is_null(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            with patch('subprocess.run', return_value=_ok(stdout='192.168.1.1\n')):
-                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        for entry in data['accessible_at']:
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        for entry in result:
             self.assertIn('container', entry)
             self.assertIsNone(entry['container'])
 
     def test_no_ports_gives_empty_accessible_at(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        self.assertEqual(data['accessible_at'], [])
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        self.assertEqual(result, [])
 
     def test_three_part_ip_host_container(self):
         toml = """\
@@ -373,21 +383,16 @@ mode = "pasta"
 ports = ["127.0.0.1:4317:4317"]
 """
         with _WorkloadDir(toml, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        entry = data['accessible_at'][0]
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        entry = result[0]
         self.assertEqual(entry['host'], '127.0.0.1:4317')
         self.assertEqual(entry['container'], '4317')
 
-    def test_host_network_includes_ip_variants(self):
+    def test_host_network_localhost_entry(self):
         with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            with patch('subprocess.run', return_value=_ok(stdout='10.0.0.1 192.168.1.1\n')):
-                data = _capture_json(lambda: cmd_inspect.cmd_ports(args, WorkloadManager()))
-        hosts = [e['host'] for e in data['accessible_at']]
+            result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
+        hosts = [e['host'] for e in result]
         self.assertIn('localhost:8080', hosts)
-        self.assertIn('10.0.0.1:8080', hosts)
-        self.assertIn('192.168.1.1:8080', hosts)
 
 
 # ── Task 1.5 — images list raw values ────────────────────────────────────────
@@ -615,103 +620,67 @@ class TestSecretListJson(unittest.TestCase):
         self.assertEqual(data['credentials'][0]['size'], 100)
 
 
-# ── Task 2.3 — uid-map --json ────────────────────────────────────────────────
+# ── Task 2.3 — _read_subid (uid/subid data folded into info) ─────────────────
 
-class TestUidMapJson(unittest.TestCase):
+class TestReadSubid(unittest.TestCase):
+    """Tests for _read_subid(), the subuid/subgid file parser used by cmd_info."""
 
-    def _fake_open(self, username, subuid_start=100000, subuid_count=65536):
+    def _fake_open(self, username, start=100000, count=65536):
         import builtins
         real_open = builtins.open
 
         def fake(path, *args, **kwargs):
             if str(path) == '/etc/subuid':
-                return io.StringIO(f'{username}:{subuid_start}:{subuid_count}\n')
+                return io.StringIO(f'{username}:{start}:{count}\n')
             if str(path) == '/etc/subgid':
-                return io.StringIO(f'{username}:{subuid_start}:{subuid_count}\n')
+                return io.StringIO(f'{username}:{start}:{count}\n')
             return real_open(path, *args, **kwargs)
 
         return fake
 
-    def _mock_pw(self, uid=20001, gid=20001):
-        pw = MagicMock()
-        pw.pw_uid = uid
-        pw.pw_gid = gid
-        return pw
+    def test_returns_start_and_count(self):
+        with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl', 100000, 65536)):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertEqual(start, 100000)
+        self.assertEqual(count, 65536)
 
-    def test_shape(self):
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        for key in ('workload', 'username', 'host_uid', 'host_gid',
-                    'subuid', 'subgid', 'userns_mode', 'mapped_uid', 'mapped_gid'):
-            self.assertIn(key, data, f'missing key: {key}')
-
-    def test_default_keep_id_mapped_uid_equals_host_uid(self):
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw(uid=20001, gid=20001)):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        self.assertEqual(data['host_uid'], 20001)
-        self.assertEqual(data['mapped_uid'], 20001)
-        self.assertEqual(data['subuid'], {'start': 100000, 'count': 65536})
-
-    def test_keep_id_with_uid_gid_override(self):
-        toml = """\
-[workload]
-name = "test-wl"
-enabled = false
-
-[container]
-image = "example.com/test:latest"
-
-[security]
-userns = "keep-id:uid=999,gid=888"
-"""
-        with _WorkloadDir(toml, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl')):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
-
-        self.assertEqual(data['mapped_uid'], 999)
-        self.assertEqual(data['mapped_gid'], 888)
-        self.assertEqual(data['userns_mode'], 'keep-id:uid=999,gid=888')
-
-    def test_subuid_null_when_not_configured(self):
+    def test_returns_none_none_when_no_entry(self):
         import builtins
         real_open = builtins.open
 
-        def no_subuid(path, *args, **kwargs):
+        def no_entry(path, *args, **kwargs):
             if str(path) in ('/etc/subuid', '/etc/subgid'):
                 return io.StringIO('')
             return real_open(path, *args, **kwargs)
 
-        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
-            args = _args(workload='test-wl', json=True)
-            m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=True)
-            with patch('pwd.getpwnam', return_value=self._mock_pw()):
-                with patch('builtins.open', side_effect=no_subuid):
-                    data = _capture_json(lambda: cmd_admin.cmd_uid_map(args, m))
+        with patch('builtins.open', side_effect=no_entry):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
+        self.assertIsNone(count)
 
-        self.assertIsNone(data['subuid']['start'])
-        self.assertIsNone(data['subuid']['count'])
+    def test_returns_none_none_when_file_missing(self):
+        with patch('builtins.open', side_effect=FileNotFoundError):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
+        self.assertIsNone(count)
+
+    def test_ignores_other_users(self):
+        import builtins
+        real_open = builtins.open
+
+        def other_user(path, *args, **kwargs):
+            if str(path) == '/etc/subuid':
+                return io.StringIO('other-user:200000:65536\n')
+            return real_open(path, *args, **kwargs)
+
+        with patch('builtins.open', side_effect=other_user):
+            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+        self.assertIsNone(start)
 
 
-# ── Task 2.4 — verify --json ─────────────────────────────────────────────────
+# ── Task 2.4 — diagnose --json ───────────────────────────────────────────────
 
-class TestVerifyJson(unittest.TestCase):
+class TestDiagnoseJson(unittest.TestCase):
 
     def _run_no_user(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
@@ -729,7 +698,7 @@ class TestVerifyJson(unittest.TestCase):
 
             with patch.object(cmd_admin, 'require_root'):
                 with patch('subprocess.run', side_effect=fake_run):
-                    return _capture_json_exitok(lambda: cmd_admin.cmd_verify(args, m))
+                    return _capture_json_exitok(lambda: cmd_admin.cmd_diagnose(args, m))
 
     def test_top_level_shape(self):
         data = self._run_no_user()
@@ -967,7 +936,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=98304):
                         data = _capture_json(
@@ -985,7 +954,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=0):
                         data = _capture_json(
@@ -998,7 +967,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload=None, json=True, all=True,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=4096):
                         data = _capture_json(
@@ -1011,7 +980,7 @@ class TestBackupJson(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
                 args = _args(workload='test-wl', json=True, all=False,
-                             output=out_tmp, no_stop=False)
+                             output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', return_value=1024):
                         data = _capture_json(
@@ -1021,40 +990,144 @@ class TestBackupJson(unittest.TestCase):
         self.assertTrue(archive.startswith(out_tmp))
         self.assertIn('test-wl', archive)
 
-    def test_vm_no_stop_single_refused(self):
-        # --no-stop on a VM risks a corrupt live qcow2 → hard refuse, no backup.
+    def test_vm_crash_consistency_accepted(self):
+        # --consistency crash on a VM is now valid (QMP-paused path).
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(VM_TOML, 'test-vm'):
-                args = _args(workload='test-vm', json=False, all=False,
-                             output=out_tmp, no_stop=True)
-                mock_backup = MagicMock(return_value=0)
+                args = _args(workload='test-vm', json=True, all=False,
+                             output=out_tmp, consistency='crash')
+                mock_backup = MagicMock(return_value=1024)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        with patch('sys.stderr', io.StringIO()):
-                            with self.assertRaises(SystemExit) as cm:
-                                cmd_backup.cmd_backup(args, WorkloadManager())
-        self.assertEqual(cm.exception.code, 1)
-        mock_backup.assert_not_called()
+                        data = _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+        mock_backup.assert_called_once()
+        # Verify consistency='crash' was threaded through
+        _, call_kwargs = mock_backup.call_args
+        self.assertEqual(call_kwargs.get('consistency') or mock_backup.call_args[0][2], 'crash')
 
-    def test_vm_no_stop_all_skips_vm_keeps_container(self):
-        # --no-stop --all: skip the VM (with a skipped[] entry) but still back up containers.
+    def test_vm_crash_all_backs_up_both(self):
+        # --consistency crash --all: both container and VM workloads are backed up.
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
                 (wdir / 'test-vm.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
-                             output=out_tmp, no_stop=True)
+                             output=out_tmp, consistency='crash')
                 mock_backup = MagicMock(return_value=4096)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        with patch('sys.stderr', io.StringIO()):
-                            data = _capture_json(
-                                lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+                        data = _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
 
         backed_up = {b['workload'] for b in data['backups']}
         self.assertIn('test-wl', backed_up)
-        self.assertNotIn('test-vm', backed_up)
-        self.assertEqual(data.get('skipped'), ['test-vm'])
-        self.assertEqual(mock_backup.call_count, 1)
+        self.assertIn('test-vm', backed_up)
+        self.assertNotIn('skipped', data)
+        self.assertEqual(mock_backup.call_count, 2)
+
+    def test_all_isolates_backup_error(self):
+        # A BackupError on one workload (e.g. a VM with an unreachable QMP
+        # monitor) must NOT abort the whole --all run: the others still get
+        # backed up, the failure is reported under 'failed', and the command
+        # exits nonzero.
+        def fake_backup(config, output, consistency, quiet=False):
+            if config.name == 'test-vm':
+                raise substrate.BackupError("QMP unreachable for VM 'test-vm'")
+            return 4096
+
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=out_tmp, consistency='crash')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', side_effect=fake_backup):
+                        # cmd exits nonzero because one workload failed.
+                        data = _capture_json_exitok(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+
+        backed_up = {b['workload'] for b in data['backups']}
+        self.assertEqual(backed_up, {'test-wl'})  # the good one still ran
+        self.assertIn('failed', data)
+        failed = {f['workload'] for f in data['failed']}
+        self.assertEqual(failed, {'test-vm'})
+
+    def test_all_output_file_rejected(self):
+        # --all with --output pointing at an existing regular file must error
+        # (otherwise every workload would clobber the same archive).
+        with tempfile.TemporaryDirectory() as out_tmp:
+            out_file = Path(out_tmp) / "single.tar.zst"
+            out_file.write_text("")  # exists as a regular file, not a dir
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=str(out_file), consistency='cold')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', return_value=4096):
+                        with patch('sys.stderr', io.StringIO()):
+                            with self.assertRaises(SystemExit) as cm:
+                                cmd_backup.cmd_backup(args, WorkloadManager())
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_all_output_dir_gives_distinct_archives(self):
+        # --all with --output dir writes one distinct archive per workload.
+        seen = []
+
+        def fake_backup(config, output, consistency, quiet=False):
+            seen.append(str(output))
+            return 4096
+
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
+                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                args = _args(workload=None, json=True, all=True,
+                             output=out_tmp, consistency='cold')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one', side_effect=fake_backup):
+                        _capture_json(
+                            lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(set(seen)), 2)  # distinct per-workload paths
+        for p in seen:
+            self.assertTrue(p.startswith(out_tmp))
+
+    def test_backup_one_normalizes_copy_fault(self):
+        # A cold-path copy fault (tar exits nonzero, disk full, permission) must
+        # be normalized to BackupError so the --all loop can isolate it instead
+        # of aborting the whole run with a traceback.
+        import subprocess
+        cfg = types.SimpleNamespace(name='test-wl')
+        sub = MagicMock()
+        sub.capture.side_effect = subprocess.CalledProcessError(2, ['tar'])
+        with patch.object(cmd_backup, 'get_substrate', return_value=sub):
+            with self.assertRaises(substrate.BackupError):
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'cold')
+
+    def test_backup_one_passes_through_backup_error(self):
+        # An existing BackupError (e.g. QMP unreachable) is re-raised unchanged,
+        # not re-wrapped.
+        cfg = types.SimpleNamespace(name='test-vm')
+        sub = MagicMock()
+        original = substrate.BackupError("QMP unreachable for VM 'test-vm'")
+        sub.capture.side_effect = original
+        with patch.object(cmd_backup, 'get_substrate', return_value=sub):
+            with self.assertRaises(substrate.BackupError) as cm:
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'crash')
+        self.assertIs(cm.exception, original)
+
+    def test_all_nonzero_exit_on_failure(self):
+        # The single-workload / --all failure path must signal nonzero exit.
+        with tempfile.TemporaryDirectory() as out_tmp:
+            with _WorkloadDir(VM_TOML, 'test-vm'):
+                args = _args(workload='test-vm', json=True, all=False,
+                             output=out_tmp, consistency='crash')
+                with patch.object(cmd_backup, 'require_root'):
+                    with patch.object(cmd_backup, '_backup_one',
+                                      side_effect=substrate.BackupError("boom")):
+                        with patch('sys.stdout', io.StringIO()):
+                            with self.assertRaises(SystemExit) as cm:
+                                cmd_backup.cmd_backup(args, WorkloadManager())
+        self.assertNotEqual(cm.exception.code, 0)
 
 
 class TestBackupImageStoreExclude(unittest.TestCase):

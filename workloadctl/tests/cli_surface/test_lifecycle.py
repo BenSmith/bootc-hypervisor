@@ -140,9 +140,9 @@ class TestCreate:
                 f"create --image docker.io/library/caddy:2-alpine --ports 19099:80 {name}",
                 check=True,
             )
-            r = target.wl(f"ports --json {name}", check=True)
+            r = target.wl(f"info --json {name}", check=True)
             data = json.loads(r.stdout)
-            ports = data.get("ports", [])
+            ports = data["network"]["ports"]
             assert any("19099" in p for p in ports), f"Port not found in: {ports}"
         finally:
             target.run(["rm", "-f", toml_path], sudo=True, check=False)

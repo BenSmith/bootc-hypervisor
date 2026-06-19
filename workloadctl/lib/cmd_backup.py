@@ -24,7 +24,7 @@ from workloadctl_core import (
     require_root,
     WORKLOAD_DIR,
 )
-from substrate import get_substrate
+from substrate import get_substrate, BackupError
 
 CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 BACKUP_DIR = WORKLOADS_BASE / "backups"
@@ -34,11 +34,11 @@ BACKUP_DIR = WORKLOADS_BASE / "backups"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool = False) -> int:
+def _backup_one(config: WorkloadConfig, output: Path, consistency: str, quiet: bool = False) -> int:
     """Create a backup archive for a single workload. Returns size in bytes.
 
     Routes through the Substrate port so VM backups are safe (excludes
-    rebuild artifacts; refuses --no-stop which risks a corrupt live disk).
+    rebuild artifacts; uses QMP-paused copy for crash-consistent VM backups).
 
     Archive layout:
         workload.toml           — the config file
@@ -47,7 +47,19 @@ def _backup_one(config: WorkloadConfig, output: Path, no_stop: bool, quiet: bool
                                   VM rebuild artifacts excluded)
     """
     substrate = get_substrate(config, None)
-    return substrate.capture(output, no_stop=no_stop, quiet=quiet)
+    try:
+        return substrate.capture(output, consistency=consistency, quiet=quiet)
+    except BackupError:
+        # Already a clean per-workload failure (e.g. QMP unreachable on a VM);
+        # the substrate printed its diagnostic. Let the caller isolate it.
+        raise
+    except (subprocess.CalledProcessError, OSError, shutil.Error) as e:
+        # Normalize copy/IO faults (tar exited nonzero, disk full, a permission
+        # error, a missing path) into BackupError so a single bad workload can't
+        # abort a whole --all run with a traceback — same isolation the crash
+        # path already gets. The underlying tool's stderr is already on the
+        # terminal; this just adds the workload context.
+        raise BackupError(f"backup of '{config.name}' failed: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -71,28 +83,24 @@ def cmd_backup(args, manager: WorkloadManager):
             sys.exit(1)
         configs = [WorkloadConfig(args.workload)]
 
+    # In --all mode every workload gets its own archive, so --output names a
+    # directory; a single file path would clobber every archive into one.
+    if args.all and args.output:
+        out_dir = Path(args.output)
+        if out_dir.exists() and not out_dir.is_dir():
+            print(f"Error: --output must be a directory when using --all "
+                  f"(got a file: {out_dir})", file=sys.stderr)
+            sys.exit(1)
+
     backups = []
-    skipped = []
+    failed = []
     for config in configs:
         name = config.name
 
-        # VM live-backup guard: tarring a running qcow2 without guest-agent
-        # fsfreeze + QMP quiesce can capture a torn, unbootable image. Until that
-        # quiesce path exists, refuse --no-stop for VMs rather than silently risk a
-        # corrupt backup. (Containers back up a stopped rootfs/volumes and are unaffected.)
-        if args.no_stop and config.is_vm:
-            msg = (f"--no-stop is unsafe for VM workload '{name}': backing up a live "
-                   f"qcow2 without guest quiesce can produce a corrupt image. "
-                   f"Re-run without --no-stop for a consistent (stopped) backup.")
-            if args.all:
-                if not args.json:
-                    print(f"  Skipping {name}: {msg}", file=sys.stderr)
-                skipped.append(name)
-                continue
-            print(f"Error: {msg}", file=sys.stderr)
-            sys.exit(1)
-
-        if args.output:
+        if args.all:
+            out_dir = Path(args.output) if args.output else BACKUP_DIR
+            output = out_dir / f"{name}-{timestamp}.tar.zst"
+        elif args.output:
             output = Path(args.output)
             if output.is_dir():
                 output = output / f"{name}-{timestamp}.tar.zst"
@@ -101,19 +109,33 @@ def cmd_backup(args, manager: WorkloadManager):
 
         if not args.json:
             print(f"Backing up: {name}")
-        size_bytes = _backup_one(config, output, args.no_stop, quiet=args.json)
+        try:
+            size_bytes = _backup_one(config, output, args.consistency, quiet=args.json)
+        except BackupError as e:
+            # Isolate per-workload backup faults (a VM whose QMP monitor is
+            # unreachable, or a copy that failed) so one bad workload can't abort
+            # a whole --all run. A diagnostic was already printed to stderr — by
+            # the substrate for QMP faults, or by the underlying tool (tar, etc.)
+            # for copy faults — and the message is also recorded under 'failed'.
+            failed.append({"workload": name, "error": str(e)})
+            continue
         backups.append({"workload": name, "archive": str(output), "size_bytes": size_bytes})
 
     if args.json:
         result = {"backups": backups}
-        if skipped:
-            result["skipped"] = skipped
+        if failed:
+            result["failed"] = failed
         print(json.dumps(result, indent=2))
     elif args.all:
         print(f"\nBacked up {len(backups)} workload(s)")
-        if skipped:
-            print(f"Skipped {len(skipped)} VM workload(s) (--no-stop unsafe): "
-                  f"{', '.join(skipped)}")
+        if failed:
+            print(f"Failed to back up {len(failed)} workload(s): "
+                  f"{', '.join(f['workload'] for f in failed)}", file=sys.stderr)
+
+    # Surface partial/total failure with a nonzero exit (covers both the
+    # single-workload path and --all).
+    if failed:
+        sys.exit(1)
 
 
 def cmd_restore(args, manager: WorkloadManager):

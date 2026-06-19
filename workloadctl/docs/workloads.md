@@ -132,10 +132,8 @@ Workloads with `enabled = true` will be provisioned automatically on first boot.
 | **Validate config** | `workloadctl validate NAME` |
 | **Edit config** | `sudo workloadctl edit NAME` |
 | **Monitor resources** | `workloadctl stats [-f] [NAME]` |
-| **Show ports** | `workloadctl ports NAME` |
 | **Check health** | `workloadctl health NAME` |
 | **Copy files** | `workloadctl cp SRC DEST` |
-| **List containers** | `workloadctl ps` |
 | **Manage images** | `workloadctl images list\|prune` |
 | **Manage secrets** | `sudo workloadctl secret create\|list\|show\|rotate\|delete NAME` |
 | **Export/import secrets** | `sudo workloadctl secret export\|import NAME` |
@@ -1144,11 +1142,9 @@ sudo workloadctl update --all         # Update all enabled workloads (skips pull
 
 **Show detailed information:**
 ```bash
-workloadctl info NAME                 # Comprehensive workload info
-workloadctl ports NAME                # Port information
+workloadctl info NAME                 # Comprehensive workload info (ports, subids, …)
 workloadctl stats NAME                # Resource usage
 workloadctl stats -f                  # All workloads, live updating
-workloadctl ps                        # List all running containers
 ```
 
 **Configuration management:**
@@ -1167,7 +1163,6 @@ workloadctl health NAME               # Comprehensive health check
 ```bash
 workloadctl cp NAME:/path/in/container ./local/path
 workloadctl cp ./local/path NAME:/path/in/container
-workloadctl attach NAME               # Attach to container process
 ```
 
 **Image management:**
@@ -1309,8 +1304,9 @@ The service is stopped during backup for a consistent snapshot, then restarted. 
 # Backup to a specific path
 sudo workloadctl backup pihole --output /mnt/backup/
 
-# Live backup (no service stop — may be inconsistent)
-sudo workloadctl backup pihole --no-stop
+# Live backup (no service stop). For containers this may be inconsistent;
+# for VMs the vCPUs are paused via QMP for the copy (crash-consistent).
+sudo workloadctl backup pihole --consistency crash
 
 # Backup all workloads
 sudo workloadctl backup --all
@@ -1679,10 +1675,6 @@ workloadctl exec NAME ps aux
 
 # Monitor resources
 workloadctl stats NAME
-workloadctl ps                       # All running containers
-
-# Check ports
-workloadctl ports NAME
 ```
 
 ### Common Issues and Solutions
@@ -1724,7 +1716,7 @@ sudo ss -tlnp | grep :8080
 
 # Check all workload ports
 workloadctl list
-workloadctl ports NAME
+workloadctl info NAME
 
 # Either change the port in config or stop conflicting service
 sudo workloadctl edit NAME  # Change port mapping
@@ -1920,8 +1912,9 @@ sudo systemctl start workload-{name}
 
 **Example - Custom network:**
 ```bash
-# Create network as workload user
-sudo -u _wl-app XDG_RUNTIME_DIR=/run/user/10001 podman network create mynetwork
+# Create the network as the workload user. `incant` supplies the rootless
+# invocation (sudo -u _wl-app + XDG_RUNTIME_DIR) for you:
+workloadctl incant app -- network create mynetwork
 
 # Configure workloads to use it
 [network]

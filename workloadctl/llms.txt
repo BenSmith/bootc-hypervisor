@@ -136,7 +136,7 @@ workloadctl loads alongside the workload module on `enable`. See
 | `workloadctl exec` | Execute command in container |
 | `workloadctl edit` | Edit config in $EDITOR with validation |
 | `workloadctl validate` | Validate TOML config |
-| `workloadctl verify` | Verify runtime setup (user, subuid, linger, image) |
+| `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux) |
 | `workloadctl stats` | Show live resource usage |
 | `workloadctl health` | Check container health status |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |

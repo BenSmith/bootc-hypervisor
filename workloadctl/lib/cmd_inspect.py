@@ -1,6 +1,6 @@
 """
 cmd_inspect — workload inspection/status commands:
-list, status, info, ps, network, ports, images, health, stats.
+list, status, info, network, images, health, stats.
 """
 
 import datetime
@@ -34,7 +34,7 @@ from workloadctl_core import (
     resolve_container_target,
     WORKLOAD_DIR,
 )
-from cmd_lifecycle import _effective_state, _gating_units
+from cmd_lifecycle import _effective_state
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +53,24 @@ def _systemctl_show(unit: str, properties: list[str], extra_args: list[str] | No
         if key:
             result[key] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _read_subid(username: str, path: str) -> tuple:
+    """Return (start, count) from /etc/subuid or /etc/subgid, or (None, None)."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith(f"{username}:"):
+                    parts = line.strip().split(":")
+                    if len(parts) == 3:
+                        return int(parts[1]), int(parts[2])
+    except (FileNotFoundError, ValueError):
+        pass
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -264,199 +282,16 @@ def cmd_status(args, manager: WorkloadManager):
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
-    if config.is_vm:
-        # Show the setup + system-disk build units alongside the main one: when
-        # a VM fails to start the cause is almost always one of these, and the
-        # main unit only reports a bland 'dependency failed'.
-        units = _gating_units(config) + [config.service_name]
+    gating = get_substrate(config, None).gating_units()
+    if gating:
+        # Show setup/build units alongside the main one: when a workload fails
+        # to start the cause is often in a gating unit, and the main unit only
+        # reports a bland 'dependency failed'.
+        units = gating + [config.service_name]
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
     subprocess.run(["systemctl", "status", config.service_name])
-
-
-# ---------------------------------------------------------------------------
-# cmd_ps
-# ---------------------------------------------------------------------------
-
-def cmd_ps(args, manager: WorkloadManager):
-    """Show all running workload containers"""
-    # Get all workload users
-    users = []
-    for entry in pwd.getpwall():
-        if entry.pw_name.startswith(USERNAME_PREFIX):
-            users.append(entry.pw_name)
-
-    users.sort()
-
-    if args.json:
-        # Collect container info for JSON output
-        containers_data = []
-        for username in users:
-            try:
-                uid = pwd.getpwnam(username).pw_uid
-                home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
-                rows = Podman.for_user(username, uid, home).list_containers(all=False)
-                for container in rows:
-                    containers_data.append({
-                        "username": username,
-                        "uid": uid,
-                        "id": container.get("Id", ""),
-                        "name": container.get("Names", [""])[0] if container.get("Names") else "",
-                        "image": container.get("Image", ""),
-                        "status": container.get("Status", ""),
-                        "created": container.get("Created", ""),
-                    })
-            except Exception:
-                continue
-
-        print(json.dumps({"containers": containers_data}, indent=2))
-        return
-
-    # Human-readable output
-    print("Workload containers:")
-    print()
-
-    found = False
-    for username in users:
-        try:
-            uid = pwd.getpwnam(username).pw_uid
-            home = str(WORKLOADS_BASE / username[len(USERNAME_PREFIX):])
-            if Podman.for_user(username, uid, home).list_containers(all=False):
-                found = True
-                print(f"=== {username} (UID {uid}) ===")
-                Podman.for_user(username, uid, home).run("ps")
-                print()
-        except Exception:
-            continue
-
-    if not found:
-        print("  No running workload containers found")
-
-
-# ---------------------------------------------------------------------------
-# cmd_network
-# ---------------------------------------------------------------------------
-
-def cmd_network(args, manager: WorkloadManager):
-    """Manage podman networks"""
-    from podman import PodmanError
-    if args.subcommand == "create":
-        # Get workload config
-        config = WorkloadConfig(args.workload)
-        network_name = args.network_name
-
-        print(f"Creating network '{network_name}' for user {config.username} (UID {config.uid})...")
-
-        try:
-            manager.podman(config).network_create(network_name)
-        except PodmanError as e:
-            print(f"Error creating network: {e.stderr}", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ Network '{network_name}' created successfully")
-        print("\nTo use this network in a workload, add to your TOML config:")
-        print("  [network]")
-        print(f"  mode = \"{network_name}\"")
-
-
-# ---------------------------------------------------------------------------
-# cmd_ports
-# ---------------------------------------------------------------------------
-
-def cmd_ports(args, manager: WorkloadManager):
-    """Show port information"""
-    config = WorkloadConfig(args.workload)
-
-    network_mode = config.get_network_mode()
-    ports = config.get_ports()
-
-    port_data = {
-        "workload": config.name,
-        "network_mode": network_mode,
-        "ports": ports,
-        "accessible_at": []
-    }
-
-    if ports:
-        if network_mode == "host":
-            result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
-            ips = result.stdout.strip().split() if result.returncode == 0 else []
-
-            for port_spec in ports:
-                port = port_spec.split(':')[-1].split('/')[0]
-                port_data["accessible_at"].append({"host": f"localhost:{port}", "container": None})
-                for ip in ips:
-                    port_data["accessible_at"].append({"host": f"{ip}:{port}", "container": None})
-            port_data["note"] = "Host networking - container ports directly accessible on host"
-        else:
-            for port_spec in ports:
-                parts = port_spec.split('/')[0].split(':')  # drop /tcp,/udp proto
-                if len(parts) == 3:
-                    # ip:hostPort:containerPort (empty hostPort => dynamic)
-                    ip, host_port, container_port = parts
-                    host = ip or "localhost"
-                    host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
-                    port_data["accessible_at"].append({
-                        "host": host_disp,
-                        "container": container_port,
-                    })
-                elif len(parts) == 2:
-                    host_port, container_port = parts
-                    host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
-                    port_data["accessible_at"].append({
-                        "host": host_disp,
-                        "container": container_port,
-                    })
-                else:
-                    port_data["accessible_at"].append({
-                        "host": f"localhost:{parts[0]}",
-                        "container": None,
-                    })
-
-    if args.json:
-        print(json.dumps(port_data, indent=2))
-        return
-
-    # Human-readable output
-    print(f"Workload: {config.name}")
-    print(f"Network Mode: {network_mode}")
-    print()
-
-    if not ports:
-        print("No ports configured")
-        return
-
-    print("Container listens on:")
-    for port in ports:
-        print(f"  {port}")
-
-    print()
-    print("Accessible at:")
-
-    if network_mode == "host":
-        result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
-        ips = result.stdout.strip().split() if result.returncode == 0 else []
-        for port_spec in ports:
-            port = port_spec.split(':')[-1].split('/')[0]
-            print(f"  localhost:{port}")
-            for ip in ips:
-                print(f"  {ip}:{port}")
-        print()
-        print("Note: Host networking - container ports directly accessible on host")
-    else:
-        for port_spec in ports:
-            parts = port_spec.split('/')[0].split(':')  # drop /tcp,/udp proto
-            if len(parts) == 3:
-                ip, host_port, container_port = parts
-                host = ip or "localhost"
-                host_disp = f"{host}:{host_port}" if host_port else f"{host}:(dynamic)"
-                print(f"  {host_disp} → container:{container_port}")
-            elif len(parts) == 2:
-                host_port, container_port = parts
-                host_disp = f"localhost:{host_port}" if host_port else "localhost:(dynamic)"
-                print(f"  {host_disp} → container:{container_port}")
-            else:
-                print(f"  localhost:{parts[0]}")
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +403,7 @@ def _vm_qmp_status(name: str) -> str | None:
 
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
-    from cmd_interact import _vm_guest_ip
+    from substrate import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
     user_exists = manager.user_exists(config)
@@ -591,6 +426,16 @@ def cmd_info(args, manager: WorkloadManager):
 
         # QMP status
         qmp_status = _vm_qmp_status(config.name)
+
+        # User identity
+        vm_uid = None
+        if user_exists:
+            try:
+                vm_uid = config.uid
+            except Exception:
+                pass
+        vm_subuid_start, vm_subuid_count = _read_subid(config.username, "/etc/subuid") if user_exists else (None, None)
+        vm_subgid_start, vm_subgid_count = _read_subid(config.username, "/etc/subgid") if user_exists else (None, None)
 
         # Service state
         svc_props = _systemctl_show(
@@ -621,7 +466,13 @@ def cmd_info(args, manager: WorkloadManager):
                 "guest_ip": guest_ip,
                 "qmp_status": qmp_status,
             },
-            "user": {"name": config.username, "exists": user_exists},
+            "user": {
+                "name": config.username,
+                "uid": vm_uid,
+                "exists": user_exists,
+                "subuid": {"start": vm_subuid_start, "count": vm_subuid_count},
+                "subgid": {"start": vm_subgid_start, "count": vm_subgid_count},
+            },
             "service": {"name": config.service_name, "state": service_state,
                         "active_since": active_since},
         }
@@ -649,6 +500,16 @@ def cmd_info(args, manager: WorkloadManager):
             print(f"  Guest IP:   {guest_ip}")
         if qmp_status:
             print(f"  QMP status: {qmp_status}")
+        print()
+        print("User:")
+        print(f"  Name: {config.username}")
+        if user_exists:
+            if vm_uid is not None:
+                print(f"  UID:    {vm_uid}")
+            if vm_subuid_start is not None:
+                print(f"  SubUID: {vm_subuid_start} ({vm_subuid_count} IDs)")
+            if vm_subgid_start is not None:
+                print(f"  SubGID: {vm_subgid_start} ({vm_subgid_count} IDs)")
         print()
         print("Service:")
         print(f"  Name: {config.service_name}")
@@ -703,6 +564,8 @@ def cmd_info(args, manager: WorkloadManager):
             groups = [_grp.getgrgid(gid).gr_name for gid in os.getgrouplist(config.username, pw.pw_gid)]
         except (KeyError, OSError):
             pass
+    subuid_start, subuid_count = _read_subid(config.username, "/etc/subuid") if user_exists else (None, None)
+    subgid_start, subgid_count = _read_subid(config.username, "/etc/subgid") if user_exists else (None, None)
 
     # Storage
     storage_home = None
@@ -749,11 +612,14 @@ def cmd_info(args, manager: WorkloadManager):
             "uid": uid,
             "exists": user_exists,
             "home": user_home,
-            "groups": groups
+            "groups": groups,
+            "subuid": {"start": subuid_start, "count": subuid_count},
+            "subgid": {"start": subgid_start, "count": subgid_count},
         },
         "network": {
             "mode": config.get_network_mode(),
-            "ports": config.get_ports()
+            "ports": config.get_ports(),
+            "accessible_at": get_substrate(config, manager).endpoints(),
         },
         "storage": {
             "home": storage_home,
@@ -800,6 +666,10 @@ def cmd_info(args, manager: WorkloadManager):
             print(f"  Home:   {user_home}")
         if groups is not None:
             print(f"  Groups: {','.join(groups)}")
+        if subuid_start is not None:
+            print(f"  SubUID: {subuid_start} ({subuid_count} IDs)")
+        if subgid_start is not None:
+            print(f"  SubGID: {subgid_start} ({subgid_count} IDs)")
     else:
         print("  (User not created - workload not enabled)")
     print()
@@ -808,6 +678,14 @@ def cmd_info(args, manager: WorkloadManager):
     print(f"  Mode:   {info_data['network']['mode']}")
     if info_data["network"]["ports"]:
         print(f"  Ports:  {', '.join(info_data['network']['ports'])}")
+        accessible = info_data["network"]["accessible_at"]
+        if accessible:
+            print("  Accessible at:")
+            for ep in accessible:
+                if ep["container"]:
+                    print(f"    {ep['host']} → container:{ep['container']}")
+                else:
+                    print(f"    {ep['host']}")
     print()
 
     print("Storage:")

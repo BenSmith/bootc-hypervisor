@@ -138,29 +138,50 @@ def _wait_container_running(target: Target, name: str, timeout: int = 120):
     """Poll until at least one of the workload's containers is Up.
 
     Closes the Type=exec readiness gap: the unit can be `active` while the
-    container is still coming up. A workload's podman container names all
-    contain the workload name (workload-<name>[-<container>]).
+    container is still coming up.
+
+    We use `health --json`, which reports the real podman container state (it
+    queries `podman container_status` under the hood): a single-container
+    workload exposes a `container_running` entry in `checks[]`, while pod/bridge
+    workloads expose a per-container `running` flag in `containers[]`. We key off
+    that container-running signal only, NOT overall health — other health checks
+    (port reachability, a configured healthcheck) can lag behind the container
+    actually being up, and we just want "is it running yet". `health` exits 1
+    when unhealthy, so accept any rc and inspect the JSON.
     """
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
-        r = target.wl("ps --json", sudo=True, check=False)
-        if r.rc == 0 and r.stdout.strip():
+        r = target.wl(f"health --json {name}", sudo=True, check=False)
+        if r.stdout.strip():
             try:
-                containers = json.loads(r.stdout).get("containers", [])
+                data = json.loads(r.stdout)
             except json.JSONDecodeError:
-                containers = []
-            last = ", ".join(
-                f"{c.get('name', '')}:{c.get('status', '')}" for c in containers
-            )
-            for c in containers:
-                if name in c.get("name", "") and c.get("status", "").startswith("Up"):
-                    return
+                data = {}
+            last = json.dumps(data.get("checks") or data.get("containers") or data)
+            if _health_reports_container_running(data):
+                return
         time.sleep(2)
     raise TimeoutError(
         f"No running container for workload {name!r} within {timeout}s; "
-        f"last ps saw: [{last}]"
+        f"last health saw: [{last}]"
     )
+
+
+def _health_reports_container_running(health_data: dict) -> bool:
+    """True if `health --json` shows at least one container actually running.
+
+    Single-container health is a flat `checks[]` list carrying a
+    `container_running` check; pod/bridge health is a `containers[]` list with a
+    per-container `running` flag. Handle both shapes.
+    """
+    for c in health_data.get("containers", []):
+        if c.get("running"):
+            return True
+    for chk in health_data.get("checks", []):
+        if chk.get("check") == "container_running" and chk.get("healthy"):
+            return True
+    return False
 
 
 def _purge_workload(target: Target, name: str):

@@ -24,7 +24,7 @@ workloadctl health myapp           # per-container health table
 
 For multi-container workloads, `exec` and `shell` **require** the `<workload>/<container>` form — a bare `<workload>` errors and lists the available containers. `logs` and `health` accept both forms.
 
-Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `ps`, `ports`, `stats`, `attach`, `cp` likewise take a bare workload name.
+Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `stats`, `cp` likewise take a bare workload name.
 
 ---
 
@@ -163,12 +163,16 @@ For `cloud_image_url`, the downloaded image is cached at `.image-cache/<filename
 Roll back a workload to its previous image or disk generation.
 
 ```
-sudo workloadctl rollback <workload>
+sudo workloadctl rollback [--list] <workload>
 ```
+
+| Option | Description |
+|---|---|
+| `--list` | List the available rollback targets instead of rolling back |
 
 **Container workloads:** Restores the image saved during the last `update` (tagged as `localhost/workload-rollback/<name>:latest`) and restarts the service. Exits with an error if no rollback image exists.
 
-**VM workloads:** Restores the latest `system.qcow2.gen-N` saved during the last `update` and restarts the VM. `vm.rollback_keep` (default 2) is the number of *older* generations retained beyond the one created by the current update, so `rollback_keep + 1` generations are kept in total (default: 3). Exits with an error if no generation exists.
+**VM workloads:** Restores the latest `system.qcow2.gen-N` saved during the last `update` and restarts the VM. `vm.rollback_keep` (default 2) is the number of *older* generations retained beyond the one created by the current update, so `rollback_keep + 1` generations are kept in total (default: 3). Exits with an error if no generation exists. A `pet` VM never rotates `system.qcow2`, so it has no generations to roll back to.
 
 ---
 
@@ -208,7 +212,7 @@ workloadctl status [--json] <workload>
 
 ### `info`
 
-Show detailed workload information: config, user, UID, home directory, image, ports, volumes.
+Show detailed workload information: config, user, UID, subuid/subgid ranges, home directory, image, ports, volumes.
 
 ```
 workloadctl info [--json] <workload>
@@ -227,22 +231,6 @@ workloadctl logs [-f] [-n N] [--since TIME] <workload>[/<container>] [extra jour
 | `-f` / `--follow` | Stream live log output |
 | `-n N` / `--lines N` | Show last N lines |
 | `--since TIME` | Show logs since TIME (journalctl format, e.g., `"1 hour ago"`) |
-
-### `ps`
-
-Show all currently running workload containers.
-
-```
-workloadctl ps [--json]
-```
-
-### `ports`
-
-Show port mappings for a workload.
-
-```
-workloadctl ports [--json] <workload>
-```
 
 ### `stats`
 
@@ -272,18 +260,6 @@ List or prune container images for workload users.
 ```
 workloadctl images [--json] [list|prune]
 ```
-
-### `uid-map`
-
-Show the UID/GID mapping for a workload (host UID → container UID via user namespace).
-
-```
-workloadctl uid-map [--json] <workload>
-```
-
-| Option | Description |
-|---|---|
-| `--json` | Output host UIDs, subuid ranges, and mapped container UIDs as JSON |
 
 ---
 
@@ -320,14 +296,6 @@ workloadctl exec myapp/db psql -U app
 workloadctl exec fedora-vm -- dnf upgrade -y
 ```
 
-### `attach`
-
-Attach to the container's main process (stdin/stdout/stderr).
-
-```
-workloadctl attach <workload>
-```
-
 ### `cp`
 
 Copy files to or from a running workload container.
@@ -341,6 +309,28 @@ Use `workload:path` syntax for container paths:
 ```bash
 workloadctl cp webserver:/etc/nginx/nginx.conf ./nginx.conf
 workloadctl cp ./nginx.conf webserver:/etc/nginx/nginx.conf
+```
+
+### `incant`
+
+Run a raw command against the workload's runtime **control plane** as the owning identity, with the fiddly invocation supplied for you. This is an escape hatch — it bypasses the declarative TOML → units model, so prefer the purpose-built verbs (`update`, `rollback`, `shell`, `exec`, …) when they cover your use case.
+
+```
+workloadctl incant <workload>[/<container>] -- <command> [args...]
+```
+
+**Container workloads:** runs `podman <command>` as the owning `_wl-<name>` user with the correct rootless environment (`XDG_RUNTIME_DIR`/session bus) — you never hand-build the `sudo … podman` invocation yourself. This replaces the old `network create` verb.
+
+**VM workloads:** sends a QMP command to the QEMU monitor. The first token after `--` is the QMP command name; additional `key=value` tokens become the arguments dict. The JSON reply is printed.
+
+> **Note:** `incant` reaches the *manager* of the runtime (podman / the QEMU monitor), not the workload interior. To run a command *inside* the workload, use `exec`/`shell`.
+
+**Examples:**
+```bash
+workloadctl incant webproxy -- network create mynet
+workloadctl incant webproxy -- volume ls
+workloadctl incant git -- query-status        # VM: QMP command
+workloadctl incant git -- system_powerdown     # VM: QMP command
 ```
 
 ---
@@ -360,12 +350,12 @@ workloadctl validate [--all] [--json] [<workload>]
 | `--all` | Validate all workload configs |
 | `--json` | Output results as JSON |
 
-### `verify`
+### `diagnose`
 
-Verify a workload's runtime setup: user exists, subuid configured, linger active, image present, service file generated.
+Diagnose a workload's runtime setup: user exists, subuid/subgid configured, linger active, SELinux label correct.
 
 ```
-workloadctl verify [--json] <workload>
+workloadctl diagnose [--json] <workload>
 ```
 
 | Option | Description |
@@ -396,15 +386,17 @@ sudo workloadctl cleanup [--apply] [--json]
 Archive a workload's home directory and config to a compressed tarball (`.tar.zst`).
 
 ```
-sudo workloadctl backup [--json] [--all] [--output PATH] [--no-stop] [<workload>]
+sudo workloadctl backup [--json] [--all] [--output PATH] [--consistency {cold,crash}] [<workload>]
 ```
 
 | Option | Description |
 |---|---|
 | `--all` | Back up all enabled workloads |
 | `--output PATH` | Directory to write archive(s) to (default: current directory) |
-| `--no-stop` | Skip stopping the workload before archiving (may produce inconsistent data) |
+| `--consistency {cold,crash}` | Consistency level (default `cold`). `cold` stops the service, copies, then restarts — always safe. `crash` copies without stopping the service: for VMs the vCPUs are paused via QMP for the copy (crash-consistent, resume-safe); for containers the rootfs/volumes are copied live (may be inconsistent). |
 | `--json` | Output archive paths and sizes as JSON instead of printing progress |
+
+VM backups exclude rebuildable artifacts (`system.qcow2`, `system.qcow2.gen-N`, `*.image-cache`) — only the durable disk and home are archived.
 
 ### `restore`
 
@@ -422,18 +414,6 @@ sudo workloadctl restore <archive>
 > decrypt them. For cross-host DR, also preserve `/var/lib/systemd/credential.secret`
 > (host-key case), or re-encrypt the affected secrets on the target with
 > `workloadctl secret`.
-
----
-
-## Networking
-
-### `network create`
-
-Create a named podman network for use with `network.mode` in a workload config.
-
-```
-sudo workloadctl network create <network-name> <workload>
-```
 
 ---
 
