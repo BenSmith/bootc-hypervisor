@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "generators" / "workload-generate"
 LIB_DIR = ROOT / "lib"
-WORKLOADS_DIR = ROOT / "workloads.d"
+WORKLOADS_DIR = ROOT / "workloads"
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 sys.path.insert(0, str(LIB_DIR))
@@ -103,7 +103,9 @@ class TestWorkloadSnapshots(unittest.TestCase):
         SNAPSHOTS_DIR.mkdir(exist_ok=True)
         update = os.environ.get("UPDATE_SNAPSHOTS") == "1"
 
-        tomls = sorted(WORKLOADS_DIR.glob("*.toml"))
+        # Each shipped bundle is workloads/<bundle>/workload.toml; the bundle
+        # dir name is the workload identity (snapshot stem + cfg filename).
+        tomls = sorted(WORKLOADS_DIR.glob("*/workload.toml"))
         self.assertGreater(len(tomls), 0, "no workload TOMLs found")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,7 +116,7 @@ class TestWorkloadSnapshots(unittest.TestCase):
             cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
 
             for src in tomls:
-                _enable_toml(src, cfg / src.name)
+                _enable_toml(src, cfg / f"{src.parent.name}.toml")
 
             env = os.environ.copy()
             env["WORKLOAD_CONFIG_DIR"] = str(cfg)
@@ -130,12 +132,12 @@ class TestWorkloadSnapshots(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
 
             for src in tomls:
-                stem = src.stem
+                stem = src.parent.name
                 conf_text = (sys_d / f"workload-{stem}.conf").read_text()
                 uid = _workload_uid(conf_text)
 
                 outputs = [(stem + ".conf", conf_text)]
-                for unit_name, suffix in _expected_units(stem, (cfg / src.name).read_text()):
+                for unit_name, suffix in _expected_units(stem, (cfg / f"{stem}.toml").read_text()):
                     unit_path = svc / unit_name
                     self.assertTrue(unit_path.is_file(),
                                     f"generator did not emit {unit_name} for {stem}")

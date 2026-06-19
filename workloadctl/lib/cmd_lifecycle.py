@@ -44,7 +44,7 @@ REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "
 RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
-_CONTAINERS_DIR = Path("/usr/share/workloadctl/containers")
+_BUNDLES_DIR = Path("/usr/share/workloadctl/workloads")
 
 _WORKLOAD_SECTION_RE = re.compile(
     r'(?ms)(?P<header>^\[workload\][^\n]*\n)(?P<body>.*?)(?=^\[|\Z)'
@@ -140,7 +140,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
         if pull == "never" and not Podman.for_root().image_id(image):
             print(f"  ✗ Image '{image}' not found locally and pull=never")
             # TODO: remove hardcoded path
-            build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+            build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
             if build_script.exists():
                 print(f"    Build the image first:")
                 print(f"      sudo {build_script}")
@@ -388,7 +388,7 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
-        build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+        build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
         if build_script.exists():
             print(f"Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
@@ -437,8 +437,8 @@ def _run_host_setup(config: WorkloadConfig, action: str):
     if setup_script.startswith("/"):
         script_path = Path(setup_script)
     else:
-        container_dir = Path(f"/usr/share/workloadctl/containers/{config.name}")
-        script_path = container_dir / setup_script
+        bundle_dir = Path(f"/usr/share/workloadctl/workloads/{config.name}")
+        script_path = bundle_dir / setup_script
 
     if not script_path.exists():
         print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)
@@ -471,16 +471,16 @@ def _selinux_enforcing() -> bool:
 
 
 def _available_bundles() -> list[str]:
-    """Bundle names shipping a CIL policy under the containers share dir.
+    """Bundle names shipping a CIL policy under the workloads share dir.
 
-    A bundle is a subdir <name>/ that contains <name>.cil (the template
+    A bundle is a subdir <name>/ that contains policy.cil (the template
     _apply_selinux_policy loads). Returned sorted for stable output.
     """
-    if not _CONTAINERS_DIR.is_dir():
+    if not _BUNDLES_DIR.is_dir():
         return []
     return sorted(
-        d.name for d in _CONTAINERS_DIR.iterdir()
-        if d.is_dir() and (d / f"{d.name}.cil").exists()
+        d.name for d in _BUNDLES_DIR.iterdir()
+        if d.is_dir() and (d / "policy.cil").exists()
     )
 
 
@@ -498,7 +498,7 @@ def _print_available_bundles(bundle: str):
 def _apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 
-    The bundle ships its policy as a CIL template (`<name>.cil`) using the
+    The bundle ships its policy as a CIL template (`policy.cil`) using the
     __WL_MODULE__ placeholder. On enable we substitute the name-keyed block name
     (wl_<name>) and load it alongside udica's base templates (which the
     workload's `(blockinherit ...)` resolves against); on disable we remove the
@@ -554,7 +554,7 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
                   f"(the bundle is a directory name and uses hyphens, not the "
                   f"underscores of the SELinux type name)", file=sys.stderr)
         sys.exit(1)
-    template = Path(f"/usr/share/workloadctl/containers/{bundle}/{bundle}.cil")
+    template = Path(f"/usr/share/workloadctl/workloads/{bundle}/policy.cil")
     if not template.exists():
         print(f"  ERROR: SELinux policy template not found: {template}",
               file=sys.stderr)

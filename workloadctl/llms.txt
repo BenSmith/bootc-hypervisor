@@ -75,7 +75,7 @@ workload-<name>-net.service          # bridge mode only — podman network creat
 workload-<name>-<container>.service  # one per [[containers]] entry
 ```
 
-Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workload>/<container>` for container-targeted commands (`exec`, `shell`, `logs`, `health`); lifecycle and most introspection commands take a bare `<workload>`. The generator normalizes single- and multi-container shapes through `normalize_containers()` so single-container TOMLs produce byte-identical units to before. See `docs/workloads.md` and `docs/schema-reference.toml` for the full schema; `workloads.d/webproxy-demo.toml` is the smallest working bridge-mode example.
+Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workload>/<container>` for container-targeted commands (`exec`, `shell`, `logs`, `health`); lifecycle and most introspection commands take a bare `<workload>`. The generator normalizes single- and multi-container shapes through `normalize_containers()` so single-container TOMLs produce byte-identical units to before. See `docs/workloads.md` and `docs/schema-reference.toml` for the full schema; `workloads/webproxy-demo/workload.toml` is the smallest working bridge-mode example.
 
 ### Substrate dispatch
 
@@ -93,7 +93,7 @@ A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[
 - **Networking** — a shared workloadctl-managed NAT bridge `_workload-br` (`VM_BRIDGE_NAME`) + dnsmasq; per-VM override via `[vm.network].bridge`.
 - **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`) or QMP (`incant`, lifecycle, `capture`), not podman.
 
-`workloads.d/virtual-forgejo.toml` is the live example; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]`, and `[vm.network]`.
+`workloads/virtual-forgejo/workload.toml` is the live example; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]`, and `[vm.network]`.
 
 ### Lifecycle: pet vs cattle
 
@@ -209,8 +209,9 @@ libexec/workload-metrics           # Prometheus metrics exporter
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
-workloads.d/                       # Example workload TOML configs
-containers/                        # Container image definitions (Containerfiles + build scripts)
+workloads/<bundle>/                # Shipped bundles: workload.toml (template declaration)
+                                   #   co-located with control files (Containerfile, build.sh,
+                                   #   setup.sh, policy.cil, cloud-init user-data — any subset)
 docs/workloads.md                  # Full configuration guide
 docs/cli.md                        # Complete CLI reference
 docs/secrets.md                    # Secrets management guide
@@ -223,7 +224,7 @@ tests/                             # Test suite
 
 ## Included Container Images
 
-Pre-built container definitions in `containers/`:
+Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`):
 
 - `smb-server` — Samba file sharing (guest shares, host networking)
 - `wireguard-vpn` — WireGuard VPN client
@@ -241,7 +242,7 @@ Pre-built container definitions in `containers/`:
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
-- [Example configs](workloads.d/) — real-world workload definitions
+- [Example configs](workloads/) — each workloads/<bundle>/workload.toml — real-world workload definitions
 
 ## Deliberate non-adoptions
 

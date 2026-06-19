@@ -309,7 +309,7 @@ enabled = false
 #
 # Example:
 #   required_files = [
-#       { path = "./smb.conf", hint = "/usr/share/workloadctl/containers/smb-server/smb.conf" },
+#       { path = "./smb.conf", hint = "/usr/share/workloadctl/workloads/smb-server/smb.conf" },
 #       { path = "./app.conf" },   # No hint - just flags it as missing
 #   ]
 #
@@ -899,7 +899,7 @@ ports = ["8080:80", "8443:443"]
 # disable runs `<script> disable`. The script is expected to be idempotent
 # in both directions.
 #
-# Container directory: /usr/share/workloadctl/containers/{name}/
+# Container directory: /usr/share/workloadctl/workloads/{name}/
 #
 # Use for host-level prerequisites that can't be handled by the container
 # itself, such as:

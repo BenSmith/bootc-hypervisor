@@ -553,7 +553,7 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
                 if pull_policy == "never":
-                    build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+                    build_script = Path(f"/usr/share/workloadctl/workloads/{config.name}/build.sh")
                     fix = (f"Build it: {build_script}" if build_script.exists()
                            else f"Build or provide: {config.image}")
                 else:

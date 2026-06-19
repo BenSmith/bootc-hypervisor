@@ -319,7 +319,7 @@ Some workloads need host-level configuration (kernel modules, udev rules, SELinu
 
 ```toml
 [host]
-setup = "setup.sh"  # relative to /usr/share/workloadctl/containers/{name}/
+setup = "setup.sh"  # relative to /usr/share/workloadctl/workloads/{name}/
 ```
 
 - `workloadctl enable` runs `setup.sh enable`
@@ -329,10 +329,10 @@ setup = "setup.sh"  # relative to /usr/share/workloadctl/containers/{name}/
 
 #### Customizing container build scripts and setup scripts
 
-The bundled scripts in `/usr/share/workloadctl/containers/` are read-only on immutable (bootc/ostree) systems. To customize them, copy the entire container directory to a writable location and make your changes there:
+The bundled scripts in `/usr/share/workloadctl/workloads/` are read-only on immutable (bootc/ostree) systems. To customize them, copy the entire container directory to a writable location and make your changes there:
 
 ```bash
-cp -r /usr/share/workloadctl/containers/sunshine-game-streaming ~/sunshine-custom
+cp -r /usr/share/workloadctl/workloads/sunshine-game-streaming ~/sunshine-custom
 cd ~/sunshine-custom
 # edit Containerfile, setup.sh, etc.
 sudo ./build.sh
@@ -1099,7 +1099,7 @@ Run `enable` once to create the directory structure, then copy the required file
 sudo workloadctl enable smb-server
 # → fails, but creates /var/lib/workloads/smb-server/ and all subdirectories
 
-sudo cp /usr/share/workloadctl/containers/smb-server/smb.conf /var/lib/workloads/smb-server/smb.conf
+sudo cp /usr/share/workloadctl/workloads/smb-server/smb.conf /var/lib/workloads/smb-server/smb.conf
 # → edit as needed
 
 sudo workloadctl enable smb-server

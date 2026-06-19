@@ -23,7 +23,18 @@ from pathlib import Path
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-WORKLOADS_DIR = Path(os.path.dirname(__file__), '..', 'workloads.d')
+# Shipped bundles live one-per-dir as workloads/<bundle>/workload.toml. The
+# bundle dir name is the workload identity; we present it as "<bundle>.toml" so
+# the filename-based assertions and skip set below read unchanged.
+WORKLOADS_DIR = Path(os.path.dirname(__file__), '..', 'workloads')
+
+
+def _bundle_tomls():
+    """Sorted (synthetic_filename, path) for every shipped bundle declaration."""
+    return sorted(
+        (f"{p.parent.name}.toml", p)
+        for p in WORKLOADS_DIR.glob("*/workload.toml")
+    )
 
 # Multi-container workloads use [[containers]] arrays; the assertions in this
 # file assume the single-container top-level [container] shape. Multi-container
@@ -54,8 +65,8 @@ def has_systemd_analyze():
 def load_all_workloads():
     """Load all real workload configs. Returns list of (filename, config_dict)."""
     workloads = []
-    for toml_path in sorted(WORKLOADS_DIR.glob("*.toml")):
-        if toml_path.name in SKIP_FILES:
+    for filename, toml_path in _bundle_tomls():
+        if filename in SKIP_FILES:
             continue
         try:
             if toml_path.resolve() == Path("/dev/null"):
@@ -64,7 +75,7 @@ def load_all_workloads():
             continue
         with open(toml_path, "rb") as f:
             config = tomllib.load(f)
-        workloads.append((toml_path.name, config))
+        workloads.append((filename, config))
     return workloads
 
 
@@ -76,10 +87,10 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 
     def test_all_configs_parseable(self):
         """Every .toml file in workloads.d/ parses without error."""
-        for toml_path in sorted(WORKLOADS_DIR.glob("*.toml")):
-            if toml_path.name in SKIP_FILES:
+        for filename, toml_path in _bundle_tomls():
+            if filename in SKIP_FILES:
                 continue
-            with self.subTest(config=toml_path.name):
+            with self.subTest(config=filename):
                 with open(toml_path, "rb") as f:
                     config = tomllib.load(f)
                 self.assertIsInstance(config, dict)
