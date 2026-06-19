@@ -1268,18 +1268,6 @@ class TestContainerLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError):
             substrate.lifecycle("bogus")
 
-    def test_start_shim_delegates_to_lifecycle(self):
-        substrate = self._substrate()
-        with patch.object(substrate, 'lifecycle') as mock_lc:
-            substrate.start()
-        mock_lc.assert_called_once_with("start")
-
-    def test_soft_reboot_shim_delegates_to_lifecycle(self):
-        substrate = self._substrate()
-        with patch.object(substrate, 'lifecycle') as mock_lc:
-            substrate.soft_reboot()
-        mock_lc.assert_called_once_with("reboot")
-
 
 class TestVMLifecycle(unittest.TestCase):
 
@@ -1324,16 +1312,6 @@ class TestContainerReprovisionRecreate(unittest.TestCase):
                         f"restart expected in {cmds}")
         # pull must NOT have been called
         manager.podman.return_value.pull.assert_not_called()
-
-    def test_recreate_shim_calls_reprovision_recreate(self):
-        """Substrate.recreate() shim calls reprovision(recreate=True)."""
-        config = _make_config(SINGLE_TOML, 'test-wl')
-        manager = MagicMock()
-        manager.user_exists.return_value = False
-        substrate = ContainerSubstrate(config, manager)
-        with patch.object(substrate, 'reprovision') as mock_reprov:
-            substrate.recreate()
-        mock_reprov.assert_called_once_with(recreate=True)
 
 
 class TestVMReprovisionRecreate(unittest.TestCase):

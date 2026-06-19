@@ -1163,7 +1163,6 @@ workloadctl health NAME               # Comprehensive health check
 ```bash
 workloadctl cp NAME:/path/in/container ./local/path
 workloadctl cp ./local/path NAME:/path/in/container
-workloadctl attach NAME               # Attach to container process
 ```
 
 **Image management:**
@@ -1305,8 +1304,9 @@ The service is stopped during backup for a consistent snapshot, then restarted. 
 # Backup to a specific path
 sudo workloadctl backup pihole --output /mnt/backup/
 
-# Live backup (no service stop — may be inconsistent)
-sudo workloadctl backup pihole --no-stop
+# Live backup (no service stop). For containers this may be inconsistent;
+# for VMs the vCPUs are paused via QMP for the copy (crash-consistent).
+sudo workloadctl backup pihole --consistency crash
 
 # Backup all workloads
 sudo workloadctl backup --all
@@ -1912,8 +1912,9 @@ sudo systemctl start workload-{name}
 
 **Example - Custom network:**
 ```bash
-# Create network as workload user
-sudo -u _wl-app XDG_RUNTIME_DIR=/run/user/10001 podman network create mynetwork
+# Create the network as the workload user. `incant` supplies the rootless
+# invocation (sudo -u _wl-app + XDG_RUNTIME_DIR) for you:
+workloadctl incant app -- network create mynetwork
 
 # Configure workloads to use it
 [network]

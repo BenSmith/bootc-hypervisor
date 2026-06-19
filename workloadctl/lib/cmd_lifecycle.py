@@ -31,7 +31,6 @@ from podman import Podman
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
-    restart_workload_service,
     require_root,
     WORKLOAD_DIR,
     VM_BRIDGE_NAME,

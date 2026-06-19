@@ -199,7 +199,9 @@ def cmd_update(args, manager: WorkloadManager):
             done += f", {container_failed} failed"
         print(done)
         if vm_total:
-            print(f"VMs: {vm_total - vm_failed} rebuilt, {vm_failed} failed")
+            # "updated" rather than "rebuilt": a pet VM is restarted in place
+            # (system.qcow2 is never rotated), so "rebuilt" would misdescribe it.
+            print(f"VMs: {vm_total - vm_failed} updated, {vm_failed} failed")
         # A failed update (VM rebuild, or a container pull/restart) must not be
         # silently reported as success — exit nonzero for scripted callers. VMs
         # additionally have no auto-rollback safety net.

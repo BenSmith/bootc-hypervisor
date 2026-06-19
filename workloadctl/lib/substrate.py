@@ -351,10 +351,6 @@ class Substrate(ABC):
         """
         ...
 
-    # Backward-compat alias — callers that use exec_command still work.
-    def exec_command(self, argv: list[str], *, container: str | None = None) -> int:
-        return self.exec(argv, container=container)
-
     @abstractmethod
     def open_shell(
         self,
@@ -377,26 +373,8 @@ class Substrate(ABC):
 
         action must be one of: ``"start"``, ``"stop"``, ``"restart"``,
         ``"reboot"`` (soft-reboot the workload's init system).
-
-        Callers that used the old ``start()`` / ``soft_reboot()`` / ``recreate()``
-        methods now go through ``lifecycle()``.
         """
         ...
-
-    # Backward-compat shims — callers that used the old split methods still work.
-    def start(self) -> None:
-        self.lifecycle("start")
-
-    def soft_reboot(self) -> None:
-        self.lifecycle("reboot")
-
-    def recreate(self) -> None:
-        """Recreate the workload from current config/image.
-
-        Delegates to reprovision(recreate=True) so the recreate path is
-        substrate-specific without duplicating the surrounding verb logic.
-        """
-        self.reprovision(recreate=True)
 
     @abstractmethod
     def rollback_targets(self) -> list:

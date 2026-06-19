@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -58,7 +57,7 @@ def cmd_exec(args, manager: WorkloadManager):
         sys.exit(2)
 
     substrate = get_substrate(config, manager)
-    sys.exit(substrate.exec_command(exec_args, container=container))
+    sys.exit(substrate.exec(exec_args, container=container))
 
 
 def cmd_logs(args, manager: WorkloadManager):
