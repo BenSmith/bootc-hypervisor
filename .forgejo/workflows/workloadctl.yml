@@ -20,6 +20,9 @@ jobs:
             bin=${pkg/rpm-build/rpmbuild}
             command -v "$bin" >/dev/null || sudo dnf install -y "$pkg"
           done
+          # Macro packages provide no binary to probe; install unconditionally.
+          # Required by the spec's BuildRequires (%{_unitdir}, %{python3_sitelib}).
+          sudo dnf install -y systemd-rpm-macros python3-rpm-macros
           python3 --version
           just --version
 
