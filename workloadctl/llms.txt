@@ -1,8 +1,8 @@
 # workloadctl
 
-> Declarative rootless container workload manager for Linux. Define workloads as TOML files, and workloadctl handles user creation, systemd service generation, volume management, secrets, and container lifecycle — all running as isolated unprivileged users with rootless podman.
+> Declarative rootless workload manager for Linux. Define workloads as TOML files, and workloadctl handles user creation, systemd service generation, volume management, secrets, and lifecycle across two **substrates** — isolated rootless-podman containers and KVM/QEMU virtual machines.
 
-workloadctl is a Python CLI tool and systemd integration that turns TOML config files into fully isolated, rootless container workloads. Each workload gets a dedicated locked-down system user (`_wl-<name>`), its own UID/subuid namespace, a systemd service generated at boot, automatic volume directories, and optional TPM2-encrypted secrets via systemd credentials.
+workloadctl is a Python CLI tool and systemd integration that turns TOML config files into fully isolated workloads. A workload is either a **container** (rootless podman, the common case) or a **VM** (raw QEMU/KVM, declared with a `[vm]` section). Each container workload gets a dedicated locked-down system user (`_wl-<name>`), its own UID/subuid namespace, a systemd service generated at boot, automatic volume directories, and optional TPM2-encrypted secrets via systemd credentials; VM workloads get a per-instance disk set, bridge networking, and cloud-init seed. The two substrates share one TOML model and one day-2 verb surface, dispatched through a **Substrate port** (see "Substrate dispatch").
 
 ## Requirements
 
@@ -17,7 +17,7 @@ The system has four main components:
 1. **Generator + early-boot oneshot**: A tiny shell systemd generator (`generators/workload-generator`) emits a single oneshot service unit, `workload-generate.service`. That service runs the Python script `generators/workload-generate` during early boot (ordered `After=sysinit.target Before=basic.target`), which reads `/etc/workloads.d/*.toml` and produces systemd-sysusers configs and per-workload service unit files in `/run/systemd/system/`. The Python work is *not* run as a systemd generator because generators are expected to be fast and minimal (see `systemd.generator(7)`); Python import overhead alone can exceed the generator execution budget systemd 258+ enforces. Both the shell generator and the Python script always exit 0 so a failure never blocks boot. The Python script is still read-only with respect to `/var` — all `/var` work is deferred to `workload-ensure-user` at service start.
 2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
 3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman. Default service type is `Type=exec` (activates when podman execs the container process). `Type=notify` with `--sdnotify=conmon` is available via `[resources] service_type = "notify"` but was broken under the previous `--cgroups=split` topology when linger is active (conmon migrates into the user session cgroup and systemd silently drops its `READY=1`). This breakage has **not been re-tested under the ADR 001 option 1b topology** (user-manager-resident payload) — the topology changed, so the result is genuinely unknown. The default remains `Type=exec` until re-tested on tp. Cgroup placement uses **ADR 001 option 1b**: the generator emits a `user@<uid>.service.d/50-workload.conf` drop-in that redirects each workload's user manager into `workloads.slice` (`Slice=workloads.slice`). The container payload follows the user manager and lands at `workloads.slice/user@<uid>.service/…/libpod-<id>.scope` — inside the aggregate slice. Per-workload resource caps (`MemoryHigh`, `CPUWeight`, etc.) go on the same drop-in as `[Service]` directives; per-container caps (`--memory`, `--cpus`, `--pids-limit`, `--device-read-bps/write-bps`) are passed as podman flags and bind natively via the user manager's delegated subtree. There is no `cgroup_exec.py` placement shim — plain `sudo -u` exec works because the container is user-manager-resident. Podman's native `--health-cmd` healthcheck timer fires in the user manager and `--health-on-failure` works without any system-manager replacement. `ExecStopPost=-podman rm -f -t0` is emitted on each container unit because `KillMode=control-group` can't reach the payload (it lives in the user manager's cgroup subtree, not the system unit's). See `docs/adr/001-container-cgroup-placement.md`. Each workload's *head* unit runs `ExecStartPre=-/usr/bin/podman system migrate` before any other podman call: a libpod pause process left over from a previous service invocation gets migrated into `podman-pause-*.scope` under `user@<uid>.service` by any host-side podman call and survives restarts, but its mount namespace pins the old invocation's already-deleted `PrivateTmp` `/tmp` — pasta then fails its sandbox mount of `/tmp` with ENOENT and the unit restart-loops. Member services must *not* run migrate (it would kill the pause out from under live pod infra / sibling containers).
-4. **CLI** (`bin/workloadctl`): Docker/kubectl-like CLI (~2500 lines, argparse) for creating, enabling, disabling, updating, and inspecting workloads. Uses `lib/podman.py` (typed Podman wrapper) for all podman interactions, which returns structured data from `podman inspect --format=json` rather than go-template strings.
+4. **CLI** (`bin/workloadctl` + `lib/cmd_*.py` + `lib/substrate.py`): Docker/kubectl-like argparse CLI for creating, enabling, disabling, updating, and inspecting workloads. `bin/workloadctl` is a thin (~330-line) argument-parser/dispatcher; each verb's body lives in a `lib/cmd_<group>.py` module (`cmd_lifecycle`, `cmd_inspect`, `cmd_interact`, `cmd_backup`, `cmd_update`, `cmd_drift`, `cmd_secret`, `cmd_admin`). Substrate-variant verbs (status, health, stats, logs, exec/shell, start/stop/reboot, update/recreate, rollback, backup, incant) route through the **Substrate port** (`lib/substrate.py`); container interactions use `lib/podman.py` (typed Podman wrapper returning structured data from `podman inspect --format=json` rather than go-template strings).
 
 ### Boot Flow
 
@@ -77,6 +77,28 @@ workload-<name>-<container>.service  # one per [[containers]] entry
 
 Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workload>/<container>` for container-targeted commands (`exec`, `shell`, `logs`, `health`); lifecycle and most introspection commands take a bare `<workload>`. The generator normalizes single- and multi-container shapes through `normalize_containers()` so single-container TOMLs produce byte-identical units to before. See `docs/workloads.md` and `docs/schema-reference.toml` for the full schema; `workloads.d/webproxy-demo.toml` is the smallest working bridge-mode example.
 
+### Substrate dispatch
+
+The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `control`, `gating_units` — and two implementations, `ContainerSubstrate` and `VMSubstrate`. `get_substrate(config, manager)` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
+
+A substrate declares the primitives it supports in a `PRIMITIVES` frozenset; optional primitives absent from it (`resource_usage`, `endpoints`, `reprovision`) auto-raise `NotApplicable` with a generated reason via one base-class check. This makes the `(verb, substrate)` capability matrix **computed, not maintained**: e.g. `stats` on a VM reports a self-documenting "not applicable" instead of running `podman stats` against a nonexistent container. `VMSubstrate` omits `resource_usage`/`logs`/`endpoints`; `ContainerSubstrate` supports all three.
+
+`gating_units()` is a diagnostics primitive: it names the systemd units that must succeed *before* the main service starts. Containers return `[]` (setup is an `ExecStartPre` on the main unit, so a failure surfaces there directly); a VM returns its `workload-<name>-setup.service` + `workload-<name>-build.service`, which run as separate `RemainAfterExit=yes` units. `status`/`_effective_state` walk these so a failed setup/build is reported as `failed` and the culprit unit is named, instead of the main service showing a bland `inactive`/`dependency failed` with the real cause buried.
+
+### VM workloads
+
+A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`):
+
+- **Disks** — a writable `system.qcow2` built once from the image source (rebuildable, with generational `system.qcow2.gen-N` rollback, `rollback_keep + 1` retained) plus an optional durable `data.qcow2`. `update`/`reprovision` rebuilds `system.qcow2`; `rollback` restores the previous generation.
+- **Networking** — a shared workloadctl-managed NAT bridge `_workload-br` (`VM_BRIDGE_NAME`) + dnsmasq; per-VM override via `[vm.network].bridge`.
+- **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`) or QMP (`incant`, lifecycle, `capture`), not podman.
+
+`workloads.d/virtual-forgejo.toml` is the live example; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]`, and `[vm.network]`.
+
+### Lifecycle: pet vs cattle
+
+`[workload] lifecycle` (default `"cattle"`) declares lifecycle intent, honored per-substrate. **Cattle** containers are ephemeral — the generator appends `--rm`, so the writable overlay is destroyed on every stop/start (including a plain reboot) and rebuilt from the image. **Pet** containers reuse the overlay (`podman create` once + `start`/`stop`, no `--rm`; the graphroot lives under `/var` and survives reboots and bootc updates) and snapshot the overlay to a timestamped local image before any destructive verb (`recreate`/`update`). A **pet VM** skips `system.qcow2` rotation on `reprovision`/`update`, keeping the durable disk. Pet reclassifies a workload's `home/`/system disk from rebuildable-and-backup-skipped to precious-and-backup-included.
+
 ### Secrets
 
 Uses systemd credentials (`systemd-creds`) for secret management:
@@ -114,8 +136,9 @@ SELinux userspace compiles `.te`/`.pp` down to), not `.te`, for two reasons:
 
 Authoring is done with **udica** against a running container; it emits the CIL
 block and the base templates (`/usr/share/udica/templates/*.cil`) that
-workloadctl loads alongside the workload module on `enable`. See
-`docs/workload-bundles.md` "SELinux: per-workload types".
+workloadctl loads alongside the workload module on `enable`. The enable-time
+loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
+`[security].selinux_policy` flag is documented in `docs/schema-reference.toml`.
 
 ## Key Commands
 
@@ -126,21 +149,25 @@ workloadctl loads alongside the workload module on `enable`. See
 | `workloadctl disable` | Stop service, optionally purge user/data |
 | `workloadctl start` | Start workload service |
 | `workloadctl stop` | Stop workload service |
-| `workloadctl update` | Pull new image and recreate (with automatic rollback on failure) |
-| `workloadctl rollback` | Roll back to previous image |
+| `workloadctl reboot` | Restart the workload (container: keeps the overlay; VM: guest reboot) |
+| `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure) |
+| `workloadctl recreate` | Recreate from current config (destroys a cattle overlay; rotates VM `system.qcow2`) |
+| `workloadctl rollback` | Roll back to the previous image (VM: restore previous disk generation); `--list` shows targets |
 | `workloadctl status` | Show workload status |
-| `workloadctl logs` | View workload container logs |
+| `workloadctl logs` | View workload logs (container output / VM service journal) |
 | `workloadctl list` | List all configured workloads |
-| `workloadctl info` | Show detailed workload information |
-| `workloadctl shell` | Open interactive shell in container |
-| `workloadctl exec` | Execute command in container |
+| `workloadctl info` | Show detailed workload information (incl. ports/uid-map/ps facets) |
+| `workloadctl shell` | Open interactive shell (container exec / VM SSH) |
+| `workloadctl exec` | Execute command inside the workload (container exec / VM SSH) |
+| `workloadctl incant` | Run a command against the runtime control plane as the owning identity (container: `podman …` as `_wl-<name>`; VM: QMP) |
 | `workloadctl edit` | Edit config in $EDITOR with validation |
-| `workloadctl validate` | Validate TOML config |
-| `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux) |
-| `workloadctl stats` | Show live resource usage |
-| `workloadctl health` | Check container health status |
+| `workloadctl validate` | Validate TOML config (static, declaration-level) |
+| `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux), emits fixes |
+| `workloadctl drift` | Show drift between generated and deployed systemd unit files (exits 1 if out of sync) |
+| `workloadctl stats` | Show live resource usage (containers; N/A for VMs) |
+| `workloadctl health` | Check health status (scriptable exit code) |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |
-| `workloadctl backup` | Backup workload config, volumes, and image |
+| `workloadctl backup` | Backup config, overrides, and durable data; `--consistency {cold,crash}` for VMs |
 | `workloadctl restore` | Restore workload from backup archive |
 | `workloadctl cleanup` | Find/remove orphaned workload users |
 
@@ -150,27 +177,37 @@ Most mutating commands require `sudo`. Read-only commands work as any user.
 
 Workloads are defined in `/etc/workloads.d/<name>.toml`. Key sections:
 
-- `[workload]` — name, enabled flag
+- `[workload]` — name, enabled flag, `mode` (single/pod/bridge), `lifecycle` (pet/cattle, default cattle)
 - `[container]` — image, command, pull policy, systemd mode, user, environment, health checks
 - `[container.health]` — health check cmd, interval, timeout, retries, on_failure action
 - `[container.environment]` — env vars, supports `${SECRET:name}` syntax
 - `[setup]` — required_files that must exist before enable
 - `[secrets]` — file-mounted systemd credentials
 - `[devices]` — generic device passthrough, GPU (amd/nvidia), input, audio, virtualization flags
-- `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile
+- `[security]` — userns mode (keep-id, host), extra_groups, capabilities, seccomp profile, `selinux_policy`
 - `[network]` — mode (pasta/host/none/custom), ports, DNS
 - `[resources]` — cpu-quota, cpu-weight, memory-max, memory-high, io-weight, tasks-max, shm-size, service_type (default: `exec`)
 - `[volumes]` — host:container path mappings
 
+VM workloads use a separate, mutually-exclusive set of sections:
+
+- `[vm]` — image source (`image` or `cloud_image_url` + `cloud_image_checksum`), memory, vcpus, rollback_keep, data-disk size
+- `[vm.cloud_init]` — user-data template + `template_vars` for per-instance seeding
+- `[vm.network]` — bridge (defaults to `_workload-br`), static addressing
+
 ## File Structure
 
 ```
-bin/workloadctl                    # Main CLI tool
+bin/workloadctl                    # CLI dispatcher (argparse → lib/cmd_*.py)
+lib/cmd_*.py                       # Per-verb-group command bodies (lifecycle, inspect, interact, backup, update, drift, secret, admin)
+lib/substrate.py                   # Substrate port (ContainerSubstrate / VMSubstrate, computed capability matrix)
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
+libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify)
 libexec/workload-metrics           # Prometheus metrics exporter
-lib/workload_lib.py                # Shared library (config parsing, UID allocation)
+lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
+lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
 workloads.d/                       # Example workload TOML configs
 containers/                        # Container image definitions (Containerfiles + build scripts)

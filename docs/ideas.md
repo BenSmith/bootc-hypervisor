@@ -81,6 +81,15 @@
 - build all container workload images and host locally?
 
 ### Separate `kind` from `name` in workload TOMLs
+> **Superseded (2026-06-19) by the `bundle` design** in
+> `workloadctl/docs/wip/workload-bundles.md`. That doc solves this exact
+> instance-vs-kind conflation with an optional `[workload] bundle` field
+> (defaults to `name`) and moves shared assets out of the old
+> `containers/<name>/` + `vms/<name>/` trees into a unified
+> `/usr/share/workloadctl/workloads/<bundle>/`. Implement `bundle`, not `kind` —
+> they differ only in name and in that `bundle` drops the backwards-compat layer
+> (no-migration stance). Retained below as the problem statement.
+
 **Why:** Today `[workload].name` is used as both the instance identifier *and*
 the lookup key for shared support assets (container build trees under
 `/usr/share/workloadctl/containers/<name>/`, VM support trees under
@@ -126,9 +135,11 @@ the instance TOML owns the values.
 during ISO build, mirrors what already happens for user-data.
 
 **Value:** Per-instance config for VM workloads without bloating
-cloud-init or copy-pasting support trees. Composes well with the
-proposed `kind` field above (one support tree, many instances, each
-with its own values).
+cloud-init or copy-pasting support trees. Composes with the `bundle`
+field (see the superseded `kind` note above) — one bundle's support
+tree, many instances, each with its own values. Re-anchor this entry's
+paths from the old `vms/<kind>/` tree to the bundle layout
+(`/usr/share/workloadctl/workloads/<bundle>/`) when implemented.
 
 ### Unified TLS: internal CA or Let's Encrypt instead of per-host Caddy CAs
 **Why:** Today every Caddy instance uses `local_certs`, i.e. mints its
@@ -186,10 +197,10 @@ on every new service, makes the fleet reachable from unmodified
 client devices, scales with N services instead of N^2 trust edges.
 
 ### App-consistent online VM backup (guest fsfreeze + QMP quiesce)
-**Why:** The substrate-dispatch P3 work builds a *crash-consistent* live VM
-backup (QMP-only — pause vCPUs / `drive-backup` the durable disk, then copy;
-journaling FS recovers on boot). That's safe but apps with in-flight state
-(a DB mid-transaction) can still be torn. An *app-consistent* backup quiesces
+**Why:** `VMSubstrate.capture()` already ships a *crash-consistent* live VM
+backup via `backup --consistency crash` (QMP-only — pause vCPUs, copy the durable
+disk, resume; journaling FS recovers on boot). That's safe but apps with in-flight
+state (a DB mid-transaction) can still be torn. An *app-consistent* backup quiesces
 the guest first so the on-disk image is clean at the application layer — the
 real "online backup."
 
@@ -208,8 +219,41 @@ real "online backup."
    once the guest is a bootc image we control ([[project-vm-bootc-guest]]),
    another bootstrap step on the current Fedora-Cloud+cloud-init guest.
 
-**When picked up:** add it as a third level to the existing
-`--consistency {cold,crash,app}` flag; the seam is already there from P3, so this
-is purely filling in the `app` branch + the guest-agent plumbing. Degrade to a
-clear error when the guest agent is absent. See
-`workloadctl/docs/wip/substrate-dispatch.md` P3.
+**When picked up:** add `app` as a third level to the existing
+`backup --consistency {cold,crash}` flag — the selection seam already exists, so
+this is purely filling in the `app` branch + the guest-agent plumbing. Degrade to
+a clear error when the guest agent is absent.
+
+### Pet overlay drift capture (`podman diff` → codify)
+**Why:** `lifecycle = "pet"` (shipped) keeps a container's writable overlay across
+reboots (create-once, no `--rm`), but the accumulated changes are *invisible* —
+nothing surfaces "what have you changed live that isn't in the image." The failure
+mode: tweak a pet desktop live, never fold it into the Containerfile, then a
+deliberate `recreate`/`update` onto a new image silently drops weeks of undeclared
+state. (The snapshot-on-destroy safety net softens this but doesn't make the drift
+*reviewable*.)
+
+**Not the same as the shipped `drift` verb.** `workloadctl drift` compares
+*generated-vs-deployed systemd unit files* (is the running unit in sync with the
+TOML). This is a different axis: *overlay-vs-image filesystem drift* (what the
+running container changed on disk vs the base image). Keep both — they answer
+different questions. An earlier design note conflated them; this entry is the
+de-conflation.
+
+**Proposal:** a verb — e.g. `workloadctl changes <wl>` or `drift --overlay <wl>` —
+that runs `podman diff <container>` for a pet's overlay and presents the
+added/changed/deleted paths vs the base image as a reviewable list. The point is
+the capture loop: persist short-term (overlay reuse + snapshot-on-destroy, both
+shipped) so nothing is lost → periodically review the diff and codify the keepers
+into the Containerfile / bundle `setup.sh` → then `recreate` onto the improved
+image with no loss. A pet that can rejoin the herd on your schedule instead of one
+you're afraid to reboot. The desktop/VNC pet is the killer use case.
+
+**Effort:** Small-Medium — `podman diff` is one call; the value is in presentation
+(filter the noise: package caches, logs, `/tmp`, runtime dirs) and wiring it to the
+pet lifecycle so it's offered where it matters.
+
+**Value:** Turns silent pet drift into a reviewable, codifiable list — closes the
+"afraid to reboot the pet" gap. Composes directly with `lifecycle = "pet"` and the
+snapshot-on-destroy net (both already shipped); this is the missing *visibility*
+half.
