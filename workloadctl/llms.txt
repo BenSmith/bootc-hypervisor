@@ -233,8 +233,6 @@ Pre-built container definitions in `containers/`:
 - `proxy-stack` — Squid cache + Pi-hole + WireGuard (all-in-one)
 - `squid` — Squid caching proxy
 - `grafana` — Grafana dashboards for workload monitoring
-- `desktop-labwc-kms` — labwc Wayland desktop (KMS/DRM)
-- `desktop-wayfire-kms` — Wayfire Wayland desktop (KMS/DRM)
 - `desktop-vnc` — VNC-accessible Wayland desktop
 
 ## Documentation
