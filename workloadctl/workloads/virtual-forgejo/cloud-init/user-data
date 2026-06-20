@@ -354,14 +354,14 @@ write_files:
           sed -i 's#\( *"./config:/etc/caddy/config",\)#\1\n    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",\n    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",#' /etc/workloads.d/caddy.toml
         fi
         # Trust the shared root in the VM's own store (runner + outbound).
-        install -m 0444 /var/lib/workloads/caddy/homelab-root.crt /etc/pki/ca-trust/source/anchors/homelab-root.crt
+        install -m 0444 /var/lib/workloads/caddy/data/homelab-root.crt /etc/pki/ca-trust/source/anchors/homelab-root.crt
         update-ca-trust extract
         # pki Caddyfile: the global `local` CA roots at the shared homelab
         # cert/key, so Caddy mints its intermediate under it; /caddy-root.crt
         # serves the shared root for client bootstrap. Built with printf (see
         # the self-signed branch's note on why, not a heredoc). $ROOT_CONTENT
         # (no braces) is a runtime shell var, invisible to template substitution.
-        ROOT_CONTENT=$(cat /var/lib/workloads/caddy/homelab-root.crt)
+        ROOT_CONTENT=$(cat /var/lib/workloads/caddy/data/homelab-root.crt)
         {
           printf '%s\n' \
             '{' \
