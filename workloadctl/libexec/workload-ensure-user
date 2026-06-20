@@ -27,6 +27,7 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
+    workload_state_dir,
 )
 
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
@@ -181,6 +182,37 @@ def configure_subuid_subgid(pw, config):
             log(f"  WARNING: podman system migrate timed out for {username}")
         except Exception as e:
             log(f"  WARNING: Failed to migrate podman storage for {username}: {e}")
+
+
+def warn_if_stale_home(pw, name):
+    """Warn (don't fix) when a workload user's home predates the Step-2 layout.
+
+    The Step-2 reshape moved each workload's $HOME from the workload root
+    (/var/lib/workloads/<name>) to its state/ subdir. systemd-sysusers only
+    sets the home of a *new* user, so a user created before the reshape keeps
+    its old home in /etc/passwd. The workload service itself is unaffected — the
+    generator forces Environment=HOME=<state> in the unit — but podman's
+    auto-generated healthcheck timer runs a bare `podman healthcheck run` that
+    inherits the user manager's HOME (= the stale passwd home), resolves an
+    empty graphroot, can't find the container, and leaves health frozen at
+    'starting' forever.
+
+    We only warn: rewriting an in-use user's home (usermod -d) requires stopping
+    the workload and bouncing user@<uid>.service to take effect, which is an
+    operator decision, not something to do under an ExecStartPre on every boot.
+    """
+    expected = str(workload_state_dir(name))
+    actual = pw.pw_dir
+    if actual == expected:
+        return
+    uid = pw.pw_uid
+    log(f"  WARNING: stale home for {pw.pw_name}: {actual!r} (expected {expected!r}).")
+    log( "           Pre-Step-2 layout. The service runs correctly, but podman's "
+         "healthcheck timer inherits this home and reads an empty graphroot, so "
+         "health is frozen at 'starting'.")
+    log(f"           Fix: systemctl stop workload-{name}; usermod -d {expected} "
+        f"{pw.pw_name}; systemctl restart workload-{name}  "
+        f"(restarting bounces user@{uid}.service so the new HOME takes effect).")
 
 
 def setup_home_directory(pw):
@@ -807,6 +839,12 @@ def main():
     except KeyError:
         log(f"ERROR: User {username} does not exist")
         return 1
+
+    # Flag (don't fix) a pre-Step-2 home dir — it silently breaks healthchecks.
+    try:
+        warn_if_stale_home(pw, name)
+    except Exception as e:
+        log(f"  WARNING: stale-home check failed for {username}: {e}")
 
     # Ensure base directory exists
     WORKLOADS_BASE.mkdir(parents=True, exist_ok=True)

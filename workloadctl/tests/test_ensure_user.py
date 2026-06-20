@@ -530,5 +530,35 @@ class TestDecryptSystemdCredential(unittest.TestCase):
             self.assertIn("credstore", str(ctx.exception))
 
 
+class TestWarnIfStaleHome(unittest.TestCase):
+    """warn_if_stale_home flags pre-Step-2 home dirs (which silently break
+    podman healthchecks) without trying to fix them."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def _capture(self, pw, name):
+        msgs = []
+        with mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.warn_if_stale_home(pw, name)
+        return "\n".join(msgs)
+
+    def test_silent_when_home_is_state_dir(self):
+        # Correct Step-2 home (= state/ subdir) → no warning.
+        pw = _fake_pw(self.mod.workload_state_dir("myapp"))
+        self.assertEqual(self._capture(pw, "myapp"), "")
+
+    def test_warns_on_pre_step2_home(self):
+        # Pre-Step-2 home = the workload root (parent of the state/ subdir).
+        stale = self.mod.workload_state_dir("myapp").parent
+        pw = _fake_pw(stale, uid=10005)
+        out = self._capture(pw, "myapp")
+        self.assertIn("stale home", out)
+        self.assertIn("frozen at 'starting'", out)
+        # Remediation names the exact usermod target + the unit to bounce.
+        self.assertIn(f"usermod -d {self.mod.workload_state_dir('myapp')}", out)
+        self.assertIn("user@10005.service", out)
+
+
 if __name__ == "__main__":
     unittest.main()
