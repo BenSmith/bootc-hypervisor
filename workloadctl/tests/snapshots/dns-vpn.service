@@ -13,14 +13,14 @@ Type=exec
 Slice=workloads.slice
 User=_wl-dns-vpn
 Group=_wl-dns-vpn
-Environment="HOME=/var/lib/workloads/dns-vpn"
+Environment="HOME=/var/lib/workloads/dns-vpn/state"
 EnvironmentFile=-/run/workload-env/workload-dns-vpn.env
 
 ExecStartPre=-/usr/bin/podman system migrate
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-dns-vpn" --hostname "dns-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=64M --cpus=0.1 --network="pasta" --publish 53:53/udp --publish 53:53/tcp --volume "/var/lib/workloads/dns-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env DNS_PORT=53 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/dns-vpn:latest"
+ExecStart=/usr/bin/podman run --name "workload-dns-vpn" --hostname "dns-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=64M --cpus=0.1 --network="pasta" --publish 53:53/udp --publish 53:53/tcp --volume "/var/lib/workloads/dns-vpn/data/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --env DNS_PORT=53 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/dns-vpn:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-dns-vpn"
 ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-dns-vpn"

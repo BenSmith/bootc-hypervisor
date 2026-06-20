@@ -82,7 +82,7 @@ start_period = "30s"
 on_failure = "kill"
 
 [containers.storage]
-volumes = ["./data:/var/lib/gitea"]
+volumes = ["./:/var/lib/gitea"]
 
 [containers.network]
 ports = ["3000:3000"]

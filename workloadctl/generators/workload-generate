@@ -61,7 +61,7 @@ try:
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
-        workload_username, workload_home_dir, expand_volume_path, dq,
+        workload_username, workload_home_dir, workload_state_dir, expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
         UID_MIN, UID_MAX, get_next_uid,
@@ -132,7 +132,7 @@ def generate_sysuser_config(config, user_name, uid):
              support range syntax.
     """
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     extra_groups = config.get("security", {}).get("extra_groups", [])
 
     lines = [
@@ -380,7 +380,7 @@ def resolve_auto_gpu():
 def generate_pod_service(workload, user_name, uid):
     """Generate the workload-{name}-pod.service unit (pod mode only)."""
     name = workload["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
 
     network_config = workload.get("network", {})
@@ -441,7 +441,7 @@ def generate_net_service(workload, user_name, uid):
     via --network, which gives them DNS resolution of each other by name.
     """
     name = workload["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
     net_name = f"workload-{name}-net"
 
@@ -536,7 +536,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         container_name = f"workload-{name}"
     else:
         container_name = f"workload-{name}-{container['name']}"
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
 
     image = container["container"]["image"]
     command = container["container"].get("command", None)
@@ -873,9 +873,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
             # Warn if host path escapes the workload home directory
             try:
                 resolved = str(Path(parts[0]).resolve())
-                if not resolved.startswith(home_dir + '/') and resolved != home_dir:
+                root = str(WORKLOADS_BASE / name)
+                if not resolved.startswith(root + '/') and resolved != root:
                     log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
-                            f"'{resolved}' outside home dir '{home_dir}'", level="warning")
+                            f"'{resolved}' outside workload dir '{root}'", level="warning")
             except Exception:
                 pass
             parts[0] = dq(parts[0])
@@ -1121,7 +1122,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "",
         "# Filesystem hardening: restrict writes to workload home + podman runtime",
         "ProtectSystem=strict",
-        f'ReadWritePaths="{home_dir}" /run/user/{uid}',
+        f'ReadWritePaths="{str(WORKLOADS_BASE / name)}" /run/user/{uid}',
         "PrivateTmp=yes",
         "# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and",
         "# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list",
@@ -1155,7 +1156,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 def generate_sysuser_config_vm(config, user_name, uid):
     """Like generate_sysuser_config but adds implicit kvm group membership."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     extra_groups = config.get("security", {}).get("extra_groups", [])
 
     lines = [
@@ -1179,7 +1180,7 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     on sidecar stop and yank the VM's qmp/console sockets out from under it.
     """
     socket_path = f"/run/workload-vm/{name}/virtiofs-{tag}.sock"
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
 
     return "\n".join([
         f"# virtiofsd sidecar for {name}/{tag}",
@@ -1340,7 +1341,7 @@ def generate_vm_bridge_service(subnet: str | None = None, dns: list | None = Non
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     system_disk = f"{home_dir}/system.qcow2"
     setup_service = f"workload-{name}-setup.service"
 
@@ -1370,7 +1371,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     """Generate the main VM service (QEMU, Type=notify via workload-vm-notify)."""
     name = config["workload"]["name"]
     vm_cfg = config.get("vm", {})
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     socket_dir = f"/run/workload-vm/{name}"
 
     # Always pass QEMU an integer number of MiB so memfd's "size=NM" stays valid.
@@ -1584,7 +1585,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
 def generate_vm_workload(config, user_name: str, uid: int):
     """Emit all unit files for a VM workload. Returns the workload name."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     vm_cfg = config.get("vm", {})
     volumes = vm_cfg.get("volumes", [])
 
@@ -1626,11 +1627,8 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # virtiofsd sidecar services
     for i, vol_spec in enumerate(volumes):
         host_raw, guest_path, _opts = parse_volume_spec(vol_spec)
-        # Expand ./ relative to workload home
-        if host_raw.startswith("./"):
-            host_path = home_dir + "/" + host_raw[2:]
-        else:
-            host_path = host_raw
+        # Expand ./ @/ data/ state/ anchors relative to the workload dirs.
+        host_path = expand_volume_path(host_raw, home_dir).split(":", 2)[0]
         tag = virtiofs_tag(guest_path, i)
         vfs_content = generate_virtiofs_service(name, tag, host_path, user_name, uid)
         (SERVICES_DIR / f"workload-{name}-virtiofs-{tag}.service").write_text(vfs_content)

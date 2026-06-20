@@ -17,7 +17,7 @@ from workload_lib import (
     WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, NAME_PATTERN,
     GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
     workload_username, workload_service_name, workload_container_name,
-    workload_home_dir, validate_workload_name, expand_volume_path, dq,
+    workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,
     validate_workload_config, infer_workload_mode, normalize_containers,
     parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address,
@@ -236,7 +236,7 @@ class TestNaming(unittest.TestCase):
         self.assertEqual(workload_container_name("foo"), "workload-foo")
 
     def test_home_dir(self):
-        self.assertEqual(workload_home_dir("foo"), WORKLOADS_BASE / "foo")
+        self.assertEqual(workload_home_dir("foo"), WORKLOADS_BASE / "foo" / "state")
 
 
 class TestValidation(unittest.TestCase):
@@ -299,31 +299,50 @@ class TestSelinuxIdentifiers(unittest.TestCase):
 
 
 class TestExpandVolumePath(unittest.TestCase):
+    def setUp(self):
+        self.home = str(workload_state_dir("foo"))  # /var/lib/workloads/foo/state
+
     def test_relative_with_container_path(self):
-        result = expand_volume_path("./data:/app/data", "/home/wl")
-        self.assertEqual(result, "/home/wl/data:/app/data")
+        result = expand_volume_path("./data:/app/data", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/data:/app/data")
 
     def test_relative_with_options(self):
-        result = expand_volume_path("./conf:/etc/conf:ro", "/home/wl")
-        self.assertEqual(result, "/home/wl/conf:/etc/conf:ro")
+        result = expand_volume_path("./conf:/etc/conf:ro", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/conf:/etc/conf:ro")
 
     def test_absolute_unchanged(self):
-        result = expand_volume_path("/srv/data:/app/data", "/home/wl")
+        result = expand_volume_path("/srv/data:/app/data", self.home)
         self.assertEqual(result, "/srv/data:/app/data")
 
     def test_relative_no_container_path(self):
-        result = expand_volume_path("./data", "/home/wl")
-        self.assertEqual(result, "/home/wl/data")
+        result = expand_volume_path("./data", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/data")
 
     def test_absolute_no_container_path(self):
-        result = expand_volume_path("/srv/data", "/home/wl")
+        result = expand_volume_path("/srv/data", self.home)
         self.assertEqual(result, "/srv/data")
 
     def test_opts_with_colon_preserved(self):
         # opts may itself contain a colon; expansion must keep the full opts
         # field intact (regression: parse used to split unbounded and drop it).
-        result = expand_volume_path("./d:/g:ro:context=x", "/home/wl")
-        self.assertEqual(result, "/home/wl/d:/g:ro:context=x")
+        result = expand_volume_path("./d:/g:ro:context=x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/d:/g:ro:context=x")
+
+    def test_at_anchor(self):
+        result = expand_volume_path("@/cache:/c", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/state/volumes/cache:/c")
+
+    def test_data_anchor(self):
+        result = expand_volume_path("data/x:/x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/x:/x")
+
+    def test_state_anchor(self):
+        result = expand_volume_path("state/x:/x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/state/volumes/x:/x")
+
+    def test_traversal_rejected(self):
+        with self.assertRaises(ValueError):
+            expand_volume_path("./../escape:/x", self.home)
 
 
 class TestDq(unittest.TestCase):

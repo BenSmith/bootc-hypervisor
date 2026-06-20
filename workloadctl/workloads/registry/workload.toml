@@ -53,7 +53,7 @@ REGISTRY_LOG_LEVEL = "info"
 
 [storage]
 volumes = [
-    "./data:/var/lib/registry"
+    "./:/var/lib/registry"
 ]
 
 [network]

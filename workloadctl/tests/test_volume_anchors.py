@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Regression guard: volume anchor expansion is correct and no raw anchors leak
+into generated unit files.
+
+Two jobs:
+1. Unit-level fast assertions on expand_volume_path for all anchor forms.
+2. Generator-level scan: run the generator over all workload TOMLs and assert
+   that no --volume or --drive host path still carries a relative anchor prefix.
+"""
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+GENERATOR = ROOT / "generators" / "workload-generate"
+LIB_DIR = ROOT / "lib"
+WORKLOADS_DIR = ROOT / "workloads"
+
+sys.path.insert(0, str(LIB_DIR))
+from workload_lib import expand_volume_path, workload_state_dir  # noqa: E402
+
+
+class TestExpandVolumePathAnchors(unittest.TestCase):
+    """Unit-level regression guard for all anchor forms."""
+
+    def setUp(self):
+        self.home = str(workload_state_dir("foo"))  # /var/lib/workloads/foo/state
+
+    def test_dot_slash_data_maps_into_data(self):
+        # ./X is sugar for data/X, so ./data resolves to a 'data' subdir of the
+        # data anchor (no special-casing of the literal name 'data').
+        result = expand_volume_path("./data:/app/data", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/data:/app/data")
+
+    def test_dot_slash_subdir_maps_into_data(self):
+        result = expand_volume_path("./conf:/etc/conf:ro", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/conf:/etc/conf:ro")
+
+    def test_dot_slash_bare_no_container_path(self):
+        result = expand_volume_path("./data", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/data")
+
+    def test_dot_slash_subdir_no_container_path(self):
+        result = expand_volume_path("./d", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/d")
+
+    def test_at_slash_anchor(self):
+        result = expand_volume_path("@/cache:/c", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/state/volumes/cache:/c")
+
+    def test_data_anchor(self):
+        result = expand_volume_path("data/x:/x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/x:/x")
+
+    def test_state_anchor(self):
+        result = expand_volume_path("state/x:/x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/state/volumes/x:/x")
+
+    def test_absolute_path_unchanged(self):
+        result = expand_volume_path("/srv/data:/app/data", self.home)
+        self.assertEqual(result, "/srv/data:/app/data")
+
+    def test_absolute_no_container_path_unchanged(self):
+        result = expand_volume_path("/srv/data", self.home)
+        self.assertEqual(result, "/srv/data")
+
+    def test_opts_with_colon_preserved(self):
+        result = expand_volume_path("./d:/g:ro:context=x", self.home)
+        self.assertEqual(result, "/var/lib/workloads/foo/data/d:/g:ro:context=x")
+
+    def test_traversal_rejected(self):
+        with self.assertRaises(ValueError):
+            expand_volume_path("./../escape:/x", self.home)
+
+
+# Anchors that must never appear as the host-path segment of an emitted unit.
+_RAW_ANCHOR_PREFIXES = ("./", "@/", "data/", "state/")
+
+# Match --volume TOKEN where TOKEN is the next whitespace-delimited argument.
+_VOLUME_RE = re.compile(r'--volume\s+(\S+)')
+# Match --drive file=PATH or if=pflash,... where file= or if= is the first key.
+_DRIVE_RE = re.compile(r'--drive\s+\S*file=([^,\s]+)')
+
+
+def _volume_and_disk_host_paths(unit_text: str):
+    """Yield every host-path token from --volume and --drive lines in a unit."""
+    for m in _VOLUME_RE.finditer(unit_text):
+        token = m.group(1).strip('"')
+        yield token.split(":", 2)[0]
+    for m in _DRIVE_RE.finditer(unit_text):
+        yield m.group(1)
+
+
+def _enable_toml(src: Path, dst: Path):
+    text = src.read_text()
+    if "enabled = false" in text:
+        text = text.replace("enabled = false", "enabled = true", 1)
+    elif "enabled = true" not in text:
+        text = text.replace("[workload]", "[workload]\nenabled = true", 1)
+    dst.write_text(text)
+
+
+class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
+    """Run the generator over all workloads and verify no anchor leaks through."""
+
+    def test_no_unexpanded_anchors_in_service_files(self):
+        tomls = sorted(WORKLOADS_DIR.glob("*/workload.toml"))
+        self.assertGreater(len(tomls), 0, "no workload TOMLs found")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = tmp / "cfg"
+            svc = tmp / "svc"
+            sys_d = tmp / "sys"
+            cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
+
+            for src in tomls:
+                _enable_toml(src, cfg / f"{src.parent.name}.toml")
+
+            env = os.environ.copy()
+            env["WORKLOAD_CONFIG_DIR"] = str(cfg)
+            env["SYSUSERS_DIR"] = str(sys_d)
+            env["PYTHONPATH"] = str(LIB_DIR)
+            env["WORKLOAD_GPU_OVERRIDE"] = "nvidia"
+
+            r = subprocess.run(
+                [sys.executable, str(GENERATOR), str(svc)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+            for unit_path in sorted(svc.glob("*.service")):
+                unit_text = unit_path.read_text()
+                unit_name = unit_path.name
+                for token_host in _volume_and_disk_host_paths(unit_text):
+                    self.assertFalse(
+                        token_host.startswith(_RAW_ANCHOR_PREFIXES),
+                        f"unexpanded anchor {token_host!r} reached an ExecStart in {unit_name}",
+                    )
+
+
+class TestRequiredFilesAnchorResolution(unittest.TestCase):
+    """get_required_files() must resolve workload-relative anchors through the
+    SAME logic as volume mounts, so a precious './config.json' required-file lands
+    where its volume actually mounts it (data/, not state/).
+
+    Guards the regression that the unit-scan above CANNOT catch: required_files
+    are consumed in CLI preflight (auto-copy + existence check), never emitted into
+    a unit's ExecStart, so a divergence here is invisible to TestNoRawAnchors.
+    """
+
+    def _config_with(self, toml_text: str):
+        import workloadctl_core as core
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        (tmp / "wltest.toml").write_text(toml_text)
+        with mock.patch.object(core, "WORKLOAD_DIR", tmp):
+            return core.WorkloadConfig("wltest")
+
+    def test_required_file_resolves_to_data_not_state(self):
+        config = self._config_with(
+            '[workload]\n'
+            'name = "wltest"\n'
+            'enabled = false\n\n'
+            '[container]\n'
+            'image = "localhost/x:latest"\n\n'
+            '[setup]\n'
+            'required_files = [\n'
+            '  { path = "./config.json", hint = "/usr/share/x/config.json" },\n'
+            ']\n\n'
+            '[storage]\n'
+            'volumes = ["./config.json:/etc/x/config.json:ro"]\n'
+        )
+        rf = config.get_required_files()
+        self.assertEqual(len(rf), 1)
+        resolved = rf[0]["path"]
+
+        # Must land in the data anchor, never under state/ (the $HOME / graphroot).
+        self.assertEqual(resolved, "/var/lib/workloads/wltest/data/config.json")
+        self.assertNotIn("/state/", resolved)
+
+        # And must be byte-identical to where the matching volume actually mounts
+        # from — the whole point: preflight checks/copies the same path the
+        # container reads.
+        home = str(workload_state_dir("wltest"))
+        vol_host = expand_volume_path("./config.json:/etc/x/config.json:ro", home).split(":", 1)[0]
+        self.assertEqual(resolved, vol_host)
+
+    def test_absolute_required_file_unchanged(self):
+        config = self._config_with(
+            '[workload]\n'
+            'name = "wltest"\n'
+            'enabled = false\n\n'
+            '[container]\n'
+            'image = "localhost/x:latest"\n\n'
+            '[setup]\n'
+            'required_files = [\n'
+            '  { path = "/etc/credstore/foo", hint = "" },\n'
+            ']\n'
+        )
+        rf = config.get_required_files()
+        self.assertEqual(rf[0]["path"], "/etc/credstore/foo")
+
+
+if __name__ == "__main__":
+    unittest.main()

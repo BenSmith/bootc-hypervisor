@@ -569,8 +569,14 @@ class WorkloadConfig:
             if "path" not in entry:
                 continue
             path = entry["path"]
-            if path.startswith("./"):
-                path = str(self.home_dir) + "/" + path[2:]
+            # Resolve workload-relative anchors (./ @/ data/ state/) through the
+            # SAME logic as volume mounts so a required file lands where its
+            # volume actually mounts it. A bare path (no ':') round-trips through
+            # expand_volume_path as just the expanded host. Without this, a
+            # precious "./config.json" required-file resolved to state/ for the
+            # preflight auto-copy while its volume mounted from data/ — they
+            # diverged and the container mounted a missing path.
+            path = expand_volume_path(path, str(self.home_dir))
             result.append({"path": path, "hint": entry.get("hint")})
         return result
 

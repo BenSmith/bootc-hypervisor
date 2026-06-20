@@ -13,7 +13,7 @@ RemainAfterExit=yes
 Slice=workloads.slice
 User=_wl-example-multi-container
 Group=_wl-example-multi-container
-Environment="HOME=/var/lib/workloads/example-multi-container"
+Environment="HOME=/var/lib/workloads/example-multi-container/state"
 EnvironmentFile=-/run/workload-env/workload-example-multi-container.env
 ExecStartPre=-/usr/bin/podman system migrate
 ExecStartPre=-/usr/bin/podman network rm -f workload-example-multi-container-net

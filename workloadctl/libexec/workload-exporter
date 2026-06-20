@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, normalize_containers, workload_home_dir
+from workload_lib import QMPClient, normalize_containers, workload_home_dir, workload_root_dir
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -384,7 +384,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     if health is not None:
                         svc["health"] = 1 if health == "healthy" else 0
                 vm = get_vm_qmp_metrics(name) if is_vm else {}
-                disk = get_workload_disk_bytes(workload_home_dir(name))
+                disk = get_workload_disk_bytes(workload_root_dir(name))
                 all_metrics.append((name, svc, cgroup, vm, disk))
             body = format_metrics(all_metrics).encode()
             self.send_response(200)

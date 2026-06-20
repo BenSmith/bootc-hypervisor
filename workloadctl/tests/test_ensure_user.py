@@ -416,7 +416,9 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
 
     def test_multi_container_volumes_created(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
+            root = Path(tmp)
+            home = root / "state"
+            home.mkdir()
             pw = _fake_pw(home)
             config = {
                 "workload": {"name": "myapp"},
@@ -435,8 +437,9 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
             }
             with mock.patch("os.chown"), mock.patch("os.chmod"):
                 self.mod.setup_volume_directories(pw, config)
-            self.assertTrue((home / "web-data").is_dir())
-            self.assertTrue((home / "db-data").is_dir())
+            # ./X anchors now resolve to the sibling data/ subdir
+            self.assertTrue((root / "data" / "web-data").is_dir())
+            self.assertTrue((root / "data" / "db-data").is_dir())
 
 
 class TestConfigureSubuidSubgid(unittest.TestCase):

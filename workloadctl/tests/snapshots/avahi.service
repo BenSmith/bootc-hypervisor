@@ -13,7 +13,7 @@ Type=simple
 Slice=workloads.slice
 User=_wl-avahi
 Group=_wl-avahi
-Environment="HOME=/var/lib/workloads/avahi"
+Environment="HOME=/var/lib/workloads/avahi/state"
 EnvironmentFile=-/run/workload-env/workload-avahi.env
 
 ExecStartPre=-/usr/bin/podman system migrate

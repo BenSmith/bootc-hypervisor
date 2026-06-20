@@ -13,7 +13,7 @@ Type=simple
 Slice=workloads.slice
 User=_wl-registry
 Group=_wl-registry
-Environment="HOME=/var/lib/workloads/registry"
+Environment="HOME=/var/lib/workloads/registry/state"
 EnvironmentFile=-/run/workload-env/workload-registry.env
 
 ExecStartPre=-/usr/bin/podman system migrate

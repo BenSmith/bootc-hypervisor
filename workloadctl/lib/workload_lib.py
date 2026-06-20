@@ -331,9 +331,35 @@ def workload_container_name(name: str) -> str:
     return f"workload-{name}"
 
 
-def workload_home_dir(name: str) -> Path:
-    """Return the home directory path for a workload."""
+STATE_SUBDIR = "state"
+DATA_SUBDIR = "data"
+
+
+def workload_root_dir(name: str) -> Path:
+    """Per-workload durable-state root: /var/lib/workloads/<name>.
+
+    Spans both the reconstructible state/ subtree and the precious data/ subtree;
+    use this for writable-path grants and containment checks.
+    """
     return WORKLOADS_BASE / name
+
+
+def workload_state_dir(name: str) -> Path:
+    """Reconstructible state subtree (= $HOME / podman graphroot / VM disks).
+
+    Backup-skipped (rebuildable from registries/Containerfiles).
+    """
+    return WORKLOADS_BASE / name / STATE_SUBDIR
+
+
+def workload_data_dir(name: str) -> Path:
+    """Precious data subtree. './' volume anchors resolve here. Backup-captured."""
+    return WORKLOADS_BASE / name / DATA_SUBDIR
+
+
+def workload_home_dir(name: str) -> Path:
+    """Workload $HOME — the state/ subdir (podman graphroot lives here)."""
+    return workload_state_dir(name)
 
 
 # Per-container keys that may appear at *either* nesting depth in a
@@ -643,21 +669,48 @@ def selinux_type_name(name: str) -> str:
 
 # --- Volume path expansion ---
 
+def _safe_anchor_subpath(sub: str) -> str:
+    """Reject traversal/absolute escapes from a workload-relative anchor."""
+    if sub.startswith("/") or ".." in Path(sub).parts:
+        raise ValueError(f"unsafe anchored volume subpath: {sub!r}")
+    return sub
+
+
+def _expand_anchor(host: str, home_dir: str) -> str:
+    """Resolve a workload-relative volume anchor to an absolute host path.
+
+    home_dir is the workload STATE dir (= $HOME). The DATA dir is its sibling.
+      data/sub  (sugar ./sub)  -> <root>/data/sub        (precious)
+      state/sub (sugar @/sub)  -> <root>/state/volumes/sub (reconstructible)
+    Anything else is returned unchanged.
+    """
+    data_root = str(Path(home_dir).parent / DATA_SUBDIR)
+    state_vol_root = home_dir + "/volumes"
+    # ./ and @/ are sugar for the canonical data/ and state/ prefixes. An empty
+    # subpath (e.g. "./" or bare "data") resolves to the anchor root itself.
+    for prefix, root in (("./", data_root), ("@/", state_vol_root),
+                         ("data/", data_root), ("state/", state_vol_root)):
+        if host.startswith(prefix):
+            sub = _safe_anchor_subpath(host[len(prefix):])
+            return root + "/" + sub if sub else root
+    if host == "data":
+        return data_root
+    if host == "state":
+        return state_vol_root
+    return host
+
+
 def expand_volume_path(vol_spec: str, home_dir: str) -> str:
-    """Expand ./ prefix in volume host path to the workload home directory.
+    """Expand a workload-relative anchor in a volume spec's host path.
 
     Args:
-        vol_spec: Volume specification like "./data:/container/path:rw"
-        home_dir: Workload home directory path (string)
+        vol_spec: "host:guest[:opts]" — host may use ./ @/ data/ state/ anchors.
+        home_dir: the workload STATE dir (= $HOME); data/ is its sibling.
 
-    Returns:
-        Volume spec with ./ expanded to home directory
+    Returns the spec with the host path made absolute, original arity preserved.
     """
     host, guest, opts = parse_volume_spec(vol_spec)
-    if host.startswith('./'):
-        host = home_dir + '/' + host[2:]
-    # Preserve the original arity: a bare path or a host:guest spec must not
-    # gain a synthesized opts field.
+    host = _expand_anchor(host, home_dir)
     ncolons = vol_spec.count(':')
     if ncolons == 0:
         return host

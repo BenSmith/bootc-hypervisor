@@ -34,7 +34,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         sys.path.insert(0, str(_libdir))
         break
 
-from workload_lib import WORKLOAD_CONFIG_DIR, WORKLOADS_BASE
+from workload_lib import WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_state_dir
 
 
 def log(msg: str):
@@ -258,7 +258,7 @@ def main():
 
     config = load_config(name)
     vm_cfg = config.get("vm", {})
-    home_dir = WORKLOADS_BASE / name
+    home_dir = workload_state_dir(name)
     home_dir.mkdir(parents=True, exist_ok=True)
 
     system_disk = home_dir / "system.qcow2"

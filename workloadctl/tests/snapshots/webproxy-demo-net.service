@@ -13,7 +13,7 @@ RemainAfterExit=yes
 Slice=workloads.slice
 User=_wl-webproxy-demo
 Group=_wl-webproxy-demo
-Environment="HOME=/var/lib/workloads/webproxy-demo"
+Environment="HOME=/var/lib/workloads/webproxy-demo/state"
 EnvironmentFile=-/run/workload-env/workload-webproxy-demo.env
 ExecStartPre=-/usr/bin/podman system migrate
 ExecStartPre=-/usr/bin/podman network rm -f workload-webproxy-demo-net
