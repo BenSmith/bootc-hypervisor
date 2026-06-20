@@ -27,6 +27,7 @@ from workload_lib import (
     get_next_uid,
     NAME_PATTERN,
     workload_username,
+    workload_root_dir,
 )
 import imagebuild
 from podman import Podman
@@ -155,12 +156,17 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     missing_required_files = [e for e in required_files if not Path(e["path"]).exists()]
 
     if missing_required_files:
-        home_resolved = Path(config.home_dir).resolve()
+        # Auto-copy is gated on the destination being inside the workload's own
+        # tree. Anchor on the workload ROOT, not home_dir: home_dir is the
+        # state/ subdir, but `./`-anchored required_files resolve to the data/
+        # sibling — checking against home_dir (state/) would reject every
+        # data/ destination and silently skip the copy.
+        root_resolved = workload_root_dir(config.name).resolve()
         still_missing = []
         for entry in missing_required_files:
             dest = Path(entry["path"])
             hint = entry.get("hint")
-            if hint and Path(hint).exists() and dest.resolve().is_relative_to(home_resolved):
+            if hint and Path(hint).exists() and dest.resolve().is_relative_to(root_resolved):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(hint, dest)
                 print(f"  ✓ Copied config template: {dest}")
@@ -201,11 +207,15 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             missing_dirs.append(host_path)
 
     if missing_dirs:
-        home_resolved = Path(config.home_dir).resolve()
+        # Same root-vs-home distinction as the required_files copy above: a `./`
+        # volume dir resolves under data/ (sibling of state/), so anchor the
+        # "auto-create vs operator-must-provision" split on the workload ROOT.
+        # Genuinely external bind sources (absolute host paths) stay must-create.
+        root_resolved = workload_root_dir(config.name).resolve()
         auto_create = [p for p in missing_dirs
-                       if Path(p).resolve().is_relative_to(home_resolved)]
+                       if Path(p).resolve().is_relative_to(root_resolved)]
         must_create = [p for p in missing_dirs
-                       if not Path(p).resolve().is_relative_to(home_resolved)]
+                       if not Path(p).resolve().is_relative_to(root_resolved)]
 
         for path in auto_create:
             Path(path).mkdir(parents=True, exist_ok=True)

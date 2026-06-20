@@ -242,7 +242,7 @@ Caddy v2 picks its on-disk storage path at runtime from, in order,
 With `userns=keep-id` the in-container process is the rootless workload
 user, which has no `pwent` in the image and therefore no real `$HOME`, so
 without an explicit pin Caddy lands somewhere unmapped (often `/.local/...`)
-and the bind-mounted `./data` volume goes unused. The visible symptom is
+and the bind-mounted `./caddy` volume goes unused. The visible symptom is
 that Caddy's internal CA root fingerprint changes on every container
 restart, breaking clients that previously trusted it.
 

@@ -68,7 +68,7 @@ on_failure = "kill"
 [storage]
 volumes = [
     "./Caddyfile:/etc/caddy/Caddyfile:ro",
-    "./data:/var/lib/caddy",
+    "./caddy:/var/lib/caddy",
     "./config:/etc/caddy/config",
     # Shared homelab CA (see README "Shared homelab CA"). Both files live in the
     # workload dir so they carry a container_file_t label caddy can read under

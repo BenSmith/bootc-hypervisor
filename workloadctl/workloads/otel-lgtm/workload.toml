@@ -71,7 +71,7 @@ PROMETHEUS_RETENTION_SIZE = "10GB"
 
 [storage]
 volumes = [
-    "./data:/data",
+    "./lgtm:/data",
     # Writable target for the image's MCP integration helpers; the entrypoint
     # tries to mkdir /etc/lgtm and dies with EACCES otherwise (non-fatal but
     # noisy in the journal).

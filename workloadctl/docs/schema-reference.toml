@@ -1550,7 +1550,7 @@ ports = ["8080:80", "8443:443"]
 # FORGEJO__database__USER = "forgejo"
 # FORGEJO__database__PASSWD = "${SECRET:forgejo-db-password}"
 # [containers.storage]
-# volumes = ["./data:/var/lib/gitea"]
+# volumes = ["./gitea:/var/lib/gitea"]
 # [containers.network]
 # ports = ["3000:3000"]
 

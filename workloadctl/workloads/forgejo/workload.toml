@@ -52,7 +52,7 @@ on_failure = "kill"
 
 [storage]
 volumes = [
-    "./data:/var/lib/gitea",
+    "./gitea:/var/lib/gitea",
 #    "./app.ini:/var/lib/gitea/custom/conf/app.ini"
 ]
 

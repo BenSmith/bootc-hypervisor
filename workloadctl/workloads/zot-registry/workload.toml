@@ -73,7 +73,7 @@ on_failure = "kill"
 [storage]
 volumes = [
     "./config.json:/etc/zot/config.json:ro",
-    "./data:/var/lib/registry",
+    "./registry:/var/lib/registry",
 ]
 
 [security]

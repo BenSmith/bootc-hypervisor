@@ -207,5 +207,71 @@ class TestRequiredFilesAnchorResolution(unittest.TestCase):
         self.assertEqual(rf[0]["path"], "/etc/credstore/foo")
 
 
+class TestPreflightDataAnchoring(unittest.TestCase):
+    """enable's preflight must treat the data/ sibling as part of the workload's
+    own tree. Regression (state/data split): the auto-copy + auto-create guards
+    anchored on home_dir (= state/), so every `./`-anchored required_file and
+    volume dir (which resolve to data/) was wrongly judged "outside the workload"
+    — silently skipping the copy and refusing to create the dir. Anchor on the
+    workload ROOT, which spans both state/ and data/.
+    """
+
+    def _run_preflight(self, base, toml_text):
+        import workload_lib
+        import workloadctl_core as core
+        sys.path.insert(0, str(LIB_DIR))
+        import cmd_lifecycle
+        toml_dir = base / "tomls"
+        toml_dir.mkdir(exist_ok=True)
+        (toml_dir / "wltest.toml").write_text(toml_text)
+        with mock.patch.object(workload_lib, "WORKLOADS_BASE", base), \
+             mock.patch.object(core, "WORKLOAD_DIR", toml_dir):
+            config = core.WorkloadConfig("wltest")
+            cmd_lifecycle._preflight_checks(config)
+
+    def test_required_file_autocopied_and_data_dir_autocreated(self):
+        import shutil as _shutil
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: _shutil.rmtree(base, ignore_errors=True))
+        ext = Path(tempfile.mkdtemp())  # writable, OUTSIDE the workload root
+        self.addCleanup(lambda: _shutil.rmtree(ext, ignore_errors=True))
+
+        hint = base / "hint-config.json"
+        hint.write_text("HINT-CONTENT")
+        ext_src = ext / "ext-bind"  # absolute external bind source
+
+        self._run_preflight(base,
+            '[workload]\n'
+            'name = "wltest"\n'
+            'enabled = false\n\n'
+            '[container]\n'
+            'image = "docker.io/x:latest"\n'
+            'pull = "missing"\n\n'
+            '[setup]\n'
+            'required_files = [\n'
+            f'  {{ path = "./config.json", hint = "{hint}" }},\n'
+            ']\n\n'
+            '[storage]\n'
+            'volumes = [\n'
+            '  "./config.json:/etc/x/config.json:ro",\n'
+            '  "./registry:/var/lib/registry",\n'
+            f'  "{ext_src}:/ext",\n'
+            ']\n'
+        )
+
+        # required_file auto-copied from its hint into data/ (not state/)
+        dest = base / "wltest" / "data" / "config.json"
+        self.assertTrue(dest.exists(), "required_file was not auto-copied into data/")
+        self.assertEqual(dest.read_text(), "HINT-CONTENT")
+
+        # `./` volume directory auto-created under data/
+        self.assertTrue((base / "wltest" / "data" / "registry").is_dir(),
+                        "./ volume dir was not auto-created under data/")
+
+        # a genuinely external bind source is NOT auto-created — operator provides it
+        self.assertFalse(ext_src.exists(),
+                         "external bind source must stay operator-provisioned")
+
+
 if __name__ == "__main__":
     unittest.main()
