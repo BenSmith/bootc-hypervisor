@@ -28,7 +28,8 @@ enabled = false
 # Optional: Bundle (kind) this workload draws shared control files from.
 # Type: string
 # Default: the workload name
-# The build context (Containerfile/build.sh), the [host].setup script, and the
+# The build context (Containerfile, plus an optional build.sh escape hatch via
+# [build].script), the [host].setup script, and the
 # SELinux CIL (policy.cil) are all looked up under
 # /usr/share/workloadctl/workloads/<bundle>/.  Defaults to the workload name, so
 # a single shipped instance needs no `bundle` field.  `workloadctl init <bundle>
@@ -768,20 +769,17 @@ virtualization = true
 # security_opt = []
 
 # Optional: Ship a per-workload SELinux type
-# Type: bool OR string
+# Type: bool
 # Default: false
 # When true, `enable` loads the bundle's udica-style CIL policy
-# (containers/<bundle>/<bundle>.cil) as a name-keyed module (wl_<name>) and the
+# (workloads/<bundle>/policy.cil) as a name-keyed module (wl_<name>) and the
 # generator labels the container with type wl_<name>.process; `disable` removes
 # it.
 #
-# The bundle dir defaults to the workload name (true → containers/<name>/). Set
-# a string to source the CIL from a differently-named bundle instead — e.g.
-# `selinux_policy = "vncdesktop-sway"` loads containers/vncdesktop-sway/
-# vncdesktop-sway.cil. This decouples the policy source from the workload name,
-# so a renamed workload can keep using its original bundle (the loaded module
-# and label stay wl_<name>.process regardless). The string must be a valid
-# workload-style name ([a-z][a-z0-9-]*).
+# The CIL is sourced from the resolved `[workload] bundle` (which defaults to the
+# workload name), so a renamed copy keeps using its source bundle's policy with
+# no extra field — the loaded module and label stay wl_<name>.process regardless.
+# (The old string form of this field is subsumed by `bundle`.)
 #
 # The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted
 # at enable time), e.g.:
@@ -923,6 +921,47 @@ ports = ["8080:80", "8443:443"]
 #
 # The script runs as root (workloadctl requires root for enable/disable).
 # setup = "setup.sh"
+
+[build]
+# Optional: how `workloadctl build <name>` builds this workload's image.
+#
+# Only relevant for locally-built images, i.e. a [container] (or [[containers]])
+# with `pull = "never"`. With a Containerfile present in the bundle and no
+# [build] section at all, `build` Just Works: it runs `podman build` over the
+# resolved build context and tags the result exactly as [container].image.
+#
+# THE BUILD CONTEXT IS OVERRIDE-RESOLVED. workloadctl assembles a merged context
+# — the shipped /usr/share/workloadctl/workloads/<bundle>/ tree with your
+# /etc/workloads.d/<name>/ overrides laid on top, file by file — so editing the
+# Containerfile or a COPY-ed asset via `workloadctl edit <name> <file>` actually
+# takes effect. (workloadctl's control files — workload.toml, build.sh,
+# policy.cil, the [host].setup script — are stripped from the context so a bare
+# `COPY . /` can't sweep them into the image.)
+#
+# containerfile: Containerfile name inside the context. Relative (no '..').
+#                Default: "Containerfile".
+# containerfile = "Containerfile"
+#
+# args: static --build-arg values.
+# args = { GPU_TYPE = "amd" }
+#
+# arg_env: host env var names forwarded as --build-arg WHEN SET — the transient
+#          per-build knob (an RPM URL, a GPU type). The env value wins over the
+#          matching `args` default. Example:
+#            sudo GPU_TYPE=nvidia workloadctl build <name>
+# arg_env = ["GPU_TYPE"]
+#
+# target: optional multi-stage build --target.
+# target = "runtime"
+#
+# script: ESCAPE HATCH. Path to a build script (resolved through the override
+#         chain like any control file). When set, `build` runs it INSTEAD of the
+#         built-in builder, handing it the merged context dir and target tag as
+#         argv plus WL_BUILD_CONTEXT / WL_TAG / WL_IMAGE in the environment — so
+#         the script builds the override-resolved context rather than locating
+#         its own directory. Use only for genuinely imperative builds the
+#         declarative fields above can't express; prefer the built-in builder.
+# script = "build.sh"
 
 [resources]
 # Optional: Resource limits and constraints

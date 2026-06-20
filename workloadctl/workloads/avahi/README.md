@@ -30,8 +30,7 @@ host's avahi-daemon and systemd-resolved's mDNS on the publishing host.
 
 1. **Build the container:**
    ```bash
-   cd containers/avahi
-   sudo ./build.sh
+   sudo workloadctl build avahi
    ```
 
 2. **Mask any host-side avahi-daemon:**

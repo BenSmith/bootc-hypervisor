@@ -5,7 +5,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/socks5-vpn && sudo ./build.sh
+#        sudo workloadctl build socks5-vpn
 #
 #   2. Copy WireGuard config and enable:
 #        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/socks5-vpn/wg0.conf

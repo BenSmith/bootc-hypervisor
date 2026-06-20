@@ -14,7 +14,7 @@
 # accessible by minimising/exiting Steam.
 #
 # Build:
-#   sudo ./build.sh
+#   sudo workloadctl build sunshine-game-streaming
 #
 # Run:
 #   workload-ctl enable sunshine-game-streaming

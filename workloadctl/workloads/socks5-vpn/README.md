@@ -7,8 +7,7 @@ exits via the VPN. Binds to `127.0.0.1:1080` by default — local use only.
 
 1. **Build the container:**
    ```bash
-   cd containers/socks5-vpn
-   sudo ./build.sh
+   sudo workloadctl build socks5-vpn
    ```
 
 2. **Copy your WireGuard config and enable:**

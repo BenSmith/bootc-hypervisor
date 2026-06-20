@@ -5,10 +5,10 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/zot-registry && sudo ./build.sh
+#        sudo workloadctl build zot-registry
 #
 #   2. Enable the workload (copies config.json template and starts Zot):
-#        sudo cp containers/zot-registry/config.json /var/lib/workloads/zot-registry/config.json
+#        sudo cp /usr/share/workloadctl/workloads/zot-registry/config.json /var/lib/workloads/zot-registry/config.json
 #        sudo workloadctl enable zot-registry
 #
 #   3. (Optional) Edit the config before or after enabling:

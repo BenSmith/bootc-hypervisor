@@ -64,3 +64,11 @@ tasks_max = 16384
 # Host prerequisites: uinput kernel module, udev rule, and the host-side udev
 # input-event relay.
 setup = "setup.sh"
+
+[build]
+# The Sunshine RPM is pinned in the Containerfile (ARG SUNSHINE_RPM_URL). When
+# that release goes stale, override the URL per build (dnf installs from a URL
+# directly — fetch only, no local file):
+#   sudo SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v.../Sunshine-...rpm \
+#       workloadctl build sunshine-game-streaming
+arg_env = ["SUNSHINE_RPM_URL"]

@@ -401,11 +401,88 @@ def _vm_qmp_status(name: str) -> str | None:
         qmp.close()
 
 
+def _collect_control_files(config) -> list[dict]:
+    """Merged view of a workload's bundle control files (build.sh, Containerfile,
+    policy.cil, setup.sh, …).
+
+    Unions the files actually present in the override tree
+    (`/etc/workloads.d/<name>/`) with those in the shipped bundle tree
+    (`/usr/.../workloads/<bundle>/`), plus any relative `[host].setup` the TOML
+    names (surfaced even when missing, so a declared-but-absent dependency
+    shows). For each, resolves the winning source — "etc" (override) or "usr"
+    (shipped default) — and whether the resolved file exists. `workload.toml` is
+    excluded: the authoritative declaration is `/etc/<name>.toml`, never an
+    override target.
+    """
+    names: set[str] = set()
+    for d in (config.override_dir, config.bundle_dir):
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.is_file() and p.name != "workload.toml":
+                    names.add(p.name)
+    setup = config.config.get("host", {}).get("setup", "")
+    if setup and not Path(setup).is_absolute():
+        names.add(setup)
+
+    files = []
+    for name in sorted(names):
+        path, source = config.resolve_control_file_with_source(name)
+        files.append({
+            "file": name,
+            "source": source,
+            "path": str(path),
+            "exists": path.exists(),
+        })
+    return files
+
+
+def _print_control_files(config, json_mode=False):
+    """Render the `info --files` merged view (systemd `systemctl cat` analogue)."""
+    files = _collect_control_files(config)
+    if json_mode:
+        print(json.dumps({
+            "workload": config.name,
+            "bundle": config.bundle,
+            "override_dir": str(config.override_dir),
+            "bundle_dir": str(config.bundle_dir),
+            "control_files": files,
+        }, indent=2))
+        return
+
+    print(f"Control files for {config.name}  (bundle: {config.bundle})")
+    print(f"  override dir: {config.override_dir}")
+    print(f"  bundle dir:   {config.bundle_dir}")
+    print()
+    if not files:
+        print("  No control files (bundle ships none, no overrides).")
+        return
+
+    fw = max((len(f["file"]) for f in files), default=4)
+    print(f"  {'FILE':<{fw}}  {'SOURCE':<9}  PATH")
+    for f in files:
+        if f["source"] == "etc":
+            src = "override"
+        else:
+            src = "shipped" if f["exists"] else "missing"
+        print(f"  {f['file']:<{fw}}  {src:<9}  {f['path']}")
+    print()
+    print("  override = /etc copy wins · shipped = /usr default · "
+          "missing = declared but absent")
+    print(f"  Edit a control file:  sudo workloadctl edit {config.name} <file>")
+
+
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
     from substrate import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
+
+    # --files: the merged control-file view (the discoverability answer to lazy
+    # override). Generic across VM/container, so handle it before the kind split.
+    if getattr(args, "files", False):
+        _print_control_files(config, json_mode=args.json)
+        return
+
     user_exists = manager.user_exists(config)
 
     if config.is_vm:

@@ -19,7 +19,7 @@ from cmd_inspect import (
 )
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
-    cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
+    cmd_build, cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
     cmd_recreate, cmd_start, cmd_stop,
 )
 from cmd_secret import cmd_secret
@@ -84,6 +84,10 @@ def main():
     duplicate_parser.add_argument("source", help="Existing workload to copy")
     duplicate_parser.add_argument("new", help="Name for the copy")
 
+    build_parser = subparsers.add_parser(
+        "build", help="Build a workload's container image from its bundle build context")
+    build_parser.add_argument("workload", help="Workload name")
+
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
@@ -119,8 +123,14 @@ def main():
                                help="Also remove user, home, and subuid/subgid")
     disable_parser.add_argument("workload", help="Workload name")
 
-    edit_parser = subparsers.add_parser("edit", help="Edit config and apply changes")
+    edit_parser = subparsers.add_parser("edit", help="Edit config, or a named control file (copy-on-write override)")
     edit_parser.add_argument("workload", help="Workload name")
+    edit_parser.add_argument(
+        "file", nargs="?",
+        help="Control file to edit (Containerfile, setup.sh, policy.cil, …). "
+             "Seeds an /etc/workloads.d/<name>/ override copy-on-write from the "
+             "shipped default. Omit to edit the workload TOML.",
+    )
     edit_parser.add_argument(
         "-y", "--yes", action="store_true",
         help="Apply changes without the interactive confirmation prompt",
@@ -169,6 +179,11 @@ def main():
 
     info_parser = subparsers.add_parser("info", help="Show detailed workload information")
     info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    info_parser.add_argument(
+        "--files", action="store_true",
+        help="Show the merged view of bundle control files: each resolved file "
+             "and whether it wins from /etc (override) or /usr (shipped default)",
+    )
     info_parser.add_argument("workload", help="Workload name")
 
     images_parser = subparsers.add_parser("images", help="Show images or prune unused")
@@ -288,6 +303,7 @@ def main():
 
     command_map = {
         "backup": cmd_backup,
+        "build": cmd_build,
         "catalog": cmd_catalog,
         "cleanup": cmd_cleanup,
         "clone": cmd_duplicate,

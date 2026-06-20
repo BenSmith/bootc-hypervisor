@@ -1,7 +1,7 @@
 # Wolf game streaming container
 # Multi-stage build: GStreamer 1.24 + gst-interpipe + gst-wayland-display + Wolf
 #
-# Build: GPU_TYPE=amd sudo ./build.sh
+# Build: sudo GPU_TYPE=amd workloadctl build wolf-game-streaming
 
 # ─── Stage 1: Build GStreamer and gst-interpipe ────────────────────────────
 FROM registry.fedoraproject.org/fedora@sha256:00d5fd230bf7ef5bb73ebc4fa9e4a29d4e10bf49647670fba5a82aab118e0863 AS gstreamer-builder

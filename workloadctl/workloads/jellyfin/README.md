@@ -2,7 +2,7 @@
 
 Free Software media server with hardware-accelerated video transcoding.
 
-Unlike most workloads under `containers/`, this one **builds no image** — it
+Unlike most workloads under `workloads/`, this one **builds no image** — it
 runs the upstream `docker.io/jellyfin/jellyfin` image directly. This directory
 exists only to ship the host setup script.
 

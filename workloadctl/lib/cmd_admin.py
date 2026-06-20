@@ -157,6 +157,32 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             })
             errors += 1
 
+    # [build] section: the containerfile names a file *inside* the build
+    # context, so it must be a plain relative path (no traversal). Only checked
+    # when the section is present.
+    if config.config.get("build"):
+        cf = config.build_containerfile
+        if Path(cf).is_absolute() or ".." in Path(cf).parts:
+            checks.append({
+                "check": "build_containerfile",
+                "passed": False,
+                "severity": "error",
+                "message": f"Invalid [build] containerfile {cf!r}: must be a "
+                           f"relative path inside the build context (no '..')",
+                "fix": 'e.g. containerfile = "Containerfile"',
+            })
+            errors += 1
+        else:
+            summary = f"containerfile={cf}"
+            if config.build_script:
+                summary = f"script={config.build_script}"
+            checks.append({
+                "check": "build",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Build: {summary}",
+            })
+
     required_file_paths = {e["path"] for e in config.get_required_files()}
     for vol in config.get_volumes():
         expanded_vol = expand_volume_path(vol, str(config.home_dir))
@@ -577,7 +603,7 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
                 if pull_policy == "never":
-                    build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
+                    build_script = config.resolve_control_file("build.sh")
                     fix = (f"Build it: {build_script}" if build_script.exists()
                            else f"Build or provide: {config.image}")
                 else:
@@ -737,9 +763,132 @@ def _ask_yes_no(prompt: str) -> bool:
         return False
 
 
+def _validate_control_file_name(rel: str) -> None:
+    """Reject anything that isn't a safe relative path under the override dir.
+
+    Blocks absolute paths and `..` traversal so `edit <name> <file>` can never
+    write outside `/etc/workloads.d/<name>/`. Nested names (e.g. `rootfs/x`) are
+    allowed — the build context may have subdirectories.
+    """
+    if not rel or not rel.strip():
+        raise ValueError("empty control-file name")
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        raise ValueError("must be a relative path with no '..' components")
+
+
+def _cleanup_override_dir(config: WorkloadConfig, override: Path) -> None:
+    """Remove now-empty override dirs from `override` up to override_dir.
+
+    Keeps the override tree free of empty `<name>/` (and any seeded subdirs)
+    after a lazy-cleanup removal, so the dir's existence stays meaningful.
+    """
+    base = config.override_dir
+    d = override.parent
+    while True:
+        try:
+            d.rmdir()
+        except OSError:
+            break
+        if d == base:
+            break
+        d = d.parent
+
+
+def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
+    """Print how to apply a just-edited control file (it isn't auto-applied)."""
+    base = Path(rel).name
+    setup = config.config.get("host", {}).get("setup", "")
+    print()
+    print("  Next steps:")
+    if base == "policy.cil":
+        print(f"    Reload SELinux policy:  sudo workloadctl enable {config.name}")
+    elif base in ("build.sh", "Containerfile"):
+        print(f"    Rebuild image:          sudo workloadctl build {config.name}")
+        print(f"    Apply to running:       sudo workloadctl recreate {config.name}")
+    elif rel == setup:
+        print(f"    Re-runs on next enable: sudo workloadctl enable {config.name}")
+    else:
+        print(f"    Apply changes:          sudo workloadctl recreate {config.name}")
+    print(f"    Revert to shipped:      sudo rm {config.override_dir / rel}")
+
+
+def _edit_control_file(args, manager: WorkloadManager):
+    """Edit a bundle control file, seeding an /etc override copy-on-write.
+
+    The lazy-override ergonomic (systemd `systemctl edit`): on first edit, seed
+    `/etc/workloads.d/<name>/<file>` from the resolved `/usr` default (or an
+    empty file if the bundle ships none), then open `$EDITOR`. If the result is
+    byte-identical to the shipped default — or an untouched empty new file — the
+    override is dropped so it never freezes upgrade-tracking.
+    """
+    name = args.workload
+    rel = args.file
+
+    config_path = WORKLOAD_DIR / f"{name}.toml"
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        _validate_control_file_name(rel)
+    except ValueError as e:
+        print(f"Error: invalid control-file name {rel!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(name)
+    override = config.override_dir / rel
+    default = config.bundle_dir / rel
+
+    seeded = False
+    if not override.exists():
+        override.parent.mkdir(parents=True, exist_ok=True)
+        if default.exists():
+            shutil.copy2(default, override)
+            print(f"  Seeded override from shipped default: {default}")
+        else:
+            override.touch()
+            if rel.endswith(".sh"):
+                override.chmod(0o755)
+            print(f"  No shipped default — created a new control file: {override}")
+        seeded = True
+
+    editor = os.environ.get("EDITOR", "nano")
+    result = subprocess.run([editor, str(override)])
+    if result.returncode != 0:
+        print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
+        # Don't leave a half-seeded override behind on editor failure.
+        if seeded:
+            override.unlink(missing_ok=True)
+            _cleanup_override_dir(config, override)
+        sys.exit(1)
+
+    # Lazy-override cleanup. An override byte-identical to the shipped default is
+    # redundant and would freeze upgrade-tracking, so drop it; likewise an
+    # untouched empty new file. Mirrors `systemctl edit` discarding a no-op.
+    if default.exists() and override.read_bytes() == default.read_bytes():
+        override.unlink()
+        _cleanup_override_dir(config, override)
+        print(f"  No change from the shipped default — no override kept "
+              f"(still tracks {default}).")
+        return
+    if not default.exists() and override.stat().st_size == 0:
+        override.unlink()
+        _cleanup_override_dir(config, override)
+        print("  Empty file — nothing created.")
+        return
+
+    print(f"✓ Override saved: {override}")
+    _print_control_file_next_steps(config, rel)
+
+
 def cmd_edit(args, manager: WorkloadManager):
     """Edit config and apply changes"""
     require_root()
+
+    if getattr(args, "file", None):
+        _edit_control_file(args, manager)
+        return
 
     config_path = WORKLOAD_DIR / f"{args.workload}.toml"
     if not config_path.exists():

@@ -20,7 +20,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/smb-server && sudo ./build.sh
+#        sudo workloadctl build smb-server
 #
 #   2. Enable the workload (copies smb.conf template and starts Samba):
 #        sudo workloadctl enable smb-server

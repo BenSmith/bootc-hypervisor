@@ -47,6 +47,7 @@ from workload_lib import (
     validate_workload_name,
     VM_SOCKET_DIR,
     WORKLOADS_BASE,
+    WORKLOAD_BUNDLES_DIR,
     WORKLOAD_CONFIG_DIR,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
@@ -429,6 +430,103 @@ class WorkloadConfig:
         (`wl_<name>.process`) so teardown is 1:1 per enabled instance.
         """
         return self.bundle if self.selinux_policy else None
+
+    @property
+    def bundle_dir(self) -> Path:
+        """The shipped /usr control-file tree for this workload's bundle."""
+        return WORKLOAD_BUNDLES_DIR / self.bundle
+
+    @property
+    def override_dir(self) -> Path:
+        """The operator's /etc/workloads.d/<name>/ control-file override tree.
+
+        Lazy: usually absent. `edit <name> <file>` seeds a copy-on-write
+        override here; resolve_control_file prefers it over the shipped bundle.
+        Keyed on *name* (not bundle) so a duplicate overrides independently of
+        its source. Uses the WORKLOAD_DIR indirection so tests patching it are
+        honored. (`get_all_configs` globs *.toml at the top level only, so this
+        <name>/ subdir is invisible to workload discovery.)
+        """
+        return _get_workload_dir() / self.name
+
+    def resolve_control_file(self, relpath: str) -> Path:
+        """Resolve a bundle control file (build.sh, policy.cil, [host].setup, …)
+        through the lazy-override chain: the operator's
+        /etc/workloads.d/<name>/<relpath> wins if it exists, else the shipped
+        /usr bundle default. An absolute path bypasses resolution.
+
+        This is the single chokepoint every control-file lookup goes through so
+        overrides apply uniformly — the /usr→/etc vendor→admin drop-in idiom
+        (systemd's `systemctl edit`/`cat`). See docs/wip/workload-bundles.md
+        "Control files — lazy override".
+        """
+        return self.resolve_control_file_with_source(relpath)[0]
+
+    def resolve_control_file_with_source(self, relpath: str) -> tuple[Path, str]:
+        """Like resolve_control_file but also returns the winning source:
+        "etc" (operator override) or "usr" (shipped default) — the merged-view
+        truth `info --files` reports.
+        """
+        p = Path(relpath)
+        if p.is_absolute():
+            return p, "usr"
+        override = self.override_dir / relpath
+        if override.exists():
+            return override, "etc"
+        return self.bundle_dir / relpath, "usr"
+
+    # --- [build]: image build context (see lib/imagebuild.py) --------------
+
+    @property
+    def build_config(self) -> dict:
+        return self.config.get("build", {})
+
+    @property
+    def build_script(self) -> str | None:
+        """Escape-hatch build script (`[build] script`). When set, `build` runs
+        it against the merged context instead of the built-in podman builder.
+        Resolved through the override chain like any other control file."""
+        return self.build_config.get("script") or None
+
+    @property
+    def build_containerfile(self) -> str:
+        """Containerfile name within the (merged) build context. Default
+        `Containerfile`. Relative — it names a file inside the context dir."""
+        return self.build_config.get("containerfile", "Containerfile")
+
+    @property
+    def build_args(self) -> dict:
+        """Static `--build-arg` defaults (`[build] args`)."""
+        return self.build_config.get("args", {}) or {}
+
+    @property
+    def build_arg_env(self) -> list:
+        """Host env var names forwarded as `--build-arg` when set
+        (`[build] arg_env`); the transient override for a knob like an RPM URL
+        or GPU type. Env value wins over the `args` default."""
+        return self.build_config.get("arg_env", []) or []
+
+    @property
+    def build_target(self) -> str | None:
+        """Optional multi-stage `--target` (`[build] target`)."""
+        return self.build_config.get("target") or None
+
+    def build_images(self) -> list[str]:
+        """Distinct `pull = never` images this workload builds locally, in TOML
+        order. The built image is tagged exactly as `[container].image`, so a
+        pull=never container always matches what gets built — there is no
+        separate build-tag to drift out of sync."""
+        seen: list[str] = []
+        for _cname, image, pull in self.container_specs():
+            if pull == "never" and image not in seen:
+                seen.append(image)
+        return seen
+
+    def has_build_context(self) -> bool:
+        """True if there's a local image to build and a Containerfile resolves
+        (in the /etc override or the /usr bundle). Gates the built-in builder."""
+        return bool(self.build_images()) and \
+            self.resolve_control_file(self.build_containerfile).exists()
 
     @property
     def username(self) -> str:

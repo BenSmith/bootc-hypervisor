@@ -4,7 +4,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/squid && sudo ./build.sh
+#        sudo workloadctl build squid
 #
 #   2. Enable the workload (copies squid.conf template and starts Squid):
 #        sudo workloadctl enable squid

@@ -5,7 +5,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/wireguard-vpn && sudo ./build.sh
+#        sudo workloadctl build wireguard-vpn
 #
 #   2. Copy WireGuard config and enable:
 #        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/wg0.conf

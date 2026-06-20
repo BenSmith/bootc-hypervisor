@@ -4,7 +4,7 @@
 # port 5900.
 #
 # Build:
-#   sudo ./build.sh
+#   sudo workloadctl build vncdesktop-wayfire
 #
 # Run:
 #   workload-ctl enable vncdesktop-wayfire

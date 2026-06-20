@@ -4,7 +4,7 @@
 # attaches to the labwc compositor and serves it on TCP 5900.
 #
 # Build:
-#   ./build.sh
+#   sudo workloadctl build vncdesktop-labwc
 #
 # All desktop configuration lives in system-wide locations (/etc/xdg, /etc,
 # /usr/local/share). The container user's $HOME is provided at runtime by

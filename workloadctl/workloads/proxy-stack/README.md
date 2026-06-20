@@ -16,8 +16,7 @@ LAN clients and the proxy services themselves.
 
 1. **Build the container:**
    ```bash
-   cd containers/proxy-stack
-   sudo ./build.sh
+   sudo workloadctl build proxy-stack
    ```
 
 2. **Copy your WireGuard config and squid.conf template:**

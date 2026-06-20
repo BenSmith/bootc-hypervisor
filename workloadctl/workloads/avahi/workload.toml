@@ -4,12 +4,12 @@
 # without any central DNS. Pair with a per-host caddy workload that routes
 # those names by Host header to the right backend port.
 #
-# See containers/avahi/README.md for the full picture (architecture,
+# See workloads/avahi/README.md for the full picture (architecture,
 # resolver-host setup, troubleshooting). The short version of setup on the
 # publishing host:
 #
 #   1. Build the container:
-#        cd containers/avahi && sudo ./build.sh
+#        sudo workloadctl build avahi
 #
 #   2. Mask any host-side avahi-daemon (only one mDNS responder per host can
 #      bind UDP 5353):

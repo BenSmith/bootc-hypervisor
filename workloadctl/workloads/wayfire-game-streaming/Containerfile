@@ -14,7 +14,7 @@
 # accessible by minimising/exiting Steam.
 #
 # Build:
-#   sudo ./build.sh
+#   sudo workloadctl build wayfire-game-streaming
 #
 # Run:
 #   workload-ctl enable wayfire-game-streaming

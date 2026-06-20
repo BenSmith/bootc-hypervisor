@@ -22,11 +22,13 @@ from workload_lib import (
     selinux_type_name,
     USERNAME_PREFIX,
     WORKLOADS_BASE,
+    WORKLOAD_BUNDLES_DIR,
     VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
     workload_username,
 )
+import imagebuild
 from podman import Podman
 from workloadctl_core import (
     WorkloadConfig,
@@ -44,7 +46,7 @@ REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "
 RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
-_BUNDLES_DIR = Path("/usr/share/workloadctl/workloads")
+_BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
 _WORKLOAD_SECTION_RE = re.compile(
     r'(?ms)(?P<header>^\[workload\][^\n]*\n)(?P<body>.*?)(?=^\[|\Z)'
@@ -139,8 +141,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     for _cname, image, pull in config.container_specs():
         if pull == "never" and not Podman.for_root().image_id(image):
             print(f"  ✗ Image '{image}' not found locally and pull=never")
-            # TODO: remove hardcoded path
-            build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
+            build_script = config.resolve_control_file("build.sh")
             if build_script.exists():
                 print(f"    Build the image first:")
                 print(f"      sudo {build_script}")
@@ -388,7 +389,7 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
-        build_script = Path(f"/usr/share/workloadctl/workloads/{config.bundle}/build.sh")
+        build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
             print(f"Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
@@ -434,11 +435,9 @@ def _run_host_setup(config: WorkloadConfig, action: str):
     if not setup_script:
         return
 
-    if setup_script.startswith("/"):
-        script_path = Path(setup_script)
-    else:
-        bundle_dir = Path(f"/usr/share/workloadctl/workloads/{config.bundle}")
-        script_path = bundle_dir / setup_script
+    # Relative names resolve through the override chain (/etc override wins over
+    # the shipped bundle); an absolute path is taken verbatim.
+    script_path = config.resolve_control_file(setup_script)
 
     if not script_path.exists():
         print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)
@@ -554,7 +553,7 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
                   f"(the bundle is a directory name and uses hyphens, not the "
                   f"underscores of the SELinux type name)", file=sys.stderr)
         sys.exit(1)
-    template = Path(f"/usr/share/workloadctl/workloads/{bundle}/policy.cil")
+    template = config.resolve_control_file("policy.cil")
     if not template.exists():
         print(f"  ERROR: SELinux policy template not found: {template}",
               file=sys.stderr)
@@ -973,6 +972,50 @@ def cmd_recreate(args, manager: WorkloadManager):
     substrate.reprovision(recreate=True)
     print(f"✓ Workload '{args.workload}' recreated")
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+
+
+def _run_build(config: WorkloadConfig) -> int:
+    """Dispatch a build, returning its exit code. Run as root, building into
+    root's podman store — `enable`/`recreate` then transfer the resulting
+    pull=never image to the user store.
+
+    Two modes (override-correct in both, via the merged build context):
+      - `[build].script` set → escape hatch, run it (imagebuild.run_build_script).
+      - else, a Containerfile resolves → built-in podman builder.
+    Both operate on the merged /usr+/etc context, so overriding the Containerfile
+    (or a COPY-ed asset) takes effect — unlike the old self-locating build.sh.
+    """
+    if config.build_script:
+        return imagebuild.run_build_script(config)
+    if config.has_build_context():
+        return imagebuild.build_image(config)
+    print(f"Error: nothing to build for '{config.name}'", file=sys.stderr)
+    print("  No pull=never image with a resolvable Containerfile, and no "
+          "[build].script — this workload pulls a published image.",
+          file=sys.stderr)
+    return 1
+
+
+def cmd_build(args, manager: WorkloadManager):
+    """Build a workload's container image from its bundle build context."""
+    require_root()
+    config = WorkloadConfig(args.workload)
+    if config.is_vm:
+        print(f"Error: 'build' applies to container workloads; '{config.name}' "
+              f"is a VM (provision via 'update'/'recreate').", file=sys.stderr)
+        sys.exit(1)
+
+    rc = _run_build(config)
+    if rc != 0:
+        print(f"✗ Build failed (exit {rc})", file=sys.stderr)
+        sys.exit(rc)
+
+    print()
+    print(f"✓ Built image for '{config.name}'")
+    if config.enabled:
+        print(f"  Apply to the running workload: sudo workloadctl recreate {config.name}")
+    else:
+        print(f"  Enable when ready: sudo workloadctl enable {config.name}")
 
 
 def cmd_reboot(args, manager: WorkloadManager):

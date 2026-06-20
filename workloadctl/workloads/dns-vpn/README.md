@@ -8,8 +8,7 @@ tunnel. LAN clients can use this host as their DNS resolver.
 
 1. **Build the container:**
    ```bash
-   cd containers/dns-vpn
-   sudo ./build.sh
+   sudo workloadctl build dns-vpn
    ```
 
 2. **Copy your WireGuard config and enable:**

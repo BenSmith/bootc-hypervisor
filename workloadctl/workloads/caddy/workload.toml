@@ -6,10 +6,10 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/caddy && sudo ./build.sh
+#        sudo workloadctl build caddy
 #
-#   2. Drop a Caddyfile in place (see containers/caddy/Caddyfile for a sample):
-#        sudo cp containers/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
+#   2. Drop a Caddyfile in place (see workloads/caddy/Caddyfile for a sample):
+#        sudo cp /usr/share/workloadctl/workloads/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
 #
 #   3. Enable:
 #        sudo workloadctl enable caddy

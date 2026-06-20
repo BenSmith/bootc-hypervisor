@@ -6,7 +6,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/pihole-vpn && sudo ./build.sh
+#        sudo workloadctl build pihole-vpn
 #
 #   2. Copy your WireGuard config and enable:
 #        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/wg0.conf

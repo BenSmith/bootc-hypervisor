@@ -233,15 +233,16 @@ write_files:
       dnf install -y "$CIDATA_MNT/workloadctl.rpm"
       umount "$CIDATA_MNT" && rmdir "$CIDATA_MNT"
 
-      # 3. Sidecar container image for caddy (TLS terminator). mDNS is handled
-      # by systemd-resolved (configured above), so no avahi container is built.
-      bash /usr/share/workloadctl/workloads/caddy/build.sh
-
-      # 4. Drop the in-VM workload TOMLs into the locations workloadctl expects.
+      # 3. Drop the in-VM workload TOMLs into the locations workloadctl expects.
       # TOMLs are installed by the RPM under /usr/share/workloadctl/workloads/.
       install -d /etc/workloads.d
       install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/forgejo.toml /etc/workloads.d/forgejo.toml
       install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/caddy.toml   /etc/workloads.d/caddy.toml
+
+      # 4. Build caddy's sidecar image (TLS terminator) now that its TOML is in
+      # place — `workloadctl build` reads /etc/workloads.d/caddy.toml. mDNS is
+      # handled by systemd-resolved (configured above), so no avahi is built.
+      workloadctl build caddy
 
       # Alloy is opt-in: provision it only if the operator has named a
       # central otel-lgtm host. Substitution happens here (not at ISO build)

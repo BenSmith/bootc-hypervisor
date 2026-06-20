@@ -80,7 +80,7 @@ REGISTER_RUNNER = "false"
 # URL to fetch the registry host's Caddy internal CA cert over plain HTTP.
 # Required for CI jobs that push/pull from registry.local (or any Caddy-fronted
 # registry using local_certs). The host serves it at http://<host>/caddy-root.crt
-# — see workloadctl/containers/caddy/Caddyfile for the server-side setup.
+# — see workloadctl/workloads/caddy/Caddyfile for the server-side setup.
 # Leave empty to skip CA trust installation.
 REGISTRY_CA_URL = ""
 # Central otel-lgtm host the in-VM Alloy collector forwards telemetry to.

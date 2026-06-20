@@ -6,7 +6,7 @@ the upstream `zot-linux-amd64` release binary on a Fedora base.
 ## Files
 
 - `Containerfile` — fetches and verifies the Zot binary, installs to `/usr/local/bin/zot`
-- `build.sh` — builds `localhost/zot-registry:latest` via podman
+- built via `sudo workloadctl build zot-registry` → `localhost/zot-registry:latest`
 - `entrypoint.sh` — runs `zot serve /etc/zot/config.json`
 - `config.json` — default config: pull-through sync from docker.io, ghcr.io,
   quay.io, registry.fedoraproject.org, codeberg.org, plus search + UI extensions

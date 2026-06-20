@@ -10,7 +10,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/proxy-stack && sudo ./build.sh
+#        sudo workloadctl build proxy-stack
 #
 #   2. Copy your WireGuard config and squid.conf template:
 #        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/proxy-stack/wg0.conf

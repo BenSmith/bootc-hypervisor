@@ -327,18 +327,17 @@ setup = "setup.sh"  # relative to /usr/share/workloadctl/workloads/{name}/
 - The script runs as root and should be idempotent in both directions
 - Absolute paths are supported: `setup = "/home/myuser/my-setup.sh"`
 
-#### Customizing container build scripts and setup scripts
+#### Customizing control files (Containerfile, setup.sh, policy.cil)
 
-The bundled scripts in `/usr/share/workloadctl/workloads/` are read-only on immutable (bootc/ostree) systems. To customize them, copy the entire container directory to a writable location and make your changes there:
+Control files ship read-only under `/usr/share/workloadctl/workloads/<bundle>/` (immutable on bootc/ostree). Don't copy the directory — use the copy-on-write override, the same `/usr`→`/etc` idiom systemd uses for unit drop-ins:
 
 ```bash
-cp -r /usr/share/workloadctl/workloads/sunshine-game-streaming ~/sunshine-custom
-cd ~/sunshine-custom
-# edit Containerfile, setup.sh, etc.
-sudo ./build.sh
+workloadctl edit <name> Containerfile   # seeds /etc/workloads.d/<name>/Containerfile from the shipped default, then opens $EDITOR
+workloadctl info <name> --files         # merged view: which file wins — /etc (override) or /usr (shipped)
+sudo workloadctl build <name>           # rebuild the image from the override-resolved context
 ```
 
-All bundled scripts use `dirname "$0"` to locate sibling files (Containerfiles, SELinux policies, configs), so they work correctly from any directory.
+The override at `/etc/workloads.d/<name>/<file>` wins over the shipped default and is what `build` (and enable's setup/SELinux steps) resolve. Untouched control files keep tracking the image across upgrades; only the files you actually change live in `/etc`. An edit that ends up byte-identical to the shipped default is discarded, so nothing freezes needlessly.
 
 To use a custom setup script with `workloadctl enable`, set an absolute path in your workload config:
 
@@ -987,7 +986,7 @@ sudo chmod 0600 /etc/credstore.encrypted/runner-token
 
 The decrypted value is baked into the seed ISO at build time. The ISO lives in the workload's home dir (root-only path, mode 0640), so the secret is at rest on disk for the lifetime of the VM — rotate by re-encrypting and re-running `workloadctl enable` (the seed rebuilds when the user-data file's mtime changes).
 
-A complete worked example lives at [`vms/virtual-forgejo/`](../vms/virtual-forgejo/README.md) (workload TOML at [`workloads.d/virtual-forgejo.toml`](../workloads.d/virtual-forgejo.toml)): a Fedora 44 VM that boots, installs workloadctl from source, runs Forgejo + Caddy + Avahi as containerized sidecars, and registers a native `forgejo-runner` against the in-VM Forgejo. The split mirrors the existing `containers/` convention — `workloads.d/` holds the TOML; `vms/<name>/` holds the bootstrap content.
+A complete worked example lives at [`workloads/virtual-forgejo/`](../workloads/virtual-forgejo/README.md) (workload TOML at [`workloads/virtual-forgejo/workload.toml`](../workloads/virtual-forgejo/workload.toml)): a Fedora 44 VM that boots, installs workloadctl from source, runs Forgejo + Caddy + Avahi as containerized sidecars, and registers a native `forgejo-runner` against the in-VM Forgejo. Everything for the bundle is co-located under `workloads/virtual-forgejo/` — the workload TOML alongside its cloud-init bootstrap content.
 
 ---
 

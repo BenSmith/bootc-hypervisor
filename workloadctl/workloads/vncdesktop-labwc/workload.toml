@@ -17,7 +17,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/vncdesktop-labwc && ./build.sh
+#        sudo workloadctl build vncdesktop-labwc
 #
 #   2. Enable the workload:
 #        sudo workloadctl enable vncdesktop-labwc

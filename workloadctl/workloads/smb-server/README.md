@@ -8,8 +8,7 @@ trusted LAN.
 
 1. **Build the container:**
    ```bash
-   cd containers/smb-server
-   sudo ./build.sh
+   sudo workloadctl build smb-server
    ```
 
 2. **Enable once to create volume directories (will fail — that's expected):**

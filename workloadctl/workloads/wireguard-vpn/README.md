@@ -7,8 +7,7 @@ Host traffic is unaffected — only this container's traffic exits via VPN.
 
 1. **Build the container:**
    ```bash
-   cd containers/wireguard-vpn
-   sudo ./build.sh
+   sudo workloadctl build wireguard-vpn
    ```
 
 2. **Copy your WireGuard config:**

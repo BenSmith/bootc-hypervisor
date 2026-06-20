@@ -17,7 +17,7 @@ import re
 import sys
 import tomllib
 
-from workload_lib import validate_workload_name
+from workload_lib import validate_workload_name, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -27,7 +27,7 @@ from workloadctl_core import (
 )
 from cmd_admin import validate_single
 
-BUNDLES_DIR = Path("/usr/share/workloadctl/workloads")
+BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
 # Edit a single field inside the [workload] section only (mirrors
 # cmd_lifecycle._set_enabled): scoping keeps the regex from touching a

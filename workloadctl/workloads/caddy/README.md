@@ -9,8 +9,7 @@ publishes those names via mDNS.
 
 1. **Build the container:**
    ```bash
-   cd containers/caddy
-   sudo ./build.sh
+   sudo workloadctl build caddy
    ```
 
    > **SELinux:** `workloadctl enable` uses `semanage` to label the workload's
@@ -25,7 +24,7 @@ publishes those names via mDNS.
 2. **Drop a Caddyfile in place** (the sample fronts zot and grafana):
    ```bash
    sudo workloadctl enable caddy             # creates /var/lib/workloads/caddy/
-   sudo cp containers/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
+   sudo cp /usr/share/workloadctl/workloads/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
    ```
 
 3. **Edit routes** and recreate the container:

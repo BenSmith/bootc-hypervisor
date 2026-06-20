@@ -12,7 +12,7 @@ HTTP/HTTPS caching proxy optimized for package management and container images.
 ## Building
 
 ```bash
-./build.sh
+sudo workloadctl build squid
 ```
 
 Or manually:

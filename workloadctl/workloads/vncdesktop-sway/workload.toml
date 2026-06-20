@@ -21,7 +21,7 @@
 #
 # Setup:
 #   1. Build the container:
-#        cd containers/vncdesktop-sway && ./build.sh
+#        sudo workloadctl build vncdesktop-sway
 #
 #   2. Enable the workload:
 #        sudo workloadctl enable vncdesktop-sway

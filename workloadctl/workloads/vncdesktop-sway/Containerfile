@@ -4,7 +4,7 @@
 # port 5900. Set VNC_PASSWORD to enable authentication.
 #
 # Build:
-#   sudo ./build.sh
+#   sudo workloadctl build vncdesktop-sway
 #
 # Run:
 #   workloadctl enable vncdesktop-sway

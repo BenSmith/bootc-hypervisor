@@ -25,6 +25,14 @@ WORKLOAD_CONFIG_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
 
+# Shipped bundle control-file tree (Containerfile/build.sh/setup.sh/policy.cil),
+# keyed by `[workload] bundle`. Env-overridable so the control-file resolver can
+# be unit-tested against a temp /usr tree. The operator override leg lives under
+# WORKLOAD_CONFIG_DIR/<name>/ (see WorkloadConfig.resolve_control_file).
+WORKLOAD_BUNDLES_DIR = Path(
+    os.environ.get("WORKLOAD_BUNDLES_DIR", "/usr/share/workloadctl/workloads")
+)
+
 # Username prefix for workload system users
 USERNAME_PREFIX = "_wl-"
 

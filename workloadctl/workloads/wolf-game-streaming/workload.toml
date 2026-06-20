@@ -50,3 +50,9 @@ tasks_max = 16384
 [host]
 # Host prerequisites: uinput kernel module + udev rule.
 setup = "setup.sh"
+
+[build]
+# GPU_TYPE selects the render stack at build time (amd|nvidia|intel). The
+# Containerfile defaults it to amd; override per build via the env var:
+#   sudo GPU_TYPE=nvidia workloadctl build wolf-game-streaming
+arg_env = ["GPU_TYPE"]
