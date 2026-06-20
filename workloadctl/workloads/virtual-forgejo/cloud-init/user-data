@@ -84,7 +84,7 @@ write_files:
         # Separate from the action cache dir to avoid double-nested path resolution.
         workdir_parent: /var/lib/forgejo-runner/workspace
 
-  - path: /var/lib/workloads/caddy/Caddyfile
+  - path: /var/lib/workloads/caddy/data/Caddyfile
     content: |
       {
           local_certs
@@ -267,12 +267,12 @@ write_files:
       install -d /var/lib/workloads/caddy
       install -d /var/lib/workloads/forgejo
 
-      # Per-workload data dirs under each workload's home (on the system
-      # disk btrfs for caddy; on data.qcow2 for forgejo via the
-      # cloud-init mounts entry above). Created here so they exist before
-      # `workloadctl enable` starts the containers. Ownership/labels get
+      # Per-workload subdirs under the data anchor. Created here so they exist
+      # before `workloadctl enable` starts the containers. Ownership/labels get
       # set after `workloadctl enable` creates the workload users.
-      install -d /var/lib/workloads/caddy/data /var/lib/workloads/caddy/config
+      # caddy: data/data = caddy store (./data anchor), data/config = config dir
+      # forgejo: data/custom/conf = app.ini location (inside data.qcow2 mount)
+      install -d /var/lib/workloads/caddy/data/data /var/lib/workloads/caddy/data/config
       install -d /var/lib/workloads/forgejo/data/custom/conf
 
       # app.ini lives on the data disk (data.qcow2) so it survives system
@@ -323,7 +323,7 @@ write_files:
       # enable` so the sysusers have been created. For forgejo this also
       # claims the data.qcow2 root (mounted at .../forgejo/data) which
       # comes up owned root:root from the fresh mkfs.
-      chown -R _wl-caddy:_wl-caddy     /var/lib/workloads/caddy/data /var/lib/workloads/caddy/config
+      chown -R _wl-caddy:_wl-caddy     /var/lib/workloads/caddy/data
       chown -R _wl-forgejo:_wl-forgejo /var/lib/workloads/forgejo/data
 
       # Relabel forgejo's data dir. Caddy's data dir is on btrfs root
@@ -346,9 +346,9 @@ write_files:
         # Cert+key into the caddy workload dir, owned by _wl-caddy and labeled
         # container_file_t (mounting from the trust anchor's cert_t is
         # SELinux-denied). _wl-caddy exists: `workloadctl enable caddy` (step 6) ran.
-        install -m 0444 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.crt /var/lib/workloads/caddy/homelab-root.crt
-        install -m 0400 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.key /var/lib/workloads/caddy/homelab-root.key
-        chcon -t container_file_t /var/lib/workloads/caddy/homelab-root.crt /var/lib/workloads/caddy/homelab-root.key
+        install -m 0444 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.crt /var/lib/workloads/caddy/data/homelab-root.crt
+        install -m 0400 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.key /var/lib/workloads/caddy/data/homelab-root.key
+        chcon -t container_file_t /var/lib/workloads/caddy/data/homelab-root.crt /var/lib/workloads/caddy/data/homelab-root.key
         # Mount cert+key into the caddy container (idempotent on re-bootstrap).
         if ! grep -q "homelab-root.crt:/etc/caddy/homelab-root.crt" /etc/workloads.d/caddy.toml; then
           sed -i 's#\( *"./config:/etc/caddy/config",\)#\1\n    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",\n    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",#' /etc/workloads.d/caddy.toml
@@ -391,18 +391,18 @@ write_files:
             ':80 {' \
             '    respond "no site configured for {host}" 404' \
             '}'
-        } > /var/lib/workloads/caddy/Caddyfile
-        chown _wl-caddy:_wl-caddy /var/lib/workloads/caddy/Caddyfile
+        } > /var/lib/workloads/caddy/data/Caddyfile
+        chown _wl-caddy:_wl-caddy /var/lib/workloads/caddy/data/Caddyfile
         # Clear the stale self-signed local CA so Caddy regenerates its
         # intermediate under the shared root, then apply.
-        rm -rf /var/lib/workloads/caddy/data/caddy/pki/authorities/local /var/lib/workloads/caddy/data/caddy/certificates
+        rm -rf /var/lib/workloads/caddy/data/data/caddy/pki/authorities/local /var/lib/workloads/caddy/data/data/caddy/certificates
         workloadctl recreate caddy
         echo "Caddy reconfigured to mint under the shared homelab CA."
       else
         # 7b. Self-signed fallback: trust Caddy's own generated local CA so the
         # runner verifies ${FORGEJO_HOSTNAME}. Caddy generates the root on first
         # start; wait up to ~3 minutes.
-        CADDY_ROOT=/var/lib/workloads/caddy/data/caddy/pki/authorities/local/root.crt
+        CADDY_ROOT=/var/lib/workloads/caddy/data/data/caddy/pki/authorities/local/root.crt
         for i in $(seq 1 90); do
           if [ -f "$CADDY_ROOT" ]; then
             install -m 0644 "$CADDY_ROOT" /etc/pki/ca-trust/source/anchors/caddy-root.crt
@@ -450,7 +450,7 @@ write_files:
               ':80 {' \
               '    respond "no site configured for {host}" 404' \
               '}'
-          } > /var/lib/workloads/caddy/Caddyfile
+          } > /var/lib/workloads/caddy/data/Caddyfile
           workloadctl recreate caddy
           echo "Caddyfile updated with embedded root CA cert."
         fi

@@ -17,11 +17,11 @@ on_failure = "kill"
 
 [storage]
 volumes = [
-    # ./data resolves to /var/lib/workloads/forgejo/data, which the
-    # cloud-init mounts entry attaches to the data.qcow2 (ext4, label
+    # ./ (bare data anchor) resolves to /var/lib/workloads/forgejo/data, which
+    # the cloud-init mounts entry attaches to the data.qcow2 (ext4, label
     # workloaddata). Forgejo's persistent state — including app.ini — lives
     # here so it survives system disk rebuilds.
-    "./data:/var/lib/gitea",
+    "./:/var/lib/gitea",
 ]
 
 [security]
