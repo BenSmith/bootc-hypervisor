@@ -37,6 +37,43 @@ _WORKLOAD_SECTION_RE = re.compile(
 )
 
 
+def _write_new(path: Path, text: str) -> bool:
+    """Exclusively create `path` with `text`. Returns False if it already exists
+    (closing the check→write TOCTOU; the caller's earlier exists() check is for
+    the friendly message, this is the race-safe guarantee)."""
+    try:
+        with open(path, "x") as f:
+            f.write(text)
+        return True
+    except FileExistsError:
+        return False
+
+
+# Matches a ${SECRET:name} env reference (mirrors cmd_secret's pattern).
+_SECRET_REF_RE = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
+
+
+def _referenced_secrets(cfg: WorkloadConfig) -> list[str]:
+    """Secret names a config pulls in — via [secrets].files credentials and
+    ${SECRET:name} refs in any container's environment (single/pod/bridge)."""
+    found: set[str] = set()
+    for spec in cfg.config.get("secrets", {}).get("files", []):
+        cred = spec.get("credential")
+        if cred:
+            found.add(cred)
+    container_envs = []
+    single = cfg.config.get("container", {})
+    if single:
+        container_envs.append(single.get("environment", {}))
+    for c in cfg.config.get("containers", []):
+        container_envs.append(c.get("environment", {}))
+    for env in container_envs:
+        for val in env.values():
+            for m in _SECRET_REF_RE.finditer(str(val)):
+                found.add(m.group(1))
+    return sorted(found)
+
+
 def _set_workload_field(content: str, field: str, value: str) -> str:
     """Set `field = value` in [workload] (value is a TOML literal). Replaces an
     existing line in place or prepends one to the section body."""
@@ -45,7 +82,10 @@ def _set_workload_field(content: str, field: str, value: str) -> str:
         sep = "" if content.endswith("\n") else "\n"
         return content + f"{sep}[workload]\n{field} = {value}\n"
     body = m.group("body")
-    pat = rf'^{re.escape(field)}\s*=[^\n]*'
+    # Tolerate an indented key (TOML allows leading whitespace); the comment
+    # `#field` won't match because `^[ \t]*field` requires the key at a line's
+    # logical start, not after a `#`.
+    pat = rf'^[ \t]*{re.escape(field)}\s*=[^\n]*'
     if re.search(pat, body, re.MULTILINE):
         new_body = re.sub(pat, f'{field} = {value}', body, count=1, flags=re.MULTILINE)
     else:
@@ -113,6 +153,16 @@ def cmd_init(args, manager: WorkloadManager):
     bundle = args.bundle
     name = args.as_name or bundle
 
+    # Validate the bundle before it's pathed (it's a directory name); the
+    # existence check below would also catch a traversal, but an up-front
+    # name error is clearer and consistent with how `name` is handled.
+    try:
+        validate_workload_name(bundle)
+    except ValueError as e:
+        print(f"Error: invalid bundle name {bundle!r}: {e}", file=sys.stderr)
+        _suggest_bundle(bundle)
+        sys.exit(1)
+
     try:
         validate_workload_name(name)
     except ValueError as e:
@@ -138,7 +188,9 @@ def cmd_init(args, manager: WorkloadManager):
     # When name == bundle, `bundle` defaults to name and the field is noise.
     if name != bundle:
         text = _set_workload_field(text, "bundle", toml_string(bundle))
-    dst.write_text(text)
+    if not _write_new(dst, text):
+        print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"✓ Instantiated bundle '{bundle}' as '{name}'")
     print(f"  {dst}")
@@ -183,7 +235,9 @@ def cmd_duplicate(args, manager: WorkloadManager):
     text = src_path.read_text()
     text = _set_workload_field(text, "name", toml_string(new_name))
     text = _set_workload_field(text, "bundle", toml_string(resolved_bundle))
-    dst_path.write_text(text)
+    if not _write_new(dst_path, text):
+        print(f"Error: workload '{new_name}' already exists: {dst_path}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"✓ Duplicated '{src_name}' → '{new_name}' (bundle '{resolved_bundle}')")
     print(f"  {dst_path}")
@@ -229,6 +283,16 @@ def _lint_duplicate(name: str, manager: WorkloadManager) -> None:
             warnings.append(
                 f"image '{image}' is also used by {', '.join(sharers)} — they "
                 f"share a mutable tag (fine for :latest, intentional otherwise)")
+
+    # Secrets are name-keyed in a global credstore, so a verbatim copy decrypts
+    # fine — but it now reads the *same* credential as the source. Surface it:
+    # the copy may want its own secret (rotate one without touching the other).
+    secrets = _referenced_secrets(cfg)
+    if secrets:
+        warnings.append(
+            f"references secret(s) {', '.join(secrets)} — the copy reads the same "
+            f"credential as its source; give it its own if they should differ "
+            f"(workloadctl secret create …)")
 
     if warnings:
         print()

@@ -27,7 +27,7 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
-    workload_state_dir,
+    workload_state_dir, workload_data_dir, workload_root_dir,
 )
 
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
@@ -215,17 +215,23 @@ def warn_if_stale_home(pw, name):
         f"(restarting bounces user@{uid}.service so the new HOME takes effect).")
 
 
-def setup_home_directory(pw):
-    """Create and configure the workload home directory."""
-    home_path = Path(pw.pw_dir)
+def setup_home_directory(pw, name):
+    """Create and configure the workload's state/ ($HOME) and data/ subdirs.
 
-    if not home_path.exists():
-        log(f"  Creating home directory {home_path}")
-        home_path.mkdir(parents=True, exist_ok=True)
-    os.chown(home_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(home_path, 0o700)
+    Anchored on the canonical Step-2 paths, NOT pw.pw_dir: the generator forces
+    HOME=<state> independent of the passwd home, so for a pre-Step-2 user whose
+    passwd home is stale these must still land where the service actually
+    reads/writes (else `./` data volumes provision in the wrong place). See
+    warn_if_stale_home.
+    """
+    state_path = workload_state_dir(name)
+    if not state_path.exists():
+        log(f"  Creating home (state) directory {state_path}")
+        state_path.mkdir(parents=True, exist_ok=True)
+    os.chown(state_path, pw.pw_uid, pw.pw_gid)
+    os.chmod(state_path, 0o700)
 
-    data_path = home_path.parent / "data"
+    data_path = workload_data_dir(name)
     if not data_path.exists():
         log(f"  Creating data directory {data_path}")
         data_path.mkdir(parents=True, exist_ok=True)
@@ -243,13 +249,15 @@ def setup_volume_directories(pw, config):
     Required-files paths are skipped — those must be supplied by the user
     as files; auto-creating them as directories would break the bind mount.
     """
-    home_path = Path(pw.pw_dir)
+    name = config["workload"]["name"]
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
 
     required_file_paths = set()
     for entry in config.get("setup", {}).get("required_files", []):
         path = entry.get("path", "")
         if path:
-            path = expand_volume_path(path, str(home_path)).split(":", 2)[0]
+            path = expand_volume_path(path, str(state_dir)).split(":", 2)[0]
         required_file_paths.add(path)
 
     # Gather volumes from all containers (single and multi-container shapes).
@@ -260,7 +268,7 @@ def setup_volume_directories(pw, config):
         all_volume_specs.extend(ctr.get("storage", {}).get("volumes", []))
 
     for volume_spec in all_volume_specs:
-        expanded = expand_volume_path(volume_spec, str(home_path))
+        expanded = expand_volume_path(volume_spec, str(state_dir))
         host_path_str = expanded.split(":", 2)[0]
         if not host_path_str:
             continue
@@ -272,11 +280,12 @@ def setup_volume_directories(pw, config):
         if str(host_path) in required_file_paths:
             continue
 
-        # Resolve symlinks before checking containment to prevent symlink traversal
+        # Resolve symlinks before checking containment to prevent symlink traversal.
+        # Anchor on the workload ROOT so both state/ and data/ destinations pass.
         try:
-            host_path.resolve().relative_to(home_path.parent.resolve())
+            host_path.resolve().relative_to(root_dir.resolve())
         except ValueError:
-            continue  # Outside home directory — admin must create
+            continue  # Outside the workload dir — admin must create
 
         if not host_path.exists():
             log(f"  Creating volume directory {host_path}")
@@ -289,21 +298,23 @@ def setup_volume_directories(pw, config):
 def setup_vm_volume_directories(pw, config):
     """Create host-side directories for virtiofs volumes declared in [vm].volumes.
 
-    Mirrors the container setup_volume_directories logic but reads from
-    vm.volumes instead of storage.volumes. Paths outside the home directory
-    are skipped — the admin must create those by hand.
+    Resolves anchors via expand_volume_path (so `./` → data/, `@/` →
+    state/volumes/, exactly like containers and the virtiofsd sidecars the
+    generator emits) and anchors on the canonical Step-2 dirs. Paths outside the
+    workload dir are skipped — the admin must create those by hand.
     """
-    home_path = Path(pw.pw_dir)
+    name = config["workload"]["name"]
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
     for vol_spec in config.get("vm", {}).get("volumes", []):
-        host_raw = vol_spec.split(":")[0]
-        if host_raw.startswith("./"):
-            host_path = home_path / host_raw[2:]
-        else:
-            host_path = Path(host_raw)
+        host_path_str = expand_volume_path(vol_spec, str(state_dir)).split(":", 2)[0]
+        if not host_path_str:
+            continue
+        host_path = Path(host_path_str)
         try:
-            host_path.resolve().relative_to(home_path.resolve())
+            host_path.resolve().relative_to(root_dir.resolve())
         except ValueError:
-            continue  # Outside home — admin's responsibility
+            continue  # Outside the workload dir — admin's responsibility
         if not host_path.exists():
             log(f"  Creating virtiofs host directory {host_path}")
             host_path.mkdir(parents=True, exist_ok=True)
@@ -311,14 +322,20 @@ def setup_vm_volume_directories(pw, config):
         os.chmod(host_path, 0o755)
 
 
-def restore_selinux_labels(pw):
-    """Restore SELinux labels on the workload home directory."""
+def restore_selinux_labels(name):
+    """Restore SELinux labels on the workload's whole tree (state/ + data/).
+
+    Relabels the canonical workload root, not the passwd home: for a correct
+    user the passwd home is state/ (which would miss data/), and for a stale
+    user it's the root — anchoring on workload_root_dir covers both subtrees.
+    """
+    target = str(workload_root_dir(name))
     result = subprocess.run(
-        ["restorecon", "-R", pw.pw_dir],
+        ["restorecon", "-R", target],
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        log(f"  WARNING: restorecon failed for {pw.pw_dir}: {result.stderr}")
+        log(f"  WARNING: restorecon failed for {target}: {result.stderr}")
 
 
 def _detect_host_ip():
@@ -865,7 +882,7 @@ def main():
         log(f"  WARNING: Failed to set up SELinux policy: {e}")
 
     try:
-        setup_home_directory(pw)
+        setup_home_directory(pw, name)
     except Exception as e:
         log(f"  WARNING: Failed to set up home directory for {username}: {e}")
 
@@ -920,7 +937,7 @@ def main():
             return 1
 
         try:
-            restore_selinux_labels(pw)
+            restore_selinux_labels(name)
         except Exception as e:
             log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 
@@ -947,7 +964,7 @@ def main():
             log(f"  WARNING: Failed to write environment file for {name}: {e}")
 
         try:
-            restore_selinux_labels(pw)
+            restore_selinux_labels(name)
         except Exception as e:
             log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 

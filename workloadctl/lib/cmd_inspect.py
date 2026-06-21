@@ -417,9 +417,12 @@ def _collect_control_files(config) -> list[dict]:
     names: set[str] = set()
     for d in (config.override_dir, config.bundle_dir):
         if d.is_dir():
-            for p in d.iterdir():
+            # Recurse: a build context can carry subdirectories, and `edit`
+            # accepts nested relpaths, so a nested override must be visible here
+            # too (else it silently shadows without showing in the merged view).
+            for p in d.rglob("*"):
                 if p.is_file() and p.name != "workload.toml":
-                    names.add(p.name)
+                    names.add(p.relative_to(d).as_posix())
     setup = config.config.get("host", {}).get("setup", "")
     if setup and not Path(setup).is_absolute():
         names.add(setup)

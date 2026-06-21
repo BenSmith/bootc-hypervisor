@@ -405,8 +405,9 @@ class WorkloadConfig:
         the SELinux CIL (`policy.cil`). Defaults to the workload name, so a
         single shipped instance needs no `bundle` field; `duplicate`/`init`
         set it to the source's resolved bundle so a copy shares one control
-        tree without copying it. Goes straight into a filesystem path, so it
-        must satisfy NAME_PATTERN — validated at config load.
+        tree without copying it. Goes straight into a filesystem path, which is
+        why `bundle_dir` (the single point where it becomes a path) validates it
+        against NAME_PATTERN before any control file is resolved or executed.
         """
         val = self.config.get("workload", {}).get("bundle")
         return val if val else self.name
@@ -435,8 +436,28 @@ class WorkloadConfig:
 
     @property
     def bundle_dir(self) -> Path:
-        """The shipped /usr control-file tree for this workload's bundle."""
-        return WORKLOAD_BUNDLES_DIR / self.bundle
+        """The shipped /usr control-file tree for this workload's bundle.
+
+        This property is the single point where the `bundle` field becomes a
+        filesystem path — and that path is read *and executed as root* (build
+        context, `[host].setup`, `policy.cil`). So validate here: anything that
+        isn't a plain workload-style name (a stray `..`, a typo, an underscored
+        SELinux type name) is rejected before it can redirect control-file
+        resolution outside the bundles tree. Construction stays lenient (callers
+        like `validate`/`info` can still inspect a bad bundle); the guarantee is
+        that no path is ever *built* from an unvalidated bundle.
+        """
+        bundle = self.bundle
+        try:
+            validate_workload_name(bundle)
+        except ValueError as e:
+            hint = ""
+            if "_" in bundle:
+                hint = (f" — did you mean {bundle.replace('_', '-')!r}? the "
+                        f"bundle is a directory name and uses hyphens, not the "
+                        f"underscores of the SELinux type name")
+            raise ValueError(f"Invalid [workload] bundle {bundle!r}: {e}{hint}")
+        return WORKLOAD_BUNDLES_DIR / bundle
 
     @property
     def override_dir(self) -> Path:
@@ -505,7 +526,9 @@ class WorkloadConfig:
     def build_arg_env(self) -> list:
         """Host env var names forwarded as `--build-arg` when set
         (`[build] arg_env`); the transient override for a knob like an RPM URL
-        or GPU type. Env value wins over the `args` default."""
+        or GPU type. Env value wins over the `args` default. Build args land in
+        image history — keep these non-sensitive (use a secret, not arg_env, for
+        anything confidential)."""
         return self.build_config.get("arg_env", []) or []
 
     @property

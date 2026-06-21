@@ -144,6 +144,18 @@ class TestControlFilesView(Step3Base):
         self.assertEqual(files["build.sh"]["source"], "usr")
         self.assertTrue(files["build.sh"]["path"].startswith(str(self.usr / "src-bundle")))
 
+    def test_nested_control_files_listed(self):
+        # edit accepts nested relpaths and the build context can carry subdirs,
+        # so a nested file must show in the merged view (not silently shadow).
+        d = self.usr / "solo" / "rootfs"
+        d.mkdir(parents=True)
+        (d / "extra.conf").write_text("x\n")
+        cfg = self._config("solo")
+        files = {f["file"]: f for f in cmd_inspect._collect_control_files(cfg)}
+        self.assertIn("rootfs/extra.conf", files)
+        self.assertEqual(files["rootfs/extra.conf"]["source"], "usr")
+        self.assertTrue(files["rootfs/extra.conf"]["exists"])
+
     def test_print_no_control_files(self):
         cfg = self._config("solo")
         buf = io.StringIO()
@@ -230,6 +242,38 @@ class TestEditControlFile(Step3Base):
                 with redirect_stdout(io.StringIO()):
                     cmd_admin.cmd_edit(_ns(workload="solo", file="../evil", yes=False),
                                        self.manager)
+
+    def test_symlink_escape_rejected(self):
+        # `..` is blocked, but a pre-planted symlinked component must not let a
+        # write follow the link out of the override tree.
+        import shutil
+        self._config("solo")
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        odir = self.etc / "solo"
+        odir.mkdir(parents=True)
+        (odir / "sub").symlink_to(outside)
+        with mock.patch.dict(os.environ, {"EDITOR": self._editor('printf x > "$1"')}):
+            with self.assertRaises(SystemExit):
+                with redirect_stdout(io.StringIO()):
+                    cmd_admin.cmd_edit(_ns(workload="solo", file="sub/evil", yes=False),
+                                       self.manager)
+        self.assertFalse((outside / "evil").exists())  # nothing written through link
+
+    def test_shebang_makes_nonsh_file_executable(self):
+        # A freshly authored hook with a shebang but no .sh suffix still gets +x.
+        self._config("solo")
+        self._edit("solo", "hook", 'printf "#!/bin/sh\\necho hi\\n" > "$1"')
+        override = self.etc / "solo" / "hook"
+        self.assertTrue(override.exists())
+        self.assertTrue(override.stat().st_mode & stat.S_IXUSR)
+
+    def test_custom_containerfile_rebuild_hint(self):
+        # A declared [build].containerfile gets the rebuild next-step, not the
+        # generic recreate hint.
+        self._config("solo", extra='\n[build]\ncontainerfile = "Containerfile.gpu"\n')
+        out = self._edit("solo", "Containerfile.gpu", 'printf "FROM x\\n" > "$1"')
+        self.assertIn("Rebuild image", out)
 
     def test_missing_workload_rejected(self):
         with mock.patch.dict(os.environ, {"EDITOR": self._editor("true")}):

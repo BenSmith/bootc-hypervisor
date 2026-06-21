@@ -857,13 +857,21 @@ extra_groups = ["video", "render", "input", "dialout", "audio"]
 # Default: []
 # Format: "host-path:container-path[:options]"
 #
-# Path substitution:
-#   ./ prefix expands to workload home directory (/var/lib/workloads/{name})
-#   Example: "./cache:/data" becomes "/var/lib/workloads/myapp/cache:/data"
+# Path substitution — workload-relative anchors (the /var/lib/workloads/{name}
+# tree is split into a precious data/ subtree and a reconstructible state/ one):
+#   ./sub   (sugar for data/sub)   -> {root}/data/sub          PRECIOUS  (backed up)
+#   @/sub   (sugar for state/sub)  -> {root}/state/volumes/sub  reconstructible (build caches/scratch, NOT backed up)
+#   /abs/path                      -> used verbatim (admin must create it)
+#   Example: "./cache:/data" becomes "/var/lib/workloads/myapp/data/cache:/data"
+#
+# Note: the bare host names "data" and "state" (and the data/ / state/ prefixes)
+# are reserved anchors — "data:/x" is rewritten to a bind from {root}/data, so
+# you cannot declare a *named volume* literally called "data" or "state" here.
+# A `..` or absolute escape inside an anchor (e.g. "./../x") is rejected.
 #
 # Examples:
-#   "./config:/config:ro"          - Workload home subdirectory (read-only)
-#   "./data:/data"                 - Workload home subdirectory (read-write)
+#   "./config:/config:ro"          - precious data/config, read-only
+#   "@/build-cache:/cache"         - reconstructible state scratch (excluded from backup)
 #   "/etc/config:/config:ro,z"     - Absolute path, SELinux relabeled
 #   "/mnt/data:/data:ro"           - Absolute path, read-only mount
 #   "/mnt/shared:/shared"          - Absolute path, read-write mount

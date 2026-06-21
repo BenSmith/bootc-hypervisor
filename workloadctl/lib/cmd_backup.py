@@ -239,5 +239,7 @@ def cmd_restore(args, manager: WorkloadManager):
                 ["workloadctl", "enable", name],
             )
         else:
-            print(f"To start the workload, run:")
+            print(f"Only the precious data/ subtree was restored; the "
+                  f"reconstructible state/ (images, graphroot, VM system disk) is "
+                  f"rebuilt on enable. To start the workload, run:")
             print(f"  sudo workloadctl enable {name}")

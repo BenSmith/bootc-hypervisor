@@ -72,6 +72,31 @@ class TestControlFileResolution(unittest.TestCase):
         cfg = self._config("copy", bundle="src-bundle")
         self.assertEqual(cfg.override_dir, self.etc / "copy")
 
+    # --- bundle_dir validates before pathing (the single chokepoint) --------
+
+    def test_bundle_dir_rejects_traversal(self):
+        # A bad bundle must not construct a path that escapes the bundles tree —
+        # bundle_dir is the one place the field becomes a path, so it validates.
+        cfg = self._config("evil", bundle="../../etc/evil")
+        # Construction stays lenient (validate/info can inspect it) ...
+        self.assertEqual(cfg.bundle, "../../etc/evil")
+        # ... but turning it into a path is rejected.
+        with self.assertRaises(ValueError):
+            _ = cfg.bundle_dir
+
+    def test_bundle_dir_underscore_hint(self):
+        cfg = self._config("typo", bundle="vncdesktop_wayfire")
+        with self.assertRaises(ValueError) as ctx:
+            _ = cfg.bundle_dir
+        self.assertIn("vncdesktop-wayfire", str(ctx.exception))
+
+    def test_resolve_control_file_inherits_bundle_validation(self):
+        # Resolution builds bundle_dir / relpath, so a bad bundle is caught here
+        # too — closing the build / [host].setup paths that used to be unguarded.
+        cfg = self._config("evil", bundle="../x")
+        with self.assertRaises(ValueError):
+            cfg.resolve_control_file("build.sh")
+
     # --- resolution chain ---------------------------------------------------
 
     def test_resolves_to_usr_when_no_override(self):

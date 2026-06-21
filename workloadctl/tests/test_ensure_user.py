@@ -367,44 +367,56 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()
 
-    def test_relative_path_created_under_home(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            pw = _fake_pw(home)
-            config = {"vm": {"volumes": ["./data:/data"]}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
-            self.assertTrue((home / "data").is_dir())
+    def _patch(self, root):
+        """Anchor the canonical Step-2 helpers into the temp tree (the function
+        keys off these, not pw.pw_dir, so it's correct even for a stale home)."""
+        return (
+            mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"),
+            mock.patch.object(self.mod, "workload_data_dir", lambda n: root / "data"),
+            mock.patch.object(self.mod, "workload_root_dir", lambda n: root),
+        )
 
-    def test_absolute_path_outside_home_skipped(self):
+    def test_relative_anchor_created_under_data(self):
+        # ./ anchors to the precious data/ subtree, matching the virtiofsd
+        # sidecars the generator emits (NOT the old state-relative behavior).
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            home.mkdir()
-            pw = _fake_pw(home)
-            config = {"vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
-            # /etc/passwd must not have been turned into a directory
-            self.assertFalse((home / "etc" / "passwd").exists())
+            root = Path(tmp); (root / "state").mkdir()
+            config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
+            self.assertTrue((root / "data" / "shared").is_dir())
+
+    def test_absolute_path_outside_workload_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "state").mkdir()
+            config = {"workload": {"name": "vmx"},
+                      "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
+            self.assertFalse((root / "etc" / "passwd").exists())
 
     def test_empty_volumes_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            pw = _fake_pw(Path(tmp))
-            config = {"vm": {}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
+            root = Path(tmp); (root / "state").mkdir()
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state"), {"workload": {"name": "vmx"}, "vm": {}})
 
     def test_existing_dir_is_chowned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            existing = home / "data"
-            existing.mkdir()
-            pw = _fake_pw(home, uid=1234, gid=1234)
-            config = {"vm": {"volumes": ["./data:/data"]}}
+            root = Path(tmp); (root / "state").mkdir()
+            existing = root / "data" / "shared"; existing.mkdir(parents=True)
+            config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             chown_calls = []
-            with mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))):
-                with mock.patch("os.chmod"):
-                    self.mod.setup_vm_volume_directories(pw, config)
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, \
+                 mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))), \
+                 mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state", uid=1234, gid=1234), config)
             self.assertTrue(any(str(existing) in c[0] for c in chown_calls))
 
 
@@ -435,11 +447,32 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
                     },
                 ],
             }
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
                 self.mod.setup_volume_directories(pw, config)
             # ./X anchors now resolve to the sibling data/ subdir
             self.assertTrue((root / "data" / "web-data").is_dir())
             self.assertTrue((root / "data" / "db-data").is_dir())
+
+    def test_stale_passwd_home_still_provisions_canonically(self):
+        # The fix: a pre-Step-2 user whose passwd home is the workload ROOT
+        # (not root/state) must STILL get ./ volumes under the canonical data/,
+        # because provisioning keys off workload_state_dir(name), not pw.pw_dir.
+        # With the old pw.pw_dir-based code this landed in the wrong place.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "state").mkdir()
+            stale_pw = _fake_pw(root)  # passwd home = root (stale, pre-Step-2)
+            config = {
+                "workload": {"name": "myapp"},
+                "containers": [{"name": "web", "container": {"image": "x"},
+                                "storage": {"volumes": ["./web-data:/data"]}}],
+            }
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_volume_directories(stale_pw, config)
+            self.assertTrue((root / "data" / "web-data").is_dir())
 
 
 class TestConfigureSubuidSubgid(unittest.TestCase):

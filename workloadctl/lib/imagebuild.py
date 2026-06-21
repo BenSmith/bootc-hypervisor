@@ -39,7 +39,14 @@ def _proxy_build_args() -> list:
 
 def assemble_build_args(config) -> list:
     """`--build-arg` list: `[build].args` defaults, overridden by `[build].arg_env`
-    host env when set, plus auto-forwarded proxy vars."""
+    host env when set, plus auto-forwarded proxy vars.
+
+    SECURITY: `--build-arg` values are recorded in the image's build history
+    (`podman history`). These are meant for non-sensitive knobs — RPM URLs, GPU
+    type, proxy endpoints — so never route a secret through `args`/`arg_env`;
+    use a workloadctl secret (tmpfs at runtime), not a build arg, for anything
+    confidential.
+    """
     merged = dict(config.build_args)
     for name in config.build_arg_env:
         val = os.environ.get(name)

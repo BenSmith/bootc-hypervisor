@@ -117,6 +117,31 @@ See also: [Manual TOML approach](workloads.md#manual-toml) and [bootc approach](
 
 ---
 
+### `build`
+
+Build a container workload's image from its bundle build context — the **merged**
+`/usr` bundle tree with any `/etc/workloads.d/<name>/` overrides laid on top, so an
+overridden `Containerfile` (or a `COPY`-ed asset) actually takes effect. Runs as
+root, building into root's store; `enable`/`recreate` then transfer the resulting
+`pull = never` image to the workload user.
+
+```
+sudo workloadctl build <workload>
+```
+
+Applies to **container** workloads only (VMs provision via `update`/`recreate`). The
+built image is tagged exactly as `[container].image`, so a `pull = never` container
+always matches what was built — there is no separate build tag to drift out of sync.
+What gets built is driven by the optional `[build]` section (see
+[schema-reference.toml](schema-reference.toml)): the built-in `podman build` of the
+merged context by default, or an escape-hatch `[build].script` run against that same
+context. A workload that pulls a published image has nothing to build and says so.
+
+Typical override-and-rebuild flow: `init` → `edit <name> Containerfile` → `build` →
+`recreate` (if already enabled) or `enable`.
+
+---
+
 ### `enable`
 
 Run preflight checks, create the workload user, set up subuid/linger, transfer the image if needed, and start the service.
@@ -220,13 +245,37 @@ sudo workloadctl rollback [--list] <workload>
 
 ### `edit`
 
-Open the workload's TOML config in `$EDITOR`, validate after saving, and apply changes via `daemon-reload`.
+Two modes, selected by whether you name a control file.
+
+**Edit the workload TOML** (no file argument) — opens the config in `$EDITOR`,
+validates after saving, shows a diff, and (when the workload is enabled) offers to
+apply the change by regenerating units and restarting. Restores the previous config
+if validation fails.
 
 ```
-sudo workloadctl edit <workload>
+sudo workloadctl edit [-y] <workload>
 ```
 
-Restores the previous config if validation fails.
+| Option | Description |
+|---|---|
+| `-y` / `--yes` | Apply changes without the interactive confirmation prompt |
+
+**Edit a bundle control file** (`<file>` argument) — the copy-on-write override
+ergonomic, mirroring systemd's `systemctl edit`. Seeds `/etc/workloads.d/<name>/<file>`
+from the shipped `/usr` default (or an empty file if the bundle ships none), opens it
+in `$EDITOR`, then keeps the override **only if you actually changed it** — an edit
+byte-identical to the default, or an untouched empty new file, is discarded so it
+never freezes upgrade-tracking. Once kept, the override wins control-file resolution
+for `build`/`enable`/`recreate`. Nested paths (e.g. `rootfs/Containerfile`) are
+allowed; traversal and symlink escapes are rejected.
+
+```
+sudo workloadctl edit <workload> <file>
+```
+
+Use `info --files` to see what can be overridden, `build`/`recreate` to apply it,
+and revert to the shipped default by deleting the override:
+`sudo rm /etc/workloads.d/<name>/<file>`.
 
 ---
 
@@ -258,7 +307,13 @@ Show detailed workload information: config, user, UID, subuid/subgid ranges, hom
 
 ```
 workloadctl info [--json] <workload>
+workloadctl info --files [--json] <workload>
 ```
+
+| Option | Description |
+|---|---|
+| `--files` | Show the **merged control-file view** instead: every control file (Containerfile, `setup.sh`, `policy.cil`, …) from the shipped `/usr` bundle, unioned with any `/etc/workloads.d/<name>/` overrides — each tagged with its winning source: `override` (your `/etc` copy), `shipped` (the `/usr` default), or `missing` (declared but absent). The `systemctl cat` analogue for bundle control files; nested paths are shown. Edit any of them with `edit <workload> <file>`. |
+| `--json` | Output as JSON |
 
 ### `logs`
 
@@ -425,7 +480,7 @@ sudo workloadctl cleanup [--apply] [--json]
 
 ### `backup`
 
-Archive a workload's home directory and config to a compressed tarball (`.tar.zst`).
+Archive a workload's precious `data/` subtree, referenced credentials, and config to a compressed tarball (`.tar.zst`).
 
 ```
 sudo workloadctl backup [--json] [--all] [--output PATH] [--consistency {cold,crash}] [<workload>]
@@ -438,7 +493,7 @@ sudo workloadctl backup [--json] [--all] [--output PATH] [--consistency {cold,cr
 | `--consistency {cold,crash}` | Consistency level (default `cold`). `cold` stops the service, copies, then restarts — always safe. `crash` copies without stopping the service: for VMs the vCPUs are paused via QMP for the copy (crash-consistent, resume-safe); for containers the rootfs/volumes are copied live (may be inconsistent). |
 | `--json` | Output archive paths and sizes as JSON instead of printing progress |
 
-VM backups exclude rebuildable artifacts (`system.qcow2`, `system.qcow2.gen-N`, `*.image-cache`) — only the durable disk and home are archived.
+A backup captures **only the precious `data/` subtree** (for every substrate). The reconstructible `state/` subtree — podman graphroot, container images, and a VM's `system.qcow2` (+ `system.qcow2.gen-N`, `*.image-cache`) — is deliberately excluded and rebuilt on `enable`/`update`. For VMs this means the durable `data.qcow2` is archived but the OS disk is not: a **`pet` VM's in-place changes to `system.qcow2` are not recoverable from a backup** (a `pet` VM never rotates its system disk, so it also has no generation to roll back to). Bake durable VM state into a `data.qcow2` volume, or into the guest image, rather than the system disk.
 
 ### `restore`
 

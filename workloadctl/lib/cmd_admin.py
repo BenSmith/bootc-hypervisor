@@ -157,6 +157,24 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             })
             errors += 1
 
+    # `selinux_policy` is now boolean-only. A leftover string from the old form
+    # is truthy, so it silently enables policy keyed on `[workload] bundle`
+    # (default = name) — NOT the directory the string named. Surface it.
+    raw_selinux = config.config.get("security", {}).get("selinux_policy")
+    if isinstance(raw_selinux, str):
+        checks.append({
+            "check": "selinux_policy_string",
+            "passed": False,
+            "severity": "warning",
+            "message": f"selinux_policy = {raw_selinux!r} is a string; the field "
+                       f"is now boolean-only and this is treated as `true` with "
+                       f"the CIL sourced from bundle '{config.bundle}', not "
+                       f"'{raw_selinux}'.",
+            "fix": f'Set selinux_policy = true and, if the policy lives elsewhere, '
+                   f'[workload] bundle = "{raw_selinux}".',
+        })
+        warnings += 1
+
     # [build] section: the containerfile names a file *inside* the build
     # context, so it must be a plain relative path (no traversal). Only checked
     # when the section is present.
@@ -603,9 +621,14 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
                 if pull_policy == "never":
-                    build_script = config.resolve_control_file("build.sh")
-                    fix = (f"Build it: {build_script}" if build_script.exists()
-                           else f"Build or provide: {config.image}")
+                    try:
+                        build_script = config.resolve_control_file("build.sh")
+                        fix = (f"Build it: {build_script}" if build_script.exists()
+                               else f"Build or provide: {config.image}")
+                    except ValueError as e:
+                        # Malformed [workload] bundle: report it as the fix-text
+                        # rather than letting it crash the whole diagnose run.
+                        fix = f"Fix [workload] bundle: {e}"
                 else:
                     fix = "Image will be pulled on first start"
                 _check("image_available", False, f"Image not available: {config.image}", fix=fix)
@@ -777,6 +800,23 @@ def _validate_control_file_name(rel: str) -> None:
         raise ValueError("must be a relative path with no '..' components")
 
 
+def _assert_no_symlink_escape(base: Path, target: Path) -> None:
+    """Reject if any component from `base` down to `target` is a symlink.
+
+    `..`/absolute are already blocked, but a relpath like `sub/file` could still
+    escape `/etc/workloads.d/<name>/` if a component (`sub`, or the file itself)
+    was pre-planted as a symlink. Walk the chain and refuse any symlinked
+    component so a write can never follow a link out of the override tree.
+    """
+    if base.is_symlink():
+        raise ValueError(f"override dir is a symlink: {base}")
+    cur = base
+    for part in target.relative_to(base).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"refusing to write through symlink: {cur}")
+
+
 def _cleanup_override_dir(config: WorkloadConfig, override: Path) -> None:
     """Remove now-empty override dirs from `override` up to override_dir.
 
@@ -799,11 +839,18 @@ def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
     """Print how to apply a just-edited control file (it isn't auto-applied)."""
     base = Path(rel).name
     setup = config.config.get("host", {}).get("setup", "")
+    # Files that drive an image build: the conventional names plus whatever this
+    # workload actually declares ([build].containerfile / [build].script), so a
+    # `Containerfile.gpu` edit still gets the rebuild hint, not the generic one.
+    build_files = {"build.sh", "Containerfile",
+                   Path(config.build_containerfile).name}
+    if config.build_script:
+        build_files.add(Path(config.build_script).name)
     print()
     print("  Next steps:")
     if base == "policy.cil":
         print(f"    Reload SELinux policy:  sudo workloadctl enable {config.name}")
-    elif base in ("build.sh", "Containerfile"):
+    elif base in build_files:
         print(f"    Rebuild image:          sudo workloadctl build {config.name}")
         print(f"    Apply to running:       sudo workloadctl recreate {config.name}")
     elif rel == setup:
@@ -839,6 +886,14 @@ def _edit_control_file(args, manager: WorkloadManager):
     config = WorkloadConfig(name)
     override = config.override_dir / rel
     default = config.bundle_dir / rel
+
+    # Containment: even with `..` blocked, a pre-planted symlink component could
+    # redirect the write outside the override tree. Check before creating dirs.
+    try:
+        _assert_no_symlink_escape(config.override_dir, override)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     seeded = False
     if not override.exists():
@@ -877,6 +932,17 @@ def _edit_control_file(args, manager: WorkloadManager):
         _cleanup_override_dir(config, override)
         print("  Empty file — nothing created.")
         return
+
+    # A freshly authored control file with a shebang should be executable even
+    # when it isn't named *.sh (a hook with no extension). copy2 already
+    # preserves a shipped default's mode, so only touch newly seeded files.
+    if seeded and not default.exists():
+        try:
+            with open(override, "rb") as fh:
+                if fh.read(2) == b"#!":
+                    override.chmod(override.stat().st_mode | 0o111)
+        except OSError:
+            pass
 
     print(f"✓ Override saved: {override}")
     _print_control_file_next_steps(config, rel)

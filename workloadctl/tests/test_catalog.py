@@ -104,6 +104,12 @@ class TestInit(CatalogTestBase):
         with self.assertRaises(SystemExit):
             cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
 
+    def test_init_invalid_bundle_name_exits(self):
+        # A bundle name that isn't NAME_PATTERN-clean is rejected up front,
+        # before it's ever turned into a /usr path.
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(_ns(bundle="../etc/evil", as_name="x"), self.manager)
+
 
 class TestDuplicate(CatalogTestBase):
     def test_duplicate_resolves_bundle_to_source_name(self):
@@ -132,6 +138,20 @@ class TestDuplicate(CatalogTestBase):
         with redirect_stdout(buf):
             cmd_catalog.cmd_duplicate(_ns(source="squid", new="squid-b"), self.manager)
         self.assertIn("host port", buf.getvalue())
+
+    def test_duplicate_lints_shared_secrets(self):
+        # A verbatim copy still references the same name-keyed credential as its
+        # source; the lint should surface it (rotate-one-without-the-other).
+        (self.tmp / "withsec.toml").write_text(
+            '[workload]\nname = "withsec"\nbundle = "alloy"\nenabled = false\n'
+            '[container]\nimage = "localhost/x:latest"\n'
+            '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_catalog.cmd_duplicate(_ns(source="withsec", new="withsec-b"), self.manager)
+        out = buf.getvalue()
+        self.assertIn("secret", out.lower())
+        self.assertIn("api-key", out)
 
 
 if __name__ == "__main__":
