@@ -2,6 +2,45 @@
 
 `workloadctl` is the CLI for managing rootless workloads. Most commands that mutate state require `sudo`; read-only commands can be run as any user.
 
+## Commands
+
+| Command | Description |
+|---|---|
+| [`backup`](#backup) | Archive a workload's `data/` subtree to a `.tar.zst` |
+| [`build`](#build) | Build a workload's container image from its bundle build context |
+| [`catalog`](#catalog) | List shippable bundles |
+| [`cleanup`](#cleanup) | Find (and optionally remove) orphaned `_wl-*` users and home directories |
+| [`cp`](#cp) | Copy files to/from a running container |
+| [`create`](#create) | Scaffold a from-scratch workload TOML (no bundle) |
+| [`diagnose`](#diagnose) | Check runtime setup: user, subuid/subgid, linger, SELinux label |
+| [`disable`](#disable) | Stop the service and set `enabled = false` (optionally `--purge`) |
+| [`drift`](#drift) | Diff running systemd units against what would be generated from current TOMLs |
+| [`duplicate`](#duplicate-alias-clone) / `clone` | Copy a live workload's TOML under a new name |
+| [`edit`](#edit) | Edit the workload TOML, or copy-on-write override a bundle control file |
+| [`enable`](#enable) | Create user, transfer image, start service (idempotent) |
+| [`exec`](#exec) | Run a command inside a container or VM (via SSH) |
+| [`health`](#health) | Show container health check status |
+| [`images`](#images) | List or prune container images across workload users |
+| [`incant`](#incant) | Raw podman command as the workload user, or QMP command for VMs |
+| [`info`](#info) | Show config, user, UID, image, ports, volumes (`--files` for control-file view) |
+| [`init`](#init) | Instantiate a catalog bundle into `/etc/workloads.d/` |
+| [`list`](#list) | List all workloads and their enabled/running state |
+| [`logs`](#logs) | View workload logs via `journalctl` |
+| [`reboot`](#reboot) | Soft-reboot a workload (systemd re-exec inside container or VM) |
+| [`recreate`](#recreate) | Regenerate units and restart (apply TOML edits or post-build) |
+| [`restore`](#restore) | Restore a workload from a `backup` archive |
+| [`rollback`](#rollback) | Revert to the previous container image or VM disk generation |
+| [`secret`](#secret-management) | Manage encrypted systemd credentials (subcommands: `create list show rotate delete export import`) |
+| [`shell`](#shell) | Open an interactive shell in a container or VM (SSH or serial console) |
+| [`start`](#start) | Start a workload service without changing its `enabled` state |
+| [`stats`](#stats) | Show live CPU/memory/I/O usage |
+| [`status`](#status) | Show systemd service status |
+| [`stop`](#stop) | Stop a workload service without changing its `enabled` state |
+| [`update`](#update) | Pull the latest image (or rebuild VM disk) and restart with auto-rollback |
+| [`validate`](#validate) | Validate a workload TOML for syntax and semantic errors |
+
+---
+
 ## Global Options
 
 ```
@@ -45,6 +84,8 @@ List shippable bundles.
 workloadctl catalog [--json]
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `init`
 
 Instantiate a catalog bundle into `/etc/workloads.d/<name>.toml`.
@@ -56,6 +97,8 @@ sudo workloadctl init <bundle> [--as <name>]
 `--as` names the instance (default: the bundle name). When the instance name
 diverges from the bundle, `init` records `[workload] bundle = "<bundle>"` so the
 copy's control-file lookups still resolve to the source bundle's tree.
+
+[↑ top](#workloadctl-command-reference)
 
 ### `duplicate` (alias `clone`)
 
@@ -71,6 +114,8 @@ original `/usr` bundle. Name uniqueness is the only hard requirement; `duplicate
 **lints** (warns, never blocks) on host-global settings a verbatim copy inherits —
 published host ports, absolute volume paths, and a mutable image tag shared with
 another enabled workload — which you resolve by editing the copy before enabling it.
+
+[↑ top](#workloadctl-command-reference)
 
 ### `create`
 
@@ -115,6 +160,8 @@ sudo workloadctl create webserver \
 
 See also: [Manual TOML approach](workloads.md#manual-toml) and [bootc approach](workloads.md#bootc-approach).
 
+[↑ top](#workloadctl-command-reference)
+
 ---
 
 ### `build`
@@ -140,6 +187,8 @@ context. A workload that pulls a published image has nothing to build and says s
 Typical override-and-rebuild flow: `init` → `edit <name> Containerfile` → `build` →
 `recreate` (if already enabled) or `enable`.
 
+[↑ top](#workloadctl-command-reference)
+
 ---
 
 ### `enable`
@@ -151,6 +200,8 @@ sudo workloadctl enable <workload>
 ```
 
 This is idempotent — safe to re-run if a previous enable was interrupted.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -165,6 +216,32 @@ sudo workloadctl disable [--purge] <workload>
 | Option | Description |
 |---|---|
 | `--purge` | Also delete the workload user, home directory, and subuid/subgid entries |
+
+[↑ top](#workloadctl-command-reference)
+
+---
+
+### `start`
+
+Start a workload service without changing its `enabled` state.
+
+```
+sudo workloadctl start <workload>
+```
+
+[↑ top](#workloadctl-command-reference)
+
+---
+
+### `stop`
+
+Stop a workload service without changing its `enabled` state.
+
+```
+sudo workloadctl stop <workload>
+```
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -181,6 +258,8 @@ sudo workloadctl reboot <workload>
 **VM workloads:** runs the same `systemctl soft-reboot` inside the guest over SSH (the disk is preserved). Requires the VM to be reachable (see `exec`/`shell` IP resolution).
 
 Requires systemd 254+ inside the guest.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -199,6 +278,8 @@ sudo workloadctl recreate <workload>
 Use this whenever you change a workload's TOML and want the change to take effect. A plain `systemctl daemon-reload && systemctl restart workload-NAME.service` is **not** equivalent — daemon-reload only re-runs the systemd shell-generator (which emits a oneshot that won't fire until next boot), so the unit file content keeps its previous values. Inlined fields like `[container.environment]`, `[security.extra_groups]`, resource limits, and image references all need `recreate` to take effect.
 
 Values that flow through `EnvironmentFile=` (`XDG_RUNTIME_DIR`, `HOST_IP`, decrypted `${SECRET:...}` env vars) are re-read on each service start, so for those a plain `systemctl restart` is sufficient.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -223,6 +304,8 @@ For `cloud_image_url`, the downloaded image is cached at `.image-cache/<filename
 
 > **No auto-rollback for VMs.** Unlike container updates, a VM update does not verify guest health after restart and does not auto-rollback on failure. If the new disk fails to boot, restore the previous generation manually with `sudo workloadctl rollback <name>`.
 
+[↑ top](#workloadctl-command-reference)
+
 ---
 
 ### `rollback`
@@ -240,6 +323,8 @@ sudo workloadctl rollback [--list] <workload>
 **Container workloads:** Restores the image saved during the last `update` (tagged as `localhost/workload-rollback/<name>:latest`) and restarts the service. Exits with an error if no rollback image exists.
 
 **VM workloads:** Restores the latest `system.qcow2.gen-N` saved during the last `update` and restarts the VM. `vm.rollback_keep` (default 2) is the number of *older* generations retained beyond the one created by the current update, so `rollback_keep + 1` generations are kept in total (default: 3). Exits with an error if no generation exists. A `pet` VM never rotates `system.qcow2`, so it has no generations to roll back to.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -277,6 +362,8 @@ Use `info --files` to see what can be overridden, `build`/`recreate` to apply it
 and revert to the shipped default by deleting the override:
 `sudo rm /etc/workloads.d/<name>/<file>`.
 
+[↑ top](#workloadctl-command-reference)
+
 ---
 
 ## Introspection Commands
@@ -289,6 +376,8 @@ List all workloads and their enabled/running state.
 workloadctl list [--json]
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `status`
 
 Show the systemd service status for a workload.
@@ -300,6 +389,8 @@ workloadctl status [--json] <workload>
 | Option | Description |
 |---|---|
 | `--json` | Output state, PID, memory, and timestamps as JSON |
+
+[↑ top](#workloadctl-command-reference)
 
 ### `info`
 
@@ -315,6 +406,8 @@ workloadctl info --files [--json] <workload>
 | `--files` | Show the **merged control-file view** instead: every control file (Containerfile, `setup.sh`, `policy.cil`, …) from the shipped `/usr` bundle, unioned with any `/etc/workloads.d/<name>/` overrides — each tagged with its winning source: `override` (your `/etc` copy), `shipped` (the `/usr` default), or `missing` (declared but absent). The `systemctl cat` analogue for bundle control files; nested paths are shown. Edit any of them with `edit <workload> <file>`. |
 | `--json` | Output as JSON |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `logs`
 
 View workload logs via `journalctl`.
@@ -329,6 +422,8 @@ workloadctl logs [-f] [-n N] [--since TIME] <workload>[/<container>] [extra jour
 | `-n N` / `--lines N` | Show last N lines |
 | `--since TIME` | Show logs since TIME (journalctl format, e.g., `"1 hour ago"`) |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `stats`
 
 Show live resource usage (CPU, memory, I/O) for a workload or all workloads.
@@ -342,6 +437,8 @@ workloadctl stats [--json] [-f] [<workload>]
 | `-f` / `--follow` | Keep updating (live view); incompatible with `--json` |
 | `--json` | Output raw numeric stats as JSON |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `health`
 
 Check the health status of a workload container.
@@ -350,6 +447,8 @@ Check the health status of a workload container.
 workloadctl health [--json] <workload>[/<container>]
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `images`
 
 List or prune container images for workload users.
@@ -357,6 +456,8 @@ List or prune container images for workload users.
 ```
 workloadctl images [--json] [list|prune]
 ```
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -373,6 +474,8 @@ sudo workloadctl shell <workload>[/<container>] [--console]
 **Container workloads:** Enters the running container. If `CONTAINER_USER` or `CONTAINER_UID` is set in `[container.environment]`, the shell runs as that user; otherwise it enters as root. For multi-container workloads, the `/<container>` suffix is required.
 
 **VM workloads:** Connects over SSH by default (same path as `exec`), so the guest tty inherits the host terminal's window size and signal handling. Falls back to the QEMU serial console via `socat` if the VM has no IP yet or SSH can't connect — press `Ctrl+]` to detach from the console. Pass `--console` to skip the SSH attempt and go straight to the serial console, which is the right tool when the VM is broken enough that the network is unreachable.
+
+[↑ top](#workloadctl-command-reference)
 
 ### `exec`
 
@@ -393,6 +496,8 @@ workloadctl exec myapp/db psql -U app
 workloadctl exec fedora-vm -- dnf upgrade -y
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `cp`
 
 Copy files to or from a running workload container.
@@ -407,6 +512,8 @@ Use `workload:path` syntax for container paths:
 workloadctl cp webserver:/etc/nginx/nginx.conf ./nginx.conf
 workloadctl cp ./nginx.conf webserver:/etc/nginx/nginx.conf
 ```
+
+[↑ top](#workloadctl-command-reference)
 
 ### `incant`
 
@@ -430,6 +537,8 @@ workloadctl incant git -- query-status        # VM: QMP command
 workloadctl incant git -- system_powerdown     # VM: QMP command
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ---
 
 ## Validation & Diagnostics
@@ -447,6 +556,8 @@ workloadctl validate [--all] [--json] [<workload>]
 | `--all` | Validate all workload configs |
 | `--json` | Output results as JSON |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `diagnose`
 
 Diagnose a workload's runtime setup: user exists, subuid/subgid configured, linger active, SELinux label correct.
@@ -461,6 +572,8 @@ workloadctl diagnose [--json] <workload>
 
 Useful for diagnosing a workload that fails to start.
 
+[↑ top](#workloadctl-command-reference)
+
 ### `cleanup`
 
 Find (and optionally remove) orphaned workload users and home directories — system users in the `_wl-*` range whose config file no longer exists.
@@ -473,6 +586,27 @@ sudo workloadctl cleanup [--apply] [--json]
 |---|---|
 | `--apply` | Actually remove orphans (default is dry-run) |
 | `--json` | Output orphan lists and removal results as JSON |
+
+[↑ top](#workloadctl-command-reference)
+
+---
+
+### `drift`
+
+Diff running systemd units against what would be generated from the current TOMLs. Outputs nothing if units are in sync; exits 1 if drift is detected. Read-only — no changes are applied.
+
+```
+workloadctl drift [--json] [<workload>]
+```
+
+| Option | Description |
+|---|---|
+| `<workload>` | Filter to units belonging to a specific workload (default: all workloads) |
+| `--json` | Output diff as JSON instead of unified diff text |
+
+Useful after editing a TOML without running `recreate`, or to verify that the running units match the current config after a `bootc upgrade`.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -495,6 +629,8 @@ sudo workloadctl backup [--json] [--all] [--output PATH] [--consistency {cold,cr
 
 A backup captures **only the precious `data/` subtree** (for every substrate). The reconstructible `state/` subtree — podman graphroot, container images, and a VM's `system.qcow2` (+ `system.qcow2.gen-N`, `*.image-cache`) — is deliberately excluded and rebuilt on `enable`/`update`. For VMs this means the durable `data.qcow2` is archived but the OS disk is not: a **`pet` VM's in-place changes to `system.qcow2` are not recoverable from a backup** (a `pet` VM never rotates its system disk, so it also has no generation to roll back to). Bake durable VM state into a `data.qcow2` volume, or into the guest image, rather than the system disk.
 
+[↑ top](#workloadctl-command-reference)
+
 ### `restore`
 
 Restore a workload from a backup archive created by `backup`.
@@ -511,6 +647,8 @@ sudo workloadctl restore <archive>
 > decrypt them. For cross-host DR, also preserve `/var/lib/systemd/credential.secret`
 > (host-key case), or re-encrypt the affected secrets on the target with
 > `workloadctl secret`.
+
+[↑ top](#workloadctl-command-reference)
 
 ---
 
@@ -548,6 +686,8 @@ Reads from stdin if `--file` is not given.
 echo -n "my-api-key" | sudo workloadctl secret create --key-type tpm2 myapp-api-key
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `secret list`
 
 List all credentials in `/etc/credstore.encrypted/`.
@@ -560,6 +700,8 @@ workloadctl secret list [--json]
 |---|---|
 | `--json` | Output credential names, sizes, and modification timestamps as JSON |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `secret show`
 
 Decrypt and print a credential's value to stdout.
@@ -568,6 +710,8 @@ Decrypt and print a credential's value to stdout.
 sudo workloadctl secret show <name>
 ```
 
+[↑ top](#workloadctl-command-reference)
+
 ### `secret rotate`
 
 Replace a credential's encrypted value (re-reads from stdin) and restart any workloads that reference it.
@@ -575,6 +719,8 @@ Replace a credential's encrypted value (re-reads from stdin) and restart any wor
 ```
 sudo workloadctl secret rotate [--key-type {tpm2,host,host+tpm2}] <name>
 ```
+
+[↑ top](#workloadctl-command-reference)
 
 ### `secret delete`
 
@@ -588,6 +734,8 @@ sudo workloadctl secret delete [--force] <name>
 |---|---|
 | `--force` | Skip confirmation prompt |
 
+[↑ top](#workloadctl-command-reference)
+
 ### `secret export`
 
 Export an encrypted credential as a passphrase-protected portable file (`.secret`). The exported file is not TPM-bound and can be transferred to another machine.
@@ -599,6 +747,8 @@ sudo workloadctl secret export [--output FILE] <name>
 | Option | Description |
 |---|---|
 | `--output FILE` | Output path (default: `./<name>.secret`) |
+
+[↑ top](#workloadctl-command-reference)
 
 ### `secret import`
 
@@ -612,3 +762,5 @@ sudo workloadctl secret import [--force] [--key-type {tpm2,host,host+tpm2}] <nam
 |---|---|
 | `--force` | Overwrite if the credential already exists |
 | `--key-type` | Encryption key type for the new credential (default: `tpm2`) |
+
+[↑ top](#workloadctl-command-reference)
