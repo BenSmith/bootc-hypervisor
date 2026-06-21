@@ -1217,45 +1217,6 @@ def get_substrate(config, manager) -> Substrate:
 # Credentials directory (matches workload-ensure-user)
 CREDSTORE_DIR = Path("/etc/credstore")
 
-# Pattern for image-store exclude (shared with cmd_backup)
-def _ignore_image_store(base_dir):
-    target_parent = Path(base_dir) / ".local" / "share"
-    def _ignore(src_dir, contents):
-        if Path(src_dir) == target_parent:
-            return {"containers"} & set(contents)
-        return set()
-    return _ignore
-
-
-# VM rebuild artifacts that should not be backed up (they are regenerated
-# by workload-vm-build-disk on next enable/update).
-# Each entry is either an exact basename or a suffix matched with endswith().
-# Prefix matches (e.g. "system.qcow2.gen-") use the "startswith:" convention.
-_VM_REBUILD_PATTERNS = (
-    "system.qcow2",            # exact
-    "startswith:system.qcow2.gen-",
-    "endswith:.image-cache",
-)
-
-
-def _ignore_vm_rebuild(base_dir):
-    """copytree ignore callable that skips VM rebuild artifacts."""
-    base = Path(base_dir)
-    def _ignore(src_dir, contents):
-        if Path(src_dir) != base:
-            return set()
-        skip = set()
-        for name in contents:
-            for pat in _VM_REBUILD_PATTERNS:
-                if pat.startswith("startswith:") and name.startswith(pat[len("startswith:"):]):
-                    skip.add(name)
-                elif pat.startswith("endswith:") and name.endswith(pat[len("endswith:"):]):
-                    skip.add(name)
-                elif name == pat:
-                    skip.add(name)
-        return skip
-    return _ignore
-
 
 def _backup_container(config, output: Path, *, no_stop: bool, quiet: bool) -> int:
     """Backup a container workload.  Returns archive size in bytes."""
@@ -1395,7 +1356,6 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
     from workload_lib import WORKLOAD_CONFIG_DIR
     workload_dir = WORKLOAD_CONFIG_DIR
     name = config.name
-    home_dir = config.home_dir
     config_path = workload_dir / f"{name}.toml"
     service_name = config.service_name
 
@@ -1425,18 +1385,19 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
                     elif not quiet:
                         print(f"  Warning: Credential '{cred_name}' not found, skipping")
 
-            if home_dir.is_dir():
-                if vm:
-                    ignore = _ignore_vm_rebuild(home_dir)
-                else:
-                    ignore = _ignore_image_store(home_dir)
+            # Capture only the precious data/ subtree — for every substrate.
+            # state/ (podman graphroot, VM system.qcow2 + gen snapshots,
+            # .image-cache) is reconstructible from registries/Containerfiles
+            # and is deliberately never in backup scope, so no exclude filtering
+            # is needed: the archive is a straight copy of data/.
+            data_dir = config.data_dir
+            if data_dir.is_dir():
                 shutil.copytree(
-                    home_dir, staging / "home",
+                    data_dir, staging / "data",
                     symlinks=True, dirs_exist_ok=False,
-                    ignore=ignore,
                 )
             else:
-                (staging / "home").mkdir()
+                (staging / "data").mkdir()
 
             output.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(

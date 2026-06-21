@@ -15,7 +15,7 @@ import tomllib
 from workload_lib import (
     auto_detect_credentials,
     WORKLOADS_BASE,
-    workload_home_dir,
+    workload_data_dir,
     workload_service_name,
 )
 from workloadctl_core import (
@@ -43,8 +43,8 @@ def _backup_one(config: WorkloadConfig, output: Path, consistency: str, quiet: b
     Archive layout:
         workload.toml           — the config file
         credentials/            — referenced encrypted credentials (TPM-bound)
-        home/                   — home directory (.local/share/containers and
-                                  VM rebuild artifacts excluded)
+        data/                   — the precious data/ subtree (the only captured
+                                  state; reconstructible state/ is never backed up)
     """
     substrate = get_substrate(config, None)
     try:
@@ -173,7 +173,7 @@ def cmd_restore(args, manager: WorkloadManager):
 
         # Check if workload already exists
         dest_config = WORKLOAD_DIR / f"{name}.toml"
-        dest_home = workload_home_dir(name)
+        dest_data = workload_data_dir(name)
         if dest_config.exists() and not args.force:
             print(f"Error: Config already exists: {dest_config}", file=sys.stderr)
             print("Use --force to overwrite", file=sys.stderr)
@@ -204,17 +204,18 @@ def cmd_restore(args, manager: WorkloadManager):
                     print(f"  Credential → {dest_cred}")
                     tpm_warning = True
 
-        # 3. Restore home directory
-        home_staging = staging / "home"
-        if home_staging.is_dir():
-            if dest_home.exists():
+        # 3. Restore the precious data/ subtree (the only captured state;
+        #    reconstructible state/ is rebuilt by `update`, not restored).
+        data_staging = staging / "data"
+        if data_staging.is_dir():
+            if dest_data.exists():
                 if args.force:
-                    shutil.rmtree(dest_home)
+                    shutil.rmtree(dest_data)
                 else:
-                    print(f"  Warning: Home dir exists, merging (use --force to replace)")
-            shutil.copytree(home_staging, dest_home,
+                    print(f"  Warning: data/ exists, merging (use --force to replace)")
+            shutil.copytree(data_staging, dest_data,
                             symlinks=True, dirs_exist_ok=True)
-            print(f"  Home dir → {dest_home}")
+            print(f"  Data dir → {dest_data}")
 
         print()
 

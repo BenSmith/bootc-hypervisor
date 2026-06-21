@@ -61,7 +61,8 @@ try:
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
-        workload_username, workload_home_dir, workload_state_dir, expand_volume_path, dq,
+        workload_username, workload_home_dir, workload_state_dir, workload_data_dir,
+        expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
         UID_MIN, UID_MAX, get_next_uid,
@@ -1372,6 +1373,9 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     name = config["workload"]["name"]
     vm_cfg = config.get("vm", {})
     home_dir = str(workload_state_dir(name))
+    # data.qcow2 is the precious disk → lives in the backup-captured data/ subtree,
+    # apart from the reconstructible system.qcow2 (state/).
+    data_dir = str(workload_data_dir(name))
     socket_dir = f"/run/workload-vm/{name}"
 
     # Always pass QEMU an integer number of MiB so memfd's "size=NM" stays valid.
@@ -1440,7 +1444,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     )
     if has_data_disk:
         qemu_args.append(
-            f"-drive file={home_dir}/data.qcow2,if=virtio,format=qcow2,id=data"
+            f"-drive file={data_dir}/data.qcow2,if=virtio,format=qcow2,id=data"
         )
 
     # Cloud-init seed (always present; removed from command after first boot

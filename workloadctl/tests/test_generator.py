@@ -1897,6 +1897,10 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self._run()
         svc = self._read("workload-fedora-vm.service")
         self.assertIn("data.qcow2", svc)
+        # data.qcow2 (precious) lives in the backup-captured data/ subtree,
+        # while system.qcow2 (reconstructible) stays in state/.
+        self.assertIn("/fedora-vm/data/data.qcow2", svc)
+        self.assertIn("/fedora-vm/state/system.qcow2", svc)
 
     def test_no_data_disk_when_size_omitted(self):
         write_config(self.config_dir, "minvm", f"""\

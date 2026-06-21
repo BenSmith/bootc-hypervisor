@@ -1134,43 +1134,5 @@ class TestBackupJson(unittest.TestCase):
         self.assertNotEqual(cm.exception.code, 0)
 
 
-class TestBackupImageStoreExclude(unittest.TestCase):
-    """_ignore_image_store excludes .local/share/containers from copytree."""
-
-    def _make_home(self, base):
-        """Create a fake workload home with container image storage."""
-        home = Path(base) / "home"
-        (home / ".local" / "share" / "containers" / "storage").mkdir(parents=True)
-        (home / ".local" / "share" / "containers" / "storage" / "layer.tar").write_text("data")
-        (home / "data" / "db").mkdir(parents=True)
-        (home / "data" / "db" / "mydb.sqlite").write_text("dbdata")
-        return home
-
-    def test_containers_excluded_from_copy(self):
-        """shutil.copytree with _ignore_image_store omits .local/share/containers."""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = self._make_home(tmp)
-            dst = Path(tmp) / "staging"
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=substrate._ignore_image_store(src))
-            self.assertFalse((dst / ".local" / "share" / "containers").exists(),
-                             ".local/share/containers should be excluded")
-            self.assertTrue((dst / "data" / "db" / "mydb.sqlite").exists(),
-                            "other home contents must be preserved")
-
-    def test_no_containers_dir_is_harmless(self):
-        """_ignore_image_store is a no-op when .local/share/containers doesn't exist."""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / "home"
-            (src / ".local" / "share").mkdir(parents=True)
-            (src / "config.txt").write_text("cfg")
-            dst = Path(tmp) / "staging"
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=substrate._ignore_image_store(src))
-            self.assertTrue((dst / "config.txt").exists())
-            # No error, just a no-op exclusion
-            self.assertFalse((dst / ".local" / "share" / "containers").exists())
-
-
 if __name__ == '__main__':
     unittest.main()

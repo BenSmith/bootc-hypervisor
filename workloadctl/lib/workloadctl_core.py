@@ -53,8 +53,10 @@ from workload_lib import (
     VM_DHCP_LEASE_FILE,
     vm_mac_address,
     workload_container_name,
+    workload_data_dir,
     workload_home_dir,
     workload_service_name,
+    workload_state_dir,
     workload_username,
 )
 from podman import Podman, PodmanError
@@ -559,6 +561,16 @@ class WorkloadConfig:
     @property
     def home_dir(self) -> Path:
         return workload_home_dir(self.name)
+
+    @property
+    def state_dir(self) -> Path:
+        """Reconstructible state subtree (= $HOME / podman graphroot / VM disks)."""
+        return workload_state_dir(self.name)
+
+    @property
+    def data_dir(self) -> Path:
+        """Precious data subtree ('./' volume anchors resolve here; backup-captured)."""
+        return workload_data_dir(self.name)
 
     @property
     def vm_bridge(self) -> str:

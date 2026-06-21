@@ -26,7 +26,6 @@ from substrate import (
     NotApplicable,
     BackupError,
     get_substrate,
-    _ignore_vm_rebuild,
 )
 import cmd_backup
 import cmd_drift
@@ -495,48 +494,6 @@ class TestBackupVMCrash(unittest.TestCase):
         # never paused, so nothing to copy or resume
         qmp_mock.execute.assert_not_called()
         mock_impl.assert_not_called()
-
-
-# ── _ignore_vm_rebuild ────────────────────────────────────────────────────────
-
-class TestIgnoreVMRebuild(unittest.TestCase):
-
-    def test_skips_system_qcow2(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            skipped = ignore(str(base), ['system.qcow2', 'data.qcow2', 'cloud-init.iso'])
-        self.assertIn('system.qcow2', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-        self.assertNotIn('cloud-init.iso', skipped)
-
-    def test_skips_gen_variants(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            contents = ['system.qcow2.gen-1', 'system.qcow2.gen-2', 'data.qcow2']
-            skipped = ignore(str(base), contents)
-        self.assertIn('system.qcow2.gen-1', skipped)
-        self.assertIn('system.qcow2.gen-2', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-
-    def test_skips_image_cache(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            contents = ['fedora.image-cache', 'data.qcow2']
-            skipped = ignore(str(base), contents)
-        self.assertIn('fedora.image-cache', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-
-    def test_does_not_skip_in_subdirs(self):
-        """Rebuild artifacts outside the base dir are not skipped."""
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            subdir = str(base / 'subdir')
-            skipped = ignore(subdir, ['system.qcow2'])
-        self.assertNotIn('system.qcow2', skipped)
 
 
 # ── ContainerSubstrate.liveness() multi-container semantics ──────────────────

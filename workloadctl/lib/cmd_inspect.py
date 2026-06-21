@@ -489,9 +489,10 @@ def cmd_info(args, manager: WorkloadManager):
         vm_cfg = config.config.get("vm", {})
         home_dir = config.home_dir
 
-        # Disk info
+        # Disk info — system.qcow2 is reconstructible (state/); data.qcow2 is
+        # precious and lives in the backup-captured data/ subtree.
         system_disk = home_dir / "system.qcow2"
-        data_disk = home_dir / "data.qcow2"
+        data_disk = config.data_dir / "data.qcow2"
         gens = sorted(
             int(p.suffix[5:])
             for p in home_dir.glob("system.qcow2.gen-*")
