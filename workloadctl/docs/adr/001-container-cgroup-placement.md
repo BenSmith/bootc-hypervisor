@@ -48,8 +48,10 @@ bind it directly.
   `custom_directives` escape hatch works.
 - ❌ Pays a permanent tax: `lib/cgroup_exec.py` (uid-owned-leaf placement) for
   `exec`/`shell`, the system-manager healthcheck timer + `workload-healthcheck`
-  + `DISABLE_HC_SYSTEMD`, the `Type=notify` caveat, and recurring debugging cost
-  (e.g. the non-interactive exec fix, commit `3b1e668`).
+  + `DISABLE_HC_SYSTEMD`, and recurring debugging cost (e.g. the non-interactive
+  exec fix, commit `3b1e668`). (`Type=notify` is unsupported, but that is *not*
+  specific to this option — it is structural to the rootless+linger design and
+  unchanged by 1b; see spike item 8.)
 - ❌ Pod mode can't use split, so pods get **no** per-unit enforcement —
   mitigated by `user-<uid>.slice` drop-ins (C11 in
   `docs/architecture-and-followup-review-2026-06-10.md`). The rejection is
@@ -357,3 +359,26 @@ Still open (subsequent stages):
    subtree, sparing the user manager and sibling containers. Caveat: with
    `MemorySwapMax` unset, zram absorbs overflow and no OOM fires — see the
    swap caveat in the 1b spike results.
+8. ~~Re-test `Type=notify` under 1b (the topology changed, result was unknown)~~
+   **Resolved 2026-06-21 on tp (Fedora 44 / systemd 259):** `Type=notify` is
+   **structurally incompatible** with the rootless+linger design — 1b does not
+   fix it, and there is no conmon-independent workaround. systemd attributes an
+   sd_notify datagram to the unit owning the *sender's* cgroup, and the process
+   that emits `READY=1` always lives in `user@<uid>.service`'s cgroup, never in
+   `workload-<name>.service`'s. Tested both policies with the container reaching
+   readiness; both left the unit stuck `activating`:
+   - `--sdnotify=conmon`: the sender (conmon) sits in
+     `…/user@<uid>.service/…/podman-*.scope`.
+   - `--sdnotify=healthy` (requires a healthcheck): podman *does* send `READY=1`
+     once healthy (confirmed by pointing it at a private datagram listener), but
+     the emitter is the re-exec'd libpod podman (`waitForHealthy`,
+     `libpod/container_internal.go`), which has migrated into the **same**
+     user-manager scope as conmon. systemd logged the proof:
+     `user@<uid>.service: Got notification message from PID <re-exec'd podman>,
+     but reception only permitted for main PID <user manager>`.
+   No `NotifyAccess` tweak on the workload unit helps (the sender is not in its
+   cgroup at all); the only unit that *could* accept the message is the user
+   manager, which is the wrong unit. Readiness gating instead uses podman-native
+   `--health-cmd` (works under 1b, item 4) + `workloadctl health`/`update`'s
+   health-verified flow. The VM substrate's `Type=notify` is unaffected:
+   `workload-vm-notify` sends `READY=1` from inside the system unit's own cgroup.

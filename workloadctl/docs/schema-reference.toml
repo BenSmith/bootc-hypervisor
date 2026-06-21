@@ -1157,12 +1157,20 @@ ports = ["8080:80", "8443:443"]
 # Common values:
 #   "exec" (default)   - Activates once podman has exec'd the container process.
 #                        Correct for all workloads. Does not require a READY
-#                        notification, which avoids a systemic issue where
-#                        conmon migrates into the user session cgroup when linger
-#                        is active, causing systemd to silently drop its READY=1.
-#   "notify"           - Waits for READY=1 from conmon (--sdnotify=conmon).
-#                        Only use this if linger is disabled for the workload user
-#                        and you need accurate readiness tracking.
+#                        notification, which sidesteps the structural sd_notify
+#                        incompatibility described under "notify" below.
+#   "notify"           - Waits for READY=1 (--sdnotify=conmon). DO NOT USE: this
+#                        is structurally incompatible with the rootless+linger
+#                        design and the unit will hang in "activating". systemd
+#                        attributes an sd_notify message to the unit owning the
+#                        sender's cgroup, but the emitter (conmon, or the re-exec'd
+#                        podman under --sdnotify=healthy) always lives in
+#                        user@<uid>.service's cgroup, not the workload service's,
+#                        so READY=1 is misattributed to the user manager and the
+#                        workload unit never sees it. No NotifyAccess tweak fixes
+#                        it. For readiness tracking use [container.health] +
+#                        `workloadctl health`/`update` instead. (Verified 2026-06-21;
+#                        see docs/adr/001-container-cgroup-placement.md.)
 #   "simple"           - Consider service started immediately after fork.
 #
 # Systemd directive: Type=

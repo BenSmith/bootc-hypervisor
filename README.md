@@ -95,8 +95,9 @@ hypervisor-amd:latest                  # Stable Fedora version (AMD)
 
 ## Workload System (workloadctl)
 
-[`workloadctl`](workloadctl/) is a standalone tool (RPM-packaged, **no bootc dependency**) that manages rootless podman
-containers as declarative TOML configs. It should work on systemd Linuxes with Podman 5.3+.
+[`workloadctl`](workloadctl/) is a standalone tool (RPM-packaged, **no bootc dependency**) that turns declarative TOML
+configs into isolated workloads — either rootless podman containers (the common case) or KVM/QEMU VMs (declared with a
+`[vm]` section). It should work on systemd Linuxes with Podman 5.3+.
 
 Each workload gets:
 
@@ -109,7 +110,7 @@ Each workload gets:
 # Create and start
 sudo workloadctl create pihole \
   --image pihole/pihole:latest \
-  --ports 53:53 80:80 \
+  --ports 53:53 --ports 80:80 \
   --enable
 
 # Manage
@@ -247,7 +248,7 @@ Weekly automated builds via GitHub Actions: `fedora-bootc-minimal` on Saturdays,
 - [CLI reference](workloadctl/docs/cli.md) — All commands and options
 - [Secrets management](workloadctl/docs/secrets.md) — TPM2-encrypted credentials
 - [Schema reference](workloadctl/docs/schema-reference.toml) — Annotated TOML schema
-- [Example configs](workloadctl/workloads.d/) — Real-world workload definitions
+- [Example configs](workloadctl/workloads/) — Real-world workload definitions, one bundle per directory
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — Common issues and fixes
 - [Emergency recovery](docs/emergency-recovery.md) — Boot recovery procedures
 

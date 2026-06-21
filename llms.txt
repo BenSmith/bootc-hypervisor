@@ -48,7 +48,7 @@ Each inherits from hypervisor-bootc and adds kernel GPU drivers:
 
 ## Workload System (workloadctl)
 
-The `workloadctl/` subdirectory is a standalone tool (RPM-packaged, no bootc dependency) that manages rootless podman containers as declarative TOML configs. Each workload gets a dedicated system user, subuid namespace, systemd service, volume management, and optional TPM2-encrypted secrets.
+The `workloadctl/` subdirectory is a standalone tool (RPM-packaged, no bootc dependency) that turns declarative TOML configs into isolated workloads across two substrates: rootless podman containers (the common case) and KVM/QEMU VMs (declared with a `[vm]` section). Each workload gets a dedicated system user, subuid namespace, systemd service, volume management, and optional TPM2-encrypted secrets.
 
 See [workloadctl/llms.txt](workloadctl/llms.txt) for full detail on architecture, CLI commands, and configuration schema.
 

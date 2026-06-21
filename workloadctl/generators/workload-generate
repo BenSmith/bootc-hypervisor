@@ -617,9 +617,18 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     # service_type is read here (before podman_args) so --sdnotify can match.
     # Default is "exec": activates once podman starts, no READY handshake needed.
-    # "notify" + --sdnotify=conmon is broken systemically when linger is active
-    # because conmon migrates into the user session cgroup and systemd rejects its
-    # READY=1 (NotifyAccess=all only accepts PIDs in the service's own cgroup tree).
+    # "notify" is structurally incompatible with this rootless+linger architecture
+    # and stays unsupported in practice (settled, not a pending question; verified
+    # tp Fedora 44/systemd 259 2026-06-21). systemd attributes an sd_notify datagram
+    # to the unit owning the *sender's* cgroup, but the process that emits READY=1
+    # always lives in user@<uid>.service's cgroup, never workload-<name>.service's:
+    # with --sdnotify=conmon the sender is conmon; with --sdnotify=healthy podman
+    # does send READY once healthy, but from the re-exec'd libpod podman that has
+    # migrated into the same user-manager scope as conmon. Either way systemd
+    # credits user@<uid>.service (wrong unit, which rejects it) and the workload
+    # unit never goes active. No NotifyAccess tweak on the workload unit can fix
+    # this — the sender is not in its cgroup at all. Use --health-cmd + the CLI's
+    # health-verified flow for readiness instead. See ADR 001 and llms.txt.
     service_type = container.get("resources", {}).get("service_type", "exec")
     valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
     if service_type not in valid_types:
