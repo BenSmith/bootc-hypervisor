@@ -558,7 +558,7 @@ class ContainerSubstrate(Substrate):
         no_stop = consistency == "crash"
         return _backup_container(self.config, output, no_stop=no_stop, quiet=quiet)
 
-    # ── step-2 primitives ────────────────────────────────────────────────────
+    # ── backup primitives ─────────────────────────────────────────────────────
 
     def gating_units(self) -> list[str]:
         return []

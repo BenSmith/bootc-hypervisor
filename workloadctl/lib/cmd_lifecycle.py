@@ -896,13 +896,13 @@ def cmd_disable(args, manager: WorkloadManager):
                 sys.stderr.write(f"    Fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge.\n")
                 sys.exit(1)
 
-            home_path = Path(home_dir)
-            if home_path.exists():
-                print(f"  Removing home directory {home_dir}...")
+            workload_dir = WORKLOADS_BASE / config.name
+            if workload_dir.exists():
+                print(f"  Removing workload directory {workload_dir}...")
                 try:
-                    shutil.rmtree(home_dir)
+                    shutil.rmtree(workload_dir)
                 except OSError as e:
-                    sys.stderr.write(f"  ! Failed to fully remove {home_dir}: {e}\n")
+                    sys.stderr.write(f"  ! Failed to fully remove {workload_dir}: {e}\n")
                     sys.stderr.write(f"  ! Workload data may still be present — remove manually before re-enabling.\n")
                     sys.exit(1)
 

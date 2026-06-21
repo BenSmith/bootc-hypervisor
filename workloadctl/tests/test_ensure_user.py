@@ -368,8 +368,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
         self.mod = _load_script()
 
     def _patch(self, root):
-        """Anchor the canonical Step-2 helpers into the temp tree (the function
-        keys off these, not pw.pw_dir, so it's correct even for a stale home)."""
+        """Anchor the canonical path helpers into the temp tree (the function
+        keys off these, not pw.pw_dir, so it's correct even with a mismatched passwd home)."""
         return (
             mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"),
             mock.patch.object(self.mod, "workload_data_dir", lambda n: root / "data"),
@@ -455,14 +455,13 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
             self.assertTrue((root / "data" / "web-data").is_dir())
             self.assertTrue((root / "data" / "db-data").is_dir())
 
-    def test_stale_passwd_home_still_provisions_canonically(self):
-        # The fix: a pre-Step-2 user whose passwd home is the workload ROOT
-        # (not root/state) must STILL get ./ volumes under the canonical data/,
-        # because provisioning keys off workload_state_dir(name), not pw.pw_dir.
-        # With the old pw.pw_dir-based code this landed in the wrong place.
+    def test_mismatched_passwd_home_still_provisions_canonically(self):
+        # A user whose passwd home doesn't match the expected state/ dir must
+        # still get ./ volumes under data/, because provisioning keys off
+        # workload_state_dir(name), not pw.pw_dir.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "state").mkdir()
-            stale_pw = _fake_pw(root)  # passwd home = root (stale, pre-Step-2)
+            stale_pw = _fake_pw(root)  # passwd home = root (mismatched)
             config = {
                 "workload": {"name": "myapp"},
                 "containers": [{"name": "web", "container": {"image": "x"},
@@ -564,7 +563,7 @@ class TestDecryptSystemdCredential(unittest.TestCase):
 
 
 class TestWarnIfStaleHome(unittest.TestCase):
-    """warn_if_stale_home flags pre-Step-2 home dirs (which silently break
+    """warn_if_stale_home flags mismatched passwd home dirs (which silently break
     podman healthchecks) without trying to fix them."""
 
     def setUp(self):
@@ -577,16 +576,14 @@ class TestWarnIfStaleHome(unittest.TestCase):
         return "\n".join(msgs)
 
     def test_silent_when_home_is_state_dir(self):
-        # Correct Step-2 home (= state/ subdir) → no warning.
         pw = _fake_pw(self.mod.workload_state_dir("myapp"))
         self.assertEqual(self._capture(pw, "myapp"), "")
 
-    def test_warns_on_pre_step2_home(self):
-        # Pre-Step-2 home = the workload root (parent of the state/ subdir).
+    def test_warns_on_mismatched_home(self):
         stale = self.mod.workload_state_dir("myapp").parent
         pw = _fake_pw(stale, uid=10005)
         out = self._capture(pw, "myapp")
-        self.assertIn("stale home", out)
+        self.assertIn("mismatched home", out)
         self.assertIn("frozen at 'starting'", out)
         # Remediation names the exact usermod target + the unit to bounce.
         self.assertIn(f"usermod -d {self.mod.workload_state_dir('myapp')}", out)

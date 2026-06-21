@@ -185,17 +185,13 @@ def configure_subuid_subgid(pw, config):
 
 
 def warn_if_stale_home(pw, name):
-    """Warn (don't fix) when a workload user's home predates the Step-2 layout.
+    """Warn (don't fix) when a workload user's passwd home doesn't match the expected state/ dir.
 
-    The Step-2 reshape moved each workload's $HOME from the workload root
-    (/var/lib/workloads/<name>) to its state/ subdir. systemd-sysusers only
-    sets the home of a *new* user, so a user created before the reshape keeps
-    its old home in /etc/passwd. The workload service itself is unaffected — the
-    generator forces Environment=HOME=<state> in the unit — but podman's
-    auto-generated healthcheck timer runs a bare `podman healthcheck run` that
-    inherits the user manager's HOME (= the stale passwd home), resolves an
-    empty graphroot, can't find the container, and leaves health frozen at
-    'starting' forever.
+    The workload service is unaffected — the generator forces Environment=HOME=<state>
+    in the unit — but podman's auto-generated healthcheck timer runs a bare
+    `podman healthcheck run` that inherits the user manager's HOME (= the mismatched
+    passwd home), resolves an empty graphroot, can't find the container, and leaves
+    health frozen at 'starting' forever.
 
     We only warn: rewriting an in-use user's home (usermod -d) requires stopping
     the workload and bouncing user@<uid>.service to take effect, which is an
@@ -206,10 +202,9 @@ def warn_if_stale_home(pw, name):
     if actual == expected:
         return
     uid = pw.pw_uid
-    log(f"  WARNING: stale home for {pw.pw_name}: {actual!r} (expected {expected!r}).")
-    log( "           Pre-Step-2 layout. The service runs correctly, but podman's "
-         "healthcheck timer inherits this home and reads an empty graphroot, so "
-         "health is frozen at 'starting'.")
+    log(f"  WARNING: mismatched home for {pw.pw_name}: {actual!r} (expected {expected!r}).")
+    log( "           The service runs correctly, but podman's healthcheck timer "
+         "inherits this home and reads an empty graphroot, so health is frozen at 'starting'.")
     log(f"           Fix: systemctl stop workload-{name}; usermod -d {expected} "
         f"{pw.pw_name}; systemctl restart workload-{name}  "
         f"(restarting bounces user@{uid}.service so the new HOME takes effect).")
@@ -218,11 +213,9 @@ def warn_if_stale_home(pw, name):
 def setup_home_directory(pw, name):
     """Create and configure the workload's state/ ($HOME) and data/ subdirs.
 
-    Anchored on the canonical Step-2 paths, NOT pw.pw_dir: the generator forces
-    HOME=<state> independent of the passwd home, so for a pre-Step-2 user whose
-    passwd home is stale these must still land where the service actually
-    reads/writes (else `./` data volumes provision in the wrong place). See
-    warn_if_stale_home.
+    Anchored on workload_state_dir/workload_data_dir, not pw.pw_dir: the generator
+    forces HOME=<state> independently, so these must land where the service actually
+    reads/writes regardless of what passwd records. See warn_if_stale_home.
     """
     state_path = workload_state_dir(name)
     if not state_path.exists():
