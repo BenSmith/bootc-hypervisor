@@ -101,8 +101,9 @@ JS
 # --- Steam ---
 
 RUN dnf install -y \
-    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+    "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+    "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" && \
+    dnf clean all
 
 RUN dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \
     dnf install -y steam mesa-va-drivers-freeworld && \
@@ -133,6 +134,10 @@ RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
 # per-host setting is `gpu = ...` in the workload TOML.
 # Pre-release RPM URL changes frequently — pass via build arg:
 #   podman build --build-arg SUNSHINE_RPM_URL=https://... .
+
+# Re-declare ARG after FROM so it's in scope for this build stage.
+# (Pre-FROM ARGs are only available to the FROM instruction itself.)
+ARG SUNSHINE_RPM_URL
 
 RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
     dnf clean all

@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="backup catalog cleanup clone cp create diagnose disable drift duplicate edit enable exec health images incant info init list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
+    local commands="backup build catalog cleanup clone cp create diagnose disable drift duplicate edit enable exec health images incant info init list logs reboot recreate restore rollback secret shell start stats status stop update validate help"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
     local bundles_dir="/usr/share/workloadctl/workloads"
@@ -106,9 +106,34 @@ _workload_ctl_completion() {
             fi
             return 0
             ;;
-        edit|reboot|recreate)
+        build|reboot|recreate)
             # Complete with workload names (no extra flags)
             COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            return 0
+            ;;
+        edit)
+            # cword 2: workload name; cword 3+: optional control file or -y/--yes
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-y --yes" -- "$cur") )
+            elif [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            elif [[ $cword -eq 3 ]]; then
+                # Offer common bundle control file names
+                local wl="${words[2]}"
+                local toml="/etc/workloads.d/${wl}.toml"
+                local bundle_name="$wl"
+                if [[ -f "$toml" ]]; then
+                    local b
+                    b=$(grep -oP '(?<=bundle = ")[^"]+' "$toml" 2>/dev/null)
+                    [[ -n "$b" ]] && bundle_name="$b"
+                fi
+                local bundle_dir="$bundles_dir/$bundle_name"
+                local control_files
+                if [[ -d "$bundle_dir" ]]; then
+                    control_files=$(cd "$bundle_dir" && find . -type f ! -name "workload.toml" -printf '%P\n' 2>/dev/null)
+                fi
+                COMPREPLY=( $(compgen -W "$control_files" -- "$cur") )
+            fi
             return 0
             ;;
         incant)
@@ -159,9 +184,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         info)
-            # Complete with --json or workload names
+            # Complete with --files, --json, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--files --json" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi

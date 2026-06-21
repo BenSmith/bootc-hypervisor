@@ -21,7 +21,8 @@ WORKDIR /tmp
 # ── Enable RPMFusion for x264/x265 codec libraries ──
 RUN dnf install -y \
     https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm \
-    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm && \
+    dnf clean all
 
 # ── GStreamer build dependencies ──
 RUN dnf install -y --setopt=install_weak_deps=False \
@@ -123,7 +124,7 @@ RUN meson setup \
 # ── Build gst-interpipe ──
 WORKDIR /tmp
 RUN git clone https://github.com/RidgeRun/gst-interpipe.git && \
-    cd gst-interpipe && git checkout ${GST_INTERPIPE_COMMIT}
+    git -C gst-interpipe checkout "${GST_INTERPIPE_COMMIT}"
 WORKDIR /tmp/gst-interpipe
 RUN meson setup build --prefix=$GSTREAMER_INSTALL_PREFIX \
     -Denable-gtk-doc=false && \
@@ -143,19 +144,20 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     wayland-devel && \
     dnf clean all
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN git clone https://github.com/games-on-whales/gst-wayland-display && \
-    cd gst-wayland-display && git checkout ${GST_WAYLAND_DISPLAY_COMMIT}
+    git -C gst-wayland-display checkout "${GST_WAYLAND_DISPLAY_COMMIT}"
 WORKDIR /tmp/gst-wayland-display
 RUN cargo install cargo-c && \
     cargo cinstall -p c-bindings \
-    --prefix=$GSTREAMER_INSTALL_PREFIX \
+    --prefix="$GSTREAMER_INSTALL_PREFIX" \
     --libdir="${GSTREAMER_INSTALL_PREFIX}/lib64/" && \
     cargo build --release -p gst-plugin-wayland-display && \
     cp target/release/libgstwaylanddisplaysrc.so \
-    ${GSTREAMER_INSTALL_PREFIX}/lib64/gstreamer-1.0/
+    "${GSTREAMER_INSTALL_PREFIX}/lib64/gstreamer-1.0/"
 
 
 # ─── Stage 3: Build Wolf (parallel — only needs GStreamer headers) ──────────
@@ -177,7 +179,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     dnf clean all
 
 RUN git clone https://github.com/games-on-whales/wolf.git && \
-    cd wolf && git checkout ${WOLF_COMMIT}
+    git -C wolf checkout "${WOLF_COMMIT}"
 WORKDIR /tmp/wolf
 
 # Enable session_id_context on Wolf's HTTPS server. The flag defaults to false
@@ -221,7 +223,8 @@ ENV WOLF_HOME=/opt/wolf \
 # ── Enable RPMFusion for mesa freeworld drivers and Steam ──
 RUN dnf install -y \
     https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm \
-    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-43.noarch.rpm && \
+    dnf clean all
 
 # ── GPU-specific driver packages ──
 RUN if [ "$GPU_TYPE" = "amd" ]; then \

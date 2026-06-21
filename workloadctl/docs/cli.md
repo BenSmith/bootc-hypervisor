@@ -28,7 +28,7 @@
 | [`logs`](#logs) | View workload logs via `journalctl` |
 | [`reboot`](#reboot) | Soft-reboot a workload (systemd re-exec inside container or VM) |
 | [`recreate`](#recreate) | Regenerate units and restart (apply TOML edits or post-build) |
-| [`restore`](#restore) | Restore a workload from a `backup` archive |
+| [`restore`](#restore) | Restore a workload from a `backup` archive (optionally `--force`, `--enable`) |
 | [`rollback`](#rollback) | Revert to the previous container image or VM disk generation |
 | [`secret`](#secret-management) | Manage encrypted systemd credentials (subcommands: `create list show rotate delete export import`) |
 | [`shell`](#shell) | Open an interactive shell in a container or VM (SSH or serial console) |
@@ -636,8 +636,13 @@ A backup captures **only the precious `data/` subtree** (for every substrate). T
 Restore a workload from a backup archive created by `backup`.
 
 ```
-sudo workloadctl restore <archive>
+sudo workloadctl restore [--force] [--enable] <archive>
 ```
+
+| Option | Description |
+|---|---|
+| `--force` | Overwrite existing config, credentials, and home directory if they exist |
+| `--enable` | Enable the workload immediately after restoring |
 
 > **DR caveat — secrets are host-bound.** A backup archives the encrypted
 > credential blobs from `/etc/credstore` but not the unlock material. Secrets

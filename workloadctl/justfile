@@ -40,6 +40,25 @@ lint:
   python3 -m py_compile libexec/workload-write-env
   python3 -m py_compile libexec/workload-exporter
 
+# Lint all bundle Containerfiles with hadolint.
+# Intentionally suppressed:
+#   DL3006/DL3007: image version/tag pinning — we track by image, not tag
+#   DL3018/DL3041: apk/dnf package version pinning — intentional; we want
+#                  the latest stable package from the distro repo
+#   DL3059: consecutive RUN — intentional for readability and layer isolation
+# Excluded: vncdesktop-labwc — XML inside a heredoc makes hadolint choke on
+# the leading '<' of XML tags, treating them as Dockerfile instructions.
+lint-containerfiles:
+  find workloads -name Containerfile \
+    ! -path 'workloads/vncdesktop-labwc/*' \
+    | sort \
+    | xargs hadolint \
+        --ignore DL3006 \
+        --ignore DL3007 \
+        --ignore DL3018 \
+        --ignore DL3041 \
+        --ignore DL3059
+
 # Build RPM from local checkout (no tarball)
 rpm-build:
   #!/usr/bin/env bash

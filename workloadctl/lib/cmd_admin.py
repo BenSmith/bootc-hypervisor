@@ -202,6 +202,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             })
 
     required_file_paths = {e["path"] for e in config.get_required_files()}
+    workload_root = str(config.home_dir.parent)
     for vol in config.get_volumes():
         expanded_vol = expand_volume_path(vol, str(config.home_dir))
         host_path = expanded_vol.split(':')[0]
@@ -219,6 +220,14 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 "passed": True,
                 "severity": "ok",
                 "message": f"Volume path listed in required_files (setup needed): {host_path}",
+                "path": host_path
+            })
+        elif host_path.startswith(workload_root + "/"):
+            checks.append({
+                "check": "volume_path",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Volume path will be created on enable: {host_path}",
                 "path": host_path
             })
         else:
