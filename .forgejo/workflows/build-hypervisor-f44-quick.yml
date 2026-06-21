@@ -1,58 +1,63 @@
-name: Build Hypervisor Bootc (per Fedora version)
+name: Build Hypervisor Bootc (F44 quick — amd + nvidia-negativo17)
 
-# Reusable per-version pipeline. The caller invokes this once per Fedora
-# version (via a strategy matrix), so F44's variants only need to wait on
-# F44's base build, not on every version's base. Within a single version,
-# the three variants still fan out in parallel via the matrix on `variant`.
+# Focused, manually-triggered build: F44 base, then the amd and
+# nvidia-negativo17 variants only (no F43, no rpmfusion). Meant for fast
+# iteration on the variants we actually deploy.
+#
+# Parallelism: amd and nvidia-negativo17 are two entries of the `variant`
+# matrix, both `needs: base` with NO dependency on each other and
+# `fail-fast: false`, so the pipeline imposes no ordering between them — they
+# are eligible to run at the same time. Whether they actually run concurrently
+# depends on the Forgejo runner's capacity (`--capacity` / `runner.capacity` in
+# the runner config). This workflow sets no `max-parallel`, so it never caps
+# the fan-out; if the runner allows >1 concurrent job they run together, and if
+# it doesn't the workflow still completes (they just serialize on the runner).
+
 on:
-  workflow_call:
-    inputs:
-      fedora_version:
-        type: number
-        required: true
-      stable:
-        type: string
-        required: true
-      rechunker:
-        type: string
-        required: true
-      variants:
-        type: string
-        required: false
-        default: 'all'
-      event_name:
-        type: string
-        required: true
+  workflow_dispatch:
+
+concurrency:
+  group: build-hypervisor-f44-quick-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.local
+  # Fixed target for this focused build. Exported into every run step's shell.
+  VERSION: '44'
 
 jobs:
+  setup:
+    runs-on: native
+    outputs:
+      stable: ${{ steps.r.outputs.stable }}
+      rechunker: ${{ steps.r.outputs.rechunker }}
+      tag: ${{ steps.r.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          command -v yq >/dev/null || sudo dnf install -y yq
+          # stable/rechunker still come from the single source of truth so the
+          # :latest / :negativo17 floating tags are pushed when 44 is stable.
+          # One dated tag shared by base + variants for this run.
+          {
+            echo "stable=$(yq '.stable' fedora-versions.yml)"
+            echo "rechunker=$(yq '.rechunker' fedora-versions.yml)"
+            echo "tag=$(date +%Y%m%d-%H%M)"
+          } >> "$GITHUB_OUTPUT"
+
   base:
+    needs: setup
     runs-on: native
     timeout-minutes: 120
-    env:
-      REGISTRY: registry.local
-    outputs:
-      tag: ${{ steps.params.outputs.tag }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Resolve build parameters
-        id: params
-        run: |
-          TAG=$(date +%Y%m%d-%H%M)
-          {
-            echo "tag=${TAG}"
-            echo "image_base=${REGISTRY}/hypervisor-bootc"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Render policy.json
         env:
           OWNER: ${{ github.repository_owner }}
         run: |
-          # Scope the ghcr.io rule to this repo's owner (matches the GitHub
-          # pipeline's ${OWNER}) rather than hardcoding a namespace, so forks
-          # trust their own subtree. registry.local trust comes from the template.
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
               policy-hypervisor.json.template > policy.json
           cat policy.json
@@ -64,10 +69,6 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
       - name: Inject homelab CA trust
-        # Bake the shared homelab root CA (public cert) into the image trust
-        # store so every host built from the internal images trusts all *.local
-        # Caddy services. The private key is never here. Secret unset => no-op
-        # (e.g. forks), and the public GitHub pipeline never runs this step.
         env:
           HOMELAB_ROOT_CA: ${{ secrets.HOMELAB_ROOT_CA }}
         run: |
@@ -80,8 +81,6 @@ jobs:
           fi
 
       - name: Build base hypervisor
-        env:
-          VERSION: ${{ inputs.fedora_version }}
         run: |
           sudo podman build \
             --pull=newer \
@@ -97,8 +96,7 @@ jobs:
 
       - name: Rechunk base image
         env:
-          VERSION: ${{ inputs.fedora_version }}
-          RECHUNKER: ${{ inputs.rechunker }}
+          RECHUNKER: ${{ needs.setup.outputs.rechunker }}
         run: |
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
@@ -108,26 +106,16 @@ jobs:
             "localhost/hypervisor-bootc:rechunked-${VERSION}"
 
       - name: Tag and push base
-        id: push_base
         env:
-          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          VERSION: ${{ inputs.fedora_version }}
-          TAG: ${{ steps.params.outputs.tag }}
-          STABLE: ${{ inputs.stable }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          STABLE: ${{ needs.setup.outputs.stable }}
         run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
           VERSIONED="${VERSION}-${TAG}"
           FLOATING="${VERSION}"
 
-          # Sign at push via containers/image (no cosign in CI; its *.local
-          # scheme race broke signing — docs/cosign-local-redirect-loop.md).
-          # The signature is a cosign-compatible sigstore attachment, verified
-          # by both `sigstoreSigned` policy and `cosign verify`. Key and
-          # passphrase are host-key-sealed systemd credentials decrypted into
-          # the runner service's tmpfs (sealed once by the seal-signing-key
-          # workflow — docs/ci-image-signing.md); no Forgejo secrets involved.
-          # Missing credentials → push unsigned with a warning. The floating
-          # tags are skopeo-copied from the signed digest in the same repo,
-          # so the digest-addressed signature already covers them.
+          # Sign at push — see docs/ci-image-signing.md. Key from the runner's
+          # systemd credentials; unsigned + warning if not sealed.
           CREDS=/run/credentials/forgejo-runner.service
           SIGN_ARGS=()
           if sudo test -s "${CREDS}/cosign-key"; then
@@ -148,15 +136,12 @@ jobs:
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
           fi
 
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-
       - name: Summary
         env:
-          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          VERSION: ${{ inputs.fedora_version }}
-          TAG: ${{ steps.params.outputs.tag }}
-          STABLE: ${{ inputs.stable }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          STABLE: ${{ needs.setup.outputs.stable }}
         run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
           {
             echo "## Base hypervisor build complete (F${VERSION})"
             echo ""
@@ -168,37 +153,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup local tags
-        # Untag only what this job created. Safe under concurrent jobs
-        # because every tag is scoped by VERSION + this job's TAG.
-        # The floating registry.local/hypervisor-bootc:${VERSION} stays —
-        # variant jobs pull it as their FROM base.
         if: always()
         env:
-          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
-          VERSION: ${{ inputs.fedora_version }}
-          TAG: ${{ steps.params.outputs.tag }}
+          TAG: ${{ needs.setup.outputs.tag }}
         run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
           sudo podman untag "localhost/hypervisor-bootc:build-${VERSION}" 2>/dev/null || true
           sudo podman untag "localhost/hypervisor-bootc:rechunked-${VERSION}" 2>/dev/null || true
           sudo podman untag "${IMAGE_BASE}:${VERSION}-${TAG}" 2>/dev/null || true
-          # Reclaim the layers we just untagged (and any other dangling ones)
-          # on this long-lived native runner. Dangling-only: never removes a
-          # tagged image, so the floating :${VERSION}/:latest base stays cached
-          # for the variant FROM, and the Containerfile's type=cache build cache
-          # is preserved. df framing makes disk use visible in the log.
           df -h /
           sudo podman image prune -f || true
           df -h /
 
   variant:
-    needs: base
+    needs: [setup, base]
     runs-on: native
     timeout-minutes: 120
-    env:
-      REGISTRY: registry.local
 
     strategy:
       fail-fast: false
+      # No max-parallel: both variants may run at once if the runner has the
+      # capacity. They share only `needs: base`, never each other.
       matrix:
         variant:
           - name: amd
@@ -211,57 +186,21 @@ jobs:
             containerfile: hypervisor-nvidia-negativo17.Containerfile
             prefix: 'negativo17-'
             floating: 'negativo17'
-          - name: nvidia-rpmfusion
-            image: hypervisor-nvidia
-            containerfile: hypervisor-nvidia-rpmfusion.Containerfile
-            prefix: 'rpmfusion-'
-            floating: 'rpmfusion'
 
     steps:
-      - name: Decide whether to build this variant
-        id: gate
-        env:
-          SELECTION: ${{ inputs.variants }}
-          EVENT: ${{ inputs.event_name }}
-          NAME: ${{ matrix.variant.name }}
-        run: |
-          # workflow_run and schedule always build all variants.
-          # workflow_dispatch respects the user's selection.
-          if [ "$EVENT" != "workflow_dispatch" ] || [ "$SELECTION" = "all" ]; then
-            BUILD=true
-          elif [ "$SELECTION" = "none" ]; then
-            BUILD=false
-          elif [ "$SELECTION" = "nvidia" ] && [[ "$NAME" == nvidia-* ]]; then
-            BUILD=true
-          elif [ "$SELECTION" = "$NAME" ]; then
-            BUILD=true
-          else
-            BUILD=false
-          fi
-          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
-
       - name: Checkout repository
-        if: steps.gate.outputs.build == 'true'
         uses: actions/checkout@v4
 
-      # No "Render policy.json" here: variant images inherit
-      # /etc/containers/policy.json from the base layer and never COPY it
-      # (the variant Containerfiles don't reference policy.json), so rendering
-      # it in this job was dead work.
-
       - name: Fetch cosy
-        if: steps.gate.outputs.build == 'true'
         run: |
           mkdir -p bin man
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
 
       - name: Build variant
-        if: steps.gate.outputs.build == 'true'
         env:
           IMAGE: ${{ matrix.variant.image }}
           CONTAINERFILE: ${{ matrix.variant.containerfile }}
-          VERSION: ${{ inputs.fedora_version }}
         run: |
           sudo podman build \
             --pull=newer \
@@ -275,11 +214,9 @@ jobs:
             .
 
       - name: Rechunk variant
-        if: steps.gate.outputs.build == 'true'
         env:
           IMAGE: ${{ matrix.variant.image }}
-          VERSION: ${{ inputs.fedora_version }}
-          RECHUNKER: ${{ inputs.rechunker }}
+          RECHUNKER: ${{ needs.setup.outputs.rechunker }}
         run: |
           sudo podman run --rm --privileged \
             -v /var/lib/containers:/var/lib/containers \
@@ -289,25 +226,18 @@ jobs:
             "localhost/${IMAGE}:rechunked-${VERSION}"
 
       - name: Tag and push variant
-        if: steps.gate.outputs.build == 'true'
         id: push
         env:
-          BASE_TAG: ${{ needs.base.outputs.tag }}
+          BASE_TAG: ${{ needs.setup.outputs.tag }}
           IMAGE: ${{ matrix.variant.image }}
           PREFIX: ${{ matrix.variant.prefix }}
           FLOATING: ${{ matrix.variant.floating }}
-          VERSION: ${{ inputs.fedora_version }}
-          STABLE: ${{ inputs.stable }}
+          STABLE: ${{ needs.setup.outputs.stable }}
         run: |
           IMAGE_BASE="${REGISTRY}/${IMAGE}"
           VERSIONED="${PREFIX}${VERSION}-${BASE_TAG}"
           FLOATING_TAG="${PREFIX}${VERSION}"
 
-          # Sign at push — same setup as the base job above: cosign-compatible
-          # sigstore signature via containers/image, key from the runner's
-          # systemd credentials, unsigned + warning if not sealed. Floating
-          # tags are digest copies in the same repo, already covered by the
-          # digest-addressed signature. See docs/ci-image-signing.md.
           CREDS=/run/credentials/forgejo-runner.service
           SIGN_ARGS=()
           if sudo test -s "${CREDS}/cosign-key"; then
@@ -334,14 +264,11 @@ jobs:
             echo "image_base=${IMAGE_BASE}"
             echo "versioned_tag=${VERSIONED}"
             echo "floating_tag=${FLOATING_TAG}"
-            echo "digest=${DIGEST}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
-        if: steps.gate.outputs.build == 'true'
         env:
           NAME: ${{ matrix.variant.name }}
-          VERSION: ${{ inputs.fedora_version }}
           IMAGE_BASE: ${{ steps.push.outputs.image_base }}
           VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
           FLOATING_TAG: ${{ steps.push.outputs.floating_tag }}
@@ -354,13 +281,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup local tags
-        # Untag only what this matrix entry created. Variant images aren't
-        # consumed by anything downstream locally, so we drop the versioned
-        # registry tag too — zot keeps the source of truth.
-        if: always() && steps.gate.outputs.build == 'true'
+        if: always()
         env:
           IMAGE: ${{ matrix.variant.image }}
-          VERSION: ${{ inputs.fedora_version }}
           IMAGE_BASE: ${{ steps.push.outputs.image_base }}
           VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
         run: |
@@ -369,10 +292,6 @@ jobs:
           if [ -n "${VERSIONED_TAG:-}" ]; then
             sudo podman untag "${IMAGE_BASE}:${VERSIONED_TAG}" 2>/dev/null || true
           fi
-          # Reclaim the layers we just untagged (and any other dangling ones)
-          # on this long-lived native runner. Dangling-only: never removes a
-          # tagged image, so the floating base tags stay cached and the
-          # Containerfile's type=cache build cache is preserved.
           df -h /
           sudo podman image prune -f || true
           df -h /
