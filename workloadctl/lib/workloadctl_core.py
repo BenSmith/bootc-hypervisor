@@ -489,10 +489,24 @@ class WorkloadConfig:
         """Like resolve_control_file but also returns the winning source:
         "etc" (operator override) or "usr" (shipped default) — the merged-view
         truth `info --files` reports.
+
+        This is the single chokepoint every control-file lookup goes through,
+        and a resolved relative path is read *and executed as root* (build
+        Containerfile/`[build].script`, `[host].setup`, `policy.cil`). So any
+        `..` traversal is rejected here — not just for `bundle` (validated in
+        `bundle_dir`), but for the relpath too, so a `[build] containerfile =
+        "../../etc/x"` or `script`/`setup` can't redirect resolution outside the
+        bundle/override trees. An absolute path is taken verbatim (the documented
+        escape hatch for a fully-qualified setup/script path).
         """
         p = Path(relpath)
         if p.is_absolute():
             return p, "usr"
+        if ".." in p.parts:
+            raise ValueError(
+                f"control-file path {relpath!r} must be relative with no '..' "
+                f"components (it resolves under the bundle/override tree)"
+            )
         override = self.override_dir / relpath
         if override.exists():
             return override, "etc"

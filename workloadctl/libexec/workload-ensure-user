@@ -697,6 +697,15 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
     vm_cfg = config.get("vm", {})
     guest_user = vm_cfg.get("user", "workload")
+    # guest_user is interpolated unquoted into the built-in #cloud-config
+    # (`- name: {guest_user}`, just above a NOPASSWD sudo grant). Validate it as
+    # a POSIX username so a value with a newline can't inject arbitrary
+    # cloud-config. Fail closed — a bad name aborts VM provisioning.
+    if not re.match(r'^[a-z_][a-z0-9_-]*$', guest_user) or len(guest_user) > 32:
+        raise RuntimeError(
+            f"[vm].user {guest_user!r} is not a valid POSIX username "
+            f"(^[a-z_][a-z0-9_-]*$, max 32 chars)"
+        )
     ci_cfg = vm_cfg.get("cloud_init", {})
 
     pubkey = _read_ssh_pubkey(pw)

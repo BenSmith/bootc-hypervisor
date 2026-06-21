@@ -14,6 +14,7 @@ import tomllib
 
 from workload_lib import (
     auto_detect_credentials,
+    validate_workload_name,
     WORKLOADS_BASE,
     workload_data_dir,
     workload_service_name,
@@ -167,6 +168,20 @@ def cmd_restore(args, manager: WorkloadManager):
         name = config_data.get("workload", {}).get("name", "")
         if not name:
             print("Error: workload.toml has no workload name", file=sys.stderr)
+            sys.exit(1)
+
+        # The name comes from a portable archive that may have been authored on
+        # another host — the one restore input that crosses a trust boundary. It
+        # flows straight into root-owned destination paths (dest_config/dest_data
+        # below, plus copy2/rmtree/copytree as root), so a crafted name like
+        # "../../etc/cron.d/x" would write/delete outside the workloads tree.
+        # WorkloadConfig enforces this on the backup side; restore reads raw
+        # tomllib, so validate here before any path is built.
+        try:
+            validate_workload_name(name)
+        except ValueError as e:
+            print(f"Error: archive has an invalid workload name {name!r}: {e}",
+                  file=sys.stderr)
             sys.exit(1)
 
         print(f"Restoring workload: {name}")

@@ -429,7 +429,17 @@ def _collect_control_files(config) -> list[dict]:
 
     files = []
     for name in sorted(names):
-        path, source = config.resolve_control_file_with_source(name)
+        try:
+            path, source = config.resolve_control_file_with_source(name)
+        except ValueError as e:
+            # A traversal-laden [host].setup name can't be resolved to a path;
+            # surface it as an invalid entry rather than crashing this read-only
+            # merged view (the chokepoint fails closed on the build/enable path).
+            files.append({
+                "file": name, "source": "invalid", "path": f"({e})",
+                "exists": False,
+            })
+            continue
         files.append({
             "file": name,
             "source": source,

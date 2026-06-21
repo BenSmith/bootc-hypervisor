@@ -151,6 +151,27 @@ class TestControlFileResolution(unittest.TestCase):
         cfg = self._config("solo")
         self.assertEqual(cfg.resolve_control_file("build.sh"), cfg.bundle_dir / "build.sh")
 
+    def test_traversal_relpath_rejected(self):
+        # A control-file relpath becomes a path that's read+executed as root
+        # (Containerfile, [build].script, [host].setup). The single chokepoint
+        # must reject '..' so a `[build] containerfile = "../../etc/x"` (or a
+        # traversal-laden [host].setup) can't redirect resolution out of the
+        # bundle/override trees — the relpath analogue of the bundle_dir guard.
+        cfg = self._config("solo")
+        for bad in ("../escape", "sub/../../escape", "../../etc/passwd"):
+            with self.assertRaises(ValueError):
+                cfg.resolve_control_file(bad)
+            with self.assertRaises(ValueError):
+                cfg.resolve_control_file_with_source(bad)
+
+    def test_absolute_path_still_allowed_after_traversal_guard(self):
+        # The guard rejects '..' but must not break the documented absolute-path
+        # escape hatch (a fully-qualified setup/script path).
+        cfg = self._config("solo")
+        path, source = cfg.resolve_control_file_with_source("/opt/x/setup.sh")
+        self.assertEqual(path, Path("/opt/x/setup.sh"))
+        self.assertEqual(source, "usr")
+
 
 if __name__ == "__main__":
     unittest.main()

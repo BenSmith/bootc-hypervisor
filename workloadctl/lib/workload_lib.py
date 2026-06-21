@@ -755,6 +755,21 @@ OPTIONAL_SECRET_PATTERN = re.compile(r'\$\{SECRET\?([a-zA-Z0-9_-]+)}')
 # by the plain template-var pass; the resolver below handles both.
 _TEMPLATE_VAR_PATTERN = re.compile(r'(?<!\$)\$\{([a-zA-Z_][a-zA-Z0-9_]*)}')
 
+# Single combined pattern for substitute_template. Folding the three forms into
+# one left-to-right pass (rather than three sequential .sub() calls) is a
+# security property, not just an optimization: re.sub never re-scans the text it
+# inserts, so a resolved value — e.g. a decrypted secret whose plaintext happens
+# to contain "${PATH}" or "${SECRET:other}" — is emitted verbatim instead of
+# being re-expanded by a later pass (which would leak host env/other secrets
+# into the rendered guest user-data). The SECRET? / SECRET: alternatives precede
+# VAR so a secret ref is never captured as a plain var; VAR keeps its (?<!\$)
+# lookbehind so `$${VAR}` still escapes to a literal after the $$ collapse.
+_SUBSTITUTION_PATTERN = re.compile(
+    r'\$\{SECRET\?(?P<optsecret>[a-zA-Z0-9_-]+)}'
+    r'|\$\{SECRET:(?P<secret>[a-zA-Z0-9_-]+)}'
+    r'|(?<!\$)\$\{(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}'
+)
+
 
 def substitute_template(
     text: str,
@@ -784,32 +799,31 @@ def substitute_template(
     template_vars = template_vars or {}
     env = env or {}
 
-    def _var(match):
-        name = match.group(1)
+    def _resolve(match):
+        opt = match.group("optsecret")
+        if opt is not None:
+            if secret_resolver is None:
+                return ""
+            try:
+                return secret_resolver(opt)
+            except (FileNotFoundError, KeyError):
+                return ""
+        secret = match.group("secret")
+        if secret is not None:
+            if secret_resolver is None:
+                raise KeyError(f"${{SECRET:{secret}}} present but no resolver provided")
+            return secret_resolver(secret)
+        name = match.group("var")
         if name in template_vars:
             return str(template_vars[name])
         if name in env:
             return env[name]
         raise KeyError(f"unresolved ${{{name}}} in cloud-init template")
 
-    def _secret(match):
-        name = match.group(1)
-        if secret_resolver is None:
-            raise KeyError(f"${{SECRET:{name}}} present but no resolver provided")
-        return secret_resolver(name)
-
-    def _optional_secret(match):
-        name = match.group(1)
-        if secret_resolver is None:
-            return ""
-        try:
-            return secret_resolver(name)
-        except (FileNotFoundError, KeyError):
-            return ""
-
-    out = OPTIONAL_SECRET_PATTERN.sub(_optional_secret, text)
-    out = SECRET_PATTERN.sub(_secret, out)
-    out = _TEMPLATE_VAR_PATTERN.sub(_var, out)
+    # One left-to-right pass: replacements are not re-scanned, so a resolved
+    # secret/var value can't be re-expanded by a "later" pass (see the pattern's
+    # comment). The $$→$ collapse stays a final step so `$${VAR}` escapes.
+    out = _SUBSTITUTION_PATTERN.sub(_resolve, text)
     return out.replace("$$", "$")
 
 
