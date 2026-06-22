@@ -139,6 +139,24 @@ class TestDuplicate(CatalogTestBase):
             cmd_catalog.cmd_duplicate(_ns(source="squid", new="squid-b"), self.manager)
         self.assertIn("host port", buf.getvalue())
 
+    def test_duplicate_multi_container_no_crash_and_lints_image(self):
+        # Regression: a pod/bridge workload has no top-level [container], so the
+        # image-sharing lint's `cfg.image` lookup KeyError'd ('container') and
+        # crashed duplicate *after* writing the copy. webproxy-demo is bridge
+        # mode (two [[containers]]); duplicating it must not crash, and since the
+        # copy shares both images with its source the lint should still fire.
+        cmd_catalog.cmd_init(_ns(bundle="webproxy-demo", as_name=None), self.manager)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_catalog.cmd_duplicate(
+                _ns(source="webproxy-demo", new="webproxy-b"), self.manager)
+        out = buf.getvalue()
+        # The copy was written …
+        self.assertTrue((self.tmp / "webproxy-b.toml").exists())
+        # … and the multi-container image lint named the source as a co-user.
+        self.assertIn("image", out.lower())
+        self.assertIn("webproxy-demo", out)
+
     def test_duplicate_lints_shared_secrets(self):
         # A verbatim copy still references the same name-keyed credential as its
         # source; the lint should surface it (rotate-one-without-the-other).

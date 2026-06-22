@@ -53,6 +53,19 @@ def _write_new(path: Path, text: str) -> bool:
 _SECRET_REF_RE = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
 
 
+def _config_images(cfg: WorkloadConfig) -> set[str]:
+    """Container images a workload references, shape-safe across single/pod/
+    bridge. VMs have no container image, so return empty. Used by the duplicate
+    lint to spot a mutable tag shared with another workload without assuming a
+    top-level [container] (which pod/bridge workloads don't have)."""
+    if cfg.is_vm:
+        return set()
+    try:
+        return {img for _, img in cfg.container_images()}
+    except Exception:
+        return set()
+
+
 def _referenced_secrets(cfg: WorkloadConfig) -> list[str]:
     """Secret names a config pulls in — via [secrets].files credentials and
     ${SECRET:name} refs in any container's environment (single/pod/bridge)."""
@@ -271,17 +284,15 @@ def _lint_duplicate(name: str, manager: WorkloadManager) -> None:
                 f"share it silently (no bind error); point the copy elsewhere")
 
     # Shared mutable image tag across enabled workloads (a legitimate choice for
-    # :latest, but worth surfacing).
-    image = getattr(cfg, "image", None)
-    if image and not cfg.is_vm:
-        sharers = [
-            c.name for c in manager.get_all_configs()
-            if c.name != name and not c.is_vm
-            and getattr(c, "image", None) == image
-        ]
+    # :latest, but worth surfacing). Shape-safe: a pod/bridge workload has no
+    # top-level [container] — `cfg.image` would KeyError — so enumerate every
+    # container's image via container_images() for both this copy and each peer.
+    others = [c for c in manager.get_all_configs() if c.name != name]
+    for img in sorted(_config_images(cfg)):
+        sharers = [c.name for c in others if img in _config_images(c)]
         if sharers:
             warnings.append(
-                f"image '{image}' is also used by {', '.join(sharers)} — they "
+                f"image '{img}' is also used by {', '.join(sharers)} — they "
                 f"share a mutable tag (fine for :latest, intentional otherwise)")
 
     # Secrets are name-keyed in a global credstore, so a verbatim copy decrypts
