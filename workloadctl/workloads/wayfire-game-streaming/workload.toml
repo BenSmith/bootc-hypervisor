@@ -52,6 +52,11 @@ selinux_policy = true
 [storage]
 volumes = [
     "./home:/home/desktop",
+    # Homelab-CA-signed TLS cert for the web UI (https://<host>:47990), minted
+    # host-side by setup.sh as root-owned 0644 (world-readable, like the rest of
+    # the workload dir under keep-id). Absent (no Homelab CA on the host) →
+    # Sunshine self-signs.
+    "./tls:/etc/sunshine/tls:ro",
     "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
     "/run/udev:/run/udev:ro",
     "/dev/input:/dev/input",

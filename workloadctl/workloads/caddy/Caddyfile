@@ -23,22 +23,23 @@
     # Drop this block if you want to serve plain HTTP only.
     local_certs
 
-    # Shared homelab CA (see README "Shared homelab CA"). Makes this host's
-    # internal `local` CA use the shared homelab root, so clients trust ONE root
-    # for every host's *.local services instead of a different self-signed root
-    # per host. Caddy still mints its own per-host intermediate. The public root
-    # cert comes from the image trust store (CI-injected); the private key is a
-    # per-host 0400 file. Remove this block + the two [storage] mounts in
-    # caddy.toml to fall back to a per-host self-signed CA.
-    pki {
-        ca local {
-            name "Homelab"
-            root {
-                cert /etc/caddy/homelab-root.crt
-                key  /etc/caddy/homelab-root.key
-            }
-        }
-    }
+    # Shared homelab CA (see README "Shared homelab CA"). The PKI snippet below
+    # is generated host-side by setup.sh based on whether this host has the
+    # shared CA private key:
+    #   key present -> snippet roots Caddy's internal `local` CA at the shared
+    #                  homelab root, so clients trust ONE root for every host's
+    #                  *.local services (Caddy still mints its own per-host
+    #                  intermediate). The public root comes from the image trust
+    #                  store (CI-injected); the private key is a per-host 0400 file.
+    #   key absent  -> the snippet is comment-only, so this import is a no-op and
+    #                  `local_certs` falls back to Caddy's own auto-generated
+    #                  internal CA. Sites still serve HTTPS (untrusted until you
+    #                  set up the shared CA) instead of Caddy crash-looping on a
+    #                  missing key file.
+    # The glob never errors when the dir is empty; setup.sh also always writes a
+    # snippet, so this resolves regardless. Drop this import (and the [storage]
+    # mounts in caddy.toml) to hard-wire a per-host self-signed CA.
+    import /etc/caddy/pki/*.caddyfile
 }
 
 zot.local, registry.local {

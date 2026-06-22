@@ -790,6 +790,15 @@ for ip in $(hostname -I 2>/dev/null); do
 done
 ORIGINS="${ORIGINS},https://localhost:47990,https://$(hostname):47990"
 echo "csrf_allowed_origins=${ORIGINS}" >> "$CONF"
+
+# Serve a Homelab-CA-signed cert when the host minted one (setup.sh mounts it
+# read-only at /etc/sunshine/tls), so the web UI is browser-trusted with no
+# warning. Absent → Sunshine generates its own self-signed cert as before.
+sed -i '/^cert=/d;/^pkey=/d' "$CONF" 2>/dev/null || true
+if [ -f /etc/sunshine/tls/cert.pem ] && [ -f /etc/sunshine/tls/pkey.pem ]; then
+    echo "cert=/etc/sunshine/tls/cert.pem" >> "$CONF"
+    echo "pkey=/etc/sunshine/tls/pkey.pem" >> "$CONF"
+fi
 SCRIPT
 
 RUN cat > /usr/lib/systemd/system/sunshine.service <<'UNIT'

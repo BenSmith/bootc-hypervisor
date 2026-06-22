@@ -261,7 +261,19 @@ trust a different root per host — and they are all confusingly named
 `SEC_ERROR_BAD_SIGNATURE` rather than a clear "untrusted" error. To trust ONE
 root for every host's `*.local` services, point every Caddy at a shared homelab
 root via the `pki` block (already wired into the sample `Caddyfile` and
-`caddy.toml`):
+`caddy.toml`).
+
+The shared-root `pki` block is **generated host-side** by `setup.sh` (the
+`[host] setup` hook) into `/etc/caddy/pki/homelab-ca.caddyfile`, which the
+Caddyfile imports. It keys off whether the private root key is present:
+
+- **Key present** → the snippet roots Caddy's `local` CA at the shared homelab
+  root (below).
+- **Key absent** → the snippet is comment-only, so Caddy falls back to its own
+  auto-generated internal CA. Caddy **still starts and serves HTTPS** (clients
+  just won't trust it until you set up the shared CA) — it does *not* crash-loop
+  on a missing key. Place the key later and re-run enable (see "Per host") to
+  switch over.
 
 - **Public root cert** — provided by the image trust store. The Forgejo build
   injects it from the `HOMELAB_ROOT_CA` secret into
@@ -271,9 +283,9 @@ root via the `pki` block (already wired into the sample `Caddyfile` and
   can read — mounting the trust anchor directly fails (`cert_t` is SELinux-denied
   to `container_t`, surfacing as `open …homelab-root.crt: permission denied`).
 - **Private root key** — a per-host `0400` file at
-  `/var/lib/workloads/caddy/homelab-root.key`, owned by the workload user. Never
-  shipped in the image or committed. caddy runs as that user under `keep-id`, so
-  it can read it (no `userns=host` needed).
+  `/var/lib/workloads/caddy/data/homelab-root.key`, owned by the workload user.
+  Never shipped in the image or committed. caddy runs as that user under
+  `keep-id`, so it can read it (no `userns=host` needed).
 
 Each Caddy still mints its own intermediate signed by the shared root, so leaf
 certs rotate normally; only the root is shared.
@@ -290,9 +302,15 @@ and back up `homelab-root.key` offline — it is the homelab CA key.
 ### Per host
 ```
 sudo install -m 0400 -o _wl-caddy -g _wl-caddy homelab-root.key \
-    /var/lib/workloads/caddy/homelab-root.key
-sudo workloadctl recreate caddy
+    /var/lib/workloads/caddy/data/homelab-root.key
+# Re-run enable (not recreate) so the [host] setup hook regenerates the PKI
+# snippet now that the key is present. recreate does NOT re-run host setup.
+sudo workloadctl disable caddy && sudo workloadctl enable caddy
 ```
+If you enabled caddy *before* placing the key, the bind-mount source may be an
+empty placeholder file — `install` overwrites it fine. (An older build could
+have left a *directory* there; `sudo rm -rf
+/var/lib/workloads/caddy/data/homelab-root.key` first if so.)
 
 ### Switching an existing self-signed Caddy to the shared root
 Caddy reuses an existing on-disk `local` CA in preference to the configured
@@ -300,8 +318,11 @@ root, so clear the stale authority + cached leaf certs first or it keeps serving
 the old root:
 ```
 sudo systemctl stop workload-caddy.service
-sudo rm -rf /var/lib/workloads/caddy/data/caddy/pki/authorities/local \
-            /var/lib/workloads/caddy/data/caddy/certificates
+# Caddy's data dir is /var/lib/caddy/caddy (XDG_DATA_HOME=/var/lib/caddy + its
+# own caddy/ subdir), so the authority lives under data/caddy/caddy/ — note the
+# doubled caddy/.
+sudo rm -rf /var/lib/workloads/caddy/data/caddy/caddy/pki/authorities/local \
+            /var/lib/workloads/caddy/data/caddy/caddy/certificates
 sudo systemctl start workload-caddy.service
 # served chain should now be issued by "Homelab - ECC Intermediate":
 echo | openssl s_client -connect zot.local:443 -servername zot.local 2>/dev/null | grep ^issuer=
