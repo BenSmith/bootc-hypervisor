@@ -613,7 +613,13 @@ def cmd_diagnose(args, manager: WorkloadManager):
 
     # Check 6: Image(s) exist locally
     if user_exists:
-        if config.is_multi:
+        if config.is_vm:
+            # VM workloads have no container image to inventory — the disk is
+            # provisioned by the substrate, not pulled. `config.image` is the
+            # sentinel "(vm)" and get_image_id() would pointlessly shell out to
+            # `podman image inspect "(vm)"`, so skip the container-image check.
+            pass
+        elif config.is_multi:
             for cname, img in config.container_images():
                 iid = manager.podman(config).image_id(img)
                 if iid:
