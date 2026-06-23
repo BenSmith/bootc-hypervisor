@@ -7,6 +7,7 @@ shipped bundles under ../workloads/, writing instances into a tmp /etc dir.
 
 import argparse
 import io
+import json
 import sys
 import tomllib
 import unittest
@@ -170,6 +171,36 @@ class TestDuplicate(CatalogTestBase):
         out = buf.getvalue()
         self.assertIn("secret", out.lower())
         self.assertIn("api-key", out)
+
+
+class CatalogListTest(CatalogTestBase):
+    """The `catalog` lister itself (cmd_catalog) — text + json + empty."""
+
+    def test_text_lists_real_bundles_with_kind(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_catalog.cmd_catalog(_ns(json=False), self.manager)
+        out = buf.getvalue()
+        self.assertIn("Available bundles", out)
+        self.assertIn("alloy", out)
+        self.assertIn("container", out)              # alloy's kind
+        self.assertIn("virtual-forgejo", out)
+        self.assertIn("vm", out)                     # the forge bundle's kind
+
+    def test_json_emits_bundle_kind_records(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_catalog.cmd_catalog(_ns(json=True), self.manager)
+        by_name = {r["bundle"]: r["kind"] for r in json.loads(buf.getvalue())}
+        self.assertEqual(by_name.get("alloy"), "container")
+        self.assertEqual(by_name.get("virtual-forgejo"), "vm")
+
+    def test_empty_dir_reports_none(self):
+        with mock.patch.object(cmd_catalog, "BUNDLES_DIR", self.tmp / "empty"):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_catalog.cmd_catalog(_ns(json=False), self.manager)
+            self.assertIn("No bundles found", buf.getvalue())
 
 
 if __name__ == "__main__":
