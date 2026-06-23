@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -943,8 +944,11 @@ def _edit_control_file(args, manager: WorkloadManager):
             print(f"  No shipped default — created a new control file: {override}")
         seeded = True
 
-    editor = os.environ.get("EDITOR", "nano")
-    result = subprocess.run([editor, str(override)])
+    # Split $EDITOR so a value carrying flags (e.g. "code --wait", "emacs -nw")
+    # is honored instead of being treated as one impossible argv[0]. Fall back
+    # to nano if the var is set but empty/whitespace.
+    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    result = subprocess.run([*editor_argv, str(override)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
         # Don't leave a half-seeded override behind on editor failure.

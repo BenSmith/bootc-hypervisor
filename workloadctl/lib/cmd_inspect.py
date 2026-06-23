@@ -409,8 +409,9 @@ def _collect_control_files(config) -> list[dict]:
     (`/etc/workloads.d/<name>/`) with those in the shipped bundle tree
     (`/usr/.../workloads/<bundle>/`), plus any relative `[host].setup` the TOML
     names (surfaced even when missing, so a declared-but-absent dependency
-    shows). For each, resolves the winning source — "etc" (override) or "usr"
-    (shipped default) — and whether the resolved file exists. `workload.toml` is
+    shows). For each, resolves the winning source — "etc" (override), "usr"
+    (shipped default), or "abs" (a verbatim absolute path) — and whether the
+    resolved file exists. `workload.toml` is
     excluded: the authoritative declaration is `/etc/<name>.toml`, never an
     override target.
     """
@@ -475,12 +476,16 @@ def _print_control_files(config, json_mode=False):
     for f in files:
         if f["source"] == "etc":
             src = "override"
+        elif f["source"] == "abs":
+            src = "absolute"
+        elif f["source"] == "invalid":
+            src = "invalid"
         else:
             src = "shipped" if f["exists"] else "missing"
         print(f"  {f['file']:<{fw}}  {src:<9}  {f['path']}")
     print()
     print("  override = /etc copy wins · shipped = /usr default · "
-          "missing = declared but absent")
+          "absolute = verbatim path · missing = declared but absent")
     print(f"  Edit a control file:  sudo workloadctl edit {config.name} <file>")
 
 

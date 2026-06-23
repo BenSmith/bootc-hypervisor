@@ -685,7 +685,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
       magic ${WORKLOADCTL_SSH_KEY} / ${WORKLOADCTL_WORKLOAD_NAME} that we
       inject. No YAML parsing — the user owns the file's structure.
     """
-    home_path = Path(pw.pw_dir)
+    # Anchor the persistent fingerprint/instance-id files on the canonical
+    # state/ dir, not pw.pw_dir: the generator forces HOME=<state> and
+    # setup_home_directory creates state/ there regardless of what passwd
+    # records, so a stale passwd home would otherwise strand these files in the
+    # wrong tree (see warn_if_stale_home).
+    home_path = workload_state_dir(name)
     # The ISO lives on tmpfs (the VM runtime dir), never the persistent home —
     # it can embed decrypted secrets. setup_vm_socket_dir() created this dir
     # earlier in the same invocation; recreate it defensively in case this is

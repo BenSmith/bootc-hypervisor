@@ -139,6 +139,31 @@ def cmd_backup(args, manager: WorkloadManager):
         sys.exit(1)
 
 
+def _assert_no_escaping_symlinks(root: Path) -> None:
+    """Reject any symlink under `root` whose target resolves outside `root`.
+
+    Restore lays the archive's data/ tree down verbatim (copytree symlinks=True)
+    and the archive may have been authored on another, untrusted host. A member
+    symlink like `data/x -> /etc` or `data/x -> ../../etc` would otherwise be
+    restored pointing out of the workload's own tree (and a later write through
+    it could land on host paths). Self-contained relative symlinks that stay
+    within the tree are allowed. We enforce this here rather than leaning on
+    tar's version-dependent traversal heuristics.
+    """
+    root_resolved = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for entry in dirnames + filenames:
+            p = Path(dirpath) / entry
+            if not p.is_symlink():
+                continue
+            target = (p.parent / os.readlink(p)).resolve()
+            if target != root_resolved and not target.is_relative_to(root_resolved):
+                raise ValueError(
+                    f"archive symlink escapes the data tree: "
+                    f"{p.relative_to(root)} -> {os.readlink(p)}"
+                )
+
+
 def cmd_restore(args, manager: WorkloadManager):
     """Restore a workload from a backup archive"""
     require_root()
@@ -223,6 +248,13 @@ def cmd_restore(args, manager: WorkloadManager):
         #    reconstructible state/ is rebuilt by `update`, not restored).
         data_staging = staging / "data"
         if data_staging.is_dir():
+            # Guard against an escaping symlink in an untrusted archive before
+            # copying the tree down verbatim.
+            try:
+                _assert_no_escaping_symlinks(data_staging)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
             if dest_data.exists():
                 if args.force:
                     shutil.rmtree(dest_data)

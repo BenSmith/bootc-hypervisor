@@ -503,8 +503,8 @@ class WorkloadConfig:
 
     def resolve_control_file_with_source(self, relpath: str) -> tuple[Path, str]:
         """Like resolve_control_file but also returns the winning source:
-        "etc" (operator override) or "usr" (shipped default) — the merged-view
-        truth `info --files` reports.
+        "etc" (operator override), "usr" (shipped default), or "abs" (a verbatim
+        absolute path) — the merged-view truth `info --files` reports.
 
         This is the single chokepoint every control-file lookup goes through,
         and a resolved relative path is read *and executed as root* (build
@@ -513,11 +513,12 @@ class WorkloadConfig:
         `bundle_dir`), but for the relpath too, so a `[build] containerfile =
         "../../etc/x"` or `script`/`setup` can't redirect resolution outside the
         bundle/override trees. An absolute path is taken verbatim (the documented
-        escape hatch for a fully-qualified setup/script path).
+        escape hatch for a fully-qualified setup/script path) and reported as
+        "abs" — neither an override nor a shipped default.
         """
         p = Path(relpath)
         if p.is_absolute():
-            return p, "usr"
+            return p, "abs"
         if ".." in p.parts:
             raise ValueError(
                 f"control-file path {relpath!r} must be relative with no '..' "

@@ -220,6 +220,17 @@ def cmd_duplicate(args, manager: WorkloadManager):
     src_name = args.source
     new_name = args.new
 
+    # Validate BOTH names before either becomes a path. src_name flows into
+    # `WORKLOAD_DIR / f"{src_name}.toml"` and is read_text()'d as root (directly
+    # and in the tomllib fallback below), so a `../`-laden source would read an
+    # arbitrary .toml from outside the workloads dir — hold it to the same bar
+    # as new_name even though it's only ever read.
+    try:
+        validate_workload_name(src_name)
+    except ValueError as e:
+        print(f"Error: invalid source workload name {src_name!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
     try:
         validate_workload_name(new_name)
     except ValueError as e:

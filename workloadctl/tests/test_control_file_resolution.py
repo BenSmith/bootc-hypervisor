@@ -135,7 +135,10 @@ class TestControlFileResolution(unittest.TestCase):
         cfg = self._config("solo")
         path, source = cfg.resolve_control_file_with_source("/opt/custom/setup.sh")
         self.assertEqual(path, Path("/opt/custom/setup.sh"))
-        self.assertEqual(source, "usr")
+        # An absolute path is neither an override nor a shipped default; it
+        # reports as "abs" (a verbatim path) so `info --files` doesn't claim it
+        # came from the /usr bundle tree.
+        self.assertEqual(source, "abs")
 
     def test_missing_file_returns_usr_path_unchecked(self):
         # The /usr leg does not require the file to exist (callers .exists()-check
@@ -170,7 +173,7 @@ class TestControlFileResolution(unittest.TestCase):
         cfg = self._config("solo")
         path, source = cfg.resolve_control_file_with_source("/opt/x/setup.sh")
         self.assertEqual(path, Path("/opt/x/setup.sh"))
-        self.assertEqual(source, "usr")
+        self.assertEqual(source, "abs")
 
 
 if __name__ == "__main__":
