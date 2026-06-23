@@ -629,6 +629,27 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
     return False
 
 
+def _resolve_cloud_init_instance_id(name: str, instance_id_file: Path,
+                                    fp_unchanged: bool) -> tuple[str, bool]:
+    """Decide the cloud-init instance-id for a (re)built seed ISO.
+
+    Reuse the persisted id when the user-data fingerprint is unchanged — that
+    means we are rebuilding only because the tmpfs ISO was wiped (a host
+    reboot clearing /run), so the guest should see the SAME instance and skip
+    re-running its per-instance modules. Mint a fresh id when the content
+    actually changed (a real edit that warrants re-provisioning) or when no id
+    has been persisted yet (first provision).
+
+    Returns ``(instance_id, minted)`` — ``minted`` is True when a new id was
+    generated and the caller must persist it.
+    """
+    existing = (instance_id_file.read_text().strip()
+                if instance_id_file.exists() else "")
+    if fp_unchanged and existing:
+        return existing, False
+    return f"{name}-{uuid.uuid4().hex[:8]}", True
+
+
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):
     """Build cloud-init seed ISO (meta-data + user-data) into the runtime dir.
 
@@ -767,15 +788,26 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # any of them reliably triggers a rebuild (and instance-id rotation).
     current_fp = hashlib.sha256(user_data_text.encode()).hexdigest()
     fingerprint_file = home_path / ".cloud-init-fingerprint"
-    if (iso_path.exists()
-            and fingerprint_file.exists()
-            and fingerprint_file.read_text().strip() == current_fp):
+    fp_unchanged = (fingerprint_file.exists()
+                    and fingerprint_file.read_text().strip() == current_fp)
+    if iso_path.exists() and fp_unchanged:
         return
 
+    # Rotate the cloud-init instance-id ONLY when the guest-affecting content
+    # actually changed (a real config/secret/key edit that legitimately
+    # warrants re-provisioning). When the content is unchanged and we're here
+    # only because the tmpfs ISO was wiped — i.e. the host rebooted, clearing
+    # /run — reuse the persisted instance-id so the guest sees the SAME instance
+    # and does NOT re-run its per-instance modules (users, runcmd, bootstrap).
+    # Without this, every host reboot churns the id and forces a full guest
+    # re-provision. An absent/empty id file falls back to a fresh mint (first
+    # provision).
     instance_id_file = home_path / ".cloud-init-instance-id"
-    instance_id = f"{name}-{uuid.uuid4().hex[:8]}"
-    instance_id_file.write_text(instance_id)
-    os.chown(instance_id_file, pw.pw_uid, pw.pw_gid)
+    instance_id, minted = _resolve_cloud_init_instance_id(
+        name, instance_id_file, fp_unchanged)
+    if minted:
+        instance_id_file.write_text(instance_id)
+        os.chown(instance_id_file, pw.pw_uid, pw.pw_gid)
 
     seed_dir.mkdir(exist_ok=True)
     os.chown(seed_dir, pw.pw_uid, pw.pw_gid)

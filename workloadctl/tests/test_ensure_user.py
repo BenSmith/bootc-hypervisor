@@ -590,5 +590,51 @@ class TestWarnIfStaleHome(unittest.TestCase):
         self.assertIn("user@10005.service", out)
 
 
+class TestResolveCloudInitInstanceId(unittest.TestCase):
+    """The instance-id reuse vs rotate decision for a (re)built seed ISO.
+
+    Rotating the id on every host reboot (tmpfs ISO wiped) makes the guest
+    re-run all its per-instance cloud-init modules; the id must be reused when
+    the user-data fingerprint is unchanged so a reboot is a cheap rehydration.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.id_file = self.tmp / ".cloud-init-instance-id"
+
+    def _resolve(self, fp_unchanged):
+        return self.mod._resolve_cloud_init_instance_id(
+            "myvm", self.id_file, fp_unchanged)
+
+    def test_first_provision_mints_when_no_file(self):
+        # No persisted id yet → mint, regardless of fingerprint state.
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertTrue(minted)
+        self.assertTrue(iid.startswith("myvm-"))
+
+    def test_host_reboot_reuses_id(self):
+        # Unchanged content + an existing id == tmpfs ISO wiped by a reboot.
+        self.id_file.write_text("myvm-deadbeef")
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)               # reused → caller must NOT rewrite
+
+    def test_content_change_rotates_id(self):
+        # A real config/secret edit (fingerprint changed) → fresh instance.
+        self.id_file.write_text("myvm-deadbeef")
+        iid, minted = self._resolve(fp_unchanged=False)
+        self.assertNotEqual(iid, "myvm-deadbeef")
+        self.assertTrue(iid.startswith("myvm-"))
+        self.assertTrue(minted)
+
+    def test_empty_id_file_mints(self):
+        # A truncated/empty persisted id is not reusable → mint.
+        self.id_file.write_text("   \n")
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertTrue(minted)
+        self.assertTrue(iid.startswith("myvm-"))
+
+
 if __name__ == "__main__":
     unittest.main()
