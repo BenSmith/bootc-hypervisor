@@ -676,18 +676,51 @@ class ContainerSubstrate(Substrate):
         non-fatal — we log and continue so the destroy still proceeds.
         """
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        snapshot_ref = f"localhost/workload-snapshot/{self.config.name}:{ts}"
+        repo = f"localhost/workload-snapshot/{self.config.name}"
+        snapshot_ref = f"{repo}:{ts}"
+        committed = False
         try:
             pod.commit(container_name, snapshot_ref)
+            committed = True
             print(f"  ✓ Pet snapshot saved: {snapshot_ref}")
         except Exception as exc:
             print(
                 f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}",
                 file=sys.stderr,
             )
+        # Bound the snapshot repository so deliberate rebuilds don't leak disk
+        # forever (the VM path has rollback_keep; pets had no analog). Only
+        # prune after a fresh commit succeeded — nothing new was added otherwise.
+        if committed:
+            self._prune_pet_snapshots(pod, repo, self.config.snapshot_keep)
         # Remove the container so the service's ExecStartPre=-podman create
         # runs fresh on next start, picking up the (possibly new) image.
         pod.run("rm", "-f", container_name)
+
+    @staticmethod
+    def _prune_pet_snapshots(pod, repo: str, keep: int) -> None:
+        """Keep only the newest ``keep`` snapshots under ``repo``, remove the rest.
+
+        Snapshot tags are UTC timestamps (``%Y%m%dT%H%M%SZ``) which sort
+        lexicographically in chronological order, so the lexically largest tags
+        are the most recent. Best-effort: every failure here is logged and
+        swallowed so pruning can never block the destroy it follows.
+        """
+        try:
+            listed = pod.run(
+                "images", "--format", "{{.Tag}}", repo, capture_output=True,
+            )
+            if listed.returncode != 0:
+                return
+            tags = sorted(t for t in listed.stdout.split() if t)
+            stale = tags[:-keep] if len(tags) > keep else []
+            for tag in stale:
+                ref = f"{repo}:{tag}"
+                removed = pod.run("rmi", ref, capture_output=True)
+                if removed.returncode == 0:
+                    print(f"  ✓ Pruned old pet snapshot: {ref}")
+        except Exception as exc:
+            print(f"  ⚠ Pet snapshot prune skipped: {exc}", file=sys.stderr)
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         from workloadctl_core import restart_workload_service, ensure_runtime_dir

@@ -29,6 +29,8 @@ WORKLOAD_CONFIG_DIR = Path(
     os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
 )
 VM_SOCKET_DIR = Path("/run/workload-vm")
+# Unified cgroup v2 mount. A module constant so tests can redirect it.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
 
@@ -233,6 +235,23 @@ def find_workload_cgroup(name):
     return None
 
 
+def find_vm_cgroup(name):
+    """Find the cgroup for a VM workload's QEMU process.
+
+    Unlike a container (whose podman runs under the rootless user manager and
+    lands in a libpod-*.scope), a VM's qemu is the main process of the
+    system-level workload-<name>.service, so its cgroup is the service's own.
+    Resolved via systemd's ControlGroup property so a custom resources.slice is
+    honoured. Returns the absolute cgroup Path, or None if not active.
+    """
+    props = systemd_show(f"workload-{name}.service", "ControlGroup")
+    cgroup = props.get("ControlGroup", "")
+    if not cgroup:
+        return None
+    path = CGROUP_ROOT / cgroup.lstrip("/")
+    return path if path.is_dir() else None
+
+
 def read_cgroup_metric(cgroup_path, filename):
     """Read a single value from a cgroup file."""
     try:
@@ -256,9 +275,13 @@ def read_cpu_usage(cgroup_path):
     return None
 
 
-def get_cgroup_metrics(name):
-    """Get resource metrics from cgroup v2 for a workload."""
-    cgroup = find_workload_cgroup(name)
+def get_cgroup_metrics(name, is_vm=False):
+    """Get resource metrics from cgroup v2 for a workload.
+
+    For VMs the cgroup is the qemu service's own (host-side footprint of the
+    hypervisor process); for containers it is the rootless podman scope.
+    """
+    cgroup = find_vm_cgroup(name) if is_vm else find_workload_cgroup(name)
     if not cgroup:
         return {}
 
@@ -378,7 +401,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             all_metrics = []
             for name, has_health, is_vm in workloads:
                 svc = get_service_metrics(name) or {}
-                cgroup = get_cgroup_metrics(name)
+                cgroup = get_cgroup_metrics(name, is_vm)
                 if has_health:
                     health = get_container_health(name)
                     if health is not None:

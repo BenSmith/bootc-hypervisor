@@ -396,6 +396,22 @@ class WorkloadConfig:
         return self.config.get("workload", {}).get("lifecycle", "cattle")
 
     @property
+    def snapshot_keep(self) -> int:
+        """How many pet-lifecycle overlay snapshots to retain (default 3).
+
+        Each destructive verb (update/recreate) on a pet container commits the
+        writable overlay to ``localhost/workload-snapshot/<name>:<ts>`` before
+        rebuilding. Without a bound these accumulate forever; this caps the
+        repository to the newest N, with older snapshots pruned after each new
+        commit. Invalid values fall back to the default so a bad config never
+        crashes a destroy (the validator surfaces the error separately).
+        """
+        val = self.config.get("workload", {}).get("snapshot_keep", 3)
+        if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+            return 3
+        return val
+
+    @property
     def bundle(self) -> str:
         """The bundle (kind) this workload draws shared control files from.
 

@@ -177,6 +177,26 @@ class TestLifecycleAccessor(unittest.TestCase):
         cfg = _make_config(_PET_VM_TOML, 'test-vm')
         self.assertEqual(cfg.lifecycle, "pet")
 
+    def test_snapshot_keep_default(self):
+        cfg = _make_config(_CONTAINER_TOML, 'test-wl')
+        self.assertEqual(cfg.snapshot_keep, 3)
+
+    def test_snapshot_keep_explicit(self):
+        toml = _CONTAINER_TOML.replace(
+            'enabled = false', 'enabled = false\nsnapshot_keep = 5'
+        )
+        cfg = _make_config(toml, 'test-wl')
+        self.assertEqual(cfg.snapshot_keep, 5)
+
+    def test_snapshot_keep_invalid_falls_back_to_default(self):
+        # The accessor must never crash a destroy; the validator flags it.
+        for bad in ('"lots"', '0', '-1', 'true'):
+            toml = _CONTAINER_TOML.replace(
+                'enabled = false', f'enabled = false\nsnapshot_keep = {bad}'
+            )
+            cfg = _make_config(toml, 'test-wl')
+            self.assertEqual(cfg.snapshot_keep, 3, f"bad={bad}")
+
 
 # =============================================================================
 # 2. validate_single rejects invalid lifecycle values
@@ -226,6 +246,40 @@ class TestLifecycleValidation(unittest.TestCase):
         )
         result = self._validate(bad_toml, 'test-wl')
         self.assertGreater(result["errors"], 0)
+
+    def test_snapshot_keep_omitted_no_check(self):
+        # Default (field absent) emits no snapshot_keep check at all.
+        result = self._validate(_CONTAINER_TOML, 'test-wl')
+        check = next(
+            (c for c in result["checks"] if c["check"] == "snapshot_keep"), None
+        )
+        self.assertIsNone(check)
+
+    def test_snapshot_keep_valid_passes(self):
+        toml = _CONTAINER_TOML.replace(
+            'enabled = false', 'enabled = false\nsnapshot_keep = 5'
+        )
+        result = self._validate(toml, 'test-wl')
+        # Valid value adds no error.
+        check = next(
+            (c for c in result["checks"] if c["check"] == "snapshot_keep"), None
+        )
+        self.assertIsNone(check)
+
+    def test_snapshot_keep_invalid_fails(self):
+        for bad in ('0', '-2', '"three"', 'true'):
+            toml = _CONTAINER_TOML.replace(
+                'enabled = false', f'enabled = false\nsnapshot_keep = {bad}'
+            )
+            result = self._validate(toml, 'test-wl')
+            check = next(
+                (c for c in result["checks"] if c["check"] == "snapshot_keep"),
+                None,
+            )
+            self.assertIsNotNone(check, f"bad={bad}")
+            self.assertFalse(check["passed"], f"bad={bad}")
+            self.assertEqual(check["severity"], "error")
+            self.assertGreater(result["errors"], 0, f"bad={bad}")
 
 
 # =============================================================================
@@ -437,11 +491,22 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
                         sub.reprovision(recreate=True)
             mock_snap.assert_not_called()
 
+    @staticmethod
+    def _run_factory(images_stdout=""):
+        """Build a pod.run side_effect: 'images' lists snapshot tags, rmi/rm ok."""
+        def fake_run(*args, **kwargs):
+            res = MagicMock()
+            res.returncode = 0
+            res.stdout = images_stdout if (args and args[0] == "images") else ""
+            return res
+        return fake_run
+
     def test_pet_snapshot_and_remove_calls_commit(self):
-        """_pet_snapshot_and_remove: calls pod.commit then pod.run rm."""
+        """_pet_snapshot_and_remove: commits then removes the container."""
         with _CfgDir(_PET_CONTAINER_TOML, 'test-wl') as cfg:
             manager = _make_manager()
             pod_mock = MagicMock()
+            pod_mock.run.side_effect = self._run_factory()  # no existing snaps
             sub = ContainerSubstrate(cfg, manager)
             sub._pet_snapshot_and_remove(pod_mock, "workload-test-wl")
             # commit must have been called
@@ -450,11 +515,72 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             self.assertEqual(commit_args[0], "workload-test-wl")
             snapshot_ref = commit_args[1]
             self.assertIn("localhost/workload-snapshot/test-wl:", snapshot_ref)
-            # rm must have been called
-            pod_mock.run.assert_called_once()
-            rm_args = pod_mock.run.call_args[0]
-            self.assertIn("rm", rm_args)
-            self.assertIn("workload-test-wl", rm_args)
+            # rm -f of the container must have happened exactly once
+            rm_calls = [
+                c for c in pod_mock.run.call_args_list
+                if "rm" in c[0] and "workload-test-wl" in c[0]
+            ]
+            self.assertEqual(len(rm_calls), 1)
+
+    def test_pet_snapshot_prunes_old_snapshots(self):
+        """After a fresh commit, snapshots beyond snapshot_keep are rmi'd
+        (oldest first); the newest `keep` are retained."""
+        tags = [
+            "20260101T000000Z", "20260102T000000Z", "20260103T000000Z",
+            "20260104T000000Z", "20260105T000000Z",
+        ]
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        pod_mock.run.side_effect = self._run_factory("\n".join(tags))
+        # keep=2 → the 3 oldest get pruned, the 2 newest kept
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=2)
+        rmi_refs = [
+            c[0][1] for c in pod_mock.run.call_args_list if c[0][0] == "rmi"
+        ]
+        self.assertEqual(rmi_refs, [
+            f"{repo}:20260101T000000Z",
+            f"{repo}:20260102T000000Z",
+            f"{repo}:20260103T000000Z",
+        ])
+
+    def test_pet_prune_noop_when_within_limit(self):
+        """No rmi calls when snapshot count is at or below keep."""
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        pod_mock.run.side_effect = self._run_factory(
+            "20260101T000000Z\n20260102T000000Z"
+        )
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=3)
+        rmi_calls = [c for c in pod_mock.run.call_args_list if c[0][0] == "rmi"]
+        self.assertEqual(rmi_calls, [])
+
+    def test_pet_prune_tolerates_images_failure(self):
+        """A failing `podman images` is swallowed (never blocks the destroy)."""
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        bad = MagicMock()
+        bad.returncode = 1
+        bad.stdout = ""
+        pod_mock.run.return_value = bad
+        # Should not raise and should issue no rmi
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=1)
+        rmi_calls = [c for c in pod_mock.run.call_args_list if c[0][0] == "rmi"]
+        self.assertEqual(rmi_calls, [])
+
+    def test_pet_snapshot_failure_skips_prune(self):
+        """If commit fails, prune is skipped (nothing new was committed)."""
+        with _CfgDir(_PET_CONTAINER_TOML, 'test-wl') as cfg:
+            manager = _make_manager()
+            pod_mock = MagicMock()
+            pod_mock.commit.side_effect = RuntimeError("container not found")
+            pod_mock.run.side_effect = self._run_factory("20260101T000000Z")
+            sub = ContainerSubstrate(cfg, manager)
+            sub._pet_snapshot_and_remove(pod_mock, "workload-test-wl")
+            # only the container rm ran — no images/rmi prune calls
+            self.assertFalse(
+                any(c[0] and c[0][0] in ("images", "rmi")
+                    for c in pod_mock.run.call_args_list)
+            )
 
     def test_pet_snapshot_and_remove_tolerates_commit_failure(self):
         """If commit fails (e.g. container never ran), remove still proceeds."""

@@ -59,6 +59,16 @@ enabled = false
 #              TODO (P3): pet reclassifies home/ as backup-included.
 # lifecycle = "cattle"
 
+# Optional: How many pet-lifecycle overlay snapshots to retain.
+# Type: integer (>= 1)
+# Default: 3
+# Each destructive verb (update/recreate) on a "pet" container commits the
+# writable overlay to localhost/workload-snapshot/<name>:<timestamp> before
+# rebuilding it. This bounds that repository to the newest N snapshots; older
+# ones are pruned right after each new commit. The VM equivalent is
+# [vm].rollback_keep. Ignored for cattle workloads (they never snapshot).
+# snapshot_keep = 3
+
 # Optional: Workload mode — how many containers and how they network.
 # Type: string
 # Default: inferred — "single" for a [container] block, "pod" for [[containers]].

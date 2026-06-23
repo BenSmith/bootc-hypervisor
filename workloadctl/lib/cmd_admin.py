@@ -133,6 +133,26 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "message": f"Lifecycle policy: {config.lifecycle}"
         })
 
+    # snapshot_keep bounds the pet overlay snapshot repository. Only the
+    # explicit field is checked; omitting it uses the default (3).
+    raw_snapshot_keep = config.config.get("workload", {}).get("snapshot_keep")
+    if raw_snapshot_keep is not None and (
+        not isinstance(raw_snapshot_keep, int)
+        or isinstance(raw_snapshot_keep, bool)
+        or raw_snapshot_keep < 1
+    ):
+        checks.append({
+            "check": "snapshot_keep",
+            "passed": False,
+            "severity": "error",
+            "message": (
+                f"[workload].snapshot_keep must be a positive integer, "
+                f"got {raw_snapshot_keep!r}"
+            ),
+            "fix": "Set [workload] snapshot_keep to a positive integer (or omit for the default 3)",
+        })
+        errors += 1
+
     # `bundle` goes straight into a /usr/share/workloadctl/workloads/<bundle>/
     # path for control-file lookups, so reject anything that isn't a plain
     # workload-style name before any path is built. Only the explicit field is

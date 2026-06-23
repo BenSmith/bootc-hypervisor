@@ -586,5 +586,92 @@ class TestMetricsLiveCollection(unittest.TestCase):
             self.assertNotIn('workload="v1"', prom2)
 
 
+def _load_exporter():
+    """Load the workload-exporter module object (for direct function calls)."""
+    if LIB_DIR not in sys.path:
+        sys.path.insert(0, LIB_DIR)
+    loader = importlib.machinery.SourceFileLoader(
+        "workload_exporter", EXPORTER_SCRIPT)
+    spec = importlib.util.spec_from_loader("workload_exporter", loader)
+    mod = importlib.util.module_from_spec(spec)
+    orig_argv = sys.argv[:]
+    sys.argv = [EXPORTER_SCRIPT]  # PORT = int(sys.argv[1]) guard
+    try:
+        loader.exec_module(mod)
+        return mod
+    finally:
+        sys.argv = orig_argv
+
+
+class TestVMCgroupMetrics(unittest.TestCase):
+    """VM workloads get host-side cgroup metrics from the qemu service's own
+    cgroup (resolved via systemd ControlGroup), not a podman libpod scope."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def _write_cgroup(self, root, rel):
+        cg = Path(root) / rel
+        cg.mkdir(parents=True)
+        (cg / "cpu.stat").write_text(
+            "usage_usec 5000000\nuser_usec 3000000\nsystem_usec 2000000\n")
+        (cg / "memory.current").write_text("268435456\n")
+        (cg / "memory.max").write_text("536870912\n")
+        (cg / "pids.current").write_text("17\n")
+        return cg
+
+    def test_find_vm_cgroup_resolves_via_controlgroup(self):
+        with tempfile.TemporaryDirectory() as root:
+            rel = "workloads.slice/workload-myvm.service"
+            self._write_cgroup(root, rel)
+            with self.mock.patch.object(self.mod, "CGROUP_ROOT", Path(root)), \
+                 self.mock.patch.object(
+                     self.mod, "systemd_show",
+                     return_value={"ControlGroup": "/" + rel}):
+                cg = self.mod.find_vm_cgroup("myvm")
+            self.assertIsNotNone(cg)
+            self.assertEqual(cg, Path(root) / rel)
+
+    def test_find_vm_cgroup_none_when_no_controlgroup(self):
+        with self.mock.patch.object(
+                self.mod, "systemd_show", return_value={}):
+            self.assertIsNone(self.mod.find_vm_cgroup("myvm"))
+
+    def test_find_vm_cgroup_none_when_dir_missing(self):
+        with self.mock.patch.object(self.mod, "CGROUP_ROOT", Path("/nonexistent")), \
+             self.mock.patch.object(
+                 self.mod, "systemd_show",
+                 return_value={"ControlGroup": "/workloads.slice/workload-myvm.service"}):
+            self.assertIsNone(self.mod.find_vm_cgroup("myvm"))
+
+    def test_vm_cgroup_metrics_read_from_qemu_service(self):
+        with tempfile.TemporaryDirectory() as root:
+            rel = "workloads.slice/workload-myvm.service"
+            cg = self._write_cgroup(root, rel)
+            with self.mock.patch.object(self.mod, "find_vm_cgroup", return_value=cg):
+                metrics = self.mod.get_cgroup_metrics("myvm", is_vm=True)
+            self.assertEqual(metrics["cpu_usage_seconds_total"], 5.0)
+            self.assertEqual(metrics["memory_current_bytes"], 268435456)
+            self.assertEqual(metrics["memory_max_bytes"], 536870912)
+            self.assertEqual(metrics["pids_current"], 17)
+
+    def test_is_vm_routes_to_vm_cgroup_finder(self):
+        # is_vm=True must use find_vm_cgroup, not the podman scope finder.
+        with self.mock.patch.object(self.mod, "find_vm_cgroup", return_value=None) as vm_finder, \
+             self.mock.patch.object(self.mod, "find_workload_cgroup") as ctr_finder:
+            self.mod.get_cgroup_metrics("myvm", is_vm=True)
+            vm_finder.assert_called_once_with("myvm")
+            ctr_finder.assert_not_called()
+
+    def test_container_routes_to_podman_scope_finder(self):
+        with self.mock.patch.object(self.mod, "find_workload_cgroup", return_value=None) as ctr_finder, \
+             self.mock.patch.object(self.mod, "find_vm_cgroup") as vm_finder:
+            self.mod.get_cgroup_metrics("myapp", is_vm=False)
+            ctr_finder.assert_called_once_with("myapp")
+            vm_finder.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
