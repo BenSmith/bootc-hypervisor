@@ -38,10 +38,16 @@ def _wait_active(target: Target, name: str, timeout: int = 120) -> bool:
 
 
 def _vm_gen_count(target: Target, name: str) -> int:
-    """Return the number of system.qcow2.gen-N files for a VM workload."""
+    """Return the number of system.qcow2.gen-N snapshots for a VM workload.
+
+    Generations live under the state/ subtree (the reconstructible-disk half
+    of the state/data layout) — same place the product's rollback_targets()
+    globs. Looking in the workload root one level too high silently counts
+    zero, which used to make the rollback half skip on every run.
+    """
     r = target.run(
         ["bash", "-c",
-         f"ls /var/lib/workloads/{name}/system.qcow2.gen-* 2>/dev/null | wc -l"],
+         f"ls /var/lib/workloads/{name}/state/system.qcow2.gen-* 2>/dev/null | wc -l"],
         sudo=True, check=False,
     )
     try:
@@ -150,26 +156,28 @@ class TestUpdateRollbackVM:
         """update → rollback on a VM, in sequence on one fixture.
 
         fresh_vm is function-scoped, so each test gets a fresh VM with zero
-        generations. Update and rollback must therefore run in a single test:
-        update creates system.qcow2.gen-N, rollback restores the prior disk.
-        If update can't produce a generation (cloud image unchanged, build
-        failure), the rollback half is skipped rather than asserted blindly.
+        generations. Update and rollback run in a single test: update rotates
+        system.qcow2 → system.qcow2.gen-N and rebuilds, rollback restores the
+        prior disk.
+
+        This is deterministic: fresh_vm is a cattle VM backed by a cloud image
+        cached at enable time, and `--update` always rotates a generation on a
+        successful rebuild — so the generation (and therefore the rollback
+        half) is asserted, not skipped.
         """
         record_property("cell", "update/vm")
 
         gen_before = _vm_gen_count(target, fresh_vm)
 
         r = target.wl(f"update {fresh_vm}", check=False, timeout=600)
-        # May fail if cloud image unchanged or disk build fails; check no traceback
         assert "Traceback" not in r.stderr, f"update crashed on VM: {r.stderr}"
+        assert r.rc == 0, f"update failed on VM (rc={r.rc}): {r.stderr}"
 
         gen_after = _vm_gen_count(target, fresh_vm)
-        if r.rc != 0 or gen_after <= gen_before:
-            pytest.skip(
-                "update did not produce a new VM generation "
-                f"(rc={r.rc}, gens {gen_before}→{gen_after}); "
-                "nothing to roll back to"
-            )
+        assert gen_after > gen_before, (
+            f"update did not cut a new generation (gens {gen_before}→{gen_after}); "
+            "a cattle VM + --update should always rotate system.qcow2"
+        )
 
         # A generation now exists — exercise rollback.
         record_property("cell", "rollback/vm")
