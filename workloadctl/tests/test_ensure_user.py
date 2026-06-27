@@ -166,6 +166,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -173,7 +175,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
              mock.patch.object(self.mod.shutil, "rmtree"):
             self.mod.build_cloud_init_iso(
                 self.pw, config, name,
-                config_path=self.config_dir / name / "workload.toml",
+                config_path=self.config_dir / "workload.toml",
             )
 
     def _iso_path(self, name: str = "myvm") -> Path:
@@ -318,6 +320,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -339,6 +343,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         rmtree_calls = []
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
