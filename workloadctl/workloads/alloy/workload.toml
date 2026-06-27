@@ -99,6 +99,12 @@ ports = [
 # --server.http.listen-addr to 0.0.0.0:12345 and add "127.0.0.1:12345:12345".
 
 [resources]
-memory_max = "512M"
-memory_high = "384M"
+# alloy's cgroup footprint is dominated by host-journal page cache (it tails
+# /var/log/journal + /run/log/journal). On hosts with busy journals a tight
+# ceiling makes alloy file-cache-thrash against memory.high (constant reclaim
+# -> refault loop, ~0 OOM but high PSI + wasted I/O). 768M/1G keeps the hot
+# working set resident on busy hosts; alloy's own anon RSS is only ~270M, so
+# the rest is reclaimable cache. Dial down on light-journal hosts if desired.
+memory_max = "1G"
+memory_high = "768M"
 cpu_quota = "50%"

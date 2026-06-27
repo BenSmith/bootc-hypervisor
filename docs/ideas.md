@@ -59,6 +59,25 @@
 
 ---
 
+### User-defined bundles in `/etc`
+
+`bundle_dir` resolves to `/usr/share/workloadctl/workloads/<bundle>/` only. So
+a user who wants two instances of a custom locally-built workload has to
+duplicate the Containerfile (and setup.sh, policy.cil) in each instance's
+`/etc/workloads.d/<name>/` override dir independently — defeating bundles.
+
+Fix: make `bundle_dir` check `/etc/workloads.d/.bundles/<bundle>/` first, same
+as `resolve_control_file` already does for individual files. Then
+`workloadctl init my-bundle --as instance2` would work against a user-defined
+bundle without an image rebuild.
+
+Note: individual control files placed in `/etc/workloads.d/<name>/` already
+work for single-instance custom workloads (the `if bundle_dir.is_dir()` in
+`materialize_build_context` is a guard, not a requirement). It's only sharing
+across instances that's missing.
+
+---
+
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*

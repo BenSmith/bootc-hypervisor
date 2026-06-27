@@ -52,6 +52,9 @@ ports = [
 setup = "setup.sh"
 
 [resources]
-memory_max = "512M"
-memory_high = "384M"
+# See workloads/alloy/workload.toml: tight ceilings make alloy file-cache-thrash
+# against memory.high on busy-journal hosts. 768M/1G keeps the hot working set
+# resident; alloy's own anon RSS is only ~270M.
+memory_max = "1G"
+memory_high = "768M"
 cpu_quota = "50%"
