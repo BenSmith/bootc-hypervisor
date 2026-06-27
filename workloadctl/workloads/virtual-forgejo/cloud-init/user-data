@@ -236,11 +236,13 @@ write_files:
       # 3. Drop the in-VM workload TOMLs into the locations workloadctl expects.
       # TOMLs are installed by the RPM under /usr/share/workloadctl/workloads/.
       install -d /etc/workloads.d
-      install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/forgejo.toml /etc/workloads.d/forgejo.toml
-      install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/caddy.toml   /etc/workloads.d/caddy.toml
+      install -d /etc/workloads.d/forgejo
+      install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/forgejo.toml /etc/workloads.d/forgejo/workload.toml
+      install -d /etc/workloads.d/caddy
+      install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/caddy.toml   /etc/workloads.d/caddy/workload.toml
 
       # 4. Build caddy's sidecar image (TLS terminator) now that its TOML is in
-      # place — `workloadctl build` reads /etc/workloads.d/caddy.toml. mDNS is
+      # place — `workloadctl build` reads /etc/workloads.d/caddy/workload.toml. mDNS is
       # handled by systemd-resolved (configured above), so no avahi is built.
       workloadctl build caddy
 
@@ -249,12 +251,13 @@ write_files:
       # because the TOML lives in /usr/share and is installed verbatim by
       # the RPM. Empty ALLOY_CENTRAL_HOST → no alloy.toml shipped, no enable.
       if [ -n "${ALLOY_CENTRAL_HOST}" ]; then
-        install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/alloy.toml /etc/workloads.d/alloy.toml
+        install -d /etc/workloads.d/alloy
+        install -m 0644 /usr/share/workloadctl/workloads/virtual-forgejo/workloads/alloy.toml /etc/workloads.d/alloy/workload.toml
         sed -i \
           -e "s|__ALLOY_CENTRAL_HOST__|${ALLOY_CENTRAL_HOST}|g" \
           -e "s|__ALLOY_HOST_LABEL__|${ALLOY_HOST_LABEL}|g" \
           -e "s|__ALLOY_ROLE_LABEL__|${ALLOY_ROLE_LABEL}|g" \
-          /etc/workloads.d/alloy.toml
+          /etc/workloads.d/alloy/workload.toml
       fi
 
       # Caddyfile is written by write_files (substituted at ISO build time).
@@ -350,8 +353,8 @@ write_files:
         install -m 0400 -o _wl-caddy -g _wl-caddy /etc/homelab-ca/homelab-root.key /var/lib/workloads/caddy/data/homelab-root.key
         chcon -t container_file_t /var/lib/workloads/caddy/data/homelab-root.crt /var/lib/workloads/caddy/data/homelab-root.key
         # Mount cert+key into the caddy container (idempotent on re-bootstrap).
-        if ! grep -q "homelab-root.crt:/etc/caddy/homelab-root.crt" /etc/workloads.d/caddy.toml; then
-          sed -i 's#\( *"./config:/etc/caddy/config",\)#\1\n    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",\n    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",#' /etc/workloads.d/caddy.toml
+        if ! grep -q "homelab-root.crt:/etc/caddy/homelab-root.crt" /etc/workloads.d/caddy/workload.toml; then
+          sed -i 's#\( *"./config:/etc/caddy/config",\)#\1\n    "./homelab-root.crt:/etc/caddy/homelab-root.crt:ro",\n    "./homelab-root.key:/etc/caddy/homelab-root.key:ro",#' /etc/workloads.d/caddy/workload.toml
         fi
         # Trust the shared root in the VM's own store (runner + outbound).
         install -m 0444 /var/lib/workloads/caddy/data/homelab-root.crt /etc/pki/ca-trust/source/anchors/homelab-root.crt

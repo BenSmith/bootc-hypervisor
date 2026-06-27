@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
-from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init
+from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_drift import cmd_drift
 from cmd_inspect import (
@@ -75,14 +75,20 @@ def main():
 
     init_parser = subparsers.add_parser(
         "init", help="Instantiate a catalog bundle into /etc/workloads.d/")
-    init_parser.add_argument("bundle", help="Bundle name (see 'workloadctl catalog')")
+    init_parser.add_argument("bundle", nargs="?", help="Bundle name (see 'workloadctl catalog')")
     init_parser.add_argument("--as", dest="as_name", metavar="NAME",
                              help="Instance name (default: the bundle name)")
+    init_parser.add_argument("--scratch", metavar="NAME",
+                             help="Create a self-contained stub workload with no bundle backing")
 
     duplicate_parser = subparsers.add_parser(
         "duplicate", aliases=["clone"], help="Copy a live workload under a new name")
     duplicate_parser.add_argument("source", help="Existing workload to copy")
     duplicate_parser.add_argument("new", help="Name for the copy")
+
+    install_parser = subparsers.add_parser(
+        "install", help="Promote a local workload directory into /etc/workloads.d/")
+    install_parser.add_argument("src", help="Source directory containing workload.toml")
 
     build_parser = subparsers.add_parser(
         "build", help="Build a workload's container image from its bundle build context")
@@ -315,6 +321,7 @@ def main():
         "duplicate": cmd_duplicate,
         "edit": cmd_edit,
         "init": cmd_init,
+        "install": cmd_install,
         "enable": cmd_enable,
         "exec": cmd_exec,
         "health": cmd_health,

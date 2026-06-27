@@ -35,7 +35,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         break
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_state_dir, workload_data_dir,
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_state_dir, workload_data_dir,
 )
 
 
@@ -44,7 +44,7 @@ def log(msg: str):
 
 
 def load_config(name: str) -> dict:
-    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    config_path = workload_config_path(WORKLOAD_CONFIG_DIR, name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 

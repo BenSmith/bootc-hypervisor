@@ -106,8 +106,9 @@ template vars.
    support tree to matching paths, e.g.:
 
    ```sh
+   sudo install -d /etc/workloads.d/virtual-forgejo
    sudo install -m 0644 workloads.d/virtual-forgejo.toml \
-       /etc/workloads.d/virtual-forgejo.toml
+       /etc/workloads.d/virtual-forgejo/workload.toml
    sudo install -d /usr/share/workloadctl/workloads
    sudo cp -a workloads/virtual-forgejo /usr/share/workloadctl/workloads/
    sudo workloadctl enable virtual-forgejo

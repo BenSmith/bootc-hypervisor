@@ -65,7 +65,8 @@ class BuildBase(unittest.TestCase):
         if build is not None:
             body += "\n[build]\n" + build
         body += extra
-        (self.etc / f"{name}.toml").write_text(body)
+        (self.etc / name).mkdir(exist_ok=True)
+        (self.etc / name / "workload.toml").write_text(body)
         return WorkloadConfig(name)
 
     def _ship(self, bundle, fname, content="x\n"):
@@ -310,7 +311,8 @@ class TestDispatch(BuildBase):
         self.assertEqual(rc, 1)
 
     def test_cmd_build_rejects_vm(self):
-        (self.etc / "vm.toml").write_text(
+        (self.etc / "vm").mkdir(exist_ok=True)
+        (self.etc / "vm" / "workload.toml").write_text(
             '[workload]\nname = "vm"\nenabled = false\n\n[vm]\nmemory = "1024M"\n')
         with self.assertRaises(SystemExit) as cm:
             with redirect_stdout(io.StringIO()):

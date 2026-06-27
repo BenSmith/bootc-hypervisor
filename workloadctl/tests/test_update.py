@@ -160,7 +160,7 @@ class TestHealthWaitSeconds(unittest.TestCase):
         """Verify _health_wait_seconds parses every real workload's health config."""
         import tomllib
         workloads_dir = Path(os.path.dirname(__file__), '..', 'workloads.d')
-        for toml_path in sorted(workloads_dir.glob("*.toml")):
+        for toml_path in sorted(workloads_dir.glob("*/workload.toml")):
             with open(toml_path, "rb") as f:
                 toml_config = tomllib.load(f)
             health = toml_config.get("container", {}).get("health", {})

@@ -123,7 +123,9 @@ class TestWorkloadSnapshots(unittest.TestCase):
             cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
 
             for src in tomls:
-                _enable_toml(src, cfg / f"{src.parent.name}.toml")
+                name = src.parent.name
+                (cfg / name).mkdir(exist_ok=True)
+                _enable_toml(src, cfg / name / "workload.toml")
 
             env = os.environ.copy()
             env["WORKLOAD_CONFIG_DIR"] = str(cfg)
@@ -144,7 +146,7 @@ class TestWorkloadSnapshots(unittest.TestCase):
                 uid = _workload_uid(conf_text)
 
                 outputs = [(stem + ".conf", conf_text)]
-                for unit_name, suffix in _expected_units(stem, (cfg / f"{stem}.toml").read_text()):
+                for unit_name, suffix in _expected_units(stem, (cfg / stem / "workload.toml").read_text()):
                     unit_path = svc / unit_name
                     self.assertTrue(unit_path.is_file(),
                                     f"generator did not emit {unit_name} for {stem}")

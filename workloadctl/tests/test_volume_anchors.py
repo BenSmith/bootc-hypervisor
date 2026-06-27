@@ -120,7 +120,9 @@ class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
             cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
 
             for src in tomls:
-                _enable_toml(src, cfg / f"{src.parent.name}.toml")
+                name = src.parent.name
+                (cfg / name).mkdir(exist_ok=True)
+                _enable_toml(src, cfg / name / "workload.toml")
 
             env = os.environ.copy()
             env["WORKLOAD_CONFIG_DIR"] = str(cfg)
@@ -158,7 +160,8 @@ class TestRequiredFilesAnchorResolution(unittest.TestCase):
         import workloadctl_core as core
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        (tmp / "wltest.toml").write_text(toml_text)
+        (tmp / "wltest").mkdir()
+        (tmp / "wltest" / "workload.toml").write_text(toml_text)
         with mock.patch.object(core, "WORKLOAD_DIR", tmp):
             return core.WorkloadConfig("wltest")
 
@@ -223,7 +226,8 @@ class TestPreflightDataAnchoring(unittest.TestCase):
         import cmd_lifecycle
         toml_dir = base / "tomls"
         toml_dir.mkdir(exist_ok=True)
-        (toml_dir / "wltest.toml").write_text(toml_text)
+        (toml_dir / "wltest").mkdir(exist_ok=True)
+        (toml_dir / "wltest" / "workload.toml").write_text(toml_text)
         with mock.patch.object(workload_lib, "WORKLOADS_BASE", base), \
              mock.patch.object(core, "WORKLOAD_DIR", toml_dir):
             config = core.WorkloadConfig("wltest")

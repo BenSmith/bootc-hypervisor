@@ -75,7 +75,8 @@ class _WorkloadDir:
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
-        (tmp_path / f'{self._name}.toml').write_text(self._toml)
+        (tmp_path / self._name).mkdir()
+        (tmp_path / self._name / 'workload.toml').write_text(self._toml)
         self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
@@ -91,7 +92,8 @@ def _make_vm_config():
     """Build a test-vm WorkloadConfig backed by a temp dir (avoids sys.modules races)."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / 'test-vm.toml').write_text(VM_TOML)
+        (p / 'test-vm').mkdir()
+        (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
         with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
             return workloadctl_core.WorkloadConfig('test-vm')
 
@@ -145,7 +147,8 @@ class TestVMStats(unittest.TestCase):
         """cmd_stats on a VM workload prints a not-applicable message and exits 0."""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-vm.toml').write_text(VM_TOML)
+            (p / 'test-vm').mkdir()
+            (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
             args = _args(workload='test-vm', json=False, follow=False)
             manager = MagicMock()
             manager.user_exists.return_value = True
@@ -216,7 +219,8 @@ class TestContainerBackupConsistency(unittest.TestCase):
     def _make_config(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(MINIMAL_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(MINIMAL_TOML)
             with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
                 return workloadctl_core.WorkloadConfig('test-wl')
 
@@ -526,7 +530,8 @@ image = "example.com/db:latest"
 def _make_config(toml, name):
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / f'{name}.toml').write_text(toml)
+        (p / name).mkdir()
+        (p / name / 'workload.toml').write_text(toml)
         with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
             return workloadctl_core.WorkloadConfig(name)
 
@@ -867,7 +872,8 @@ class TestCmdHealthPlacement(unittest.TestCase):
         """Run cmd_health and return (exit_code, health_data_dict)."""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(toml)
             args = _args(workload='test-wl', json=True)
             manager = MagicMock()
             manager.user_exists.return_value = user_exists
@@ -1295,7 +1301,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             from substrate import rollback_tag
             tag = rollback_tag('test-wl')
@@ -1324,7 +1331,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             manager = MagicMock()
             manager.user_exists.return_value = True
@@ -1345,7 +1353,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             manager = MagicMock()
             manager.user_exists.return_value = True
@@ -1480,7 +1489,8 @@ class TestCmdIncant(unittest.TestCase):
         config_toml = SINGLE_TOML
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(config_toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(config_toml)
             manager = self._make_manager()
             manager.run_podman.return_value = _ok(returncode=0)
 
@@ -1500,7 +1510,8 @@ class TestCmdIncant(unittest.TestCase):
         config_toml = SINGLE_TOML
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(config_toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(config_toml)
             manager = self._make_manager()
             manager.run_podman.return_value = _ok(returncode=0)
 
@@ -1514,7 +1525,8 @@ class TestCmdIncant(unittest.TestCase):
         import cmd_interact
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
             manager = self._make_manager(user_exists=False)
             args = types.SimpleNamespace(workload='test-wl', argv=['volume', 'ls'])
             buf = io.StringIO()
@@ -1529,7 +1541,8 @@ class TestCmdIncant(unittest.TestCase):
         import cmd_interact
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
             manager = self._make_manager()
             args = types.SimpleNamespace(workload='test-wl', argv=[])
             buf = io.StringIO()

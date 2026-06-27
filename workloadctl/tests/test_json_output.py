@@ -103,7 +103,8 @@ class _WorkloadDir:
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
-        (tmp_path / f'{self._name}.toml').write_text(self._toml)
+        (tmp_path / self._name).mkdir()
+        (tmp_path / self._name / 'workload.toml').write_text(self._toml)
         self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
@@ -1014,7 +1015,8 @@ class TestBackupJson(unittest.TestCase):
         # --consistency crash --all: both container and VM workloads are backed up.
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='crash')
                 mock_backup = MagicMock(return_value=4096)
@@ -1041,7 +1043,8 @@ class TestBackupJson(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='crash')
                 with patch.object(cmd_backup, 'require_root'):
@@ -1063,7 +1066,8 @@ class TestBackupJson(unittest.TestCase):
             out_file = Path(out_tmp) / "single.tar.zst"
             out_file.write_text("")  # exists as a regular file, not a dir
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=str(out_file), consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
@@ -1083,7 +1087,8 @@ class TestBackupJson(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):

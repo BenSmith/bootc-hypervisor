@@ -15,6 +15,7 @@ import tomllib
 from workload_lib import (
     auto_detect_credentials,
     validate_workload_name,
+    workload_config_path,
     WORKLOADS_BASE,
     workload_data_dir,
     workload_service_name,
@@ -212,9 +213,9 @@ def cmd_restore(args, manager: WorkloadManager):
         print(f"Restoring workload: {name}")
 
         # Check if workload already exists
-        dest_config = WORKLOAD_DIR / f"{name}.toml"
+        dest_config = workload_config_path(WORKLOAD_DIR, name)
         dest_data = workload_data_dir(name)
-        if dest_config.exists() and not args.force:
+        if dest_config.parent.exists() and not args.force:
             print(f"Error: Config already exists: {dest_config}", file=sys.stderr)
             print("Use --force to overwrite", file=sys.stderr)
             sys.exit(1)
@@ -226,6 +227,7 @@ def cmd_restore(args, manager: WorkloadManager):
 
         # 1. Restore config
         print(f"  Config → {dest_config}")
+        dest_config.parent.mkdir(exist_ok=True)
         shutil.copy2(config_path, dest_config)
 
         # 2. Restore credentials

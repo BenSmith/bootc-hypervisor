@@ -99,6 +99,25 @@ OVMF_VARS_CANDIDATES = [
 ]
 
 
+# --- Config locator ---
+
+def workload_config_path(base: Path, name: str) -> Path:
+    """Instance config path for a workload, under `base`."""
+    return base / name / "workload.toml"
+
+
+def iter_workloads(base: Path) -> list[tuple[str, Path]]:
+    """(name, config_path) for every instance under `base`, sorted by name.
+
+    Yields the name (derived from the path) so no caller knows the on-disk shape.
+    This is the single place discovery encodes the layout.
+    """
+    return sorted(
+        (p.parent.name, p)                                    # name from dir, not stem
+        for p in base.glob("*/workload.toml")
+    )
+
+
 # --- Kind routing ---
 
 def infer_workload_kind(config: dict) -> str:

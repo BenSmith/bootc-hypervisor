@@ -33,6 +33,7 @@ There are four ways to create a workload — all produce the same result (a TOML
 | Approach | Best for |
 |---|---|
 | **[From a bundle (`init`)](#bundle-approach)** | Enabling a shipped workload (alloy, jellyfin, vncdesktop, …) |
+| **`workloadctl init --scratch <name>`** | Novel workload with no bundle — generates a stub TOML, no `/usr` fallback |
 | **`workloadctl create`** (below) | From-scratch workload with no bundle |
 | **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or adapting an example |
 | **[bootc image](#bootc-approach)** | Baking workloads into an immutable OS image |
@@ -58,7 +59,7 @@ Instantiate a bundle into `/etc/workloads.d/`:
 sudo workloadctl init alloy
 ```
 
-This stamps the bundle's template TOML at `/etc/workloads.d/alloy.toml`. Control
+This stamps the bundle's template TOML at `/etc/workloads.d/alloy/workload.toml`. Control
 files are **not** copied — they're resolved from the `/usr` bundle tree at
 build/enable time, so the instance picks up changes automatically when the package
 upgrades.
@@ -103,6 +104,21 @@ sudo workloadctl init alloy --as alloy-lan
 TOML so control-file lookups still resolve to the source bundle. Both instances share
 the same Containerfile and support scripts; each has its own TOML, user, and state.
 
+**Installing a custom workload directory (`install`):**
+
+If you have a workload directory (e.g., checked out from a repo or written locally)
+that you want to promote into the system, use `install`:
+
+```bash
+sudo workloadctl install ./my-workloads/myapp/
+```
+
+This copies the entire directory into `/etc/workloads.d/<name>/` where `<name>` is
+taken from `[workload].name` in the source `workload.toml` (not the directory name).
+File modes are preserved, so an executable `setup.sh` stays executable. Errors if the
+workload already exists (edit in place or use `duplicate` to rename). The source is
+never modified. See [`install`](cli.md#install) in the command reference.
+
 ---
 
 ### CLI approach
@@ -138,7 +154,7 @@ Useful when you want full control over the config or are adapting an existing ex
 
 1. Create a config file:
 ```bash
-sudo nano /etc/workloads.d/webserver.toml
+sudo nano /etc/workloads.d/webserver/workload.toml
 ```
 
 2. Add this minimal configuration:
@@ -239,7 +255,7 @@ The workload provisioning system allows you to declaratively define long-running
 ### Components
 
 - **Shell generator** (`/usr/lib/systemd/system-generators/workload-generator`, source: `generators/workload-generator`): A minimal shell generator that emits a single oneshot service unit (`workload-generate.service`). Does not read workload configs; its only job is to schedule the Python script as an early-boot service. Kept tiny so it fits comfortably inside the generator execution budget systemd enforces.
-- **Workload generator script** (`/usr/libexec/workloadctl/workload-generate`): The Python script that actually reads `/etc/workloads.d/*.toml` and emits per-workload unit files + sysusers configs into `/run/systemd/system/`. Runs as an early-boot oneshot service (not as a systemd generator — see "Why the split?" below).
+- **Workload generator script** (`/usr/libexec/workloadctl/workload-generate`): The Python script that actually reads `/etc/workloads.d/*/workload.toml` and emits per-workload unit files + sysusers configs into `/run/systemd/system/`. Runs as an early-boot oneshot service (not as a systemd generator — see "Why the split?" below).
 - **User Setup** (`/usr/libexec/workloadctl/workload-ensure-user`): Runs as `ExecStartPre` in each workload service to configure subordinate UID/GID ranges, create home and volume directories, write the EnvironmentFile, and enable linger. Handles all `/var` work, which must not happen from generator or early-boot-oneshot context.
 - **Workload Services**: Per-workload systemd services that run `podman run` as dedicated users
 - **Management Tool** (`workloadctl`): Docker/kubectl-like CLI for managing workloads
@@ -1242,7 +1258,7 @@ If you prefer to manage workloads manually:
 **Enable a workload:**
 ```bash
 # 1. Edit the config file
-sudo nano /etc/workloads.d/example-webserver.toml
+sudo nano /etc/workloads.d/example-webserver/workload.toml
 # Change: enabled = false → enabled = true
 
 # 2. Reload systemd and start
@@ -1256,7 +1272,7 @@ sudo systemctl start workload-webserver.service
 sudo systemctl stop workload-webserver.service
 
 # 2. Edit the config file
-sudo nano /etc/workloads.d/example-webserver.toml
+sudo nano /etc/workloads.d/example-webserver/workload.toml
 # Change: enabled = true → enabled = false
 
 # 3. Reload systemd
@@ -1267,7 +1283,7 @@ sudo systemctl daemon-reload
 ```bash
 # 1. Stop and disable
 sudo systemctl stop workload-webserver.service
-sudo nano /etc/workloads.d/example-webserver.toml  # Set enabled = false
+sudo nano /etc/workloads.d/example-webserver/workload.toml  # Set enabled = false
 sudo systemctl daemon-reload
 
 # 2. Get user info and remove
@@ -1409,7 +1425,7 @@ Alternatively, use `secret export/import` to transfer credentials portably with 
 
 ```
 pihole-20260315-120000.tar.zst
-├── workload.toml              # /etc/workloads.d/pihole.toml
+├── workload.toml              # /etc/workloads.d/pihole/workload.toml
 ├── credentials/               # Referenced credentials from /etc/credstore.encrypted/
 │   └── pihole-webpassword
 └── home/                      # /var/lib/workloads/pihole/
@@ -1748,7 +1764,7 @@ workloadctl stats NAME
 **Symptom:** Generator logs error about username length.
 
 ```
-workload-generate: ERROR processing /etc/workloads.d/my-workload.toml:
+workload-generate: ERROR processing /etc/workloads.d/my-workload/workload.toml:
 Username '_wl-my-very-long-workload-name' is 33 chars (max 32)
 ```
 

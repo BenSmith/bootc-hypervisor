@@ -35,6 +35,7 @@ from workload_lib import (
     get_next_uid,
     infer_workload_kind,
     infer_workload_mode,
+    iter_workloads,
     MAX_NAME_LENGTH,
     NAME_PATTERN,
     normalize_containers,
@@ -49,6 +50,7 @@ from workload_lib import (
     WORKLOADS_BASE,
     WORKLOAD_BUNDLES_DIR,
     WORKLOAD_CONFIG_DIR,
+    workload_config_path,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     vm_mac_address,
@@ -339,7 +341,7 @@ class WorkloadConfig:
 
     def __init__(self, filename: str):
         self.filename = filename
-        self.path = _get_workload_dir() / f"{filename}.toml"
+        self.path = workload_config_path(_get_workload_dir(), filename)
 
         # Masked workload: symlink to /dev/null (same semantics as systemd masking)
         if self.path.is_symlink() and self.path.resolve() == Path('/dev/null'):
@@ -793,9 +795,9 @@ class WorkloadManager:
     def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
         """Get all workload configs"""
         configs = []
-        for path in sorted(self.workload_dir.glob("*.toml")):
+        for name, path in iter_workloads(self.workload_dir):
             try:
-                config = WorkloadConfig(path.stem)
+                config = WorkloadConfig(name)
                 if not enabled_only or config.enabled:
                     configs.append(config)
             except WorkloadMasked:

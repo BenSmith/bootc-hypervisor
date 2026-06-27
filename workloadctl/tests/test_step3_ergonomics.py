@@ -84,7 +84,8 @@ class Step3Base(unittest.TestCase):
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'
         body += '\n[container]\nimage = "localhost/x:latest"\n' + extra
-        (self.etc / f"{name}.toml").write_text(body)
+        (self.etc / name).mkdir(exist_ok=True)
+        (self.etc / name / "workload.toml").write_text(body)
         return WorkloadConfig(name)
 
     def _ship(self, bundle, fname, content="shipped\n"):
@@ -207,7 +208,8 @@ class TestEditControlFile(Step3Base):
         # Editor "writes" the exact shipped bytes back (a no-op edit).
         out = self._edit("solo", "build.sh", f'cp "{default}" "$1"')
         self.assertFalse((self.etc / "solo" / "build.sh").exists())
-        self.assertFalse((self.etc / "solo").exists())  # empty override dir cleaned
+        # override dir survives: it holds workload.toml (subdir layout)
+        self.assertTrue((self.etc / "solo").exists())
         self.assertIn("still tracks", out)
 
     def test_new_file_left_empty_is_discarded(self):
@@ -251,7 +253,7 @@ class TestEditControlFile(Step3Base):
         outside = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
         odir = self.etc / "solo"
-        odir.mkdir(parents=True)
+        odir.mkdir(parents=True, exist_ok=True)
         (odir / "sub").symlink_to(outside)
         with mock.patch.dict(os.environ, {"EDITOR": self._editor('printf x > "$1"')}):
             with self.assertRaises(SystemExit):

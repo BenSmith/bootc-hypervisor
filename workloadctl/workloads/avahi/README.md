@@ -53,7 +53,7 @@ host's avahi-daemon and systemd-resolved's mDNS on the publishing host.
    resolve `.local` names via the host stub resolver. If a co-tenant container
    needs `.local` resolution, ship `nss-mdns` inside *that* container.
 
-4. **Edit `ALIASES`** in `/etc/workloads.d/avahi.toml`, then:
+4. **Edit `ALIASES`** in `/etc/workloads.d/avahi/workload.toml`, then:
    ```bash
    sudo workloadctl enable avahi
    ```

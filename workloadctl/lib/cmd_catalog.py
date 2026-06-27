@@ -3,7 +3,7 @@ cmd_catalog — bundle catalog + instantiation: catalog, init, duplicate.
 
 A *bundle* is a shipped directory `/usr/share/workloadctl/workloads/<bundle>/`
 co-locating a template declaration (`workload.toml`) with its control files.
-`init` stamps a catalog bundle into `/etc/workloads.d/<name>.toml`; `duplicate`
+`init` stamps a catalog bundle into `/etc/workloads.d/<name>/workload.toml`; `duplicate`
 copies a live workload. Neither touches `/var` or the boot path — they only
 write the authoritative `/etc` declaration. Control files are *not* copied:
 the new TOML's resolved `bundle` falls through to the shared `/usr` tree until
@@ -14,10 +14,11 @@ import difflib
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
 import tomllib
 
-from workload_lib import validate_workload_name, WORKLOAD_BUNDLES_DIR
+from workload_lib import validate_workload_name, workload_config_path, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -161,9 +162,45 @@ def cmd_catalog(args, manager: WorkloadManager):
 # ---------------------------------------------------------------------------
 
 def cmd_init(args, manager: WorkloadManager):
-    """Stamp a catalog bundle into /etc/workloads.d/<name>.toml."""
+    """Stamp a catalog bundle into /etc/workloads.d/<name>/workload.toml."""
     require_root()
-    bundle = args.bundle
+
+    scratch = getattr(args, "scratch", None)
+    bundle = getattr(args, "bundle", None)
+
+    if scratch and bundle:
+        print("Error: --scratch and a bundle positional are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
+    if scratch:
+        name = scratch
+        try:
+            validate_workload_name(name)
+        except ValueError as e:
+            print(f"Error: invalid workload name {name!r}: {e}", file=sys.stderr)
+            sys.exit(1)
+        stub = (
+            f'[workload]\n'
+            f'name = "{name}"\n'
+            f'enabled = false\n'
+            f'\n'
+            f'[container]\n'
+            f'image = "CHANGE_ME"\n'
+            f'pull = "newer"\n'
+        )
+        dst = workload_config_path(WORKLOAD_DIR, name)
+        if dst.parent.exists():
+            print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
+            sys.exit(1)
+        dst.parent.mkdir()
+        if not _write_new(dst, stub):
+            print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
+            sys.exit(1)
+        print(f"✓ Created scratch workload '{name}'")
+        print(f"  {dst}")
+        _post_write_report(name, manager)
+        return
+
     name = args.as_name or bundle
 
     # Validate the bundle before it's pathed (it's a directory name); the
@@ -188,12 +225,13 @@ def cmd_init(args, manager: WorkloadManager):
         _suggest_bundle(bundle)
         sys.exit(1)
 
-    dst = WORKLOAD_DIR / f"{name}.toml"
-    if dst.exists():
+    dst = workload_config_path(WORKLOAD_DIR, name)
+    if dst.parent.exists():
         print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
         print(f"  choose another name with --as, or edit the existing one", file=sys.stderr)
         sys.exit(1)
 
+    dst.parent.mkdir()
     text = src.read_text()
     text = _set_workload_field(text, "name", toml_string(name))
     # Only pin `bundle` when the instance name diverges from the bundle, so
@@ -221,10 +259,10 @@ def cmd_duplicate(args, manager: WorkloadManager):
     new_name = args.new
 
     # Validate BOTH names before either becomes a path. src_name flows into
-    # `WORKLOAD_DIR / f"{src_name}.toml"` and is read_text()'d as root (directly
-    # and in the tomllib fallback below), so a `../`-laden source would read an
-    # arbitrary .toml from outside the workloads dir — hold it to the same bar
-    # as new_name even though it's only ever read.
+    # `WORKLOAD_DIR / src_name / "workload.toml"` and is read_text()'d as root
+    # (directly and in the tomllib fallback below), so a `../`-laden source would
+    # read an arbitrary workload.toml from outside the workloads dir — hold it to
+    # the same bar as new_name even though it's only ever read.
     try:
         validate_workload_name(src_name)
     except ValueError as e:
@@ -237,13 +275,13 @@ def cmd_duplicate(args, manager: WorkloadManager):
         print(f"Error: invalid workload name {new_name!r}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    src_path = WORKLOAD_DIR / f"{src_name}.toml"
+    src_path = workload_config_path(WORKLOAD_DIR, src_name)
     if not src_path.exists():
         print(f"Error: no workload '{src_name}' in {WORKLOAD_DIR}", file=sys.stderr)
         sys.exit(1)
 
-    dst_path = WORKLOAD_DIR / f"{new_name}.toml"
-    if dst_path.exists():
+    dst_path = workload_config_path(WORKLOAD_DIR, new_name)
+    if dst_path.parent.exists():
         print(f"Error: workload '{new_name}' already exists: {dst_path}", file=sys.stderr)
         sys.exit(1)
 
@@ -259,6 +297,7 @@ def cmd_duplicate(args, manager: WorkloadManager):
     text = src_path.read_text()
     text = _set_workload_field(text, "name", toml_string(new_name))
     text = _set_workload_field(text, "bundle", toml_string(resolved_bundle))
+    dst_path.parent.mkdir()
     if not _write_new(dst_path, text):
         print(f"Error: workload '{new_name}' already exists: {dst_path}", file=sys.stderr)
         sys.exit(1)
@@ -336,3 +375,47 @@ def _post_write_report(name: str, manager: WorkloadManager) -> None:
     print("Next steps:")
     print(f"  Edit:    workloadctl edit {name}")
     print(f"  Enable:  workloadctl enable {name}")
+
+
+# ---------------------------------------------------------------------------
+# install — promote a local workload directory into /etc/workloads.d/
+# ---------------------------------------------------------------------------
+
+def cmd_install(args, manager: WorkloadManager):
+    """Copy a workload directory into /etc/workloads.d/<name>/ (from workload.toml name)."""
+    require_root()
+    src = Path(args.src).resolve()
+
+    toml_path = src / "workload.toml"
+    if not toml_path.exists():
+        print(f"Error: no workload.toml found in {src}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = tomllib.loads(toml_path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        print(f"Error: workload.toml parse error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    name = data.get("workload", {}).get("name", "")
+    if not name:
+        print("Error: workload.toml has no [workload] name field", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        validate_workload_name(name)
+    except ValueError as e:
+        print(f"Error: invalid workload name {name!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    dst_dir = workload_config_path(WORKLOAD_DIR, name).parent
+    if dst_dir.exists():
+        print(f"Error: workload '{name}' already exists: {dst_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    shutil.copytree(src, dst_dir, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+
+    dst = workload_config_path(WORKLOAD_DIR, name)
+    print(f"✓ Installed '{name}' from {src}")
+    print(f"  {dst}")
+    _post_write_report(name, manager)

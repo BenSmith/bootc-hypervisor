@@ -3,7 +3,7 @@
 Workload service file generator for dynamic rootless workload provisioning.
 Called by workload-generate.service (a oneshot that runs early in boot).
 
-Reads workload configs from /etc/workloads.d/*.toml and generates:
+Reads workload configs from /etc/workloads.d/*/workload.toml and generates:
 - systemd-sysusers configs for user creation
 - systemd service files for rootless podman execution
 
@@ -1682,7 +1682,7 @@ def main():
     written_workloads = []
 
     # Process each workload config
-    config_files = list(WORKLOAD_CONFIG_DIR.glob("*.toml"))
+    config_files = list(WORKLOAD_CONFIG_DIR.glob("*/workload.toml"))
     log_msg(f"Found {len(config_files)} config files")
 
     # Pre-scan to build the set of all enabled workload names; used below to

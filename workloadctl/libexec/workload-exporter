@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, normalize_containers, workload_home_dir, workload_root_dir
+from workload_lib import QMPClient, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -58,7 +58,7 @@ def get_enabled_workloads():
     if not WORKLOAD_CONFIG_DIR.is_dir():
         return workloads
 
-    for toml_path in sorted(WORKLOAD_CONFIG_DIR.glob("*.toml")):
+    for _, toml_path in iter_workloads(WORKLOAD_CONFIG_DIR):
         try:
             if toml_path.resolve() == Path("/dev/null"):
                 continue

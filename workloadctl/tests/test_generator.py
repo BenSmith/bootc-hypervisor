@@ -46,7 +46,8 @@ def run_generator(config_dir, services_dir, sysusers_dir):
 
 def write_config(config_dir, name, toml_content):
     """Write a TOML config file to the config directory."""
-    path = Path(config_dir) / f"{name}.toml"
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
     path.write_text(textwrap.dedent(toml_content))
     return path
 

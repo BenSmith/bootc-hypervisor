@@ -66,8 +66,8 @@ class TestRestoreNameValidation(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 self._restore(archive)
             self.assertNotEqual(cm.exception.code, 0)
-        # Nothing escaped the sandbox: no stray .toml written above WORKLOAD_DIR.
-        self.assertEqual(list(self.etc.glob("*.toml")), [])
+        # Nothing escaped the sandbox: no stray workload.toml written above WORKLOAD_DIR.
+        self.assertEqual(list(self.etc.glob("*/workload.toml")), [])
         self.assertFalse((self.tmp / "etc" / "cron.d").exists())
 
     def test_empty_name_rejected(self):

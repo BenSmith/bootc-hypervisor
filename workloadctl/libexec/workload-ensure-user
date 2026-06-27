@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir,
@@ -40,7 +40,7 @@ def log(msg):
 
 def load_config(name):
     """Load and return the TOML config for a workload."""
-    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    config_path = workload_config_path(WORKLOAD_CONFIG_DIR, name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
@@ -969,7 +969,7 @@ def main():
         try:
             build_cloud_init_iso(
                 pw, config, name,
-                config_path=WORKLOAD_CONFIG_DIR / f"{name}.toml",
+                config_path=workload_config_path(WORKLOAD_CONFIG_DIR, name),
             )
         except Exception as e:
             log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")

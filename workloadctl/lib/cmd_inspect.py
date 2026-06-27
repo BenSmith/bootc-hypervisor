@@ -412,8 +412,8 @@ def _collect_control_files(config) -> list[dict]:
     shows). For each, resolves the winning source — "etc" (override), "usr"
     (shipped default), or "abs" (a verbatim absolute path) — and whether the
     resolved file exists. `workload.toml` is
-    excluded: the authoritative declaration is `/etc/<name>.toml`, never an
-    override target.
+    excluded: the authoritative declaration is `/etc/workloads.d/<name>/workload.toml`,
+    never an override target.
     """
     names: set[str] = set()
     for d in (config.override_dir, config.bundle_dir):

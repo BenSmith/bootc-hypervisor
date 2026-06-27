@@ -1652,7 +1652,7 @@ ports = ["8080:80", "8443:443"]
 # - --init (catatonit) as PID 1 for zombie reaping (skipped when container.systemd is set)
 #
 # File Locations:
-# - Workload configs: /etc/workloads.d/*.toml
+# - Workload configs: /etc/workloads.d/*/workload.toml
 # - Generated sysusers configs: /run/sysusers.d/workload-{name}.conf
 # - Generated service files: /run/systemd/system/workload-{name}.service
 # - User home directory: /var/lib/workloads/{name}

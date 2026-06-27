@@ -72,7 +72,8 @@ class _WlDir:
         self._tmp = tempfile.mkdtemp()
         wl_path = Path(self._tmp)
         for name, text in self._tomls.items():
-            (wl_path / f"{name}.toml").write_text(text)
+            (wl_path / name).mkdir(exist_ok=True)
+            (wl_path / name / "workload.toml").write_text(text)
         self._patch = patch.object(workloadctl_core, "WORKLOAD_DIR", wl_path)
         self._patch.start()
         return wl_path

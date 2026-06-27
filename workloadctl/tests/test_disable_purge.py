@@ -64,7 +64,8 @@ class _Env:
         self._wl_tmp = tempfile.mkdtemp()
         self._env_tmp = tempfile.mkdtemp()
         wl_path = Path(self._wl_tmp)
-        (wl_path / f'{self._name}.toml').write_text(self._toml)
+        (wl_path / self._name).mkdir()
+        (wl_path / self._name / 'workload.toml').write_text(self._toml)
         self._wl_patch = patch.object(workloadctl_core, 'WORKLOAD_DIR', wl_path)
         self._wl_patch.start()
         self._env_patch = patch.dict(

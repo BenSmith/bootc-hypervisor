@@ -46,7 +46,8 @@ def run_write_env(name, config_dir, creds_dir, env_dir):
 
 
 def write_config(config_dir, name, toml_content):
-    path = Path(config_dir) / f"{name}.toml"
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
     path.write_text(textwrap.dedent(toml_content))
     return path
 

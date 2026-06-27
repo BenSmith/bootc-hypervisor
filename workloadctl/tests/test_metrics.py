@@ -105,7 +105,8 @@ def scrape(config_dir):
 
 
 def write_config(config_dir, name, toml_content):
-    path = Path(config_dir) / f"{name}.toml"
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
     path.write_text(textwrap.dedent(toml_content))
     return path
 
@@ -570,7 +571,8 @@ class TestMetricsLiveCollection(unittest.TestCase):
             self.assertIn('workload="v1"', prom1)
 
             # Remove v1, add v2 — same running server.
-            (Path(self.config_dir) / "v1.toml").unlink()
+            import shutil as _shutil
+            _shutil.rmtree(Path(self.config_dir) / "v1")
             write_config(self.config_dir, "v2", """\
                 [workload]
                 name = "v2"

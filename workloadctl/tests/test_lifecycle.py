@@ -58,7 +58,8 @@ def _run_generator(config_dir, services_dir, sysusers_dir):
 
 
 def _write_cfg(config_dir, name, toml_content):
-    path = Path(config_dir) / f"{name}.toml"
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
     path.write_text(textwrap.dedent(toml_content))
     return path
 
@@ -143,7 +144,8 @@ image = "example.com/guest:latest"
 def _make_config(toml: str, name: str) -> WorkloadConfig:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / f'{name}.toml').write_text(toml)
+        (p / name).mkdir()
+        (p / name / 'workload.toml').write_text(toml)
         with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
             return WorkloadConfig(name)
 
@@ -428,7 +430,8 @@ class _CfgDir:
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         p = Path(self._tmp)
-        (p / f'{self._name}.toml').write_text(self._toml)
+        (p / self._name).mkdir()
+        (p / self._name / 'workload.toml').write_text(self._toml)
         self._patcher = patch.object(workloadctl_core, '_get_workload_dir', return_value=p)
         self._patcher.start()
         return workloadctl_core.WorkloadConfig(self._name)

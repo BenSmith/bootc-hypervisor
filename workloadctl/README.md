@@ -64,7 +64,8 @@ workloadctl logs webserver
 Or write a TOML config directly:
 
 ```bash
-sudo tee /etc/workloads.d/webserver.toml <<'EOF'
+sudo mkdir -p /etc/workloads.d/webserver
+sudo tee /etc/workloads.d/webserver/workload.toml <<'EOF'
 [workload]
 name = "webserver"
 enabled = true
@@ -92,7 +93,7 @@ Each workload gets:
 
 At boot, a tiny shell systemd generator emits an early-boot oneshot service
 (`workload-generate.service`) that runs the Python `workload-generate` script.
-The script reads `/etc/workloads.d/*.toml` and writes per-workload unit files
+The script reads `/etc/workloads.d/*/workload.toml` and writes per-workload unit files
 into `/run/systemd/system/` before `basic.target` is reached. The Python work
 is kept out of generator context because systemd expects generators to be
 fast and minimal (see `systemd.generator(7)`) — see `docs/workloads.md` for

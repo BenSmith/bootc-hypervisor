@@ -45,7 +45,8 @@ class TestControlFileResolution(unittest.TestCase):
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'
         body += '\n[container]\nimage = "localhost/x:latest"\n' + extra
-        (self.etc / f"{name}.toml").write_text(body)
+        (self.etc / name).mkdir(exist_ok=True)
+        (self.etc / name / "workload.toml").write_text(body)
         return core.WorkloadConfig(name)
 
     def _ship(self, bundle: str, fname: str, content: str = "shipped"):

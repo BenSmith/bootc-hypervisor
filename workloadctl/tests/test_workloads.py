@@ -250,7 +250,9 @@ class TestWorkloadGeneration(unittest.TestCase):
             config_copy = _deep_copy_config(config)
             config_copy.setdefault("workload", {})["enabled"] = True
             toml_text = _config_to_toml(config_copy)
-            (Path(cls.config_dir) / filename).write_text(toml_text)
+            name = filename.removesuffix(".toml")
+            (Path(cls.config_dir) / name).mkdir(exist_ok=True)
+            (Path(cls.config_dir) / name / "workload.toml").write_text(toml_text)
             cls.configs[filename] = config_copy
 
         cls.gen_result = run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
@@ -534,7 +536,9 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
             config_copy = _deep_copy_config(config)
             config_copy.setdefault("workload", {})["enabled"] = True
             toml_text = _config_to_toml(config_copy)
-            (Path(cls.config_dir) / filename).write_text(toml_text)
+            wl_name = filename.removesuffix(".toml")
+            (Path(cls.config_dir) / wl_name).mkdir(exist_ok=True)
+            (Path(cls.config_dir) / wl_name / "workload.toml").write_text(toml_text)
 
         run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
 

@@ -170,7 +170,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
              mock.patch.object(self.mod.shutil, "rmtree"):
             self.mod.build_cloud_init_iso(
                 self.pw, config, name,
-                config_path=self.config_dir / f"{name}.toml",
+                config_path=self.config_dir / name / "workload.toml",
             )
 
     def _iso_path(self, name: str = "myvm") -> Path:

@@ -152,10 +152,12 @@ class RotateTest(SecretTestBase):
 
     def test_detects_affected_workloads_via_env_ref(self):
         self._seed_cred("api-key")
-        (self.wl_dir / "web.toml").write_text(
+        (self.wl_dir / "web").mkdir()
+        (self.wl_dir / "web" / "workload.toml").write_text(
             '[workload]\nname = "web"\n[container]\nimage = "x"\n'
             '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
-        (self.wl_dir / "other.toml").write_text(
+        (self.wl_dir / "other").mkdir()
+        (self.wl_dir / "other" / "workload.toml").write_text(
             '[workload]\nname = "other"\n[container]\nimage = "y"\n')
 
         # Stub the encrypt + any restart so we only assert the detection output.

@@ -45,7 +45,7 @@ class CatalogTestBase(unittest.TestCase):
         self.manager = WorkloadManager()
 
     def _read(self, name):
-        return tomllib.loads((self.tmp / f"{name}.toml").read_text())
+        return tomllib.loads((self.tmp / name / "workload.toml").read_text())
 
 
 class TestDiscovery(CatalogTestBase):
@@ -112,6 +112,46 @@ class TestInit(CatalogTestBase):
             cmd_catalog.cmd_init(_ns(bundle="../etc/evil", as_name="x"), self.manager)
 
 
+class TestInitScratch(CatalogTestBase):
+    def test_scratch_writes_stub_with_interpolated_name(self):
+        cmd_catalog.cmd_init(_ns(scratch="coolapp", bundle=None, as_name=None), self.manager)
+        dst = self.tmp / "coolapp" / "workload.toml"
+        self.assertTrue(dst.exists())
+        data = tomllib.loads(dst.read_text())
+        self.assertEqual(data["workload"]["name"], "coolapp")
+        self.assertNotIn("bundle", data["workload"])
+        self.assertEqual(data["container"]["image"], "CHANGE_ME")
+        self.assertEqual(data["container"]["pull"], "newer")
+
+    def test_scratch_name_is_interpolated_not_literal(self):
+        # Use a distinct name so a hardcoded "myapp" or "{name}" stub is caught.
+        cmd_catalog.cmd_init(_ns(scratch="myrealapp", bundle=None, as_name=None), self.manager)
+        text = (self.tmp / "myrealapp" / "workload.toml").read_text()
+        self.assertIn('name = "myrealapp"', text)
+        self.assertNotIn('"myapp"', text)
+        self.assertNotIn('"{name}"', text)
+
+    def test_scratch_and_bundle_positional_rejected(self):
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch="coolapp", bundle="alloy", as_name=None), self.manager)
+
+    def test_scratch_and_bundle_rejection_message_contains_mutually(self):
+        import io
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr", buf):
+                cmd_catalog.cmd_init(
+                    _ns(scratch="coolapp", bundle="alloy", as_name=None), self.manager)
+        self.assertIn("mutually", buf.getvalue())
+
+    def test_scratch_duplicate_name_exits(self):
+        cmd_catalog.cmd_init(_ns(scratch="coolapp", bundle=None, as_name=None), self.manager)
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch="coolapp", bundle=None, as_name=None), self.manager)
+
+
 class TestDuplicate(CatalogTestBase):
     def test_duplicate_resolves_bundle_to_source_name(self):
         cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
@@ -153,7 +193,7 @@ class TestDuplicate(CatalogTestBase):
                 _ns(source="webproxy-demo", new="webproxy-b"), self.manager)
         out = buf.getvalue()
         # The copy was written …
-        self.assertTrue((self.tmp / "webproxy-b.toml").exists())
+        self.assertTrue((self.tmp / "webproxy-b" / "workload.toml").exists())
         # … and the multi-container image lint named the source as a co-user.
         self.assertIn("image", out.lower())
         self.assertIn("webproxy-demo", out)
@@ -161,7 +201,8 @@ class TestDuplicate(CatalogTestBase):
     def test_duplicate_lints_shared_secrets(self):
         # A verbatim copy still references the same name-keyed credential as its
         # source; the lint should surface it (rotate-one-without-the-other).
-        (self.tmp / "withsec.toml").write_text(
+        (self.tmp / "withsec").mkdir(exist_ok=True)
+        (self.tmp / "withsec" / "workload.toml").write_text(
             '[workload]\nname = "withsec"\nbundle = "alloy"\nenabled = false\n'
             '[container]\nimage = "localhost/x:latest"\n'
             '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
@@ -171,6 +212,75 @@ class TestDuplicate(CatalogTestBase):
         out = buf.getvalue()
         self.assertIn("secret", out.lower())
         self.assertIn("api-key", out)
+
+
+class TestInstall(CatalogTestBase):
+    def _make_src(self, name: str, dir_name: str | None = None) -> Path:
+        """Write a minimal workload dir with the given [workload].name."""
+        src_name = dir_name or name
+        src = Path(self.enterContext(__import__("tempfile").TemporaryDirectory())) / src_name
+        src.mkdir()
+        (src / "workload.toml").write_text(
+            f'[workload]\nname = "{name}"\nenabled = false\n'
+            '[container]\nimage = "docker.io/library/hello-world:latest"\npull = "newer"\n'
+        )
+        return src
+
+    def test_install_copies_to_name_derived_destination(self):
+        src = self._make_src("myapp")
+        cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+        dst = self.tmp / "myapp" / "workload.toml"
+        self.assertTrue(dst.exists())
+        data = self._read("myapp")
+        self.assertEqual(data["workload"]["name"], "myapp")
+
+    def test_install_destination_derived_from_toml_name_not_dir_name(self):
+        # Source directory is called "somedir" but workload.toml declares name = "theapp".
+        src = self._make_src("theapp", dir_name="somedir")
+        cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+        # Should install under "theapp", not "somedir".
+        self.assertTrue((self.tmp / "theapp" / "workload.toml").exists())
+        self.assertFalse((self.tmp / "somedir").exists())
+
+    def test_install_duplicate_name_exits(self):
+        src = self._make_src("myapp")
+        cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+
+    def test_install_missing_toml_exits(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_install(_ns(src=d), self.manager)
+
+    def test_install_invalid_toml_exits(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "workload.toml").write_text("not valid toml ][")
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_install(_ns(src=d), self.manager)
+
+    def test_install_copies_extra_files_and_preserves_mode(self):
+        import stat
+        src = self._make_src("withfiles")
+        setup = src / "setup.sh"
+        setup.write_text("#!/bin/sh\necho hi\n")
+        setup.chmod(0o755)
+        cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+        dst_setup = self.tmp / "withfiles" / "setup.sh"
+        self.assertTrue(dst_setup.exists())
+        self.assertTrue(dst_setup.stat().st_mode & stat.S_IXUSR)
+
+    def test_install_excludes_git_and_pycache(self):
+        src = self._make_src("cleanapp")
+        (src / ".git").mkdir()
+        (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        (src / "__pycache__").mkdir()
+        cmd_catalog.cmd_install(_ns(src=str(src)), self.manager)
+        dst = self.tmp / "cleanapp"
+        self.assertFalse((dst / ".git").exists())
+        self.assertFalse((dst / "__pycache__").exists())
 
 
 class CatalogListTest(CatalogTestBase):

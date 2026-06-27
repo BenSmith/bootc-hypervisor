@@ -66,7 +66,7 @@ class CreateTest(unittest.TestCase):
         return code
 
     def _toml(self, name):
-        return tomllib.loads((self.tmp / f"{name}.toml").read_text())
+        return tomllib.loads((self.tmp / name / "workload.toml").read_text())
 
     # --- rejection paths ---------------------------------------------------
 
@@ -74,10 +74,11 @@ class CreateTest(unittest.TestCase):
         code = self._create(name="../evil", image="nginx")
         self.assertEqual(code, 1)
         self.assertIn("Error", self._err)
-        self.assertFalse(list(self.tmp.glob("*.toml")))  # nothing written
+        self.assertFalse(list(self.tmp.glob("*/workload.toml")))  # nothing written
 
     def test_rejects_duplicate(self):
-        (self.tmp / "web.toml").write_text("[workload]\nname = \"web\"\n")
+        (self.tmp / "web").mkdir()
+        (self.tmp / "web" / "workload.toml").write_text("[workload]\nname = \"web\"\n")
         code = self._create(name="web", image="nginx")
         self.assertEqual(code, 1)
         self.assertIn("already exists", self._err)
@@ -160,7 +161,8 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workloadctl_core, "WORKLOAD_DIR", self.tmp))
-        (self.tmp / "clitest-vmguard.toml").write_text(_VM_TOML)
+        (self.tmp / "clitest-vmguard").mkdir()
+        (self.tmp / "clitest-vmguard" / "workload.toml").write_text(_VM_TOML)
         # Make the workload "user" resolvable so the user_exists path runs.
         fake_pw = types.SimpleNamespace(
             pw_uid=10001, pw_gid=10001, pw_dir=str(self.tmp / "home"))
@@ -191,6 +193,44 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         # No check should reference the "(vm)" image sentinel.
         joined = " ".join(c.get("message", "") for c in result["checks"])
         self.assertNotIn("(vm)", joined)
+
+
+class CleanupOverrideDirTest(unittest.TestCase):
+    """_cleanup_override_dir must not delete the instance dir when workload.toml
+    lives inside it (post-subdir flip).  A naive rmdir-to-base would evict the
+    config, disabling the workload silently.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workloadctl_core, "WORKLOAD_DIR", self.tmp))
+        # Seed a workload with the new subdir layout.
+        instance_dir = self.tmp / "myapp"
+        instance_dir.mkdir()
+        (instance_dir / "workload.toml").write_text(
+            '[workload]\nname = "myapp"\nenabled = true\n'
+            '\n[container]\nimage = "localhost/myapp:latest"\n'
+        )
+        self.instance_dir = instance_dir
+
+    def test_workload_toml_survives_cleanup(self):
+        """Dropping an override file from override_dir must leave workload.toml
+        (and the dir itself) intact — the OSError on rmdir is the correct stop."""
+        config = WorkloadConfig("myapp")
+
+        # Plant a control-file override directly in override_dir, then remove
+        # it (simulating what cmd_admin does before calling _cleanup_override_dir).
+        override_file = self.instance_dir / "Containerfile"
+        override_file.write_text("FROM scratch\n")
+        override_file.unlink()
+
+        cmd_admin._cleanup_override_dir(config, override_file)
+
+        # workload.toml must survive — rmdir hit OSError and stopped correctly.
+        self.assertTrue((self.instance_dir / "workload.toml").exists(),
+                        "workload.toml was deleted by _cleanup_override_dir")
+        self.assertTrue(self.instance_dir.exists(),
+                        "instance dir was deleted by _cleanup_override_dir")
 
 
 if __name__ == "__main__":

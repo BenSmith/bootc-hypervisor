@@ -24,6 +24,7 @@
 | [`incant`](#incant) | Raw podman command as the workload user, or QMP command for VMs |
 | [`info`](#info) | Show config, user, UID, image, ports, volumes (`--files` for control-file view) |
 | [`init`](#init) | Instantiate a catalog bundle into `/etc/workloads.d/` |
+| [`install`](#install) | Promote a local workload directory into `/etc/workloads.d/` |
 | [`list`](#list) | List all workloads and their enabled/running state |
 | [`logs`](#logs) | View workload logs via `journalctl` |
 | [`reboot`](#reboot) | Soft-reboot a workload (systemd re-exec inside container or VM) |
@@ -88,13 +89,14 @@ workloadctl catalog [--json]
 
 ### `init`
 
-Instantiate a catalog bundle into `/etc/workloads.d/<name>.toml`.
+Instantiate a catalog bundle into `/etc/workloads.d/<name>/workload.toml`.
 
 ```
 sudo workloadctl init <bundle> [--as <name>]
+sudo workloadctl init --scratch <name>
 ```
 
-Stamps the bundle's template `workload.toml` at `/etc/workloads.d/<name>.toml`.
+Stamps the bundle's template `workload.toml` at `/etc/workloads.d/<name>/workload.toml`.
 Control files (Containerfile, `setup.sh`, `policy.cil`, …) are **not** copied —
 they're resolved from `/usr/share/workloadctl/workloads/<bundle>/` at build/enable
 time and automatically inherit package upgrades. Use `workloadctl edit <name> <file>`
@@ -105,6 +107,11 @@ from the bundle, `init` records `[workload] bundle = "<bundle>"` so the new TOML
 control-file lookups still resolve to the source bundle's tree.
 
 See [Bundle-based approach](workloads.md#bundle-approach) for typical workflows.
+
+`--scratch <name>` creates a self-contained stub with no bundle backing — for novel
+workloads that aren't shipped as bundles. The generated TOML has no `bundle` field and
+resolves all control files from `/etc/workloads.d/<name>/` only. Mutually exclusive
+with the `<bundle>` positional.
 
 [↑ top](#workloadctl-command-reference)
 
@@ -125,9 +132,29 @@ another enabled workload — which you resolve by editing the copy before enabli
 
 [↑ top](#workloadctl-command-reference)
 
+### `install`
+
+Promote a local workload directory into `/etc/workloads.d/<name>/`. The
+destination name is derived from `[workload].name` in the source `workload.toml`,
+not the source directory name.
+
+```
+sudo workloadctl install <src>
+```
+
+| Argument | Description |
+|---|---|
+| `src` | Path to a directory containing `workload.toml` |
+
+The entire directory is copied (`.git` and `__pycache__` excluded, file modes
+preserved). Errors if a workload with that name already exists in
+`/etc/workloads.d/`. The source directory is never modified.
+
+[↑ top](#workloadctl-command-reference)
+
 ### `create`
 
-Scaffold a from-scratch workload config (no bundle) at `/etc/workloads.d/<name>.toml`.
+Scaffold a from-scratch workload config (no bundle) at `/etc/workloads.d/<name>/workload.toml`.
 
 ```
 workloadctl create <name> --image IMAGE [OPTIONS]
