@@ -61,35 +61,7 @@
 
 ### Custom workloads and user-defined bundles
 
-The current creation story only covers shipped bundles. Three related gaps:
-
-1. **Novel single-instance workload** — `workloadctl init` only works from
-   shipped bundles. Add `workloadctl init --scratch <name>` to stamp a minimal
-   stub TOML (and empty override dir) into `/etc/workloads.d/` for workloads
-   not derived from any bundle. Individual control files placed there already
-   work — the `if bundle_dir.is_dir()` guard in `materialize_build_context` is
-   optional, not required.
-
-2. **Iterating without root** — developing a new bundle requires root to write
-   to `/etc/workloads.d/`. Users should be able to develop and VC a bundle in
-   any writable directory, then promote it:
-
-   ```
-   sudo workloadctl install ./my-bundles/myapp/
-   ```
-
-   Reads the name from `workload.toml` inside the directory, copies to
-   `/etc/workloads.d/`. After that the workload has the normal lifecycle
-   (`build`, `enable`, `disable`, etc.). Re-run `install` to update from source.
-   Source stays under VC; `/etc` is the deployed state.
-
-3. **Multi-instance sharing** — two instances of a custom workload can't share
-   a bundle (Containerfile, setup.sh, policy.cil) because `bundle_dir` only
-   resolves into `/usr`. Fix: make `bundle_dir` also check
-   `/etc/workloads.d/.bundles/<bundle>/`, the same pattern `resolve_control_file`
-   already uses for individual file overrides. Then `workloadctl install` could
-   target `.bundles/`, and `workloadctl init my-bundle --as instance2` would
-   work against a user-defined bundle without an image rebuild.
+→ See [`workloadctl/docs/wip/custom-workloads.md`](../workloadctl/docs/wip/custom-workloads.md)
 
 ---
 
