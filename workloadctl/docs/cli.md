@@ -94,9 +94,17 @@ Instantiate a catalog bundle into `/etc/workloads.d/<name>.toml`.
 sudo workloadctl init <bundle> [--as <name>]
 ```
 
-`--as` names the instance (default: the bundle name). When the instance name
-diverges from the bundle, `init` records `[workload] bundle = "<bundle>"` so the
-copy's control-file lookups still resolve to the source bundle's tree.
+Stamps the bundle's template `workload.toml` at `/etc/workloads.d/<name>.toml`.
+Control files (Containerfile, `setup.sh`, `policy.cil`, …) are **not** copied —
+they're resolved from `/usr/share/workloadctl/workloads/<bundle>/` at build/enable
+time and automatically inherit package upgrades. Use `workloadctl edit <name> <file>`
+to override individual control files copy-on-write.
+
+`--as` names the instance (default: the bundle name). When the instance name diverges
+from the bundle, `init` records `[workload] bundle = "<bundle>"` so the new TOML's
+control-file lookups still resolve to the source bundle's tree.
+
+See [Bundle-based approach](workloads.md#bundle-approach) for typical workflows.
 
 [↑ top](#workloadctl-command-reference)
 

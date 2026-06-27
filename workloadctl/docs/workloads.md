@@ -28,15 +28,80 @@
 
 ## Quick Start
 
-There are three ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
+There are four ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
 
 | Approach | Best for |
 |---|---|
-| **`workloadctl create`** (below) | Interactive use on a running system |
-| **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or working from an example |
+| **[From a bundle (`init`)](#bundle-approach)** | Enabling a shipped workload (alloy, jellyfin, vncdesktop, …) |
+| **`workloadctl create`** (below) | From-scratch workload with no bundle |
+| **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or adapting an example |
 | **[bootc image](#bootc-approach)** | Baking workloads into an immutable OS image |
 
 See [cli.md](cli.md) for the full command reference.
+
+---
+
+### Bundle-based approach (`init`) {#bundle-approach}
+
+Shipped workloads arrive as **bundles** — directories under
+`/usr/share/workloadctl/workloads/<bundle>/` that pair a template `workload.toml`
+with their control files (Containerfile, `setup.sh`, `policy.cil`, etc.). List
+what's available:
+
+```bash
+workloadctl catalog
+```
+
+Instantiate a bundle into `/etc/workloads.d/`:
+
+```bash
+sudo workloadctl init alloy
+```
+
+This stamps the bundle's template TOML at `/etc/workloads.d/alloy.toml`. Control
+files are **not** copied — they're resolved from the `/usr` bundle tree at
+build/enable time, so the instance picks up changes automatically when the package
+upgrades.
+
+**Typical flows:**
+
+*Pull-only bundle (image is pre-built):*
+```bash
+sudo workloadctl init alloy
+sudo workloadctl edit alloy        # set CENTRAL_HOST, HOST_LABEL, etc.
+sudo workloadctl enable alloy
+```
+
+*Build-from-source bundle:*
+```bash
+sudo workloadctl init vncdesktop-sway
+sudo workloadctl edit vncdesktop-sway   # configure as needed
+sudo workloadctl build vncdesktop-sway
+sudo workloadctl enable vncdesktop-sway
+```
+
+*Override a control file (copy-on-write, like `systemctl edit`):*
+```bash
+sudo workloadctl init vncdesktop-sway
+sudo workloadctl edit vncdesktop-sway Containerfile   # seeds from /usr, opens $EDITOR
+sudo workloadctl build vncdesktop-sway
+sudo workloadctl enable vncdesktop-sway
+```
+
+The override is kept only if you change it — a byte-identical file is discarded so
+it never freezes the bundle's upgrade tracking. Use `info --files` to see the merged
+control-file view (which source wins for each file). See [`init`](cli.md#init) and
+[`edit`](cli.md#edit) in the command reference.
+
+**Multiple instances of the same bundle:**
+
+```bash
+sudo workloadctl init alloy --as alloy-lan
+```
+
+`--as` names the instance; `init` records `[workload] bundle = "alloy"` in the new
+TOML so control-file lookups still resolve to the source bundle. Both instances share
+the same Containerfile and support scripts; each has its own TOML, user, and state.
 
 ---
 
