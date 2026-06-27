@@ -44,7 +44,7 @@ def log(msg: str):
 
 
 def load_config(name: str) -> dict:
-    config_path = workload_config_path(WORKLOAD_CONFIG_DIR, name)
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 

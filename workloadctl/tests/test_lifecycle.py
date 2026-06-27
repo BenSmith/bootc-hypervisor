@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, call, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
 import substrate
@@ -146,7 +147,7 @@ def _make_config(toml: str, name: str) -> WorkloadConfig:
         p = Path(d)
         (p / name).mkdir()
         (p / name / 'workload.toml').write_text(toml)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return WorkloadConfig(name)
 
 
@@ -432,7 +433,7 @@ class _CfgDir:
         p = Path(self._tmp)
         (p / self._name).mkdir()
         (p / self._name / 'workload.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, '_get_workload_dir', return_value=p)
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p)
         self._patcher.start()
         return workloadctl_core.WorkloadConfig(self._name)
 

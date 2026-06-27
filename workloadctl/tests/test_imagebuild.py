@@ -28,6 +28,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import workload_lib               # noqa: E402
 import workloadctl_core as core   # noqa: E402
 import imagebuild                 # noqa: E402
 import cmd_lifecycle              # noqa: E402
@@ -47,7 +48,7 @@ class BuildBase(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.usr, ignore_errors=True))
         for p in (
             mock.patch.object(core, "WORKLOAD_BUNDLES_DIR", self.usr),
-            mock.patch.object(core, "WORKLOAD_DIR", self.etc),
+            mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc),
             mock.patch.object(cmd_lifecycle, "require_root", lambda: None),
         ):
             p.start()

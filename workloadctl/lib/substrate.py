@@ -1386,10 +1386,9 @@ def _backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
 
 def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -> None:
     """Internal backup implementation shared by container and VM paths."""
-    from workload_lib import WORKLOAD_CONFIG_DIR, workload_config_path
-    workload_dir = WORKLOAD_CONFIG_DIR
+    from workload_lib import workload_config_path
     name = config.name
-    config_path = workload_config_path(workload_dir, name)
+    config_path = workload_config_path(name)
     service_name = config.service_name
 
     service_was_active = subprocess.run(

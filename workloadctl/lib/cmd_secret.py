@@ -16,13 +16,13 @@ import tomllib
 from workload_lib import (
     auto_detect_credentials,
     iter_workloads,
+    workload_config_dir,
 )
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     restart_workload_service,
     require_root,
-    WORKLOAD_DIR,
 )
 
 
@@ -223,7 +223,7 @@ def cmd_secret(args, manager: WorkloadManager):
         # Find workloads using this credential (via secrets.files or ${SECRET:name} env refs)
         affected_workloads = []
         cred_env_pattern = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
-        for _, workload_file in iter_workloads(WORKLOAD_DIR):
+        for _, workload_file in iter_workloads():
             try:
                 with open(workload_file, "rb") as f:
                     wl_config = tomllib.load(f)
@@ -381,7 +381,7 @@ def cmd_secret(args, manager: WorkloadManager):
 
         # Suggest restart if workloads use this credential
         affected = []
-        for _, wl_file in iter_workloads(WORKLOAD_DIR):
+        for _, wl_file in iter_workloads():
             try:
                 with open(wl_file, "rb") as f:
                     wl_config = tomllib.load(f)

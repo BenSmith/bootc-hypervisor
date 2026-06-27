@@ -22,6 +22,18 @@ from pathlib import Path
 # Config directory (override with WORKLOAD_CONFIG_DIR env var for testing)
 WORKLOAD_CONFIG_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d"))
 
+
+def workload_config_dir() -> Path:
+    """Canonical call-time reader for the workloads config dir. Resolves
+    WORKLOAD_CONFIG_DIR against this module at call time, so a single
+    patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", tmp) is honored everywhere.
+    Also re-checks the env var at call time so in-process module loaders that
+    set WORKLOAD_CONFIG_DIR in os.environ before exec_module() work correctly."""
+    env_val = os.environ.get("WORKLOAD_CONFIG_DIR")
+    if env_val:
+        return Path(env_val)
+    return WORKLOAD_CONFIG_DIR
+
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
 
@@ -108,20 +120,20 @@ OVMF_VARS_CANDIDATES = [
 
 # --- Config locator ---
 
-def workload_config_path(base: Path, name: str) -> Path:
-    """Instance config path for a workload, under `base`."""
-    return base / name / "workload.toml"
+def workload_config_path(name: str) -> Path:
+    """Instance config path for a workload, under the config dir."""
+    return workload_config_dir() / name / "workload.toml"
 
 
-def iter_workloads(base: Path) -> list[tuple[str, Path]]:
-    """(name, config_path) for every instance under `base`, sorted by name.
+def iter_workloads() -> list[tuple[str, Path]]:
+    """(name, config_path) for every instance under the config dir, sorted by name.
 
     Yields the name (derived from the path) so no caller knows the on-disk shape.
     This is the single place discovery encodes the layout.
     """
     return sorted(
         (p.parent.name, p)                                    # name from dir, not stem
-        for p in base.glob("*/workload.toml")
+        for p in workload_config_dir().glob("*/workload.toml")
     )
 
 

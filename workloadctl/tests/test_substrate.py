@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import workloadctl_core
 import substrate as _substrate_mod
 from substrate import (
@@ -77,7 +78,7 @@ class _WorkloadDir:
         tmp_path = Path(self._tmp)
         (tmp_path / self._name).mkdir()
         (tmp_path / self._name / 'workload.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
@@ -94,7 +95,7 @@ def _make_vm_config():
         p = Path(d)
         (p / 'test-vm').mkdir()
         (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return workloadctl_core.WorkloadConfig('test-vm')
 
 
@@ -154,7 +155,7 @@ class TestVMStats(unittest.TestCase):
             manager.user_exists.return_value = True
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_inspect.cmd_stats(args, manager)
@@ -221,7 +222,7 @@ class TestContainerBackupConsistency(unittest.TestCase):
             p = Path(d)
             (p / 'test-wl').mkdir()
             (p / 'test-wl' / 'workload.toml').write_text(MINIMAL_TOML)
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                 return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_cold_passes_no_stop_false(self):
@@ -532,7 +533,7 @@ def _make_config(toml, name):
         p = Path(d)
         (p / name).mkdir()
         (p / name / 'workload.toml').write_text(toml)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return workloadctl_core.WorkloadConfig(name)
 
 
@@ -882,7 +883,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
             manager.podman.return_value.container_health.return_value = None
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('subprocess.run', side_effect=fake_run), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
@@ -1315,7 +1316,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=True)
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stdout', buf):
                 cmd_update.cmd_rollback(args, manager)
@@ -1340,7 +1341,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=True)
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stdout', buf):
                 cmd_update.cmd_rollback(args, manager)
@@ -1363,7 +1364,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=False)
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
@@ -1495,7 +1496,7 @@ class TestCmdIncant(unittest.TestCase):
             manager.run_podman.return_value = _ok(returncode=0)
 
             args = types.SimpleNamespace(workload='test-wl', argv=['--', 'volume', 'ls'])
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.exit') as mock_exit:
                 cmd_interact.cmd_incant(args, manager)
         mock_exit.assert_called_once_with(0)
@@ -1516,7 +1517,7 @@ class TestCmdIncant(unittest.TestCase):
             manager.run_podman.return_value = _ok(returncode=0)
 
             args = types.SimpleNamespace(workload='test-wl/mycontainer', argv=['volume', 'ls'])
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.exit'):
                 cmd_interact.cmd_incant(args, manager)
         manager.run_podman.assert_called_once()
@@ -1530,7 +1531,7 @@ class TestCmdIncant(unittest.TestCase):
             manager = self._make_manager(user_exists=False)
             args = types.SimpleNamespace(workload='test-wl', argv=['volume', 'ls'])
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stderr', buf):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_interact.cmd_incant(args, manager)
@@ -1546,7 +1547,7 @@ class TestCmdIncant(unittest.TestCase):
             manager = self._make_manager()
             args = types.SimpleNamespace(workload='test-wl', argv=[])
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stderr', buf):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_interact.cmd_incant(args, manager)

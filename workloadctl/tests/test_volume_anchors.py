@@ -157,12 +157,13 @@ class TestRequiredFilesAnchorResolution(unittest.TestCase):
     """
 
     def _config_with(self, toml_text: str):
+        import workload_lib
         import workloadctl_core as core
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         (tmp / "wltest").mkdir()
         (tmp / "wltest" / "workload.toml").write_text(toml_text)
-        with mock.patch.object(core, "WORKLOAD_DIR", tmp):
+        with mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", tmp):
             return core.WorkloadConfig("wltest")
 
     def test_required_file_resolves_to_data_not_state(self):
@@ -229,7 +230,7 @@ class TestPreflightDataAnchoring(unittest.TestCase):
         (toml_dir / "wltest").mkdir(exist_ok=True)
         (toml_dir / "wltest" / "workload.toml").write_text(toml_text)
         with mock.patch.object(workload_lib, "WORKLOADS_BASE", base), \
-             mock.patch.object(core, "WORKLOAD_DIR", toml_dir):
+             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", toml_dir):
             config = core.WorkloadConfig("wltest")
             cmd_lifecycle._preflight_checks(config)
 

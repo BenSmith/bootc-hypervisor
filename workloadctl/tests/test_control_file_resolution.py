@@ -19,6 +19,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import workload_lib               # noqa: E402
 import workloadctl_core as core  # noqa: E402
 
 
@@ -30,9 +31,9 @@ class TestControlFileResolution(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.etc, ignore_errors=True))
         self.addCleanup(lambda: __import__("shutil").rmtree(self.usr, ignore_errors=True))
         # bundle_dir reads the WORKLOAD_BUNDLES_DIR imported into core's namespace;
-        # override_dir reads core.WORKLOAD_DIR via _get_workload_dir().
+        # override_dir reads workload_lib.WORKLOAD_CONFIG_DIR via workload_config_dir().
         self._p1 = mock.patch.object(core, "WORKLOAD_BUNDLES_DIR", self.usr)
-        self._p2 = mock.patch.object(core, "WORKLOAD_DIR", self.etc)
+        self._p2 = mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc)
         self._p1.start(); self._p2.start()
         self.addCleanup(self._p1.stop); self.addCleanup(self._p2.stop)
 

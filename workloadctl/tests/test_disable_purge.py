@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
+import workload_lib
 import cmd_lifecycle
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
@@ -66,7 +67,7 @@ class _Env:
         wl_path = Path(self._wl_tmp)
         (wl_path / self._name).mkdir()
         (wl_path / self._name / 'workload.toml').write_text(self._toml)
-        self._wl_patch = patch.object(workloadctl_core, 'WORKLOAD_DIR', wl_path)
+        self._wl_patch = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', wl_path)
         self._wl_patch.start()
         self._env_patch = patch.dict(
             os.environ, {'WORKLOAD_ENV_DIR': self._env_tmp}

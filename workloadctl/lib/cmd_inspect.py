@@ -18,6 +18,7 @@ from workload_lib import (
     USERNAME_PREFIX,
     WORKLOADS_BASE,
     VM_SOCKET_DIR,
+    workload_config_dir,
 )
 from podman import Podman
 from substrate import NotApplicable, get_substrate
@@ -32,7 +33,6 @@ from workloadctl_core import (
     parse_workload_ref,
     require_root,
     resolve_container_target,
-    WORKLOAD_DIR,
 )
 from cmd_lifecycle import _effective_state
 
@@ -129,7 +129,7 @@ def cmd_list(args, manager: WorkloadManager):
         print(json.dumps({"workloads": workloads}, indent=2))
         return
 
-    print(f"Available workloads in {WORKLOAD_DIR}:")
+    print(f"Available workloads in {workload_config_dir()}:")
     print()
 
     if not configs:

@@ -22,6 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import workload_lib  # noqa: E402
 import cmd_backup  # noqa: E402
 
 
@@ -46,7 +47,7 @@ class TestRestoreNameValidation(unittest.TestCase):
         self.var = self.tmp / "var"
         self.var.mkdir()
         self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
-        self.enterContext(mock.patch.object(cmd_backup, "WORKLOAD_DIR", self.etc))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
         self.enterContext(mock.patch.object(
             cmd_backup, "workload_data_dir", lambda n: self.var / n / "data"))
 

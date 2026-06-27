@@ -2,7 +2,7 @@
 
 > Idea capture and planning. No commitment.
 
-**Last Updated:** 2026-06-18
+**Last Updated:** 2026-06-27
 
 ---
 
@@ -59,12 +59,6 @@
 
 ---
 
-### Custom workloads and user-defined bundles
-
-→ See [`workloadctl/docs/wip/custom-workloads.md`](../workloadctl/docs/wip/custom-workloads.md)
-
----
-
 ## Random Ideas (Unsorted)
 
 *Quick capture spot - organize into sections above during review*
@@ -78,56 +72,19 @@
 - Secrets rotation automation (auto-rotate credentials periodically)
 - Workload migration tools (move between hosts)
 - Generate seccomp profile instead of static, so it will handle changes in the distribution policies
-- Scheduled image updates: systemd timer that runs `workloadctl update --all` periodically.
-  Pulls newer images for updatable workloads (skip pull=never), restarts only if image changed.
-  Could add configurable schedule, notification on updates, and update log.
 - Workloads get LVM provisioned to cap or flex storage
 - make missing host setup script an error not a warning
 - put all control surfaces in wireguard/vpn
-- build all container workload images and host locally?
-
-### Separate `kind` from `name` in workload TOMLs
-> **Superseded (2026-06-19) by the `bundle` design** in
-> `workloadctl/docs/wip/workload-bundles.md`. That doc solves this exact
-> instance-vs-kind conflation with an optional `[workload] bundle` field
-> (defaults to `name`) and moves shared assets out of the old
-> `containers/<name>/` + `vms/<name>/` trees into a unified
-> `/usr/share/workloadctl/workloads/<bundle>/`. Implement `bundle`, not `kind` —
-> they differ only in name and in that `bundle` drops the backwards-compat layer
-> (no-migration stance). Retained below as the problem statement.
-
-**Why:** Today `[workload].name` is used as both the instance identifier *and*
-the lookup key for shared support assets (container build trees under
-`/usr/share/workloadctl/containers/<name>/`, VM support trees under
-`/usr/share/workloadctl/vms/<name>/`, default relative paths, etc.). That
-conflates "what is this instance called" with "what kind of workload is
-this," so running two instances of one kind (e.g. samba as `files` and
-`archive`, or a second virtual-forgejo as `git`) requires either renaming
-the on-disk support tree or overriding every kind-derived path explicitly
-in the instance TOML with absolute paths.
-
-**Proposal:** Add an optional `kind = "<name>"` field. If set, all default
-lookups for shared assets resolve under `<kind>` instead of `<name>`;
-per-instance state (`/var/lib/workloads/<name>/`, `_wl-<name>` sysuser,
-`workload-<name>.service`) still uses `<name>`. Absent `kind`, behavior is
-unchanged (kind defaults to name) — fully backwards compatible. The
-absolute-path escape hatch remains for one-off mix-and-match cases.
-
-**Effort:** Medium — every name-derivation point in workloadctl (and the
-generators) needs to learn the kind/name split. Mostly mechanical.
-
-**Value:** Unblocks N:1 instance:kind cleanly. Today's only path is
-copy-paste the support tree under a new name, which fragments updates.
 
 ### Extend `template_vars` substitution to `.tmpl` files in the support tree
 **Why:** Today `[vm.cloud_init.template_vars]` in an instance TOML feeds
-substitutions into `user_data_file` only. Files in the support tree
-(e.g. `vms/virtual-forgejo/workloads/avahi.toml`) are copied verbatim,
+substitutions into `user_data_file` only. Files in a bundle's support tree
+(e.g. `workloads/virtual-forgejo/workloads/caddy.toml`) are copied verbatim,
 so anything per-instance has to be inlined into cloud-init's `write_files`
 to pick up substitution — bloating user-data and making the workload
-config not browsable as its own file. Concrete example: avahi.toml
-hardcodes `ALIASES = "virtual-forgejo"`; running a second instance as
-`git.local` requires that string to vary per instance.
+config not browsable as its own file. Concrete example: a support-tree
+config that hardcodes a hostname/alias has to vary per instance when the
+same bundle is run as a second instance.
 
 **Proposal:** Workloadctl walks the kind's support tree at ISO build
 time; any file ending in `.tmpl` is processed with the instance's
@@ -142,10 +99,9 @@ during ISO build, mirrors what already happens for user-data.
 
 **Value:** Per-instance config for VM workloads without bloating
 cloud-init or copy-pasting support trees. Composes with the `bundle`
-field (see the superseded `kind` note above) — one bundle's support
-tree, many instances, each with its own values. Re-anchor this entry's
-paths from the old `vms/<kind>/` tree to the bundle layout
-(`/usr/share/workloadctl/workloads/<bundle>/`) when implemented.
+field — one bundle's support tree
+(`/usr/share/workloadctl/workloads/<bundle>/`), many instances, each
+with its own values.
 
 ### Unified TLS: internal CA or Let's Encrypt instead of per-host Caddy CAs
 **Why:** Today every Caddy instance uses `local_certs`, i.e. mints its

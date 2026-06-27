@@ -58,7 +58,7 @@ def get_enabled_workloads():
     if not WORKLOAD_CONFIG_DIR.is_dir():
         return workloads
 
-    for _, toml_path in iter_workloads(WORKLOAD_CONFIG_DIR):
+    for _, toml_path in iter_workloads():
         try:
             if toml_path.resolve() == Path("/dev/null"):
                 continue

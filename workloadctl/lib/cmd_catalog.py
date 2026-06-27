@@ -18,13 +18,12 @@ import shutil
 import sys
 import tomllib
 
-from workload_lib import validate_workload_name, workload_config_path, WORKLOAD_BUNDLES_DIR
+from workload_lib import validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     require_root,
     toml_string,
-    WORKLOAD_DIR,
 )
 from cmd_admin import validate_single
 
@@ -188,7 +187,7 @@ def cmd_init(args, manager: WorkloadManager):
             f'image = "CHANGE_ME"\n'
             f'pull = "newer"\n'
         )
-        dst = workload_config_path(WORKLOAD_DIR, name)
+        dst = workload_config_path(name)
         if dst.parent.exists():
             print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
             sys.exit(1)
@@ -225,7 +224,7 @@ def cmd_init(args, manager: WorkloadManager):
         _suggest_bundle(bundle)
         sys.exit(1)
 
-    dst = workload_config_path(WORKLOAD_DIR, name)
+    dst = workload_config_path(name)
     if dst.parent.exists():
         print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
         print(f"  choose another name with --as, or edit the existing one", file=sys.stderr)
@@ -259,7 +258,7 @@ def cmd_duplicate(args, manager: WorkloadManager):
     new_name = args.new
 
     # Validate BOTH names before either becomes a path. src_name flows into
-    # `WORKLOAD_DIR / src_name / "workload.toml"` and is read_text()'d as root
+    # `workload_config_dir() / src_name / "workload.toml"` and is read_text()'d as root
     # (directly and in the tomllib fallback below), so a `../`-laden source would
     # read an arbitrary workload.toml from outside the workloads dir — hold it to
     # the same bar as new_name even though it's only ever read.
@@ -275,12 +274,12 @@ def cmd_duplicate(args, manager: WorkloadManager):
         print(f"Error: invalid workload name {new_name!r}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    src_path = workload_config_path(WORKLOAD_DIR, src_name)
+    src_path = workload_config_path(src_name)
     if not src_path.exists():
-        print(f"Error: no workload '{src_name}' in {WORKLOAD_DIR}", file=sys.stderr)
+        print(f"Error: no workload '{src_name}' in {workload_config_dir()}", file=sys.stderr)
         sys.exit(1)
 
-    dst_path = workload_config_path(WORKLOAD_DIR, new_name)
+    dst_path = workload_config_path(new_name)
     if dst_path.parent.exists():
         print(f"Error: workload '{new_name}' already exists: {dst_path}", file=sys.stderr)
         sys.exit(1)
@@ -408,14 +407,14 @@ def cmd_install(args, manager: WorkloadManager):
         print(f"Error: invalid workload name {name!r}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dst_dir = workload_config_path(WORKLOAD_DIR, name).parent
+    dst_dir = workload_config_path(name).parent
     if dst_dir.exists():
         print(f"Error: workload '{name}' already exists: {dst_dir}", file=sys.stderr)
         sys.exit(1)
 
     shutil.copytree(src, dst_dir, ignore=shutil.ignore_patterns(".git", "__pycache__"))
 
-    dst = workload_config_path(WORKLOAD_DIR, name)
+    dst = workload_config_path(name)
     print(f"✓ Installed '{name}' from {src}")
     print(f"  {dst}")
     _post_write_report(name, manager)

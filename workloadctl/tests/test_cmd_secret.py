@@ -24,6 +24,7 @@ LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
 if LIB not in sys.path:
     sys.path.insert(0, LIB)
 
+import workload_lib          # noqa: E402
 import cmd_secret           # noqa: E402
 import workloadctl_core     # noqa: E402
 
@@ -63,7 +64,7 @@ class SecretTestBase(unittest.TestCase):
 
         self.enterContext(mock.patch.object(cmd_secret, "Path", _fake_path))
         self.enterContext(mock.patch.object(cmd_secret, "require_root", lambda: None))
-        self.enterContext(mock.patch.object(cmd_secret, "WORKLOAD_DIR", self.wl_dir))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.wl_dir))
 
     def _seed_cred(self, name, content=b"blob"):
         self.cred_dir.mkdir(parents=True, exist_ok=True)

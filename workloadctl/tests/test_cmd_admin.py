@@ -24,6 +24,7 @@ LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
 if LIB not in sys.path:
     sys.path.insert(0, LIB)
 
+import workload_lib          # noqa: E402
 import cmd_admin            # noqa: E402
 import workloadctl_core     # noqa: E402
 from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
@@ -46,8 +47,7 @@ def _create_ns(**kw):
 class CreateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(cmd_admin, "WORKLOAD_DIR", self.tmp))
-        self.enterContext(mock.patch.object(workloadctl_core, "WORKLOAD_DIR", self.tmp))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
         # Isolate flag->TOML from the validation pass (covered separately).
         self.enterContext(mock.patch.object(
@@ -160,7 +160,7 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(workloadctl_core, "WORKLOAD_DIR", self.tmp))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         (self.tmp / "clitest-vmguard").mkdir()
         (self.tmp / "clitest-vmguard" / "workload.toml").write_text(_VM_TOML)
         # Make the workload "user" resolvable so the user_exists path runs.
@@ -203,7 +203,7 @@ class CleanupOverrideDirTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(workloadctl_core, "WORKLOAD_DIR", self.tmp))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         # Seed a workload with the new subdir layout.
         instance_dir = self.tmp / "myapp"
         instance_dir.mkdir()

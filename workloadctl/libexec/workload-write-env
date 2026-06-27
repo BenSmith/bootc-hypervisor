@@ -43,7 +43,7 @@ def main():
     name = sys.argv[1]
     container = sys.argv[2] if len(sys.argv) == 3 else None
 
-    config_path = workload_config_path(WORKLOAD_CONFIG_DIR, name)
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
 

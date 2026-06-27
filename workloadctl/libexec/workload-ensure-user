@@ -40,7 +40,7 @@ def log(msg):
 
 def load_config(name):
     """Load and return the TOML config for a workload."""
-    config_path = workload_config_path(WORKLOAD_CONFIG_DIR, name)
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
@@ -974,7 +974,7 @@ def main():
         try:
             build_cloud_init_iso(
                 pw, config, name,
-                config_path=workload_config_path(WORKLOAD_CONFIG_DIR, name),
+                config_path=workload_config_path(name),
             )
         except Exception as e:
             log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")

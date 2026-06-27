@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call, patch
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
+import workload_lib
 import cmd_lifecycle
 import workloadctl_core
 from workloadctl_core import WorkloadConfig, VM_BRIDGE_NAME
@@ -74,7 +75,7 @@ class _WlDir:
         for name, text in self._tomls.items():
             (wl_path / name).mkdir(exist_ok=True)
             (wl_path / name / "workload.toml").write_text(text)
-        self._patch = patch.object(workloadctl_core, "WORKLOAD_DIR", wl_path)
+        self._patch = patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", wl_path)
         self._patch.start()
         return wl_path
 

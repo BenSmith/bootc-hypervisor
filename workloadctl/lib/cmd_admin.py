@@ -20,6 +20,7 @@ from workload_lib import (
     selinux_module_name,
     selinux_type_name,
     validate_workload_name,
+    workload_config_dir,
     workload_config_path,
 )
 from workloadctl_core import (
@@ -29,7 +30,6 @@ from workloadctl_core import (
     restart_workload_service,
     require_root,
     toml_string,
-    WORKLOAD_DIR,
 )
 
 
@@ -352,7 +352,7 @@ def cmd_create(args, manager: WorkloadManager):
         sys.exit(1)
 
     # Check if config already exists
-    config_path = workload_config_path(WORKLOAD_DIR, name)
+    config_path = workload_config_path(name)
     if config_path.parent.exists():
         print(f"Error: Workload config already exists: {config_path}", file=sys.stderr)
         print(f"Use 'workloadctl edit {name}' to modify it", file=sys.stderr)
@@ -911,7 +911,7 @@ def _edit_control_file(args, manager: WorkloadManager):
     name = args.workload
     rel = args.file
 
-    config_path = workload_config_path(WORKLOAD_DIR, name)
+    config_path = workload_config_path(name)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -998,7 +998,7 @@ def cmd_edit(args, manager: WorkloadManager):
         _edit_control_file(args, manager)
         return
 
-    config_path = workload_config_path(WORKLOAD_DIR, args.workload)
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)

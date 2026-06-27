@@ -50,6 +50,7 @@ from workload_lib import (
     WORKLOADS_BASE,
     WORKLOAD_BUNDLES_DIR,
     WORKLOAD_CONFIG_DIR,
+    workload_config_dir,
     workload_config_path,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
@@ -62,16 +63,6 @@ from workload_lib import (
     workload_username,
 )
 from podman import Podman, PodmanError
-
-WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
-
-
-def _get_workload_dir() -> "Path":
-    """Return the current WORKLOAD_DIR (indirection so patch.object on this
-    module's WORKLOAD_DIR is honored by WorkloadConfig/WorkloadManager at call
-    time)."""
-    return WORKLOAD_DIR
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -341,7 +332,7 @@ class WorkloadConfig:
 
     def __init__(self, filename: str):
         self.filename = filename
-        self.path = workload_config_path(_get_workload_dir(), filename)
+        self.path = workload_config_path(filename)
 
         # Masked workload: symlink to /dev/null (same semantics as systemd masking)
         if self.path.is_symlink() and self.path.resolve() == Path('/dev/null'):
@@ -484,11 +475,10 @@ class WorkloadConfig:
         Lazy: usually absent. `edit <name> <file>` seeds a copy-on-write
         override here; resolve_control_file prefers it over the shipped bundle.
         Keyed on *name* (not bundle) so a duplicate overrides independently of
-        its source. Uses the WORKLOAD_DIR indirection so tests patching it are
-        honored. (`get_all_configs` globs *.toml at the top level only, so this
-        <name>/ subdir is invisible to workload discovery.)
+        its source. Resolves via workload_config_dir() so tests patching the
+        config dir are honored.
         """
-        return _get_workload_dir() / self.name
+        return workload_config_dir() / self.name
 
     def resolve_control_file(self, relpath: str) -> Path:
         """Resolve a bundle control file (build.sh, policy.cil, [host].setup, …)
@@ -755,7 +745,7 @@ class WorkloadManager:
     """Manages workload operations"""
 
     def __init__(self):
-        self.workload_dir = _get_workload_dir()
+        self.workload_dir = workload_config_dir()
 
     def run_podman_exec(self, config: WorkloadConfig, args,
                         check=False, capture_output=False):
@@ -795,7 +785,7 @@ class WorkloadManager:
     def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
         """Get all workload configs"""
         configs = []
-        for name, path in iter_workloads(self.workload_dir):
+        for name, path in iter_workloads():
             try:
                 config = WorkloadConfig(name)
                 if not enabled_only or config.enabled:

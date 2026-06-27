@@ -27,6 +27,7 @@ from workload_lib import (
     VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
+    workload_config_dir,
     workload_config_path,
     workload_username,
     workload_root_dir,
@@ -37,7 +38,6 @@ from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     require_root,
-    WORKLOAD_DIR,
     VM_BRIDGE_NAME,
 )
 from cmd_admin import validate_single
@@ -689,7 +689,7 @@ def cmd_enable(args, manager: WorkloadManager):
     """Enable and start a workload"""
     require_root()
 
-    config_path = workload_config_path(WORKLOAD_DIR, args.workload)
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -827,7 +827,7 @@ def cmd_disable(args, manager: WorkloadManager):
     # an unambiguous teardown — nothing else depends on wl_<name>).
     _apply_selinux_policy(config, "disable")
 
-    config_path = workload_config_path(WORKLOAD_DIR, args.workload)
+    config_path = workload_config_path(args.workload)
     content = config_path.read_text()
     content, _ = _replace_workload_enabled(content, "false")
     config_path.write_text(content)
@@ -927,7 +927,7 @@ def cmd_start(args, manager: WorkloadManager):
     """Start a workload service (does not change enabled state)"""
     require_root()
 
-    config_path = workload_config_path(WORKLOAD_DIR, args.workload)
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -943,7 +943,7 @@ def cmd_stop(args, manager: WorkloadManager):
     """Stop a workload service (does not change enabled state)"""
     require_root()
 
-    config_path = workload_config_path(WORKLOAD_DIR, args.workload)
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -1060,7 +1060,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
     # Per-workload SELinux modules a config still expects (selinux_policy = true).
     # Keyed on declaration, not enabled state — same as users above.
     expected_modules = set()
-    for _name, config_file in iter_workloads(manager.workload_dir):
+    for _name, config_file in iter_workloads():
         try:
             with open(config_file, "rb") as f:
                 cfg = tomllib.load(f)

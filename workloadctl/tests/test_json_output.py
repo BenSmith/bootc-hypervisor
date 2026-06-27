@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import cmd_admin
 import cmd_backup
 import cmd_inspect
@@ -105,7 +106,7 @@ class _WorkloadDir:
         tmp_path = Path(self._tmp)
         (tmp_path / self._name).mkdir()
         (tmp_path / self._name / 'workload.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
