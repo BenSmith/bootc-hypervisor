@@ -8,6 +8,7 @@ No root required — all paths are overridden via env vars and argv.
 import importlib.machinery
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1799,12 +1800,18 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         # The guest's primary user is uid/gid 1000 (cloud-init default), while
         # the host share is owned by the workload user (>=10000). virtiofsd must
         # bidirectionally translate 1000 <-> the workload uid so the guest user
-        # can write the share. fedora-vm is the only workload here, so uid=10000.
+        # can write the share. The exact slot isn't deterministic across hosts
+        # (get_next_uid scans the live passwd DB — a CI runner with any UID in
+        # [10000, 52948] shifts it off 10000), so derive the allocated uid from
+        # the drop-in rather than hardcoding it.
         self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
         self._run()
+        sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
+        uid = int(re.search(r"^u _wl-fedora-vm (\d+)", sysusers, re.M).group(1))
+        self.assertGreaterEqual(uid, 10000)
         sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
-        self.assertIn("--translate-uid=map:1000:10000:1", sidecar)
-        self.assertIn("--translate-gid=map:1000:10000:1", sidecar)
+        self.assertIn(f"--translate-uid=map:1000:{uid}:1", sidecar)
+        self.assertIn(f"--translate-gid=map:1000:{uid}:1", sidecar)
 
     def test_bridge_service_does_not_swallow_dnsmasq_failures(self):
         # The earlier "|| true" trailing the dnsmasq ExecStart hid genuine
