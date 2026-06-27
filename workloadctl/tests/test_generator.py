@@ -1795,6 +1795,17 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("User=", sidecar)
         self.assertIn("--sandbox=chroot", sidecar)
 
+    def test_virtiofsd_translates_guest_user_to_host_workload_uid(self):
+        # The guest's primary user is uid/gid 1000 (cloud-init default), while
+        # the host share is owned by the workload user (>=10000). virtiofsd must
+        # bidirectionally translate 1000 <-> the workload uid so the guest user
+        # can write the share. fedora-vm is the only workload here, so uid=10000.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertIn("--translate-uid=map:1000:10000:1", sidecar)
+        self.assertIn("--translate-gid=map:1000:10000:1", sidecar)
+
     def test_bridge_service_does_not_swallow_dnsmasq_failures(self):
         # The earlier "|| true" trailing the dnsmasq ExecStart hid genuine
         # failures (missing binary, port in use) and left VMs without DHCP.

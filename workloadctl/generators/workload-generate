@@ -67,7 +67,7 @@ try:
         infer_workload_kind,
         UID_MIN, UID_MAX, get_next_uid,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_IP, VM_DHCP_RANGE,
-        VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE,
+        VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tag, parse_volume_spec,
         selinux_type_name,
@@ -1214,11 +1214,21 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
         # sharing inside the guest. --sandbox=chroot still confines the
         # daemon's view of the host filesystem; --socket-group lets the
         # unprivileged QEMU process connect.
+        #
+        # --translate-uid/--translate-gid bidirectionally remap the guest's
+        # primary user (VM_GUEST_UID, the cloud-init default user) to the host
+        # workload uid/gid. Without this the share is owned by _wl-<name>
+        # (uid>=10000) on the host while the guest writes as uid 1000, so the
+        # guest user gets EPERM. The map is internal to virtiofsd (no user
+        # namespace needed, compatible with --sandbox=chroot); all other guest
+        # uids/gids still pass through 1:1, preserving multi-user sharing.
         f'Environment="HOME={home_dir}"',
         f"ExecStart=/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
         f"--socket-group={user_name} "
         f"--shared-dir={dq(host_path)} "
+        f"--translate-uid=map:{VM_GUEST_UID}:{uid}:1 "
+        f"--translate-gid=map:{VM_GUEST_UID}:{uid}:1 "
         f"--cache=auto --sandbox=chroot",
         # Wait for virtiofsd to create the socket before QEMU starts.
         # virtiofsd creates the socket before blocking on accept(), so this

@@ -65,6 +65,13 @@ GENERATOR_OWNED_DIRECTIVES = frozenset({
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
 VM_SOCKET_DIR = Path("/run/workload-vm")
 
+# UID/GID of the guest's primary interactive user. Cloud images assign the
+# first user (cloud-init's default user) uid/gid 1000, and our default
+# cloud-config pins it there explicitly. virtiofsd internally translates this
+# guest id <-> the host workload uid so the guest user can write the share
+# (which on the host is owned by _wl-<name>); see generate_virtiofs_service.
+VM_GUEST_UID = 1000
+
 # Default bridge for VM workloads.  _workload-br is the workloadctl-managed
 # isolated NAT bridge (auto-provisioned by workload-bridge.service). The name
 # is deliberately distinctive (and reserved) so the always-manage bridge setup

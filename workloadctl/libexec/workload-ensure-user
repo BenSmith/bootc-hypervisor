@@ -25,7 +25,7 @@ from pathlib import Path
 
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
-    infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
+    infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir,
 )
@@ -575,6 +575,11 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         f"fqdn: {name}.local",
         "users:",
         f"  - name: {guest_user}",
+        # Pin the primary user to VM_GUEST_UID so virtiofsd's uid/gid
+        # translation (guest 1000 <-> host workload uid) is deterministic and
+        # the guest user can write virtiofs shares. Cloud images already assign
+        # the default user 1000, so this only makes the convention explicit.
+        f"    uid: {VM_GUEST_UID}",
         "    sudo: ALL=(ALL) NOPASSWD:ALL",
         "    ssh_authorized_keys:",
         f"      - {pubkey}",

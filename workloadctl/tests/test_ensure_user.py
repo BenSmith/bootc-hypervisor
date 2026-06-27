@@ -55,6 +55,9 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertIn("hostname: myvm", out)
         self.assertIn("fqdn: myvm.local", out)
         self.assertIn("- name: fedora", out)
+        # Pin the primary user to uid 1000 so virtiofsd's guest<->host uid
+        # translation is deterministic and the guest user can write shares.
+        self.assertIn("uid: 1000", out)
         self.assertIn("ssh-ed25519 AAAA fedora@build", out)
         self.assertIn("sudo: ALL=(ALL) NOPASSWD:ALL", out)
         self.assertNotIn("mounts:", out)
