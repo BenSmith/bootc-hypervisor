@@ -22,6 +22,9 @@ COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dic
 # Work around pasta's loopback splice() throughput regression (see the file's
 # header) — without this, large pulls through the Caddy->zot reverse proxy hang.
 COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d/10-pasta-no-splice.conf
+# fail2ban's /var/lib/fail2ban state dir is emptied with the rest of /var during
+# the build; recreate it at boot so fail2ban-server can open its sqlite db.
+COPY tmpfiles.d/fail2ban-statedir.conf /usr/lib/tmpfiles.d/fail2ban-statedir.conf
 
 # CI-injectable trust anchors. The Forgejo pipeline drops the homelab root CA
 # (public cert) into ca-trust-inject/ from the HOMELAB_ROOT_CA secret before
