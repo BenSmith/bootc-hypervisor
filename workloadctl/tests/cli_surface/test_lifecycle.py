@@ -113,7 +113,8 @@ class TestCreate:
         """create writes a TOML file to /etc/workloads.d/."""
         record_property("cell", "create/container")
         name = "clitest-created"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        toml_path = f"{cfg_dir}/workload.toml"
         try:
             r = target.wl(
                 f"create --image docker.io/library/caddy:2-alpine {name}",
@@ -127,14 +128,14 @@ class TestCreate:
             v = target.wl(f"validate {name}", check=True)
             assert v.rc == 0
         finally:
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
     @pytest.mark.mutating
     def test_create_with_ports(self, target, record_property):
         """create --ports writes port mapping into the TOML."""
         record_property("cell", "create/container")
         name = "clitest-created-ports"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
         try:
             target.wl(
                 f"create --image docker.io/library/caddy:2-alpine --ports 19099:80 {name}",
@@ -145,7 +146,7 @@ class TestCreate:
             ports = data["network"]["ports"]
             assert any("19099" in p for p in ports), f"Port not found in: {ports}"
         finally:
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +182,15 @@ class TestEnableDisable:
         """enable then disable (without --purge) stops the service."""
         record_property("cell", "disable/container")
         name = "clitest-dis-test"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        toml_path = f"{cfg_dir}/workload.toml"
         # Write minimal TOML
         toml_content = (
             f'[workload]\nname = "{name}"\nenabled = false\n\n'
             '[container]\nimage = "docker.io/library/caddy:2-alpine"\n'
         )
         try:
+            target.run(["mkdir", "-p", cfg_dir], sudo=True, check=True)
             target.put_content(toml_content, toml_path)
             target.wl(f"enable {name}", check=True, timeout=180)
             assert _wait_active(target, name), f"{name} did not become active"
@@ -199,7 +202,7 @@ class TestEnableDisable:
             assert _user_exists(target, name), "User removed unexpectedly (no --purge)"
         finally:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
     @pytest.mark.mutating
     @pytest.mark.destructive
@@ -207,12 +210,14 @@ class TestEnableDisable:
         """disable --purge removes the user and home directory."""
         record_property("cell", "disable_purge/container")
         name = "clitest-purge-test"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        toml_path = f"{cfg_dir}/workload.toml"
         toml_content = (
             f'[workload]\nname = "{name}"\nenabled = false\n\n'
             '[container]\nimage = "docker.io/library/caddy:2-alpine"\n'
         )
         try:
+            target.run(["mkdir", "-p", cfg_dir], sudo=True, check=True)
             target.put_content(toml_content, toml_path)
             target.wl(f"enable {name}", check=True, timeout=180)
             assert _wait_active(target, name)
@@ -225,7 +230,7 @@ class TestEnableDisable:
             assert not _home_exists(target, name), f"Home /var/lib/workloads/{name} still exists"
         finally:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +400,7 @@ class TestEdit:
         assert r.rc == 0
 
         # Verify the change is in the TOML
-        content = target.read(f"/etc/workloads.d/{fresh_single}.toml")
+        content = target.read(f"/etc/workloads.d/{fresh_single}/workload.toml")
         assert "edited-by-clitest" in content, (
             f"edit did not persist the change: {content[:500]}"
         )

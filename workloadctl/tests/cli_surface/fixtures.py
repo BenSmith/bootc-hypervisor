@@ -64,15 +64,19 @@ def skip_if_no_br0(target: Target):
 # ---------------------------------------------------------------------------
 
 def _install_toml(target: Target, toml_name: str) -> str:
-    """Copy a fixture TOML to /etc/workloads.d/ on the target.
+    """Copy a fixture TOML into its Step-2 subdir on the target.
 
-    Returns the workload name (derived from the TOML filename, stripping .toml).
+    Writes /etc/workloads.d/<name>/workload.toml (name = filename minus .toml,
+    matching the subdir layout the generator/resolver expect) and returns the
+    workload name.
     """
     toml_path = WORKLOADS_DIR / toml_name
     assert toml_path.exists(), f"Fixture TOML not found: {toml_path}"
-    remote_path = f"/etc/workloads.d/{toml_name}"
+    name = toml_name.replace(".toml", "")
+    target.run(["mkdir", "-p", f"/etc/workloads.d/{name}"], sudo=True, check=True)
+    remote_path = f"/etc/workloads.d/{name}/workload.toml"
     target.put_content(toml_path.read_text(), remote_path)
-    return toml_name.replace(".toml", "")
+    return name
 
 
 def _enable_workload(target: Target, name: str, timeout: int = 120,
@@ -104,8 +108,8 @@ def _enable_workload(target: Target, name: str, timeout: int = 120,
             if attempt >= retries:
                 raise
             attempt += 1
-            # Tear down to a clean slate (disable --purge keeps the TOML in
-            # /etc/workloads.d, so the retry's enable still finds it) and clear
+            # Tear down to a clean slate (disable --purge keeps the config dir
+            # /etc/workloads.d/<name>/, so the retry's enable still finds it) and clear
             # any failed/start-limit state before re-enabling.
             target.wl(f"disable --purge {name}", check=False, timeout=120)
             target.run(
@@ -207,7 +211,7 @@ def _purge_workload(target: Target, name: str):
         sudo=True, check=False,
     )
     target.run(
-        ["rm", "-f", f"/etc/workloads.d/{name}.toml"],
+        ["rm", "-rf", f"/etc/workloads.d/{name}"],
         sudo=True, check=False,
     )
 
@@ -337,7 +341,7 @@ def clitest_broken(target: Target):
     name = _install_toml(target, "clitest-broken.toml")
     yield name
     target.run(
-        ["rm", "-f", f"/etc/workloads.d/{name}.toml"],
+        ["rm", "-rf", f"/etc/workloads.d/{name}"],
         sudo=True, check=False,
     )
 

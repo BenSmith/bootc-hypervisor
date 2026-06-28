@@ -192,14 +192,20 @@ def _purge_all_clitest(target: Target):
 
 
 def _remove_clitest_tomls(target: Target):
-    """Remove any leftover /etc/workloads.d/clitest-*.toml files."""
+    """Remove any leftover clitest-* workload configs.
+
+    Step-2 layout puts each workload in /etc/workloads.d/<name>/workload.toml, so
+    remove the whole clitest-* subdir. Also sweep any stray flat clitest-*.toml
+    left by a pre-flip run.
+    """
     r = target.run(
-        ["bash", "-c", "ls /etc/workloads.d/clitest-*.toml 2>/dev/null || true"],
+        ["bash", "-c",
+         "ls -d /etc/workloads.d/clitest-* 2>/dev/null || true"],
         sudo=False, check=False,
     )
-    files = [f.strip() for f in r.stdout.strip().splitlines() if f.strip()]
-    for f in files:
-        target.run(["rm", "-f", f], sudo=True, check=False)
+    paths = [p.strip() for p in r.stdout.strip().splitlines() if p.strip()]
+    for p in paths:
+        target.run(["rm", "-rf", p], sudo=True, check=False)
 
 
 # Capability-gate skip helpers (skip_if_no_kvm / skip_if_no_br0) live in

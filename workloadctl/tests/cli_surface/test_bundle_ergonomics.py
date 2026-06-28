@@ -94,7 +94,19 @@ def _scrub(target: Target):
 
 
 def _rm_toml(target: Target, name: str):
+    # Legacy sweep: a pre-flip run may have left a flat <name>.toml behind.
     target.run(["rm", "-f", f"/etc/workloads.d/{name}.toml"], sudo=True, check=False)
+
+
+def _workload_toml(name: str) -> str:
+    """Step-2 config path for a workload: /etc/workloads.d/<name>/workload.toml."""
+    return f"/etc/workloads.d/{name}/workload.toml"
+
+
+def _put_workload(target: Target, name: str, content: str):
+    """Write a workload TOML into its Step-2 subdir (creating the dir first)."""
+    target.run(["mkdir", "-p", f"/etc/workloads.d/{name}"], sudo=True, check=True)
+    target.put_content(content, _workload_toml(name))
 
 
 def _rm_workload(target: Target, name: str):
@@ -155,17 +167,17 @@ class TestCatalog:
 
 class TestInit:
     def test_init_creates_toml(self, target: Target, record_property):
-        """init <bundle> --as <name> writes /etc/workloads.d/<name>.toml."""
+        """init <bundle> --as <name> writes /etc/workloads.d/<name>/workload.toml."""
         record_property("cell", "init/container")
         target.wl(f"init {_TEST_BUNDLE} --as {_INIT_NAME}", check=True)
-        assert target.remote_path_exists(f"/etc/workloads.d/{_INIT_NAME}.toml"), (
-            f"/etc/workloads.d/{_INIT_NAME}.toml not created by init"
+        assert target.remote_path_exists(_workload_toml(_INIT_NAME)), (
+            f"{_workload_toml(_INIT_NAME)} not created by init"
         )
 
     def test_init_sets_bundle_field(self, target: Target):
         """When --as renames the instance, the TOML records bundle = '<source>'."""
         target.wl(f"init {_TEST_BUNDLE} --as {_INIT_NAME}", check=True)
-        content = target.read(f"/etc/workloads.d/{_INIT_NAME}.toml")
+        content = target.read(_workload_toml(_INIT_NAME))
         assert f'bundle = "{_TEST_BUNDLE}"' in content, (
             f"Expected bundle = {_TEST_BUNDLE!r} in TOML:\n{content}"
         )
@@ -201,10 +213,7 @@ class TestValidateRelativePaths:
         by enable and pass with "will be created on enable".
         """
         record_property("cell", "validate/container")
-        target.put_content(
-            _RELPATH_TOML,
-            f"/etc/workloads.d/{_RELPATH_NAME}.toml",
-        )
+        _put_workload(target, _RELPATH_NAME, _RELPATH_TOML)
         r = target.wl(f"validate --json {_RELPATH_NAME}", sudo=False, check=False)
         data = json.loads(r.stdout)
         vol_checks = [
@@ -228,15 +237,15 @@ class TestDuplicate:
         record_property("cell", "duplicate/container")
         target.wl(f"init {_TEST_BUNDLE} --as {_INIT_NAME}", check=True)
         target.wl(f"duplicate {_INIT_NAME} {_DUP_NAME}", check=True)
-        assert target.remote_path_exists(f"/etc/workloads.d/{_DUP_NAME}.toml"), (
-            f"/etc/workloads.d/{_DUP_NAME}.toml not created by duplicate"
+        assert target.remote_path_exists(_workload_toml(_DUP_NAME)), (
+            f"{_workload_toml(_DUP_NAME)} not created by duplicate"
         )
 
     def test_duplicate_preserves_bundle_field(self, target: Target):
         """A duplicate-of-an-init still points at the original bundle, not the init copy."""
         target.wl(f"init {_TEST_BUNDLE} --as {_INIT_NAME}", check=True)
         target.wl(f"duplicate {_INIT_NAME} {_DUP_NAME}", check=True)
-        content = target.read(f"/etc/workloads.d/{_DUP_NAME}.toml")
+        content = target.read(_workload_toml(_DUP_NAME))
         assert f'bundle = "{_TEST_BUNDLE}"' in content, (
             f"Expected bundle = {_TEST_BUNDLE!r} in duplicate TOML:\n{content}"
         )
@@ -374,7 +383,7 @@ class TestBadBundle:
     def test_info_files_rejects_traversal_bundle(self, target: Target, record_property):
         """info --files on a `..`-laden bundle fails closed with a clear error."""
         record_property("cell", "info/container")
-        target.put_content(_BAD_BUNDLE_TOML, f"/etc/workloads.d/{_BAD_NAME}.toml")
+        _put_workload(target, _BAD_NAME, _BAD_BUNDLE_TOML)
         r = target.wl(f"info {_BAD_NAME} --files", check=False)
         assert r.rc != 0, "info --files should reject a traversal bundle"
         err = (r.stdout + r.stderr).lower()
@@ -385,7 +394,7 @@ class TestBadBundle:
     def test_diagnose_no_traceback_on_bad_bundle(self, target: Target, record_property):
         """diagnose must not crash with a Python traceback on a bad bundle."""
         record_property("cell", "diagnose/container")
-        target.put_content(_BAD_BUNDLE_TOML, f"/etc/workloads.d/{_BAD_NAME}.toml")
+        _put_workload(target, _BAD_NAME, _BAD_BUNDLE_TOML)
         r = target.wl(f"diagnose {_BAD_NAME}", check=False)
         assert "traceback" not in (r.stdout + r.stderr).lower(), (
             f"diagnose crashed on a bad bundle:\n{r.stdout}\n{r.stderr}"

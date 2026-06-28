@@ -85,13 +85,15 @@ class TestUpdateRollbackContainer:
         """
         record_property("cell", "rollback/container")
         name = "clitest-rollback-test"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        toml_path = f"{cfg_dir}/workload.toml"
         toml_content = (
             f'[workload]\nname = "{name}"\nenabled = false\n\n'
             '[container]\nimage = "docker.io/library/caddy:2-alpine"\n'
         )
         try:
             # Enable
+            target.run(["mkdir", "-p", cfg_dir], sudo=True, check=True)
             target.put_content(toml_content, toml_path)
             target.wl(f"enable {name}", check=True, timeout=180)
             assert _wait_active(target, name)
@@ -126,7 +128,7 @@ class TestUpdateRollbackContainer:
             # state survives the purge and poisons the *next* run's `enable` of
             # the same unit name (it never reaches active).
             _purge_workload(target, name)
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
     def test_rollback_without_prior_fails_cleanly(self, target, fresh_single, record_property):
         """rollback when no rollback tag exists: exit nonzero, no traceback."""
