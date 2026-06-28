@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +28,7 @@ from workload_lib import (
     NAME_PATTERN,
     workload_config_dir,
     workload_config_path,
+    workload_enabled_marker,
     workload_username,
     workload_root_dir,
 )
@@ -50,11 +50,6 @@ RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
 _BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
-
-_WORKLOAD_SECTION_RE = re.compile(
-    r'(?ms)(?P<header>^\[workload\][^\n]*\n)(?P<body>.*?)(?=^\[|\Z)'
-)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -587,38 +582,6 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
             sys.exit(1)
 
 
-def _replace_workload_enabled(content: str, value: str | None) -> tuple[str, bool]:
-    """Set, change, or remove `enabled` in the [workload] section only.
-
-    Scoping the edit to [workload] keeps the regex from accidentally flipping
-    an unrelated `enabled = ...` in some other section (today there's none,
-    but the schema is open to extension and the wider regex would silently
-    catch a future `[[containers]] enabled = ...` field).
-
-    value: "true" or "false" to set; None to remove the line.
-    Returns (new_content, had_field_before).
-    """
-    m = _WORKLOAD_SECTION_RE.search(content)
-    if not m:
-        if value is None:
-            return content, False
-        sep = "" if content.endswith("\n") else "\n"
-        return content + f"{sep}[workload]\nenabled = {value}\n", False
-    body = m.group("body")
-    had_field = bool(re.search(r'^enabled\s*=', body, re.MULTILINE))
-    if had_field and value is None:
-        new_body = re.sub(r'^enabled\s*=[^\n]*\n?', '', body, count=1,
-                          flags=re.MULTILINE)
-    elif had_field:
-        new_body = re.sub(r'^enabled\s*=[^\n]*', f'enabled = {value}',
-                          body, count=1, flags=re.MULTILINE)
-    elif value is None:
-        new_body = body
-    else:
-        new_body = f'enabled = {value}\n' + body
-    return content[:m.start("body")] + new_body + content[m.end("body"):], had_field
-
-
 def _remove_user_dropin(config: WorkloadConfig):
     """Remove the user@<uid>.service.d/50-workload.conf drop-in for a workload."""
     dropin_dir = Path("/run/systemd/system") / f"user@{config.uid}.service.d"
@@ -696,9 +659,9 @@ def cmd_enable(args, manager: WorkloadManager):
 
     print(f"Enabling workload: {args.workload}")
 
-    content = config_path.read_text()
-    content, had_enabled_field = _replace_workload_enabled(content, "true")
-    config_path.write_text(content)
+    # Mark enabled before the daemon-reload below: the boot/CLI generator only
+    # emits this workload's units when the marker is present.
+    workload_enabled_marker(args.workload).touch()
 
     print("  Reloading systemd...")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
@@ -713,14 +676,8 @@ def cmd_enable(args, manager: WorkloadManager):
         print("Pre-flight checks failed. Fix the issues above, then re-run enable.")
         print(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
         print(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
-        # Revert enabled = true since we haven't actually started anything.
-        # If the original file didn't have an enabled field, remove the one we
-        # added; otherwise flip it back to false to preserve user formatting.
-        content = config_path.read_text()
-        content, _ = _replace_workload_enabled(
-            content, "false" if had_enabled_field else None
-        )
-        config_path.write_text(content)
+        # Nothing was started, so revert to disabled by removing the marker.
+        workload_enabled_marker(args.workload).unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], check=False)
         sys.exit(1)
 
@@ -827,10 +784,8 @@ def cmd_disable(args, manager: WorkloadManager):
     # an unambiguous teardown — nothing else depends on wl_<name>).
     _apply_selinux_policy(config, "disable")
 
-    config_path = workload_config_path(args.workload)
-    content = config_path.read_text()
-    content, _ = _replace_workload_enabled(content, "false")
-    config_path.write_text(content)
+    # Mark disabled: the next daemon-reload regenerates without this workload.
+    workload_enabled_marker(args.workload).unlink(missing_ok=True)
 
     # Remove the user@ drop-in so systemd stops constraining user@<uid>
     # to workloads.slice once the workload is disabled.  Lives in /run so

@@ -46,9 +46,7 @@ podman build -t localhost/squid:latest .
 
 4. **Enable the workload:**
    ```bash
-   sudo vi /etc/workloads.d/squid/workload.toml  # Set enabled = true
-   sudo systemctl daemon-reload
-   sudo systemctl start workload-squid.service
+   sudo workloadctl enable squid
    ```
 
 5. **Verify it's running:**

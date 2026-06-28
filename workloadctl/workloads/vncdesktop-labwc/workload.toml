@@ -39,7 +39,6 @@
 
 [workload]
 name = "vncdesktop-labwc"
-enabled = false
 
 [container]
 image = "localhost/vncdesktop-labwc:latest"

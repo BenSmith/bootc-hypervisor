@@ -89,7 +89,10 @@ class CreateTest(unittest.TestCase):
         self.assertIsNone(self._create(name="web", image="nginx:latest"))
         data = self._toml("web")
         self.assertEqual(data["workload"]["name"], "web")
-        self.assertFalse(data["workload"]["enabled"])
+        # `enabled` is no longer a TOML field; created workloads start disabled
+        # by virtue of having no .enabled marker.
+        self.assertNotIn("enabled", data["workload"])
+        self.assertFalse((self.tmp / "web" / ".enabled").exists())
         self.assertEqual(data["container"]["image"], "nginx:latest")
         for absent in ("devices", "network", "storage", "resources", "security"):
             self.assertNotIn(absent, data)

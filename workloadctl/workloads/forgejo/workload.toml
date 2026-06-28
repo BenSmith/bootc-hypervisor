@@ -39,7 +39,6 @@
 
 [workload]
 name = "forgejo"
-enabled = false
 
 [container]
 image = "codeberg.org/forgejo/forgejo:15-rootless"

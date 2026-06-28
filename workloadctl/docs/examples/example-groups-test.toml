@@ -2,7 +2,7 @@
 # This workload demonstrates that extra_groups are passed through to the container
 #
 # To test:
-# 1. Enable this workload (set enabled = true)
+# 1. Enable this workload: sudo workloadctl enable example-groups-test
 # 2. systemctl daemon-reload
 # 3. Check user groups: id _wl-groups-test
 # 4. Check container: podman exec workload-groups-test id
@@ -10,7 +10,6 @@
 
 [workload]
 name = "example-groups-test"
-enabled = false  # Set to true to test group preservation
 
 [container]
 # Simple alpine container that sleeps forever (so we can exec into it)

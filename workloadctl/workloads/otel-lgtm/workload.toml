@@ -41,7 +41,6 @@
 
 [workload]
 name = "otel-lgtm"
-enabled = false
 
 [container]
 image = "docker.io/grafana/otel-lgtm:latest"

@@ -43,7 +43,6 @@
 
 [workload]
 name = "vncdesktop-sway"
-enabled = false
 
 [container]
 image = "localhost/vncdesktop-sway:latest"

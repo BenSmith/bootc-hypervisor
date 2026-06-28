@@ -25,7 +25,6 @@
 
 [workload]
 name = "webproxy-demo"
-enabled = false
 mode = "bridge"
 
 # --- Backend ----------------------------------------------------------------

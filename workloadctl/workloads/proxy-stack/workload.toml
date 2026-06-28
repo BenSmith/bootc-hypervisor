@@ -41,7 +41,6 @@
 
 [workload]
 name = "proxy-stack"
-enabled = false
 
 [setup]
 required_files = [

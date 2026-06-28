@@ -35,7 +35,6 @@
 
 [workload]
 name = "registry"
-enabled = false
 
 [container]
 image = "docker.io/library/registry:2"

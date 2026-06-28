@@ -3,7 +3,6 @@
 
 [workload]
 name = "test-resource-limits"
-enabled = false  # Disabled by default - enable to test resource constraints
 
 [container]
 image = "docker.io/library/alpine:latest"

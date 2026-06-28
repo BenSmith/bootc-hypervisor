@@ -49,7 +49,12 @@ def write_config(config_dir, name, toml_content):
     """Write a TOML config file to the config directory."""
     (Path(config_dir) / name).mkdir(exist_ok=True)
     path = Path(config_dir) / name / "workload.toml"
-    path.write_text(textwrap.dedent(toml_content))
+    body = textwrap.dedent(toml_content)
+    path.write_text(body)
+    # Enabled-ness is a marker file now, not a TOML field; mirror an
+    # `enabled = true` in the fixture by creating the marker.
+    if "enabled=true" in body.replace(" ", ""):
+        (Path(config_dir) / name / ".enabled").touch()
     return path
 
 

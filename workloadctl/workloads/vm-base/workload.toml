@@ -2,11 +2,10 @@
 # Use: workloadctl init vm-base --as <name>
 # Copies this workload.toml to /etc/workloads.d/<name>/; the cloud-init seed
 # stays in /usr/share/workloadctl/workloads/vm-base/ and is referenced absolutely.
-# After init, edit /etc/workloads.d/<name>/workload.toml and set enabled = true.
+# After init, edit /etc/workloads.d/<name>/workload.toml, then `workloadctl enable <name>`.
 
 [workload]
 name = "vm-base"
-enabled = false
 
 [vm]
 # Fedora 44 Cloud-Base (bump with fedora-versions.yml `stable:`).

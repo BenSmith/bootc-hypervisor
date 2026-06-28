@@ -68,7 +68,6 @@ sudo mkdir -p /etc/workloads.d/webserver
 sudo tee /etc/workloads.d/webserver/workload.toml <<'EOF'
 [workload]
 name = "webserver"
-enabled = true
 
 [container]
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"

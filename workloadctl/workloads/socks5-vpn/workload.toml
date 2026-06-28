@@ -17,7 +17,6 @@
 
 [workload]
 name = "socks5-vpn"
-enabled = false
 
 [setup]
 required_files = [

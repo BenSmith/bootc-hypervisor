@@ -19,12 +19,6 @@
 # Home directory: /var/lib/workloads/{name}
 name = "schema-reference"
 
-# Optional: Whether this workload should be enabled
-# Type: boolean
-# Default: true
-# Set to false to disable without deleting the config file
-enabled = false
-
 # Optional: Bundle (kind) this workload draws shared control files from.
 # Type: string
 # Default: the workload name
@@ -270,7 +264,6 @@ enabled = false
 # ------------------------------------------------
 # [workload]
 # name = "fedora-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 2
@@ -284,7 +277,6 @@ enabled = false
 # -----------------------------------------------
 # [workload]
 # name = "dev-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 4
@@ -298,7 +290,6 @@ enabled = false
 # ---------------------------------------------------------------
 # [workload]
 # name = "lan-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 2
@@ -385,7 +376,7 @@ enabled = false
 #
 # --- Field allocation -------------------------------------------------------
 # Workload-level (declared once, at the top level):
-#   [workload]   name, enabled, mode
+#   [workload]   name, mode
 #   [setup]      required_files
 #   [host]       setup
 #   [network]    mode, ports          (pod mode only; ignored in bridge mode)
@@ -1236,7 +1227,6 @@ ports = ["8080:80", "8443:443"]
 # ----------------------------------------
 # [workload]
 # name = "gaming"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/user/gaming-vm:latest"
@@ -1260,7 +1250,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------
 # [workload]
 # name = "sunshine"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/lizardbyte/sunshine:latest"
@@ -1282,7 +1271,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------
 # [workload]
 # name = "webserver"
-# enabled = true
 #
 # [container]
 # image = "docker.io/library/nginx:alpine"
@@ -1303,7 +1291,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------------
 # [workload]
 # name = "devenv"
-# enabled = true
 #
 # [container]
 # image = "localhost/my-devenv:latest"
@@ -1324,7 +1311,6 @@ ports = ["8080:80", "8443:443"]
 # ------------------------------------------------
 # [workload]
 # name = "homeassistant"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/home-assistant/home-assistant:stable"
@@ -1352,7 +1338,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------
 # [workload]
 # name = "groups-test"
-# enabled = true
 #
 # [container]
 # image = "docker.io/library/alpine:latest"
@@ -1369,7 +1354,6 @@ ports = ["8080:80", "8443:443"]
 # ---------------------------------------
 # [workload]
 # name = "plex"
-# enabled = true
 #
 # [container]
 # image = "docker.io/plexinc/pms-docker:latest"
@@ -1388,7 +1372,6 @@ ports = ["8080:80", "8443:443"]
 # -----------------------------------
 # [workload]
 # name = "frigate"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/blakeblackshear/frigate:stable"
@@ -1409,7 +1392,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------
 # [workload]
 # name = "qemu-vm"
-# enabled = true
 #
 # [container]
 # image = "tianon/qemu:latest"
@@ -1430,7 +1412,6 @@ ports = ["8080:80", "8443:443"]
 # -----------------------------------------
 # [workload]
 # name = "webapp"
-# enabled = true
 #
 # [container]
 # image = "myapp:latest"
@@ -1454,7 +1435,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------
 # [workload]
 # name = "postgres"
-# enabled = true
 #
 # [container]
 # image = "postgres:16"
@@ -1493,7 +1473,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "jellyfin"
-# enabled = true
 #
 # [container]
 # image = "jellyfin/jellyfin:latest"
@@ -1523,7 +1502,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "proxy-stack"
-# enabled = true
 # mode = "pod"
 #
 # # Pod-level: ports are published once, on the pod's infra container.
@@ -1549,7 +1527,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "forgejo-stack"
-# enabled = true
 # mode = "bridge"
 #
 # [[containers]]

@@ -16,7 +16,6 @@
 
 [workload]
 name = "wireguard-vpn"
-enabled = false
 
 [setup]
 required_files = [

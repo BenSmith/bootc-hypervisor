@@ -188,7 +188,7 @@ For immutable OS images, place workload configs directly in the image:
 COPY workloads.d/ /etc/workloads.d/
 ```
 
-Workloads with `enabled = true` will be provisioned automatically on first boot. The TOML format is identical — only the delivery mechanism differs. See the [Bootc Integration section in secrets.md](secrets.md#bootc-integration) for handling secrets in immutable images.
+Workloads that carry a `.enabled` marker (created by `workloadctl enable`, or shipped alongside the config in the image) will be provisioned automatically on first boot. The TOML format is identical — only the delivery mechanism differs. See the [Bootc Integration section in secrets.md](secrets.md#bootc-integration) for handling secrets in immutable images.
 
 ---
 
@@ -343,7 +343,6 @@ Workload configurations are TOML files in `/etc/workloads.d/`. See [schema-refer
 ```toml
 [workload]
 name = "webserver"
-enabled = true
 
 [container]
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
@@ -775,7 +774,6 @@ an array of `[[containers]]` tables, each with a unique `name`:
 ```toml
 [workload]
 name = "myapp"
-enabled = true
 mode = "pod"          # or "bridge" — see below
 
 [[containers]]
@@ -894,7 +892,7 @@ sudo workloadctl init --scratch-vm myvm
 sudo workloadctl init vm-base --as myvm
 ```
 
-Both create `/etc/workloads.d/myvm/` containing a `workload.toml` and a `cloud-init/user-data` seed. The stub is **enable-ready out of the box**: it pins the current Fedora Cloud-Base image (`cloud_image_url` + `cloud_image_checksum`) with the `local_image` and `image` alternatives stamped as commented one-line swaps, sane `vcpus`/`memory`/`system_disk_size` defaults, `user = "fedora"`, and `enabled = false`. The seed already wires up `${WORKLOADCTL_SSH_KEY}` and `${WORKLOADCTL_WORKLOAD_NAME}` (see [Bootstrapping a VM with cloud-init](#bootstrapping-a-vm-with-cloud-init)).
+Both create `/etc/workloads.d/myvm/` containing a `workload.toml` and a `cloud-init/user-data` seed. The stub is **enable-ready out of the box**: it pins the current Fedora Cloud-Base image (`cloud_image_url` + `cloud_image_checksum`) with the `local_image` and `image` alternatives stamped as commented one-line swaps, sane `vcpus`/`memory`/`system_disk_size` defaults, and `user = "fedora"`. It starts disabled (no `.enabled` marker) until you run `workloadctl enable`. The seed already wires up `${WORKLOADCTL_SSH_KEY}` and `${WORKLOADCTL_WORKLOAD_NAME}` (see [Bootstrapping a VM with cloud-init](#bootstrapping-a-vm-with-cloud-init)).
 
 Edit to taste, then enable:
 
@@ -910,7 +908,6 @@ sudo workloadctl enable myvm      # downloads the image, builds the disk, boots
 ```toml
 [workload]
 name = "fedora-vm"
-enabled = true
 
 [vm]
 vcpus = 2
@@ -1279,11 +1276,12 @@ workloadctl images prune              # Remove unused images
 
 If you prefer to manage workloads manually:
 
+Enabled-ness is a marker file, `/etc/workloads.d/<name>/.enabled` — `workloadctl enable`/`disable` just create and remove it. To do the same by hand:
+
 **Enable a workload:**
 ```bash
-# 1. Edit the config file
-sudo nano /etc/workloads.d/example-webserver/workload.toml
-# Change: enabled = false → enabled = true
+# 1. Create the enable marker (the generator only emits units when it's present)
+sudo touch /etc/workloads.d/example-webserver/.enabled
 
 # 2. Reload systemd and start
 sudo systemctl daemon-reload
@@ -1295,9 +1293,8 @@ sudo systemctl start workload-webserver.service
 # 1. Stop the service
 sudo systemctl stop workload-webserver.service
 
-# 2. Edit the config file
-sudo nano /etc/workloads.d/example-webserver/workload.toml
-# Change: enabled = true → enabled = false
+# 2. Remove the enable marker
+sudo rm -f /etc/workloads.d/example-webserver/.enabled
 
 # 3. Reload systemd
 sudo systemctl daemon-reload
@@ -1307,7 +1304,7 @@ sudo systemctl daemon-reload
 ```bash
 # 1. Stop and disable
 sudo systemctl stop workload-webserver.service
-sudo nano /etc/workloads.d/example-webserver/workload.toml  # Set enabled = false
+sudo rm -f /etc/workloads.d/example-webserver/.enabled
 sudo systemctl daemon-reload
 
 # 2. Get user info and remove
@@ -1826,19 +1823,15 @@ workloadctl info NAME
 sudo workloadctl edit NAME  # Change port mapping
 ```
 
-#### 3. Workload Not Starting (enabled = false)
+#### 3. Workload Not Starting (no `.enabled` marker)
 
 **Symptom:** Config file exists but service never starts.
 
-**Fix:**
-```toml
-[workload]
-enabled = true  # Must be true!
-```
+**Cause:** The workload has no enable marker (`/etc/workloads.d/<name>/.enabled`), so the generator skips it.
 
-Then reload: `sudo systemctl daemon-reload`
+**Fix:** `sudo workloadctl enable NAME`
 
-Or use: `sudo workloadctl enable NAME`
+Or by hand: `sudo touch /etc/workloads.d/NAME/.enabled && sudo systemctl daemon-reload`
 
 #### 4. SELinux Denying Device Access
 
@@ -2062,7 +2055,7 @@ RUN grep -E "^(video|render|input):" /usr/lib/group >> /etc/group || true
 
 #### 3. No Automatic Cleanup of Disabled Workloads
 
-When you disable a workload (`enabled = false`), the generator stops creating the service, but:
+When you disable a workload (`workloadctl disable`, which removes the `.enabled` marker), the generator stops creating the service, but:
 - The user account persists
 - Home directory remains
 - Subuid/subgid entries remain

@@ -211,7 +211,6 @@ def _scratch_vm(name: str, manager: WorkloadManager) -> None:
     stub = (
         f'[workload]\n'
         f'name = "{name}"\n'
-        f'enabled = false\n'
         f'\n'
         f'[vm]\n'
         f'# Fedora 44 Cloud-Base (bump with fedora-versions.yml `stable:`).\n'
@@ -273,7 +272,6 @@ def cmd_init(args, manager: WorkloadManager):
         stub = (
             f'[workload]\n'
             f'name = "{name}"\n'
-            f'enabled = false\n'
             f'\n'
             f'[container]\n'
             f'image = "CHANGE_ME"\n'
@@ -504,7 +502,10 @@ def cmd_install(args, manager: WorkloadManager):
         print(f"Error: workload '{name}' already exists: {dst_dir}", file=sys.stderr)
         sys.exit(1)
 
-    shutil.copytree(src, dst_dir, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    # Never carry the source's enable marker into a fresh instance — a newly
+    # installed/cloned workload always starts disabled.
+    shutil.copytree(src, dst_dir,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".enabled"))
 
     dst = workload_config_path(name)
     print(f"✓ Installed '{name}' from {src}")

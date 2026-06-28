@@ -125,6 +125,24 @@ def workload_config_path(name: str) -> Path:
     return workload_config_dir() / name / "workload.toml"
 
 
+# Enabled-ness is denoted by the presence of this marker file in the workload's
+# own config dir — NOT by a field in workload.toml. `enable`/`disable` touch and
+# unlink it; the boot generator and `WorkloadConfig.enabled` read it. This keeps
+# workload.toml purely declarative (no command ever rewrites it) and makes the
+# state a single atomic 1-byte file living right beside the config.
+ENABLED_MARKER_NAME = ".enabled"
+
+
+def workload_enabled_marker(name: str) -> Path:
+    """Path to a workload's enable marker; its presence == enabled."""
+    return workload_config_dir() / name / ENABLED_MARKER_NAME
+
+
+def workload_is_enabled(name: str) -> bool:
+    """Single source of truth for enabled-ness: the marker file is present."""
+    return workload_enabled_marker(name).exists()
+
+
 def iter_workloads() -> list[tuple[str, Path]]:
     """(name, config_path) for every instance under the config dir, sorted by name.
 

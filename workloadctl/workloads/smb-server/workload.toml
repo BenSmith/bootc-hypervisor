@@ -52,7 +52,6 @@
 
 [workload]
 name = "smb-server"
-enabled = false
 
 [setup]
 required_files = [

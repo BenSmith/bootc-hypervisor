@@ -1,6 +1,5 @@
 [workload]
 name = "wayfire-game-streaming"
-enabled = false
 
 [container]
 image = "localhost/wayfire-game-streaming:latest"

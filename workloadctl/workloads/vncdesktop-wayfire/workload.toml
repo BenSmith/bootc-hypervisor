@@ -1,6 +1,5 @@
 [workload]
 name = "vncdesktop-wayfire"
-enabled = false
 
 [container]
 image = "localhost/vncdesktop-wayfire:latest"

@@ -3,7 +3,6 @@
 
 [workload]
 name = "caddy"
-enabled = true
 
 [setup]
 required_files = [

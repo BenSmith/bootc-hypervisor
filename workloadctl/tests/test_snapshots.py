@@ -46,13 +46,9 @@ _SYSUSERS_UID_RE = re.compile(r'^u\s+\S+\s+(\d+)\s', re.M)
 
 
 def _enable_toml(src: Path, dst: Path):
-    """Copy a TOML and force enabled = true so the generator processes it."""
-    text = src.read_text()
-    if "enabled = false" in text:
-        text = text.replace("enabled = false", "enabled = true", 1)
-    elif "enabled = true" not in text:
-        text = text.replace("[workload]", "[workload]\nenabled = true", 1)
-    dst.write_text(text)
+    """Copy a TOML and create the .enabled marker so the generator processes it."""
+    dst.write_text(src.read_text())
+    (dst.parent / ".enabled").touch()
 
 
 def _workload_uid(conf_text: str) -> str | None:

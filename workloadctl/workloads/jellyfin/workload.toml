@@ -51,7 +51,6 @@
 
 [workload]
 name = "jellyfin"
-enabled = false
 
 [container]
 image = "docker.io/jellyfin/jellyfin:latest"

@@ -106,6 +106,10 @@ class _WorkloadDir:
         tmp_path = Path(self._tmp)
         (tmp_path / self._name).mkdir()
         (tmp_path / self._name / 'workload.toml').write_text(self._toml)
+        # Enabled-ness is a marker file now, not a TOML field; mirror an
+        # `enabled = true` in the fixture by creating the marker.
+        if "enabled=true" in self._toml.replace(" ", ""):
+            (tmp_path / self._name / '.enabled').touch()
         self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
         return tmp_path

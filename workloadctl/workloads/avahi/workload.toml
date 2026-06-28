@@ -43,7 +43,6 @@
 
 [workload]
 name = "avahi"
-enabled = false
 
 [container]
 image = "localhost/avahi:latest"

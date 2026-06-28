@@ -13,7 +13,7 @@
 | [`cp`](#cp) | Copy files to/from a running container |
 | [`create`](#create) | Scaffold a from-scratch workload TOML (no bundle) |
 | [`diagnose`](#diagnose) | Check runtime setup: user, subuid/subgid, linger, SELinux label |
-| [`disable`](#disable) | Stop the service and set `enabled = false` (optionally `--purge`) |
+| [`disable`](#disable) | Stop the service and remove the `.enabled` marker (optionally `--purge`) |
 | [`drift`](#drift) | Diff running systemd units against what would be generated from current TOMLs |
 | [`duplicate`](#duplicate-alias-clone) / `clone` | Copy a live workload's TOML under a new name |
 | [`edit`](#edit) | Edit the workload TOML, or copy-on-write override a bundle control file |
@@ -228,7 +228,7 @@ Typical override-and-rebuild flow: `init` → `edit <name> Containerfile` → `b
 
 ### `enable`
 
-Run preflight checks, create the workload user, set up subuid/linger, transfer the image if needed, and start the service.
+Run preflight checks, create the workload's `.enabled` marker (`/etc/workloads.d/<name>/.enabled`, which is what tells the generator to emit its units), create the workload user, set up subuid/linger, transfer the image if needed, and start the service.
 
 ```
 sudo workloadctl enable <workload>
@@ -242,7 +242,7 @@ This is idempotent — safe to re-run if a previous enable was interrupted.
 
 ### `disable`
 
-Stop the workload service and set `enabled = false` in its config.
+Stop the workload service and remove its `.enabled` marker (`/etc/workloads.d/<name>/.enabled`), so the generator stops emitting its units.
 
 ```
 sudo workloadctl disable [--purge] <workload>

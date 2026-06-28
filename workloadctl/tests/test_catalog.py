@@ -167,7 +167,10 @@ class TestInitScratchVM(CatalogTestBase):
         self.assertTrue(dst.exists())
         data = tomllib.loads(dst.read_text())
         self.assertEqual(data["workload"]["name"], "myvm")
-        self.assertFalse(data["workload"]["enabled"])
+        # `enabled` is no longer a TOML field; absence of a .enabled marker
+        # means the scaffolded VM starts disabled.
+        self.assertNotIn("enabled", data["workload"])
+        self.assertFalse((self.tmp / "myvm" / ".enabled").exists())
         self.assertIn("vm", data)
 
     def test_scratch_vm_user_data_file_is_relative(self):

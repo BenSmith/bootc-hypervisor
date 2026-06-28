@@ -121,12 +121,16 @@ class TestWorkloadConfigParsing(unittest.TestCase):
                 self.assertTrue(image, f"{filename} missing container.image")
 
     def test_all_configs_disabled_by_default(self):
-        """Shipped configs should be disabled (enabled = false)."""
+        """Shipped bundles must ship disabled: no .enabled marker, and no dead
+        `enabled` field left in the TOML (enabled-ness is the marker file now)."""
         for filename, config in ALL_WORKLOADS:
             with self.subTest(config=filename):
-                enabled = config.get("workload", {}).get("enabled", True)
-                self.assertFalse(enabled,
-                                 f"{filename} is enabled by default — shipped configs should be disabled")
+                name = filename.removesuffix(".toml")
+                marker = WORKLOADS_DIR / name / ".enabled"
+                self.assertFalse(marker.exists(),
+                                 f"{filename} ships a .enabled marker — bundles must ship disabled")
+                self.assertNotIn("enabled", config.get("workload", {}),
+                                 f"{filename} has a dead `enabled` field — remove it (use the marker)")
 
     def test_name_is_valid(self):
         """Workload names follow the naming rules."""
@@ -253,6 +257,7 @@ class TestWorkloadGeneration(unittest.TestCase):
             name = filename.removesuffix(".toml")
             (Path(cls.config_dir) / name).mkdir(exist_ok=True)
             (Path(cls.config_dir) / name / "workload.toml").write_text(toml_text)
+            (Path(cls.config_dir) / name / ".enabled").touch()
             cls.configs[filename] = config_copy
 
         cls.gen_result = run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
@@ -539,6 +544,7 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
             wl_name = filename.removesuffix(".toml")
             (Path(cls.config_dir) / wl_name).mkdir(exist_ok=True)
             (Path(cls.config_dir) / wl_name / "workload.toml").write_text(toml_text)
+            (Path(cls.config_dir) / wl_name / ".enabled").touch()
 
         run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
 

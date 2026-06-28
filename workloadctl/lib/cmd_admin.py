@@ -365,7 +365,6 @@ def cmd_create(args, manager: WorkloadManager):
     config_lines = [
         "[workload]",
         f"name = {toml_string(name)}",
-        "enabled = false",
     ]
 
     config_lines.extend([

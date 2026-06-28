@@ -1,6 +1,5 @@
 [workload]
 name = "sunshine-game-streaming"
-enabled = false
 
 [container]
 image = "localhost/sunshine-game-streaming:latest"

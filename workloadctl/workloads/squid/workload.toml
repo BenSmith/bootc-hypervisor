@@ -30,7 +30,6 @@
 
 [workload]
 name = "squid"
-enabled = false
 
 [setup]
 required_files = [

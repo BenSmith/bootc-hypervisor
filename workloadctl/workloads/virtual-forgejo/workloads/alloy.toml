@@ -7,7 +7,6 @@
 
 [workload]
 name = "alloy"
-enabled = true
 
 [setup]
 required_files = [

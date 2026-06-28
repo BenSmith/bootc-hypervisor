@@ -60,6 +60,7 @@ try:
 
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
+        ENABLED_MARKER_NAME,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
         workload_username, workload_home_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
@@ -1723,12 +1724,13 @@ def main():
     all_workload_names: set[str] = set()
     for _cf in config_files:
         try:
+            if not (_cf.parent / ENABLED_MARKER_NAME).exists():
+                continue
             with open(_cf, "rb") as _f:
                 _c = tomllib.load(_f)
-            if _c.get("workload", {}).get("enabled", False):
-                _n = _c.get("workload", {}).get("name", "")
-                if _n:
-                    all_workload_names.add(_n)
+            _n = _c.get("workload", {}).get("name", "")
+            if _n:
+                all_workload_names.add(_n)
         except Exception:
             pass
 
@@ -1738,7 +1740,7 @@ def main():
             with open(config_file, "rb") as f:
                 config = tomllib.load(f)
 
-            enabled = config.get("workload", {}).get("enabled", False)
+            enabled = (config_file.parent / ENABLED_MARKER_NAME).exists()
             if not enabled:
                 log_msg(f"  Skipping {config_file} (disabled)")
                 continue

@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -65,18 +65,21 @@ def get_enabled_workloads():
         except OSError:
             continue
 
+        # Enabled-ness is the marker file beside the config.
+        if not (toml_path.parent / ENABLED_MARKER_NAME).exists():
+            continue
+
         try:
             with open(toml_path, "rb") as f:
                 config = tomllib.load(f)
-            if config.get("workload", {}).get("enabled", False):
-                name = config.get("workload", {}).get("name", "")
-                is_vm = bool(config.get("vm"))
-                has_health = any(
-                    bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
-                    for ctr in normalize_containers(config)
-                ) if not is_vm else False
-                if name:
-                    workloads.append((name, has_health, is_vm))
+            name = config.get("workload", {}).get("name", "")
+            is_vm = bool(config.get("vm"))
+            has_health = any(
+                bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
+                for ctr in normalize_containers(config)
+            ) if not is_vm else False
+            if name:
+                workloads.append((name, has_health, is_vm))
         except Exception:
             continue
 

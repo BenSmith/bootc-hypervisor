@@ -52,6 +52,7 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR,
     workload_config_dir,
     workload_config_path,
+    workload_is_enabled,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     vm_mac_address,
@@ -373,7 +374,9 @@ class WorkloadConfig:
 
     @property
     def enabled(self) -> bool:
-        return self.config.get("workload", {}).get("enabled", False)
+        # Enabled-ness lives in a marker file, not workload.toml (see
+        # workload_lib.workload_enabled_marker).
+        return workload_is_enabled(self.name)
 
     @property
     def lifecycle(self) -> str:

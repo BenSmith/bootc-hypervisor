@@ -1,6 +1,5 @@
 [workload]
 name = "wolf-game-streaming"
-enabled = false
 
 [container]
 image = "localhost/wolf-game-streaming:latest"

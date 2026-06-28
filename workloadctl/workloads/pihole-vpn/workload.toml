@@ -30,7 +30,6 @@
 
 [workload]
 name = "pihole-vpn"
-enabled = false
 
 [setup]
 required_files = [

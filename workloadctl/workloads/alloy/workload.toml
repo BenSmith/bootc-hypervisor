@@ -21,7 +21,6 @@
 
 [workload]
 name = "alloy"
-enabled = false
 
 [setup]
 required_files = [

@@ -30,7 +30,6 @@
 
 [workload]
 name = "example-multi-container"
-enabled = false
 mode = "bridge"
 
 # --- Database container -----------------------------------------------------
