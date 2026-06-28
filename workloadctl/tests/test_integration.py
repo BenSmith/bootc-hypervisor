@@ -45,14 +45,12 @@ def run_write_env(name, config_dir, creds_dir, env_dir):
     )
 
 
-def write_config(config_dir, name, toml_content):
+def write_config(config_dir, name, toml_content, enabled=True):
     (Path(config_dir) / name).mkdir(exist_ok=True)
     path = Path(config_dir) / name / "workload.toml"
     body = textwrap.dedent(toml_content)
     path.write_text(body)
-    # Enabled-ness is a marker file now, not a TOML field; mirror an
-    # `enabled = true` in the fixture by creating the marker.
-    if "enabled=true" in body.replace(" ", ""):
+    if enabled:
         (Path(config_dir) / name / ".enabled").touch()
     return path
 
@@ -131,7 +129,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "myapp", """\
             [workload]
             name = "myapp"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -169,7 +166,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "tls-app", """\
             [workload]
             name = "tls-app"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -200,7 +196,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "full", """\
             [workload]
             name = "full"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -250,7 +245,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "pathcheck", """\
             [workload]
             name = "pathcheck"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -283,7 +277,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "missing", """\
             [workload]
             name = "missing"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -309,7 +302,6 @@ class TestPipelineCredentialConsistency(unittest.TestCase):
         write_config(self.config_dir, "dsn", """\
             [workload]
             name = "dsn"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -393,7 +385,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("minimal", """\
             [workload]
             name = "minimal"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -404,7 +395,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("webserver", """\
             [workload]
             name = "webserver"
-            enabled = true
 
             [container]
             image = "nginx:latest"
@@ -418,7 +408,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("secretsvc", """\
             [workload]
             name = "secretsvc"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -433,7 +422,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("volsvc", """\
             [workload]
             name = "volsvc"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -447,7 +435,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("limited", """\
             [workload]
             name = "limited"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -463,7 +450,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("gpusvc", """\
             [workload]
             name = "gpusvc"
-            enabled = true
 
             [container]
             image = "rocm-app:latest"
@@ -478,7 +464,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("tlssvc", """\
             [workload]
             name = "tlssvc"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -495,7 +480,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("hostnetsvc", """\
             [workload]
             name = "hostnetsvc"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -509,7 +493,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("hostns", """\
             [workload]
             name = "hostns"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -523,7 +506,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("uidmap", """\
             [workload]
             name = "uidmap"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -537,7 +519,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("capsvc", """\
             [workload]
             name = "capsvc"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -552,7 +533,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("cmdsvc", """\
             [workload]
             name = "cmdsvc"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -565,7 +545,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         result, _ = self._generate_and_verify("kitchen", """\
             [workload]
             name = "kitchen"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -611,7 +590,6 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         write_config(self.config_dir, "clean", """\
             [workload]
             name = "clean"
-            enabled = true
 
             [container]
             image = "alpine:latest"

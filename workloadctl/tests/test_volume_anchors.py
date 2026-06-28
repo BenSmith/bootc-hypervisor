@@ -97,12 +97,10 @@ def _volume_and_disk_host_paths(unit_text: str):
 
 
 def _enable_toml(src: Path, dst: Path):
-    text = src.read_text()
-    if "enabled = false" in text:
-        text = text.replace("enabled = false", "enabled = true", 1)
-    elif "enabled = true" not in text:
-        text = text.replace("[workload]", "[workload]\nenabled = true", 1)
-    dst.write_text(text)
+    """Copy a shipped workload TOML into the test config dir and enable it by
+    creating the `.enabled` marker beside it."""
+    dst.write_text(src.read_text())
+    (dst.parent / ".enabled").touch()
 
 
 class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
@@ -170,7 +168,6 @@ class TestRequiredFilesAnchorResolution(unittest.TestCase):
         config = self._config_with(
             '[workload]\n'
             'name = "wltest"\n'
-            'enabled = false\n\n'
             '[container]\n'
             'image = "localhost/x:latest"\n\n'
             '[setup]\n'
@@ -199,7 +196,6 @@ class TestRequiredFilesAnchorResolution(unittest.TestCase):
         config = self._config_with(
             '[workload]\n'
             'name = "wltest"\n'
-            'enabled = false\n\n'
             '[container]\n'
             'image = "localhost/x:latest"\n\n'
             '[setup]\n'
@@ -248,7 +244,6 @@ class TestPreflightDataAnchoring(unittest.TestCase):
         self._run_preflight(base,
             '[workload]\n'
             'name = "wltest"\n'
-            'enabled = false\n\n'
             '[container]\n'
             'image = "docker.io/x:latest"\n'
             'pull = "missing"\n\n'

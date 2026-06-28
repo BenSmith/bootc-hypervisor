@@ -69,7 +69,7 @@ class TestDiscovery(CatalogTestBase):
 class TestSetField(unittest.TestCase):
     def test_replace_existing(self):
         out = cmd_catalog._set_workload_field(
-            '[workload]\nname = "old"\nenabled = false\n', "name", '"new"')
+            '[workload]\nname = "old"\n', "name", '"new"')
         self.assertIn('name = "new"', out)
         self.assertNotIn('"old"', out)
 
@@ -160,15 +160,14 @@ class TestInitScratch(CatalogTestBase):
 
 class TestInitScratchVM(CatalogTestBase):
     def test_scratch_vm_writes_workload_toml_with_vm_table(self):
-        """workload.toml is written with a [vm] table, enabled=false."""
+        """workload.toml is written with a [vm] table and ships disabled."""
         cmd_catalog.cmd_init(
             _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
         dst = self.tmp / "myvm" / "workload.toml"
         self.assertTrue(dst.exists())
         data = tomllib.loads(dst.read_text())
         self.assertEqual(data["workload"]["name"], "myvm")
-        # `enabled` is no longer a TOML field; absence of a .enabled marker
-        # means the scaffolded VM starts disabled.
+        # Absence of a .enabled marker means the scaffolded VM starts disabled.
         self.assertNotIn("enabled", data["workload"])
         self.assertFalse((self.tmp / "myvm" / ".enabled").exists())
         self.assertIn("vm", data)
@@ -295,7 +294,7 @@ class TestDuplicate(CatalogTestBase):
         # source; the lint should surface it (rotate-one-without-the-other).
         (self.tmp / "withsec").mkdir(exist_ok=True)
         (self.tmp / "withsec" / "workload.toml").write_text(
-            '[workload]\nname = "withsec"\nbundle = "alloy"\nenabled = false\n'
+            '[workload]\nname = "withsec"\nbundle = "alloy"\n'
             '[container]\nimage = "localhost/x:latest"\n'
             '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
         buf = io.StringIO()
@@ -313,7 +312,7 @@ class TestInstall(CatalogTestBase):
         src = Path(self.enterContext(__import__("tempfile").TemporaryDirectory())) / src_name
         src.mkdir()
         (src / "workload.toml").write_text(
-            f'[workload]\nname = "{name}"\nenabled = false\n'
+            f'[workload]\nname = "{name}"\n'
             '[container]\nimage = "docker.io/library/hello-world:latest"\npull = "newer"\n'
         )
         return src

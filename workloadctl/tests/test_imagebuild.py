@@ -57,7 +57,7 @@ class BuildBase(unittest.TestCase):
 
     def _config(self, name, *, bundle=None, pull="never", build=None,
                 host_setup=None, extra=""):
-        body = f'[workload]\nname = "{name}"\nenabled = false\n'
+        body = f'[workload]\nname = "{name}"\n'
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'
         body += f'\n[container]\nimage = "localhost/{name}:latest"\npull = "{pull}"\n'
@@ -314,7 +314,7 @@ class TestDispatch(BuildBase):
     def test_cmd_build_rejects_vm(self):
         (self.etc / "vm").mkdir(exist_ok=True)
         (self.etc / "vm" / "workload.toml").write_text(
-            '[workload]\nname = "vm"\nenabled = false\n\n[vm]\nmemory = "1024M"\n')
+            '[workload]\nname = "vm"\n\n[vm]\nmemory = "1024M"\n')
         with self.assertRaises(SystemExit) as cm:
             with redirect_stdout(io.StringIO()):
                 cmd_lifecycle.cmd_build(_ns(workload="vm"), self.manager)

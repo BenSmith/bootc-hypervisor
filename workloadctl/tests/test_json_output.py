@@ -50,7 +50,6 @@ def _args(**kwargs):
 MINIMAL_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -59,7 +58,6 @@ image = "example.com/test:latest"
 ENABLED_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -72,7 +70,6 @@ ports = ["8080:80"]
 HOST_NET_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -85,7 +82,6 @@ ports = ["8080"]
 VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -95,9 +91,10 @@ image = "example.com/guest:latest"
 class _WorkloadDir:
     """Temp WORKLOAD_DIR with one TOML, WORKLOAD_DIR patched on the module."""
 
-    def __init__(self, toml=MINIMAL_TOML, name='test-wl'):
+    def __init__(self, toml=MINIMAL_TOML, name='test-wl', enabled=False):
         self._toml = toml
         self._name = name
+        self._enabled = enabled
         self._tmp = None
         self._patcher = None
 
@@ -106,9 +103,7 @@ class _WorkloadDir:
         tmp_path = Path(self._tmp)
         (tmp_path / self._name).mkdir()
         (tmp_path / self._name / 'workload.toml').write_text(self._toml)
-        # Enabled-ness is a marker file now, not a TOML field; mirror an
-        # `enabled = true` in the fixture by creating the marker.
-        if "enabled=true" in self._toml.replace(" ", ""):
+        if self._enabled:
             (tmp_path / self._name / '.enabled').touch()
         self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
@@ -239,14 +234,14 @@ class TestListJson(unittest.TestCase):
         self.assertIsNone(data['workloads'][0]['state'])
 
     def test_enabled_workload_state_is_raw_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('inactive\n')):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
         self.assertEqual(data['workloads'][0]['state'], 'inactive')
 
     def test_activating_not_remapped(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('activating\n')):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
@@ -255,7 +250,7 @@ class TestListJson(unittest.TestCase):
         self.assertNotEqual(wl['state'], 'starting')
 
     def test_failed_not_remapped(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('failed\n', returncode=3)):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
@@ -349,7 +344,7 @@ class TestPortsJson(unittest.TestCase):
     ContainerSubstrate.endpoints() / cmd_info's network section."""
 
     def test_bridge_entry_is_dict_with_host_and_container(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         self.assertEqual(len(result), 1)
         entry = result[0]
@@ -358,13 +353,13 @@ class TestPortsJson(unittest.TestCase):
         self.assertEqual(entry['container'], '80')
 
     def test_bridge_entry_not_a_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertNotIsInstance(entry, str)
 
     def test_host_network_container_field_is_null(self):
-        with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
+        with _WorkloadDir(HOST_NET_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertIn('container', entry)
@@ -379,7 +374,6 @@ class TestPortsJson(unittest.TestCase):
         toml = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -395,7 +389,7 @@ ports = ["127.0.0.1:4317:4317"]
         self.assertEqual(entry['container'], '4317')
 
     def test_host_network_localhost_entry(self):
-        with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
+        with _WorkloadDir(HOST_NET_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         hosts = [e['host'] for e in result]
         self.assertIn('localhost:8080', hosts)
@@ -414,7 +408,7 @@ class TestImagesListJson(unittest.TestCase):
         return m
 
     def test_size_bytes_is_int(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 129499136, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -422,21 +416,21 @@ class TestImagesListJson(unittest.TestCase):
         self.assertEqual(data['images'][0]['size_bytes'], 129499136)
 
     def test_created_is_int_from_iso_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': '2024-11-15T10:30:00Z'})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['created'], int)
 
     def test_created_null_when_none(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsNone(data['images'][0]['created'])
 
     def test_no_human_strings_in_size(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 99000000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -445,7 +439,7 @@ class TestImagesListJson(unittest.TestCase):
         self.assertNotIn('GB', str(size))
 
     def test_image_keys(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -874,7 +868,7 @@ class TestSelinuxBundleResolution(unittest.TestCase):
     def _config(self, security_block='', bundle=None):
         # config dict + name are loaded in __init__, so the object is usable
         # after the temp dir is torn down (selinux_bundle does no file I/O).
-        workload = '[workload]\nname = "test-wl"\nenabled = false\n'
+        workload = '[workload]\nname = "test-wl"\n'
         if bundle is not None:
             workload += f'bundle = "{bundle}"\n'
         toml = workload + '\n[container]\nimage = "example.com/test:latest"\n' + security_block

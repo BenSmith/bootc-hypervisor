@@ -58,14 +58,12 @@ def _run_generator(config_dir, services_dir, sysusers_dir):
     )
 
 
-def _write_cfg(config_dir, name, toml_content):
+def _write_cfg(config_dir, name, toml_content, enabled=True):
     (Path(config_dir) / name).mkdir(exist_ok=True)
     path = Path(config_dir) / name / "workload.toml"
     body = textwrap.dedent(toml_content)
     path.write_text(body)
-    # Enabled-ness is a marker file now, not a TOML field; mirror an
-    # `enabled = true` in the fixture by creating the marker.
-    if "enabled=true" in body.replace(" ", ""):
+    if enabled:
         (Path(config_dir) / name / ".enabled").touch()
     return path
 
@@ -75,7 +73,6 @@ def _write_cfg(config_dir, name, toml_content):
 _CATTLE_TOML = """\
 [workload]
 name = "cattle-wl"
-enabled = true
 
 [container]
 image = "docker.io/nginx:latest"
@@ -84,7 +81,6 @@ image = "docker.io/nginx:latest"
 _PET_TOML = """\
 [workload]
 name = "pet-wl"
-enabled = true
 lifecycle = "pet"
 
 [container]
@@ -94,7 +90,6 @@ image = "docker.io/nginx:latest"
 _PET_POD_TOML = """\
 [workload]
 name = "pet-pod"
-enabled = true
 lifecycle = "pet"
 
 [[containers]]
@@ -111,7 +106,6 @@ image = "docker.io/postgres:latest"
 _CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -120,7 +114,6 @@ image = "example.com/test:latest"
 _PET_CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 lifecycle = "pet"
 
 [container]
@@ -130,7 +123,6 @@ image = "example.com/test:latest"
 _VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -139,7 +131,6 @@ image = "example.com/guest:latest"
 _PET_VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 lifecycle = "pet"
 
 [vm]
@@ -168,7 +159,7 @@ class TestLifecycleAccessor(unittest.TestCase):
 
     def test_explicit_cattle(self):
         toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "cattle"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "cattle"'
         )
         cfg = _make_config(toml, 'test-wl')
         self.assertEqual(cfg.lifecycle, "cattle")
@@ -191,7 +182,7 @@ class TestLifecycleAccessor(unittest.TestCase):
 
     def test_snapshot_keep_explicit(self):
         toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nsnapshot_keep = 5'
+            'name = "test-wl"', 'name = "test-wl"\nsnapshot_keep = 5'
         )
         cfg = _make_config(toml, 'test-wl')
         self.assertEqual(cfg.snapshot_keep, 5)
@@ -200,7 +191,7 @@ class TestLifecycleAccessor(unittest.TestCase):
         # The accessor must never crash a destroy; the validator flags it.
         for bad in ('"lots"', '0', '-1', 'true'):
             toml = _CONTAINER_TOML.replace(
-                'enabled = false', f'enabled = false\nsnapshot_keep = {bad}'
+                'name = "test-wl"', f'name = "test-wl"\nsnapshot_keep = {bad}'
             )
             cfg = _make_config(toml, 'test-wl')
             self.assertEqual(cfg.snapshot_keep, 3, f"bad={bad}")
@@ -237,7 +228,7 @@ class TestLifecycleValidation(unittest.TestCase):
 
     def test_invalid_value_fails(self):
         bad_toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "immortal"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "immortal"'
         )
         result = self._validate(bad_toml, 'test-wl')
         lifecycle_check = next(
@@ -250,7 +241,7 @@ class TestLifecycleValidation(unittest.TestCase):
 
     def test_invalid_value_increments_error_count(self):
         bad_toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "immortal"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "immortal"'
         )
         result = self._validate(bad_toml, 'test-wl')
         self.assertGreater(result["errors"], 0)
@@ -265,7 +256,7 @@ class TestLifecycleValidation(unittest.TestCase):
 
     def test_snapshot_keep_valid_passes(self):
         toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nsnapshot_keep = 5'
+            'name = "test-wl"', 'name = "test-wl"\nsnapshot_keep = 5'
         )
         result = self._validate(toml, 'test-wl')
         # Valid value adds no error.
@@ -277,7 +268,7 @@ class TestLifecycleValidation(unittest.TestCase):
     def test_snapshot_keep_invalid_fails(self):
         for bad in ('0', '-2', '"three"', 'true'):
             toml = _CONTAINER_TOML.replace(
-                'enabled = false', f'enabled = false\nsnapshot_keep = {bad}'
+                'name = "test-wl"', f'name = "test-wl"\nsnapshot_keep = {bad}'
             )
             result = self._validate(toml, 'test-wl')
             check = next(

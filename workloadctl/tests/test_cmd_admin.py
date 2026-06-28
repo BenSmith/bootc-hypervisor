@@ -89,8 +89,8 @@ class CreateTest(unittest.TestCase):
         self.assertIsNone(self._create(name="web", image="nginx:latest"))
         data = self._toml("web")
         self.assertEqual(data["workload"]["name"], "web")
-        # `enabled` is no longer a TOML field; created workloads start disabled
-        # by virtue of having no .enabled marker.
+        # Created workloads start disabled: no `enabled` key is written and no
+        # .enabled marker exists.
         self.assertNotIn("enabled", data["workload"])
         self.assertFalse((self.tmp / "web" / ".enabled").exists())
         self.assertEqual(data["container"]["image"], "nginx:latest")
@@ -146,7 +146,6 @@ class CreateTest(unittest.TestCase):
 _VM_TOML = """\
 [workload]
 name = "clitest-vmguard"
-enabled = false
 
 [vm]
 cloud_image_url = "https://example.invalid/f.qcow2"
@@ -211,7 +210,7 @@ class CleanupOverrideDirTest(unittest.TestCase):
         instance_dir = self.tmp / "myapp"
         instance_dir.mkdir()
         (instance_dir / "workload.toml").write_text(
-            '[workload]\nname = "myapp"\nenabled = true\n'
+            '[workload]\nname = "myapp"\n'
             '\n[container]\nimage = "localhost/myapp:latest"\n'
         )
         self.instance_dir = instance_dir

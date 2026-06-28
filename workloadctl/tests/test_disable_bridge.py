@@ -26,7 +26,6 @@ from workloadctl_core import WorkloadConfig, VM_BRIDGE_NAME
 CONTAINER_TOML = """\
 [workload]
 name = "{name}"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -35,7 +34,6 @@ image = "example.com/test:latest"
 VM_TOML_MANAGED = """\
 [workload]
 name = "{name}"
-enabled = {enabled}
 
 [vm]
 local_image = "/var/lib/workloads/images/test.qcow2"
@@ -45,7 +43,6 @@ local_image = "/var/lib/workloads/images/test.qcow2"
 VM_TOML_CUSTOM_BRIDGE = """\
 [workload]
 name = "{name}"
-enabled = true
 
 [vm]
 local_image = "/var/lib/workloads/images/test.qcow2"
@@ -103,7 +100,7 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
     def _run(self, config_name, manager, toml_text):
         """Load a WorkloadConfig for config_name from a temp dir and call the
         helper with the supplied manager mock."""
-        tomls = {config_name: toml_text.format(name=config_name, enabled="false")}
+        tomls = {config_name: toml_text.format(name=config_name)}
         with _WlDir(tomls):
             config = WorkloadConfig(config_name)
             with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
@@ -131,8 +128,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
     def test_another_managed_bridge_vm_present_no_stop(self):
         """A second enabled managed-bridge VM remains → bridge left running."""
         # Build a second VM config in a temp dir so we get a real WorkloadConfig
-        second_toml = VM_TOML_MANAGED.format(name="othervm", enabled="true")
-        with _WlDir({"myvm": VM_TOML_MANAGED.format(name="myvm", enabled="false"),
+        second_toml = VM_TOML_MANAGED.format(name="othervm")
+        with _WlDir({"myvm": VM_TOML_MANAGED.format(name="myvm"),
                      "othervm": second_toml}):
             other_config = WorkloadConfig("othervm")
             mgr = _mock_manager([other_config])
@@ -183,7 +180,7 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
     def test_disabled_vm_in_enabled_list_still_excluded(self):
         """If the disabled VM somehow appears in get_all_configs (shouldn't happen),
         the c.name != config.name guard prevents a false 'still needed' result."""
-        with _WlDir({"myvm": VM_TOML_MANAGED.format(name="myvm", enabled="false")}):
+        with _WlDir({"myvm": VM_TOML_MANAGED.format(name="myvm")}):
             config = WorkloadConfig("myvm")
             # Pretend get_all_configs returned the *same* workload (edge case)
             mgr = _mock_manager([config])

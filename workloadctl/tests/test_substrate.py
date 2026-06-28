@@ -50,7 +50,6 @@ def _args(**kwargs):
 MINIMAL_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -59,7 +58,6 @@ image = "example.com/test:latest"
 VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -506,7 +504,6 @@ class TestBackupVMCrash(unittest.TestCase):
 SINGLE_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -516,7 +513,6 @@ POD_TOML = """\
 [workload]
 name = "test-pod"
 mode = "pod"
-enabled = true
 
 [[containers]]
 name = "web"
@@ -847,7 +843,6 @@ class TestCmdDriftDropins(unittest.TestCase):
 CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -856,7 +851,6 @@ image = "example.com/test:latest"
 CONTAINER_TOML_CUSTOM_SLICE = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -1061,7 +1055,6 @@ class TestCapabilityMatrix(unittest.TestCase):
         toml_with_ports = """\
 [workload]
 name = "test-ep"
-enabled = true
 
 [container]
 image = "example.com/test:latest"

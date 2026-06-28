@@ -26,7 +26,6 @@ from workloadctl_core import WorkloadConfig
 SINGLE_TOML = """\
 [workload]
 name = "{name}"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -36,7 +35,6 @@ MULTI_TOML = """\
 [workload]
 name = "{name}"
 mode = "pod"
-enabled = false
 
 [[containers]]
 name = "web"

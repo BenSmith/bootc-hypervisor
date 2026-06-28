@@ -41,7 +41,6 @@ class TestControlFileResolution(unittest.TestCase):
         body = (
             "[workload]\n"
             f'name = "{name}"\n'
-            "enabled = false\n"
         )
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'

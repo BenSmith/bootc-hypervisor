@@ -104,14 +104,12 @@ def scrape(config_dir):
         return body
 
 
-def write_config(config_dir, name, toml_content):
+def write_config(config_dir, name, toml_content, enabled=True):
     (Path(config_dir) / name).mkdir(exist_ok=True)
     path = Path(config_dir) / name / "workload.toml"
     body = textwrap.dedent(toml_content)
     path.write_text(body)
-    # Enabled-ness is a marker file now, not a TOML field; mirror an
-    # `enabled = true` in the fixture by creating the marker.
-    if "enabled=true" in body.replace(" ", ""):
+    if enabled:
         (Path(config_dir) / name / ".enabled").touch()
     return path
 
@@ -211,7 +209,6 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
 
             [container]
             image = "nginx:latest"
@@ -226,11 +223,10 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "off", """\
             [workload]
             name = "off"
-            enabled = false
 
             [container]
             image = "alpine:latest"
-        """)
+        """, enabled=False)
 
         prom = scrape(self.config_dir)
         self.assertNotIn('workload="off"', prom)
@@ -241,7 +237,6 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "real", """\
             [workload]
             name = "real"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -260,7 +255,6 @@ class TestMetricsDiscovery(unittest.TestCase):
             write_config(self.config_dir, name, f"""\
                 [workload]
                 name = "{name}"
-                enabled = true
 
                 [container]
                 image = "alpine:latest"
@@ -276,7 +270,6 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "on1", """\
             [workload]
             name = "on1"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -284,15 +277,13 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "off1", """\
             [workload]
             name = "off1"
-            enabled = false
 
             [container]
             image = "alpine:latest"
-        """)
+        """, enabled=False)
         write_config(self.config_dir, "on2", """\
             [workload]
             name = "on2"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -312,7 +303,7 @@ class TestMetricsDiscovery(unittest.TestCase):
 
             [container]
             image = "alpine:latest"
-        """)
+        """, enabled=False)
 
         prom = scrape(self.config_dir)
         self.assertNotIn('workload="implicit"', prom)
@@ -323,7 +314,6 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "multi", """\
             [workload]
             name = "multi"
-            enabled = true
 
             [[containers]]
             name = "web"
@@ -353,7 +343,6 @@ class TestMetricsDiscovery(unittest.TestCase):
         write_config(self.config_dir, "nohc", """\
             [workload]
             name = "nohc"
-            enabled = true
 
             [[containers]]
             name = "a"
@@ -382,7 +371,6 @@ class TestMetricsFormat(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp:latest"
@@ -496,7 +484,6 @@ class TestMetricsRobustness(unittest.TestCase):
         write_config(self.config_dir, "good", """\
             [workload]
             name = "good"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -511,7 +498,7 @@ class TestMetricsRobustness(unittest.TestCase):
     def test_config_missing_name_skipped(self):
         """Config without workload.name is silently skipped."""
         (Path(self.config_dir) / "noname.toml").write_text(
-            '[workload]\nenabled = true\n\n[container]\nimage = "x"\n')
+            '[workload]\n\n[container]\nimage = "x"\n')
 
         prom = scrape(self.config_dir)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "0")
@@ -524,7 +511,6 @@ class TestMetricsRobustness(unittest.TestCase):
         write_config(self.config_dir, "real", """\
             [workload]
             name = "real"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -564,7 +550,6 @@ class TestMetricsLiveCollection(unittest.TestCase):
         write_config(self.config_dir, "v1", """\
             [workload]
             name = "v1"
-            enabled = true
 
             [container]
             image = "alpine:latest"
@@ -581,7 +566,6 @@ class TestMetricsLiveCollection(unittest.TestCase):
             write_config(self.config_dir, "v2", """\
                 [workload]
                 name = "v2"
-                enabled = true
 
                 [container]
                 image = "alpine:latest"

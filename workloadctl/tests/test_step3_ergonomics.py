@@ -80,7 +80,7 @@ class Step3Base(unittest.TestCase):
         return path
 
     def _config(self, name, bundle=None, *, extra=""):
-        body = f'[workload]\nname = "{name}"\nenabled = false\n'
+        body = f'[workload]\nname = "{name}"\n'
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'
         body += '\n[container]\nimage = "localhost/x:latest"\n' + extra

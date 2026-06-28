@@ -176,7 +176,7 @@ class TestHealthWaitSeconds(unittest.TestCase):
 
 class TestEnabledMarker(unittest.TestCase):
     """Enabled-ness is the presence of a `.enabled` marker in the workload's
-    config dir, not a field in workload.toml (which is now dead/ignored)."""
+    config dir."""
 
     def setUp(self):
         import tempfile
@@ -216,14 +216,6 @@ class TestEnabledMarker(unittest.TestCase):
         (d / ".enabled").touch()
         self.assertTrue(self.workload_lib.workload_is_enabled("foo"))
         self.assertTrue(WorkloadConfig("foo").enabled)
-
-    def test_stale_toml_field_is_ignored(self):
-        """A leftover `enabled = true` field with no marker is NOT enabled —
-        the field is dead, so it can't silently re-enable a disabled workload."""
-        self._write("foo",
-                    '[workload]\nname = "foo"\nenabled = true\n[container]\nimage = "x"\n')
-        self.assertFalse(self.workload_lib.workload_is_enabled("foo"))
-        self.assertFalse(WorkloadConfig("foo").enabled)
 
 
 if __name__ == "__main__":

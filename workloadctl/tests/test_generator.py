@@ -45,15 +45,13 @@ def run_generator(config_dir, services_dir, sysusers_dir):
     )
 
 
-def write_config(config_dir, name, toml_content):
+def write_config(config_dir, name, toml_content, enabled=True):
     """Write a TOML config file to the config directory."""
     (Path(config_dir) / name).mkdir(exist_ok=True)
     path = Path(config_dir) / name / "workload.toml"
     body = textwrap.dedent(toml_content)
     path.write_text(body)
-    # Enabled-ness is a marker file now, not a TOML field; mirror an
-    # `enabled = true` in the fixture by creating the marker.
-    if "enabled=true" in body.replace(" ", ""):
+    if enabled:
         (Path(config_dir) / name / ".enabled").touch()
     return path
 
@@ -95,7 +93,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -126,7 +123,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -134,7 +130,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -158,11 +153,10 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "off", """\
             [workload]
             name = "off"
-            enabled = false
 
             [container]
             image = "nginx"
-        """)
+        """, enabled=False)
 
         self.run_gen()
         self.assertFalse(
@@ -172,7 +166,6 @@ class TestGeneratorBasic(unittest.TestCase):
     def test_missing_name_skipped(self):
         write_config(self.config_dir, "broken", """\
             [workload]
-            enabled = true
 
             [container]
             image = "nginx"
@@ -188,7 +181,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc", """\
             [workload]
             name = "svc"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -204,14 +196,12 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "caddy", """\
             [workload]
             name = "caddy"
-            enabled = true
             [container]
             image = "docker.io/caddy:latest"
         """)
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             requires = ["caddy"]
             [container]
             image = "alpine"
@@ -225,14 +215,12 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "registry", """\
             [workload]
             name = "registry"
-            enabled = true
             [container]
             image = "docker.io/registry:2"
         """)
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             after = ["registry"]
             [container]
             image = "alpine"
@@ -247,14 +235,12 @@ class TestGeneratorBasic(unittest.TestCase):
             write_config(self.config_dir, name, f"""\
                 [workload]
                 name = "{name}"
-                enabled = true
                 [container]
                 image = "alpine"
             """)
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
             requires = ["db"]
             after = ["cache"]
             [container]
@@ -270,7 +256,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc2", """\
             [workload]
             name = "svc2"
-            enabled = true
             [container]
             image = "alpine"
         """)
@@ -284,7 +269,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc3", """\
             [workload]
             name = "svc3"
-            enabled = true
             [container]
             image = "alpine"
             [resources]
@@ -314,7 +298,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -381,7 +364,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "solo", """\
             [workload]
             name = "solo"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -389,7 +371,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "grp", """\
             [workload]
             name = "grp"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -400,7 +381,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "brg", """\
             [workload]
             name = "brg"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -431,7 +411,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -455,7 +434,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -477,7 +455,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -503,7 +480,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -540,7 +516,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "hc", """\
             [workload]
             name = "hc"
-            enabled = true
             mode = "single"
 
             [container]
@@ -573,7 +548,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "pm", """\
             [workload]
             name = "pm"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -601,7 +575,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -632,7 +605,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
 
             [network]
             mode = "pasta"
@@ -688,7 +660,6 @@ class TestGeneratorPlainEnvVars(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -725,7 +696,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "secret-app", """\
             [workload]
             name = "secret-app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -754,7 +724,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "creds", """\
             [workload]
             name = "creds"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -778,7 +747,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "filemount", """\
             [workload]
             name = "filemount"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -808,7 +776,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "multi-creds", """\
             [workload]
             name = "multi-creds"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -843,7 +810,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "clobber", """\
             [workload]
             name = "clobber"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -878,7 +844,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "podsec", """\
             [workload]
             name = "podsec"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -924,7 +889,6 @@ class TestGeneratorVolumeExpansion(unittest.TestCase):
         write_config(self.config_dir, "vols", """\
             [workload]
             name = "vols"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -955,7 +919,6 @@ class TestGeneratorDevices(unittest.TestCase):
         write_config(self.config_dir, "gpu", """\
             [workload]
             name = "gpu"
-            enabled = true
 
             [container]
             image = "rocm-app"
@@ -974,7 +937,6 @@ class TestGeneratorDevices(unittest.TestCase):
         write_config(self.config_dir, "usb", """\
             [workload]
             name = "usb"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1008,7 +970,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "limited", """\
             [workload]
             name = "limited"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1045,7 +1006,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1062,7 +1022,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "slowdb", """\
             [workload]
             name = "slowdb"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1084,7 +1043,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "spanstop", """\
             [workload]
             name = "spanstop"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1119,7 +1077,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
             [container]
             image = "nginx:latest"
         """)
@@ -1134,7 +1091,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "pm", """\
             [workload]
             name = "pm"
-            enabled = true
             mode = "pod"
             [[containers]]
             name = "a"
@@ -1155,7 +1111,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "capped", """\
             [workload]
             name = "capped"
-            enabled = true
             [container]
             image = "myapp"
             [resources]
@@ -1187,7 +1142,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1202,7 +1156,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "clean", """\
             [workload]
             name = "clean"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1217,7 +1170,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "rm", """\
             [workload]
             name = "rm"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1241,7 +1193,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1255,7 +1206,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "gpu", """\
             [workload]
             name = "gpu"
-            enabled = true
 
             [container]
             image = "gpu-app"
@@ -1273,7 +1223,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "sys", """\
             [workload]
             name = "sys"
-            enabled = true
 
             [container]
             image = "sysapp"
@@ -1302,7 +1251,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "keepid", """\
             [workload]
             name = "keepid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1316,7 +1264,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "hostns", """\
             [workload]
             name = "hostns"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1333,7 +1280,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "uidgid", """\
             [workload]
             name = "uidgid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1350,7 +1296,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "uidonly", """\
             [workload]
             name = "uidonly"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1367,7 +1312,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "gidonly", """\
             [workload]
             name = "gidonly"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1384,7 +1328,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "badns", """\
             [workload]
             name = "badns"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1401,7 +1344,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "baduid", """\
             [workload]
             name = "baduid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1418,7 +1360,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "badparam", """\
             [workload]
             name = "badparam"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1447,7 +1388,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "labeled", """\
             [workload]
             name = "labeled"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1464,7 +1404,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "multi-sel", """\
             [workload]
             name = "multi-sel"
-            enabled = true
             mode = "pod"
 
             [security]
@@ -1490,7 +1429,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "bad-sel", """\
             [workload]
             name = "bad-sel"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -1529,7 +1467,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1553,7 +1490,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "sysd", """\
             [workload]
             name = "sysd"
-            enabled = true
 
             [container]
             image = "systemd-app"
@@ -1572,7 +1508,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "notifywl", """\
             [workload]
             name = "notifywl"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1592,7 +1527,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "badtype", """\
             [workload]
             name = "badtype"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1720,7 +1654,6 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         write_config(self.config_dir, name, f"""\
             [workload]
             name = "{name}"
-            enabled = true
 
             [vm]
             vcpus = 2
@@ -1946,7 +1879,6 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         write_config(self.config_dir, "minvm", f"""\
             [workload]
             name = "minvm"
-            enabled = true
 
             [vm]
             vcpus = 1
