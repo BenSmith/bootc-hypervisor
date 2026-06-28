@@ -28,13 +28,14 @@
 
 ## Quick Start
 
-There are four ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
+There are several ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
 
 | Approach | Best for |
 |---|---|
 | **[From a bundle (`init`)](#bundle-approach)** | Enabling a shipped workload (alloy, jellyfin, vncdesktop, …) |
-| **`workloadctl init --scratch <name>`** | Novel workload with no bundle — generates a stub TOML, no `/usr` fallback |
-| **`workloadctl create`** (below) | From-scratch workload with no bundle |
+| **`workloadctl init --scratch <name>`** | Novel container workload with no bundle — generates a stub TOML, no `/usr` fallback |
+| **`workloadctl init --scratch-vm <name>`** | Novel **VM** workload — stamps a Fedora Cloud `[vm]` stub + `cloud-init/` seed, enable-ready (see [Scaffolding a new VM](#scaffolding-a-new-vm)) |
+| **`workloadctl create`** (below) | From-scratch container workload with no bundle |
 | **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or adapting an example |
 | **[bootc image](#bootc-approach)** | Baking workloads into an immutable OS image |
 
@@ -880,6 +881,29 @@ sudo dnf install qemu-kvm edk2-ovmf
 ```
 
 The `workloadctl preflight` command checks these and reports any missing pieces before you try to enable a VM workload.
+
+### Scaffolding a new VM {#scaffolding-a-new-vm}
+
+Rather than hand-writing the `[vm]` section, scaffold a self-contained VM workload the same way you would a container — two symmetric entry points:
+
+```bash
+# Stamp a blank, enable-ready VM stub directly into /etc/workloads.d/<name>/
+sudo workloadctl init --scratch-vm myvm
+
+# …or instantiate the shipped generic VM bundle (identical starting point)
+sudo workloadctl init vm-base --as myvm
+```
+
+Both create `/etc/workloads.d/myvm/` containing a `workload.toml` and a `cloud-init/user-data` seed. The stub is **enable-ready out of the box**: it pins the current Fedora Cloud-Base image (`cloud_image_url` + `cloud_image_checksum`) with the `local_image` and `image` alternatives stamped as commented one-line swaps, sane `vcpus`/`memory`/`system_disk_size` defaults, `user = "fedora"`, and `enabled = false`. The seed already wires up `${WORKLOADCTL_SSH_KEY}` and `${WORKLOADCTL_WORKLOAD_NAME}` (see [Bootstrapping a VM with cloud-init](#bootstrapping-a-vm-with-cloud-init)).
+
+Edit to taste, then enable:
+
+```bash
+sudo workloadctl edit myvm        # change base image, sizing, cloud-init
+sudo workloadctl enable myvm      # downloads the image, builds the disk, boots
+```
+
+> The default base image is a fixed Fedora Cloud-Base release (the download path requires a known checksum, so there is no base-image argument — swap it in the stub instead). Bump it alongside `fedora-versions.yml` when the host's Fedora version moves.
 
 ### Basic Configuration
 

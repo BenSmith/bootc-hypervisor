@@ -59,6 +59,12 @@ class TestDiscovery(CatalogTestBase):
         self.assertEqual(cmd_catalog._bundle_kind("virtual-forgejo"), "vm")
         self.assertEqual(cmd_catalog._bundle_kind("alloy"), "container")
 
+    def test_list_bundles_includes_vm_base(self):
+        self.assertIn("vm-base", cmd_catalog.list_bundles())
+
+    def test_bundle_kind_vm_base(self):
+        self.assertEqual(cmd_catalog._bundle_kind("vm-base"), "vm")
+
 
 class TestSetField(unittest.TestCase):
     def test_replace_existing(self):
@@ -150,6 +156,89 @@ class TestInitScratch(CatalogTestBase):
         with self.assertRaises(SystemExit):
             cmd_catalog.cmd_init(
                 _ns(scratch="coolapp", bundle=None, as_name=None), self.manager)
+
+
+class TestInitScratchVM(CatalogTestBase):
+    def test_scratch_vm_writes_workload_toml_with_vm_table(self):
+        """workload.toml is written with a [vm] table, enabled=false."""
+        cmd_catalog.cmd_init(
+            _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
+        dst = self.tmp / "myvm" / "workload.toml"
+        self.assertTrue(dst.exists())
+        data = tomllib.loads(dst.read_text())
+        self.assertEqual(data["workload"]["name"], "myvm")
+        self.assertFalse(data["workload"]["enabled"])
+        self.assertIn("vm", data)
+
+    def test_scratch_vm_user_data_file_is_relative(self):
+        """vm.cloud_init.user_data_file must be the relative path 'cloud-init/user-data'."""
+        cmd_catalog.cmd_init(
+            _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
+        data = tomllib.loads((self.tmp / "myvm" / "workload.toml").read_text())
+        self.assertEqual(data["vm"]["cloud_init"]["user_data_file"], "cloud-init/user-data")
+
+    def test_scratch_vm_writes_cloud_init_user_data(self):
+        """cloud-init/user-data is written with #cloud-config header and required placeholders."""
+        cmd_catalog.cmd_init(
+            _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
+        ud = self.tmp / "myvm" / "cloud-init" / "user-data"
+        self.assertTrue(ud.exists())
+        text = ud.read_text()
+        self.assertTrue(text.startswith("#cloud-config"))
+        self.assertIn("${WORKLOADCTL_SSH_KEY}", text)
+        self.assertIn("${WORKLOADCTL_WORKLOAD_NAME}", text)
+
+    def test_scratch_vm_and_bundle_rejected(self):
+        """scratch_vm and bundle positional are mutually exclusive -> SystemExit."""
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch_vm="a", bundle="alloy", scratch=None, as_name=None), self.manager)
+
+    def test_scratch_vm_and_bundle_rejection_message_contains_mutually(self):
+        """The mutual-exclusion error message contains 'mutually'."""
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr", buf):
+                cmd_catalog.cmd_init(
+                    _ns(scratch_vm="a", bundle="alloy", scratch=None, as_name=None), self.manager)
+        self.assertIn("mutually", buf.getvalue())
+
+    def test_scratch_vm_and_scratch_rejected(self):
+        """scratch_vm and --scratch together are mutually exclusive -> SystemExit."""
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch_vm="a", scratch="b", bundle=None, as_name=None), self.manager)
+
+    def test_scratch_vm_invalid_name_rejected(self):
+        """An invalid workload name ('bad/name') raises SystemExit before writing anything."""
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch_vm="bad/name", bundle=None, scratch=None, as_name=None), self.manager)
+        # Nothing should have been created under the tmp dir for this name.
+        self.assertFalse((self.tmp / "bad").exists())
+
+    def test_scratch_vm_duplicate_name_exits(self):
+        """Stamping the same scratch_vm name twice raises SystemExit on the second call."""
+        cmd_catalog.cmd_init(
+            _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(
+                _ns(scratch_vm="myvm", bundle=None, scratch=None, as_name=None), self.manager)
+
+
+class TestVmBaseBundle(CatalogTestBase):
+    """Checks on the shipped vm-base bundle in workloads/."""
+
+    def test_vm_base_workload_toml_user_data_file_is_absolute(self):
+        """vm-base/workload.toml must carry the absolute /usr/share/... user_data_file."""
+        data = tomllib.loads((REPO_BUNDLES / "vm-base" / "workload.toml").read_text())
+        expected = "/usr/share/workloadctl/workloads/vm-base/cloud-init/user-data"
+        self.assertEqual(data["vm"]["cloud_init"]["user_data_file"], expected)
+
+    def test_vm_base_cloud_init_user_data_matches_constant(self):
+        """workloads/vm-base/cloud-init/user-data must be byte-identical to _SCRATCH_VM_USER_DATA."""
+        shipped = (REPO_BUNDLES / "vm-base" / "cloud-init" / "user-data").read_text()
+        self.assertEqual(shipped, cmd_catalog._SCRATCH_VM_USER_DATA)
 
 
 class TestDuplicate(CatalogTestBase):

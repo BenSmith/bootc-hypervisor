@@ -826,11 +826,15 @@ _TEMPLATE_VAR_PATTERN = re.compile(r'(?<!\$)\$\{([a-zA-Z_][a-zA-Z0-9_]*)}')
 # to contain "${PATH}" or "${SECRET:other}" — is emitted verbatim instead of
 # being re-expanded by a later pass (which would leak host env/other secrets
 # into the rendered guest user-data). The SECRET? / SECRET: alternatives precede
-# VAR so a secret ref is never captured as a plain var; VAR keeps its (?<!\$)
-# lookbehind so `$${VAR}` still escapes to a literal after the $$ collapse.
+# VAR so a secret ref is never captured as a plain var. All three branches carry
+# the (?<!\$) lookbehind so `$$` escaping is uniform: `$${VAR}`, `$${SECRET:name}`
+# and `$${SECRET?name}` all survive the pass untouched and collapse to a literal
+# `${...}` in the final $$→$ step. (A missing lookbehind on the SECRET branches
+# silently broke that escape: `$${SECRET:name}` still matched and tried to resolve
+# a secret named "name", aborting substitution — see tests/test_substitution.)
 _SUBSTITUTION_PATTERN = re.compile(
-    r'\$\{SECRET\?(?P<optsecret>[a-zA-Z0-9_-]+)}'
-    r'|\$\{SECRET:(?P<secret>[a-zA-Z0-9_-]+)}'
+    r'(?<!\$)\$\{SECRET\?(?P<optsecret>[a-zA-Z0-9_-]+)}'
+    r'|(?<!\$)\$\{SECRET:(?P<secret>[a-zA-Z0-9_-]+)}'
     r'|(?<!\$)\$\{(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}'
 )
 

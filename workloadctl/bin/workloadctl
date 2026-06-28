@@ -80,6 +80,8 @@ def main():
                              help="Instance name (default: the bundle name)")
     init_parser.add_argument("--scratch", metavar="NAME",
                              help="Create a self-contained stub workload with no bundle backing")
+    init_parser.add_argument("--scratch-vm", dest="scratch_vm", metavar="NAME",
+                             help="Create a self-contained VM stub workload (Fedora 44 Cloud-Base default)")
 
     duplicate_parser = subparsers.add_parser(
         "duplicate", aliases=["clone"], help="Copy a live workload under a new name")

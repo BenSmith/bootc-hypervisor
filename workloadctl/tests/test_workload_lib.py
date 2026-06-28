@@ -833,6 +833,39 @@ class TestSubstituteTemplate(unittest.TestCase):
         out = substitute_template("$${HOME}", env={"HOME": "/nope"})
         self.assertEqual(out, "${HOME}")
 
+    def test_dollar_dollar_escapes_required_secret(self):
+        # Regression: `$${SECRET:name}` must escape to a literal, NOT trigger a
+        # secret lookup. Before the SECRET branches gained the (?<!\$) lookbehind,
+        # this matched and resolved "name" — aborting on a missing credential
+        # (the bug the scratch-VM cloud-init comment tripped at enable time).
+        called = []
+        def resolver(name):
+            called.append(name)
+            return "LEAK"
+        out = substitute_template(
+            "$${SECRET:name}", secret_resolver=resolver,
+        )
+        self.assertEqual(out, "${SECRET:name}")
+        self.assertEqual(called, [])  # resolver must never run for an escaped ref
+
+    def test_dollar_dollar_escapes_optional_secret(self):
+        # `$${SECRET?name}` must escape to a literal too, not be swallowed to "".
+        called = []
+        def resolver(name):
+            called.append(name)
+            return "LEAK"
+        out = substitute_template(
+            "$${SECRET?name}", secret_resolver=resolver,
+        )
+        self.assertEqual(out, "${SECRET?name}")
+        self.assertEqual(called, [])
+
+    def test_dollar_dollar_escapes_secret_without_resolver(self):
+        # The escaped required form must not raise even with no resolver — it's
+        # a literal, so the missing-resolver KeyError path is never reached.
+        out = substitute_template("$${SECRET:name}")
+        self.assertEqual(out, "${SECRET:name}")
+
     def test_multiple_vars_and_secrets(self):
         out = substitute_template(
             "user=${USER} pw=${SECRET:pw} home=${HOME}",

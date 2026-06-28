@@ -1,0 +1,29 @@
+# vm-base — generic clean VM starting point.
+# Use: workloadctl init vm-base --as <name>
+# Copies this workload.toml to /etc/workloads.d/<name>/; the cloud-init seed
+# stays in /usr/share/workloadctl/workloads/vm-base/ and is referenced absolutely.
+# After init, edit /etc/workloads.d/<name>/workload.toml and set enabled = true.
+
+[workload]
+name = "vm-base"
+enabled = false
+
+[vm]
+# Fedora 44 Cloud-Base (bump with fedora-versions.yml `stable:`).
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+# --- or copy/reflink a local qcow2 instead: ---
+# local_image = "/path/to/image.qcow2"
+# --- or build from a bootc image ref (needs bootc-image-builder + /dev/kvm): ---
+# image = "ghcr.io/you/custom-bootc:latest"
+vcpus = 2
+memory = "2G"
+system_disk_size = "20G"
+# data_disk_size = "20G"   # uncomment for a persistent /dev/vdb data disk
+user = "fedora"
+
+[vm.cloud_init]
+user_data_file = "/usr/share/workloadctl/workloads/vm-base/cloud-init/user-data"
+
+# [vm.cloud_init.template_vars]
+# MY_VAR = "value"   # referenced as ${MY_VAR} in cloud-init/user-data

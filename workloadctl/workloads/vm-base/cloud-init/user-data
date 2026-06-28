@@ -1,0 +1,22 @@
+#cloud-config
+# Starter cloud-init for a workloadctl VM. Substitution happens at seed-build
+# time (see docs/workloads.md "Bootstrapping a VM with cloud-init"):
+#   $${WORKLOADCTL_SSH_KEY}        the workload's auto-generated pubkey
+#   $${WORKLOADCTL_WORKLOAD_NAME}  this workload's name
+#   $${VAR}                        from [vm.cloud_init.template_vars] or env
+#   SECRET:name / SECRET?name   systemd-creds (?=optional, ""), $$ = literal $
+hostname: ${WORKLOADCTL_WORKLOAD_NAME}
+
+users:
+  - default
+  - name: fedora
+    groups: [wheel]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${WORKLOADCTL_SSH_KEY}
+
+ssh_pwauth: false
+
+# runcmd:
+#   - echo "first boot" > /etc/motd

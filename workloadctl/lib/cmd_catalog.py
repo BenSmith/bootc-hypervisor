@@ -160,16 +160,108 @@ def cmd_catalog(args, manager: WorkloadManager):
 # init — instantiate a catalog bundle into /etc
 # ---------------------------------------------------------------------------
 
+_SCRATCH_VM_CLOUD_IMAGE_URL = (
+    "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/"
+    "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+)
+_SCRATCH_VM_CLOUD_IMAGE_CHECKSUM = (
+    "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+)
+
+_SCRATCH_VM_USER_DATA = """\
+#cloud-config
+# Starter cloud-init for a workloadctl VM. Substitution happens at seed-build
+# time (see docs/workloads.md "Bootstrapping a VM with cloud-init"):
+#   $${WORKLOADCTL_SSH_KEY}        the workload's auto-generated pubkey
+#   $${WORKLOADCTL_WORKLOAD_NAME}  this workload's name
+#   $${VAR}                        from [vm.cloud_init.template_vars] or env
+#   SECRET:name / SECRET?name   systemd-creds (?=optional, ""), $$ = literal $
+hostname: ${WORKLOADCTL_WORKLOAD_NAME}
+
+users:
+  - default
+  - name: fedora
+    groups: [wheel]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${WORKLOADCTL_SSH_KEY}
+
+ssh_pwauth: false
+
+# runcmd:
+#   - echo "first boot" > /etc/motd
+"""
+
+
+def _scratch_vm(name: str, manager: WorkloadManager) -> None:
+    """Stamp a self-contained VM stub under /etc/workloads.d/<name>/."""
+    try:
+        validate_workload_name(name)
+    except ValueError as e:
+        print(f"Error: invalid workload name {name!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    dst = workload_config_path(name)
+    if dst.parent.exists():
+        print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
+        sys.exit(1)
+    dst.parent.mkdir()
+
+    stub = (
+        f'[workload]\n'
+        f'name = "{name}"\n'
+        f'enabled = false\n'
+        f'\n'
+        f'[vm]\n'
+        f'# Fedora 44 Cloud-Base (bump with fedora-versions.yml `stable:`).\n'
+        f'cloud_image_url = "{_SCRATCH_VM_CLOUD_IMAGE_URL}"\n'
+        f'cloud_image_checksum = "{_SCRATCH_VM_CLOUD_IMAGE_CHECKSUM}"\n'
+        f'# --- or copy/reflink a local qcow2 instead: ---\n'
+        f'# local_image = "/path/to/image.qcow2"\n'
+        f'# --- or build from a bootc image ref (needs bootc-image-builder + /dev/kvm): ---\n'
+        f'# image = "ghcr.io/you/custom-bootc:latest"\n'
+        f'vcpus = 2\n'
+        f'memory = "2G"\n'
+        f'system_disk_size = "20G"\n'
+        f'# data_disk_size = "20G"   # uncomment for a persistent /dev/vdb data disk\n'
+        f'user = "fedora"\n'
+        f'\n'
+        f'[vm.cloud_init]\n'
+        f'user_data_file = "cloud-init/user-data"\n'
+        f'\n'
+        f'# [vm.cloud_init.template_vars]\n'
+        f'# MY_VAR = "value"   # referenced as ${{MY_VAR}} in cloud-init/user-data\n'
+    )
+
+    if not _write_new(dst, stub):
+        print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
+        sys.exit(1)
+
+    cloud_init_dir = dst.parent / "cloud-init"
+    cloud_init_dir.mkdir()
+    (cloud_init_dir / "user-data").write_text(_SCRATCH_VM_USER_DATA)
+
+    print(f"✓ Created VM stub workload '{name}'")
+    print(f"  {dst}")
+    _post_write_report(name, manager)
+
+
 def cmd_init(args, manager: WorkloadManager):
     """Stamp a catalog bundle into /etc/workloads.d/<name>/workload.toml."""
     require_root()
 
     scratch = getattr(args, "scratch", None)
+    scratch_vm = getattr(args, "scratch_vm", None)
     bundle = getattr(args, "bundle", None)
 
-    if scratch and bundle:
-        print("Error: --scratch and a bundle positional are mutually exclusive", file=sys.stderr)
+    if sum(bool(x) for x in (scratch, scratch_vm, bundle)) > 1:
+        print("Error: --scratch, --scratch-vm, and a bundle positional are mutually exclusive", file=sys.stderr)
         sys.exit(1)
+
+    if scratch_vm:
+        _scratch_vm(scratch_vm, manager)
+        return
 
     if scratch:
         name = scratch
