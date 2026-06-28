@@ -37,7 +37,9 @@ pull = "newer"
 cmd = "bash -c 'exec 3<>/dev/tcp/localhost/12345' || exit 1"
 interval = "60s"
 start_period = "30s"
-on_failure = "kill"
+# Report health but don't self-kill: SIGKILLing on a transient probe miss just
+# drops alloy's buffered telemetry and fixes nothing. "none" keeps the status.
+on_failure = "none"
 
 [container.environment]
 # ---- Required: edit these for each host ----
