@@ -377,6 +377,32 @@ def workload_container_name(name: str) -> str:
     return f"workload-{name}"
 
 
+# Generated unit files live in the systemd runtime tree (transient; rewritten on
+# boot by workload-generate.service and on every `workloadctl enable`).
+RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
+
+
+def units_outdated(name: str) -> bool:
+    """True if the workload's config TOML is newer than its generated unit file.
+
+    `systemctl daemon-reload` re-runs the *shell* generator only (which emits a
+    boot oneshot), NOT the Python unit-writer — so editing a workload.toml does
+    not regenerate the per-workload units until `workloadctl enable <name>` is
+    re-run. This mtime comparison is the cheap heads-up for that foot-gun; the
+    authoritative content-level check is `workloadctl drift`.
+
+    Returns False if either file is absent (workload never enabled / no config)
+    so callers can treat "can't tell" as "nothing to warn about". A 1s slack
+    swallows same-second writes from an enable that wrote both.
+    """
+    try:
+        unit_mtime = (RUN_SYSTEMD_SYSTEM / workload_service_name(name)).stat().st_mtime
+        config_mtime = workload_config_path(name).stat().st_mtime
+    except OSError:
+        return False
+    return config_mtime > unit_mtime + 1.0
+
+
 STATE_SUBDIR = "state"
 DATA_SUBDIR = "data"
 

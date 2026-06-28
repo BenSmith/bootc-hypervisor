@@ -19,6 +19,7 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
     selinux_module_name,
     selinux_type_name,
+    units_outdated,
     validate_workload_name,
     workload_config_dir,
     workload_config_path,
@@ -548,6 +549,7 @@ def cmd_diagnose(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     checks = []
+    linger_enabled = False  # set by Check 3; referenced by the session/runtime checks
 
     def _check(name, passed, message, fix=None):
         entry = {"check": name, "passed": passed, "message": message}
@@ -599,6 +601,25 @@ def cmd_diagnose(args, manager: WorkloadManager):
             _check("linger_enabled", False, "Linger not enabled",
                    fix=f"sudo loginctl enable-linger {config.uid}")
 
+    # Check 3b: User manager session live. Rootless workloads need user@<uid> up
+    # (linger keeps it alive) for the user D-Bus that crun's cgroup manager talks
+    # to. If linger is on but the session is dead, the safe fix is to RESTART the
+    # user manager — never `loginctl terminate-user`, which also tears down
+    # /run/user/<uid> and leaves workloads failing with 226/NAMESPACE.
+    if user_exists and linger_enabled:
+        session_active = subprocess.run(
+            ["systemctl", "is-active", f"user@{config.uid}.service"],
+            capture_output=True, text=True,
+        ).returncode == 0
+        if session_active:
+            _check("user_session", True, f"User manager session active: user@{config.uid}.service")
+        else:
+            _check("user_session", False,
+                   f"User manager session not active despite linger: user@{config.uid}.service",
+                   fix=f"sudo systemctl restart user@{config.uid}.service  "
+                       f"(do NOT use 'loginctl terminate-user' — it removes /run/user/{config.uid} "
+                       f"→ 226/NAMESPACE)")
+
     # Check: per-workload SELinux module loaded (only if the workload ships one)
     if config.selinux_policy:
         module = selinux_module_name(config.name)
@@ -622,9 +643,15 @@ def cmd_diagnose(args, manager: WorkloadManager):
         runtime_dir = Path(f"/run/user/{config.uid}")
         if runtime_dir.exists():
             _check("runtime_dir", True, f"Runtime directory exists: {runtime_dir}")
+        elif linger_enabled:
+            # Linger is on but the dir is gone — the classic `terminate-user`
+            # aftermath. Restarting the user manager recreates it.
+            _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
+                   fix=f"sudo systemctl restart user@{config.uid}.service "
+                       f"(linger is on; do NOT 'loginctl terminate-user')")
         else:
             _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
-                   fix="Enable linger to create runtime directory")
+                   fix=f"sudo loginctl enable-linger {config.uid} (creates the runtime directory)")
 
     # Check 5: Home directory exists
     if user_exists:
@@ -688,6 +715,18 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 _check(f"service_file[{unit}]", False, f"Sub-service file missing: {unit}",
                        fix="sudo systemctl daemon-reload")
+
+    # Check 7b: Config not edited since the units were last generated. Editing
+    # the workload.toml + `daemon-reload` does NOT regenerate per-workload units
+    # (only `enable` runs the unit-writer), a common foot-gun.
+    if service_file.exists():
+        if units_outdated(config.name):
+            _check("config_current", False,
+                   "Config edited since last enable — generated units are stale",
+                   fix=f"sudo workloadctl enable {config.name}  "
+                       f"(daemon-reload does not regenerate units; see `drift` for the diff)")
+        else:
+            _check("config_current", True, "Generated units match current config (by mtime)")
 
     # Check 8: Service enabled
     result = subprocess.run(

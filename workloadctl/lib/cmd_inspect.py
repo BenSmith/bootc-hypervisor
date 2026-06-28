@@ -18,6 +18,7 @@ from workload_lib import (
     USERNAME_PREFIX,
     WORKLOADS_BASE,
     VM_SOCKET_DIR,
+    units_outdated,
     workload_config_dir,
 )
 from podman import Podman
@@ -261,6 +262,7 @@ def cmd_status(args, manager: WorkloadManager):
             "memory_current": _int_or_null(props.get("MemoryCurrent", "")),
             "tasks_current": _int_or_null(props.get("TasksCurrent", "")),
             "result": props.get("Result") or None,
+            "config_stale": units_outdated(config.name),
         }
         if config.is_multi:
             out["mode"] = config.mode
@@ -273,6 +275,13 @@ def cmd_status(args, manager: WorkloadManager):
             out["containers"] = sub
         print(json.dumps(out, indent=2))
         return
+
+    if units_outdated(config.name):
+        # flush before the systemctl subprocess writes to the same fd, else the
+        # hint (block-buffered when stdout is piped) lands after / behind it.
+        print(f"⚠  config edited since last enable — units are stale. Run "
+              f"'sudo workloadctl enable {config.name}' to apply "
+              f"(daemon-reload does not regenerate units).\n", flush=True)
 
     if config.is_multi:
         units = [config.service_name]

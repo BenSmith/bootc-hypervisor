@@ -9,10 +9,12 @@ import threading
 import unittest
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 # Add lib to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
+import workload_lib
 from workload_lib import (
     WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, NAME_PATTERN,
     GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
@@ -966,6 +968,55 @@ class TestQMPClient(unittest.TestCase):
             warnings.simplefilter("error", ResourceWarning)
             with self.assertRaises(TimeoutError):
                 qmp.connect(missing, timeout=0.3, recv_timeout=0.3)
+
+
+class TestUnitsOutdated(unittest.TestCase):
+    """units_outdated(): config-edited-since-enable mtime heads-up (gotcha #3)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.cfgdir = root / "etc"
+        self.rundir = root / "run"
+        (self.cfgdir / "foo").mkdir(parents=True)
+        self.rundir.mkdir(parents=True)
+        self._patches = [
+            patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.cfgdir),
+            patch.object(workload_lib, "RUN_SYSTEMD_SYSTEM", self.rundir),
+        ]
+        for p in self._patches:
+            p.start()
+        self.cfg = self.cfgdir / "foo" / "workload.toml"
+        self.unit = self.rundir / "workload-foo.service"
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_false_when_unit_missing(self):
+        self.cfg.write_text("x")
+        self.assertFalse(workload_lib.units_outdated("foo"))
+
+    def test_false_when_config_missing(self):
+        self.unit.write_text("x")
+        self.assertFalse(workload_lib.units_outdated("foo"))
+
+    def test_false_when_unit_newer(self):
+        self.cfg.write_text("x"); os.utime(self.cfg, (1000, 1000))
+        self.unit.write_text("x"); os.utime(self.unit, (2000, 2000))
+        self.assertFalse(workload_lib.units_outdated("foo"))
+
+    def test_true_when_config_newer(self):
+        self.unit.write_text("x"); os.utime(self.unit, (1000, 1000))
+        self.cfg.write_text("x"); os.utime(self.cfg, (2000, 2000))
+        self.assertTrue(workload_lib.units_outdated("foo"))
+
+    def test_slack_swallows_same_second_enable(self):
+        # enable writes both within the same second — must not flag stale.
+        self.unit.write_text("x"); os.utime(self.unit, (1000.0, 1000.0))
+        self.cfg.write_text("x"); os.utime(self.cfg, (1000.4, 1000.4))
+        self.assertFalse(workload_lib.units_outdated("foo"))
 
 
 if __name__ == "__main__":
