@@ -420,10 +420,12 @@ def generate_pod_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
-        # Stale-pause cleanup (see the comment in generate_system_service):
+        # Fresh-pause cleanup (see the comment in generate_system_service):
         # this is the workload's first podman touch, so the recreated pause
         # namespace stays consistent for every member container.
         "ExecStartPre=-/usr/bin/podman system migrate",
+        f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+        f" /run/user/{uid}/libpod/tmp/ns_handles",
         f"ExecStartPre=-/usr/bin/podman pod rm -f --ignore workload-{name}",
         f"ExecStart=/usr/bin/podman pod create {pod_args_str}",
         f"ExecStop=/usr/bin/podman pod rm -f --ignore workload-{name}",
@@ -467,10 +469,12 @@ def generate_net_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
-        # Stale-pause cleanup (see the comment in generate_system_service):
+        # Fresh-pause cleanup (see the comment in generate_system_service):
         # this is the workload's first podman touch, so the recreated pause
         # namespace stays consistent for every member container.
         "ExecStartPre=-/usr/bin/podman system migrate",
+        f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+        f" /run/user/{uid}/libpod/tmp/ns_handles",
         f"ExecStartPre=-/usr/bin/podman network rm -f {net_name}",
         f"ExecStart=/usr/bin/podman network create {net_name}",
         f"ExecStop=/usr/bin/podman network rm -f {net_name}",
@@ -1049,16 +1053,35 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         )
 
     if mode == "single":
-        # Kill any stale libpod pause process before the first podman touch of
-        # this invocation. A pause that outlives the previous invocation (it
-        # gets moved into podman-pause-*.scope under user@<uid> by any host-side
-        # podman call) pins a mount namespace whose PrivateTmp /tmp is already
-        # deleted; pasta then fails its sandbox mount of /tmp with ENOENT and
-        # the unit restart-loops until StartLimitBurst. Tolerant "-" so a
-        # missing rundir on first boot can't block startup. Pod/bridge members
-        # must NOT do this (it would kill the pause out from under the live
-        # pod infra / sibling containers) — their head units handle it.
+        # Force a *fresh* libpod pause process before the first podman touch of
+        # this invocation. Trigger: any pasta-networked workload. pasta's
+        # prefork isolation does mount("","/tmp","tmpfs")+pivot_root (passt
+        # isolation.c, TMPDIR==/tmp, compile-time) — if /tmp doesn't resolve in
+        # pasta's mount ns it dies with "Failed to mount empty tmpfs for
+        # pivot_root(): ENOENT" and the unit restart-loops to StartLimitBurst.
+        # How /tmp goes missing: a pause that outlives the previous activation
+        # (podman moves it into podman-pause-*.scope under user@<uid>, where it
+        # survives the unit stop) still pins that activation's PrivateTmp /tmp,
+        # which systemd already deleted. The next `podman run` takes the rootless
+        # join shortcut (rootless_linux.c can_use_shortcut → join_namespace_or_die
+        # "mnt") and *inherits that dead mount ns*. NB the join is userns-agnostic
+        # — keep-id vs userns=host is irrelevant; only pasta (vs --network=host,
+        # which spawns no pasta) is the trigger.
+        #   `podman system migrate` is necessary but not sufficient: it stops all
+        # running containers first and returns *before* killing the pause if any
+        # stop errors (runtime_migrate.go), and it's tolerant ("-"). So we also
+        # rm pause.pid + ns_handles unconditionally — that makes the shortcut
+        # fall through so `podman run` builds a fresh pause in the live (valid)
+        # mount ns. migrate runs first so it can still SIGKILL the tracked pause;
+        # the rm cleans up when migrate couldn't. Both tolerant so first boot
+        # (no rundir/handles yet) never blocks startup. Pod/bridge members must
+        # NOT do this (it would kill the pause out from under the live pod infra
+        # / sibling containers) — their head units handle it.
         lines.append("ExecStartPre=-/usr/bin/podman system migrate")
+        lines.append(
+            f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+            f" /run/user/{uid}/libpod/tmp/ns_handles"
+        )
 
     lines.append("")
 

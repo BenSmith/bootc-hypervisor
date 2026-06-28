@@ -16,6 +16,7 @@ Group=_wl-example-multi-container
 Environment="HOME=/var/lib/workloads/example-multi-container/state"
 EnvironmentFile=-/run/workload-env/workload-example-multi-container.env
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 ExecStartPre=-/usr/bin/podman network rm -f workload-example-multi-container-net
 ExecStart=/usr/bin/podman network create workload-example-multi-container-net
 ExecStop=/usr/bin/podman network rm -f workload-example-multi-container-net

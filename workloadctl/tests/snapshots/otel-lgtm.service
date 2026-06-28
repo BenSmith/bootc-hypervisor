@@ -21,6 +21,7 @@ LoadCredentialEncrypted=grafana-admin-password:/etc/credstore.encrypted/grafana-
 
 ExecStartPre=+/usr/libexec/workloadctl/workload-write-env otel-lgtm
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 
 # Image pulling handled by podman run --pull=newer
 

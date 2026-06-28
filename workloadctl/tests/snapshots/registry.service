@@ -17,6 +17,7 @@ Environment="HOME=/var/lib/workloads/registry/state"
 EnvironmentFile=-/run/workload-env/workload-registry.env
 
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 
 # Image pulling handled by podman run --pull=missing
 

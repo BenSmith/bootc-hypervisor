@@ -349,14 +349,30 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertNotIn("workload-app-pod.service", umbrella)
 
     def test_stale_pause_migrate_in_head_units_only(self):
-        """`podman system migrate` must run in each workload's first
-        podman-touching unit (single service, pod service, net service) and
-        never in pod/bridge member services — there it would kill the libpod
-        pause out from under the live pod infra / sibling containers.
-        Regresses the pasta restart-loop bug (stale pause pins a mount ns
-        whose PrivateTmp /tmp is deleted; pasta's sandbox mount gets ENOENT).
+        """The fresh-pause cleanup (`podman system migrate` + rm of
+        pause.pid/ns_handles) must run in each workload's first podman-touching
+        unit (single service, pod service, net service) and never in pod/bridge
+        member services — there it would kill the libpod pause out from under
+        the live pod infra / sibling containers. Regresses the pasta
+        restart-loop bug: a pause surviving the previous activation pins a mount
+        ns whose PrivateTmp /tmp is deleted, the next `podman run` joins it, and
+        pasta's pivot_root tmpfs mount gets ENOENT. The rm forces the rootless
+        join shortcut to fall through so a fresh pause is built in the live ns.
         """
         migrate = "ExecStartPre=-/usr/bin/podman system migrate"
+        # The rm is uid-specific; assert the stable prefix/suffix.
+        rm_prefix = "ExecStartPre=-/usr/bin/rm -f /run/user/"
+        rm_files = "/libpod/tmp/pause.pid"
+
+        def assert_fresh_pause(unit_text):
+            self.assertIn(migrate, unit_text)
+            self.assertIn(rm_prefix, unit_text)
+            self.assertIn(rm_files, unit_text)
+            self.assertIn("/libpod/tmp/ns_handles", unit_text)
+
+        def assert_no_fresh_pause(unit_text):
+            self.assertNotIn(migrate, unit_text)
+            self.assertNotIn(rm_prefix, unit_text)
         write_config(self.config_dir, "solo", """\
             [workload]
             name = "solo"
@@ -391,17 +407,17 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
         solo = (Path(self.services_dir) / "workload-solo.service").read_text()
-        self.assertIn(migrate, solo)
+        assert_fresh_pause(solo)
 
         pod = (Path(self.services_dir) / "workload-grp-pod.service").read_text()
-        self.assertIn(migrate, pod)
+        assert_fresh_pause(pod)
         pod_member = (Path(self.services_dir) / "workload-grp-db.service").read_text()
-        self.assertNotIn(migrate, pod_member)
+        assert_no_fresh_pause(pod_member)
 
         net = (Path(self.services_dir) / "workload-brg-net.service").read_text()
-        self.assertIn(migrate, net)
+        assert_fresh_pause(net)
         net_member = (Path(self.services_dir) / "workload-brg-web.service").read_text()
-        self.assertNotIn(migrate, net_member)
+        assert_no_fresh_pause(net_member)
 
     def test_per_container_environment_sibling_form(self):
         """[containers.environment] (sibling of [containers.container]) must

@@ -16,6 +16,7 @@ Group=_wl-webproxy-demo
 Environment="HOME=/var/lib/workloads/webproxy-demo/state"
 EnvironmentFile=-/run/workload-env/workload-webproxy-demo.env
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 ExecStartPre=-/usr/bin/podman network rm -f workload-webproxy-demo-net
 ExecStart=/usr/bin/podman network create workload-webproxy-demo-net
 ExecStop=/usr/bin/podman network rm -f workload-webproxy-demo-net
