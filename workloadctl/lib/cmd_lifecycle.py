@@ -31,6 +31,9 @@ from workload_lib import (
     workload_enabled_marker,
     workload_username,
     workload_root_dir,
+    RUN_SYSTEMD_SYSTEM,
+    virtiofs_tag,
+    parse_volume_spec,
 )
 import imagebuild
 from podman import Podman
@@ -582,16 +585,41 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
             sys.exit(1)
 
 
-def _remove_user_dropin(config: WorkloadConfig):
-    """Remove the user@<uid>.service.d/50-workload.conf drop-in for a workload."""
-    dropin_dir = Path("/run/systemd/system") / f"user@{config.uid}.service.d"
-    dropin_conf = dropin_dir / "50-workload.conf"
-    if dropin_conf.exists():
-        dropin_conf.unlink()
-    try:
-        dropin_dir.rmdir()
-    except OSError:
-        pass
+def _workload_run_files(config: WorkloadConfig) -> list[Path]:
+    """Every file the generator writes into /run/systemd/system for THIS workload.
+
+    The generator only ever writes (idempotent emit from the enabled set); it
+    never deletes. Removing a workload's units on disable is the CLI's job, so
+    this lists them by exact name from the current config — no glob, so disabling
+    'foo' can never touch a sibling 'foo-bar'. Removing a name that isn't present
+    is harmless (callers use missing_ok), so we list the full superset for the
+    topology rather than branching on pod/bridge. Never includes the shared
+    workload-bridge.service.
+
+    MUST be kept in sync with generators/workload-generate (generate_*_workload).
+    """
+    run = RUN_SYSTEMD_SYSTEM
+    name = config.name
+    files = [
+        run / f"workload-{name}.conf",                                  # sysusers
+        run / f"workload-{name}-setup.service",
+        run / f"workload-{name}.service",                              # umbrella / main
+        run / "multi-user.target.wants" / f"workload-{name}.service",  # autostart symlink
+    ]
+    if config.is_vm:
+        files.append(run / f"workload-{name}-build.service")
+        for i, vol_spec in enumerate(config.config.get("vm", {}).get("volumes", [])):
+            tag = virtiofs_tag(parse_volume_spec(vol_spec)[1], i)
+            files.append(run / f"workload-{name}-virtiofs-{tag}.service")
+    else:
+        # cgroup-placement drop-in (containers only; VMs have none).
+        files.append(run / f"user@{config.uid}.service.d" / "50-workload.conf")
+        files.append(run / f"workload-{name}-pod.service")    # pod mode
+        files.append(run / f"workload-{name}-net.service")    # bridge mode
+        if config.is_multi:
+            for cname in config.container_names():
+                files.append(run / f"workload-{name}-{cname}.service")
+    return files
 
 
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
@@ -746,8 +774,21 @@ def cmd_disable(args, manager: WorkloadManager):
     else:
         print(f"Disabling workload: {args.workload}")
 
+    # Every teardown/removal step below is attempted independently and
+    # best-effort: a failure in one never skips the rest, so a half-provisioned
+    # or partly-wedged workload still gets torn down as far as possible. Failures
+    # are collected and reported together with a non-zero exit at the end.
+    failures: list[str] = []
+
+    def attempt(label, fn):
+        try:
+            fn()
+        except Exception as e:
+            failures.append(f"{label}: {e}")
+
     print(f"  Stopping {config.service_name}...")
-    subprocess.run(["systemctl", "stop", config.service_name], check=False)
+    attempt(f"stop {config.service_name}",
+            lambda: subprocess.run(["systemctl", "stop", config.service_name], check=False))
 
     # Stop and reset the workload's RemainAfterExit=yes oneshot helpers so they
     # re-run on the next enable. They stay "active (exited)" after the umbrella
@@ -774,53 +815,86 @@ def cmd_disable(args, manager: WorkloadManager):
                 for cname in config.container_names()
             ]
     for svc in helper_services:
-        subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True)
-        subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True)
+        attempt(f"stop {svc}",
+                lambda svc=svc: subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True))
+        attempt(f"reset-failed {svc}",
+                lambda svc=svc: subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True))
 
     # Run host setup teardown if configured
-    _run_host_setup(config, "disable")
+    attempt("host setup teardown", lambda: _run_host_setup(config, "disable"))
 
     # Remove the per-workload SELinux module (1:1 with the workload, so this is
     # an unambiguous teardown — nothing else depends on wl_<name>).
-    _apply_selinux_policy(config, "disable")
+    attempt("remove SELinux module", lambda: _apply_selinux_policy(config, "disable"))
 
-    # Mark disabled: the next daemon-reload regenerates without this workload.
-    workload_enabled_marker(args.workload).unlink(missing_ok=True)
+    # Mark disabled so a future generation (next enable of anything, or boot)
+    # won't re-emit this workload.
+    attempt("mark disabled (unlink marker)",
+            lambda: workload_enabled_marker(args.workload).unlink(missing_ok=True))
 
-    # Remove the user@ drop-in so systemd stops constraining user@<uid>
-    # to workloads.slice once the workload is disabled.  Lives in /run so
-    # it would vanish on reboot anyway, but clean it up eagerly.
-    _remove_user_dropin(config)
-
-    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    # Remove this workload's generated unit files from /run/systemd/system. The
+    # generator only ever writes (idempotent emit from the enabled set), so unless
+    # we delete them here they linger as dead units — including the user@<uid>
+    # drop-in that pins the user manager into workloads.slice — until the next
+    # reboot wipes the tmpfs. Each unlink is independent (one failure never skips
+    # the rest), then daemon-reload drops them from systemd's view.
+    def _remove_run_files():
+        for p in _workload_run_files(config):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                failures.append(f"remove {p}: {e}")
+        if not config.is_vm:
+            # Prune the now-empty user@<uid>.service.d drop-in dir.
+            try:
+                (RUN_SYSTEMD_SYSTEM / f"user@{config.uid}.service.d").rmdir()
+            except OSError:
+                pass
+    _remove_run_files()
+    attempt("reload systemd",
+            lambda: subprocess.run(["systemctl", "daemon-reload"], check=False))
 
     if purge:
-        # Get user info before deletion
+        # Look up the user up front (may be absent if the workload was enabled
+        # but never fully provisioned — /var setup is deferred to first start).
+        # An absent user is "already clean", not an error.
+        uid = None
         try:
-            pw = pwd.getpwnam(config.username)
-            uid = pw.pw_uid
-            home_dir = pw.pw_dir
+            uid = pwd.getpwnam(config.username).pw_uid
+        except KeyError:
+            print(f"  User {config.username} not present (nothing to remove)")
 
-            print(f"  Terminating user sessions for {config.username}...")
-            _stop_user_manager(config.username)
-            time.sleep(1)
-            # Kill any straggler processes (rootless podman, conmon, etc.)
-            # so userdel doesn't print "user is currently used by process N".
-            subprocess.run(["pkill", "-KILL", "-u", str(uid)],
-                           check=False, capture_output=True)
-            time.sleep(0.5)
+        if uid is not None:
+            try:
+                print(f"  Terminating user sessions for {config.username}...")
+                _stop_user_manager(config.username)
+                time.sleep(1)
+                # Kill any straggler processes (rootless podman, conmon, etc.)
+                # so userdel doesn't print "user is currently used by process N".
+                subprocess.run(["pkill", "-KILL", "-u", str(uid)],
+                               check=False, capture_output=True)
+                time.sleep(0.5)
+            except Exception as e:
+                failures.append(f"terminate user sessions: {e}")
 
-            # Remove per-workload runtime files in /run/workload-env (decrypted
-            # secrets + the env file) so a purge doesn't leave them readable in
-            # /run until the next reboot.
+        # Remove per-workload runtime files in /run/workload-env (decrypted
+        # secrets + the env file) so a purge doesn't leave them readable in
+        # /run until the next reboot.
+        try:
             _remove_runtime_env_files(config)
+        except Exception as e:
+            failures.append(f"remove runtime env files: {e}")
 
-            if config.is_vm:
+        if config.is_vm:
+            try:
                 # Clean up the runtime socket directory
                 vm_sock_dir = VM_SOCKET_DIR / config.name
                 if vm_sock_dir.exists():
                     shutil.rmtree(vm_sock_dir, ignore_errors=True)
-            else:
+            except Exception as e:
+                failures.append(f"remove VM socket dir: {e}")
+        else:
+            try:
                 print("  Removing subuid/subgid entries...")
                 subid_lock = Path("/run/lock/workload-subid.lock")
                 subid_lock.parent.mkdir(parents=True, exist_ok=True)
@@ -832,50 +906,65 @@ def cmd_disable(args, manager: WorkloadManager):
                             lines = [l for l in p.read_text().splitlines()
                                      if not l.startswith(f"{config.username}:")]
                             p.write_text("\n".join(lines) + ("\n" if lines else ""))
+            except Exception as e:
+                failures.append(f"remove subuid/subgid entries: {e}")
 
-            print(f"  Removing user {config.username}...")
-            userdel = subprocess.run(["userdel", "-f", config.username],
-                                     check=False, capture_output=True, text=True)
-            # userdel -f exits 0 even when it prints a warning about a process
-            # still using the account — check whether the user actually got
-            # removed rather than trusting the exit code.
-            user_still_exists = False
+        if uid is not None:
             try:
-                pwd.getpwnam(config.username)
-                user_still_exists = True
-            except KeyError:
-                pass
-
-            if user_still_exists:
-                sys.stderr.write(f"  ! userdel failed — user {config.username} still exists.\n")
-                if userdel.stderr.strip():
-                    sys.stderr.write(f"    {userdel.stderr.strip()}\n")
-                sys.stderr.write(f"    Fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge.\n")
-                sys.exit(1)
-
-            workload_dir = WORKLOADS_BASE / config.name
-            if workload_dir.exists():
-                print(f"  Removing workload directory {workload_dir}...")
+                print(f"  Removing user {config.username}...")
+                userdel = subprocess.run(["userdel", "-f", config.username],
+                                         check=False, capture_output=True, text=True)
+                # userdel -f exits 0 even when it prints a warning about a
+                # process still using the account — check whether the user
+                # actually got removed rather than trusting the exit code.
                 try:
-                    shutil.rmtree(workload_dir)
-                except OSError as e:
-                    sys.stderr.write(f"  ! Failed to fully remove {workload_dir}: {e}\n")
-                    sys.stderr.write(f"  ! Workload data may still be present — remove manually before re-enabling.\n")
-                    sys.exit(1)
+                    pwd.getpwnam(config.username)
+                    msg = f"userdel: user {config.username} still exists"
+                    if userdel.stderr.strip():
+                        msg += f" ({userdel.stderr.strip()})"
+                    msg += " — fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge"
+                    failures.append(msg)
+                except KeyError:
+                    pass
+            except Exception as e:
+                failures.append(f"remove user {config.username}: {e}")
 
-            print(f"✓ Workload '{args.workload}' disabled and purged")
-        except KeyError:
-            print(f"✓ Workload '{args.workload}' disabled (user not found)")
+        # Remove the data dir regardless of whether the user still existed — an
+        # orphaned /var/lib/workloads/<name> should still be swept.
+        workload_dir = WORKLOADS_BASE / config.name
+        if workload_dir.exists():
+            try:
+                print(f"  Removing workload directory {workload_dir}...")
+                shutil.rmtree(workload_dir)
+            except OSError as e:
+                failures.append(f"remove {workload_dir}: {e} "
+                                "(data may still be present — remove manually before re-enabling)")
+
+        if uid is None:
+            success_msg = (f"✓ Workload '{args.workload}' disabled and purged "
+                           "(user was not provisioned)")
+        else:
+            success_msg = f"✓ Workload '{args.workload}' disabled and purged"
     else:
         # A disabled (non-purged) workload keeps its user, home, and subuid
         # ranges, but should not keep a live lingering user manager. Stop it so
         # /run/user/<uid> and user@<uid>.service don't idle on; re-enable
         # re-establishes linger via workload-ensure-user.
-        if _stop_user_manager(config.username):
-            print(f"  Stopped lingering user manager for {config.username}")
-        print(f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)")
+        def _stop_lingering_user_manager():
+            if _stop_user_manager(config.username):
+                print(f"  Stopped lingering user manager for {config.username}")
+        attempt("stop lingering user manager", _stop_lingering_user_manager)
+        success_msg = f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)"
 
-    _stop_bridge_if_last_vm(config, manager)
+    attempt("stop shared VM bridge", lambda: _stop_bridge_if_last_vm(config, manager))
+
+    if failures:
+        sys.stderr.write(f"  ! Disable of '{args.workload}' completed with errors:\n")
+        for f in failures:
+            sys.stderr.write(f"    - {f}\n")
+        sys.exit(1)
+
+    print(success_msg)
 
 
 def cmd_start(args, manager: WorkloadManager):

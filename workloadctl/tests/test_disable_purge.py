@@ -48,6 +48,17 @@ image = "example.com/db:latest"
 """
 
 
+VM_TOML = """\
+[workload]
+name = "{name}"
+
+[vm]
+cloud_image_url = "https://example.com/img.qcow2"
+memory = "2G"
+system_disk_size = "10G"
+"""
+
+
 class _Env:
     """Temp WORKLOAD_DIR (with one TOML) + temp WORKLOAD_ENV_DIR.
 
@@ -180,6 +191,155 @@ class TestStopUserManager(unittest.TestCase):
             acted = cmd_lifecycle._stop_user_manager('_wl-gone')
         self.assertFalse(acted)
         run.assert_not_called()
+
+
+class TestPurgeBestEffort(unittest.TestCase):
+    """cmd_disable --purge attempts every removal independently (one failure
+    never skips the rest) and treats a never-provisioned user as already-clean."""
+
+    def _run_purge(self, getpwnam_side, *, userdel_leaves_user=False):
+        """Drive cmd_disable(--purge) with the host-touching bits stubbed.
+
+        Uses a VM workload so the purge path skips the subuid/subgid host-file
+        mutation (which touches /run/lock + /etc and isn't relevant here),
+        keeping the test focused on best-effort independence + idempotency.
+
+        Returns (exit_code or None, set of rmtree'd paths, the WORKLOADS_BASE
+        temp dir holding a pre-created data dir for the workload).
+        """
+        with _Env(VM_TOML, 'pp') as (config, _env_dir):
+            base = Path(tempfile.mkdtemp())
+            data_dir = base / 'pp'
+            data_dir.mkdir()
+            removed = []
+
+            def fake_rmtree(path, *a, **k):
+                removed.append(str(path))
+
+            # userdel "success" means the user is gone afterwards; getpwnam is
+            # called once up front and once post-userdel to confirm removal.
+            calls = {'n': 0}
+            def getpwnam(_name):
+                calls['n'] += 1
+                if calls['n'] == 1:
+                    return getpwnam_side()  # up-front lookup
+                # post-userdel confirmation
+                if userdel_leaves_user:
+                    return SimpleNamespace(pw_uid=10005)
+                raise KeyError(_name)
+
+            args = SimpleNamespace(workload='pp', purge=True)
+            exit_code = None
+            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
+                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base), \
+                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_lifecycle.time, 'sleep', lambda *_: None), \
+                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_workload_run_files', MagicMock(return_value=[])), \
+                 patch.object(cmd_lifecycle, '_remove_runtime_env_files', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())), \
+                 patch.object(cmd_lifecycle.shutil, 'rmtree', fake_rmtree), \
+                 patch.object(cmd_lifecycle.pwd, 'getpwnam', side_effect=getpwnam):
+                try:
+                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                except SystemExit as e:
+                    exit_code = e.code
+            return exit_code, removed, data_dir
+
+    def test_never_provisioned_user_is_idempotent_and_still_removes_data(self):
+        # User absent up front: must NOT error, and must still sweep the data dir.
+        def absent():
+            raise KeyError('_wl-pp')
+        exit_code, removed, data_dir = self._run_purge(absent)
+        self.assertIsNone(exit_code)  # clean exit, no sys.exit(1)
+        self.assertIn(str(data_dir), removed)
+
+    def test_userdel_failure_still_removes_data_then_exits_nonzero(self):
+        # User exists but userdel leaves it behind: the data dir is STILL
+        # removed (independent best-effort), but the command exits non-zero.
+        exit_code, removed, data_dir = self._run_purge(
+            lambda: SimpleNamespace(pw_uid=10005),
+            userdel_leaves_user=True,
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn(str(data_dir), removed)  # not skipped despite userdel fail
+
+    def test_early_step_failure_does_not_skip_later_teardown(self):
+        # An exception in an early teardown step (host setup) must not abort the
+        # rest of disable: the later /run unit-file removal still runs, and the
+        # command still exits non-zero to surface the failure.
+        with _Env(VM_TOML, 'pp') as (config, _env_dir):
+            stranded = Path(tempfile.mkdtemp()) / "workload-pp.service"
+            stranded.write_text("# unit\n")
+            args = SimpleNamespace(workload='pp', purge=False)
+            exit_code = None
+            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
+                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_run_host_setup',
+                              MagicMock(side_effect=RuntimeError("boom"))), \
+                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_workload_run_files',
+                              MagicMock(return_value=[stranded])), \
+                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())):
+                try:
+                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                except SystemExit as e:
+                    exit_code = e.code
+        # later step ran despite the earlier failure
+        self.assertFalse(stranded.exists())
+        self.assertEqual(exit_code, 1)   # failure surfaced
+
+
+class TestDisableRemovesRunFiles(unittest.TestCase):
+    """cmd_disable removes the workload's generated /run/systemd/system unit
+    files itself (the generator only ever writes)."""
+
+    def test_run_files_removed_on_disable(self):
+        run = Path(tempfile.mkdtemp())
+        with _Env(SINGLE_TOML, 'pp') as (config, _env_dir):
+            # Stage the files the generator would have written for 'pp', plus a
+            # sibling 'pp-extra' file that must NOT be touched, plus the drop-in.
+            (run / "multi-user.target.wants").mkdir()
+            mine = [
+                run / "workload-pp.service",
+                run / "workload-pp-setup.service",
+                run / "workload-pp.conf",
+                run / "multi-user.target.wants" / "workload-pp.service",
+            ]
+            for p in mine:
+                p.write_text("x\n")
+            dropin = run / "user@10005.service.d" / "50-workload.conf"
+            dropin.parent.mkdir()
+            dropin.write_text("x\n")
+            sibling = run / "workload-pp-extra.service"   # belongs to 'pp-extra'
+            sibling.write_text("x\n")
+
+            args = SimpleNamespace(workload='pp', purge=False)
+            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
+                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())), \
+                 patch.object(type(config), 'uid', property(lambda self: 10005)):
+                cmd_lifecycle.cmd_disable(args, MagicMock())
+
+        for p in mine:
+            self.assertFalse(p.exists(), f"{p} should have been removed")
+        self.assertFalse(dropin.exists())
+        self.assertFalse(dropin.parent.exists(), "empty drop-in dir should be pruned")
+        # Exact-name removal must not touch the prefix-sibling's file.
+        self.assertTrue(sibling.exists(), "sibling 'pp-extra' must be untouched")
 
 
 if __name__ == '__main__':

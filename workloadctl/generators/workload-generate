@@ -1721,6 +1721,12 @@ def main():
 
     # Pre-scan to build the set of all enabled workload names; used below to
     # validate [workload].requires / .after cross-references.
+    #
+    # NOTE: the generator only ever *writes* — it emits units for enabled
+    # workloads and never deletes anything. Removing a disabled workload's unit
+    # files from /run is `workloadctl disable`'s job (see cmd_disable /
+    # _workload_run_files); at boot /run is a fresh tmpfs so there is nothing to
+    # clean up here.
     all_workload_names: set[str] = set()
     for _cf in config_files:
         try:
