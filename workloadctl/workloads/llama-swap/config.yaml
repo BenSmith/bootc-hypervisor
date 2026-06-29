@@ -1,0 +1,67 @@
+# llama-swap configuration for the llama-swap workload.
+#
+# llama-swap fronts one OpenAI/Anthropic-compatible endpoint and starts,
+# stops, and swaps the right upstream llama-server process based on the
+# "model" field of each request. Declare one entry per model below.
+#
+# Docs:  https://github.com/mostlygeek/llama-swap
+# Full annotated example with every option (matrix routing, peers, hooks,
+# filters, capabilities, ...):
+#   /usr/share/workloadctl/workloads/llama-swap/config.example.yaml
+#
+# After editing this file:  sudo workloadctl recreate llama-swap
+# (the proxy also hot-reloads on SIGHUP; recreate is the simple path.)
+
+# Seconds to wait for a cold model to become ready before failing the
+# request. Cold starts can take a while for big models — keep this generous
+# and set long client-side timeouts. Minimum 15.
+healthCheckTimeout: 300
+
+logLevel: info
+
+# Base port for the auto-assigned ${PORT} macro. Each model that uses ${PORT}
+# gets the next port up from here. These stay inside the container netns; only
+# the proxy's :8080 is published to the host.
+startPort: 10001
+
+# Default idle-unload time in seconds. 0 = never auto-unload (a loaded model
+# stays resident until another model is requested and swaps it out). Set a
+# per-model `ttl` to override.
+globalTTL: 0
+
+# Authentication is OFF by default (allow-all). This workload publishes :8080
+# on the host, so if it is reachable beyond this machine, REQUIRE a key:
+#   printf "sk-%s\n" "$(head -c 48 /dev/urandom | base64)"
+# apiKeys:
+#   - "sk-changeme"
+
+macros:
+  # The inference binary shipped in the image. The :vulkan / :cuda / :cpu /
+  # :intel images are built on llama.cpp and provide `llama-server` on PATH.
+  # --host 127.0.0.1 keeps each upstream bound inside the container; llama-swap
+  # is the only thing the host talks to.
+  server: "llama-server --port ${PORT} --host 127.0.0.1"
+
+# Each key is the value a client sends as "model". Drop the GGUF into
+# /var/lib/workloads/llama-swap/models/ and point --model at /models/<file>.
+# This first request to a cold model blocks until it is loaded.
+models:
+  # ---- Example model (edit or remove) -------------------------------------
+  "qwen2.5-7b":
+    cmd: |
+      ${server}
+      --model /models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+      --ctx-size 8192
+      --n-gpu-layers -1      # -1 = offload all layers to the GPU
+    name: "Qwen2.5 7B Instruct"
+    ttl: 300                 # unload after 5 min idle
+
+  # ---- A second model. By default only one runs at a time; requesting this
+  #      one swaps out the first. ------------------------------------------
+  # "llama3.1-8b":
+  #   cmd: |
+  #     ${server}
+  #     --model /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+  #     --ctx-size 8192
+  #     --n-gpu-layers -1
+  #   ttl: 300

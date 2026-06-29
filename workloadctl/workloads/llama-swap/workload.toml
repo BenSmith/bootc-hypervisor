@@ -1,0 +1,101 @@
+# llama-swap - transparent model-swapping proxy for local LLM inference
+#
+# Fronts a single OpenAI- and Anthropic-compatible HTTP API on port 8080 and,
+# based on each request's "model" field, automatically starts/stops/swaps the
+# right upstream llama-server process. To a client it looks like one normal
+# OpenAI endpoint (/v1/chat/completions, /v1/models, /v1/embeddings, ...); the
+# loading and swapping is transparent. Also serves a web UI at /ui, Prometheus
+# metrics at /metrics, and live logs at /logs/stream.
+#
+# Relationship to the llamacpp workload: llamacpp serves one fixed model;
+# llama-swap declares many in its config.yaml and swaps between them on demand
+# (one resident at a time by default). Run one or the other on :8080.
+#
+# GPU: defaults to the :vulkan image for cross-vendor acceleration (AMD,
+# NVIDIA, Intel), matching the llamacpp workload. Alternatives — set in
+# [container].image below:
+#   ghcr.io/mostlygeek/llama-swap:cpu            — CPU only
+#   ghcr.io/mostlygeek/llama-swap:cuda           — NVIDIA (CUDA)
+#   ghcr.io/mostlygeek/llama-swap:intel          — Intel
+#   ghcr.io/mostlygeek/llama-swap:unified-cuda   — NVIDIA + bundled whisper /
+#                                                  stable-diffusion / embeddings
+#                                                  (enables the audio/image
+#                                                  endpoints). NOTE: the unified
+#                                                  images read their config at
+#                                                  /etc/llama-swap/config/config.yaml
+#                                                  — update the [storage] mount
+#                                                  target below if you switch.
+#
+# Models: drop GGUF files into /var/lib/workloads/llama-swap/models/ and
+# reference them as /models/<file> in each model's `cmd` in config.yaml.
+#
+# Setup:
+#   1. Add a config (a starter is copied from the bundle; edit it for your
+#      models):
+#        sudo cp /usr/share/workloadctl/workloads/llama-swap/config.yaml \
+#                /var/lib/workloads/llama-swap/config.yaml
+#        sudo nano /var/lib/workloads/llama-swap/config.yaml
+#
+#   2. Add GGUF models:
+#        sudo mkdir -p /var/lib/workloads/llama-swap/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llama-swap/models/
+#
+#   3. Enable:
+#        sudo workloadctl enable llama-swap
+#
+#   4. Open http://<host-ip>:8080/ui (UI) or POST to /v1/chat/completions.
+#      GET /v1/models lists configured models.
+#
+#   5. To change models/config later:
+#        sudo nano /var/lib/workloads/llama-swap/config.yaml
+#        sudo workloadctl recreate llama-swap
+#
+# Auth: llama-swap is allow-all by default. Since :8080 is published on the
+# host, set `apiKeys` in config.yaml if it is reachable beyond this machine.
+
+[workload]
+name = "llama-swap"
+
+[setup]
+required_files = [
+    { path = "./config.yaml", hint = "/usr/share/workloadctl/workloads/llama-swap/config.yaml" },
+]
+
+[container]
+image = "ghcr.io/mostlygeek/llama-swap:vulkan"
+pull = "newer"
+# No command override: the image's default CMD reads /app/config.yaml and
+# listens on 0.0.0.0:8080.
+
+[container.health]
+# /health returns 200 "OK" as soon as the proxy is up (independent of whether
+# any model is loaded).
+cmd = "curl -sf http://localhost:8080/health || exit 1"
+interval = "30s"
+start_period = "60s"
+on_failure = "kill"
+
+[devices]
+gpu = "auto"
+
+[security]
+extra_groups = ["video", "render"]
+
+[storage]
+volumes = [
+    "./config.yaml:/app/config.yaml:ro",
+    "./models:/models:ro",
+]
+
+[network]
+mode = "pasta"
+ports = ["8080:8080"]
+
+[resources]
+memory_swap_max = "0"
+shm_size = "1g"
+# Sized for the loaded model's footprint, e.g.:
+#   7B  Q4: ~5G    13B Q4: ~9G    70B Q4: ~45G
+# Account for the largest model you swap to (plus some headroom).
+# memory_max = "8G"
+# memory_high = "6G"
