@@ -116,8 +116,12 @@ real "online backup."
 
 - **Effort:** Medium-Large — spans host + guest + image chain.
 - **Value:** Medium (crash-consistent already closes the corruption hazard;
-  this is the upgrade for stateful guests).
-- **Interest:** Deferred until the bootc-guest migration lands.
+  this is the upgrade for guests whose app-state can't survive a torn image).
+- **Interest:** Deferred until a workload actually needs it — i.e. a guest whose
+  on-disk app-state tears under crash-consistency (today's forge recovers cleanly,
+  so nothing demands it). The bootc-guest migration is a *prerequisite*, not the
+  trigger: it makes the guest-agent plumbing trivial, but doesn't by itself create
+  a reason to build this.
 
 **Mechanism:** in `VMSubstrate.capture(consistency="app")` —
 `guest-fsfreeze-freeze` → QMP snapshot/copy of `data.qcow2` → `guest-fsfreeze-thaw`.
@@ -126,7 +130,7 @@ real "online backup."
 1. **Host:** add an `org.qemu.guest_agent.0` virtio-serial channel to the QEMU
    argv in the VM launch helper (`libexec/workload-vm-*`).
 2. **Guest:** `qemu-guest-agent` installed + enabled in the VM image — trivial
-   once the guest is a bootc image we control ([[project-vm-bootc-guest]]),
+   once the guest is a bootc image we control (`docs/wip/vm-workloads-direction.md`),
    another bootstrap step on the current Fedora-Cloud+cloud-init guest.
 
 **When picked up:** add `app` as a third level to the existing
