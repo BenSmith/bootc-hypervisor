@@ -341,6 +341,51 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         # Exact-name removal must not touch the prefix-sibling's file.
         self.assertTrue(sibling.exists(), "sibling 'pp-extra' must be untouched")
 
+    def test_run_file_removal_tolerates_absent_user(self):
+        # Regression: a second disable (or any disable after the user is already
+        # gone) must not abort. The container drop-in path is keyed by the
+        # workload UID, whose passwd lookup raises WorkloadUserNotFound once the
+        # user is removed — this must be tolerated (drop-in skipped), and the
+        # UID-independent /run units must still be removed. /run removal runs for
+        # both purge and plain disable, so purge=False exercises it without the
+        # purge block's host-file mutation. Uses the REAL _workload_run_files (not
+        # a stub), since the stub hid this bug.
+        run = Path(tempfile.mkdtemp())
+        with _Env(SINGLE_TOML, 'pp') as (config, _env_dir):
+            (run / "multi-user.target.wants").mkdir()
+            mine = [
+                run / "workload-pp.service",
+                run / "workload-pp-setup.service",
+                run / "workload-pp.conf",
+                run / "multi-user.target.wants" / "workload-pp.service",
+            ]
+            for p in mine:
+                p.write_text("x\n")
+
+            def raise_absent(self):
+                raise workloadctl_core.WorkloadUserNotFound('pp')
+
+            args = SimpleNamespace(workload='pp', purge=False)
+            exit_code = None
+            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
+                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())), \
+                 patch.object(type(config), 'uid', property(raise_absent)):
+                try:
+                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                except SystemExit as e:
+                    exit_code = e.code
+
+        self.assertIsNone(exit_code, "absent user must not abort disable")
+        for p in mine:
+            self.assertFalse(p.exists(), f"{p} should still be removed with user gone")
+
 
 if __name__ == '__main__':
     unittest.main()

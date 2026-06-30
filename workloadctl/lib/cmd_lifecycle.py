@@ -40,6 +40,7 @@ from podman import Podman
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    WorkloadUserNotFound,
     require_root,
     VM_BRIDGE_NAME,
 )
@@ -612,8 +613,16 @@ def _workload_run_files(config: WorkloadConfig) -> list[Path]:
             tag = virtiofs_tag(parse_volume_spec(vol_spec)[1], i)
             files.append(run / f"workload-{name}-virtiofs-{tag}.service")
     else:
-        # cgroup-placement drop-in (containers only; VMs have none).
-        files.append(run / f"user@{config.uid}.service.d" / "50-workload.conf")
+        # cgroup-placement drop-in (containers only; VMs have none). The path is
+        # keyed by the workload user's UID, which comes from the passwd db — gone
+        # once the user is removed (e.g. a second disable, or disabling after an
+        # out-of-band userdel). The drop-in went with the user's runtime in that
+        # case, and we can't reconstruct the UID, so just omit it rather than
+        # letting WorkloadUserNotFound abort the whole removal.
+        try:
+            files.append(run / f"user@{config.uid}.service.d" / "50-workload.conf")
+        except WorkloadUserNotFound:
+            pass
         files.append(run / f"workload-{name}-pod.service")    # pod mode
         files.append(run / f"workload-{name}-net.service")    # bridge mode
         if config.is_multi:
@@ -845,12 +854,13 @@ def cmd_disable(args, manager: WorkloadManager):
             except OSError as e:
                 failures.append(f"remove {p}: {e}")
         if not config.is_vm:
-            # Prune the now-empty user@<uid>.service.d drop-in dir.
+            # Prune the now-empty user@<uid>.service.d drop-in dir. The UID lookup
+            # raises once the user is gone; nothing to prune in that case.
             try:
                 (RUN_SYSTEMD_SYSTEM / f"user@{config.uid}.service.d").rmdir()
-            except OSError:
+            except (OSError, WorkloadUserNotFound):
                 pass
-    _remove_run_files()
+    attempt("remove /run unit files", _remove_run_files)
     attempt("reload systemd",
             lambda: subprocess.run(["systemctl", "daemon-reload"], check=False))
 
