@@ -1,0 +1,163 @@
+name: Build Workload Images
+
+# Builds the self-built workload container images (the `pull = never`,
+# localhost/<name>:latest bundles) and publishes them to the homelab registry
+# as registry.local/workload-<name>:<tag>. This is what lets a host consume a
+# prebuilt image (registry.local/workload-<name>:latest + pull=newer) instead
+# of running `workloadctl build` locally on every box.
+#
+# Mostly dormant: on push it only rebuilds the workloads whose bundle actually
+# changed (these images rarely move). workflow_dispatch can force a subset or
+# all. Bundle images are ordinary OCI builds — no rechunk, no bootc plumbing —
+# so this is a much lighter pipeline than build-hypervisor.yml, which it
+# otherwise mirrors (native runner, registry.local, sealed-key signing).
+
+on:
+  workflow_dispatch:
+    inputs:
+      workloads:
+        description: 'Workloads to build: "all", or a space/comma list of names'
+        required: true
+        default: 'all'
+        type: string
+  push:
+    branches: [internal]
+    paths:
+      - 'workloadctl/workloads/**'
+      - '.forgejo/workflows/build-workload-images.yml'
+      - '.forgejo/scripts/ci-workload-images.py'
+
+concurrency:
+  group: build-workload-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: native
+    outputs:
+      workloads: ${{ steps.r.outputs.workloads }}
+      any: ${{ steps.r.outputs.any }}
+      tag: ${{ steps.r.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Need the previous commit to diff changed bundles on push.
+          fetch-depth: 2
+
+      - name: Compute build matrix
+        id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          SELECT: ${{ inputs.workloads }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            # Only rebuild bundles touched by this push. If the before-sha is
+            # unknown (new branch / all-zeros), fall back to building all.
+            if git rev-parse --quiet --verify "${BEFORE}^{commit}" >/dev/null 2>&1; then
+              CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${SHA}")"
+            else
+              CHANGED_FILES=""
+              SELECT="all"
+            fi
+            export CHANGED_FILES
+          fi
+          export SELECT
+          WORKLOADS="$(python3 .forgejo/scripts/ci-workload-images.py list)"
+          echo "workloads=${WORKLOADS}" >> "$GITHUB_OUTPUT"
+          # 'any' gates the build job so an empty matrix (nothing changed) is a
+          # clean no-op instead of a matrix-expansion error.
+          if [ "$(echo "$WORKLOADS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -gt 0 ]; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          fi
+          # One dated tag shared by the whole run, alongside :latest — gives a
+          # pinned, rollback-able reference for each image.
+          echo "tag=$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+          echo "Selected: ${WORKLOADS}"
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.any == 'true'
+    runs-on: native
+    timeout-minutes: 120
+    env:
+      REGISTRY: registry.local
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: ${{ fromJson(needs.setup.outputs.workloads) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        env:
+          NAME: ${{ matrix.workload }}
+          REFS_OUT: /tmp/wl-refs-${{ github.run_id }}-${{ matrix.workload }}.txt
+        run: |
+          : > "$REFS_OUT"
+          # Build into root's store (matches the hypervisor pipeline). The
+          # helper reuses lib/imagebuild.py so this is exactly what
+          # `workloadctl build ${NAME}` produces, tagged for the registry.
+          sudo env REGISTRY="${REGISTRY}" REFS_OUT="${REFS_OUT}" \
+            python3 .forgejo/scripts/ci-workload-images.py build "${NAME}"
+
+      - name: Push and sign
+        env:
+          NAME: ${{ matrix.workload }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          REFS_OUT: /tmp/wl-refs-${{ github.run_id }}-${{ matrix.workload }}.txt
+        run: |
+          # Sign at push via containers/image — same sealed-key setup as
+          # build-hypervisor.yml (no cosign CLI; its *.local scheme race broke
+          # signing). Key + passphrase are host-key-sealed systemd credentials
+          # in the runner's tmpfs; missing creds => push unsigned with a warning.
+          CREDS=/run/credentials/forgejo-runner.service
+          SIGN_ARGS=()
+          if sudo test -s "${CREDS}/cosign-key"; then
+            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                       --sign-passphrase-file "${CREDS}/cosign-pass")
+          else
+            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          fi
+
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            repo="${ref%:*}"   # strip :latest
+            sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "$ref"
+            DIGEST=$(cat /tmp/digest.txt)
+            # Dated tag = pinned rollback ref; digest copy is already covered by
+            # the digest-addressed signature.
+            sudo skopeo copy "docker://${repo}@${DIGEST}" "docker://${repo}:${TAG}"
+            {
+              echo "- \`${ref}\`"
+              echo "- \`${repo}:${TAG}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done < "$REFS_OUT"
+
+      - name: Cleanup local tags
+        if: always()
+        env:
+          NAME: ${{ matrix.workload }}
+          REFS_OUT: /tmp/wl-refs-${{ github.run_id }}-${{ matrix.workload }}.txt
+        run: |
+          # Drop the localhost/<name> build tag and the registry tag this job
+          # created; zot holds the source of truth. Dangling prune reclaims the
+          # layers on the long-lived native runner without touching the build
+          # cache or other workloads' tagged images.
+          sudo podman untag "localhost/${NAME}:latest" 2>/dev/null || true
+          if [ -f "$REFS_OUT" ]; then
+            while IFS= read -r ref; do
+              [ -n "$ref" ] || continue
+              sudo podman untag "$ref" 2>/dev/null || true
+            done < "$REFS_OUT"
+            rm -f "$REFS_OUT"
+          fi
+          df -h /
+          sudo podman image prune -f || true
+          df -h /
