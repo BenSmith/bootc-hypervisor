@@ -143,15 +143,19 @@ def workload_is_enabled(name: str) -> bool:
     return workload_enabled_marker(name).exists()
 
 
-def iter_workloads() -> list[tuple[str, Path]]:
-    """(name, config_path) for every instance under the config dir, sorted by name.
+def iter_workloads(base: Path | None = None) -> list[tuple[str, Path]]:
+    """(name, config_path) for every workload under `base`, sorted by name.
 
-    Yields the name (derived from the path) so no caller knows the on-disk shape.
-    This is the single place discovery encodes the layout.
+    `base` defaults to the config dir (the common case); pass BUNDLES_DIR to
+    discover shipped bundles instead. Either way the name is derived from the
+    directory so no caller knows the on-disk shape — this is the single place
+    discovery encodes the layout.
     """
+    if base is None:
+        base = workload_config_dir()
     return sorted(
         (p.parent.name, p)                                    # name from dir, not stem
-        for p in workload_config_dir().glob("*/workload.toml")
+        for p in base.glob("*/workload.toml")
     )
 
 

@@ -941,7 +941,7 @@ def cmd_disable(args, manager: WorkloadManager):
 
         # Remove the data dir regardless of whether the user still existed — an
         # orphaned /var/lib/workloads/<name> should still be swept.
-        workload_dir = WORKLOADS_BASE / config.name
+        workload_dir = workload_root_dir(config.name)
         if workload_dir.exists():
             try:
                 print(f"  Removing workload directory {workload_dir}...")

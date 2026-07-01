@@ -59,10 +59,10 @@ try:
     from pathlib import Path
 
     from workload_lib import (
-        WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
-        ENABLED_MARKER_NAME,
+        WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
+        ENABLED_MARKER_NAME, iter_workloads,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
-        workload_username, workload_home_dir, workload_state_dir, workload_data_dir,
+        workload_username, workload_root_dir, workload_home_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
@@ -888,7 +888,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
             # Warn if host path escapes the workload home directory
             try:
                 resolved = str(Path(parts[0]).resolve())
-                root = str(WORKLOADS_BASE / name)
+                root = str(workload_root_dir(name))
                 if not resolved.startswith(root + '/') and resolved != root:
                     log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
                             f"'{resolved}' outside workload dir '{root}'", level="warning")
@@ -1156,7 +1156,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "",
         "# Filesystem hardening: restrict writes to workload home + podman runtime",
         "ProtectSystem=strict",
-        f'ReadWritePaths="{str(WORKLOADS_BASE / name)}" /run/user/{uid}',
+        f'ReadWritePaths="{str(workload_root_dir(name))}" /run/user/{uid}',
         "PrivateTmp=yes",
         "# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and",
         "# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list",
@@ -1715,8 +1715,10 @@ def main():
     # at the end of main() for why the wants symlinks alone don't suffice.
     written_workloads = []
 
-    # Process each workload config
-    config_files = list(WORKLOAD_CONFIG_DIR.glob("*/workload.toml"))
+    # Process each workload config. Discovery goes through iter_workloads so the
+    # <name>/workload.toml layout lives in exactly one place (workload_lib); we
+    # keep just the paths since the loop below re-derives name from the parent.
+    config_files = [path for _name, path in iter_workloads(WORKLOAD_CONFIG_DIR)]
     log_msg(f"Found {len(config_files)} config files")
 
     # Pre-scan to build the set of all enabled workload names; used below to

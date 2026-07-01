@@ -232,6 +232,7 @@ class TestPurgeBestEffort(unittest.TestCase):
             exit_code = None
             with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
                  patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base), \
+                 patch.object(workload_lib, 'WORKLOADS_BASE', base), \
                  patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_lifecycle.time, 'sleep', lambda *_: None), \
                  patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock()), \

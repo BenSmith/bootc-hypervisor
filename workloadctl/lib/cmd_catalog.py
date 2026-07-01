@@ -18,7 +18,7 @@ import shutil
 import sys
 import tomllib
 
-from workload_lib import validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
+from workload_lib import iter_workloads, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -114,7 +114,7 @@ def list_bundles() -> list[str]:
     """Sorted names of shippable bundles (a dir with a workload.toml)."""
     if not BUNDLES_DIR.is_dir():
         return []
-    return sorted(p.parent.name for p in BUNDLES_DIR.glob("*/workload.toml"))
+    return [name for name, _ in iter_workloads(BUNDLES_DIR)]
 
 
 def _bundle_kind(bundle: str) -> str:

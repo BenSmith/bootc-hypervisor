@@ -16,7 +16,6 @@ import sys
 from workload_lib import (
     QMPClient,
     USERNAME_PREFIX,
-    WORKLOADS_BASE,
     VM_SOCKET_DIR,
     units_outdated,
     workload_config_dir,
@@ -319,7 +318,11 @@ def cmd_images(args, manager: WorkloadManager):
             if entry.pw_name.startswith(USERNAME_PREFIX):
                 print(f"Pruning images for {entry.pw_name}...")
                 try:
-                    home = str(WORKLOADS_BASE / entry.pw_name[len(USERNAME_PREFIX):])
+                    # Authoritative $HOME from passwd (the state/ subdir), matching
+                    # what the workload service and exporter use. Do NOT reconstruct
+                    # WORKLOADS_BASE/<name> — that's the root, one level above the
+                    # real podman graphroot, so the prune would hit an empty store.
+                    home = entry.pw_dir
                     result = Podman.for_user(
                         entry.pw_name, entry.pw_uid, home
                     ).run("image", "prune", "-f", capture_output=True)
