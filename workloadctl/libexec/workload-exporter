@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -192,7 +192,7 @@ def get_container_health(name):
     Returns "healthy", "unhealthy", "starting", or None if no health check.
     Runs podman inspect as the workload user.
     """
-    username = f"_wl-{name}"
+    username = workload_username(name)
     try:
         import pwd as _pwd
         pw = _pwd.getpwnam(username)
@@ -216,7 +216,7 @@ def find_workload_cgroup(name):
     Falls back to the pre-1b login-session path for rollback compatibility:
       /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/.../libpod-*.scope
     """
-    username = f"_wl-{name}"
+    username = workload_username(name)
     try:
         import pwd
         pw = pwd.getpwnam(username)
