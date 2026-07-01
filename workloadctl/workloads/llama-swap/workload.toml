@@ -26,19 +26,19 @@
 #                                                  — update the [storage] mount
 #                                                  target below if you switch.
 #
-# Models: drop GGUF files into /var/lib/workloads/llama-swap/models/ and
+# Models: drop GGUF files into /var/lib/workloads/llama-swap/data/models/ and
 # reference them as /models/<file> in each model's `cmd` in config.yaml.
 #
 # Setup:
 #   1. Add a config (a starter is copied from the bundle; edit it for your
 #      models):
 #        sudo cp /usr/share/workloadctl/workloads/llama-swap/config.yaml \
-#                /var/lib/workloads/llama-swap/config.yaml
-#        sudo nano /var/lib/workloads/llama-swap/config.yaml
+#                /var/lib/workloads/llama-swap/data/config.yaml
+#        sudo nano /var/lib/workloads/llama-swap/data/config.yaml
 #
 #   2. Add GGUF models:
-#        sudo mkdir -p /var/lib/workloads/llama-swap/models
-#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llama-swap/models/
+#        sudo mkdir -p /var/lib/workloads/llama-swap/data/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llama-swap/data/models/
 #
 #   3. Enable:
 #        sudo workloadctl enable llama-swap
@@ -47,7 +47,7 @@
 #      GET /v1/models lists configured models.
 #
 #   5. To change models/config later:
-#        sudo nano /var/lib/workloads/llama-swap/config.yaml
+#        sudo nano /var/lib/workloads/llama-swap/data/config.yaml
 #        sudo workloadctl recreate llama-swap
 #
 # Auth: llama-swap is allow-all by default. Since :8080 is published on the

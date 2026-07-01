@@ -56,7 +56,16 @@ def _load(name: str):
 
 def _is_buildable(name: str) -> bool:
     cfg = _load(name)
-    return bool(cfg and not cfg.is_vm and cfg.has_build_context())
+    if not cfg or cfg.is_vm:
+        return False
+    # has_build_context() resolves bundle_dir/containerfile and can raise
+    # ValueError on a malformed [workload].bundle or a traversal-laden
+    # [build].containerfile. Treat that like a failed load (skip, don't crash)
+    # so one bad bundle can't take down the whole CI matrix.
+    try:
+        return cfg.has_build_context()
+    except Exception:
+        return False
 
 
 def _all_buildable() -> list[str]:

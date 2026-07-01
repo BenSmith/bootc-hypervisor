@@ -22,7 +22,7 @@
 #
 #   2. Add media. By default the library is the workload's own directory,
 #      mounted read-only at /media inside the container:
-#        /var/lib/workloads/jellyfin/media
+#        /var/lib/workloads/jellyfin/data/media
 #      Drop video files there (created automatically on enable). To serve
 #      media from elsewhere instead — e.g. the smb-server share so files can
 #      be added over SMB — see the [storage] section below.
@@ -71,11 +71,11 @@ on_failure = "kill"
 [storage]
 # By default the library lives in the workload's own home, so jellyfin is a
 # fully independent workload with no dependency on any other.
-#   Default media path: /var/lib/workloads/jellyfin/media
+#   Default media path: /var/lib/workloads/jellyfin/data/media
 #
 # Deployment tweak — to serve media from another location, replace the last
 # entry with an absolute host path, e.g. to share the smb-server library:
-#   "/var/lib/workloads/smb-server/exports/media:/media:ro"
+#   "/var/lib/workloads/smb-server/data/exports/media:/media:ro"
 # (the workload user only needs read access to whatever path you choose).
 volumes = [
     "./config:/config",

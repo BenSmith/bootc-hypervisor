@@ -1757,6 +1757,19 @@ def main():
 
             name = config["workload"]["name"]
 
+            # Identity is directory-based everywhere else (iter_workloads, the
+            # .enabled marker, WorkloadConfig which enforces name==dir), but the
+            # generator keys unit filenames off [workload].name. If the two
+            # disagree we'd emit workload-<tomlname>.service while the CLI and
+            # marker operate on the dir name — a split identity. Refuse it.
+            if config_file.parent.name != name:
+                log_msg(
+                    f"ERROR: {config_file}: [workload].name {name!r} does not "
+                    f"match bundle directory {config_file.parent.name!r}, skipping",
+                    level="err",
+                )
+                continue
+
             errors = validate_workload_config(config)
             if errors:
                 for e in errors:

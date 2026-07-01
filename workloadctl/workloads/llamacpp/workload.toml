@@ -5,13 +5,13 @@
 # GPU: server-vulkan uses Vulkan for cross-vendor acceleration (AMD, NVIDIA,
 # Intel). For CPU-only inference, swap the image tag to "server".
 #
-# Models: drop GGUF files into /var/lib/workloads/llamacpp/models/ and set the
+# Models: drop GGUF files into /var/lib/workloads/llamacpp/data/models/ and set the
 # --model flag below. Restart the workload to switch models.
 #
 # Setup:
 #   1. Add a GGUF model:
-#        sudo mkdir -p /var/lib/workloads/llamacpp/models
-#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llamacpp/models/
+#        sudo mkdir -p /var/lib/workloads/llamacpp/data/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llamacpp/data/models/
 #
 #   2. Set the --model path in the command below to match.
 #

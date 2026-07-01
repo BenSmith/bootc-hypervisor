@@ -9,7 +9,7 @@
 #        sudo workloadctl build dns-vpn
 #
 #   2. Copy WireGuard config and enable:
-#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/dns-vpn/wg0.conf
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/dns-vpn/data/wg0.conf
 #        sudo workloadctl enable dns-vpn
 #
 #   3. Open the firewall for LAN access:

@@ -9,7 +9,7 @@
 #        sudo workloadctl build caddy
 #
 #   2. Drop a Caddyfile in place (see workloads/caddy/Caddyfile for a sample):
-#        sudo cp /usr/share/workloadctl/workloads/caddy/Caddyfile /var/lib/workloads/caddy/Caddyfile
+#        sudo cp /usr/share/workloadctl/workloads/caddy/Caddyfile /var/lib/workloads/caddy/data/Caddyfile
 #
 #   3. Enable:
 #        sudo workloadctl enable caddy
@@ -21,7 +21,7 @@
 #        sudo firewall-cmd --reload
 #
 #   5. To change routes later:
-#        sudo nano /var/lib/workloads/caddy/Caddyfile
+#        sudo nano /var/lib/workloads/caddy/data/Caddyfile
 #        sudo workloadctl recreate caddy
 #
 # Why host networking:

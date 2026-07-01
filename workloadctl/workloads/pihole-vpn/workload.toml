@@ -9,7 +9,7 @@
 #        sudo workloadctl build pihole-vpn
 #
 #   2. Copy your WireGuard config and enable:
-#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/wg0.conf
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/data/wg0.conf
 #        sudo workloadctl enable pihole-vpn
 #
 #   3. Configure firewall for LAN access:

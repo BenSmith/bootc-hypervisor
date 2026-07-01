@@ -23,7 +23,10 @@ from pathlib import Path
 
 # workloadctl-owned control files never belong in a build context — a bare
 # `COPY . /` in a Containerfile would otherwise sweep them into the image.
-_CONTEXT_EXCLUDE = {"workload.toml", "build.sh", "policy.cil"}
+# ".enabled" is the enabled-marker (workload_lib.ENABLED_MARKER_NAME) that the
+# override dir carries for an enabled workload; keep it out of the build context
+# so a `COPY . /` Containerfile can't sweep control files into the image.
+_CONTEXT_EXCLUDE = {"workload.toml", "build.sh", "policy.cil", ".enabled"}
 
 
 def _proxy_build_args() -> list:

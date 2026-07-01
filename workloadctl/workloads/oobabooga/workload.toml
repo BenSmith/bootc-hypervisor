@@ -10,15 +10,15 @@
 #   atinoda/text-generation-webui:default-rocm   — AMD (ROCm)
 #
 # Models: place GGUF or other supported model files in
-# /var/lib/workloads/oobabooga/models/. Load and switch models at runtime
+# /var/lib/workloads/oobabooga/data/models/. Load and switch models at runtime
 # from the Models tab in the UI — no restart needed.
 #
 # Setup:
 #   1. Set the image tag above to match your GPU.
 #
 #   2. Add models:
-#        sudo mkdir -p /var/lib/workloads/oobabooga/models
-#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/oobabooga/models/
+#        sudo mkdir -p /var/lib/workloads/oobabooga/data/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/oobabooga/data/models/
 #
 #   3. Enable:
 #        sudo workloadctl enable oobabooga

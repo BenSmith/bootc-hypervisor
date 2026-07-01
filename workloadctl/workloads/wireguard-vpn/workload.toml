@@ -8,7 +8,7 @@
 #        sudo workloadctl build wireguard-vpn
 #
 #   2. Copy WireGuard config and enable:
-#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/wg0.conf
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/data/wg0.conf
 #        sudo workloadctl enable wireguard-vpn
 #
 #   3. Verify connection (from within the container):

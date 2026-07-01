@@ -15,7 +15,7 @@
 #      also runs otel-lgtm).
 #   3. sudo workloadctl enable alloy
 #   4. To change collection later, edit
-#      /var/lib/workloads/alloy/alloy-config.alloy and
+#      /var/lib/workloads/alloy/data/alloy-config.alloy and
 #      `sudo workloadctl recreate alloy`.
 #
 
@@ -52,7 +52,7 @@ ROLE_LABEL   = "CHANGE_ME"   # Role tag (gaming, ai, nas, networking, thin-clien
 
 [storage]
 volumes = [
-    # Alloy config (edit /var/lib/workloads/alloy/alloy-config.alloy)
+    # Alloy config (edit /var/lib/workloads/alloy/data/alloy-config.alloy)
     "./alloy-config.alloy:/etc/alloy/config.alloy:ro",
     # Journal access (read-only)
     "/run/log/journal:/run/log/journal:ro",
@@ -65,7 +65,7 @@ volumes = [
 
 [security]
 # Map container UID 0 → host workload user so alloy (running as root in the
-# image) can read /var/lib/workloads/alloy/alloy-config.alloy that's owned by
+# image) can read /var/lib/workloads/alloy/data/alloy-config.alloy that's owned by
 # the workload user on the host.
 userns = "host"
 extra_groups = ["systemd-journal"]
