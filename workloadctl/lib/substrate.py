@@ -51,6 +51,7 @@ from workload_lib import (
     VM_SOCKET_DIR,
     vm_mac_address,
 )
+from service_runtime import ensure_runtime_dir, restart_workload_service
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +623,6 @@ class ContainerSubstrate(Substrate):
 
     def lifecycle(self, action: str) -> None:
         """Unified lifecycle for containers: start / stop / restart / reboot."""
-        from workloadctl_core import restart_workload_service
         if action == "start":
             # Re-pin /run/user/<uid> and tolerate runtime-dir / start-limit
             # thrash (a bare `systemctl start` doesn't re-run the setup oneshot,
@@ -723,7 +723,6 @@ class ContainerSubstrate(Substrate):
             print(f"  ⚠ Pet snapshot prune skipped: {exc}", file=sys.stderr)
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
-        from workloadctl_core import restart_workload_service, ensure_runtime_dir
         from podman import PodmanError
 
         if recreate:
@@ -860,7 +859,6 @@ class ContainerSubstrate(Substrate):
 
     def rollback(self) -> None:
         """Roll back all containers to their previous images and restart."""
-        from workloadctl_core import restart_workload_service
 
         targets = self.rollback_targets()
         have_any_tag = bool(targets) or self._has_any_rollback_tag()
@@ -1446,7 +1444,6 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
             if vm:
                 subprocess.run(["systemctl", "start", service_name])
             else:
-                from workloadctl_core import restart_workload_service
                 try:
                     restart_workload_service(config.uid, service_name, action="start")
                 except subprocess.CalledProcessError:
