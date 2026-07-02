@@ -17,6 +17,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 LIBEXEC = Path(__file__).resolve().parent.parent / "libexec"
@@ -44,7 +45,7 @@ class FakeQMP:
 
     def __init__(self, *, connect_raises=None, handler=None):
         self.connect_raises = connect_raises
-        self.handler = handler or (lambda cmd, args=None: {"return": {}})
+        self.handler: Any = handler or (lambda cmd, args=None: {"return": {}})
         self.sent = []
         self.closed = False
 

@@ -63,7 +63,10 @@ class TestContainerSpecs(unittest.TestCase):
 
     def _fake(self, config, is_multi):
         class FakeConfig:
-            pass
+            config: dict
+            is_multi: bool
+            name: str
+            image: str
         fc = FakeConfig()
         fc.config = config
         fc.is_multi = is_multi

@@ -367,16 +367,19 @@ class TestSecretPattern(unittest.TestCase):
     def test_matches_simple(self):
         m = SECRET_PATTERN.search("${SECRET:api-key}")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "api-key")
 
     def test_matches_underscore(self):
         m = SECRET_PATTERN.search("${SECRET:my_secret}")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "my_secret")
 
     def test_matches_embedded(self):
         m = SECRET_PATTERN.search("prefix${SECRET:key}suffix")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "key")
 
     def test_no_match_plain(self):
@@ -496,14 +499,14 @@ class TestResolveSecretEnvVars(unittest.TestCase):
         self.assertIn("SECRET_VAR", resolved)
 
     def test_missing_credential_raises(self):
-        config = {
+        config: dict = {
             "container": {"environment": {"K": "${SECRET:nonexistent}"}}
         }
         with self.assertRaises(FileNotFoundError):
             resolve_secret_env_vars(config, self.creds_dir)
 
     def test_empty_env(self):
-        config = {"container": {"environment": {}}}
+        config: dict = {"container": {"environment": {}}}
         resolved = resolve_secret_env_vars(config, self.creds_dir)
         self.assertEqual(resolved, {})
 

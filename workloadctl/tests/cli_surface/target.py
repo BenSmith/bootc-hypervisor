@@ -51,8 +51,8 @@ class Target:
     # SSH multiplexing state (remote only)
     _ctl_dir: str = field(default="", repr=False)
     _ctl_path: str = field(default="", repr=False)
-    _master_proc: object = field(default=None, repr=False)
-    _lock: object = field(default_factory=threading.Lock, repr=False)
+    _master_proc: "subprocess.Popen | None" = field(default=None, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _started: bool = field(default=False, repr=False)
 
     # Capability cache

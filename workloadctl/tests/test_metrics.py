@@ -147,6 +147,7 @@ def _exporter_get_enabled_workloads(config_dir):
     loader = importlib.machinery.SourceFileLoader(
         "workload_exporter", EXPORTER_SCRIPT)
     spec = importlib.util.spec_from_loader("workload_exporter", loader)
+    assert spec is not None
     mod = importlib.util.module_from_spec(spec)
     orig_env = os.environ.get("WORKLOAD_CONFIG_DIR")
     orig_argv = sys.argv[:]
@@ -584,6 +585,7 @@ def _load_exporter():
     loader = importlib.machinery.SourceFileLoader(
         "workload_exporter", EXPORTER_SCRIPT)
     spec = importlib.util.spec_from_loader("workload_exporter", loader)
+    assert spec is not None
     mod = importlib.util.module_from_spec(spec)
     orig_argv = sys.argv[:]
     sys.argv = [EXPORTER_SCRIPT]  # PORT = int(sys.argv[1]) guard

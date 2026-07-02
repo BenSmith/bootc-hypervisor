@@ -59,7 +59,7 @@ class _FakeBridge(_FakePod):
 
 class _LogsBase(unittest.TestCase):
     def setUp(self):
-        self.captured = {}
+        self.captured: dict = {}
 
         class _Sub:
             def logs(_self, cmd):
@@ -143,7 +143,7 @@ class ExecTest(unittest.TestCase):
     def setUp(self):
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
-        self.calls = {}
+        self.calls: dict = {}
 
         class _Sub:
             def exec(_self, exec_args, container=None):

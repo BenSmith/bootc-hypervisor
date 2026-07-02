@@ -34,7 +34,7 @@ class CatalogTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
         # init/duplicate write here; WorkloadConfig/Manager read here.
-        patches = [
+        patches: list = [
             mock.patch.object(cmd_catalog, "BUNDLES_DIR", REPO_BUNDLES),
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp),
             mock.patch.object(cmd_catalog, "require_root", lambda: None),

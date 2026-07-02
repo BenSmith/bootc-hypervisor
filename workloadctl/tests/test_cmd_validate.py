@@ -34,7 +34,7 @@ class ValidateDispatchTest(unittest.TestCase):
     def setUp(self):
         self.manager = mock.Mock()
         # Map config name -> passed bool; validate_single stub honors it.
-        self.verdicts = {}
+        self.verdicts: dict = {}
 
         def fake_validate(config, manager, json_mode=False):
             name = getattr(config, "name", config)

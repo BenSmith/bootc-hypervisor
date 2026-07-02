@@ -281,12 +281,14 @@ class QMPClient:
             if b"\n" in self._buf:
                 line, self._buf = self._buf.split(b"\n", 1)
                 return json.loads(line.decode())
+            assert self._sock is not None
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ConnectionError("QMP socket closed")
             self._buf += chunk
 
     def _send(self, obj: dict):
+        assert self._sock is not None
         self._sock.sendall((json.dumps(obj) + "\n").encode())
 
     def negotiate(self):

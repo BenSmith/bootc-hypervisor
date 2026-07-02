@@ -213,6 +213,7 @@ class TestLifecycleValidation(unittest.TestCase):
             (c for c in result["checks"] if c["check"] == "lifecycle"), None
         )
         self.assertIsNotNone(lifecycle_check)
+        assert lifecycle_check is not None
         self.assertTrue(lifecycle_check["passed"])
 
     def test_valid_pet_passes(self):
@@ -221,6 +222,7 @@ class TestLifecycleValidation(unittest.TestCase):
             (c for c in result["checks"] if c["check"] == "lifecycle"), None
         )
         self.assertIsNotNone(lifecycle_check)
+        assert lifecycle_check is not None
         self.assertTrue(lifecycle_check["passed"])
 
     def test_invalid_value_fails(self):
@@ -232,6 +234,7 @@ class TestLifecycleValidation(unittest.TestCase):
             (c for c in result["checks"] if c["check"] == "lifecycle"), None
         )
         self.assertIsNotNone(lifecycle_check)
+        assert lifecycle_check is not None
         self.assertFalse(lifecycle_check["passed"])
         self.assertEqual(lifecycle_check["severity"], "error")
         self.assertIn("immortal", lifecycle_check["message"])
@@ -273,6 +276,7 @@ class TestLifecycleValidation(unittest.TestCase):
                 None,
             )
             self.assertIsNotNone(check, f"bad={bad}")
+            assert check is not None
             self.assertFalse(check["passed"], f"bad={bad}")
             self.assertEqual(check["severity"], "error")
             self.assertGreater(result["errors"], 0, f"bad={bad}")
@@ -431,6 +435,7 @@ class _CfgDir:
         return workloadctl_core.WorkloadConfig(self._name)
 
     def __exit__(self, *_):
+        assert self._patcher is not None and self._tmp is not None
         self._patcher.stop()
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -451,7 +456,7 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             sub = ContainerSubstrate(cfg, manager)
             # keep cfg alive (CfgDir teardown would remove the temp dir,
             # but the config object is already parsed)
-            sub._cfg_tmp = None
+            sub._cfg_tmp = None  # type: ignore[attr-defined]
             return sub, cfg, manager
 
     def test_pet_recreate_calls_commit(self):

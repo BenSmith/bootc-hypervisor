@@ -26,6 +26,7 @@ def _load_script():
         sys.path.insert(0, LIB_DIR)
     loader = importlib.machinery.SourceFileLoader("workload_ensure_user", SCRIPT)
     spec = importlib.util.spec_from_loader("workload_ensure_user", loader)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
@@ -280,7 +281,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # pubkey+mtime fingerprint missed this and reused a stale ISO.
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nv: ${V}\n")
-        cfg = {"vm": {"cloud_init": {
+        cfg: dict = {"vm": {"cloud_init": {
             "user_data_file": "user-data",
             "template_vars": {"V": "first"},
         }}}
@@ -515,14 +516,14 @@ class TestConfigureSubuidSubgid(unittest.TestCase):
                 if "subuid" in str(path):
                     buf = []
                     m = mock.MagicMock()
-                    m.write = lambda s: buf.append(s) or subuid_written.append(s)
+                    m.write = lambda s: buf.append(s) or subuid_written.append(s)  # type: ignore[func-returns-value]
                     m.__enter__ = lambda s: m
                     m.__exit__ = mock.MagicMock(return_value=False)
                     return m
                 if "subgid" in str(path):
                     buf = []
                     m = mock.MagicMock()
-                    m.write = lambda s: buf.append(s) or subgid_written.append(s)
+                    m.write = lambda s: buf.append(s) or subgid_written.append(s)  # type: ignore[func-returns-value]
                     m.__enter__ = lambda s: m
                     m.__exit__ = mock.MagicMock(return_value=False)
                     return m
@@ -585,7 +586,7 @@ class TestWarnIfStaleHome(unittest.TestCase):
         self.mod = _load_script()
 
     def _capture(self, pw, name):
-        msgs = []
+        msgs: list = []
         with mock.patch.object(self.mod, "log", side_effect=msgs.append):
             self.mod.warn_if_stale_home(pw, name)
         return "\n".join(msgs)

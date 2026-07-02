@@ -163,7 +163,7 @@ class UpdateDispatchTest(unittest.TestCase):
 
     def test_single_success_verifies_result(self):
         cfg = _FakeConfig("x", _FakeSub(result=("x", {})))
-        seen = {}
+        seen: dict = {}
         with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg), \
              mock.patch.object(cmd_update, "get_substrate", lambda c, m: c._sub), \
              mock.patch.object(cmd_update, "_verify_all",
