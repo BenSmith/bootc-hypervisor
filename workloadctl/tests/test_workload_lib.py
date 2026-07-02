@@ -1035,19 +1035,25 @@ class TestUnitsOutdated(unittest.TestCase):
         self.assertFalse(workload_lib.units_outdated("foo"))
 
     def test_false_when_unit_newer(self):
-        self.cfg.write_text("x"); os.utime(self.cfg, (1000, 1000))
-        self.unit.write_text("x"); os.utime(self.unit, (2000, 2000))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (1000, 1000))
+        self.unit.write_text("x")
+        os.utime(self.unit, (2000, 2000))
         self.assertFalse(workload_lib.units_outdated("foo"))
 
     def test_true_when_config_newer(self):
-        self.unit.write_text("x"); os.utime(self.unit, (1000, 1000))
-        self.cfg.write_text("x"); os.utime(self.cfg, (2000, 2000))
+        self.unit.write_text("x")
+        os.utime(self.unit, (1000, 1000))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (2000, 2000))
         self.assertTrue(workload_lib.units_outdated("foo"))
 
     def test_slack_swallows_same_second_enable(self):
         # enable writes both within the same second — must not flag stale.
-        self.unit.write_text("x"); os.utime(self.unit, (1000.0, 1000.0))
-        self.cfg.write_text("x"); os.utime(self.cfg, (1000.4, 1000.4))
+        self.unit.write_text("x")
+        os.utime(self.unit, (1000.0, 1000.0))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (1000.4, 1000.4))
         self.assertFalse(workload_lib.units_outdated("foo"))
 
 

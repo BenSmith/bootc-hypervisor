@@ -106,8 +106,6 @@ class TestCleanupApply:
         record_property("cell", "cleanup/apply")
         orphan_user = "_wl-clitest-orphan-ap"
         orphan_uid = 19999
-        name_part = "clitest-orphan-ap"
-        home = f"/var/lib/workloads/{name_part}"
 
         try:
             _plant_orphan_user(target, orphan_user, orphan_uid)

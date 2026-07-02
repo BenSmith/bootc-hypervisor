@@ -113,7 +113,6 @@ class QmpTest(unittest.TestCase):
             seen["command"] = command
             seen["arguments"] = arguments
 
-        sock = LIBEXEC  # any existing dir works as VM_SOCKET_DIR root
         with mock.patch.object(qmp, "qmp_send_cmd", _capture), \
              mock.patch.object(qmp, "VM_SOCKET_DIR", Path("/sockroot")), \
              mock.patch.object(qmp.Path, "exists", lambda self: True), \

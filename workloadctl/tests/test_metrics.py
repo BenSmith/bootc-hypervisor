@@ -423,9 +423,9 @@ class TestMetricsFormat(unittest.TestCase):
 
     def test_no_duplicate_type_lines(self):
         """Each metric has exactly one TYPE declaration."""
-        type_lines = [l for l in self.prom.splitlines()
-                      if l.startswith("# TYPE ")]
-        metric_names = [l.split()[2] for l in type_lines]
+        type_lines = [line for line in self.prom.splitlines()
+                      if line.startswith("# TYPE ")]
+        metric_names = [line.split()[2] for line in type_lines]
         self.assertEqual(len(metric_names), len(set(metric_names)),
                          f"Duplicate TYPE declarations: {metric_names}")
 

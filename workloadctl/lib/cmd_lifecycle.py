@@ -911,8 +911,8 @@ def cmd_disable(args, manager: WorkloadManager):
                     for file in ["/etc/subuid", "/etc/subgid"]:
                         p = Path(file)
                         if p.exists():
-                            lines = [l for l in p.read_text().splitlines()
-                                     if not l.startswith(f"{config.username}:")]
+                            lines = [line for line in p.read_text().splitlines()
+                                     if not line.startswith(f"{config.username}:")]
                             p.write_text("\n".join(lines) + ("\n" if lines else ""))
             except Exception as e:
                 failures.append(f"remove subuid/subgid entries: {e}")
@@ -1245,8 +1245,8 @@ def cmd_cleanup(args, manager: WorkloadManager):
         for f in ["/etc/subuid", "/etc/subgid"]:
             p = Path(f)
             if p.exists():
-                lines = [l for l in p.read_text().splitlines()
-                         if not l.startswith(f"{username}:")]
+                lines = [line for line in p.read_text().splitlines()
+                         if not line.startswith(f"{username}:")]
                 p.write_text("\n".join(lines) + ("\n" if lines else ""))
 
         subprocess.run(["userdel", "-r", username], check=False, capture_output=True)

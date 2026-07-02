@@ -621,16 +621,8 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
         port_claims = {}
         for filename, config in ALL_WORKLOADS:
             name = config["workload"]["name"]
-            mode = config.get("network", {}).get("mode", "pasta")
             ports = config.get("network", {}).get("ports", [])
             for port_spec in ports:
-                # Parse host port from specs like "53:53/udp", "127.0.0.1:1080:1080"
-                parts = port_spec.split(":")
-                if len(parts) == 3:
-                    host_port_proto = parts[1] + ":" + parts[2].split("/")[-1] if "/" in parts[2] else parts[1]
-                else:
-                    host_port_proto = parts[0]
-
                 # Normalize: extract port number and protocol
                 if "/" in port_spec:
                     proto = port_spec.rsplit("/", 1)[1]

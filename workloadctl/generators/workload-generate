@@ -1635,8 +1635,6 @@ def generate_vm_workload(config, user_name: str, uid: int):
     vm_cfg = config.get("vm", {})
     volumes = vm_cfg.get("volumes", [])
 
-    written = []
-
     # Sysusers (with implicit kvm)
     sysuser_content = generate_sysuser_config_vm(config, user_name, uid)
     sysuser_file = SYSUSERS_DIR / f"workload-{name}.conf"

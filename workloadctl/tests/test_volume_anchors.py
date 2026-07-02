@@ -115,7 +115,9 @@ class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
             cfg = tmp / "cfg"
             svc = tmp / "svc"
             sys_d = tmp / "sys"
-            cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
+            cfg.mkdir()
+            svc.mkdir()
+            sys_d.mkdir()
 
             for src in tomls:
                 name = src.parent.name

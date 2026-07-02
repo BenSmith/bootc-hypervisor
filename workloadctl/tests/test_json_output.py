@@ -1001,7 +1001,7 @@ class TestBackupJson(unittest.TestCase):
                 mock_backup = MagicMock(return_value=1024)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        data = _capture_json(
+                        _capture_json(
                             lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
         mock_backup.assert_called_once()
         # Verify consistency='crash' was threaded through

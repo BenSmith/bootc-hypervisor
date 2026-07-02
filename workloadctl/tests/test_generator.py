@@ -1775,7 +1775,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         bridge = self._read("workload-bridge.service")
         # The dnsmasq ExecStart line itself must not end with "|| true".
         # (Other ExecStop lines may legitimately use || true for cleanup.)
-        dnsmasq_lines = [l for l in bridge.splitlines() if "/usr/sbin/dnsmasq" in l]
+        dnsmasq_lines = [line for line in bridge.splitlines() if "/usr/sbin/dnsmasq" in line]
         self.assertEqual(len(dnsmasq_lines), 1, dnsmasq_lines)
         self.assertNotIn("|| true", dnsmasq_lines[0])
         # The bogus --keep-in-foreground=no flag must not appear.
@@ -1783,8 +1783,8 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         # Type=forking only allows one ExecStart= line — the setup steps
         # must be ExecStartPre=, and dnsmasq is the sole ExecStart=.
         # systemd refuses to load the unit otherwise.
-        exec_starts = [l for l in bridge.splitlines()
-                       if l.startswith("ExecStart=")]
+        exec_starts = [line for line in bridge.splitlines()
+                       if line.startswith("ExecStart=")]
         self.assertEqual(len(exec_starts), 1, exec_starts)
         self.assertIn("/usr/sbin/dnsmasq", exec_starts[0])
 
@@ -1822,7 +1822,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self._write_vm_config()
         self._run()
         svc = self._read("workload-fedora-vm.service")
-        exec_stops = [l for l in svc.splitlines() if l.startswith("ExecStop=")]
+        exec_stops = [line for line in svc.splitlines() if line.startswith("ExecStop=")]
         self.assertEqual(len(exec_stops), 1, exec_stops)
         self.assertIn("workload-vm-shutdown", exec_stops[0])
         self.assertIn("fedora-vm", exec_stops[0])

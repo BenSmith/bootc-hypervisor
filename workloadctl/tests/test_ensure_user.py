@@ -389,7 +389,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
         # ./ anchors to the precious data/ subtree, matching the virtiofsd
         # sidecars the generator emits (NOT the old state-relative behavior).
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             ps, pd, pr = self._patch(root)
             with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
@@ -398,7 +399,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_absolute_path_outside_workload_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             config = {"workload": {"name": "vmx"},
                       "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
             ps, pd, pr = self._patch(root)
@@ -408,7 +410,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_empty_volumes_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             ps, pd, pr = self._patch(root)
             with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
                 self.mod.setup_vm_volume_directories(
@@ -416,8 +419,10 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_existing_dir_is_chowned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
-            existing = root / "data" / "shared"; existing.mkdir(parents=True)
+            root = Path(tmp)
+            (root / "state").mkdir()
+            existing = root / "data" / "shared"
+            existing.mkdir(parents=True)
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             chown_calls = []
             ps, pd, pr = self._patch(root)
@@ -469,7 +474,8 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
         # still get ./ volumes under data/, because provisioning keys off
         # workload_state_dir(name), not pw.pw_dir.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             stale_pw = _fake_pw(root)  # passwd home = root (mismatched)
             config = {
                 "workload": {"name": "myapp"},

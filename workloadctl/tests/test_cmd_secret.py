@@ -211,7 +211,6 @@ class PassphraseTest(unittest.TestCase):
 
     def _read(self, args, stdin_bytes=None):
         out, err = io.StringIO(), io.StringIO()
-        code = None
         ctx = mock.patch.object(
             cmd_secret.sys, "stdin",
             types.SimpleNamespace(buffer=io.BytesIO(stdin_bytes or b"")))
