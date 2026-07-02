@@ -13,7 +13,7 @@ import subprocess
 import time
 
 
-def _linger_manager_active(uid: int) -> bool:
+def manager_active(uid: int) -> bool:
     """True iff the persistent user manager (user@<uid>.service) is running.
 
     This — NOT the mere existence of /run/user/<uid> — is the real signal that
@@ -56,7 +56,7 @@ def ensure_runtime_dir(uid: int, timeout: float = 8.0) -> bool:
     Returns True if the manager is active and the dir exists by the deadline.
     """
     runtime_dir = f"/run/user/{uid}"
-    if _linger_manager_active(uid) and os.path.isdir(runtime_dir):
+    if manager_active(uid) and os.path.isdir(runtime_dir):
         return True
     try:
         subprocess.run(
@@ -71,10 +71,10 @@ def ensure_runtime_dir(uid: int, timeout: float = 8.0) -> bool:
         pass
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _linger_manager_active(uid) and os.path.isdir(runtime_dir):
+        if manager_active(uid) and os.path.isdir(runtime_dir):
             return True
         time.sleep(0.1)
-    return _linger_manager_active(uid) and os.path.isdir(runtime_dir)
+    return manager_active(uid) and os.path.isdir(runtime_dir)
 
 
 def restart_workload_service(

@@ -35,7 +35,7 @@ class TestEnsureRuntimeDir(unittest.TestCase):
 
     def test_already_effective_skips_actions(self):
         # Manager active AND dir present → no loginctl/systemctl side effects.
-        with patch.object(service_runtime, '_linger_manager_active',
+        with patch.object(service_runtime, 'manager_active',
                           return_value=True), \
              patch.object(service_runtime.os.path, 'isdir', return_value=True), \
              patch.object(service_runtime.subprocess, 'run') as run:
@@ -48,7 +48,7 @@ class TestEnsureRuntimeDir(unittest.TestCase):
         # user@<uid>.service is NOT active. Must enable-linger AND start the
         # manager, not short-circuit on the dir.
         active = iter([False, True])  # fast-path inactive, then active
-        with patch.object(service_runtime, '_linger_manager_active',
+        with patch.object(service_runtime, 'manager_active',
                           side_effect=lambda *_: next(active)), \
              patch.object(service_runtime.os.path, 'isdir', return_value=True), \
              patch.object(service_runtime.subprocess, 'run') as run, \
@@ -60,7 +60,7 @@ class TestEnsureRuntimeDir(unittest.TestCase):
         self.assertIn(['systemctl', 'start', 'user@10005.service'], verbs)
 
     def test_never_effective_returns_false(self):
-        with patch.object(service_runtime, '_linger_manager_active',
+        with patch.object(service_runtime, 'manager_active',
                           return_value=False), \
              patch.object(service_runtime.os.path, 'isdir', return_value=True), \
              patch.object(service_runtime.subprocess, 'run'), \
@@ -72,7 +72,7 @@ class TestEnsureRuntimeDir(unittest.TestCase):
 
     def test_subprocess_failure_is_swallowed(self):
         active = iter([False, True])
-        with patch.object(service_runtime, '_linger_manager_active',
+        with patch.object(service_runtime, 'manager_active',
                           side_effect=lambda *_: next(active)), \
              patch.object(service_runtime.os.path, 'isdir', return_value=True), \
              patch.object(service_runtime.subprocess, 'run',
