@@ -26,7 +26,6 @@ from workload_lib import (
     VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
-    workload_config_dir,
     workload_config_path,
     workload_enabled_marker,
     workload_username,
@@ -44,7 +43,6 @@ from workloadctl_core import (
     require_root,
     VM_BRIDGE_NAME,
 )
-from cmd_admin import validate_single
 from cmd_backup import BACKUP_DIR
 from substrate import get_substrate
 
@@ -145,10 +143,10 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             print(f"  ✗ Image '{image}' not found locally and pull=never")
             build_script = config.resolve_control_file("build.sh")
             if build_script.exists():
-                print(f"    Build the image first:")
+                print("    Build the image first:")
                 print(f"      sudo {build_script}")
             else:
-                print(f"    Build or pull the image first, or change pull policy")
+                print("    Build or pull the image first, or change pull policy")
             failed = True
 
     # Check required files exist (declared in [setup].required_files)
@@ -250,7 +248,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             missing_groups.append(group)
 
     if missing_groups:
-        print(f"  ✗ Missing groups:")
+        print("  ✗ Missing groups:")
         for group in missing_groups:
             print(f"    - {group}")
         print()
@@ -265,8 +263,8 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             if unpriv_start > 0:
                 print(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
                 print(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
-                print(f"    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
-                      f"sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
+                print("    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
+                      "sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
         except Exception:
             pass
 
@@ -395,14 +393,14 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 check=False
             )
             if active.returncode == 0:
-                print(f"  Note: container is still running the old image.")
+                print("  Note: container is still running the old image.")
                 print(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
         build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
-            print(f"Build the image first:", file=sys.stderr)
+            print("Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
         else:
             print(f"Build or pull the image '{image}' first.", file=sys.stderr)

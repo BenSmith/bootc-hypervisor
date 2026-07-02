@@ -16,7 +16,6 @@ import tomllib
 from workload_lib import (
     auto_detect_credentials,
     iter_workloads,
-    workload_config_dir,
 )
 from workloadctl_core import (
     WorkloadConfig,
@@ -326,7 +325,7 @@ def cmd_secret(args, manager: WorkloadManager):
                 sys.exit(1)
 
         print(f"✓ Exported credential '{name}' to {output}")
-        print(f"  Transfer this file to the target machine, then import with:")
+        print("  Transfer this file to the target machine, then import with:")
         print(f"  sudo workloadctl secret import {name} {output}")
 
     elif args.subcommand == "import":
@@ -391,6 +390,6 @@ def cmd_secret(args, manager: WorkloadManager):
             except Exception:
                 pass
         if affected:
-            print(f"\n  Restart affected workloads:")
+            print("\n  Restart affected workloads:")
             for wl_name in affected:
                 print(f"    sudo workloadctl recreate {wl_name}")

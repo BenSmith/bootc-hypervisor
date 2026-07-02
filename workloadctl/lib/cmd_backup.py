@@ -13,9 +13,7 @@ import tempfile
 import tomllib
 
 from workload_lib import (
-    auto_detect_credentials,
     validate_workload_name,
-    workload_config_dir,
     workload_config_path,
     WORKLOADS_BASE,
     workload_data_dir,
@@ -261,7 +259,7 @@ def cmd_restore(args, manager: WorkloadManager):
                 if args.force:
                     shutil.rmtree(dest_data)
                 else:
-                    print(f"  Warning: data/ exists, merging (use --force to replace)")
+                    print("  Warning: data/ exists, merging (use --force to replace)")
             shutil.copytree(data_staging, dest_data,
                             symlinks=True, dirs_exist_ok=True)
             print(f"  Data dir → {dest_data}")
@@ -288,7 +286,7 @@ def cmd_restore(args, manager: WorkloadManager):
                 ["workloadctl", "enable", name],
             )
         else:
-            print(f"Only the precious data/ subtree was restored; the "
-                  f"reconstructible state/ (images, graphroot, VM system disk) is "
-                  f"rebuilt on enable. To start the workload, run:")
+            print("Only the precious data/ subtree was restored; the "
+                  "reconstructible state/ (images, graphroot, VM system disk) is "
+                  "rebuilt on enable. To start the workload, run:")
             print(f"  sudo workloadctl enable {name}")

@@ -7,7 +7,6 @@ import grp
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ from workload_lib import (
     selinux_type_name,
     units_outdated,
     validate_workload_name,
-    workload_config_dir,
     workload_config_path,
 )
 from workloadctl_core import (

@@ -7,7 +7,6 @@ Usage: workload-vm-notify <name> <qemu-system-x86_64> [qemu-args...]
 Starts QEMU, connects to its QMP socket, waits until the guest enters the
 running state, then sends READY=1 to systemd. Exits with QEMU's exit code.
 """
-import json
 import os
 import signal
 import socket

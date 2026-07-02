@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import shutil
 import socket
 import subprocess
 import sys
@@ -33,7 +32,6 @@ from workloadctl_core import (
     _parse_size_bytes,
     parse_workload_ref,
     require_root,
-    resolve_container_target,
 )
 from cmd_lifecycle import _effective_state
 
@@ -198,14 +196,14 @@ def cmd_list(args, manager: WorkloadManager):
         print(f"  {name:<{name_w}} {status:<10} {state:<12} {image_id:<14} {ports_str:<20} {image:<30}")
 
     print()
-    print(f"  Use 'workloadctl status <name>' for details on a specific workload.")
+    print("  Use 'workloadctl status <name>' for details on a specific workload.")
 
     if failed_workloads:
         print()
         for name, unit in failed_workloads:
             print(f"  WARNING: '{name}' is not running — {unit} failed.")
-        print(f"           Run 'workloadctl status <name>' or "
-              f"'sudo journalctl -u <unit>' to see why.")
+        print("           Run 'workloadctl status <name>' or "
+              "'sudo journalctl -u <unit>' to see why.")
 
 
 # ---------------------------------------------------------------------------

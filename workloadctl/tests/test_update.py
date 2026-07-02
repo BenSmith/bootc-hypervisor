@@ -9,7 +9,6 @@ from pathlib import Path
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
-import cmd_lifecycle
 import cmd_update
 from substrate import rollback_tag
 from workloadctl_core import WorkloadConfig

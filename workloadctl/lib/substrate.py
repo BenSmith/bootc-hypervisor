@@ -791,7 +791,7 @@ class ContainerSubstrate(Substrate):
                 print(f"  {label}: {(old_id or 'none')[:12]} → {(new_id or 'unknown')[:12]}")
 
         if not changed and not force:
-            print(f"  ✓ Already up to date")
+            print("  ✓ Already up to date")
             return None
 
         # Tag old images for rollback before restarting

@@ -11,7 +11,6 @@ check has to be repeated there or a crafted name like "../../etc/cron.d/x"
 escapes the workloads tree.
 """
 import argparse
-import shutil
 import subprocess
 import sys
 import tempfile

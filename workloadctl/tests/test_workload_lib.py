@@ -16,8 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
 import workload_lib
 from workload_lib import (
-    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, NAME_PATTERN,
-    GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
+    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
     workload_username, workload_service_name, workload_container_name,
     workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,

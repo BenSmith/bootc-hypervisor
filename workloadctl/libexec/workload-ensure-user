@@ -17,7 +17,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 import uuid
@@ -846,8 +845,8 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             break
 
     if iso_tool is None:
-        log(f"  WARNING: No ISO tool found (genisoimage/mkisofs/xorriso). "
-            f"cloud-init will not work.")
+        log("  WARNING: No ISO tool found (genisoimage/mkisofs/xorriso). "
+            "cloud-init will not work.")
         return
 
     if iso_tool == "xorriso":

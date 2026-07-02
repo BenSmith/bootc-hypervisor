@@ -26,9 +26,7 @@ from substrate import (
     VMSubstrate,
     NotApplicable,
     BackupError,
-    get_substrate,
 )
-import cmd_backup
 import cmd_drift
 import cmd_inspect
 
@@ -290,7 +288,6 @@ class TestBackupVMCrash(unittest.TestCase):
 
     def _patch_active_vm(self, config_name, d):
         """Return a context-manager stack that makes the VM appear active + QMP socket present."""
-        import contextlib
         # Create the fake qmp.sock path so Path.exists() returns True
         sock_dir = Path(d) / config_name
         sock_dir.mkdir(parents=True, exist_ok=True)

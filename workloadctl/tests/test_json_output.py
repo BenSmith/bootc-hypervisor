@@ -5,7 +5,6 @@ import io
 from contextlib import redirect_stderr
 import json
 import os
-import pwd
 import shutil
 import sys
 import tempfile
@@ -27,7 +26,6 @@ import cmd_inspect
 import cmd_lifecycle
 import cmd_secret
 import substrate
-import workloadctl_core
 from workloadctl_core import WorkloadConfig, WorkloadManager
 
 # ── shared helpers ────────────────────────────────────────────────────────────

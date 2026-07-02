@@ -17,18 +17,16 @@ Covers:
      cattle continues normally.
 """
 
-import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
-import types
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 # ── lib path ──────────────────────────────────────────────────────────────────
 
@@ -38,7 +36,6 @@ sys.path.insert(0, _LIB)
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
-import substrate
 from substrate import ContainerSubstrate, VMSubstrate
 
 # ── generator helpers (shared with test_generator.py) ─────────────────────────

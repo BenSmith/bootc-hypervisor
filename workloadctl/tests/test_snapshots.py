@@ -29,7 +29,14 @@ by default, since it reflects an expected (if unreviewed) generator change
 rather than a correctness bug. Set STRICT_SNAPSHOTS=1 to turn drift back
 into a hard failure (e.g. in a gate that should block on it).
 """
-import os, re, subprocess, sys, tempfile, tomllib, unittest, warnings
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

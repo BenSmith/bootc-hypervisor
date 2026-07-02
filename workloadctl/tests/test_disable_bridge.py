@@ -18,7 +18,6 @@ sys.path.insert(0, LIB_DIR)
 
 import workload_lib
 import cmd_lifecycle
-import workloadctl_core
 from workloadctl_core import WorkloadConfig, VM_BRIDGE_NAME
 
 # Minimal TOML fixtures -------------------------------------------------------

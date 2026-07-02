@@ -26,7 +26,6 @@ if LIB not in sys.path:
 
 import workload_lib          # noqa: E402
 import cmd_secret           # noqa: E402
-import workloadctl_core     # noqa: E402
 
 _REAL_PATH = pathlib.Path
 

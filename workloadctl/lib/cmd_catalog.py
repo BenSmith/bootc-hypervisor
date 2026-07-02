@@ -317,7 +317,7 @@ def cmd_init(args, manager: WorkloadManager):
     dst = workload_config_path(name)
     if dst.parent.exists():
         print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
-        print(f"  choose another name with --as, or edit the existing one", file=sys.stderr)
+        print("  choose another name with --as, or edit the existing one", file=sys.stderr)
         sys.exit(1)
 
     dst.parent.mkdir()

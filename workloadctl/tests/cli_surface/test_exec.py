@@ -10,7 +10,6 @@ VM exec: goes over SSH to the guest.
 
 import pytest
 
-from target import Target
 
 
 # ---------------------------------------------------------------------------
