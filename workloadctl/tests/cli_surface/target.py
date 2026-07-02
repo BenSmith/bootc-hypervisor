@@ -19,6 +19,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -50,8 +51,8 @@ class Target:
     # SSH multiplexing state (remote only)
     _ctl_dir: str = field(default="", repr=False)
     _ctl_path: str = field(default="", repr=False)
-    _master_proc: object = field(default=None, repr=False)
-    _lock: object = field(default_factory=threading.Lock, repr=False)
+    _master_proc: "subprocess.Popen | None" = field(default=None, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _started: bool = field(default=False, repr=False)
 
     # Capability cache
@@ -194,6 +195,7 @@ class Target:
     def wl(self, args: str | list, *, sudo: bool = True, check: bool = True,
             input: str | None = None, timeout: int = 300) -> RunResult:
         """Convenience: run `workloadctl <args>` with sudo by default."""
+        cmd: str | list[str]
         if isinstance(args, list):
             cmd = ["workloadctl"] + args
         else:
@@ -260,7 +262,7 @@ class Target:
         return self._caps
 
     def _detect_capabilities(self) -> dict:
-        caps = {}
+        caps: dict[str, Any] = {}
         caps["has_kvm"] = self.run(["test", "-e", "/dev/kvm"], sudo=False, check=False).rc == 0
         caps["has_tpm2"] = self.run(["test", "-e", "/dev/tpmrm0"], sudo=False, check=False).rc == 0
 

@@ -26,7 +26,6 @@ if LIB not in sys.path:
 
 import workload_lib          # noqa: E402
 import cmd_secret           # noqa: E402
-import workloadctl_core     # noqa: E402
 
 _REAL_PATH = pathlib.Path
 
@@ -212,7 +211,6 @@ class PassphraseTest(unittest.TestCase):
 
     def _read(self, args, stdin_bytes=None):
         out, err = io.StringIO(), io.StringIO()
-        code = None
         ctx = mock.patch.object(
             cmd_secret.sys, "stdin",
             types.SimpleNamespace(buffer=io.BytesIO(stdin_bytes or b"")))

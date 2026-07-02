@@ -16,8 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
 import workload_lib
 from workload_lib import (
-    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, NAME_PATTERN,
-    GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
+    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
     workload_username, workload_service_name, workload_container_name,
     workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,
@@ -368,16 +367,19 @@ class TestSecretPattern(unittest.TestCase):
     def test_matches_simple(self):
         m = SECRET_PATTERN.search("${SECRET:api-key}")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "api-key")
 
     def test_matches_underscore(self):
         m = SECRET_PATTERN.search("${SECRET:my_secret}")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "my_secret")
 
     def test_matches_embedded(self):
         m = SECRET_PATTERN.search("prefix${SECRET:key}suffix")
         self.assertIsNotNone(m)
+        assert m is not None
         self.assertEqual(m.group(1), "key")
 
     def test_no_match_plain(self):
@@ -497,14 +499,14 @@ class TestResolveSecretEnvVars(unittest.TestCase):
         self.assertIn("SECRET_VAR", resolved)
 
     def test_missing_credential_raises(self):
-        config = {
+        config: dict = {
             "container": {"environment": {"K": "${SECRET:nonexistent}"}}
         }
         with self.assertRaises(FileNotFoundError):
             resolve_secret_env_vars(config, self.creds_dir)
 
     def test_empty_env(self):
-        config = {"container": {"environment": {}}}
+        config: dict = {"container": {"environment": {}}}
         resolved = resolve_secret_env_vars(config, self.creds_dir)
         self.assertEqual(resolved, {})
 
@@ -1036,19 +1038,25 @@ class TestUnitsOutdated(unittest.TestCase):
         self.assertFalse(workload_lib.units_outdated("foo"))
 
     def test_false_when_unit_newer(self):
-        self.cfg.write_text("x"); os.utime(self.cfg, (1000, 1000))
-        self.unit.write_text("x"); os.utime(self.unit, (2000, 2000))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (1000, 1000))
+        self.unit.write_text("x")
+        os.utime(self.unit, (2000, 2000))
         self.assertFalse(workload_lib.units_outdated("foo"))
 
     def test_true_when_config_newer(self):
-        self.unit.write_text("x"); os.utime(self.unit, (1000, 1000))
-        self.cfg.write_text("x"); os.utime(self.cfg, (2000, 2000))
+        self.unit.write_text("x")
+        os.utime(self.unit, (1000, 1000))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (2000, 2000))
         self.assertTrue(workload_lib.units_outdated("foo"))
 
     def test_slack_swallows_same_second_enable(self):
         # enable writes both within the same second — must not flag stale.
-        self.unit.write_text("x"); os.utime(self.unit, (1000.0, 1000.0))
-        self.cfg.write_text("x"); os.utime(self.cfg, (1000.4, 1000.4))
+        self.unit.write_text("x")
+        os.utime(self.unit, (1000.0, 1000.0))
+        self.cfg.write_text("x")
+        os.utime(self.cfg, (1000.4, 1000.4))
         self.assertFalse(workload_lib.units_outdated("foo"))
 
 

@@ -55,20 +55,19 @@ try:
     import shlex
     import pwd
     import grp
-    import re
     from pathlib import Path
 
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
         ENABLED_MARKER_NAME, iter_workloads,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
-        workload_username, workload_root_dir, workload_home_dir, workload_state_dir, workload_data_dir,
+        workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
-        UID_MIN, UID_MAX, get_next_uid,
+        get_next_uid,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_IP, VM_DHCP_RANGE,
-        VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
+        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tag, parse_volume_spec,
         selinux_type_name,
@@ -916,7 +915,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         container_path = file_spec.get("path")
 
         if not credential_name or not container_path:
-            log_msg(f"WARNING: secrets.files entry missing 'credential' or 'path', skipping", level="warning")
+            log_msg("WARNING: secrets.files entry missing 'credential' or 'path', skipping", level="warning")
             continue
 
         # Credential will be decrypted to /run/credentials/{service}/
@@ -1092,7 +1091,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         # use" so the unit starts cleanly after a plain reboot.
         # --pull is honoured on the initial create; later starts use whatever
         # image the overlay was originally built from.
-        lines.append(f"# Pet lifecycle: create-once + start (overlay survives stop/reboot)")
+        lines.append("# Pet lifecycle: create-once + start (overlay survives stop/reboot)")
         lines.append(f"ExecStartPre=-{podman_cmd}")
         lines.append("")
         lines.append(f"ExecStart=/usr/bin/podman start -a {container_name_quoted}")
@@ -1286,7 +1285,7 @@ def generate_vm_bridge_service(subnet: str | None = None, dns: list | None = Non
     if subnet is not None:
         import ipaddress
         net = ipaddress.ip_network(subnet, strict=False)
-        bridge_ip = str(next(net.hosts()))
+        bridge_ip = str(next(iter(net.hosts())))
         bridge_cidr = f"{bridge_ip}/{net.prefixlen}"
         bridge_subnet = str(net)
     else:
@@ -1636,18 +1635,16 @@ def generate_vm_workload(config, user_name: str, uid: int):
     vm_cfg = config.get("vm", {})
     volumes = vm_cfg.get("volumes", [])
 
-    written = []
-
     # Sysusers (with implicit kvm)
     sysuser_content = generate_sysuser_config_vm(config, user_name, uid)
     sysuser_file = SYSUSERS_DIR / f"workload-{name}.conf"
     sysuser_file.write_text(sysuser_content)
-    log_msg(f"  Created VM sysusers config (implicit kvm group)")
+    log_msg("  Created VM sysusers config (implicit kvm group)")
 
     # Setup service (same as container)
     setup_content = generate_setup_service(config, user_name)
     (SERVICES_DIR / f"workload-{name}-setup.service").write_text(setup_content)
-    log_msg(f"  Created setup service")
+    log_msg("  Created setup service")
 
     # Only emit the shared workload-bridge.service when this VM actually uses
     # _workload-br (the default). Workloads bridged onto a user-provided bridge
@@ -1662,7 +1659,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
             dns=net_cfg.get("dns"),
         )
         (SERVICES_DIR / "workload-bridge.service").write_text(bridge_content)
-        log_msg(f"  Created workload-bridge.service")
+        log_msg("  Created workload-bridge.service")
 
         bridge_link = wants_dir / "workload-bridge.service"
         if bridge_link.exists() or bridge_link.is_symlink():
@@ -1684,12 +1681,12 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # Build service
     build_content = generate_vm_build_service(config, user_name)
     (SERVICES_DIR / f"workload-{name}-build.service").write_text(build_content)
-    log_msg(f"  Created build service")
+    log_msg("  Created build service")
 
     # Main VM service
     vm_service_content = generate_vm_service(config, user_name, uid)
     (SERVICES_DIR / f"workload-{name}.service").write_text(vm_service_content)
-    log_msg(f"  Created VM service")
+    log_msg("  Created VM service")
 
     # Wants symlink for main service
     symlink_path = wants_dir / f"workload-{name}.service"

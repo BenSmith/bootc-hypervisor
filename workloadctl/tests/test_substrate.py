@@ -26,9 +26,7 @@ from substrate import (
     VMSubstrate,
     NotApplicable,
     BackupError,
-    get_substrate,
 )
-import cmd_backup
 import cmd_drift
 import cmd_inspect
 
@@ -81,6 +79,7 @@ class _WorkloadDir:
         return tmp_path
 
     def __exit__(self, *_):
+        assert self._patcher is not None and self._tmp is not None
         self._patcher.stop()
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -290,7 +289,6 @@ class TestBackupVMCrash(unittest.TestCase):
 
     def _patch_active_vm(self, config_name, d):
         """Return a context-manager stack that makes the VM appear active + QMP socket present."""
-        import contextlib
         # Create the fake qmp.sock path so Path.exists() returns True
         sock_dir = Path(d) / config_name
         sock_dir.mkdir(parents=True, exist_ok=True)
@@ -911,6 +909,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(placement, "placement check missing from output")
+        assert placement is not None
         self.assertTrue(placement['healthy'])
 
     def test_placement_unhealthy_when_wrong_slice(self):
@@ -934,6 +933,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(placement)
+        assert placement is not None
         self.assertFalse(placement['healthy'])
         self.assertIn('user.slice', placement['message'])
         self.assertIn('workloads.slice', placement['message'])
@@ -980,6 +980,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(placement)
+        assert placement is not None
         self.assertTrue(placement['healthy'])
 
     def test_placement_not_run_when_user_missing(self):
@@ -1277,7 +1278,7 @@ class TestVMReprovisionRecreate(unittest.TestCase):
         config = _make_vm_config()
         substrate = VMSubstrate(config, None)
         calls = []
-        with patch('subprocess.run', side_effect=lambda cmd, **kw: calls.append(cmd) or _ok()):
+        with patch('subprocess.run', side_effect=lambda cmd, **kw: calls.append(cmd) or _ok()):  # type: ignore[func-returns-value]
             result = substrate.reprovision(recreate=True)
         self.assertIsNone(result)
         combined = ' '.join(str(t) for c in calls for t in c)

@@ -237,6 +237,12 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 class TestWorkloadGeneration(unittest.TestCase):
     """Run the generator against each real workload config and validate output."""
 
+    config_dir: str
+    services_dir: str
+    sysusers_dir: str
+    configs: dict
+    gen_result: subprocess.CompletedProcess
+
     @classmethod
     def setUpClass(cls):
         """Generate services for all workloads once."""
@@ -527,6 +533,10 @@ class TestWorkloadGeneration(unittest.TestCase):
 class TestWorkloadSystemdVerify(unittest.TestCase):
     """Run systemd-analyze verify on every generated workload service."""
 
+    config_dir: str
+    services_dir: str
+    sysusers_dir: str
+
     @classmethod
     def setUpClass(cls):
         cls.config_dir = tempfile.mkdtemp()
@@ -618,19 +628,11 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
         We check all ports together since the host sees them the same way.
         """
         # Collect (port_number, protocol) → [workload_name]
-        port_claims = {}
+        port_claims: dict = {}
         for filename, config in ALL_WORKLOADS:
             name = config["workload"]["name"]
-            mode = config.get("network", {}).get("mode", "pasta")
             ports = config.get("network", {}).get("ports", [])
             for port_spec in ports:
-                # Parse host port from specs like "53:53/udp", "127.0.0.1:1080:1080"
-                parts = port_spec.split(":")
-                if len(parts) == 3:
-                    host_port_proto = parts[1] + ":" + parts[2].split("/")[-1] if "/" in parts[2] else parts[1]
-                else:
-                    host_port_proto = parts[0]
-
                 # Normalize: extract port number and protocol
                 if "/" in port_spec:
                     proto = port_spec.rsplit("/", 1)[1]

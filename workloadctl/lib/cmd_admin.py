@@ -7,7 +7,6 @@ import grp
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ from workload_lib import (
     selinux_type_name,
     units_outdated,
     validate_workload_name,
-    workload_config_dir,
     workload_config_path,
 )
 from workloadctl_core import (
@@ -1068,8 +1066,8 @@ def cmd_edit(args, manager: WorkloadManager):
 
     try:
         config = WorkloadConfig(args.workload)
-        result = validate_single(config, manager, json_mode=False)
-        if not result["passed"]:
+        validation = validate_single(config, manager, json_mode=False)
+        if not validation["passed"]:
             print()
             if _ask_yes_no("Validation failed. Restore backup? [y/N] "):
                 shutil.copy2(backup_path, config_path)

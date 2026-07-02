@@ -42,32 +42,29 @@ coverage-html: coverage
 lint:
   python3 -m py_compile lib/*.py bin/workloadctl generators/workload-generate libexec/workload-*
 
-# Lint with ruff (dev-only); scripts named explicitly since they lack .py
+# Lint with ruff (dev-only); scripts named explicitly since they lack .py.
+# tests/ and libexec/ scripts insert lib/ onto sys.path before importing
+# from it (no venv/package manager here), which ruff flags as E402
+# (import not at top of file) — that pattern is intentional.
 lint-ruff:
-  ruff check lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
+  ruff check --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
 
-# Type-check lib/ with mypy (dev-only, advisory)
+# Type-check with mypy (dev-only, advisory). lib/ + tests/ run together
+# (--explicit-package-bases avoids a false "duplicate module" clash between
+# tests/test_lifecycle.py and tests/cli_surface/test_lifecycle.py); the
+# extension-less scripts have no unique module name of their own, so mypy
+# treats each as "__main__" and they must be checked one at a time or they
+# collide with each other.
 typecheck:
-  MYPYPATH=lib mypy lib/ --ignore-missing-imports
-
-# Lint all bundle Containerfiles with hadolint.
-# Intentionally suppressed:
-#   DL3006/DL3007: image version/tag pinning — we track by image, not tag
-#   DL3018/DL3041: apk/dnf package version pinning — intentional; we want
-#                  the latest stable package from the distro repo
-#   DL3059: consecutive RUN — intentional for readability and layer isolation
-# Excluded: vncdesktop-labwc — XML inside a heredoc makes hadolint choke on
-# the leading '<' of XML tags, treating them as Dockerfile instructions.
-lint-containerfiles:
-  find workloads -name Containerfile \
-    ! -path 'workloads/vncdesktop-labwc/*' \
-    | sort \
-    | xargs hadolint \
-        --ignore DL3006 \
-        --ignore DL3007 \
-        --ignore DL3018 \
-        --ignore DL3041 \
-        --ignore DL3059
+  #!/usr/bin/env bash
+  set -uo pipefail
+  export MYPYPATH=lib
+  status=0
+  mypy lib/ tests/ --ignore-missing-imports --explicit-package-bases --check-untyped-defs || status=1
+  for f in bin/workloadctl generators/workload-generate libexec/workload-*; do
+    mypy "$f" --ignore-missing-imports --check-untyped-defs || status=1
+  done
+  exit "$status"
 
 # Lint all bundle Containerfiles with hadolint.
 # Intentionally suppressed:

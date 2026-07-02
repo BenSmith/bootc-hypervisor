@@ -16,7 +16,6 @@ import tomllib
 from workload_lib import (
     auto_detect_credentials,
     iter_workloads,
-    workload_config_dir,
 )
 from workloadctl_core import (
     WorkloadConfig,
@@ -197,15 +196,15 @@ def cmd_secret(args, manager: WorkloadManager):
 
         # Decrypt and show
         try:
-            result = subprocess.run(
+            decrypted = subprocess.run(
                 ["systemd-creds", "decrypt", str(cred_file), "-"],
                 capture_output=True,
                 check=True,
                 text=True
             )
             print(f"Credential: {name}")
-            print(f"Value: {result.stdout}", end="")
-            if not result.stdout.endswith("\n"):
+            print(f"Value: {decrypted.stdout}", end="")
+            if not decrypted.stdout.endswith("\n"):
                 print()  # Add newline if value doesn't have one
         except subprocess.CalledProcessError as e:
             print(f"Error: Failed to decrypt credential: {e}", file=sys.stderr)
@@ -326,7 +325,7 @@ def cmd_secret(args, manager: WorkloadManager):
                 sys.exit(1)
 
         print(f"✓ Exported credential '{name}' to {output}")
-        print(f"  Transfer this file to the target machine, then import with:")
+        print("  Transfer this file to the target machine, then import with:")
         print(f"  sudo workloadctl secret import {name} {output}")
 
     elif args.subcommand == "import":
@@ -385,12 +384,12 @@ def cmd_secret(args, manager: WorkloadManager):
             try:
                 with open(wl_file, "rb") as f:
                     wl_config = tomllib.load(f)
-                creds = auto_detect_credentials(wl_config)
-                if name in creds:
+                wl_creds = auto_detect_credentials(wl_config)
+                if name in wl_creds:
                     affected.append(wl_config["workload"]["name"])
             except Exception:
                 pass
         if affected:
-            print(f"\n  Restart affected workloads:")
+            print("\n  Restart affected workloads:")
             for wl_name in affected:
                 print(f"    sudo workloadctl recreate {wl_name}")

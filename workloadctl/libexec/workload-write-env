@@ -27,7 +27,7 @@ import tomllib
 from pathlib import Path
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, workload_config_path, workload_username, resolve_secret_env_vars,
+    workload_config_path, workload_username, resolve_secret_env_vars,
     SECRET_PATTERN, validate_env_key, normalize_containers,
 )
 
@@ -82,7 +82,7 @@ def main():
 
     creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
     if not creds_dir:
-        print(f"ERROR: CREDENTIALS_DIRECTORY not set", file=sys.stderr)
+        print("ERROR: CREDENTIALS_DIRECTORY not set", file=sys.stderr)
         return 1
 
     # resolve_secret_env_vars expects config["container"]["environment"];

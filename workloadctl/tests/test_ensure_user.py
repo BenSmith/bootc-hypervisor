@@ -26,6 +26,7 @@ def _load_script():
         sys.path.insert(0, LIB_DIR)
     loader = importlib.machinery.SourceFileLoader("workload_ensure_user", SCRIPT)
     spec = importlib.util.spec_from_loader("workload_ensure_user", loader)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
@@ -280,7 +281,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # pubkey+mtime fingerprint missed this and reused a stale ISO.
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nv: ${V}\n")
-        cfg = {"vm": {"cloud_init": {
+        cfg: dict = {"vm": {"cloud_init": {
             "user_data_file": "user-data",
             "template_vars": {"V": "first"},
         }}}
@@ -389,7 +390,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
         # ./ anchors to the precious data/ subtree, matching the virtiofsd
         # sidecars the generator emits (NOT the old state-relative behavior).
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             ps, pd, pr = self._patch(root)
             with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
@@ -398,7 +400,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_absolute_path_outside_workload_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             config = {"workload": {"name": "vmx"},
                       "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
             ps, pd, pr = self._patch(root)
@@ -408,7 +411,8 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_empty_volumes_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             ps, pd, pr = self._patch(root)
             with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
                 self.mod.setup_vm_volume_directories(
@@ -416,8 +420,10 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
 
     def test_existing_dir_is_chowned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
-            existing = root / "data" / "shared"; existing.mkdir(parents=True)
+            root = Path(tmp)
+            (root / "state").mkdir()
+            existing = root / "data" / "shared"
+            existing.mkdir(parents=True)
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             chown_calls = []
             ps, pd, pr = self._patch(root)
@@ -469,7 +475,8 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
         # still get ./ volumes under data/, because provisioning keys off
         # workload_state_dir(name), not pw.pw_dir.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / "state").mkdir()
+            root = Path(tmp)
+            (root / "state").mkdir()
             stale_pw = _fake_pw(root)  # passwd home = root (mismatched)
             config = {
                 "workload": {"name": "myapp"},
@@ -509,14 +516,14 @@ class TestConfigureSubuidSubgid(unittest.TestCase):
                 if "subuid" in str(path):
                     buf = []
                     m = mock.MagicMock()
-                    m.write = lambda s: buf.append(s) or subuid_written.append(s)
+                    m.write = lambda s: buf.append(s) or subuid_written.append(s)  # type: ignore[func-returns-value]
                     m.__enter__ = lambda s: m
                     m.__exit__ = mock.MagicMock(return_value=False)
                     return m
                 if "subgid" in str(path):
                     buf = []
                     m = mock.MagicMock()
-                    m.write = lambda s: buf.append(s) or subgid_written.append(s)
+                    m.write = lambda s: buf.append(s) or subgid_written.append(s)  # type: ignore[func-returns-value]
                     m.__enter__ = lambda s: m
                     m.__exit__ = mock.MagicMock(return_value=False)
                     return m
@@ -579,7 +586,7 @@ class TestWarnIfStaleHome(unittest.TestCase):
         self.mod = _load_script()
 
     def _capture(self, pw, name):
-        msgs = []
+        msgs: list = []
         with mock.patch.object(self.mod, "log", side_effect=msgs.append):
             self.mod.warn_if_stale_home(pw, name)
         return "\n".join(msgs)

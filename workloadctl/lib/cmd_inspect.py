@@ -8,10 +8,10 @@ import json
 import os
 from pathlib import Path
 import pwd
-import shutil
 import socket
 import subprocess
 import sys
+from typing import Any
 
 from workload_lib import (
     QMPClient,
@@ -33,7 +33,6 @@ from workloadctl_core import (
     _parse_size_bytes,
     parse_workload_ref,
     require_root,
-    resolve_container_target,
 )
 from cmd_lifecycle import _effective_state
 
@@ -198,14 +197,14 @@ def cmd_list(args, manager: WorkloadManager):
         print(f"  {name:<{name_w}} {status:<10} {state:<12} {image_id:<14} {ports_str:<20} {image:<30}")
 
     print()
-    print(f"  Use 'workloadctl status <name>' for details on a specific workload.")
+    print("  Use 'workloadctl status <name>' for details on a specific workload.")
 
     if failed_workloads:
         print()
         for name, unit in failed_workloads:
             print(f"  WARNING: '{name}' is not running — {unit} failed.")
-        print(f"           Run 'workloadctl status <name>' or "
-              f"'sudo journalctl -u <unit>' to see why.")
+        print("           Run 'workloadctl status <name>' or "
+              "'sudo journalctl -u <unit>' to see why.")
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +339,7 @@ def cmd_images(args, manager: WorkloadManager):
     else:
         # List images
         configs = manager.get_all_configs()
-        images_data = []
+        images_data: list[dict[str, Any]] = []
 
         for config in configs:
             if not manager.user_exists(config):
@@ -702,7 +701,7 @@ def cmd_info(args, manager: WorkloadManager):
         except ValueError:
             pass
 
-    info_data = {
+    info_data: dict[str, Any] = {
         "workload": {
             "name": config.name,
             "filename": config.filename,
@@ -753,6 +752,7 @@ def cmd_info(args, manager: WorkloadManager):
     print()
 
     if config.is_multi:
+        assert per_container is not None
         print(f"Containers ({config.mode} mode):")
         for c in per_container:
             print(f"  - {c['name']}: {c['image']}"
@@ -1044,7 +1044,7 @@ def cmd_health(args, manager: WorkloadManager):
         service_state = liveness["service_state"]
         user_exists = manager.user_exists(config)
         all_healthy = service_active and user_exists
-        health_data = {
+        health_data: dict[str, Any] = {
             "workload": config.name,
             "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
             "checks": [
@@ -1210,10 +1210,10 @@ def cmd_health(args, manager: WorkloadManager):
                 port_num = int(port)
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(2)
-                result = sock.connect_ex(('localhost', port_num))
+                rc = sock.connect_ex(('localhost', port_num))
                 sock.close()
 
-                port_accessible = result == 0
+                port_accessible = rc == 0
                 health_data["checks"].append({
                     "check": "port_accessibility",
                     "healthy": port_accessible,

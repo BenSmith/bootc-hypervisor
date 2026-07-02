@@ -117,19 +117,19 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                 if all(s == "healthy" for s in statuses.values()):
                     print(" healthy")
                 else:
-                    detail = ", ".join(f"{l}={s or 'unknown'}" for l, s in statuses.items()
+                    detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                        if s != "healthy")
                     print(f" {detail}")
                     _do_rollback(config, manager, old_ids)
                     rolled_back += 1
             elif have_old:
-                detail = ", ".join(f"{l}={s or 'unknown'}" for l, s in statuses.items()
+                detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                    if s != "healthy")
                 print(f"  ✗ {config.name}: {detail}")
                 _do_rollback(config, manager, old_ids)
                 rolled_back += 1
             else:
-                detail = ", ".join(f"{l}={s or 'unknown'}" for l, s in statuses.items()
+                detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                    if s != "healthy")
                 print(f"  ⚠ {config.name}: {detail} (no previous image to roll back)")
         else:

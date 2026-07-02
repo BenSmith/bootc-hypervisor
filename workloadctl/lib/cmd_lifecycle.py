@@ -26,7 +26,6 @@ from workload_lib import (
     VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
-    workload_config_dir,
     workload_config_path,
     workload_enabled_marker,
     workload_username,
@@ -44,7 +43,6 @@ from workloadctl_core import (
     require_root,
     VM_BRIDGE_NAME,
 )
-from cmd_admin import validate_single
 from cmd_backup import BACKUP_DIR
 from substrate import get_substrate
 
@@ -145,10 +143,10 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             print(f"  ✗ Image '{image}' not found locally and pull=never")
             build_script = config.resolve_control_file("build.sh")
             if build_script.exists():
-                print(f"    Build the image first:")
+                print("    Build the image first:")
                 print(f"      sudo {build_script}")
             else:
-                print(f"    Build or pull the image first, or change pull policy")
+                print("    Build or pull the image first, or change pull policy")
             failed = True
 
     # Check required files exist (declared in [setup].required_files)
@@ -250,7 +248,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             missing_groups.append(group)
 
     if missing_groups:
-        print(f"  ✗ Missing groups:")
+        print("  ✗ Missing groups:")
         for group in missing_groups:
             print(f"    - {group}")
         print()
@@ -265,8 +263,8 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             if unpriv_start > 0:
                 print(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
                 print(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
-                print(f"    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
-                      f"sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
+                print("    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
+                      "sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
         except Exception:
             pass
 
@@ -395,14 +393,14 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 check=False
             )
             if active.returncode == 0:
-                print(f"  Note: container is still running the old image.")
+                print("  Note: container is still running the old image.")
                 print(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
         build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
-            print(f"Build the image first:", file=sys.stderr)
+            print("Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
         else:
             print(f"Build or pull the image '{image}' first.", file=sys.stderr)
@@ -551,6 +549,11 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     # the bundle dir (defaults to the workload name; a `selinux_policy` string
     # names it explicitly so a renamed workload keeps its original policy).
     bundle = config.selinux_bundle
+    if bundle is None:
+        # Reached only if a workload without selinux_policy is routed here.
+        print(f"  ERROR: no SELinux bundle resolved for '{config.name}' "
+              f"(selinux_policy not set)", file=sys.stderr)
+        sys.exit(1)
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
@@ -913,8 +916,8 @@ def cmd_disable(args, manager: WorkloadManager):
                     for file in ["/etc/subuid", "/etc/subgid"]:
                         p = Path(file)
                         if p.exists():
-                            lines = [l for l in p.read_text().splitlines()
-                                     if not l.startswith(f"{config.username}:")]
+                            lines = [line for line in p.read_text().splitlines()
+                                     if not line.startswith(f"{config.username}:")]
                             p.write_text("\n".join(lines) + ("\n" if lines else ""))
             except Exception as e:
                 failures.append(f"remove subuid/subgid entries: {e}")
@@ -1198,10 +1201,10 @@ def cmd_cleanup(args, manager: WorkloadManager):
             print(f"Orphaned users ({len(orphaned_users)}):")
             for entry in orphaned_users:
                 has_subid_entries = False
-                for f in ["/etc/subuid", "/etc/subgid"]:
-                    if Path(f).exists() and any(
+                for subid_file in ["/etc/subuid", "/etc/subgid"]:
+                    if Path(subid_file).exists() and any(
                         line.startswith(f"{entry.pw_name}:")
-                        for line in Path(f).read_text().splitlines()
+                        for line in Path(subid_file).read_text().splitlines()
                     ):
                         has_subid_entries = True
                         break
@@ -1244,11 +1247,11 @@ def cmd_cleanup(args, manager: WorkloadManager):
         subprocess.run(["loginctl", "disable-linger", str(uid)], check=False,
                        capture_output=True)
 
-        for f in ["/etc/subuid", "/etc/subgid"]:
-            p = Path(f)
+        for subid_file in ["/etc/subuid", "/etc/subgid"]:
+            p = Path(subid_file)
             if p.exists():
-                lines = [l for l in p.read_text().splitlines()
-                         if not l.startswith(f"{username}:")]
+                lines = [line for line in p.read_text().splitlines()
+                         if not line.startswith(f"{username}:")]
                 p.write_text("\n".join(lines) + ("\n" if lines else ""))
 
         subprocess.run(["userdel", "-r", username], check=False, capture_output=True)

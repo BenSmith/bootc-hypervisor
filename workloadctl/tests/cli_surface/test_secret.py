@@ -146,8 +146,7 @@ class TestSecretRotate:
         name, value = created_secret
 
         # Read original blob bytes (as size proxy; actual bytes differ per-run)
-        r1 = target.run(["stat", "-c", "%s", CRED_PATH], sudo=True, check=True)
-        original_size = r1.stdout.strip()
+        target.run(["stat", "-c", "%s", CRED_PATH], sudo=True, check=True)
 
         r = target.wl(
             f"secret rotate --key-type {key_type} {name}",

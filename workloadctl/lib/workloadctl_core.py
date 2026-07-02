@@ -12,50 +12,24 @@ Import chain:
 """
 
 import datetime
-import difflib
-import fcntl
-import grp
-import json
 import os
 from pathlib import Path
 import pwd
-import re
-import shutil
-import socket
-import subprocess
 import sys
-import tempfile
-import time
 import tomllib
 
 from workload_lib import (
-    auto_detect_credentials,
     expand_volume_path,
-    GENERATOR_OWNED_DIRECTIVES,
-    get_next_uid,
     infer_workload_kind,
     infer_workload_mode,
     iter_workloads,
-    MAX_NAME_LENGTH,
-    NAME_PATTERN,
     normalize_containers,
-    QMPClient,
-    selinux_module_name,
-    selinux_type_name,
-    UID_MIN,
-    UID_MAX,
-    USERNAME_PREFIX,
     validate_workload_name,
-    VM_SOCKET_DIR,
-    WORKLOADS_BASE,
     WORKLOAD_BUNDLES_DIR,
-    WORKLOAD_CONFIG_DIR,
     workload_config_dir,
     workload_config_path,
     workload_is_enabled,
     VM_BRIDGE_NAME,
-    VM_DHCP_LEASE_FILE,
-    vm_mac_address,
     workload_container_name,
     workload_data_dir,
     workload_home_dir,
@@ -63,7 +37,7 @@ from workload_lib import (
     workload_state_dir,
     workload_username,
 )
-from podman import Podman, PodmanError
+from podman import Podman
 
 # ---------------------------------------------------------------------------
 # Helpers

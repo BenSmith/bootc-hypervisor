@@ -5,7 +5,7 @@ import os
 import sys
 import unittest
 from subprocess import CompletedProcess
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from podman import Podman, PodmanError

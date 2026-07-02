@@ -37,6 +37,7 @@ def _health_json(target: Target, ref: str, retries: int = 5):
                 pass
         last = r
         time.sleep(2)
+    assert last is not None
     raise AssertionError(
         f"health --json {ref} never produced parseable JSON; "
         f"last stdout={last.stdout!r} stderr={last.stderr!r}"

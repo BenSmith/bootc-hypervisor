@@ -35,7 +35,7 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         break
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_state_dir, workload_data_dir,
+    workload_config_path, workload_state_dir, workload_data_dir,
 )
 
 
@@ -122,7 +122,7 @@ def download_cloud_image(url: str, checksum: str, home_dir: Path) -> Path:
             verify_checksum(cached, checksum)
             return cached
         except ValueError:
-            log(f"  Cached image checksum invalid; re-downloading")
+            log("  Cached image checksum invalid; re-downloading")
             cached.unlink()
 
     log(f"  Downloading {url}")
@@ -157,7 +157,7 @@ def download_cloud_image(url: str, checksum: str, home_dir: Path) -> Path:
 def build_from_cloud_image(url: str, checksum: str, home_dir: Path, system_disk: Path):
     source = download_cloud_image(url, checksum, home_dir)
     if source.suffix == ".qcow2":
-        log(f"  Copying qcow2 to system disk (reflink if supported)...")
+        log("  Copying qcow2 to system disk (reflink if supported)...")
         try:
             subprocess.run(
                 ["cp", "--reflink=auto", str(source), str(system_disk)],
@@ -167,7 +167,7 @@ def build_from_cloud_image(url: str, checksum: str, home_dir: Path, system_disk:
             shutil.copy2(source, system_disk)
     else:
         # Convert raw/vmdk/etc to qcow2
-        log(f"  Converting image to qcow2...")
+        log("  Converting image to qcow2...")
         subprocess.run(
             ["qemu-img", "convert", "-f", "raw", "-O", "qcow2",
              str(source), str(system_disk)],
@@ -207,7 +207,7 @@ def build_from_bootc_image(image_ref: str, home_dir: Path, system_disk: Path):
     build_dir.mkdir(parents=True, exist_ok=True)
 
     log(f"  Building disk from bootc image {image_ref!r} via bootc-image-builder...")
-    log(f"  This may take 10-30 minutes on first run.")
+    log("  This may take 10-30 minutes on first run.")
 
     result = subprocess.run(
         [
@@ -272,7 +272,7 @@ def main():
     rollback_keep = vm_cfg.get("rollback_keep", 2)
 
     if system_disk.exists() and not update_mode:
-        log(f"  system.qcow2 already exists; skipping system disk build (use --update to rebuild)")
+        log("  system.qcow2 already exists; skipping system disk build (use --update to rebuild)")
         # Don't exit — still let the data disk block run below so a
         # data_disk_size added after first enable creates data.qcow2 on
         # next start (instead of silently nothing happening because the

@@ -169,12 +169,12 @@ def cmd_drift(args, manager):
     for fname, live_text, gen_text in diffs:
         from_label = f"running/{fname}" if live_text else "/dev/null"
         to_label = f"generated/{fname}" if gen_text else "/dev/null"
-        diff_lines = difflib.unified_diff(
+        diff_lines = list(difflib.unified_diff(
             live_text.splitlines(keepends=True),
             gen_text.splitlines(keepends=True),
             fromfile=from_label,
             tofile=to_label,
-        )
+        ))
         sys.stdout.writelines(diff_lines)
         print()
 

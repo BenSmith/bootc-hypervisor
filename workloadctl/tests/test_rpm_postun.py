@@ -37,14 +37,14 @@ _SECTION_RE = re.compile(
 def _extract_postun_body() -> str:
     """Return the shell body of %postun (RPM %macro lines stripped)."""
     lines = SPEC.read_text().splitlines()
-    start = next(i for i, l in enumerate(lines) if l.strip() == "%postun")
+    start = next(i for i, line in enumerate(lines) if line.strip() == "%postun")
     body = []
-    for l in lines[start + 1:]:
-        if _SECTION_RE.match(l):
+    for line in lines[start + 1:]:
+        if _SECTION_RE.match(line):
             break  # next spec section — body ends here
-        if l.startswith("%"):
+        if line.startswith("%"):
             continue  # RPM macro line — not shell, drop it
-        body.append(l)
+        body.append(line)
     return "\n".join(body)
 
 

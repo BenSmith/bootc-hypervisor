@@ -26,7 +26,6 @@ if LIB not in sys.path:
 
 import workload_lib          # noqa: E402
 import cmd_admin            # noqa: E402
-import workloadctl_core     # noqa: E402
 from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
 
 

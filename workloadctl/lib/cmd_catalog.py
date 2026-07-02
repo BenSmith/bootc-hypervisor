@@ -290,6 +290,11 @@ def cmd_init(args, manager: WorkloadManager):
         _post_write_report(name, manager)
         return
 
+    if not bundle:
+        print("Error: no bundle specified (pass a bundle name, --scratch, or --scratch-vm)",
+              file=sys.stderr)
+        sys.exit(1)
+
     name = args.as_name or bundle
 
     # Validate the bundle before it's pathed (it's a directory name); the
@@ -317,7 +322,7 @@ def cmd_init(args, manager: WorkloadManager):
     dst = workload_config_path(name)
     if dst.parent.exists():
         print(f"Error: workload '{name}' already exists: {dst}", file=sys.stderr)
-        print(f"  choose another name with --as, or edit the existing one", file=sys.stderr)
+        print("  choose another name with --as, or edit the existing one", file=sys.stderr)
         sys.exit(1)
 
     dst.parent.mkdir()

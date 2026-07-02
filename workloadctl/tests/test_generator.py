@@ -15,6 +15,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
@@ -27,6 +28,7 @@ def _load_generator_module():
         sys.path.insert(0, LIB_DIR)
     loader = importlib.machinery.SourceFileLoader("workload_generate", GENERATOR)
     spec = importlib.util.spec_from_loader("workload_generate", loader)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
@@ -1566,6 +1568,8 @@ class TestGeneratorAlwaysExitsZero(unittest.TestCase):
 class TestResolveAutoGpu(unittest.TestCase):
     """Unit tests for resolve_auto_gpu() — vendor + NVIDIA driver detection."""
 
+    wg: Any
+
     @classmethod
     def setUpClass(cls):
         cls.wg = _load_generator_module()
@@ -1761,7 +1765,9 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
         self._run()
         sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
-        uid = int(re.search(r"^u _wl-fedora-vm (\d+)", sysusers, re.M).group(1))
+        m = re.search(r"^u _wl-fedora-vm (\d+)", sysusers, re.M)
+        assert m is not None
+        uid = int(m.group(1))
         self.assertGreaterEqual(uid, 10000)
         sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
         self.assertIn(f"--translate-uid=map:1000:{uid}:1", sidecar)
@@ -1775,7 +1781,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         bridge = self._read("workload-bridge.service")
         # The dnsmasq ExecStart line itself must not end with "|| true".
         # (Other ExecStop lines may legitimately use || true for cleanup.)
-        dnsmasq_lines = [l for l in bridge.splitlines() if "/usr/sbin/dnsmasq" in l]
+        dnsmasq_lines = [line for line in bridge.splitlines() if "/usr/sbin/dnsmasq" in line]
         self.assertEqual(len(dnsmasq_lines), 1, dnsmasq_lines)
         self.assertNotIn("|| true", dnsmasq_lines[0])
         # The bogus --keep-in-foreground=no flag must not appear.
@@ -1783,8 +1789,8 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         # Type=forking only allows one ExecStart= line — the setup steps
         # must be ExecStartPre=, and dnsmasq is the sole ExecStart=.
         # systemd refuses to load the unit otherwise.
-        exec_starts = [l for l in bridge.splitlines()
-                       if l.startswith("ExecStart=")]
+        exec_starts = [line for line in bridge.splitlines()
+                       if line.startswith("ExecStart=")]
         self.assertEqual(len(exec_starts), 1, exec_starts)
         self.assertIn("/usr/sbin/dnsmasq", exec_starts[0])
 
@@ -1822,7 +1828,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self._write_vm_config()
         self._run()
         svc = self._read("workload-fedora-vm.service")
-        exec_stops = [l for l in svc.splitlines() if l.startswith("ExecStop=")]
+        exec_stops = [line for line in svc.splitlines() if line.startswith("ExecStop=")]
         self.assertEqual(len(exec_stops), 1, exec_stops)
         self.assertIn("workload-vm-shutdown", exec_stops[0])
         self.assertIn("fedora-vm", exec_stops[0])

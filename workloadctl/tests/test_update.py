@@ -9,7 +9,6 @@ from pathlib import Path
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
-import cmd_lifecycle
 import cmd_update
 from substrate import rollback_tag
 from workloadctl_core import WorkloadConfig
@@ -64,7 +63,10 @@ class TestContainerSpecs(unittest.TestCase):
 
     def _fake(self, config, is_multi):
         class FakeConfig:
-            pass
+            config: dict
+            is_multi: bool
+            name: str
+            image: str
         fc = FakeConfig()
         fc.config = config
         fc.is_multi = is_multi

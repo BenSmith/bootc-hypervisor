@@ -34,8 +34,10 @@ class TestControlFileResolution(unittest.TestCase):
         # override_dir reads workload_lib.WORKLOAD_CONFIG_DIR via workload_config_dir().
         self._p1 = mock.patch.object(core, "WORKLOAD_BUNDLES_DIR", self.usr)
         self._p2 = mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc)
-        self._p1.start(); self._p2.start()
-        self.addCleanup(self._p1.stop); self.addCleanup(self._p2.stop)
+        self._p1.start()
+        self._p2.start()
+        self.addCleanup(self._p1.stop)
+        self.addCleanup(self._p2.stop)
 
     def _config(self, name: str, bundle: str | None = None, *, extra: str = "") -> "core.WorkloadConfig":
         body = (

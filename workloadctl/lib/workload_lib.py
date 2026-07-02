@@ -15,6 +15,7 @@ import re
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 
 # --- Constants ---
@@ -280,12 +281,14 @@ class QMPClient:
             if b"\n" in self._buf:
                 line, self._buf = self._buf.split(b"\n", 1)
                 return json.loads(line.decode())
+            assert self._sock is not None
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ConnectionError("QMP socket closed")
             self._buf += chunk
 
     def _send(self, obj: dict):
+        assert self._sock is not None
         self._sock.sendall((json.dumps(obj) + "\n").encode())
 
     def negotiate(self):
@@ -301,7 +304,7 @@ class QMPClient:
         Returns the full reply dict ({"return": ...} or {"error": ...}).
         Raises ConnectionError if no reply arrives within max_events messages.
         """
-        cmd = {"execute": command}
+        cmd: dict[str, Any] = {"execute": command}
         if arguments:
             cmd["arguments"] = arguments
         self._send(cmd)

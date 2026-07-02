@@ -5,7 +5,6 @@ import io
 from contextlib import redirect_stderr
 import json
 import os
-import pwd
 import shutil
 import sys
 import tempfile
@@ -27,7 +26,6 @@ import cmd_inspect
 import cmd_lifecycle
 import cmd_secret
 import substrate
-import workloadctl_core
 from workloadctl_core import WorkloadConfig, WorkloadManager
 
 # ── shared helpers ────────────────────────────────────────────────────────────
@@ -110,6 +108,7 @@ class _WorkloadDir:
         return tmp_path
 
     def __exit__(self, *_):
+        assert self._patcher is not None and self._tmp is not None
         self._patcher.stop()
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -222,8 +221,8 @@ class TestListJson(unittest.TestCase):
 
     def _manager(self, user_exists=False, image_id=''):
         m = WorkloadManager()
-        m.user_exists = MagicMock(return_value=user_exists)
-        m.get_image_id = MagicMock(return_value=image_id)
+        m.user_exists = MagicMock(return_value=user_exists)  # type: ignore[method-assign]
+        m.get_image_id = MagicMock(return_value=image_id)  # type: ignore[method-assign]
         return m
 
     def test_disabled_workload_state_is_null(self):
@@ -273,8 +272,8 @@ class TestInfoJson(unittest.TestCase):
 
     def _manager(self, user_exists=False):
         m = WorkloadManager()
-        m.user_exists = MagicMock(return_value=user_exists)
-        m.get_image_id = MagicMock(return_value='sha256:abcdef' if user_exists else '')
+        m.user_exists = MagicMock(return_value=user_exists)  # type: ignore[method-assign]
+        m.get_image_id = MagicMock(return_value='sha256:abcdef' if user_exists else '')  # type: ignore[method-assign]
         return m
 
     def _run(self, user_exists=False, show_out=None):
@@ -401,10 +400,10 @@ class TestImagesListJson(unittest.TestCase):
 
     def _manager_with_image(self, info):
         m = WorkloadManager()
-        m.user_exists = MagicMock(return_value=True)
+        m.user_exists = MagicMock(return_value=True)  # type: ignore[method-assign]
         mock_podman = MagicMock()
         mock_podman.image_info.return_value = info
-        m.podman = MagicMock(return_value=mock_podman)
+        m.podman = MagicMock(return_value=mock_podman)  # type: ignore[method-assign]
         return m
 
     def test_size_bytes_is_int(self):
@@ -456,7 +455,7 @@ class TestValidateSingleSeverity(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             config = WorkloadConfig('test-wl')
             manager = WorkloadManager()
-            manager.get_image_id = MagicMock(return_value='')
+            manager.get_image_id = MagicMock(return_value='')  # type: ignore[method-assign]
             return cmd_admin.validate_single(config, manager)
 
     def test_every_check_has_severity(self):
@@ -686,8 +685,8 @@ class TestDiagnoseJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True)
             m = WorkloadManager()
-            m.user_exists = MagicMock(return_value=False)
-            m.get_image_id = MagicMock(return_value='')
+            m.user_exists = MagicMock(return_value=False)  # type: ignore[method-assign]
+            m.get_image_id = MagicMock(return_value='')  # type: ignore[method-assign]
 
             def fake_run(cmd, **kw):
                 if 'is-enabled' in cmd:
@@ -734,6 +733,7 @@ class TestDiagnoseJson(unittest.TestCase):
         data = self._run_no_user()
         user_check = next((c for c in data['checks'] if c['check'] == 'user_exists'), None)
         self.assertIsNotNone(user_check)
+        assert user_check is not None
         self.assertFalse(user_check['passed'])
 
 
@@ -1003,7 +1003,7 @@ class TestBackupJson(unittest.TestCase):
                 mock_backup = MagicMock(return_value=1024)
                 with patch.object(cmd_backup, 'require_root'):
                     with patch.object(cmd_backup, '_backup_one', mock_backup):
-                        data = _capture_json(
+                        _capture_json(
                             lambda: cmd_backup.cmd_backup(args, WorkloadManager()))
         mock_backup.assert_called_once()
         # Verify consistency='crash' was threaded through
@@ -1109,7 +1109,7 @@ class TestBackupJson(unittest.TestCase):
         sub.capture.side_effect = subprocess.CalledProcessError(2, ['tar'])
         with patch.object(cmd_backup, 'get_substrate', return_value=sub):
             with self.assertRaises(substrate.BackupError):
-                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'cold')
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'cold')  # type: ignore[arg-type]
 
     def test_backup_one_passes_through_backup_error(self):
         # An existing BackupError (e.g. QMP unreachable) is re-raised unchanged,
@@ -1120,7 +1120,7 @@ class TestBackupJson(unittest.TestCase):
         sub.capture.side_effect = original
         with patch.object(cmd_backup, 'get_substrate', return_value=sub):
             with self.assertRaises(substrate.BackupError) as cm:
-                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'crash')
+                cmd_backup._backup_one(cfg, Path('/tmp/x.tar.zst'), 'crash')  # type: ignore[arg-type]
         self.assertIs(cm.exception, original)
 
     def test_all_nonzero_exit_on_failure(self):

@@ -23,6 +23,7 @@ def _load_script():
         sys.path.insert(0, LIB_DIR)
     loader = importlib.machinery.SourceFileLoader("workload_vm_build_disk", SCRIPT)
     spec = importlib.util.spec_from_loader("workload_vm_build_disk", loader)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module

@@ -21,7 +21,6 @@ if LIB not in sys.path:
 
 import workload_lib            # noqa: E402
 import cmd_catalog            # noqa: E402
-import workloadctl_core       # noqa: E402
 from workloadctl_core import WorkloadManager  # noqa: E402
 
 REPO_BUNDLES = Path(__file__).resolve().parent.parent / "workloads"
@@ -35,7 +34,7 @@ class CatalogTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
         # init/duplicate write here; WorkloadConfig/Manager read here.
-        patches = [
+        patches: list = [
             mock.patch.object(cmd_catalog, "BUNDLES_DIR", REPO_BUNDLES),
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp),
             mock.patch.object(cmd_catalog, "require_root", lambda: None),

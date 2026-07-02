@@ -29,7 +29,14 @@ by default, since it reflects an expected (if unreviewed) generator change
 rather than a correctness bug. Set STRICT_SNAPSHOTS=1 to turn drift back
 into a hard failure (e.g. in a gate that should block on it).
 """
-import os, re, subprocess, sys, tempfile, tomllib, unittest, warnings
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -112,11 +119,13 @@ class TestWorkloadSnapshots(unittest.TestCase):
         self.assertGreater(len(tomls), 0, "no workload TOMLs found")
 
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            cfg = tmp / "cfg"
-            svc = tmp / "svc"
-            sys_d = tmp / "sys"
-            cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
+            tmp_path = Path(tmp)
+            cfg = tmp_path / "cfg"
+            svc = tmp_path / "svc"
+            sys_d = tmp_path / "sys"
+            cfg.mkdir()
+            svc.mkdir()
+            sys_d.mkdir()
 
             for src in tomls:
                 name = src.parent.name

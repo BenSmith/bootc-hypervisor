@@ -111,11 +111,13 @@ class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
         self.assertGreater(len(tomls), 0, "no workload TOMLs found")
 
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            cfg = tmp / "cfg"
-            svc = tmp / "svc"
-            sys_d = tmp / "sys"
-            cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
+            tmp_path = Path(tmp)
+            cfg = tmp_path / "cfg"
+            svc = tmp_path / "svc"
+            sys_d = tmp_path / "sys"
+            cfg.mkdir()
+            svc.mkdir()
+            sys_d.mkdir()
 
             for src in tomls:
                 name = src.parent.name

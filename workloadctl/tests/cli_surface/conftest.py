@@ -98,7 +98,6 @@ def target(request) -> Target:
 
 def _deploy_workloadctl(t: Target):
     """Rsync the local workloadctl tree to ~/clitest-src/workloadctl/ and rpm-install."""
-    import os
     from pathlib import Path
 
     # Find repo root relative to this file

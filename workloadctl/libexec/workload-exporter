@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir, workload_username
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_root_dir, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -54,7 +54,7 @@ def get_enabled_workloads():
 
     Returns list of (name, has_health_check, is_vm) tuples.
     """
-    workloads = []
+    workloads: list[tuple] = []
     if not WORKLOAD_CONFIG_DIR.is_dir():
         return workloads
 
@@ -169,7 +169,7 @@ def get_service_metrics(name):
     )
     active_state = props.get("ActiveState", "inactive") if props else "inactive"
 
-    metrics = {
+    metrics: dict[str, float] = {
         "active": 1 if active_state == "active" else 0,
         "failed": 1 if active_state == "failed" else 0,
         "restarts_total": int(props.get("NRestarts", 0)),
