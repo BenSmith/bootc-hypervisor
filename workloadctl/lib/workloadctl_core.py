@@ -65,12 +65,6 @@ from workload_lib import (
 )
 from podman import Podman, PodmanError
 
-# Re-exported for existing importers; canonical home is service_runtime.
-from service_runtime import (  # noqa: F401
-    ensure_runtime_dir,
-    restart_workload_service,
-)
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

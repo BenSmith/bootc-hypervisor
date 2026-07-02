@@ -21,9 +21,9 @@ from workload_lib import (
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
-    restart_workload_service,
     require_root,
 )
+from service_runtime import restart_workload_service
 
 
 def _read_passphrase(args, *, prompt: str, confirm: bool) -> str:

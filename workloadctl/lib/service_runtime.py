@@ -42,9 +42,10 @@ def ensure_runtime_dir(uid: int, timeout: float = 8.0) -> bool:
     `Failed to set up mount namespacing: /run/user/<uid>: No such file` →
     `226/NAMESPACE`. The setup oneshot (`RemainAfterExit=yes`) does NOT re-run on
     a bare restart, so the CLI restart paths (update/rollback/recreate/start) call
-    this first to re-pin linger. Mirrors `podman._ensure_runtime_dir`, which
-    covers the read-only CLI-as-user path. Swallows all errors — if it can't fix
-    it, the caller's restart surfaces the original failure.
+    this first to re-pin linger. `podman._ensure_runtime_dir` (the read-only
+    CLI-as-user retry path) also delegates here, with a shorter 5s deadline.
+    Swallows all errors — if it can't fix it, the caller's restart surfaces the
+    original failure.
 
     Gate on `user@<uid>.service` being active, NOT on `/run/user/<uid>` merely
     existing: a transient login session creates that dir too, so a dir-only
