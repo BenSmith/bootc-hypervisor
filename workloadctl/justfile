@@ -30,6 +30,23 @@ test-unit:
 test-integration:
   PYTHONPATH=lib python3 -m unittest tests.test_integration -v
 
+# coverage.py is a dev-only tool — never imported by lib/, never in the RPM.
+# It measures lib/ plus the extensionless scripts (bin, generators, libexec),
+# but can only auto-list never-run files that end in .py: a script shows up
+# only if a test loads it, so bin/workloadctl (never imported by tests) is
+# absent and generators/workload-generate reads low because most of its tests
+# drive it as a subprocess (see docs/).
+#
+# Run the unit suite under coverage, then print a per-file report
+coverage:
+  PYTHONPATH=lib python3 -m coverage run --source=lib,bin,generators,libexec -m unittest discover -s tests
+  python3 -m coverage report --sort=cover
+
+# As `coverage`, plus write the drill-down HTML report to htmlcov/
+coverage-html: coverage
+  python3 -m coverage html
+  @echo "HTML report: file://$(pwd)/htmlcov/index.html"
+
 # Lint: check Python syntax
 lint:
   python3 -m py_compile lib/workload_lib.py
@@ -39,6 +56,21 @@ lint:
   python3 -m py_compile libexec/workload-ensure-user
   python3 -m py_compile libexec/workload-write-env
   python3 -m py_compile libexec/workload-exporter
+
+# ruff is a dev-only tool; not a runtime dep. A directory scan only picks up
+# .py files, so the extensionless scripts are named explicitly to be checked.
+#
+# Style/lint check with ruff (exits non-zero on findings)
+lint-ruff:
+  ruff check lib/ tests/ bin/workloadctl generators/workload-generate libexec/*
+
+# mypy is a dev-only tool. It is noisy on this untyped stdlib CLI (argparse
+# attrs / JSON dicts type as Any | None); treat as advisory until a
+# [tool.mypy] config narrows the scope.
+#
+# Static type check with mypy (advisory)
+typecheck:
+  MYPYPATH=lib mypy lib/ --ignore-missing-imports
 
 # Lint all bundle Containerfiles with hadolint.
 # Intentionally suppressed:
