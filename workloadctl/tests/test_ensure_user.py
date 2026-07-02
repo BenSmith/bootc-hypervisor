@@ -55,6 +55,9 @@ class TestRenderDefaultUserData(unittest.TestCase):
         self.assertIn("hostname: myvm", out)
         self.assertIn("fqdn: myvm.local", out)
         self.assertIn("- name: fedora", out)
+        # Pin the primary user to uid 1000 so virtiofsd's guest<->host uid
+        # translation is deterministic and the guest user can write shares.
+        self.assertIn("uid: 1000", out)
         self.assertIn("ssh-ed25519 AAAA fedora@build", out)
         self.assertIn("sudo: ALL=(ALL) NOPASSWD:ALL", out)
         self.assertNotIn("mounts:", out)
@@ -163,6 +166,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -170,7 +175,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
              mock.patch.object(self.mod.shutil, "rmtree"):
             self.mod.build_cloud_init_iso(
                 self.pw, config, name,
-                config_path=self.config_dir / f"{name}.toml",
+                config_path=self.config_dir / "workload.toml",
             )
 
     def _iso_path(self, name: str = "myvm") -> Path:
@@ -315,6 +320,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -336,6 +343,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         rmtree_calls = []
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir",
+                               lambda _name: self.home), \
              mock.patch.object(self.mod.subprocess, "run", self._fake_iso_run), \
              mock.patch.object(_shutil, "which",
                                lambda name: "/usr/bin/genisoimage"
@@ -367,44 +376,56 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()
 
-    def test_relative_path_created_under_home(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            pw = _fake_pw(home)
-            config = {"vm": {"volumes": ["./data:/data"]}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
-            self.assertTrue((home / "data").is_dir())
+    def _patch(self, root):
+        """Anchor the canonical path helpers into the temp tree (the function
+        keys off these, not pw.pw_dir, so it's correct even with a mismatched passwd home)."""
+        return (
+            mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"),
+            mock.patch.object(self.mod, "workload_data_dir", lambda n: root / "data"),
+            mock.patch.object(self.mod, "workload_root_dir", lambda n: root),
+        )
 
-    def test_absolute_path_outside_home_skipped(self):
+    def test_relative_anchor_created_under_data(self):
+        # ./ anchors to the precious data/ subtree, matching the virtiofsd
+        # sidecars the generator emits (NOT the old state-relative behavior).
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            home.mkdir()
-            pw = _fake_pw(home)
-            config = {"vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
-            # /etc/passwd must not have been turned into a directory
-            self.assertFalse((home / "etc" / "passwd").exists())
+            root = Path(tmp); (root / "state").mkdir()
+            config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
+            self.assertTrue((root / "data" / "shared").is_dir())
+
+    def test_absolute_path_outside_workload_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "state").mkdir()
+            config = {"workload": {"name": "vmx"},
+                      "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
+            self.assertFalse((root / "etc" / "passwd").exists())
 
     def test_empty_volumes_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            pw = _fake_pw(Path(tmp))
-            config = {"vm": {}}
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
-                self.mod.setup_vm_volume_directories(pw, config)
+            root = Path(tmp); (root / "state").mkdir()
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state"), {"workload": {"name": "vmx"}, "vm": {}})
 
     def test_existing_dir_is_chowned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            existing = home / "data"
-            existing.mkdir()
-            pw = _fake_pw(home, uid=1234, gid=1234)
-            config = {"vm": {"volumes": ["./data:/data"]}}
+            root = Path(tmp); (root / "state").mkdir()
+            existing = root / "data" / "shared"; existing.mkdir(parents=True)
+            config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             chown_calls = []
-            with mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))):
-                with mock.patch("os.chmod"):
-                    self.mod.setup_vm_volume_directories(pw, config)
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, \
+                 mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))), \
+                 mock.patch("os.chmod"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state", uid=1234, gid=1234), config)
             self.assertTrue(any(str(existing) in c[0] for c in chown_calls))
 
 
@@ -416,7 +437,9 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
 
     def test_multi_container_volumes_created(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
+            root = Path(tmp)
+            home = root / "state"
+            home.mkdir()
             pw = _fake_pw(home)
             config = {
                 "workload": {"name": "myapp"},
@@ -433,10 +456,31 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
                     },
                 ],
             }
-            with mock.patch("os.chown"), mock.patch("os.chmod"):
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
                 self.mod.setup_volume_directories(pw, config)
-            self.assertTrue((home / "web-data").is_dir())
-            self.assertTrue((home / "db-data").is_dir())
+            # ./X anchors now resolve to the sibling data/ subdir
+            self.assertTrue((root / "data" / "web-data").is_dir())
+            self.assertTrue((root / "data" / "db-data").is_dir())
+
+    def test_mismatched_passwd_home_still_provisions_canonically(self):
+        # A user whose passwd home doesn't match the expected state/ dir must
+        # still get ./ volumes under data/, because provisioning keys off
+        # workload_state_dir(name), not pw.pw_dir.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "state").mkdir()
+            stale_pw = _fake_pw(root)  # passwd home = root (mismatched)
+            config = {
+                "workload": {"name": "myapp"},
+                "containers": [{"name": "web", "container": {"image": "x"},
+                                "storage": {"volumes": ["./web-data:/data"]}}],
+            }
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_volume_directories(stale_pw, config)
+            self.assertTrue((root / "data" / "web-data").is_dir())
 
 
 class TestConfigureSubuidSubgid(unittest.TestCase):
@@ -525,6 +569,80 @@ class TestDecryptSystemdCredential(unittest.TestCase):
             # Error mentions both candidate locations so operators know
             # where to drop the credential.
             self.assertIn("credstore", str(ctx.exception))
+
+
+class TestWarnIfStaleHome(unittest.TestCase):
+    """warn_if_stale_home flags mismatched passwd home dirs (which silently break
+    podman healthchecks) without trying to fix them."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def _capture(self, pw, name):
+        msgs = []
+        with mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.warn_if_stale_home(pw, name)
+        return "\n".join(msgs)
+
+    def test_silent_when_home_is_state_dir(self):
+        pw = _fake_pw(self.mod.workload_state_dir("myapp"))
+        self.assertEqual(self._capture(pw, "myapp"), "")
+
+    def test_warns_on_mismatched_home(self):
+        stale = self.mod.workload_state_dir("myapp").parent
+        pw = _fake_pw(stale, uid=10005)
+        out = self._capture(pw, "myapp")
+        self.assertIn("mismatched home", out)
+        self.assertIn("frozen at 'starting'", out)
+        # Remediation names the exact usermod target + the unit to bounce.
+        self.assertIn(f"usermod -d {self.mod.workload_state_dir('myapp')}", out)
+        self.assertIn("user@10005.service", out)
+
+
+class TestResolveCloudInitInstanceId(unittest.TestCase):
+    """The instance-id reuse vs rotate decision for a (re)built seed ISO.
+
+    Rotating the id on every host reboot (tmpfs ISO wiped) makes the guest
+    re-run all its per-instance cloud-init modules; the id must be reused when
+    the user-data fingerprint is unchanged so a reboot is a cheap rehydration.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.id_file = self.tmp / ".cloud-init-instance-id"
+
+    def _resolve(self, fp_unchanged):
+        return self.mod._resolve_cloud_init_instance_id(
+            "myvm", self.id_file, fp_unchanged)
+
+    def test_first_provision_mints_when_no_file(self):
+        # No persisted id yet → mint, regardless of fingerprint state.
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertTrue(minted)
+        self.assertTrue(iid.startswith("myvm-"))
+
+    def test_host_reboot_reuses_id(self):
+        # Unchanged content + an existing id == tmpfs ISO wiped by a reboot.
+        self.id_file.write_text("myvm-deadbeef")
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertEqual(iid, "myvm-deadbeef")
+        self.assertFalse(minted)               # reused → caller must NOT rewrite
+
+    def test_content_change_rotates_id(self):
+        # A real config/secret edit (fingerprint changed) → fresh instance.
+        self.id_file.write_text("myvm-deadbeef")
+        iid, minted = self._resolve(fp_unchanged=False)
+        self.assertNotEqual(iid, "myvm-deadbeef")
+        self.assertTrue(iid.startswith("myvm-"))
+        self.assertTrue(minted)
+
+    def test_empty_id_file_mints(self):
+        # A truncated/empty persisted id is not reusable → mint.
+        self.id_file.write_text("   \n")
+        iid, minted = self._resolve(fp_unchanged=True)
+        self.assertTrue(minted)
+        self.assertTrue(iid.startswith("myvm-"))
 
 
 if __name__ == "__main__":

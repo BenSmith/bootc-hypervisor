@@ -27,7 +27,7 @@ import tomllib
 from pathlib import Path
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, workload_username, resolve_secret_env_vars,
+    WORKLOAD_CONFIG_DIR, workload_config_path, workload_username, resolve_secret_env_vars,
     SECRET_PATTERN, validate_env_key, normalize_containers,
 )
 
@@ -43,7 +43,7 @@ def main():
     name = sys.argv[1]
     container = sys.argv[2] if len(sys.argv) == 3 else None
 
-    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
 

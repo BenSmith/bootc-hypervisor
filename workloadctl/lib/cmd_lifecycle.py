@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import re
 import shutil
 import subprocess
 import sys
@@ -18,21 +17,31 @@ import time
 import tomllib
 
 from workload_lib import (
+    iter_workloads,
     selinux_module_name,
     selinux_type_name,
     USERNAME_PREFIX,
     WORKLOADS_BASE,
+    WORKLOAD_BUNDLES_DIR,
     VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
+    workload_config_dir,
+    workload_config_path,
+    workload_enabled_marker,
     workload_username,
+    workload_root_dir,
+    RUN_SYSTEMD_SYSTEM,
+    virtiofs_tag,
+    parse_volume_spec,
 )
+import imagebuild
 from podman import Podman
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    WorkloadUserNotFound,
     require_root,
-    WORKLOAD_DIR,
     VM_BRIDGE_NAME,
 )
 from cmd_admin import validate_single
@@ -44,12 +53,7 @@ REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "
 RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
-_CONTAINERS_DIR = Path("/usr/share/workloadctl/containers")
-
-_WORKLOAD_SECTION_RE = re.compile(
-    r'(?ms)(?P<header>^\[workload\][^\n]*\n)(?P<body>.*?)(?=^\[|\Z)'
-)
-
+_BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -139,8 +143,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     for _cname, image, pull in config.container_specs():
         if pull == "never" and not Podman.for_root().image_id(image):
             print(f"  ✗ Image '{image}' not found locally and pull=never")
-            # TODO: remove hardcoded path
-            build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+            build_script = config.resolve_control_file("build.sh")
             if build_script.exists():
                 print(f"    Build the image first:")
                 print(f"      sudo {build_script}")
@@ -154,12 +157,17 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
     missing_required_files = [e for e in required_files if not Path(e["path"]).exists()]
 
     if missing_required_files:
-        home_resolved = Path(config.home_dir).resolve()
+        # Auto-copy is gated on the destination being inside the workload's own
+        # tree. Anchor on the workload ROOT, not home_dir: home_dir is the
+        # state/ subdir, but `./`-anchored required_files resolve to the data/
+        # sibling — checking against home_dir (state/) would reject every
+        # data/ destination and silently skip the copy.
+        root_resolved = workload_root_dir(config.name).resolve()
         still_missing = []
         for entry in missing_required_files:
             dest = Path(entry["path"])
             hint = entry.get("hint")
-            if hint and Path(hint).exists() and dest.resolve().is_relative_to(home_resolved):
+            if hint and Path(hint).exists() and dest.resolve().is_relative_to(root_resolved):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(hint, dest)
                 print(f"  ✓ Copied config template: {dest}")
@@ -200,11 +208,15 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             missing_dirs.append(host_path)
 
     if missing_dirs:
-        home_resolved = Path(config.home_dir).resolve()
+        # Same root-vs-home distinction as the required_files copy above: a `./`
+        # volume dir resolves under data/ (sibling of state/), so anchor the
+        # "auto-create vs operator-must-provision" split on the workload ROOT.
+        # Genuinely external bind sources (absolute host paths) stay must-create.
+        root_resolved = workload_root_dir(config.name).resolve()
         auto_create = [p for p in missing_dirs
-                       if Path(p).resolve().is_relative_to(home_resolved)]
+                       if Path(p).resolve().is_relative_to(root_resolved)]
         must_create = [p for p in missing_dirs
-                       if not Path(p).resolve().is_relative_to(home_resolved)]
+                       if not Path(p).resolve().is_relative_to(root_resolved)]
 
         for path in auto_create:
             Path(path).mkdir(parents=True, exist_ok=True)
@@ -388,7 +400,7 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
     elif not user_image_id:
         print()
         print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
-        build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
+        build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
             print(f"Build the image first:", file=sys.stderr)
             print(f"  sudo {build_script}", file=sys.stderr)
@@ -434,11 +446,9 @@ def _run_host_setup(config: WorkloadConfig, action: str):
     if not setup_script:
         return
 
-    if setup_script.startswith("/"):
-        script_path = Path(setup_script)
-    else:
-        container_dir = Path(f"/usr/share/workloadctl/containers/{config.name}")
-        script_path = container_dir / setup_script
+    # Relative names resolve through the override chain (/etc override wins over
+    # the shipped bundle); an absolute path is taken verbatim.
+    script_path = config.resolve_control_file(setup_script)
 
     if not script_path.exists():
         print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)
@@ -471,16 +481,16 @@ def _selinux_enforcing() -> bool:
 
 
 def _available_bundles() -> list[str]:
-    """Bundle names shipping a CIL policy under the containers share dir.
+    """Bundle names shipping a CIL policy under the workloads share dir.
 
-    A bundle is a subdir <name>/ that contains <name>.cil (the template
+    A bundle is a subdir <name>/ that contains policy.cil (the template
     _apply_selinux_policy loads). Returned sorted for stable output.
     """
-    if not _CONTAINERS_DIR.is_dir():
+    if not _BUNDLES_DIR.is_dir():
         return []
     return sorted(
-        d.name for d in _CONTAINERS_DIR.iterdir()
-        if d.is_dir() and (d / f"{d.name}.cil").exists()
+        d.name for d in _BUNDLES_DIR.iterdir()
+        if d.is_dir() and (d / "policy.cil").exists()
     )
 
 
@@ -498,7 +508,7 @@ def _print_available_bundles(bundle: str):
 def _apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 
-    The bundle ships its policy as a CIL template (`<name>.cil`) using the
+    The bundle ships its policy as a CIL template (`policy.cil`) using the
     __WL_MODULE__ placeholder. On enable we substitute the name-keyed block name
     (wl_<name>) and load it alongside udica's base templates (which the
     workload's `(blockinherit ...)` resolves against); on disable we remove the
@@ -544,17 +554,17 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
-        print(f"  ERROR: invalid selinux_policy bundle {bundle!r} "
+        print(f"  ERROR: invalid [workload] bundle {bundle!r} "
               f"(must match {NAME_PATTERN.pattern})", file=sys.stderr)
         # Common footgun: users copy the SELinux *type* name (wl_foo_bar,
-        # underscores) into selinux_policy, but the bundle is a directory name
+        # underscores) into `bundle`, but the bundle is a directory name
         # and dirs are hyphenated. Suggest the hyphenated form.
         if "_" in bundle:
             print(f"         did you mean {bundle.replace('_', '-')!r}? "
                   f"(the bundle is a directory name and uses hyphens, not the "
                   f"underscores of the SELinux type name)", file=sys.stderr)
         sys.exit(1)
-    template = Path(f"/usr/share/workloadctl/containers/{bundle}/{bundle}.cil")
+    template = config.resolve_control_file("policy.cil")
     if not template.exists():
         print(f"  ERROR: SELinux policy template not found: {template}",
               file=sys.stderr)
@@ -576,48 +586,49 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
             sys.exit(1)
 
 
-def _replace_workload_enabled(content: str, value: str | None) -> tuple[str, bool]:
-    """Set, change, or remove `enabled` in the [workload] section only.
+def _workload_run_files(config: WorkloadConfig) -> list[Path]:
+    """Every file the generator writes into /run/systemd/system for THIS workload.
 
-    Scoping the edit to [workload] keeps the regex from accidentally flipping
-    an unrelated `enabled = ...` in some other section (today there's none,
-    but the schema is open to extension and the wider regex would silently
-    catch a future `[[containers]] enabled = ...` field).
+    The generator only ever writes (idempotent emit from the enabled set); it
+    never deletes. Removing a workload's units on disable is the CLI's job, so
+    this lists them by exact name from the current config — no glob, so disabling
+    'foo' can never touch a sibling 'foo-bar'. Removing a name that isn't present
+    is harmless (callers use missing_ok), so we list the full superset for the
+    topology rather than branching on pod/bridge. Never includes the shared
+    workload-bridge.service.
 
-    value: "true" or "false" to set; None to remove the line.
-    Returns (new_content, had_field_before).
+    MUST be kept in sync with generators/workload-generate (generate_*_workload).
     """
-    m = _WORKLOAD_SECTION_RE.search(content)
-    if not m:
-        if value is None:
-            return content, False
-        sep = "" if content.endswith("\n") else "\n"
-        return content + f"{sep}[workload]\nenabled = {value}\n", False
-    body = m.group("body")
-    had_field = bool(re.search(r'^enabled\s*=', body, re.MULTILINE))
-    if had_field and value is None:
-        new_body = re.sub(r'^enabled\s*=[^\n]*\n?', '', body, count=1,
-                          flags=re.MULTILINE)
-    elif had_field:
-        new_body = re.sub(r'^enabled\s*=[^\n]*', f'enabled = {value}',
-                          body, count=1, flags=re.MULTILINE)
-    elif value is None:
-        new_body = body
+    run = RUN_SYSTEMD_SYSTEM
+    name = config.name
+    files = [
+        run / f"workload-{name}.conf",                                  # sysusers
+        run / f"workload-{name}-setup.service",
+        run / f"workload-{name}.service",                              # umbrella / main
+        run / "multi-user.target.wants" / f"workload-{name}.service",  # autostart symlink
+    ]
+    if config.is_vm:
+        files.append(run / f"workload-{name}-build.service")
+        for i, vol_spec in enumerate(config.config.get("vm", {}).get("volumes", [])):
+            tag = virtiofs_tag(parse_volume_spec(vol_spec)[1], i)
+            files.append(run / f"workload-{name}-virtiofs-{tag}.service")
     else:
-        new_body = f'enabled = {value}\n' + body
-    return content[:m.start("body")] + new_body + content[m.end("body"):], had_field
-
-
-def _remove_user_dropin(config: WorkloadConfig):
-    """Remove the user@<uid>.service.d/50-workload.conf drop-in for a workload."""
-    dropin_dir = Path("/run/systemd/system") / f"user@{config.uid}.service.d"
-    dropin_conf = dropin_dir / "50-workload.conf"
-    if dropin_conf.exists():
-        dropin_conf.unlink()
-    try:
-        dropin_dir.rmdir()
-    except OSError:
-        pass
+        # cgroup-placement drop-in (containers only; VMs have none). The path is
+        # keyed by the workload user's UID, which comes from the passwd db — gone
+        # once the user is removed (e.g. a second disable, or disabling after an
+        # out-of-band userdel). The drop-in went with the user's runtime in that
+        # case, and we can't reconstruct the UID, so just omit it rather than
+        # letting WorkloadUserNotFound abort the whole removal.
+        try:
+            files.append(run / f"user@{config.uid}.service.d" / "50-workload.conf")
+        except WorkloadUserNotFound:
+            pass
+        files.append(run / f"workload-{name}-pod.service")    # pod mode
+        files.append(run / f"workload-{name}-net.service")    # bridge mode
+        if config.is_multi:
+            for cname in config.container_names():
+                files.append(run / f"workload-{name}-{cname}.service")
+    return files
 
 
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
@@ -678,16 +689,16 @@ def cmd_enable(args, manager: WorkloadManager):
     """Enable and start a workload"""
     require_root()
 
-    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
     print(f"Enabling workload: {args.workload}")
 
-    content = config_path.read_text()
-    content, had_enabled_field = _replace_workload_enabled(content, "true")
-    config_path.write_text(content)
+    # Mark enabled before the daemon-reload below: the boot/CLI generator only
+    # emits this workload's units when the marker is present.
+    workload_enabled_marker(args.workload).touch()
 
     print("  Reloading systemd...")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
@@ -702,14 +713,8 @@ def cmd_enable(args, manager: WorkloadManager):
         print("Pre-flight checks failed. Fix the issues above, then re-run enable.")
         print(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
         print(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
-        # Revert enabled = true since we haven't actually started anything.
-        # If the original file didn't have an enabled field, remove the one we
-        # added; otherwise flip it back to false to preserve user formatting.
-        content = config_path.read_text()
-        content, _ = _replace_workload_enabled(
-            content, "false" if had_enabled_field else None
-        )
-        config_path.write_text(content)
+        # Nothing was started, so revert to disabled by removing the marker.
+        workload_enabled_marker(args.workload).unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], check=False)
         sys.exit(1)
 
@@ -778,8 +783,21 @@ def cmd_disable(args, manager: WorkloadManager):
     else:
         print(f"Disabling workload: {args.workload}")
 
+    # Every teardown/removal step below is attempted independently and
+    # best-effort: a failure in one never skips the rest, so a half-provisioned
+    # or partly-wedged workload still gets torn down as far as possible. Failures
+    # are collected and reported together with a non-zero exit at the end.
+    failures: list[str] = []
+
+    def attempt(label, fn):
+        try:
+            fn()
+        except Exception as e:
+            failures.append(f"{label}: {e}")
+
     print(f"  Stopping {config.service_name}...")
-    subprocess.run(["systemctl", "stop", config.service_name], check=False)
+    attempt(f"stop {config.service_name}",
+            lambda: subprocess.run(["systemctl", "stop", config.service_name], check=False))
 
     # Stop and reset the workload's RemainAfterExit=yes oneshot helpers so they
     # re-run on the next enable. They stay "active (exited)" after the umbrella
@@ -806,55 +824,87 @@ def cmd_disable(args, manager: WorkloadManager):
                 for cname in config.container_names()
             ]
     for svc in helper_services:
-        subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True)
-        subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True)
+        attempt(f"stop {svc}",
+                lambda svc=svc: subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True))
+        attempt(f"reset-failed {svc}",
+                lambda svc=svc: subprocess.run(["systemctl", "reset-failed", svc], check=False, capture_output=True))
 
     # Run host setup teardown if configured
-    _run_host_setup(config, "disable")
+    attempt("host setup teardown", lambda: _run_host_setup(config, "disable"))
 
     # Remove the per-workload SELinux module (1:1 with the workload, so this is
     # an unambiguous teardown — nothing else depends on wl_<name>).
-    _apply_selinux_policy(config, "disable")
+    attempt("remove SELinux module", lambda: _apply_selinux_policy(config, "disable"))
 
-    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
-    content = config_path.read_text()
-    content, _ = _replace_workload_enabled(content, "false")
-    config_path.write_text(content)
+    # Mark disabled so a future generation (next enable of anything, or boot)
+    # won't re-emit this workload.
+    attempt("mark disabled (unlink marker)",
+            lambda: workload_enabled_marker(args.workload).unlink(missing_ok=True))
 
-    # Remove the user@ drop-in so systemd stops constraining user@<uid>
-    # to workloads.slice once the workload is disabled.  Lives in /run so
-    # it would vanish on reboot anyway, but clean it up eagerly.
-    _remove_user_dropin(config)
-
-    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    # Remove this workload's generated unit files from /run/systemd/system. The
+    # generator only ever writes (idempotent emit from the enabled set), so unless
+    # we delete them here they linger as dead units — including the user@<uid>
+    # drop-in that pins the user manager into workloads.slice — until the next
+    # reboot wipes the tmpfs. Each unlink is independent (one failure never skips
+    # the rest), then daemon-reload drops them from systemd's view.
+    def _remove_run_files():
+        for p in _workload_run_files(config):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                failures.append(f"remove {p}: {e}")
+        if not config.is_vm:
+            # Prune the now-empty user@<uid>.service.d drop-in dir. The UID lookup
+            # raises once the user is gone; nothing to prune in that case.
+            try:
+                (RUN_SYSTEMD_SYSTEM / f"user@{config.uid}.service.d").rmdir()
+            except (OSError, WorkloadUserNotFound):
+                pass
+    attempt("remove /run unit files", _remove_run_files)
+    attempt("reload systemd",
+            lambda: subprocess.run(["systemctl", "daemon-reload"], check=False))
 
     if purge:
-        # Get user info before deletion
+        # Look up the user up front (may be absent if the workload was enabled
+        # but never fully provisioned — /var setup is deferred to first start).
+        # An absent user is "already clean", not an error.
+        uid = None
         try:
-            pw = pwd.getpwnam(config.username)
-            uid = pw.pw_uid
-            home_dir = pw.pw_dir
+            uid = pwd.getpwnam(config.username).pw_uid
+        except KeyError:
+            print(f"  User {config.username} not present (nothing to remove)")
 
-            print(f"  Terminating user sessions for {config.username}...")
-            _stop_user_manager(config.username)
-            time.sleep(1)
-            # Kill any straggler processes (rootless podman, conmon, etc.)
-            # so userdel doesn't print "user is currently used by process N".
-            subprocess.run(["pkill", "-KILL", "-u", str(uid)],
-                           check=False, capture_output=True)
-            time.sleep(0.5)
+        if uid is not None:
+            try:
+                print(f"  Terminating user sessions for {config.username}...")
+                _stop_user_manager(config.username)
+                time.sleep(1)
+                # Kill any straggler processes (rootless podman, conmon, etc.)
+                # so userdel doesn't print "user is currently used by process N".
+                subprocess.run(["pkill", "-KILL", "-u", str(uid)],
+                               check=False, capture_output=True)
+                time.sleep(0.5)
+            except Exception as e:
+                failures.append(f"terminate user sessions: {e}")
 
-            # Remove per-workload runtime files in /run/workload-env (decrypted
-            # secrets + the env file) so a purge doesn't leave them readable in
-            # /run until the next reboot.
+        # Remove per-workload runtime files in /run/workload-env (decrypted
+        # secrets + the env file) so a purge doesn't leave them readable in
+        # /run until the next reboot.
+        try:
             _remove_runtime_env_files(config)
+        except Exception as e:
+            failures.append(f"remove runtime env files: {e}")
 
-            if config.is_vm:
+        if config.is_vm:
+            try:
                 # Clean up the runtime socket directory
                 vm_sock_dir = VM_SOCKET_DIR / config.name
                 if vm_sock_dir.exists():
                     shutil.rmtree(vm_sock_dir, ignore_errors=True)
-            else:
+            except Exception as e:
+                failures.append(f"remove VM socket dir: {e}")
+        else:
+            try:
                 print("  Removing subuid/subgid entries...")
                 subid_lock = Path("/run/lock/workload-subid.lock")
                 subid_lock.parent.mkdir(parents=True, exist_ok=True)
@@ -866,57 +916,72 @@ def cmd_disable(args, manager: WorkloadManager):
                             lines = [l for l in p.read_text().splitlines()
                                      if not l.startswith(f"{config.username}:")]
                             p.write_text("\n".join(lines) + ("\n" if lines else ""))
+            except Exception as e:
+                failures.append(f"remove subuid/subgid entries: {e}")
 
-            print(f"  Removing user {config.username}...")
-            userdel = subprocess.run(["userdel", "-f", config.username],
-                                     check=False, capture_output=True, text=True)
-            # userdel -f exits 0 even when it prints a warning about a process
-            # still using the account — check whether the user actually got
-            # removed rather than trusting the exit code.
-            user_still_exists = False
+        if uid is not None:
             try:
-                pwd.getpwnam(config.username)
-                user_still_exists = True
-            except KeyError:
-                pass
-
-            if user_still_exists:
-                sys.stderr.write(f"  ! userdel failed — user {config.username} still exists.\n")
-                if userdel.stderr.strip():
-                    sys.stderr.write(f"    {userdel.stderr.strip()}\n")
-                sys.stderr.write(f"    Fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge.\n")
-                sys.exit(1)
-
-            home_path = Path(home_dir)
-            if home_path.exists():
-                print(f"  Removing home directory {home_dir}...")
+                print(f"  Removing user {config.username}...")
+                userdel = subprocess.run(["userdel", "-f", config.username],
+                                         check=False, capture_output=True, text=True)
+                # userdel -f exits 0 even when it prints a warning about a
+                # process still using the account — check whether the user
+                # actually got removed rather than trusting the exit code.
                 try:
-                    shutil.rmtree(home_dir)
-                except OSError as e:
-                    sys.stderr.write(f"  ! Failed to fully remove {home_dir}: {e}\n")
-                    sys.stderr.write(f"  ! Workload data may still be present — remove manually before re-enabling.\n")
-                    sys.exit(1)
+                    pwd.getpwnam(config.username)
+                    msg = f"userdel: user {config.username} still exists"
+                    if userdel.stderr.strip():
+                        msg += f" ({userdel.stderr.strip()})"
+                    msg += " — fix the underlying issue (e.g. 'sudo grpck') then re-run disable --purge"
+                    failures.append(msg)
+                except KeyError:
+                    pass
+            except Exception as e:
+                failures.append(f"remove user {config.username}: {e}")
 
-            print(f"✓ Workload '{args.workload}' disabled and purged")
-        except KeyError:
-            print(f"✓ Workload '{args.workload}' disabled (user not found)")
+        # Remove the data dir regardless of whether the user still existed — an
+        # orphaned /var/lib/workloads/<name> should still be swept.
+        workload_dir = workload_root_dir(config.name)
+        if workload_dir.exists():
+            try:
+                print(f"  Removing workload directory {workload_dir}...")
+                shutil.rmtree(workload_dir)
+            except OSError as e:
+                failures.append(f"remove {workload_dir}: {e} "
+                                "(data may still be present — remove manually before re-enabling)")
+
+        if uid is None:
+            success_msg = (f"✓ Workload '{args.workload}' disabled and purged "
+                           "(user was not provisioned)")
+        else:
+            success_msg = f"✓ Workload '{args.workload}' disabled and purged"
     else:
         # A disabled (non-purged) workload keeps its user, home, and subuid
         # ranges, but should not keep a live lingering user manager. Stop it so
         # /run/user/<uid> and user@<uid>.service don't idle on; re-enable
         # re-establishes linger via workload-ensure-user.
-        if _stop_user_manager(config.username):
-            print(f"  Stopped lingering user manager for {config.username}")
-        print(f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)")
+        def _stop_lingering_user_manager():
+            if _stop_user_manager(config.username):
+                print(f"  Stopped lingering user manager for {config.username}")
+        attempt("stop lingering user manager", _stop_lingering_user_manager)
+        success_msg = f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)"
 
-    _stop_bridge_if_last_vm(config, manager)
+    attempt("stop shared VM bridge", lambda: _stop_bridge_if_last_vm(config, manager))
+
+    if failures:
+        sys.stderr.write(f"  ! Disable of '{args.workload}' completed with errors:\n")
+        for f in failures:
+            sys.stderr.write(f"    - {f}\n")
+        sys.exit(1)
+
+    print(success_msg)
 
 
 def cmd_start(args, manager: WorkloadManager):
     """Start a workload service (does not change enabled state)"""
     require_root()
 
-    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -932,7 +997,7 @@ def cmd_stop(args, manager: WorkloadManager):
     """Stop a workload service (does not change enabled state)"""
     require_root()
 
-    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -975,6 +1040,50 @@ def cmd_recreate(args, manager: WorkloadManager):
     print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
 
 
+def _run_build(config: WorkloadConfig) -> int:
+    """Dispatch a build, returning its exit code. Run as root, building into
+    root's podman store — `enable`/`recreate` then transfer the resulting
+    pull=never image to the user store.
+
+    Two modes (override-correct in both, via the merged build context):
+      - `[build].script` set → escape hatch, run it (imagebuild.run_build_script).
+      - else, a Containerfile resolves → built-in podman builder.
+    Both operate on the merged /usr+/etc context, so overriding the Containerfile
+    (or a COPY-ed asset) takes effect — unlike the old self-locating build.sh.
+    """
+    if config.build_script:
+        return imagebuild.run_build_script(config)
+    if config.has_build_context():
+        return imagebuild.build_image(config)
+    print(f"Error: nothing to build for '{config.name}'", file=sys.stderr)
+    print("  No pull=never image with a resolvable Containerfile, and no "
+          "[build].script — this workload pulls a published image.",
+          file=sys.stderr)
+    return 1
+
+
+def cmd_build(args, manager: WorkloadManager):
+    """Build a workload's container image from its bundle build context."""
+    require_root()
+    config = WorkloadConfig(args.workload)
+    if config.is_vm:
+        print(f"Error: 'build' applies to container workloads; '{config.name}' "
+              f"is a VM (provision via 'update'/'recreate').", file=sys.stderr)
+        sys.exit(1)
+
+    rc = _run_build(config)
+    if rc != 0:
+        print(f"✗ Build failed (exit {rc})", file=sys.stderr)
+        sys.exit(rc)
+
+    print()
+    print(f"✓ Built image for '{config.name}'")
+    if config.enabled:
+        print(f"  Apply to the running workload: sudo workloadctl recreate {config.name}")
+    else:
+        print(f"  Enable when ready: sudo workloadctl enable {config.name}")
+
+
 def cmd_reboot(args, manager: WorkloadManager):
     """Soft-reboot a workload (re-exec systemd, restart all services, keep disk).
 
@@ -1005,7 +1114,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
     # Per-workload SELinux modules a config still expects (selinux_policy = true).
     # Keyed on declaration, not enabled state — same as users above.
     expected_modules = set()
-    for config_file in manager.workload_dir.glob("*.toml"):
+    for _name, config_file in iter_workloads():
         try:
             with open(config_file, "rb") as f:
                 cfg = tomllib.load(f)

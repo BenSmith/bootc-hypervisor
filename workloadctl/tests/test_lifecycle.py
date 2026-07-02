@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, call, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
 import substrate
@@ -57,9 +58,13 @@ def _run_generator(config_dir, services_dir, sysusers_dir):
     )
 
 
-def _write_cfg(config_dir, name, toml_content):
-    path = Path(config_dir) / f"{name}.toml"
-    path.write_text(textwrap.dedent(toml_content))
+def _write_cfg(config_dir, name, toml_content, enabled=True):
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
+    body = textwrap.dedent(toml_content)
+    path.write_text(body)
+    if enabled:
+        (Path(config_dir) / name / ".enabled").touch()
     return path
 
 
@@ -68,7 +73,6 @@ def _write_cfg(config_dir, name, toml_content):
 _CATTLE_TOML = """\
 [workload]
 name = "cattle-wl"
-enabled = true
 
 [container]
 image = "docker.io/nginx:latest"
@@ -77,7 +81,6 @@ image = "docker.io/nginx:latest"
 _PET_TOML = """\
 [workload]
 name = "pet-wl"
-enabled = true
 lifecycle = "pet"
 
 [container]
@@ -87,7 +90,6 @@ image = "docker.io/nginx:latest"
 _PET_POD_TOML = """\
 [workload]
 name = "pet-pod"
-enabled = true
 lifecycle = "pet"
 
 [[containers]]
@@ -104,7 +106,6 @@ image = "docker.io/postgres:latest"
 _CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -113,7 +114,6 @@ image = "example.com/test:latest"
 _PET_CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 lifecycle = "pet"
 
 [container]
@@ -123,7 +123,6 @@ image = "example.com/test:latest"
 _VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -132,7 +131,6 @@ image = "example.com/guest:latest"
 _PET_VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 lifecycle = "pet"
 
 [vm]
@@ -143,8 +141,9 @@ image = "example.com/guest:latest"
 def _make_config(toml: str, name: str) -> WorkloadConfig:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / f'{name}.toml').write_text(toml)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        (p / name).mkdir()
+        (p / name / 'workload.toml').write_text(toml)
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return WorkloadConfig(name)
 
 
@@ -160,7 +159,7 @@ class TestLifecycleAccessor(unittest.TestCase):
 
     def test_explicit_cattle(self):
         toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "cattle"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "cattle"'
         )
         cfg = _make_config(toml, 'test-wl')
         self.assertEqual(cfg.lifecycle, "cattle")
@@ -176,6 +175,26 @@ class TestLifecycleAccessor(unittest.TestCase):
     def test_vm_pet(self):
         cfg = _make_config(_PET_VM_TOML, 'test-vm')
         self.assertEqual(cfg.lifecycle, "pet")
+
+    def test_snapshot_keep_default(self):
+        cfg = _make_config(_CONTAINER_TOML, 'test-wl')
+        self.assertEqual(cfg.snapshot_keep, 3)
+
+    def test_snapshot_keep_explicit(self):
+        toml = _CONTAINER_TOML.replace(
+            'name = "test-wl"', 'name = "test-wl"\nsnapshot_keep = 5'
+        )
+        cfg = _make_config(toml, 'test-wl')
+        self.assertEqual(cfg.snapshot_keep, 5)
+
+    def test_snapshot_keep_invalid_falls_back_to_default(self):
+        # The accessor must never crash a destroy; the validator flags it.
+        for bad in ('"lots"', '0', '-1', 'true'):
+            toml = _CONTAINER_TOML.replace(
+                'name = "test-wl"', f'name = "test-wl"\nsnapshot_keep = {bad}'
+            )
+            cfg = _make_config(toml, 'test-wl')
+            self.assertEqual(cfg.snapshot_keep, 3, f"bad={bad}")
 
 
 # =============================================================================
@@ -209,7 +228,7 @@ class TestLifecycleValidation(unittest.TestCase):
 
     def test_invalid_value_fails(self):
         bad_toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "immortal"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "immortal"'
         )
         result = self._validate(bad_toml, 'test-wl')
         lifecycle_check = next(
@@ -222,10 +241,44 @@ class TestLifecycleValidation(unittest.TestCase):
 
     def test_invalid_value_increments_error_count(self):
         bad_toml = _CONTAINER_TOML.replace(
-            'enabled = false', 'enabled = false\nlifecycle = "immortal"'
+            'name = "test-wl"', 'name = "test-wl"\nlifecycle = "immortal"'
         )
         result = self._validate(bad_toml, 'test-wl')
         self.assertGreater(result["errors"], 0)
+
+    def test_snapshot_keep_omitted_no_check(self):
+        # Default (field absent) emits no snapshot_keep check at all.
+        result = self._validate(_CONTAINER_TOML, 'test-wl')
+        check = next(
+            (c for c in result["checks"] if c["check"] == "snapshot_keep"), None
+        )
+        self.assertIsNone(check)
+
+    def test_snapshot_keep_valid_passes(self):
+        toml = _CONTAINER_TOML.replace(
+            'name = "test-wl"', 'name = "test-wl"\nsnapshot_keep = 5'
+        )
+        result = self._validate(toml, 'test-wl')
+        # Valid value adds no error.
+        check = next(
+            (c for c in result["checks"] if c["check"] == "snapshot_keep"), None
+        )
+        self.assertIsNone(check)
+
+    def test_snapshot_keep_invalid_fails(self):
+        for bad in ('0', '-2', '"three"', 'true'):
+            toml = _CONTAINER_TOML.replace(
+                'name = "test-wl"', f'name = "test-wl"\nsnapshot_keep = {bad}'
+            )
+            result = self._validate(toml, 'test-wl')
+            check = next(
+                (c for c in result["checks"] if c["check"] == "snapshot_keep"),
+                None,
+            )
+            self.assertIsNotNone(check, f"bad={bad}")
+            self.assertFalse(check["passed"], f"bad={bad}")
+            self.assertEqual(check["severity"], "error")
+            self.assertGreater(result["errors"], 0, f"bad={bad}")
 
 
 # =============================================================================
@@ -374,8 +427,9 @@ class _CfgDir:
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         p = Path(self._tmp)
-        (p / f'{self._name}.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, '_get_workload_dir', return_value=p)
+        (p / self._name).mkdir()
+        (p / self._name / 'workload.toml').write_text(self._toml)
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p)
         self._patcher.start()
         return workloadctl_core.WorkloadConfig(self._name)
 
@@ -437,11 +491,22 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
                         sub.reprovision(recreate=True)
             mock_snap.assert_not_called()
 
+    @staticmethod
+    def _run_factory(images_stdout=""):
+        """Build a pod.run side_effect: 'images' lists snapshot tags, rmi/rm ok."""
+        def fake_run(*args, **kwargs):
+            res = MagicMock()
+            res.returncode = 0
+            res.stdout = images_stdout if (args and args[0] == "images") else ""
+            return res
+        return fake_run
+
     def test_pet_snapshot_and_remove_calls_commit(self):
-        """_pet_snapshot_and_remove: calls pod.commit then pod.run rm."""
+        """_pet_snapshot_and_remove: commits then removes the container."""
         with _CfgDir(_PET_CONTAINER_TOML, 'test-wl') as cfg:
             manager = _make_manager()
             pod_mock = MagicMock()
+            pod_mock.run.side_effect = self._run_factory()  # no existing snaps
             sub = ContainerSubstrate(cfg, manager)
             sub._pet_snapshot_and_remove(pod_mock, "workload-test-wl")
             # commit must have been called
@@ -450,11 +515,72 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             self.assertEqual(commit_args[0], "workload-test-wl")
             snapshot_ref = commit_args[1]
             self.assertIn("localhost/workload-snapshot/test-wl:", snapshot_ref)
-            # rm must have been called
-            pod_mock.run.assert_called_once()
-            rm_args = pod_mock.run.call_args[0]
-            self.assertIn("rm", rm_args)
-            self.assertIn("workload-test-wl", rm_args)
+            # rm -f of the container must have happened exactly once
+            rm_calls = [
+                c for c in pod_mock.run.call_args_list
+                if "rm" in c[0] and "workload-test-wl" in c[0]
+            ]
+            self.assertEqual(len(rm_calls), 1)
+
+    def test_pet_snapshot_prunes_old_snapshots(self):
+        """After a fresh commit, snapshots beyond snapshot_keep are rmi'd
+        (oldest first); the newest `keep` are retained."""
+        tags = [
+            "20260101T000000Z", "20260102T000000Z", "20260103T000000Z",
+            "20260104T000000Z", "20260105T000000Z",
+        ]
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        pod_mock.run.side_effect = self._run_factory("\n".join(tags))
+        # keep=2 → the 3 oldest get pruned, the 2 newest kept
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=2)
+        rmi_refs = [
+            c[0][1] for c in pod_mock.run.call_args_list if c[0][0] == "rmi"
+        ]
+        self.assertEqual(rmi_refs, [
+            f"{repo}:20260101T000000Z",
+            f"{repo}:20260102T000000Z",
+            f"{repo}:20260103T000000Z",
+        ])
+
+    def test_pet_prune_noop_when_within_limit(self):
+        """No rmi calls when snapshot count is at or below keep."""
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        pod_mock.run.side_effect = self._run_factory(
+            "20260101T000000Z\n20260102T000000Z"
+        )
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=3)
+        rmi_calls = [c for c in pod_mock.run.call_args_list if c[0][0] == "rmi"]
+        self.assertEqual(rmi_calls, [])
+
+    def test_pet_prune_tolerates_images_failure(self):
+        """A failing `podman images` is swallowed (never blocks the destroy)."""
+        repo = "localhost/workload-snapshot/test-wl"
+        pod_mock = MagicMock()
+        bad = MagicMock()
+        bad.returncode = 1
+        bad.stdout = ""
+        pod_mock.run.return_value = bad
+        # Should not raise and should issue no rmi
+        ContainerSubstrate._prune_pet_snapshots(pod_mock, repo, keep=1)
+        rmi_calls = [c for c in pod_mock.run.call_args_list if c[0][0] == "rmi"]
+        self.assertEqual(rmi_calls, [])
+
+    def test_pet_snapshot_failure_skips_prune(self):
+        """If commit fails, prune is skipped (nothing new was committed)."""
+        with _CfgDir(_PET_CONTAINER_TOML, 'test-wl') as cfg:
+            manager = _make_manager()
+            pod_mock = MagicMock()
+            pod_mock.commit.side_effect = RuntimeError("container not found")
+            pod_mock.run.side_effect = self._run_factory("20260101T000000Z")
+            sub = ContainerSubstrate(cfg, manager)
+            sub._pet_snapshot_and_remove(pod_mock, "workload-test-wl")
+            # only the container rm ran — no images/rmi prune calls
+            self.assertFalse(
+                any(c[0] and c[0][0] in ("images", "rmi")
+                    for c in pod_mock.run.call_args_list)
+            )
 
     def test_pet_snapshot_and_remove_tolerates_commit_failure(self):
         """If commit fails (e.g. container never ran), remove still proceeds."""

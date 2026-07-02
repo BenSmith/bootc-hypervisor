@@ -1,0 +1,41 @@
+# In-VM Caddy — TLS terminator for ${FORGEJO_HOSTNAME}. Installed into the
+# guest's /etc/workloads.d/ by the cloud-init bootstrap.
+
+[workload]
+name = "caddy"
+
+[setup]
+required_files = [
+    { path = "./Caddyfile", hint = "written by cloud-init write_files at boot" },
+]
+
+[container]
+image = "localhost/caddy:latest"
+pull = "never"
+
+[container.health]
+cmd = "curl -sS --max-time 5 -o /dev/null http://localhost:80/"
+interval = "30s"
+timeout = "10s"
+retries = 3
+start_period = "15s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    "./Caddyfile:/etc/caddy/Caddyfile:ro",
+    "./data:/var/lib/caddy",
+    "./config:/etc/caddy/config",
+]
+
+[security]
+userns = "keep-id"
+
+[network]
+mode = "host"
+
+[resources]
+service_type = "simple"
+memory_max = "384M"
+memory_high = "256M"
+cpu_quota = "100%"

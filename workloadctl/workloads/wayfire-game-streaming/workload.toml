@@ -1,0 +1,99 @@
+[workload]
+name = "wayfire-game-streaming"
+
+[container]
+image = "localhost/wayfire-game-streaming:latest"
+pull = "never"
+systemd = "always"
+
+[container.environment]
+CONTAINER_USER = "desktop"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
+DESKTOP_RESOLUTION = "1920x1080"
+
+[container.health]
+cmd = "pgrep -x sunshine > /dev/null || exit 1"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[devices]
+# This configuration requires a render node (/dev/dri/renderD*)
+gpu = "auto"
+
+# input = true is NOT used — it maps to --device /dev/input, which snapshots
+# device nodes at container start. Sunshine's uinput devices appear later, so
+# /dev/input must be a volume bind-mount (live view).
+# audio = true is NOT used — it mounts host PipeWire/PulseAudio sockets, but
+# this container runs its own PipeWire internally. Only /dev/snd is needed.
+devices = ["/dev/uinput", "/dev/snd"]
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL", "NET_BIND_SERVICE",
+    "SETFCAP", "SETPCAP",
+    "SYS_CHROOT", "SYS_NICE",
+]
+extra_groups = ["video", "render", "input", "audio"]
+# Map container root to the workload user on the host as well, so files
+# created by container-bootstrap (running as uid 0 inside) end up owned by
+# _wl-wayfire-game-streaming on the host — same as files created by desktop
+# (mapped via the keep-id suffix above). Without this, root-created dirs like
+# /home/desktop/.config land on a subuid the host workload user can't touch.
+extra_uidmaps = ["+0:@{UID}:1"]
+extra_gidmaps = ["+0:@{GID}:1"]
+selinux_policy = true
+
+[storage]
+volumes = [
+    "./home:/home/desktop",
+    # Homelab-CA-signed TLS cert for the web UI (https://<host>:47990), minted
+    # host-side by setup.sh as root-owned 0644 (world-readable, like the rest of
+    # the workload dir under keep-id). Absent (no Homelab CA on the host) →
+    # Sunshine self-signs.
+    "./tls:/etc/sunshine/tls:ro",
+    "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
+    "/run/udev:/run/udev:ro",
+    "/dev/input:/dev/input",
+]
+
+[network]
+mode = "host"
+
+[resources]
+shm_size = "2g"
+memory_max = "8G"
+memory_high = "6G"
+cpu_quota = "400%"
+tasks_max = 16384
+
+# Raise the scheduling-priority rlimit ceilings so the SYS_NICE capability above
+# is actually usable. Without these the unit inherits LimitNICE=0/LimitRTPRIO=0,
+# so Sunshine's capture/encode threads and the compositor are stuck at nice 0 and
+# cannot get real-time scheduling — Steam logs "failed to set thread priority …
+# elevated priorities most likely unavailable", and stream frame-pacing jitters
+# under load. systemd propagates these into the container (podman inherits the
+# caller's rlimits; default_ulimits is empty). LimitNICE=40 ⇒ allows down to nice
+# -20 (safe: CFS is proportional-share, negative nice cannot starve the host).
+# LimitRTPRIO=20 gives Sunshine modest real-time headroom while staying well
+# below host kernel RT threads (migration/* at 99); the global RT throttle
+# (kernel.sched_rt_runtime_us, 5% reserved for non-RT) bounds it further. Note:
+# cgroup v2 cpu.max does NOT throttle RT tasks, so keep this ceiling low.
+custom_directives = { LimitNICE = "40", LimitRTPRIO = "20" }
+
+[host]
+# Host prerequisites: uinput kernel module, udev rule, and the host-side udev
+# input-event relay.
+setup = "setup.sh"
+
+[build]
+# The Sunshine RPM is pinned in the Containerfile (ARG SUNSHINE_RPM_URL). When
+# that release goes stale, override the URL per build (dnf installs from a URL
+# directly — fetch only, no local file):
+#   sudo SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v.../Sunshine-...rpm \
+#       workloadctl build wayfire-game-streaming
+arg_env = ["SUNSHINE_RPM_URL"]

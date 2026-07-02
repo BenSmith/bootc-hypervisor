@@ -1,0 +1,619 @@
+# Fedora 44 labwc desktop served over VNC
+#
+# labwc runs in headless wlroots mode (no host Wayland or KMS); wayvnc
+# attaches to the labwc compositor and serves it on TCP 5900.
+#
+# Build:
+#   sudo workloadctl build vncdesktop-labwc
+#
+# All desktop configuration lives in system-wide locations (/etc/xdg, /etc,
+# /usr/local/share). The container user's $HOME is provided at runtime by
+# a host bind mount (./home:/home/desktop), starting empty; XDG fallback
+# to /etc/xdg/* serves the defaults for every tool used here. Users
+# customize by dropping files into the host-side home directory.
+
+FROM registry.fedoraproject.org/fedora:44
+
+# Desktop session components:
+#   arc-theme             - GTK theme (clean dark style)
+#   btop                  - system monitor
+#   cliphist              - clipboard history; pairs with wl-paste and fuzzel (Ctrl+Alt+V)
+#   dbus-daemon           - per-session D-Bus (waybar, mako, clipboard need it)
+#   foot                  - terminal emulator (native Wayland, lightweight)
+#   fuzzel                - app launcher (native Wayland, keyboard-driven)
+#   geany                 - lightweight GUI text editor
+#   imv                   - image viewer (Wayland native)
+#   jetbrains-mono-fonts  - monospace font for the terminal
+#   labwc                 - Wayland compositor (wlroots-based)
+#                           grim and xdg-desktop-portal-wlr pulled in as deps
+#   labwc-menu-generator  - generates right-click menu from .desktop files
+#   mako                  - notification daemon (native Wayland)
+#   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
+#   mesa-libEGL           - EGL for wlroots / wayvnc
+#   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
+#   procps-ng             - pkill, used by labwc autostart for housekeeping
+#   sudo                  - passwordless sudo for the desktop user
+#   swaybg                - wallpaper setter
+#   thunar                - file manager
+#   tini                  - minimal init / subreaper for zombie reaping
+#   tmux                  - terminal multiplexer
+#   waybar                - status bar
+#   wayvnc                - VNC server attaching to the labwc compositor
+#   wl-clipboard          - wl-copy / wl-paste for clipboard support
+#   wlr-randr             - sets the headless output resolution at runtime
+#   xdg-user-dirs         - creates ~/Documents, ~/Downloads etc. on first login
+#   xorg-x11-server-Xwayland - X11 compatibility; labwc aborts at startup
+#                              if its built-in xwayland support can't find
+#                              /usr/bin/Xwayland
+RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
+    arc-theme \
+    bash-completion \
+    btop \
+    cliphist \
+    dbus-daemon \
+    foot \
+    fuzzel \
+    geany \
+    git-core \
+    imv \
+    jetbrains-mono-fonts \
+    labwc \
+    labwc-menu-generator \
+    mako \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    papirus-icon-theme \
+    procps-ng \
+    rsync \
+    sudo \
+    swaybg \
+    thunar \
+    tini \
+    tmux \
+    waybar \
+    wayvnc \
+    wl-clipboard \
+    wlr-randr \
+    xdg-user-dirs \
+    xorg-x11-server-Xwayland \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN sed -i 's/^hosts:.*/hosts: files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+
+# UID 1000 matches the workload's keep-id user mapping. Use -M (no home)
+# because /home/desktop is provided at runtime by the workload's
+# ./home:/home/desktop bind mount; an in-image home would be shadowed anyway.
+RUN useradd -M -u 1000 -s /bin/bash desktop \
+    && echo "desktop ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/desktop \
+    && chmod 0440 /etc/sudoers.d/desktop
+
+# Headless wlroots backend — labwc creates a virtual output instead of needing
+# a host Wayland socket or DRM/KMS device. wayvnc attaches to it.
+ENV GDK_BACKEND=wayland \
+    LIBSEAT_BACKEND=noop \
+    MOZ_ENABLE_WAYLAND=1 \
+    QT_QPA_PLATFORM=wayland \
+    WLR_BACKENDS=headless \
+    WLR_LIBINPUT_NO_DEVICES=1 \
+    XDG_RUNTIME_DIR=/run/user/1000 \
+    XDG_SESSION_TYPE=wayland
+
+# --- labwc compositor config (system-wide; user can override via ~/.config/labwc) ---
+
+RUN mkdir -p /etc/xdg/labwc && cat > /etc/xdg/labwc/rc.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<labwc_config>
+
+  <core>
+    <gap>6</gap>
+  </core>
+
+  <theme>
+    <name>Arc-Labwc</name>
+    <cornerRadius>4</cornerRadius>
+    <font place="ActiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <slant>Normal</slant>
+      <weight>Bold</weight>
+    </font>
+    <font place="InactiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <slant>Normal</slant>
+      <weight>Normal</weight>
+    </font>
+  </theme>
+
+  <desktops>
+    <popupTime>500</popupTime>
+    <names>
+      <name>1</name>
+      <name>2</name>
+      <name>3</name>
+      <name>4</name>
+    </names>
+  </desktops>
+
+  <keyboard>
+    <default/>
+
+    <!-- Applications
+         Ctrl+Alt is used as the primary modifier — chosen to coexist with
+         host DEs when this image is also run nested. Inside a VNC viewer,
+         Super is often intercepted by the local DE before reaching the
+         server, so Ctrl+Alt is the more reliable choice either way.
+    -->
+    <keybind key="C-A-Return">
+      <action name="Execute"><command>foot</command></action>
+    </keybind>
+    <keybind key="C-A-space">
+      <action name="Execute"><command>fuzzel</command></action>
+    </keybind>
+    <keybind key="C-A-v">
+      <action name="Execute">
+        <command>sh -c 'cliphist list | fuzzel --dmenu | cliphist decode | wl-copy'</command>
+      </action>
+    </keybind>
+
+    <!-- Window management -->
+    <keybind key="C-A-q">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="C-A-f">
+      <action name="ToggleMaximize"/>
+    </keybind>
+    <!-- Snapping: hjkl avoids Ctrl+Alt+arrows (KDE workspace switch on host) -->
+    <keybind key="C-A-h">
+      <action name="SnapToEdge"><direction>left</direction></action>
+    </keybind>
+    <keybind key="C-A-l">
+      <action name="SnapToEdge"><direction>right</direction></action>
+    </keybind>
+    <keybind key="C-A-k">
+      <action name="SnapToEdge"><direction>up</direction></action>
+    </keybind>
+    <keybind key="C-A-j">
+      <action name="SnapToEdge"><direction>down</direction></action>
+    </keybind>
+    <keybind key="C-A-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+    <keybind key="C-A-S-Tab">
+      <action name="PreviousWindow"/>
+    </keybind>
+
+    <!-- Workspaces -->
+    <keybind key="C-A-1">
+      <action name="GoToDesktop"><to>1</to></action>
+    </keybind>
+    <keybind key="C-A-2">
+      <action name="GoToDesktop"><to>2</to></action>
+    </keybind>
+    <keybind key="C-A-3">
+      <action name="GoToDesktop"><to>3</to></action>
+    </keybind>
+    <keybind key="C-A-4">
+      <action name="GoToDesktop"><to>4</to></action>
+    </keybind>
+    <keybind key="C-A-S-1">
+      <action name="SendToDesktop"><to>1</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="C-A-S-2">
+      <action name="SendToDesktop"><to>2</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="C-A-S-3">
+      <action name="SendToDesktop"><to>3</to><follow>yes</follow></action>
+    </keybind>
+    <keybind key="C-A-S-4">
+      <action name="SendToDesktop"><to>4</to><follow>yes</follow></action>
+    </keybind>
+
+  </keyboard>
+
+  <mouse>
+    <default/>
+    <context name="Root">
+      <mousebind button="Right" action="Press">
+        <action name="ShowMenu"><menu>root-menu</menu></action>
+      </mousebind>
+    </context>
+  </mouse>
+
+</labwc_config>
+EOF
+
+RUN cat > /etc/xdg/labwc/environment << 'EOF'
+XCURSOR_THEME=Adwaita
+XCURSOR_SIZE=24
+GTK_THEME=Arc-Dark
+QT_QPA_PLATFORM=wayland
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+EOF
+
+RUN cat > /etc/xdg/labwc/autostart << 'EOF'
+xdg-user-dirs-update
+swaybg -c '#383c4a' &
+wl-paste --watch cliphist store &
+mako &
+sleep 0.5 && waybar &
+EOF
+
+# --- .desktop entries (system-wide overrides under /usr/local/share) ---
+# Hide dependency entries that clutter the menu, and tidy up Thunar / btop.
+# These must be in place BEFORE labwc-menu-generator runs below.
+
+RUN mkdir -p /usr/local/share/applications && \
+    for f in foot-server footclient thunar-bulk-rename thunar-settings xterm panel-preferences panel-desktop-handler; do \
+        printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' \
+            > /usr/local/share/applications/${f}.desktop ; \
+    done
+
+RUN cat > /usr/local/share/applications/btop.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=btop++
+Icon=btop
+Exec=foot --window-size-chars=80x24 btop
+Categories=System;Monitor;
+EOF
+
+RUN cat > /usr/local/share/applications/thunar.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Thunar File Manager
+Icon=org.xfce.thunar
+Exec=thunar
+Categories=Utility;FileManager;
+MimeType=inode/directory;
+EOF
+
+# Right-click menu generated at build time from installed .desktop files —
+# the app set is fixed by the image, so there's no need to regenerate at
+# session start. Users who install extra apps and want them in the menu
+# can drop their own ~/.config/labwc/menu.xml.
+RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
+
+# --- App tool configs in /etc/xdg (XDG fallback path) ---
+# Minimal waybar config — avoids modules that crash in a container environment
+# (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
+# caused segfaults or runaway memory usage during testing).
+
+RUN mkdir -p /etc/xdg/waybar && cat > /etc/xdg/waybar/config.jsonc << 'EOF'
+{
+    "modules-left": [],
+    "modules-center": ["clock"],
+    "modules-right": ["cpu", "memory"],
+    "clock": {
+        "format": "{:%a %b %d  %H:%M}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    },
+    "cpu": {
+        "format": "cpu {usage}%",
+        "tooltip": false,
+        "interval": 2
+    },
+    "memory": {
+        "format": "mem {}%",
+        "interval": 5
+    }
+}
+EOF
+
+RUN cat > /etc/xdg/waybar/style.css << 'EOF'
+* {
+    font-family: Cantarell, sans-serif;
+    font-size: 13px;
+}
+
+window#waybar {
+    background-color: #383c4a;
+    color: #d3dae3;
+    border-bottom: 2px solid #2b2e3b;
+}
+
+#clock {
+    color: #d3dae3;
+    padding: 0 12px;
+}
+
+#cpu,
+#memory {
+    color: #9da0a8;
+    padding: 0 10px;
+}
+
+#cpu:hover,
+#memory:hover {
+    color: #d3dae3;
+}
+
+#cpu.warning,
+#memory.warning {
+    color: #e67e22;
+}
+
+#cpu.critical,
+#memory.critical {
+    color: #e74c3c;
+}
+EOF
+
+RUN mkdir -p /etc/xdg/foot && cat > /etc/xdg/foot/foot.ini << 'EOF'
+[main]
+font=JetBrains Mono:size=11
+pad=4x4
+initial-window-size-chars=80x25
+
+[scrollback]
+lines=10000
+
+[mouse]
+hide-when-typing=yes
+
+[colors-dark]
+alpha=1.0
+background=383c4a
+foreground=d3dae3
+
+regular0=1c2023
+regular1=c0392b
+regular2=4e9a06
+regular3=c4a000
+regular4=5294e2
+regular5=75507b
+regular6=06989a
+regular7=d3dae3
+
+bright0=555753
+bright1=ef2929
+bright2=8ae234
+bright3=fce94f
+bright4=729fcf
+bright5=ad7fa8
+bright6=34e2e2
+bright7=eeeeec
+EOF
+
+RUN mkdir -p /etc/xdg/fuzzel && cat > /etc/xdg/fuzzel/fuzzel.ini << 'EOF'
+[main]
+font=Cantarell:size=12
+icon-theme=Papirus-Dark
+icons-enabled=yes
+lines=12
+terminal=foot -e
+width=35
+
+[colors]
+background=383c4aff
+border=5294e2ff
+match=5294e2ff
+selection-match=5294e2ff
+selection-text=ffffffff
+selection=4b5162ff
+text=d3dae3ff
+
+[border]
+width=1
+radius=4
+
+[dmenu]
+exit-immediately-if-empty=yes
+EOF
+
+RUN mkdir -p /etc/xdg/mako && cat > /etc/xdg/mako/config << 'EOF'
+background-color=#383c4a
+border-color=#5294e2
+border-radius=4
+border-size=1
+default-timeout=5000
+font=Cantarell 11
+margin=10
+max-visible=5
+padding=10
+text-color=#d3dae3
+width=320
+EOF
+
+# --- Theme: GTK settings (system-wide) and Arc-Labwc window decorations ---
+
+RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini << 'EOF'
+[Settings]
+gtk-button-images=0
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-enable-event-sounds=0
+gtk-enable-input-feedback-sounds=0
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-menu-images=0
+gtk-theme-name=Arc-Dark
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintmedium
+gtk-xft-rgba=rgb
+EOF
+
+RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini << 'EOF'
+[Settings]
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-font-name=Cantarell 11
+gtk-icon-theme-name=Papirus-Dark
+gtk-theme-name=Arc-Dark
+EOF
+
+# Arc-Labwc window decoration theme — based on Arc-Dark color palette.
+# /usr/share/themes is searched by labwc.
+RUN mkdir -p /usr/share/themes/Arc-Labwc/openbox-3 && \
+    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc << 'EOF'
+border.width: 1
+padding.height: 5
+window.client.padding.height: 0
+window.client.padding.width: 0
+window.handle.width: 0
+window.label.text.justify: center
+window.titlebar.padding.height: 2
+window.titlebar.padding.width: 5
+
+# Titlebar buttons
+window.button.height: 20
+window.button.spacing: 0
+window.button.width: 28
+
+# Active window
+window.active.border.color:                 #5294e2
+window.active.button.hover.image.color:     #ffffff
+window.active.button.pressed.image.color:   #5294e2
+window.active.button.unpressed.image.color: #d3dae3
+window.active.label.text.color:             #ffffff
+window.active.title.bg.color:               #4b5162
+window.active.title.bg:                     Solid
+
+# Inactive window
+window.inactive.border.color:                 #404552
+window.inactive.button.unpressed.image.color: #676a72
+window.inactive.label.text.color:             #9da0a8
+window.inactive.title.bg.color:               #383c4a
+window.inactive.title.bg:                     Solid
+
+# Menu
+menu.border.color: #2b2e3b
+menu.border.width: 1
+menu.items.active.bg.color: #4b5162
+menu.items.active.text.color: #ffffff
+menu.items.bg.color: #383c4a
+menu.items.padding.x: 6
+menu.items.padding.y: 4
+menu.items.text.color: #d3dae3
+menu.overlap.x: -4
+menu.overlap.y: 0
+menu.separator.color: #5294e2
+menu.separator.padding.height: 3
+menu.separator.padding.width: 6
+menu.separator.width: 1
+menu.width.max: 300
+menu.width.min: 140
+
+# On-screen display (Alt+Tab switcher, workspace switcher)
+osd.bg.color: #383c4a
+osd.label.text.color: #5294e2
+osd.border.width: 1
+osd.window-switcher.width: 600
+osd.window-switcher.padding: 8
+osd.window-switcher.item.padding.x: 12
+osd.window-switcher.item.padding.y: 12
+osd.window-switcher.item.active.border.width: 1
+osd.window-switcher.preview.border.width: 2
+osd.window-switcher.preview.border.color: #5294e2
+osd.workspace-switcher.boxes.width: 150
+osd.workspace-switcher.boxes.height: 40
+osd.workspace-switcher.boxes.border.width: 1
+
+# Snapping overlay
+snapping.overlay.edge.bg.color: #5294e280
+snapping.overlay.region.bg.color: #5294e280
+EOF
+
+# --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
+
+RUN cat > /etc/profile.d/desktop-prompt.sh << 'EOF'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][labwc]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+EOF
+
+# --- Entrypoint script ---
+# Starts a per-session D-Bus, the labwc compositor on the headless backend,
+# sizes the virtual output, then starts wayvnc on 0.0.0.0:5900.
+
+RUN cat > /usr/local/bin/start-desktop.sh << 'STARTUP' && chmod 0755 /usr/local/bin/start-desktop.sh
+#!/bin/bash
+set -e
+
+# Ensure XDG_RUNTIME_DIR exists — /run is a fresh tmpfs at container start.
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+ls /dev/dri/renderD* >/dev/null 2>&1 || {
+    export WLR_RENDERER=pixman
+    export LIBGL_ALWAYS_SOFTWARE=1
+}
+
+# Configure wayvnc auth before the compositor starts (read at wayvnc spawn).
+mkdir -p "$HOME/.config/wayvnc"
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    cat > "$HOME/.config/wayvnc/config" <<CFG
+enable_auth=true
+username=${VNC_USERNAME:-desktop}
+password=${VNC_PASSWORD}
+CFG
+    chmod 600 "$HOME/.config/wayvnc/config"
+    echo "wayvnc: authentication enabled (username: ${VNC_USERNAME:-desktop})"
+else
+    echo "wayvnc: WARNING — no authentication. Set VNC_PASSWORD to enable."
+fi
+
+# Launch labwc under a private D-Bus session (waybar/mako/clipboard need it).
+dbus-run-session labwc &
+LABWC_PID=$!
+
+# Wait for the wayland socket to appear.
+for i in $(seq 1 50); do
+    for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+        if [ -S "$sock" ] && [ "${sock##*.}" != "lock" ]; then
+            export WAYLAND_DISPLAY="${sock##*/}"
+            break 2
+        fi
+    done
+    sleep 0.1
+done
+
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "ERROR: labwc did not create a Wayland socket"
+    kill "$LABWC_PID" 2>/dev/null || true
+    exit 1
+fi
+
+# Set the headless output resolution (HEADLESS-1 is wlroots' default name).
+wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60" || true
+
+wayvnc 0.0.0.0 5900 &
+WAYVNC_PID=$!
+
+cleanup() {
+    kill "$WAYVNC_PID" 2>/dev/null || true
+    kill "$LABWC_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup TERM INT
+
+# Exit when either child dies — the other gets cleaned up.
+wait -n "$LABWC_PID" "$WAYVNC_PID"
+cleanup
+STARTUP
+
+RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && chmod 700 /run/user/1000
+
+# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
+# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
+# which breaks apps with a bundled TLS stack that read the bundle *file*
+# ("unable to load trusted SSL root certificates"). Restore the legacy names as
+# symlinks to the stable extracted bundle (Fedora's documented permanent fix).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
+USER desktop
+WORKDIR /home/desktop
+
+EXPOSE 5900
+
+# tini -s: subreaper mode — reaps orphaned descendants without being PID 1
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+CMD ["/usr/local/bin/start-desktop.sh"]

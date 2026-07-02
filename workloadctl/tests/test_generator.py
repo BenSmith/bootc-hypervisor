@@ -8,6 +8,7 @@ No root required — all paths are overridden via env vars and argv.
 import importlib.machinery
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,10 +45,14 @@ def run_generator(config_dir, services_dir, sysusers_dir):
     )
 
 
-def write_config(config_dir, name, toml_content):
+def write_config(config_dir, name, toml_content, enabled=True):
     """Write a TOML config file to the config directory."""
-    path = Path(config_dir) / f"{name}.toml"
-    path.write_text(textwrap.dedent(toml_content))
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
+    body = textwrap.dedent(toml_content)
+    path.write_text(body)
+    if enabled:
+        (Path(config_dir) / name / ".enabled").touch()
     return path
 
 
@@ -88,7 +93,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -119,7 +123,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -127,7 +130,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -151,11 +153,10 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "off", """\
             [workload]
             name = "off"
-            enabled = false
 
             [container]
             image = "nginx"
-        """)
+        """, enabled=False)
 
         self.run_gen()
         self.assertFalse(
@@ -165,7 +166,6 @@ class TestGeneratorBasic(unittest.TestCase):
     def test_missing_name_skipped(self):
         write_config(self.config_dir, "broken", """\
             [workload]
-            enabled = true
 
             [container]
             image = "nginx"
@@ -181,7 +181,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc", """\
             [workload]
             name = "svc"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -197,14 +196,12 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "caddy", """\
             [workload]
             name = "caddy"
-            enabled = true
             [container]
             image = "docker.io/caddy:latest"
         """)
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             requires = ["caddy"]
             [container]
             image = "alpine"
@@ -218,14 +215,12 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "registry", """\
             [workload]
             name = "registry"
-            enabled = true
             [container]
             image = "docker.io/registry:2"
         """)
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             after = ["registry"]
             [container]
             image = "alpine"
@@ -240,14 +235,12 @@ class TestGeneratorBasic(unittest.TestCase):
             write_config(self.config_dir, name, f"""\
                 [workload]
                 name = "{name}"
-                enabled = true
                 [container]
                 image = "alpine"
             """)
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
             requires = ["db"]
             after = ["cache"]
             [container]
@@ -263,7 +256,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc2", """\
             [workload]
             name = "svc2"
-            enabled = true
             [container]
             image = "alpine"
         """)
@@ -277,7 +269,6 @@ class TestGeneratorBasic(unittest.TestCase):
         write_config(self.config_dir, "svc3", """\
             [workload]
             name = "svc3"
-            enabled = true
             [container]
             image = "alpine"
             [resources]
@@ -307,7 +298,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -347,18 +337,33 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertNotIn("workload-app-pod.service", umbrella)
 
     def test_stale_pause_migrate_in_head_units_only(self):
-        """`podman system migrate` must run in each workload's first
-        podman-touching unit (single service, pod service, net service) and
-        never in pod/bridge member services — there it would kill the libpod
-        pause out from under the live pod infra / sibling containers.
-        Regresses the pasta restart-loop bug (stale pause pins a mount ns
-        whose PrivateTmp /tmp is deleted; pasta's sandbox mount gets ENOENT).
+        """The fresh-pause cleanup (`podman system migrate` + rm of
+        pause.pid/ns_handles) must run in each workload's first podman-touching
+        unit (single service, pod service, net service) and never in pod/bridge
+        member services — there it would kill the libpod pause out from under
+        the live pod infra / sibling containers. Regresses the pasta
+        restart-loop bug: a pause surviving the previous activation pins a mount
+        ns whose PrivateTmp /tmp is deleted, the next `podman run` joins it, and
+        pasta's pivot_root tmpfs mount gets ENOENT. The rm forces the rootless
+        join shortcut to fall through so a fresh pause is built in the live ns.
         """
         migrate = "ExecStartPre=-/usr/bin/podman system migrate"
+        # The rm is uid-specific; assert the stable prefix/suffix.
+        rm_prefix = "ExecStartPre=-/usr/bin/rm -f /run/user/"
+        rm_files = "/libpod/tmp/pause.pid"
+
+        def assert_fresh_pause(unit_text):
+            self.assertIn(migrate, unit_text)
+            self.assertIn(rm_prefix, unit_text)
+            self.assertIn(rm_files, unit_text)
+            self.assertIn("/libpod/tmp/ns_handles", unit_text)
+
+        def assert_no_fresh_pause(unit_text):
+            self.assertNotIn(migrate, unit_text)
+            self.assertNotIn(rm_prefix, unit_text)
         write_config(self.config_dir, "solo", """\
             [workload]
             name = "solo"
-            enabled = true
 
             [container]
             image = "docker.io/nginx:latest"
@@ -366,7 +371,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "grp", """\
             [workload]
             name = "grp"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -377,7 +381,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "brg", """\
             [workload]
             name = "brg"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -389,17 +392,17 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
         solo = (Path(self.services_dir) / "workload-solo.service").read_text()
-        self.assertIn(migrate, solo)
+        assert_fresh_pause(solo)
 
         pod = (Path(self.services_dir) / "workload-grp-pod.service").read_text()
-        self.assertIn(migrate, pod)
+        assert_fresh_pause(pod)
         pod_member = (Path(self.services_dir) / "workload-grp-db.service").read_text()
-        self.assertNotIn(migrate, pod_member)
+        assert_no_fresh_pause(pod_member)
 
         net = (Path(self.services_dir) / "workload-brg-net.service").read_text()
-        self.assertIn(migrate, net)
+        assert_fresh_pause(net)
         net_member = (Path(self.services_dir) / "workload-brg-web.service").read_text()
-        self.assertNotIn(migrate, net_member)
+        assert_no_fresh_pause(net_member)
 
     def test_per_container_environment_sibling_form(self):
         """[containers.environment] (sibling of [containers.container]) must
@@ -408,7 +411,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -432,7 +434,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -454,7 +455,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -480,7 +480,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -517,7 +516,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "hc", """\
             [workload]
             name = "hc"
-            enabled = true
             mode = "single"
 
             [container]
@@ -550,7 +548,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "pm", """\
             [workload]
             name = "pm"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -578,7 +575,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
             mode = "bridge"
 
             [[containers]]
@@ -609,7 +605,6 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         write_config(self.config_dir, "stack", """\
             [workload]
             name = "stack"
-            enabled = true
 
             [network]
             mode = "pasta"
@@ -665,7 +660,6 @@ class TestGeneratorPlainEnvVars(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -702,7 +696,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "secret-app", """\
             [workload]
             name = "secret-app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -731,7 +724,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "creds", """\
             [workload]
             name = "creds"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -755,7 +747,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "filemount", """\
             [workload]
             name = "filemount"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -785,7 +776,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "multi-creds", """\
             [workload]
             name = "multi-creds"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -820,7 +810,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "clobber", """\
             [workload]
             name = "clobber"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -855,7 +844,6 @@ class TestGeneratorSecrets(unittest.TestCase):
         write_config(self.config_dir, "podsec", """\
             [workload]
             name = "podsec"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -901,7 +889,6 @@ class TestGeneratorVolumeExpansion(unittest.TestCase):
         write_config(self.config_dir, "vols", """\
             [workload]
             name = "vols"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -932,7 +919,6 @@ class TestGeneratorDevices(unittest.TestCase):
         write_config(self.config_dir, "gpu", """\
             [workload]
             name = "gpu"
-            enabled = true
 
             [container]
             image = "rocm-app"
@@ -951,7 +937,6 @@ class TestGeneratorDevices(unittest.TestCase):
         write_config(self.config_dir, "usb", """\
             [workload]
             name = "usb"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -985,7 +970,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "limited", """\
             [workload]
             name = "limited"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1022,7 +1006,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1039,7 +1022,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "slowdb", """\
             [workload]
             name = "slowdb"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1061,7 +1043,6 @@ class TestGeneratorResources(unittest.TestCase):
         write_config(self.config_dir, "spanstop", """\
             [workload]
             name = "spanstop"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1096,7 +1077,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "web", """\
             [workload]
             name = "web"
-            enabled = true
             [container]
             image = "nginx:latest"
         """)
@@ -1111,7 +1091,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "pm", """\
             [workload]
             name = "pm"
-            enabled = true
             mode = "pod"
             [[containers]]
             name = "a"
@@ -1132,7 +1111,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "capped", """\
             [workload]
             name = "capped"
-            enabled = true
             [container]
             image = "myapp"
             [resources]
@@ -1164,7 +1142,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1179,7 +1156,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "clean", """\
             [workload]
             name = "clean"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1194,7 +1170,6 @@ class TestGeneratorUserDropin(unittest.TestCase):
         write_config(self.config_dir, "rm", """\
             [workload]
             name = "rm"
-            enabled = true
             [container]
             image = "myapp"
         """)
@@ -1218,7 +1193,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1232,7 +1206,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "gpu", """\
             [workload]
             name = "gpu"
-            enabled = true
 
             [container]
             image = "gpu-app"
@@ -1250,7 +1223,6 @@ class TestGeneratorSlice(unittest.TestCase):
         write_config(self.config_dir, "sys", """\
             [workload]
             name = "sys"
-            enabled = true
 
             [container]
             image = "sysapp"
@@ -1279,7 +1251,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "keepid", """\
             [workload]
             name = "keepid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1293,7 +1264,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "hostns", """\
             [workload]
             name = "hostns"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1310,7 +1280,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "uidgid", """\
             [workload]
             name = "uidgid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1327,7 +1296,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "uidonly", """\
             [workload]
             name = "uidonly"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1344,7 +1312,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "gidonly", """\
             [workload]
             name = "gidonly"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1361,7 +1328,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "badns", """\
             [workload]
             name = "badns"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1378,7 +1344,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "baduid", """\
             [workload]
             name = "baduid"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1395,7 +1360,6 @@ class TestGeneratorUserns(unittest.TestCase):
         write_config(self.config_dir, "badparam", """\
             [workload]
             name = "badparam"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1424,7 +1388,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "labeled", """\
             [workload]
             name = "labeled"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -1441,7 +1404,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "multi-sel", """\
             [workload]
             name = "multi-sel"
-            enabled = true
             mode = "pod"
 
             [security]
@@ -1467,7 +1429,6 @@ class TestGeneratorSelinuxLabel(unittest.TestCase):
         write_config(self.config_dir, "bad-sel", """\
             [workload]
             name = "bad-sel"
-            enabled = true
             mode = "pod"
 
             [[containers]]
@@ -1506,7 +1467,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1530,7 +1490,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "sysd", """\
             [workload]
             name = "sysd"
-            enabled = true
 
             [container]
             image = "systemd-app"
@@ -1549,7 +1508,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "notifywl", """\
             [workload]
             name = "notifywl"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1569,7 +1527,6 @@ class TestGeneratorServiceType(unittest.TestCase):
         write_config(self.config_dir, "badtype", """\
             [workload]
             name = "badtype"
-            enabled = true
 
             [container]
             image = "alpine"
@@ -1697,7 +1654,6 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         write_config(self.config_dir, name, f"""\
             [workload]
             name = "{name}"
-            enabled = true
 
             [vm]
             vcpus = 2
@@ -1793,6 +1749,23 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         # own uid, breaking multi-user data sharing inside the guest).
         self.assertNotIn("User=", sidecar)
         self.assertIn("--sandbox=chroot", sidecar)
+
+    def test_virtiofsd_translates_guest_user_to_host_workload_uid(self):
+        # The guest's primary user is uid/gid 1000 (cloud-init default), while
+        # the host share is owned by the workload user (>=10000). virtiofsd must
+        # bidirectionally translate 1000 <-> the workload uid so the guest user
+        # can write the share. The exact slot isn't deterministic across hosts
+        # (get_next_uid scans the live passwd DB — a CI runner with any UID in
+        # [10000, 52948] shifts it off 10000), so derive the allocated uid from
+        # the drop-in rather than hardcoding it.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
+        uid = int(re.search(r"^u _wl-fedora-vm (\d+)", sysusers, re.M).group(1))
+        self.assertGreaterEqual(uid, 10000)
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertIn(f"--translate-uid=map:1000:{uid}:1", sidecar)
+        self.assertIn(f"--translate-gid=map:1000:{uid}:1", sidecar)
 
     def test_bridge_service_does_not_swallow_dnsmasq_failures(self):
         # The earlier "|| true" trailing the dnsmasq ExecStart hid genuine
@@ -1897,12 +1870,15 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self._run()
         svc = self._read("workload-fedora-vm.service")
         self.assertIn("data.qcow2", svc)
+        # data.qcow2 (precious) lives in the backup-captured data/ subtree,
+        # while system.qcow2 (reconstructible) stays in state/.
+        self.assertIn("/fedora-vm/data/data.qcow2", svc)
+        self.assertIn("/fedora-vm/state/system.qcow2", svc)
 
     def test_no_data_disk_when_size_omitted(self):
         write_config(self.config_dir, "minvm", f"""\
             [workload]
             name = "minvm"
-            enabled = true
 
             [vm]
             vcpus = 1

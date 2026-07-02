@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import workloadctl_core
 import substrate as _substrate_mod
 from substrate import (
@@ -26,7 +27,6 @@ from substrate import (
     NotApplicable,
     BackupError,
     get_substrate,
-    _ignore_vm_rebuild,
 )
 import cmd_backup
 import cmd_drift
@@ -50,7 +50,6 @@ def _args(**kwargs):
 MINIMAL_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -59,7 +58,6 @@ image = "example.com/test:latest"
 VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -76,8 +74,9 @@ class _WorkloadDir:
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
-        (tmp_path / f'{self._name}.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
+        (tmp_path / self._name).mkdir()
+        (tmp_path / self._name / 'workload.toml').write_text(self._toml)
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
@@ -92,8 +91,9 @@ def _make_vm_config():
     """Build a test-vm WorkloadConfig backed by a temp dir (avoids sys.modules races)."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / 'test-vm.toml').write_text(VM_TOML)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        (p / 'test-vm').mkdir()
+        (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return workloadctl_core.WorkloadConfig('test-vm')
 
 
@@ -146,13 +146,14 @@ class TestVMStats(unittest.TestCase):
         """cmd_stats on a VM workload prints a not-applicable message and exits 0."""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-vm.toml').write_text(VM_TOML)
+            (p / 'test-vm').mkdir()
+            (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
             args = _args(workload='test-vm', json=False, follow=False)
             manager = MagicMock()
             manager.user_exists.return_value = True
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_inspect.cmd_stats(args, manager)
@@ -217,8 +218,9 @@ class TestContainerBackupConsistency(unittest.TestCase):
     def _make_config(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(MINIMAL_TOML)
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(MINIMAL_TOML)
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                 return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_cold_passes_no_stop_false(self):
@@ -497,54 +499,11 @@ class TestBackupVMCrash(unittest.TestCase):
         mock_impl.assert_not_called()
 
 
-# ── _ignore_vm_rebuild ────────────────────────────────────────────────────────
-
-class TestIgnoreVMRebuild(unittest.TestCase):
-
-    def test_skips_system_qcow2(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            skipped = ignore(str(base), ['system.qcow2', 'data.qcow2', 'cloud-init.iso'])
-        self.assertIn('system.qcow2', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-        self.assertNotIn('cloud-init.iso', skipped)
-
-    def test_skips_gen_variants(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            contents = ['system.qcow2.gen-1', 'system.qcow2.gen-2', 'data.qcow2']
-            skipped = ignore(str(base), contents)
-        self.assertIn('system.qcow2.gen-1', skipped)
-        self.assertIn('system.qcow2.gen-2', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-
-    def test_skips_image_cache(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            contents = ['fedora.image-cache', 'data.qcow2']
-            skipped = ignore(str(base), contents)
-        self.assertIn('fedora.image-cache', skipped)
-        self.assertNotIn('data.qcow2', skipped)
-
-    def test_does_not_skip_in_subdirs(self):
-        """Rebuild artifacts outside the base dir are not skipped."""
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            ignore = _ignore_vm_rebuild(base)
-            subdir = str(base / 'subdir')
-            skipped = ignore(subdir, ['system.qcow2'])
-        self.assertNotIn('system.qcow2', skipped)
-
-
 # ── ContainerSubstrate.liveness() multi-container semantics ──────────────────
 
 SINGLE_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -554,7 +513,6 @@ POD_TOML = """\
 [workload]
 name = "test-pod"
 mode = "pod"
-enabled = true
 
 [[containers]]
 name = "web"
@@ -569,8 +527,9 @@ image = "example.com/db:latest"
 def _make_config(toml, name):
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        (p / f'{name}.toml').write_text(toml)
-        with patch.object(workloadctl_core, '_get_workload_dir', return_value=p):
+        (p / name).mkdir()
+        (p / name / 'workload.toml').write_text(toml)
+        with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
             return workloadctl_core.WorkloadConfig(name)
 
 
@@ -884,7 +843,6 @@ class TestCmdDriftDropins(unittest.TestCase):
 CONTAINER_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -893,7 +851,6 @@ image = "example.com/test:latest"
 CONTAINER_TOML_CUSTOM_SLICE = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -910,7 +867,8 @@ class TestCmdHealthPlacement(unittest.TestCase):
         """Run cmd_health and return (exit_code, health_data_dict)."""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(toml)
             args = _args(workload='test-wl', json=True)
             manager = MagicMock()
             manager.user_exists.return_value = user_exists
@@ -919,7 +877,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
             manager.podman.return_value.container_health.return_value = None
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('subprocess.run', side_effect=fake_run), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
@@ -1097,7 +1055,6 @@ class TestCapabilityMatrix(unittest.TestCase):
         toml_with_ports = """\
 [workload]
 name = "test-ep"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -1338,7 +1295,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             from substrate import rollback_tag
             tag = rollback_tag('test-wl')
@@ -1351,7 +1309,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=True)
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stdout', buf):
                 cmd_update.cmd_rollback(args, manager)
@@ -1367,7 +1325,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             manager = MagicMock()
             manager.user_exists.return_value = True
@@ -1375,7 +1334,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=True)
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stdout', buf):
                 cmd_update.cmd_rollback(args, manager)
@@ -1388,7 +1347,8 @@ class TestCmdRollbackList(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
 
             manager = MagicMock()
             manager.user_exists.return_value = True
@@ -1397,7 +1357,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             args = types.SimpleNamespace(workload='test-wl', list=False)
             buf_err = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
@@ -1523,12 +1483,13 @@ class TestCmdIncant(unittest.TestCase):
         config_toml = SINGLE_TOML
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(config_toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(config_toml)
             manager = self._make_manager()
             manager.run_podman.return_value = _ok(returncode=0)
 
             args = types.SimpleNamespace(workload='test-wl', argv=['--', 'volume', 'ls'])
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.exit') as mock_exit:
                 cmd_interact.cmd_incant(args, manager)
         mock_exit.assert_called_once_with(0)
@@ -1543,12 +1504,13 @@ class TestCmdIncant(unittest.TestCase):
         config_toml = SINGLE_TOML
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(config_toml)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(config_toml)
             manager = self._make_manager()
             manager.run_podman.return_value = _ok(returncode=0)
 
             args = types.SimpleNamespace(workload='test-wl/mycontainer', argv=['volume', 'ls'])
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.exit'):
                 cmd_interact.cmd_incant(args, manager)
         manager.run_podman.assert_called_once()
@@ -1557,11 +1519,12 @@ class TestCmdIncant(unittest.TestCase):
         import cmd_interact
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
             manager = self._make_manager(user_exists=False)
             args = types.SimpleNamespace(workload='test-wl', argv=['volume', 'ls'])
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stderr', buf):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_interact.cmd_incant(args, manager)
@@ -1572,11 +1535,12 @@ class TestCmdIncant(unittest.TestCase):
         import cmd_interact
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
-            (p / 'test-wl.toml').write_text(SINGLE_TOML)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(SINGLE_TOML)
             manager = self._make_manager()
             args = types.SimpleNamespace(workload='test-wl', argv=[])
             buf = io.StringIO()
-            with patch.object(workloadctl_core, '_get_workload_dir', return_value=p), \
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stderr', buf):
                 with self.assertRaises(SystemExit) as cm:
                     cmd_interact.cmd_incant(args, manager)

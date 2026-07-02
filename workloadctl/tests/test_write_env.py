@@ -30,9 +30,13 @@ def run_write_env(name, config_dir, creds_dir, env_dir):
     )
 
 
-def write_config(config_dir, name, toml_content):
-    path = Path(config_dir) / f"{name}.toml"
-    path.write_text(textwrap.dedent(toml_content))
+def write_config(config_dir, name, toml_content, enabled=True):
+    (Path(config_dir) / name).mkdir(exist_ok=True)
+    path = Path(config_dir) / name / "workload.toml"
+    body = textwrap.dedent(toml_content)
+    path.write_text(body)
+    if enabled:
+        (Path(config_dir) / name / ".enabled").touch()
     return path
 
 
@@ -55,7 +59,6 @@ class TestWriteEnvBasic(unittest.TestCase):
         write_config(self.config_dir, "app", """\
             [workload]
             name = "app"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -77,7 +80,6 @@ class TestWriteEnvBasic(unittest.TestCase):
         write_config(self.config_dir, "db", """\
             [workload]
             name = "db"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -97,7 +99,6 @@ class TestWriteEnvBasic(unittest.TestCase):
         write_config(self.config_dir, "multi", """\
             [workload]
             name = "multi"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -120,7 +121,6 @@ class TestWriteEnvBasic(unittest.TestCase):
         write_config(self.config_dir, "mix", """\
             [workload]
             name = "mix"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -142,7 +142,6 @@ class TestWriteEnvBasic(unittest.TestCase):
         write_config(self.config_dir, "perms", """\
             [workload]
             name = "perms"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -174,7 +173,6 @@ class TestWriteEnvNoSecrets(unittest.TestCase):
         write_config(self.config_dir, "plain", """\
             [workload]
             name = "plain"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -194,7 +192,6 @@ class TestWriteEnvNoSecrets(unittest.TestCase):
         write_config(self.config_dir, "empty", """\
             [workload]
             name = "empty"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -219,7 +216,6 @@ class TestWriteEnvErrors(unittest.TestCase):
         write_config(self.config_dir, "fail", """\
             [workload]
             name = "fail"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -236,7 +232,6 @@ class TestWriteEnvErrors(unittest.TestCase):
         write_config(self.config_dir, "nocreds", """\
             [workload]
             name = "nocreds"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -285,7 +280,6 @@ class TestWriteEnvEdgeCases(unittest.TestCase):
         write_config(self.config_dir, "special", """\
             [workload]
             name = "special"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -305,7 +299,6 @@ class TestWriteEnvEdgeCases(unittest.TestCase):
         write_config(self.config_dir, "newline", """\
             [workload]
             name = "newline"
-            enabled = true
 
             [container]
             image = "myapp"
@@ -324,7 +317,6 @@ class TestWriteEnvEdgeCases(unittest.TestCase):
         write_config(self.config_dir, "combo", """\
             [workload]
             name = "combo"
-            enabled = true
 
             [container]
             image = "myapp"

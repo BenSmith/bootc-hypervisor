@@ -13,14 +13,15 @@ Type=exec
 Slice=workloads.slice
 User=_wl-wireguard-vpn
 Group=_wl-wireguard-vpn
-Environment="HOME=/var/lib/workloads/wireguard-vpn"
+Environment="HOME=/var/lib/workloads/wireguard-vpn/state"
 EnvironmentFile=-/run/workload-env/workload-wireguard-vpn.env
 
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-wireguard-vpn" --hostname "wireguard-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.2 --network="pasta" --volume "/var/lib/workloads/wireguard-vpn/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/wireguard-vpn:latest"
+ExecStart=/usr/bin/podman run --name "workload-wireguard-vpn" --hostname "wireguard-vpn" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=host --cap-add=NET_ADMIN --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.2 --network="pasta" --volume "/var/lib/workloads/wireguard-vpn/data/wg0.conf":/etc/wireguard/wg0.conf:ro --env HOST_IP=${HOST_IP} --env WG_INTERFACE=wg0 --health-cmd "wg show wg0 > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=15s --health-on-failure=kill "localhost/wireguard-vpn:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-wireguard-vpn"
 ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-wireguard-vpn"

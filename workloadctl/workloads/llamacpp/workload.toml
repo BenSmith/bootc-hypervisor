@@ -1,0 +1,62 @@
+# llamacpp - llama.cpp inference server
+#
+# OpenAI-compatible API + minimal built-in chat UI on port 8080.
+#
+# GPU: server-vulkan uses Vulkan for cross-vendor acceleration (AMD, NVIDIA,
+# Intel). For CPU-only inference, swap the image tag to "server".
+#
+# Models: drop GGUF files into /var/lib/workloads/llamacpp/data/models/ and set the
+# --model flag below. Restart the workload to switch models.
+#
+# Setup:
+#   1. Add a GGUF model:
+#        sudo mkdir -p /var/lib/workloads/llamacpp/data/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/llamacpp/data/models/
+#
+#   2. Set the --model path in the command below to match.
+#
+#   3. Enable:
+#        sudo workloadctl enable llamacpp
+#
+#   4. Open http://<host-ip>:8080 (chat UI + API at /v1/chat/completions).
+
+[workload]
+name = "llamacpp"
+
+[container]
+image = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
+pull = "newer"
+command = [
+    "--host", "0.0.0.0",
+    "--port", "8080",
+    "--model", "/models/model.gguf",
+    "--ctx-size", "4096",
+    "--n-gpu-layers", "-1",
+]
+
+[container.health]
+cmd = "curl -sf http://localhost:8080/health || exit 1"
+interval = "30s"
+start_period = "60s"
+on_failure = "kill"
+
+[devices]
+gpu = "auto"
+
+[security]
+extra_groups = ["video", "render"]
+
+[storage]
+volumes = ["./models:/models:ro"]
+
+[network]
+mode = "pasta"
+ports = ["8080:8080"]
+
+[resources]
+memory_swap_max = "0"
+shm_size = "1g"
+# Set memory_max to match your model's footprint, e.g.:
+#   7B  Q4: ~5G    13B Q4: ~9G    70B Q4: ~45G
+# memory_max = "8G"
+# memory_high = "6G"

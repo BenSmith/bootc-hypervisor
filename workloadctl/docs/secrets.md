@@ -362,7 +362,7 @@ sudo systemd-creds decrypt /etc/credstore.encrypted/jellyfin-api-key -
 
 ### Add to Workload Configuration
 
-Create or edit `/etc/workloads.d/jellyfin.toml`:
+Create or edit `/etc/workloads.d/jellyfin/workload.toml`:
 
 ```toml
 [workload]
@@ -855,7 +855,7 @@ Organize credentials by sensitivity:
 ### Example 1: Simple API Key
 
 ```toml
-# /etc/workloads.d/myapp.toml
+# /etc/workloads.d/myapp/workload.toml
 [workload]
 name = "myapp"
 
@@ -882,7 +882,7 @@ sudo -u _wl-myapp podman exec workload-myapp env | grep API_KEY
 ### Example 2: Multiple Secrets + Config File
 
 ```toml
-# /etc/workloads.d/database.toml
+# /etc/workloads.d/database/workload.toml
 [workload]
 name = "postgres"
 
@@ -912,7 +912,7 @@ sudo systemd-creds encrypt --with-key=tpm2 --name=tls-key /path/to/server.key /e
 ### Example 3: Machine-Specific Tailscale Auth
 
 ```toml
-# /etc/workloads.d/tailscale.toml (baked into image)
+# /etc/workloads.d/tailscale/workload.toml (baked into image)
 [workload]
 name = "tailscale"
 

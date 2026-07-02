@@ -1,0 +1,69 @@
+# oobabooga - text-generation-webui inference server
+#
+# Feature-rich LLM web UI with runtime model loading, parameter tuning, and
+# multiple backend support. Gradio UI on port 7860, OpenAI-compatible API on 5000.
+#
+# GPU: unlike llama.cpp, there is no cross-vendor image — pick the tag that
+# matches your GPU and set it in [container].image below:
+#   atinoda/text-generation-webui:default-cpu    — CPU only
+#   atinoda/text-generation-webui:default-cuda   — NVIDIA (CUDA)
+#   atinoda/text-generation-webui:default-rocm   — AMD (ROCm)
+#
+# Models: place GGUF or other supported model files in
+# /var/lib/workloads/oobabooga/data/models/. Load and switch models at runtime
+# from the Models tab in the UI — no restart needed.
+#
+# Setup:
+#   1. Set the image tag above to match your GPU.
+#
+#   2. Add models:
+#        sudo mkdir -p /var/lib/workloads/oobabooga/data/models
+#        sudo cp ~/Downloads/model.gguf /var/lib/workloads/oobabooga/data/models/
+#
+#   3. Enable:
+#        sudo workloadctl enable oobabooga
+#
+#   4. Open http://<host-ip>:7860 (UI) or use the API at :5000/v1.
+
+[workload]
+name = "oobabooga"
+
+[container]
+image = "docker.io/atinoda/text-generation-webui:default-cpu"
+pull = "newer"
+# This image's entrypoint runs `python3.13 server.py $EXTRA_LAUNCH_ARGS`; launch
+# flags go through that env var, NOT a command override (overriding the command
+# replaces server.py and the flags get handed to the entrypoint shell instead).
+
+[container.environment]
+# --listen exposes the UI on 0.0.0.0 (required to reach it via the published
+# port); --api enables the OpenAI-compatible API on :5000.
+EXTRA_LAUNCH_ARGS = "--listen --api"
+
+[container.health]
+cmd = "curl -sf http://localhost:7860/ || exit 1"
+interval = "30s"
+start_period = "120s"
+on_failure = "kill"
+
+[devices]
+gpu = "auto"
+
+[security]
+extra_groups = ["video", "render"]
+
+[storage]
+volumes = ["./models:/app/text-generation-webui/models"]
+
+[network]
+mode = "pasta"
+ports = [
+    "7860:7860",   # Gradio UI
+    "5000:5000",   # OpenAI-compatible API
+]
+
+[resources]
+memory_swap_max = "0"
+shm_size = "1g"
+# memory_max = "8G"
+# memory_high = "6G"

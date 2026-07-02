@@ -154,7 +154,8 @@ class TestRestore:
         """
         record_property("cell", "restore/container")
         name = "clitest-restore-test"
-        toml_path = f"/etc/workloads.d/{name}.toml"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        toml_path = f"{cfg_dir}/workload.toml"
         toml_content = (
             f'[workload]\nname = "{name}"\nenabled = false\n\n'
             '[container]\nimage = "docker.io/library/caddy:2-alpine"\n'
@@ -162,6 +163,7 @@ class TestRestore:
         archive_path = None
         try:
             # 1. Create and enable
+            target.run(["mkdir", "-p", cfg_dir], sudo=True, check=True)
             target.put_content(toml_content, toml_path)
             target.wl(f"enable {name}", check=True, timeout=180)
 
@@ -175,8 +177,8 @@ class TestRestore:
             target.wl(f"disable --purge {name}", check=True, timeout=60)
             time.sleep(2)
 
-            # 4. Remove TOML (simulate clean slate)
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            # 4. Remove config dir (simulate clean slate)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
             # 5. Restore --enable
             r = target.wl(
@@ -194,7 +196,7 @@ class TestRestore:
 
         finally:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
-            target.run(["rm", "-f", toml_path], sudo=True, check=False)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
             if archive_path:
                 target.run(["rm", "-f", archive_path], sudo=True, check=False)
 

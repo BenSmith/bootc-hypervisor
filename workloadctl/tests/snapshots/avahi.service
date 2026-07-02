@@ -13,10 +13,11 @@ Type=simple
 Slice=workloads.slice
 User=_wl-avahi
 Group=_wl-avahi
-Environment="HOME=/var/lib/workloads/avahi"
+Environment="HOME=/var/lib/workloads/avahi/state"
 EnvironmentFile=-/run/workload-env/workload-avahi.env
 
 ExecStartPre=-/usr/bin/podman system migrate
+ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 
 # Image pulling handled by podman run --pull=never
 

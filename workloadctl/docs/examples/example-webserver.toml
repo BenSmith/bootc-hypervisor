@@ -3,7 +3,6 @@
 
 [workload]
 name = "example-webserver"
-enabled = false
 
 [container]
 # Use nginx-unprivileged image designed for rootless containers

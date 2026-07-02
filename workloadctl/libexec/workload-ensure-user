@@ -24,9 +24,10 @@ import uuid
 from pathlib import Path
 
 from workload_lib import (
-    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_username, expand_volume_path,
-    infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, find_ovmf_vars,
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
+    infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
+    workload_state_dir, workload_data_dir, workload_root_dir,
 )
 
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
@@ -39,7 +40,7 @@ def log(msg):
 
 def load_config(name):
     """Load and return the TOML config for a workload."""
-    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
@@ -183,15 +184,52 @@ def configure_subuid_subgid(pw, config):
             log(f"  WARNING: Failed to migrate podman storage for {username}: {e}")
 
 
-def setup_home_directory(pw):
-    """Create and configure the workload home directory."""
-    home_path = Path(pw.pw_dir)
+def warn_if_stale_home(pw, name):
+    """Warn (don't fix) when a workload user's passwd home doesn't match the expected state/ dir.
 
-    if not home_path.exists():
-        log(f"  Creating home directory {home_path}")
-        home_path.mkdir(parents=True, exist_ok=True)
-    os.chown(home_path, pw.pw_uid, pw.pw_gid)
-    os.chmod(home_path, 0o700)
+    The workload service is unaffected — the generator forces Environment=HOME=<state>
+    in the unit — but podman's auto-generated healthcheck timer runs a bare
+    `podman healthcheck run` that inherits the user manager's HOME (= the mismatched
+    passwd home), resolves an empty graphroot, can't find the container, and leaves
+    health frozen at 'starting' forever.
+
+    We only warn: rewriting an in-use user's home (usermod -d) requires stopping
+    the workload and bouncing user@<uid>.service to take effect, which is an
+    operator decision, not something to do under an ExecStartPre on every boot.
+    """
+    expected = str(workload_state_dir(name))
+    actual = pw.pw_dir
+    if actual == expected:
+        return
+    uid = pw.pw_uid
+    log(f"  WARNING: mismatched home for {pw.pw_name}: {actual!r} (expected {expected!r}).")
+    log( "           The service runs correctly, but podman's healthcheck timer "
+         "inherits this home and reads an empty graphroot, so health is frozen at 'starting'.")
+    log(f"           Fix: systemctl stop workload-{name}; usermod -d {expected} "
+        f"{pw.pw_name}; systemctl restart workload-{name}  "
+        f"(restarting bounces user@{uid}.service so the new HOME takes effect).")
+
+
+def setup_home_directory(pw, name):
+    """Create and configure the workload's state/ ($HOME) and data/ subdirs.
+
+    Anchored on workload_state_dir/workload_data_dir, not pw.pw_dir: the generator
+    forces HOME=<state> independently, so these must land where the service actually
+    reads/writes regardless of what passwd records. See warn_if_stale_home.
+    """
+    state_path = workload_state_dir(name)
+    if not state_path.exists():
+        log(f"  Creating home (state) directory {state_path}")
+        state_path.mkdir(parents=True, exist_ok=True)
+    os.chown(state_path, pw.pw_uid, pw.pw_gid)
+    os.chmod(state_path, 0o700)
+
+    data_path = workload_data_dir(name)
+    if not data_path.exists():
+        log(f"  Creating data directory {data_path}")
+        data_path.mkdir(parents=True, exist_ok=True)
+    os.chown(data_path, pw.pw_uid, pw.pw_gid)
+    os.chmod(data_path, 0o700)
 
 
 def setup_volume_directories(pw, config):
@@ -204,13 +242,15 @@ def setup_volume_directories(pw, config):
     Required-files paths are skipped — those must be supplied by the user
     as files; auto-creating them as directories would break the bind mount.
     """
-    home_path = Path(pw.pw_dir)
+    name = config["workload"]["name"]
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
 
     required_file_paths = set()
     for entry in config.get("setup", {}).get("required_files", []):
         path = entry.get("path", "")
-        if path.startswith("./"):
-            path = str(home_path) + "/" + path[2:]
+        if path:
+            path = expand_volume_path(path, str(state_dir)).split(":", 2)[0]
         required_file_paths.add(path)
 
     # Gather volumes from all containers (single and multi-container shapes).
@@ -221,7 +261,7 @@ def setup_volume_directories(pw, config):
         all_volume_specs.extend(ctr.get("storage", {}).get("volumes", []))
 
     for volume_spec in all_volume_specs:
-        expanded = expand_volume_path(volume_spec, str(home_path))
+        expanded = expand_volume_path(volume_spec, str(state_dir))
         host_path_str = expanded.split(":", 2)[0]
         if not host_path_str:
             continue
@@ -233,11 +273,12 @@ def setup_volume_directories(pw, config):
         if str(host_path) in required_file_paths:
             continue
 
-        # Resolve symlinks before checking containment to prevent symlink traversal
+        # Resolve symlinks before checking containment to prevent symlink traversal.
+        # Anchor on the workload ROOT so both state/ and data/ destinations pass.
         try:
-            host_path.resolve().relative_to(home_path.resolve())
+            host_path.resolve().relative_to(root_dir.resolve())
         except ValueError:
-            continue  # Outside home directory — admin must create
+            continue  # Outside the workload dir — admin must create
 
         if not host_path.exists():
             log(f"  Creating volume directory {host_path}")
@@ -250,21 +291,23 @@ def setup_volume_directories(pw, config):
 def setup_vm_volume_directories(pw, config):
     """Create host-side directories for virtiofs volumes declared in [vm].volumes.
 
-    Mirrors the container setup_volume_directories logic but reads from
-    vm.volumes instead of storage.volumes. Paths outside the home directory
-    are skipped — the admin must create those by hand.
+    Resolves anchors via expand_volume_path (so `./` → data/, `@/` →
+    state/volumes/, exactly like containers and the virtiofsd sidecars the
+    generator emits) and anchors on the canonical Step-2 dirs. Paths outside the
+    workload dir are skipped — the admin must create those by hand.
     """
-    home_path = Path(pw.pw_dir)
+    name = config["workload"]["name"]
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
     for vol_spec in config.get("vm", {}).get("volumes", []):
-        host_raw = vol_spec.split(":")[0]
-        if host_raw.startswith("./"):
-            host_path = home_path / host_raw[2:]
-        else:
-            host_path = Path(host_raw)
+        host_path_str = expand_volume_path(vol_spec, str(state_dir)).split(":", 2)[0]
+        if not host_path_str:
+            continue
+        host_path = Path(host_path_str)
         try:
-            host_path.resolve().relative_to(home_path.resolve())
+            host_path.resolve().relative_to(root_dir.resolve())
         except ValueError:
-            continue  # Outside home — admin's responsibility
+            continue  # Outside the workload dir — admin's responsibility
         if not host_path.exists():
             log(f"  Creating virtiofs host directory {host_path}")
             host_path.mkdir(parents=True, exist_ok=True)
@@ -272,14 +315,20 @@ def setup_vm_volume_directories(pw, config):
         os.chmod(host_path, 0o755)
 
 
-def restore_selinux_labels(pw):
-    """Restore SELinux labels on the workload home directory."""
+def restore_selinux_labels(name):
+    """Restore SELinux labels on the workload's whole tree (state/ + data/).
+
+    Relabels the canonical workload root, not the passwd home: for a correct
+    user the passwd home is state/ (which would miss data/), and for a stale
+    user it's the root — anchoring on workload_root_dir covers both subtrees.
+    """
+    target = str(workload_root_dir(name))
     result = subprocess.run(
-        ["restorecon", "-R", pw.pw_dir],
+        ["restorecon", "-R", target],
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        log(f"  WARNING: restorecon failed for {pw.pw_dir}: {result.stderr}")
+        log(f"  WARNING: restorecon failed for {target}: {result.stderr}")
 
 
 def _detect_host_ip():
@@ -526,6 +575,11 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         f"fqdn: {name}.local",
         "users:",
         f"  - name: {guest_user}",
+        # Pin the primary user to VM_GUEST_UID so virtiofsd's uid/gid
+        # translation (guest 1000 <-> host workload uid) is deterministic and
+        # the guest user can write virtiofs shares. Cloud images already assign
+        # the default user 1000, so this only makes the convention explicit.
+        f"    uid: {VM_GUEST_UID}",
         "    sudo: ALL=(ALL) NOPASSWD:ALL",
         "    ssh_authorized_keys:",
         f"      - {pubkey}",
@@ -580,6 +634,27 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
     return False
 
 
+def _resolve_cloud_init_instance_id(name: str, instance_id_file: Path,
+                                    fp_unchanged: bool) -> tuple[str, bool]:
+    """Decide the cloud-init instance-id for a (re)built seed ISO.
+
+    Reuse the persisted id when the user-data fingerprint is unchanged — that
+    means we are rebuilding only because the tmpfs ISO was wiped (a host
+    reboot clearing /run), so the guest should see the SAME instance and skip
+    re-running its per-instance modules. Mint a fresh id when the content
+    actually changed (a real edit that warrants re-provisioning) or when no id
+    has been persisted yet (first provision).
+
+    Returns ``(instance_id, minted)`` — ``minted`` is True when a new id was
+    generated and the caller must persist it.
+    """
+    existing = (instance_id_file.read_text().strip()
+                if instance_id_file.exists() else "")
+    if fp_unchanged and existing:
+        return existing, False
+    return f"{name}-{uuid.uuid4().hex[:8]}", True
+
+
 def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None = None):
     """Build cloud-init seed ISO (meta-data + user-data) into the runtime dir.
 
@@ -615,7 +690,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
       magic ${WORKLOADCTL_SSH_KEY} / ${WORKLOADCTL_WORKLOAD_NAME} that we
       inject. No YAML parsing — the user owns the file's structure.
     """
-    home_path = Path(pw.pw_dir)
+    # Anchor the persistent fingerprint/instance-id files on the canonical
+    # state/ dir, not pw.pw_dir: the generator forces HOME=<state> and
+    # setup_home_directory creates state/ there regardless of what passwd
+    # records, so a stale passwd home would otherwise strand these files in the
+    # wrong tree (see warn_if_stale_home).
+    home_path = workload_state_dir(name)
     # The ISO lives on tmpfs (the VM runtime dir), never the persistent home —
     # it can embed decrypted secrets. setup_vm_socket_dir() created this dir
     # earlier in the same invocation; recreate it defensively in case this is
@@ -641,6 +721,15 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
 
     vm_cfg = config.get("vm", {})
     guest_user = vm_cfg.get("user", "workload")
+    # guest_user is interpolated unquoted into the built-in #cloud-config
+    # (`- name: {guest_user}`, just above a NOPASSWD sudo grant). Validate it as
+    # a POSIX username so a value with a newline can't inject arbitrary
+    # cloud-config. Fail closed — a bad name aborts VM provisioning.
+    if not re.match(r'^[a-z_][a-z0-9_-]*$', guest_user) or len(guest_user) > 32:
+        raise RuntimeError(
+            f"[vm].user {guest_user!r} is not a valid POSIX username "
+            f"(^[a-z_][a-z0-9_-]*$, max 32 chars)"
+        )
     ci_cfg = vm_cfg.get("cloud_init", {})
 
     pubkey = _read_ssh_pubkey(pw)
@@ -709,15 +798,26 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # any of them reliably triggers a rebuild (and instance-id rotation).
     current_fp = hashlib.sha256(user_data_text.encode()).hexdigest()
     fingerprint_file = home_path / ".cloud-init-fingerprint"
-    if (iso_path.exists()
-            and fingerprint_file.exists()
-            and fingerprint_file.read_text().strip() == current_fp):
+    fp_unchanged = (fingerprint_file.exists()
+                    and fingerprint_file.read_text().strip() == current_fp)
+    if iso_path.exists() and fp_unchanged:
         return
 
+    # Rotate the cloud-init instance-id ONLY when the guest-affecting content
+    # actually changed (a real config/secret/key edit that legitimately
+    # warrants re-provisioning). When the content is unchanged and we're here
+    # only because the tmpfs ISO was wiped — i.e. the host rebooted, clearing
+    # /run — reuse the persisted instance-id so the guest sees the SAME instance
+    # and does NOT re-run its per-instance modules (users, runcmd, bootstrap).
+    # Without this, every host reboot churns the id and forces a full guest
+    # re-provision. An absent/empty id file falls back to a fresh mint (first
+    # provision).
     instance_id_file = home_path / ".cloud-init-instance-id"
-    instance_id = f"{name}-{uuid.uuid4().hex[:8]}"
-    instance_id_file.write_text(instance_id)
-    os.chown(instance_id_file, pw.pw_uid, pw.pw_gid)
+    instance_id, minted = _resolve_cloud_init_instance_id(
+        name, instance_id_file, fp_unchanged)
+    if minted:
+        instance_id_file.write_text(instance_id)
+        os.chown(instance_id_file, pw.pw_uid, pw.pw_gid)
 
     seed_dir.mkdir(exist_ok=True)
     os.chown(seed_dir, pw.pw_uid, pw.pw_gid)
@@ -801,6 +901,12 @@ def main():
         log(f"ERROR: User {username} does not exist")
         return 1
 
+    # Flag (don't fix) a pre-Step-2 home dir — it silently breaks healthchecks.
+    try:
+        warn_if_stale_home(pw, name)
+    except Exception as e:
+        log(f"  WARNING: stale-home check failed for {username}: {e}")
+
     # Ensure base directory exists
     WORKLOADS_BASE.mkdir(parents=True, exist_ok=True)
 
@@ -820,7 +926,7 @@ def main():
         log(f"  WARNING: Failed to set up SELinux policy: {e}")
 
     try:
-        setup_home_directory(pw)
+        setup_home_directory(pw, name)
     except Exception as e:
         log(f"  WARNING: Failed to set up home directory for {username}: {e}")
 
@@ -868,14 +974,14 @@ def main():
         try:
             build_cloud_init_iso(
                 pw, config, name,
-                config_path=WORKLOAD_CONFIG_DIR / f"{name}.toml",
+                config_path=workload_config_path(name),
             )
         except Exception as e:
             log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")
             return 1
 
         try:
-            restore_selinux_labels(pw)
+            restore_selinux_labels(name)
         except Exception as e:
             log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 
@@ -902,7 +1008,7 @@ def main():
             log(f"  WARNING: Failed to write environment file for {name}: {e}")
 
         try:
-            restore_selinux_labels(pw)
+            restore_selinux_labels(name)
         except Exception as e:
             log(f"  WARNING: Failed to restore SELinux labels for {username}: {e}")
 

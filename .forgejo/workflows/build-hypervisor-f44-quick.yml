@@ -1,0 +1,297 @@
+name: Build Hypervisor Bootc (F44 quick — amd + nvidia-negativo17)
+
+# Focused, manually-triggered build: F44 base, then the amd and
+# nvidia-negativo17 variants only (no F43, no rpmfusion). Meant for fast
+# iteration on the variants we actually deploy.
+#
+# Parallelism: amd and nvidia-negativo17 are two entries of the `variant`
+# matrix, both `needs: base` with NO dependency on each other and
+# `fail-fast: false`, so the pipeline imposes no ordering between them — they
+# are eligible to run at the same time. Whether they actually run concurrently
+# depends on the Forgejo runner's capacity (`--capacity` / `runner.capacity` in
+# the runner config). This workflow sets no `max-parallel`, so it never caps
+# the fan-out; if the runner allows >1 concurrent job they run together, and if
+# it doesn't the workflow still completes (they just serialize on the runner).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-hypervisor-f44-quick-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.local
+  # Fixed target for this focused build. Exported into every run step's shell.
+  VERSION: '44'
+
+jobs:
+  setup:
+    runs-on: native
+    outputs:
+      stable: ${{ steps.r.outputs.stable }}
+      rechunker: ${{ steps.r.outputs.rechunker }}
+      tag: ${{ steps.r.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          command -v yq >/dev/null || sudo dnf install -y yq
+          # stable/rechunker still come from the single source of truth so the
+          # :latest / :negativo17 floating tags are pushed when 44 is stable.
+          # One dated tag shared by base + variants for this run.
+          {
+            echo "stable=$(yq '.stable' fedora-versions.yml)"
+            echo "rechunker=$(yq '.rechunker' fedora-versions.yml)"
+            echo "tag=$(date +%Y%m%d-%H%M)"
+          } >> "$GITHUB_OUTPUT"
+
+  base:
+    needs: setup
+    runs-on: native
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Render policy.json
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
+              policy-hypervisor.json.template > policy.json
+          cat policy.json
+
+      - name: Fetch cosy
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
+      - name: Inject homelab CA trust
+        env:
+          HOMELAB_ROOT_CA: ${{ secrets.HOMELAB_ROOT_CA }}
+        run: |
+          if [ -n "$HOMELAB_ROOT_CA" ]; then
+            printf '%s\n' "$HOMELAB_ROOT_CA" > ca-trust-inject/homelab-root.crt
+            openssl x509 -in ca-trust-inject/homelab-root.crt -noout -subject \
+              && echo "Injected homelab root CA into build context"
+          else
+            echo "HOMELAB_ROOT_CA secret not set; building without injected anchors"
+          fi
+
+      - name: Build base hypervisor
+        run: |
+          sudo podman build \
+            --pull=newer \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            --network=host \
+            --build-arg BASE_IMAGE=${REGISTRY}/fedora-bootc-minimal:${VERSION} \
+            -f hypervisor.Containerfile \
+            -t "localhost/hypervisor-bootc:build-${VERSION}" \
+            .
+
+      - name: Rechunk base image
+        env:
+          RECHUNKER: ${{ needs.setup.outputs.rechunker }}
+        run: |
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:${RECHUNKER} \
+            /usr/libexec/bootc-base-imagectl rechunk \
+            "localhost/hypervisor-bootc:build-${VERSION}" \
+            "localhost/hypervisor-bootc:rechunked-${VERSION}"
+
+      - name: Tag and push base
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          STABLE: ${{ needs.setup.outputs.stable }}
+        run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
+          VERSIONED="${VERSION}-${TAG}"
+          FLOATING="${VERSION}"
+
+          # Sign at push — see docs/ci-image-signing.md. Key from the runner's
+          # systemd credentials; unsigned + warning if not sealed.
+          CREDS=/run/credentials/forgejo-runner.service
+          SIGN_ARGS=()
+          if sudo test -s "${CREDS}/cosign-key"; then
+            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                       --sign-passphrase-file "${CREDS}/cosign-pass")
+          else
+            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          fi
+
+          sudo podman tag "localhost/hypervisor-bootc:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          sudo skopeo copy \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
+          if [ "${VERSION}" = "${STABLE}" ]; then
+            sudo skopeo copy \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
+          fi
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          STABLE: ${{ needs.setup.outputs.stable }}
+        run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
+          {
+            echo "## Base hypervisor build complete (F${VERSION})"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${VERSION}-${TAG}\`"
+            echo "- \`${IMAGE_BASE}:${VERSION}\`"
+            if [ "${VERSION}" = "${STABLE}" ]; then
+              echo "- \`${IMAGE_BASE}:latest\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        if: always()
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          IMAGE_BASE="${REGISTRY}/hypervisor-bootc"
+          sudo podman untag "localhost/hypervisor-bootc:build-${VERSION}" 2>/dev/null || true
+          sudo podman untag "localhost/hypervisor-bootc:rechunked-${VERSION}" 2>/dev/null || true
+          sudo podman untag "${IMAGE_BASE}:${VERSION}-${TAG}" 2>/dev/null || true
+          df -h /
+          sudo podman image prune -f || true
+          df -h /
+
+  variant:
+    needs: [setup, base]
+    runs-on: native
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      # No max-parallel: both variants may run at once if the runner has the
+      # capacity. They share only `needs: base`, never each other.
+      matrix:
+        variant:
+          - name: amd
+            image: hypervisor-amd
+            containerfile: hypervisor-amd.Containerfile
+            prefix: ''
+            floating: ''
+          - name: nvidia-negativo17
+            image: hypervisor-nvidia
+            containerfile: hypervisor-nvidia-negativo17.Containerfile
+            prefix: 'negativo17-'
+            floating: 'negativo17'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch cosy
+        run: |
+          mkdir -p bin man
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+          curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+
+      - name: Build variant
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          CONTAINERFILE: ${{ matrix.variant.containerfile }}
+        run: |
+          sudo podman build \
+            --pull=newer \
+            --security-opt=label=disable \
+            --security-opt=seccomp=unconfined \
+            --cap-add=all \
+            --ipc=host \
+            --build-arg BASE=${REGISTRY}/hypervisor-bootc:${VERSION} \
+            -f "${CONTAINERFILE}" \
+            -t "localhost/${IMAGE}:build-${VERSION}" \
+            .
+
+      - name: Rechunk variant
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          RECHUNKER: ${{ needs.setup.outputs.rechunker }}
+        run: |
+          sudo podman run --rm --privileged \
+            -v /var/lib/containers:/var/lib/containers \
+            quay.io/fedora/fedora-bootc:${RECHUNKER} \
+            /usr/libexec/bootc-base-imagectl rechunk \
+            "localhost/${IMAGE}:build-${VERSION}" \
+            "localhost/${IMAGE}:rechunked-${VERSION}"
+
+      - name: Tag and push variant
+        id: push
+        env:
+          BASE_TAG: ${{ needs.setup.outputs.tag }}
+          IMAGE: ${{ matrix.variant.image }}
+          PREFIX: ${{ matrix.variant.prefix }}
+          FLOATING: ${{ matrix.variant.floating }}
+          STABLE: ${{ needs.setup.outputs.stable }}
+        run: |
+          IMAGE_BASE="${REGISTRY}/${IMAGE}"
+          VERSIONED="${PREFIX}${VERSION}-${BASE_TAG}"
+          FLOATING_TAG="${PREFIX}${VERSION}"
+
+          CREDS=/run/credentials/forgejo-runner.service
+          SIGN_ARGS=()
+          if sudo test -s "${CREDS}/cosign-key"; then
+            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                       --sign-passphrase-file "${CREDS}/cosign-pass")
+          else
+            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          fi
+
+          sudo podman tag "localhost/${IMAGE}:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
+          sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
+          DIGEST=$(cat /tmp/digest.txt)
+
+          sudo skopeo copy \
+            "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
+
+          if [ "${VERSION}" = "${STABLE}" ]; then
+            STABLE_FLOATING="${FLOATING:-latest}"
+            sudo skopeo copy \
+              "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
+          fi
+
+          {
+            echo "image_base=${IMAGE_BASE}"
+            echo "versioned_tag=${VERSIONED}"
+            echo "floating_tag=${FLOATING_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          NAME: ${{ matrix.variant.name }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+          FLOATING_TAG: ${{ steps.push.outputs.floating_tag }}
+        run: |
+          {
+            echo "## Variant ${NAME} (F${VERSION}) complete"
+            echo ""
+            echo "- \`${IMAGE_BASE}:${VERSIONED_TAG}\`"
+            echo "- \`${IMAGE_BASE}:${FLOATING_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup local tags
+        if: always()
+        env:
+          IMAGE: ${{ matrix.variant.image }}
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          VERSIONED_TAG: ${{ steps.push.outputs.versioned_tag }}
+        run: |
+          sudo podman untag "localhost/${IMAGE}:build-${VERSION}" 2>/dev/null || true
+          sudo podman untag "localhost/${IMAGE}:rechunked-${VERSION}" 2>/dev/null || true
+          if [ -n "${VERSIONED_TAG:-}" ]; then
+            sudo podman untag "${IMAGE_BASE}:${VERSIONED_TAG}" 2>/dev/null || true
+          fi
+          df -h /
+          sudo podman image prune -f || true
+          df -h /

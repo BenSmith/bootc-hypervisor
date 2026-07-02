@@ -22,13 +22,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, normalize_containers, workload_home_dir
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_home_dir, workload_root_dir, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
     os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d")
 )
 VM_SOCKET_DIR = Path("/run/workload-vm")
+# Unified cgroup v2 mount. A module constant so tests can redirect it.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
 
@@ -56,25 +58,28 @@ def get_enabled_workloads():
     if not WORKLOAD_CONFIG_DIR.is_dir():
         return workloads
 
-    for toml_path in sorted(WORKLOAD_CONFIG_DIR.glob("*.toml")):
+    for _, toml_path in iter_workloads():
         try:
             if toml_path.resolve() == Path("/dev/null"):
                 continue
         except OSError:
             continue
 
+        # Enabled-ness is the marker file beside the config.
+        if not (toml_path.parent / ENABLED_MARKER_NAME).exists():
+            continue
+
         try:
             with open(toml_path, "rb") as f:
                 config = tomllib.load(f)
-            if config.get("workload", {}).get("enabled", False):
-                name = config.get("workload", {}).get("name", "")
-                is_vm = bool(config.get("vm"))
-                has_health = any(
-                    bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
-                    for ctr in normalize_containers(config)
-                ) if not is_vm else False
-                if name:
-                    workloads.append((name, has_health, is_vm))
+            name = config.get("workload", {}).get("name", "")
+            is_vm = bool(config.get("vm"))
+            has_health = any(
+                bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
+                for ctr in normalize_containers(config)
+            ) if not is_vm else False
+            if name:
+                workloads.append((name, has_health, is_vm))
         except Exception:
             continue
 
@@ -187,7 +192,7 @@ def get_container_health(name):
     Returns "healthy", "unhealthy", "starting", or None if no health check.
     Runs podman inspect as the workload user.
     """
-    username = f"_wl-{name}"
+    username = workload_username(name)
     try:
         import pwd as _pwd
         pw = _pwd.getpwnam(username)
@@ -211,7 +216,7 @@ def find_workload_cgroup(name):
     Falls back to the pre-1b login-session path for rollback compatibility:
       /sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/.../libpod-*.scope
     """
-    username = f"_wl-{name}"
+    username = workload_username(name)
     try:
         import pwd
         pw = pwd.getpwnam(username)
@@ -231,6 +236,23 @@ def find_workload_cgroup(name):
                 return scope
 
     return None
+
+
+def find_vm_cgroup(name):
+    """Find the cgroup for a VM workload's QEMU process.
+
+    Unlike a container (whose podman runs under the rootless user manager and
+    lands in a libpod-*.scope), a VM's qemu is the main process of the
+    system-level workload-<name>.service, so its cgroup is the service's own.
+    Resolved via systemd's ControlGroup property so a custom resources.slice is
+    honoured. Returns the absolute cgroup Path, or None if not active.
+    """
+    props = systemd_show(f"workload-{name}.service", "ControlGroup")
+    cgroup = props.get("ControlGroup", "")
+    if not cgroup:
+        return None
+    path = CGROUP_ROOT / cgroup.lstrip("/")
+    return path if path.is_dir() else None
 
 
 def read_cgroup_metric(cgroup_path, filename):
@@ -256,9 +278,13 @@ def read_cpu_usage(cgroup_path):
     return None
 
 
-def get_cgroup_metrics(name):
-    """Get resource metrics from cgroup v2 for a workload."""
-    cgroup = find_workload_cgroup(name)
+def get_cgroup_metrics(name, is_vm=False):
+    """Get resource metrics from cgroup v2 for a workload.
+
+    For VMs the cgroup is the qemu service's own (host-side footprint of the
+    hypervisor process); for containers it is the rootless podman scope.
+    """
+    cgroup = find_vm_cgroup(name) if is_vm else find_workload_cgroup(name)
     if not cgroup:
         return {}
 
@@ -378,13 +404,13 @@ class MetricsHandler(BaseHTTPRequestHandler):
             all_metrics = []
             for name, has_health, is_vm in workloads:
                 svc = get_service_metrics(name) or {}
-                cgroup = get_cgroup_metrics(name)
+                cgroup = get_cgroup_metrics(name, is_vm)
                 if has_health:
                     health = get_container_health(name)
                     if health is not None:
                         svc["health"] = 1 if health == "healthy" else 0
                 vm = get_vm_qmp_metrics(name) if is_vm else {}
-                disk = get_workload_disk_bytes(workload_home_dir(name))
+                disk = get_workload_disk_bytes(workload_root_dir(name))
                 all_metrics.append((name, svc, cgroup, vm, disk))
             body = format_metrics(all_metrics).encode()
             self.send_response(200)

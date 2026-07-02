@@ -14,15 +14,17 @@ import tomllib
 
 from workload_lib import (
     auto_detect_credentials,
+    validate_workload_name,
+    workload_config_dir,
+    workload_config_path,
     WORKLOADS_BASE,
-    workload_home_dir,
+    workload_data_dir,
     workload_service_name,
 )
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     require_root,
-    WORKLOAD_DIR,
 )
 from substrate import get_substrate, BackupError
 
@@ -43,8 +45,8 @@ def _backup_one(config: WorkloadConfig, output: Path, consistency: str, quiet: b
     Archive layout:
         workload.toml           — the config file
         credentials/            — referenced encrypted credentials (TPM-bound)
-        home/                   — home directory (.local/share/containers and
-                                  VM rebuild artifacts excluded)
+        data/                   — the precious data/ subtree (the only captured
+                                  state; reconstructible state/ is never backed up)
     """
     substrate = get_substrate(config, None)
     try:
@@ -138,6 +140,31 @@ def cmd_backup(args, manager: WorkloadManager):
         sys.exit(1)
 
 
+def _assert_no_escaping_symlinks(root: Path) -> None:
+    """Reject any symlink under `root` whose target resolves outside `root`.
+
+    Restore lays the archive's data/ tree down verbatim (copytree symlinks=True)
+    and the archive may have been authored on another, untrusted host. A member
+    symlink like `data/x -> /etc` or `data/x -> ../../etc` would otherwise be
+    restored pointing out of the workload's own tree (and a later write through
+    it could land on host paths). Self-contained relative symlinks that stay
+    within the tree are allowed. We enforce this here rather than leaning on
+    tar's version-dependent traversal heuristics.
+    """
+    root_resolved = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for entry in dirnames + filenames:
+            p = Path(dirpath) / entry
+            if not p.is_symlink():
+                continue
+            target = (p.parent / os.readlink(p)).resolve()
+            if target != root_resolved and not target.is_relative_to(root_resolved):
+                raise ValueError(
+                    f"archive symlink escapes the data tree: "
+                    f"{p.relative_to(root)} -> {os.readlink(p)}"
+                )
+
+
 def cmd_restore(args, manager: WorkloadManager):
     """Restore a workload from a backup archive"""
     require_root()
@@ -169,12 +196,26 @@ def cmd_restore(args, manager: WorkloadManager):
             print("Error: workload.toml has no workload name", file=sys.stderr)
             sys.exit(1)
 
+        # The name comes from a portable archive that may have been authored on
+        # another host — the one restore input that crosses a trust boundary. It
+        # flows straight into root-owned destination paths (dest_config/dest_data
+        # below, plus copy2/rmtree/copytree as root), so a crafted name like
+        # "../../etc/cron.d/x" would write/delete outside the workloads tree.
+        # WorkloadConfig enforces this on the backup side; restore reads raw
+        # tomllib, so validate here before any path is built.
+        try:
+            validate_workload_name(name)
+        except ValueError as e:
+            print(f"Error: archive has an invalid workload name {name!r}: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+
         print(f"Restoring workload: {name}")
 
         # Check if workload already exists
-        dest_config = WORKLOAD_DIR / f"{name}.toml"
-        dest_home = workload_home_dir(name)
-        if dest_config.exists() and not args.force:
+        dest_config = workload_config_path(name)
+        dest_data = workload_data_dir(name)
+        if dest_config.parent.exists() and not args.force:
             print(f"Error: Config already exists: {dest_config}", file=sys.stderr)
             print("Use --force to overwrite", file=sys.stderr)
             sys.exit(1)
@@ -186,6 +227,7 @@ def cmd_restore(args, manager: WorkloadManager):
 
         # 1. Restore config
         print(f"  Config → {dest_config}")
+        dest_config.parent.mkdir(exist_ok=True)
         shutil.copy2(config_path, dest_config)
 
         # 2. Restore credentials
@@ -204,17 +246,25 @@ def cmd_restore(args, manager: WorkloadManager):
                     print(f"  Credential → {dest_cred}")
                     tpm_warning = True
 
-        # 3. Restore home directory
-        home_staging = staging / "home"
-        if home_staging.is_dir():
-            if dest_home.exists():
+        # 3. Restore the precious data/ subtree (the only captured state;
+        #    reconstructible state/ is rebuilt by `update`, not restored).
+        data_staging = staging / "data"
+        if data_staging.is_dir():
+            # Guard against an escaping symlink in an untrusted archive before
+            # copying the tree down verbatim.
+            try:
+                _assert_no_escaping_symlinks(data_staging)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            if dest_data.exists():
                 if args.force:
-                    shutil.rmtree(dest_home)
+                    shutil.rmtree(dest_data)
                 else:
-                    print(f"  Warning: Home dir exists, merging (use --force to replace)")
-            shutil.copytree(home_staging, dest_home,
+                    print(f"  Warning: data/ exists, merging (use --force to replace)")
+            shutil.copytree(data_staging, dest_data,
                             symlinks=True, dirs_exist_ok=True)
-            print(f"  Home dir → {dest_home}")
+            print(f"  Data dir → {dest_data}")
 
         print()
 
@@ -238,5 +288,7 @@ def cmd_restore(args, manager: WorkloadManager):
                 ["workloadctl", "enable", name],
             )
         else:
-            print(f"To start the workload, run:")
+            print(f"Only the precious data/ subtree was restored; the "
+                  f"reconstructible state/ (images, graphroot, VM system disk) is "
+                  f"rebuilt on enable. To start the workload, run:")
             print(f"  sudo workloadctl enable {name}")

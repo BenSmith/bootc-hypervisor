@@ -16,8 +16,9 @@ import sys
 from workload_lib import (
     QMPClient,
     USERNAME_PREFIX,
-    WORKLOADS_BASE,
     VM_SOCKET_DIR,
+    units_outdated,
+    workload_config_dir,
 )
 from podman import Podman
 from substrate import NotApplicable, get_substrate
@@ -32,7 +33,6 @@ from workloadctl_core import (
     parse_workload_ref,
     require_root,
     resolve_container_target,
-    WORKLOAD_DIR,
 )
 from cmd_lifecycle import _effective_state
 
@@ -129,7 +129,7 @@ def cmd_list(args, manager: WorkloadManager):
         print(json.dumps({"workloads": workloads}, indent=2))
         return
 
-    print(f"Available workloads in {WORKLOAD_DIR}:")
+    print(f"Available workloads in {workload_config_dir()}:")
     print()
 
     if not configs:
@@ -261,6 +261,7 @@ def cmd_status(args, manager: WorkloadManager):
             "memory_current": _int_or_null(props.get("MemoryCurrent", "")),
             "tasks_current": _int_or_null(props.get("TasksCurrent", "")),
             "result": props.get("Result") or None,
+            "config_stale": units_outdated(config.name),
         }
         if config.is_multi:
             out["mode"] = config.mode
@@ -273,6 +274,13 @@ def cmd_status(args, manager: WorkloadManager):
             out["containers"] = sub
         print(json.dumps(out, indent=2))
         return
+
+    if units_outdated(config.name):
+        # flush before the systemctl subprocess writes to the same fd, else the
+        # hint (block-buffered when stdout is piped) lands after / behind it.
+        print(f"⚠  config edited since last enable — units are stale. Run "
+              f"'sudo workloadctl enable {config.name}' to apply "
+              f"(daemon-reload does not regenerate units).\n", flush=True)
 
     if config.is_multi:
         units = [config.service_name]
@@ -310,7 +318,11 @@ def cmd_images(args, manager: WorkloadManager):
             if entry.pw_name.startswith(USERNAME_PREFIX):
                 print(f"Pruning images for {entry.pw_name}...")
                 try:
-                    home = str(WORKLOADS_BASE / entry.pw_name[len(USERNAME_PREFIX):])
+                    # Authoritative $HOME from passwd (the state/ subdir), matching
+                    # what the workload service and exporter use. Do NOT reconstruct
+                    # WORKLOADS_BASE/<name> — that's the root, one level above the
+                    # real podman graphroot, so the prune would hit an empty store.
+                    home = entry.pw_dir
                     result = Podman.for_user(
                         entry.pw_name, entry.pw_uid, home
                     ).run("image", "prune", "-f", capture_output=True)
@@ -401,20 +413,116 @@ def _vm_qmp_status(name: str) -> str | None:
         qmp.close()
 
 
+def _collect_control_files(config) -> list[dict]:
+    """Merged view of a workload's bundle control files (build.sh, Containerfile,
+    policy.cil, setup.sh, …).
+
+    Unions the files actually present in the override tree
+    (`/etc/workloads.d/<name>/`) with those in the shipped bundle tree
+    (`/usr/.../workloads/<bundle>/`), plus any relative `[host].setup` the TOML
+    names (surfaced even when missing, so a declared-but-absent dependency
+    shows). For each, resolves the winning source — "etc" (override), "usr"
+    (shipped default), or "abs" (a verbatim absolute path) — and whether the
+    resolved file exists. `workload.toml` is
+    excluded: the authoritative declaration is `/etc/workloads.d/<name>/workload.toml`,
+    never an override target.
+    """
+    names: set[str] = set()
+    for d in (config.override_dir, config.bundle_dir):
+        if d.is_dir():
+            # Recurse: a build context can carry subdirectories, and `edit`
+            # accepts nested relpaths, so a nested override must be visible here
+            # too (else it silently shadows without showing in the merged view).
+            for p in d.rglob("*"):
+                if p.is_file() and p.name != "workload.toml":
+                    names.add(p.relative_to(d).as_posix())
+    setup = config.config.get("host", {}).get("setup", "")
+    if setup and not Path(setup).is_absolute():
+        names.add(setup)
+
+    files = []
+    for name in sorted(names):
+        try:
+            path, source = config.resolve_control_file_with_source(name)
+        except ValueError as e:
+            # A traversal-laden [host].setup name can't be resolved to a path;
+            # surface it as an invalid entry rather than crashing this read-only
+            # merged view (the chokepoint fails closed on the build/enable path).
+            files.append({
+                "file": name, "source": "invalid", "path": f"({e})",
+                "exists": False,
+            })
+            continue
+        files.append({
+            "file": name,
+            "source": source,
+            "path": str(path),
+            "exists": path.exists(),
+        })
+    return files
+
+
+def _print_control_files(config, json_mode=False):
+    """Render the `info --files` merged view (systemd `systemctl cat` analogue)."""
+    files = _collect_control_files(config)
+    if json_mode:
+        print(json.dumps({
+            "workload": config.name,
+            "bundle": config.bundle,
+            "override_dir": str(config.override_dir),
+            "bundle_dir": str(config.bundle_dir),
+            "control_files": files,
+        }, indent=2))
+        return
+
+    print(f"Control files for {config.name}  (bundle: {config.bundle})")
+    print(f"  override dir: {config.override_dir}")
+    print(f"  bundle dir:   {config.bundle_dir}")
+    print()
+    if not files:
+        print("  No control files (bundle ships none, no overrides).")
+        return
+
+    fw = max((len(f["file"]) for f in files), default=4)
+    print(f"  {'FILE':<{fw}}  {'SOURCE':<9}  PATH")
+    for f in files:
+        if f["source"] == "etc":
+            src = "override"
+        elif f["source"] == "abs":
+            src = "absolute"
+        elif f["source"] == "invalid":
+            src = "invalid"
+        else:
+            src = "shipped" if f["exists"] else "missing"
+        print(f"  {f['file']:<{fw}}  {src:<9}  {f['path']}")
+    print()
+    print("  override = /etc copy wins · shipped = /usr default · "
+          "absolute = verbatim path · missing = declared but absent")
+    print(f"  Edit a control file:  sudo workloadctl edit {config.name} <file>")
+
+
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
     from substrate import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
+
+    # --files: the merged control-file view (the discoverability answer to lazy
+    # override). Generic across VM/container, so handle it before the kind split.
+    if getattr(args, "files", False):
+        _print_control_files(config, json_mode=args.json)
+        return
+
     user_exists = manager.user_exists(config)
 
     if config.is_vm:
         vm_cfg = config.config.get("vm", {})
         home_dir = config.home_dir
 
-        # Disk info
+        # Disk info — system.qcow2 is reconstructible (state/); data.qcow2 is
+        # precious and lives in the backup-captured data/ subtree.
         system_disk = home_dir / "system.qcow2"
-        data_disk = home_dir / "data.qcow2"
+        data_disk = config.data_dir / "data.qcow2"
         gens = sorted(
             int(p.suffix[5:])
             for p in home_dir.glob("system.qcow2.gen-*")

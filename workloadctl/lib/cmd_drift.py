@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from workload_lib import WORKLOAD_CONFIG_DIR
+from workload_lib import workload_config_dir
 
 
 # The generator script location (installed path first, dev checkout fallback)
@@ -52,7 +52,7 @@ def cmd_drift(args, manager):
     with tempfile.TemporaryDirectory(prefix="workload-drift-") as tmpdir:
         env = {
             **os.environ,
-            "WORKLOAD_CONFIG_DIR": str(WORKLOAD_CONFIG_DIR),
+            "WORKLOAD_CONFIG_DIR": str(workload_config_dir()),
             "SYSUSERS_DIR": tmpdir,
         }
         result = subprocess.run(

@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
+from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_drift import cmd_drift
 from cmd_inspect import (
@@ -18,7 +19,7 @@ from cmd_inspect import (
 )
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
-    cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
+    cmd_build, cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
     cmd_recreate, cmd_start, cmd_stop,
 )
 from cmd_secret import cmd_secret
@@ -69,6 +70,32 @@ def main():
     create_parser.add_argument("--memory-swap-max", metavar="SIZE", help="Maximum swap usage (0 to disable, or size like 512M)")
     create_parser.add_argument("--tasks-max", type=int, metavar="NUM", help="Maximum number of tasks/threads")
 
+    catalog_parser = subparsers.add_parser("catalog", help="List shippable workload bundles")
+    catalog_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    init_parser = subparsers.add_parser(
+        "init", help="Instantiate a catalog bundle into /etc/workloads.d/")
+    init_parser.add_argument("bundle", nargs="?", help="Bundle name (see 'workloadctl catalog')")
+    init_parser.add_argument("--as", dest="as_name", metavar="NAME",
+                             help="Instance name (default: the bundle name)")
+    init_parser.add_argument("--scratch", metavar="NAME",
+                             help="Create a self-contained stub workload with no bundle backing")
+    init_parser.add_argument("--scratch-vm", dest="scratch_vm", metavar="NAME",
+                             help="Create a self-contained VM stub workload (Fedora 44 Cloud-Base default)")
+
+    duplicate_parser = subparsers.add_parser(
+        "duplicate", aliases=["clone"], help="Copy a live workload under a new name")
+    duplicate_parser.add_argument("source", help="Existing workload to copy")
+    duplicate_parser.add_argument("new", help="Name for the copy")
+
+    install_parser = subparsers.add_parser(
+        "install", help="Promote a local workload directory into /etc/workloads.d/")
+    install_parser.add_argument("src", help="Source directory containing workload.toml")
+
+    build_parser = subparsers.add_parser(
+        "build", help="Build a workload's container image from its bundle build context")
+    build_parser.add_argument("workload", help="Workload name")
+
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
@@ -104,8 +131,14 @@ def main():
                                help="Also remove user, home, and subuid/subgid")
     disable_parser.add_argument("workload", help="Workload name")
 
-    edit_parser = subparsers.add_parser("edit", help="Edit config and apply changes")
+    edit_parser = subparsers.add_parser("edit", help="Edit config, or a named control file (copy-on-write override)")
     edit_parser.add_argument("workload", help="Workload name")
+    edit_parser.add_argument(
+        "file", nargs="?",
+        help="Control file to edit (Containerfile, setup.sh, policy.cil, …). "
+             "Seeds an /etc/workloads.d/<name>/ override copy-on-write from the "
+             "shipped default. Omit to edit the workload TOML.",
+    )
     edit_parser.add_argument(
         "-y", "--yes", action="store_true",
         help="Apply changes without the interactive confirmation prompt",
@@ -154,6 +187,11 @@ def main():
 
     info_parser = subparsers.add_parser("info", help="Show detailed workload information")
     info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    info_parser.add_argument(
+        "--files", action="store_true",
+        help="Show the merged view of bundle control files: each resolved file "
+             "and whether it wins from /etc (override) or /usr (shipped default)",
+    )
     info_parser.add_argument("workload", help="Workload name")
 
     images_parser = subparsers.add_parser("images", help="Show images or prune unused")
@@ -273,13 +311,19 @@ def main():
 
     command_map = {
         "backup": cmd_backup,
+        "build": cmd_build,
+        "catalog": cmd_catalog,
         "cleanup": cmd_cleanup,
+        "clone": cmd_duplicate,
         "cp": cmd_cp,
         "create": cmd_create,
         "diagnose": cmd_diagnose,
         "disable": cmd_disable,
         "drift": cmd_drift,
+        "duplicate": cmd_duplicate,
         "edit": cmd_edit,
+        "init": cmd_init,
+        "install": cmd_install,
         "enable": cmd_enable,
         "exec": cmd_exec,
         "health": cmd_health,

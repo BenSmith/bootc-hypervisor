@@ -1,0 +1,39 @@
+# In-VM Forgejo workload. Installed into the guest's /etc/workloads.d/
+# by the cloud-init bootstrap; not enabled on the host.
+
+[workload]
+name = "forgejo"
+
+[container]
+image = "codeberg.org/forgejo/forgejo:15-rootless"
+pull = "missing"
+
+[container.health]
+cmd = "curl -sf http://localhost:3000/api/healthz"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[storage]
+volumes = [
+    # ./ (bare data anchor) resolves to /var/lib/workloads/forgejo/data, which
+    # the cloud-init mounts entry attaches to the data.qcow2 (ext4, label
+    # workloaddata). Forgejo's persistent state — including app.ini — lives
+    # here so it survives system disk rebuilds.
+    "./:/var/lib/gitea",
+]
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+
+[network]
+# Use the VM's network namespace directly instead of pasta. The VM is
+# already on the LAN bridge with its own IP, so Forgejo listens directly
+# on :3000 (HTTP) and :2222 (SSH) of the VM. Caddy (also network=host on
+# this VM) reverse-proxies HTTPS:443 to localhost:3000.
+mode = "host"
+
+[resources]
+memory_max = "1G"
+memory_high = "768M"
+cpu_quota = "200%"

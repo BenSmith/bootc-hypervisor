@@ -1,0 +1,95 @@
+# otel-lgtm - Central observability backend
+#
+# All-in-one container running OpenTelemetry Collector, Prometheus, Loki,
+# Tempo, Pyroscope, and Grafana. Runs on the designated stats/NAS host;
+# receives OTLP telemetry from Alloy agents on all other hosts and from
+# local workloadctl operations.
+#
+# Ports exposed to LAN:
+#   3000  — Grafana UI (authenticated)
+#   4317  — OTLP gRPC ingestion (unauthenticated — trust the LAN, or front
+#           with a TLS-terminating proxy)
+#   4318  — OTLP HTTP ingestion (unauthenticated; same caveat)
+#
+# Prometheus query (9090) and Pyroscope (4040) are bound to loopback only;
+# query them through Grafana rather than exposing them to the LAN.
+#
+# Setup:
+#   1. Create the Grafana admin password as a systemd credential:
+#        echo -n "your-strong-password" | sudo systemd-creds encrypt \
+#            --with-key=tpm2 --name=grafana-admin-password - \
+#            /etc/credstore.encrypted/grafana-admin-password
+#
+#   2. Enable (pulls upstream image; no local build needed):
+#        sudo workloadctl enable otel-lgtm
+#
+#   3. Open firewall for LAN access:
+#        sudo firewall-cmd --add-port=3000/tcp --permanent
+#        sudo firewall-cmd --add-port=4317/tcp --permanent
+#        sudo firewall-cmd --add-port=4318/tcp --permanent
+#        sudo firewall-cmd --reload
+#
+#   4. Visit http://<host-ip>:3000 and log in as admin with the password
+#      from step 1.
+#
+# Data persistence:
+#   All backend data lives in /var/lib/workloads/otel-lgtm/data (mounted
+#   to /data inside the container). Survives restarts and image updates.
+#
+# Grafana config: use GF_* environment variables.
+# See https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/
+
+[workload]
+name = "otel-lgtm"
+
+[container]
+image = "docker.io/grafana/otel-lgtm:latest"
+# "newer" pulls only when a newer tag is available; falls back to local copy
+# if the registry is unreachable.
+pull = "newer"
+
+[container.health]
+# Probe Grafana (3000) and OTLP gRPC (4317) to confirm the all-in-one is
+# actually accepting both UI traffic and telemetry ingestion.
+cmd = "bash -c 'exec 3<>/dev/tcp/localhost/3000 && exec 4<>/dev/tcp/localhost/4317' || exit 1"
+interval = "30s"
+start_period = "180s"
+on_failure = "kill"
+
+[container.environment]
+GF_SECURITY_ADMIN_USER = "admin"
+GF_SECURITY_ADMIN_PASSWORD = "${SECRET:grafana-admin-password}"
+GF_USERS_ALLOW_SIGN_UP = "false"
+GF_ANALYTICS_REPORTING_ENABLED = "false"
+GF_ANALYTICS_CHECK_FOR_UPDATES = "false"
+
+# Retention caps — keep disk usage bounded. Tune to your data volume.
+# Prometheus: 30 days, 10 GiB cap on the local TSDB.
+PROMETHEUS_RETENTION_TIME = "30d"
+PROMETHEUS_RETENTION_SIZE = "10GB"
+
+[storage]
+volumes = [
+    "./lgtm:/data",
+    # Writable target for the image's MCP integration helpers; the entrypoint
+    # tries to mkdir /etc/lgtm and dies with EACCES otherwise (non-fatal but
+    # noisy in the journal).
+    "./lgtm-etc:/etc/lgtm",
+]
+
+[network]
+mode = "pasta"
+# Bind LAN-facing services to all interfaces; keep Prometheus query (9090)
+# and Pyroscope (4040) on loopback. Query them through Grafana instead.
+ports = [
+    "3000:3000",
+    "4317:4317",
+    "4318:4318",
+    "127.0.0.1:9090:9090",
+    "127.0.0.1:4040:4040",
+]
+
+[resources]
+memory_max = "4G"
+memory_high = "3G"
+cpu_quota = "200%"

@@ -1,0 +1,559 @@
+# Headless Wayfire Desktop (VNC)
+#
+# Wayfire runs headlessly (WLR_BACKENDS=headless). Access via wayvnc on
+# port 5900.
+#
+# Build:
+#   sudo workloadctl build vncdesktop-wayfire
+#
+# Run:
+#   workload-ctl enable vncdesktop-wayfire
+
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    adwaita-cursor-theme \
+    adwaita-icon-theme \
+    bash-completion \
+    clinfo \
+    dbus-daemon \
+    drm_info \
+    eglinfo \
+    fira-code-fonts \
+    firefox \
+    foot \
+    git \
+    google-noto-color-emoji-fonts \
+    google-noto-sans-fonts \
+    grim \
+    hostname \
+    htop \
+    imv \
+    less \
+    librsvg2 \
+    mako \
+    mesa-dri-drivers \
+    mesa-libEGL \
+    mesa-libGL \
+    mesa-libgbm \
+    mesa-vulkan-drivers \
+    nano \
+    neovim \
+    procps-ng \
+    rsync \
+    slurp \
+    sudo \
+    swappy \
+    swaybg \
+    systemd \
+    systemd-udev \
+    util-linux \
+    vainfo \
+    vulkan-tools \
+    wayfire \
+    wayfire-config-manager \
+    wayland-info \
+    wayvnc \
+    wdisplays \
+    wf-recorder \
+    wf-shell \
+    wl-clipboard \
+    wlr-randr \
+    wlrctl \
+    wofi \
+    xdg-utils \
+    xorg-x11-server-Xwayland \
+    && dnf clean all
+
+RUN sed -i 's/^hosts:.*/hosts: files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
+
+# --- Firefox stability fix ---
+# Disable Wayland vsync: Firefox freezes under wlroots compositors without
+# mouse movement. Mozilla bug #1954343.
+
+RUN mkdir -p /usr/lib/firefox/browser/defaults/preferences && \
+    cat > /usr/lib/firefox/browser/defaults/preferences/99-container.js <<'JS'
+pref("widget.wayland.vsync.enabled", false);
+JS
+
+# --- GTK settings ---
+
+RUN mkdir -p /etc/gtk-3.0 /etc/gtk-4.0 && \
+    cat > /etc/gtk-3.0/settings.ini <<'INI' && cp /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini
+[Settings]
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-font-name=Noto Sans 11
+gtk-application-prefer-dark-theme=1
+INI
+
+# --- Wayfire config ---
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/wayfire.ini <<'INI'
+[core]
+plugins = \
+  alpha \
+  animate \
+  autostart \
+  command \
+  cube \
+  decoration \
+  expo \
+  fast-switcher \
+  fisheye \
+  foreign-toplevel \
+  grid \
+  move \
+  oswitch \
+  place \
+  resize \
+  switcher \
+  vswitch \
+  wayfire-shell \
+  window-rules \
+  wm-actions \
+  wobbly \
+  zoom
+
+[output:HEADLESS-1]
+mode = 1920x1080@60000
+
+[autostart]
+background = wf-background
+panel = wf-panel
+dock = wf-dock
+notifications = mako
+
+[command]
+binding_terminal = <super> KEY_ENTER
+command_terminal = foot
+
+binding_launcher = <super> KEY_D
+command_launcher = wofi --show run --style /etc/xdg/wofi/style.css
+
+binding_close = <super> KEY_Q
+command_close = wlrctl toplevel close
+
+[move]
+activate = <super> BTN_LEFT
+
+[resize]
+activate = <super> BTN_MIDDLE
+
+[fast-switcher]
+activate = <alt> KEY_TAB
+
+[vswitch]
+binding_left = <super> KEY_LEFT
+binding_down = <super> KEY_DOWN
+binding_up = <super> KEY_UP
+binding_right = <super> KEY_RIGHT
+
+[wm-actions]
+toggle_fullscreen = <super> KEY_F
+
+[grid]
+slot_bl = <super> KEY_KP1
+slot_b = <super> KEY_KP2
+slot_br = <super> KEY_KP3
+slot_l = <super> KEY_KP4
+slot_c = <super> KEY_KP5
+slot_r = <super> KEY_KP6
+slot_tl = <super> KEY_KP7
+slot_t = <super> KEY_KP8
+slot_tr = <super> KEY_KP9
+
+[cube]
+activate = <ctrl> <alt> BTN_LEFT
+background = 0.051 0.082 0.125 1.0
+
+[animate]
+open_animation = zoom
+close_animation = zoom
+duration = 300
+
+[wobbly]
+friction = 3.0
+spring_k = 8.0
+
+[decoration]
+active_color = 0.0 0.831 1.0 1.0
+inactive_color = 0.118 0.176 0.251 1.0
+
+INI
+
+# --- wf-shell config ---
+# Panel widgets that talk to system buses (volume, network, battery) fail in
+# this container with "Connection refused" because NetworkManager / UPower /
+# the PulseAudio system socket aren't present. Stick to self-contained widgets.
+
+RUN cat > /etc/xdg/wf-shell.ini <<'INI'
+[panel]
+widgets_left = menu
+widgets_center = window-list
+widgets_right = clock
+position = top
+minimal_height = 32
+
+[dock]
+position = bottom
+INI
+
+# --- Foot terminal config ---
+
+RUN mkdir -p /etc/xdg/foot && \
+    cat > /etc/xdg/foot/foot.ini <<'INI'
+[main]
+font=Fira Code:size=14
+initial-window-size-chars=80x24
+
+[colors-dark]
+background=0d1520
+foreground=c8dde8
+regular0=111d2e
+regular1=ff4d6d
+regular2=00c896
+regular3=f0c060
+regular4=4090d8
+regular5=8060c8
+regular6=00c8d8
+regular7=8899aa
+bright0=1e2d40
+bright1=ff6b85
+bright2=00e8aa
+bright3=f8d880
+bright4=60b0f0
+bright5=a080e8
+bright6=00e8f0
+bright7=c8dde8
+INI
+
+# --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
+
+RUN cat > /etc/profile.d/desktop-prompt.sh <<'SH'
+if [ "$PS1" ]; then
+    PS1='\[\033[01;36m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+fi
+SH
+
+# --- Mako notification config ---
+
+RUN mkdir -p /etc/xdg/mako && \
+    cat > /etc/xdg/mako/config <<'INI'
+background-color=#111d2e
+text-color=#c8dde8
+border-color=#00d4ff
+border-radius=8
+border-size=2
+width=380
+padding=12
+margin=8
+font=Noto Sans 11
+INI
+
+# --- Wofi launcher style ---
+
+RUN mkdir -p /etc/xdg/wofi && \
+    cat > /etc/xdg/wofi/style.css <<'CSS'
+window {
+    background-color: #0d1520;
+    border: 2px solid #00d4ff;
+    border-radius: 10px;
+    color: #c8dde8;
+    font-family: "Noto Sans";
+    font-size: 13px;
+}
+#input {
+    background-color: #111d2e;
+    border: 1px solid #1e2d40;
+    border-radius: 6px;
+    color: #c8dde8;
+    padding: 8px 12px;
+    margin: 8px;
+    outline: none;
+}
+#outer-box {
+    padding: 6px;
+}
+#entry {
+    padding: 6px 12px;
+    border-radius: 5px;
+    margin: 2px 4px;
+}
+#entry:selected {
+    background-color: #1e3550;
+}
+#text {
+    color: #c8dde8;
+}
+#text:selected {
+    color: #00d4ff;
+}
+CSS
+
+# --- XDG runtime dir service ---
+# container-bootstrap.service is gated by ConditionPathExists so it only runs
+# once, but /run is a fresh tmpfs on every container start. This service
+# creates /run/user/${CONTAINER_UID} unconditionally before any user service.
+
+RUN cat > /usr/lib/systemd/system/xdg-runtime-dir.service <<'UNIT'
+[Unit]
+Description=Create XDG_RUNTIME_DIR for container user
+After=container-bootstrap.service
+Requires=container-bootstrap.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID CONTAINER_GID
+ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Wayfire systemd service ---
+
+RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
+[Unit]
+Description=Wayfire Wayland Compositor (headless)
+After=xdg-runtime-dir.service
+Requires=xdg-runtime-dir.service
+
+[Service]
+Type=simple
+TasksMax=infinity
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE
+
+Environment=LIBSEAT_BACKEND=noop
+Environment=MOZ_ENABLE_WAYLAND=1
+Environment=WLR_BACKENDS=headless
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_THEME=Adwaita
+Environment=XDG_CURRENT_DESKTOP=wlroots
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus WAYFIRE_CONFIG_FILE=/etc/xdg/wayfire.ini; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Wayland ready gate ---
+
+RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
+#!/bin/sh
+RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+ENV_FILE="/run/wayland-display.env"
+
+while true; do
+    for sock in "$RUNTIME_DIR"/wayland-*; do
+        case "$sock" in *.lock) continue ;; esac
+        if [ -S "$sock" ]; then
+            DISPLAY_NAME="${sock##*/}"
+            echo "WAYLAND_DISPLAY=${DISPLAY_NAME}" > "$ENV_FILE"
+            exit 0
+        fi
+    done
+    sleep 0.5
+done
+SCRIPT
+
+RUN chmod +x /usr/local/bin/wait-for-wayland
+
+RUN cat > /usr/lib/systemd/system/wayfire-wayland-ready.service <<'UNIT'
+[Unit]
+Description=Wait for wayfire Wayland socket
+After=wayfire.service
+Requires=wayfire.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID
+ExecStart=/usr/local/bin/wait-for-wayland
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- set-resolution systemd service ---
+
+RUN cat > /usr/lib/systemd/system/set-resolution.service <<'UNIT'
+[Unit]
+Description=Set virtual output resolution
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c '. /run/wayland-display.env && export XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60"'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- wayvnc launcher ---
+# Writes wayvnc auth config from VNC_PASSWORD/VNC_USERNAME (if set) before
+# spawning wayvnc. With no VNC_PASSWORD, wayvnc runs unauthenticated.
+
+RUN cat > /usr/local/bin/start-wayvnc <<'SCRIPT'
+#!/bin/sh
+set -e
+. /run/wayland-display.env
+export WAYLAND_DISPLAY
+export HOME="/home/${CONTAINER_USER}"
+export XDG_RUNTIME_DIR="/run/user/${CONTAINER_UID}"
+
+mkdir -p "$HOME/.config/wayvnc"
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    cat > "$HOME/.config/wayvnc/config" <<CFG
+enable_auth=true
+username=${VNC_USERNAME:-desktop}
+password=${VNC_PASSWORD}
+CFG
+    chmod 600 "$HOME/.config/wayvnc/config"
+    echo "wayvnc: authentication enabled (username: ${VNC_USERNAME:-desktop})"
+else
+    rm -f "$HOME/.config/wayvnc/config"
+    echo "wayvnc: WARNING — no authentication. Set VNC_PASSWORD to enable."
+fi
+
+cd
+exec /usr/bin/wayvnc 0.0.0.0 5900
+SCRIPT
+
+RUN chmod +x /usr/local/bin/start-wayvnc
+
+RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
+[Unit]
+Description=wayvnc VNC server
+After=set-resolution.service
+Requires=set-resolution.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /usr/local/bin/start-wayvnc
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Bootstrap ---
+
+RUN cat > /usr/local/bin/container-bootstrap <<'SCRIPT'
+#!/bin/bash
+set -e
+: "${CONTAINER_USER:?must be set}"
+: "${CONTAINER_UID:?must be set}"
+: "${CONTAINER_GID:?must be set}"
+
+HOME_DIR="/home/$CONTAINER_USER"
+
+groupadd -g "$CONTAINER_GID" "$CONTAINER_USER" 2>/dev/null || true
+useradd -u "$CONTAINER_UID" -g "$CONTAINER_GID" -d "$HOME_DIR" -s /bin/bash -M "$CONTAINER_USER" 2>/dev/null || true
+chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR"
+
+for grp in render video; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        usermod -aG "$grp" "$CONTAINER_USER" 2>/dev/null || true
+    fi
+done
+
+mkdir -p /etc/sudoers.d
+echo "$CONTAINER_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/container-user
+chown 0:0 /etc/sudoers.d/container-user
+chmod 0440 /etc/sudoers.d/container-user
+
+echo "Bootstrap complete."
+SCRIPT
+
+RUN cat > /usr/lib/systemd/system/container-bootstrap.service <<'UNIT'
+[Unit]
+Description=First-boot container bootstrap
+ConditionPathExists=!/etc/container-bootstrapped
+DefaultDependencies=no
+After=sysinit.target
+Before=wayfire.service
+
+[Service]
+Type=oneshot
+PassEnvironment=CONTAINER_USER CONTAINER_UID CONTAINER_GID
+ExecStart=/usr/local/bin/container-bootstrap
+ExecStartPost=/bin/touch /etc/container-bootstrapped
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN mkdir -p /etc/systemd/journald.conf.d && \
+    cat > /etc/systemd/journald.conf.d/10-container.conf <<'CONF'
+[Journal]
+Storage=volatile
+ForwardToSocket=/run/host-systemd/journal/socket
+CONF
+
+RUN mkdir -p /etc/systemd/system/systemd-journald.service.d && \
+    cat > /etc/systemd/system/systemd-journald.service.d/10-container.conf <<'DROPIN'
+[Service]
+CapabilityBoundingSet=
+IPAddressDeny=
+LockPersonality=no
+MemoryDenyWriteExecute=no
+NoNewPrivileges=no
+ProtectClock=no
+RestrictAddressFamilies=
+RestrictNamespaces=no
+RestrictRealtime=no
+RestrictSUIDSGID=no
+SystemCallArchitectures=
+SystemCallFilter=
+DROPIN
+
+RUN mkdir -p /etc/systemd/system && \
+    ln -sf /dev/null /etc/systemd/system/rtkit-daemon.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-oomd.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-resolved.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-resolved.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
+    systemctl enable wayfire wayfire-wayland-ready set-resolution wayvnc container-bootstrap xdg-runtime-dir && \
+    chmod +x /usr/local/bin/container-bootstrap
+
+# --- DNS fix ---
+# Mask systemd-resolved (host networking means the host's resolver handles DNS;
+# a second resolved inside the container races on 127.0.0.53 and loses).
+# single-request serialises A/AAAA queries so an unreachable IPv6 upstream
+# can't stall every lookup for 15 s.
+RUN printf 'nameserver 127.0.0.53\noptions single-request ndots:1\n' > /etc/resolv.conf
+
+# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
+# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
+# which breaks apps with a bundled TLS stack that read the bundle *file*
+# ("unable to load trusted SSL root certificates"). Restore the legacy names as
+# symlinks to the stable extracted bundle (Fedora's documented permanent fix).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

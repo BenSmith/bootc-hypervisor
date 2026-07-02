@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,10 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
     selinux_module_name,
     selinux_type_name,
+    units_outdated,
     validate_workload_name,
+    workload_config_dir,
+    workload_config_path,
 )
 from workloadctl_core import (
     WorkloadConfig,
@@ -27,7 +31,6 @@ from workloadctl_core import (
     restart_workload_service,
     require_root,
     toml_string,
-    WORKLOAD_DIR,
 )
 
 
@@ -133,7 +136,96 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "message": f"Lifecycle policy: {config.lifecycle}"
         })
 
+    # snapshot_keep bounds the pet overlay snapshot repository. Only the
+    # explicit field is checked; omitting it uses the default (3).
+    raw_snapshot_keep = config.config.get("workload", {}).get("snapshot_keep")
+    if raw_snapshot_keep is not None and (
+        not isinstance(raw_snapshot_keep, int)
+        or isinstance(raw_snapshot_keep, bool)
+        or raw_snapshot_keep < 1
+    ):
+        checks.append({
+            "check": "snapshot_keep",
+            "passed": False,
+            "severity": "error",
+            "message": (
+                f"[workload].snapshot_keep must be a positive integer, "
+                f"got {raw_snapshot_keep!r}"
+            ),
+            "fix": "Set [workload] snapshot_keep to a positive integer (or omit for the default 3)",
+        })
+        errors += 1
+
+    # `bundle` goes straight into a /usr/share/workloadctl/workloads/<bundle>/
+    # path for control-file lookups, so reject anything that isn't a plain
+    # workload-style name before any path is built. Only the explicit field is
+    # checked; the default (the workload name) is validated on its own.
+    raw_bundle = config.config.get("workload", {}).get("bundle")
+    if raw_bundle is not None:
+        try:
+            validate_workload_name(raw_bundle)
+            checks.append({
+                "check": "bundle",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Bundle: {config.bundle}",
+            })
+        except ValueError as e:
+            checks.append({
+                "check": "bundle",
+                "passed": False,
+                "severity": "error",
+                "message": f"Invalid bundle {raw_bundle!r}: {e}",
+                "fix": "bundle is a directory name (lowercase letters, digits, hyphens)",
+            })
+            errors += 1
+
+    # `selinux_policy` is now boolean-only. A leftover string from the old form
+    # is truthy, so it silently enables policy keyed on `[workload] bundle`
+    # (default = name) — NOT the directory the string named. Surface it.
+    raw_selinux = config.config.get("security", {}).get("selinux_policy")
+    if isinstance(raw_selinux, str):
+        checks.append({
+            "check": "selinux_policy_string",
+            "passed": False,
+            "severity": "warning",
+            "message": f"selinux_policy = {raw_selinux!r} is a string; the field "
+                       f"is now boolean-only and this is treated as `true` with "
+                       f"the CIL sourced from bundle '{config.bundle}', not "
+                       f"'{raw_selinux}'.",
+            "fix": f'Set selinux_policy = true and, if the policy lives elsewhere, '
+                   f'[workload] bundle = "{raw_selinux}".',
+        })
+        warnings += 1
+
+    # [build] section: the containerfile names a file *inside* the build
+    # context, so it must be a plain relative path (no traversal). Only checked
+    # when the section is present.
+    if config.config.get("build"):
+        cf = config.build_containerfile
+        if Path(cf).is_absolute() or ".." in Path(cf).parts:
+            checks.append({
+                "check": "build_containerfile",
+                "passed": False,
+                "severity": "error",
+                "message": f"Invalid [build] containerfile {cf!r}: must be a "
+                           f"relative path inside the build context (no '..')",
+                "fix": 'e.g. containerfile = "Containerfile"',
+            })
+            errors += 1
+        else:
+            summary = f"containerfile={cf}"
+            if config.build_script:
+                summary = f"script={config.build_script}"
+            checks.append({
+                "check": "build",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Build: {summary}",
+            })
+
     required_file_paths = {e["path"] for e in config.get_required_files()}
+    workload_root = str(config.home_dir.parent)
     for vol in config.get_volumes():
         expanded_vol = expand_volume_path(vol, str(config.home_dir))
         host_path = expanded_vol.split(':')[0]
@@ -151,6 +243,14 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 "passed": True,
                 "severity": "ok",
                 "message": f"Volume path listed in required_files (setup needed): {host_path}",
+                "path": host_path
+            })
+        elif host_path.startswith(workload_root + "/"):
+            checks.append({
+                "check": "volume_path",
+                "passed": True,
+                "severity": "ok",
+                "message": f"Volume path will be created on enable: {host_path}",
                 "path": host_path
             })
         else:
@@ -253,17 +353,18 @@ def cmd_create(args, manager: WorkloadManager):
         sys.exit(1)
 
     # Check if config already exists
-    config_path = WORKLOAD_DIR / f"{name}.toml"
-    if config_path.exists():
+    config_path = workload_config_path(name)
+    if config_path.parent.exists():
         print(f"Error: Workload config already exists: {config_path}", file=sys.stderr)
         print(f"Use 'workloadctl edit {name}' to modify it", file=sys.stderr)
         sys.exit(1)
+
+    config_path.parent.mkdir()
 
     # Build configuration
     config_lines = [
         "[workload]",
         f"name = {toml_string(name)}",
-        "enabled = false",
     ]
 
     config_lines.extend([
@@ -447,6 +548,7 @@ def cmd_diagnose(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     checks = []
+    linger_enabled = False  # set by Check 3; referenced by the session/runtime checks
 
     def _check(name, passed, message, fix=None):
         entry = {"check": name, "passed": passed, "message": message}
@@ -498,6 +600,25 @@ def cmd_diagnose(args, manager: WorkloadManager):
             _check("linger_enabled", False, "Linger not enabled",
                    fix=f"sudo loginctl enable-linger {config.uid}")
 
+    # Check 3b: User manager session live. Rootless workloads need user@<uid> up
+    # (linger keeps it alive) for the user D-Bus that crun's cgroup manager talks
+    # to. If linger is on but the session is dead, the safe fix is to RESTART the
+    # user manager — never `loginctl terminate-user`, which also tears down
+    # /run/user/<uid> and leaves workloads failing with 226/NAMESPACE.
+    if user_exists and linger_enabled:
+        session_active = subprocess.run(
+            ["systemctl", "is-active", f"user@{config.uid}.service"],
+            capture_output=True, text=True,
+        ).returncode == 0
+        if session_active:
+            _check("user_session", True, f"User manager session active: user@{config.uid}.service")
+        else:
+            _check("user_session", False,
+                   f"User manager session not active despite linger: user@{config.uid}.service",
+                   fix=f"sudo systemctl restart user@{config.uid}.service  "
+                       f"(do NOT use 'loginctl terminate-user' — it removes /run/user/{config.uid} "
+                       f"→ 226/NAMESPACE)")
+
     # Check: per-workload SELinux module loaded (only if the workload ships one)
     if config.selinux_policy:
         module = selinux_module_name(config.name)
@@ -521,9 +642,15 @@ def cmd_diagnose(args, manager: WorkloadManager):
         runtime_dir = Path(f"/run/user/{config.uid}")
         if runtime_dir.exists():
             _check("runtime_dir", True, f"Runtime directory exists: {runtime_dir}")
+        elif linger_enabled:
+            # Linger is on but the dir is gone — the classic `terminate-user`
+            # aftermath. Restarting the user manager recreates it.
+            _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
+                   fix=f"sudo systemctl restart user@{config.uid}.service "
+                       f"(linger is on; do NOT 'loginctl terminate-user')")
         else:
             _check("runtime_dir", False, f"Runtime directory missing: {runtime_dir}",
-                   fix="Enable linger to create runtime directory")
+                   fix=f"sudo loginctl enable-linger {config.uid} (creates the runtime directory)")
 
     # Check 5: Home directory exists
     if user_exists:
@@ -536,7 +663,13 @@ def cmd_diagnose(args, manager: WorkloadManager):
 
     # Check 6: Image(s) exist locally
     if user_exists:
-        if config.is_multi:
+        if config.is_vm:
+            # VM workloads have no container image to inventory — the disk is
+            # provisioned by the substrate, not pulled. `config.image` is the
+            # sentinel "(vm)" and get_image_id() would pointlessly shell out to
+            # `podman image inspect "(vm)"`, so skip the container-image check.
+            pass
+        elif config.is_multi:
             for cname, img in config.container_images():
                 iid = manager.podman(config).image_id(img)
                 if iid:
@@ -553,9 +686,14 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
                 if pull_policy == "never":
-                    build_script = Path(f"/usr/share/workloadctl/containers/{config.name}/build.sh")
-                    fix = (f"Build it: {build_script}" if build_script.exists()
-                           else f"Build or provide: {config.image}")
+                    try:
+                        build_script = config.resolve_control_file("build.sh")
+                        fix = (f"Build it: {build_script}" if build_script.exists()
+                               else f"Build or provide: {config.image}")
+                    except ValueError as e:
+                        # Malformed [workload] bundle: report it as the fix-text
+                        # rather than letting it crash the whole diagnose run.
+                        fix = f"Fix [workload] bundle: {e}"
                 else:
                     fix = "Image will be pulled on first start"
                 _check("image_available", False, f"Image not available: {config.image}", fix=fix)
@@ -576,6 +714,18 @@ def cmd_diagnose(args, manager: WorkloadManager):
             else:
                 _check(f"service_file[{unit}]", False, f"Sub-service file missing: {unit}",
                        fix="sudo systemctl daemon-reload")
+
+    # Check 7b: Config not edited since the units were last generated. Editing
+    # the workload.toml + `daemon-reload` does NOT regenerate per-workload units
+    # (only `enable` runs the unit-writer), a common foot-gun.
+    if service_file.exists():
+        if units_outdated(config.name):
+            _check("config_current", False,
+                   "Config edited since last enable — generated units are stale",
+                   fix=f"sudo workloadctl enable {config.name}  "
+                       f"(daemon-reload does not regenerate units; see `drift` for the diff)")
+        else:
+            _check("config_current", True, "Generated units match current config (by mtime)")
 
     # Check 8: Service enabled
     result = subprocess.run(
@@ -713,11 +863,180 @@ def _ask_yes_no(prompt: str) -> bool:
         return False
 
 
+def _validate_control_file_name(rel: str) -> None:
+    """Reject anything that isn't a safe relative path under the override dir.
+
+    Blocks absolute paths and `..` traversal so `edit <name> <file>` can never
+    write outside `/etc/workloads.d/<name>/`. Nested names (e.g. `rootfs/x`) are
+    allowed — the build context may have subdirectories.
+    """
+    if not rel or not rel.strip():
+        raise ValueError("empty control-file name")
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        raise ValueError("must be a relative path with no '..' components")
+
+
+def _assert_no_symlink_escape(base: Path, target: Path) -> None:
+    """Reject if any component from `base` down to `target` is a symlink.
+
+    `..`/absolute are already blocked, but a relpath like `sub/file` could still
+    escape `/etc/workloads.d/<name>/` if a component (`sub`, or the file itself)
+    was pre-planted as a symlink. Walk the chain and refuse any symlinked
+    component so a write can never follow a link out of the override tree.
+    """
+    if base.is_symlink():
+        raise ValueError(f"override dir is a symlink: {base}")
+    cur = base
+    for part in target.relative_to(base).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"refusing to write through symlink: {cur}")
+
+
+def _cleanup_override_dir(config: WorkloadConfig, override: Path) -> None:
+    """Remove now-empty override dirs from `override` up to override_dir.
+
+    Keeps the override tree free of empty `<name>/` (and any seeded subdirs)
+    after a lazy-cleanup removal, so the dir's existence stays meaningful.
+    """
+    base = config.override_dir
+    d = override.parent
+    while True:
+        try:
+            d.rmdir()
+        except OSError:
+            break
+        if d == base:
+            break
+        d = d.parent
+
+
+def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
+    """Print how to apply a just-edited control file (it isn't auto-applied)."""
+    base = Path(rel).name
+    setup = config.config.get("host", {}).get("setup", "")
+    # Files that drive an image build: the conventional names plus whatever this
+    # workload actually declares ([build].containerfile / [build].script), so a
+    # `Containerfile.gpu` edit still gets the rebuild hint, not the generic one.
+    build_files = {"build.sh", "Containerfile",
+                   Path(config.build_containerfile).name}
+    if config.build_script:
+        build_files.add(Path(config.build_script).name)
+    print()
+    print("  Next steps:")
+    if base == "policy.cil":
+        print(f"    Reload SELinux policy:  sudo workloadctl enable {config.name}")
+    elif base in build_files:
+        print(f"    Rebuild image:          sudo workloadctl build {config.name}")
+        print(f"    Apply to running:       sudo workloadctl recreate {config.name}")
+    elif rel == setup:
+        print(f"    Re-runs on next enable: sudo workloadctl enable {config.name}")
+    else:
+        print(f"    Apply changes:          sudo workloadctl recreate {config.name}")
+    print(f"    Revert to shipped:      sudo rm {config.override_dir / rel}")
+
+
+def _edit_control_file(args, manager: WorkloadManager):
+    """Edit a bundle control file, seeding an /etc override copy-on-write.
+
+    The lazy-override ergonomic (systemd `systemctl edit`): on first edit, seed
+    `/etc/workloads.d/<name>/<file>` from the resolved `/usr` default (or an
+    empty file if the bundle ships none), then open `$EDITOR`. If the result is
+    byte-identical to the shipped default — or an untouched empty new file — the
+    override is dropped so it never freezes upgrade-tracking.
+    """
+    name = args.workload
+    rel = args.file
+
+    config_path = workload_config_path(name)
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        _validate_control_file_name(rel)
+    except ValueError as e:
+        print(f"Error: invalid control-file name {rel!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(name)
+    override = config.override_dir / rel
+    default = config.bundle_dir / rel
+
+    # Containment: even with `..` blocked, a pre-planted symlink component could
+    # redirect the write outside the override tree. Check before creating dirs.
+    try:
+        _assert_no_symlink_escape(config.override_dir, override)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    seeded = False
+    if not override.exists():
+        override.parent.mkdir(parents=True, exist_ok=True)
+        if default.exists():
+            shutil.copy2(default, override)
+            print(f"  Seeded override from shipped default: {default}")
+        else:
+            override.touch()
+            if rel.endswith(".sh"):
+                override.chmod(0o755)
+            print(f"  No shipped default — created a new control file: {override}")
+        seeded = True
+
+    # Split $EDITOR so a value carrying flags (e.g. "code --wait", "emacs -nw")
+    # is honored instead of being treated as one impossible argv[0]. Fall back
+    # to nano if the var is set but empty/whitespace.
+    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    result = subprocess.run([*editor_argv, str(override)])
+    if result.returncode != 0:
+        print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
+        # Don't leave a half-seeded override behind on editor failure.
+        if seeded:
+            override.unlink(missing_ok=True)
+            _cleanup_override_dir(config, override)
+        sys.exit(1)
+
+    # Lazy-override cleanup. An override byte-identical to the shipped default is
+    # redundant and would freeze upgrade-tracking, so drop it; likewise an
+    # untouched empty new file. Mirrors `systemctl edit` discarding a no-op.
+    if default.exists() and override.read_bytes() == default.read_bytes():
+        override.unlink()
+        _cleanup_override_dir(config, override)
+        print(f"  No change from the shipped default — no override kept "
+              f"(still tracks {default}).")
+        return
+    if not default.exists() and override.stat().st_size == 0:
+        override.unlink()
+        _cleanup_override_dir(config, override)
+        print("  Empty file — nothing created.")
+        return
+
+    # A freshly authored control file with a shebang should be executable even
+    # when it isn't named *.sh (a hook with no extension). copy2 already
+    # preserves a shipped default's mode, so only touch newly seeded files.
+    if seeded and not default.exists():
+        try:
+            with open(override, "rb") as fh:
+                if fh.read(2) == b"#!":
+                    override.chmod(override.stat().st_mode | 0o111)
+        except OSError:
+            pass
+
+    print(f"✓ Override saved: {override}")
+    _print_control_file_next_steps(config, rel)
+
+
 def cmd_edit(args, manager: WorkloadManager):
     """Edit config and apply changes"""
     require_root()
 
-    config_path = WORKLOAD_DIR / f"{args.workload}.toml"
+    if getattr(args, "file", None):
+        _edit_control_file(args, manager)
+        return
+
+    config_path = workload_config_path(args.workload)
     if not config_path.exists():
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)

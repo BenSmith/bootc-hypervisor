@@ -246,6 +246,9 @@ RUN rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
 COPY bin/cosy /usr/bin/
 COPY man/cosy.1 /usr/share/man/man1/cosy.1
+# cosy desktop-container recipes (build contexts an operator runs with `cosy`).
+# Not workloadctl workloads — kept in the image but scoped out of the RPM.
+COPY desktop-containers/ /usr/share/cosy/desktop-containers/
 RUN chmod 0755 /usr/bin/cosy && \
     chmod 0644 /usr/share/man/man1/cosy.1 && \
     chmod 0644 /usr/lib/systemd/system/emergency.target.d/emergency-access.conf && \

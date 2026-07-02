@@ -106,21 +106,16 @@ install -Dpm 0644 %{_sourcedir}/docs/workloads.md \
 install -Dpm 0644 %{_sourcedir}/docs/schema-reference.toml \
     %{buildroot}%{_docdir}/workloadctl/schema-reference.toml
 
+# Shipped workload bundles: one subdir per bundle co-locating the template
+# declaration (workload.toml) with its control files (Containerfile, build.sh,
+# setup.sh, policy.cil, cloud-init user-data, *.conf templates — any subset).
+# This replaces the old split across containers/, vms/, and docdir examples.
+# `catalog`/`init` read the declarations from here; build/setup/SELinux lookups
+# resolve control files from here; [vm.cloud_init].user_data_file references
+# real on-disk paths under it. So it must be a real share location, not docdir.
 install -dm 0755 %{buildroot}%{_datadir}/workloadctl
-cp -a %{_sourcedir}/containers %{buildroot}%{_datadir}/workloadctl/containers
-find %{buildroot}%{_datadir}/workloadctl/containers -name '*.sh' -exec chmod 0755 {} \;
-
-install -dm 0755 %{buildroot}%{_docdir}/workloadctl/examples
-install -pm 0644 %{_sourcedir}/workloads.d/*.toml \
-    %{buildroot}%{_docdir}/workloadctl/examples/
-
-# VM support trees (cloud-init user-data, in-VM workload TOMLs, helper
-# systemd units, etc.). Mirrors the containers/ layout: one subdir per
-# VM workload, installed to /usr/share/workloadctl/vms/<name>/.
-# [vm.cloud_init].user_data_file in the workload TOMLs references files
-# under this path, so it must be a real on-disk location (not docdir).
-install -dm 0755 %{buildroot}%{_datadir}/workloadctl/vms
-cp -a %{_sourcedir}/vms/. %{buildroot}%{_datadir}/workloadctl/vms/
+cp -a %{_sourcedir}/workloads %{buildroot}%{_datadir}/workloadctl/workloads
+find %{buildroot}%{_datadir}/workloadctl/workloads -name '*.sh' -exec chmod 0755 {} \;
 
 install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
 

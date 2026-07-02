@@ -1,0 +1,80 @@
+# Pi-hole with VPN DNS - Network-wide ad blocker with upstream DNS through WireGuard VPN
+#
+# Pi-hole blocks ads and trackers at the DNS level. All upstream DNS queries
+# exit through a WireGuard VPN tunnel, so your DNS lookups are private.
+# The upstream DNS server is read from the wg0.conf DNS= line automatically.
+#
+# Setup:
+#   1. Build the container:
+#        sudo workloadctl build pihole-vpn
+#
+#   2. Copy your WireGuard config and enable:
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/pihole-vpn/data/wg0.conf
+#        sudo workloadctl enable pihole-vpn
+#
+#   3. Configure firewall for LAN access:
+#        sudo firewall-cmd --add-service=dns --permanent
+#        sudo firewall-cmd --add-service=http --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to your local subnet (more secure):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="dns" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="http" accept'
+#        sudo firewall-cmd --reload
+#
+#   4. Run gravity to download blocklists:
+#        sudo workloadctl exec pihole-vpn pihole -g
+#
+#   5. Point devices to <this-host-ip> for DNS.
+#      Web interface: http://<this-host-ip>/admin
+
+[workload]
+name = "pihole-vpn"
+
+[setup]
+required_files = [
+    { path = "./wg0.conf", hint = "WireGuard client config from your VPN provider" },
+]
+
+[container]
+image = "localhost/pihole-vpn:latest"
+pull = "never"
+
+[container.health]
+cmd = "dig +short +time=2 @127.0.0.1 pi.hole || exit 1"
+interval = "30s"
+start_period = "60s"
+on_failure = "kill"
+
+[container.environment]
+# TZ = "America/Los_Angeles"  # Uncomment and set to your timezone
+WG_INTERFACE = "wg0"
+
+# Leave empty to disable web interface authentication, or use a secret:
+WEBPASSWORD = ""
+# WEBPASSWORD = "${SECRET:pihole-vpn-webpassword}"
+
+# Override the DNS server from wg0.conf if needed:
+# UPSTREAM_DNS = "10.5.0.1"
+
+[storage]
+volumes = [
+    "./wg0.conf:/etc/wireguard/wg0.conf:ro",
+    "./etc-pihole:/etc/pihole",
+    "./etc-dnsmasq.d:/etc/dnsmasq.d",
+]
+
+[network]
+mode = "pasta"
+ports = ["53:53/udp", "53:53/tcp", "80:80/tcp"]
+
+[security]
+# userns=host: both wg-quick and Pi-hole's entrypoint require root inside the container.
+# Container UID 0 maps to the workload user on the host — no actual host root access.
+userns = "host"
+capabilities = ["NET_ADMIN"]
+
+[resources]
+memory_max = "256M"
+memory_high = "192M"
+cpu_quota = "20%"

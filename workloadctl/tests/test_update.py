@@ -160,7 +160,7 @@ class TestHealthWaitSeconds(unittest.TestCase):
         """Verify _health_wait_seconds parses every real workload's health config."""
         import tomllib
         workloads_dir = Path(os.path.dirname(__file__), '..', 'workloads.d')
-        for toml_path in sorted(workloads_dir.glob("*.toml")):
+        for toml_path in sorted(workloads_dir.glob("*/workload.toml")):
             with open(toml_path, "rb") as f:
                 toml_config = tomllib.load(f)
             health = toml_config.get("container", {}).get("health", {})
@@ -174,77 +174,48 @@ class TestHealthWaitSeconds(unittest.TestCase):
             self.assertLess(wait, 300, f"{toml_path.name}: wait seems too long ({wait}s)")
 
 
-class TestReplaceWorkloadEnabled(unittest.TestCase):
-    """The cmd_enable rewrite must only touch [workload].enabled, even if
-    some other section happens to have an `enabled = ...` line."""
+class TestEnabledMarker(unittest.TestCase):
+    """Enabled-ness is the presence of a `.enabled` marker in the workload's
+    config dir."""
 
-    def test_flip_false_to_true(self):
-        src = "[workload]\nname = \"x\"\nenabled = false\n"
-        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
-        self.assertIn("enabled = true", out)
-        self.assertNotIn("enabled = false", out)
-        self.assertTrue(had)
+    def setUp(self):
+        import tempfile
+        import workload_lib
+        self._tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("WORKLOAD_CONFIG_DIR")
+        os.environ["WORKLOAD_CONFIG_DIR"] = self._tmp
+        self.workload_lib = workload_lib
 
-    def test_flip_true_to_false(self):
-        src = "[workload]\nname = \"x\"\nenabled = true\n"
-        out, had = cmd_lifecycle._replace_workload_enabled(src, "false")
-        self.assertIn("enabled = false", out)
-        self.assertNotIn("enabled = true", out)
-        self.assertTrue(had)
+    def tearDown(self):
+        import shutil
+        if self._prev is None:
+            os.environ.pop("WORKLOAD_CONFIG_DIR", None)
+        else:
+            os.environ["WORKLOAD_CONFIG_DIR"] = self._prev
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def test_insert_when_missing(self):
-        src = "[workload]\nname = \"x\"\n"
-        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
-        self.assertIn("enabled = true", out)
-        self.assertFalse(had)
+    def _write(self, name, toml):
+        d = Path(self._tmp) / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "workload.toml").write_text(toml)
+        return d
 
-    def test_remove_when_present(self):
-        src = "[workload]\nname = \"x\"\nenabled = true\n"
-        out, had = cmd_lifecycle._replace_workload_enabled(src, None)
-        self.assertNotIn("enabled", out)
-        self.assertTrue(had)
-
-    def test_does_not_touch_other_sections(self):
-        """A future [[containers]] entry (or any other table) with its own
-        `enabled` field must be left alone — only [workload].enabled flips."""
-        src = (
-            "[workload]\n"
-            "name = \"x\"\n"
-            "enabled = false\n"
-            "\n"
-            "[[containers]]\n"
-            "name = \"web\"\n"
-            "enabled = false   # hypothetical per-container field\n"
+    def test_marker_path(self):
+        self.assertEqual(
+            self.workload_lib.workload_enabled_marker("foo"),
+            Path(self._tmp) / "foo" / ".enabled",
         )
-        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
-        # [workload].enabled flipped:
-        self.assertIn("[workload]", out)
-        workload_section = out.split("[[containers]]")[0]
-        self.assertIn("enabled = true", workload_section)
-        # [[containers]] section untouched:
-        containers_section = out.split("[[containers]]")[1]
-        self.assertIn("enabled = false", containers_section)
-        self.assertTrue(had)
 
-    def test_first_match_only(self):
-        """If [workload] somehow contains two enabled lines, only the first
-        is changed — count=1 keeps the operation deterministic."""
-        src = (
-            "[workload]\n"
-            "enabled = false\n"
-            "enabled = false\n"
-        )
-        out, _ = cmd_lifecycle._replace_workload_enabled(src, "true")
-        # Exactly one true, exactly one false
-        self.assertEqual(out.count("enabled = true"), 1)
-        self.assertEqual(out.count("enabled = false"), 1)
+    def test_absent_marker_is_disabled(self):
+        self._write("foo", '[workload]\nname = "foo"\n[container]\nimage = "x"\n')
+        self.assertFalse(self.workload_lib.workload_is_enabled("foo"))
+        self.assertFalse(WorkloadConfig("foo").enabled)
 
-    def test_no_workload_section_creates_one(self):
-        src = "[container]\nimage = \"x\"\n"
-        out, had = cmd_lifecycle._replace_workload_enabled(src, "true")
-        self.assertIn("[workload]", out)
-        self.assertIn("enabled = true", out)
-        self.assertFalse(had)
+    def test_present_marker_is_enabled(self):
+        d = self._write("foo", '[workload]\nname = "foo"\n[container]\nimage = "x"\n')
+        (d / ".enabled").touch()
+        self.assertTrue(self.workload_lib.workload_is_enabled("foo"))
+        self.assertTrue(WorkloadConfig("foo").enabled)
 
 
 if __name__ == "__main__":

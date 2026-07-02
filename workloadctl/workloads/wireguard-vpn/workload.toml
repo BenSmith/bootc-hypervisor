@@ -1,0 +1,55 @@
+# WireGuard VPN - VPN tunnel for container workloads
+# Uses WireGuard protocol inside the container's own network namespace.
+# Host traffic is NOT routed through VPN — only traffic from workloads
+# that join this container's network namespace.
+#
+# Setup:
+#   1. Build the container:
+#        sudo workloadctl build wireguard-vpn
+#
+#   2. Copy WireGuard config and enable:
+#        sudo cp ~/Downloads/vpn.conf /var/lib/workloads/wireguard-vpn/data/wg0.conf
+#        sudo workloadctl enable wireguard-vpn
+#
+#   3. Verify connection (from within the container):
+#        sudo -u _wl-wireguard-vpn podman exec workload-wireguard-vpn curl https://ipinfo.io/ip
+
+[workload]
+name = "wireguard-vpn"
+
+[setup]
+required_files = [
+    { path = "./wg0.conf", hint = "WireGuard client config from your VPN provider" },
+]
+
+[container]
+image = "localhost/wireguard-vpn:latest"
+pull = "never"
+
+[container.health]
+cmd = "wg show wg0 > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "15s"
+on_failure = "kill"
+
+[container.environment]
+WG_INTERFACE = "wg0"
+
+[storage]
+volumes = [
+    "./wg0.conf:/etc/wireguard/wg0.conf:ro",
+]
+
+[security]
+# userns=host: wg-quick requires root inside the container (it uses sudo internally
+# when run as non-root). With rootless podman, userns=host maps container UID 0 to
+# the workload user on the host — no actual host root access.
+userns = "host"
+
+# NET_ADMIN required for creating WireGuard interface and managing routes
+capabilities = ["NET_ADMIN"]
+
+[resources]
+memory_max = "128M"
+memory_high = "96M"
+cpu_quota = "20%"

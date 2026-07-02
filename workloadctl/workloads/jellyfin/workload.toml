@@ -1,0 +1,112 @@
+# Jellyfin - Free Software Media System (stream & transcode video)
+# Web interface: http://<host-ip>:8096
+#
+# Runs the official jellyfin/jellyfin image rootless. Video transcoding is
+# hardware-accelerated through VAAPI on the host GPU render node
+# (/dev/dri/renderD128) — works with AMD (amdgpu) and Intel (i915) GPUs.
+# For NVIDIA, use the `gpu = "nvidia"` convenience flag under [devices]
+# instead and select NVENC in the Jellyfin UI.
+#
+# Note on `gpu = "auto"` and NVIDIA: auto detects both the PCI vendor and the
+# bound driver. With the proprietary driver it uses the NVIDIA Container
+# Toolkit (CDI) path for NVENC; with nouveau it uses plain /dev/dri VAAPI.
+# Both work — but nouveau's hardware encode support is weak, so a proprietary
+# driver with `gpu = "nvidia"` is recommended for real transcoding on NVIDIA.
+#
+# Setup:
+#   1. Enable the workload. This pulls the image, creates the volume
+#      directories, and runs the host setup script (setup.sh) which turns on
+#      the `container_use_devices` SELinux boolean so the container may open
+#      the GPU render node:
+#        sudo workloadctl enable jellyfin
+#
+#   2. Add media. By default the library is the workload's own directory,
+#      mounted read-only at /media inside the container:
+#        /var/lib/workloads/jellyfin/data/media
+#      Drop video files there (created automatically on enable). To serve
+#      media from elsewhere instead — e.g. the smb-server share so files can
+#      be added over SMB — see the [storage] section below.
+#
+#   3. Configure the firewall (LAN-only — recommended):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="8096" protocol="tcp" accept'
+#        sudo firewall-cmd --reload
+#
+#   4. Open http://<host-ip>:8096 and complete first-run setup. Add a library
+#      pointing at /media. Then under Dashboard > Playback > Transcoding:
+#        - Hardware acceleration: Video Acceleration API (VAAPI)
+#        - VA-API device:        /dev/dri/renderD128
+#        - Enable the HEVC / H.264 hardware decoders & encoders you want.
+#      (AMD Navi 10 / RX 5000-series does H.264 and HEVC but not AV1 encode.)
+#
+# Notes:
+#   - The official image runs as root inside the container. userns
+#     keep-id:uid=0,gid=0 maps that to the unprivileged _wl-jellyfin host
+#     user, so /config and /cache stay writable without granting real root.
+#   - /media is mounted read-only — Jellyfin never modifies your library.
+#   - To serve from the local registry instead of Docker Hub, retag the image
+#     into zot (e.g. registry.local/jellyfin/jellyfin) and adjust [container].
+#
+# After editing this file, apply changes with:
+#   sudo workloadctl recreate jellyfin
+
+[workload]
+name = "jellyfin"
+
+[container]
+image = "docker.io/jellyfin/jellyfin:latest"
+pull = "missing"
+
+[container.health]
+# The official image is Ubuntu-based (bash present) but ships no curl, so
+# probe the HTTP listener socket directly rather than hitting /health.
+cmd = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8096'"
+interval = "30s"
+start_period = "30s"
+on_failure = "kill"
+
+[container.environment]
+# Optional: the absolute URL clients should use, shown in the dashboard.
+# JELLYFIN_PublishedServerUrl = "http://192.168.0.100:8096"
+
+[storage]
+# By default the library lives in the workload's own home, so jellyfin is a
+# fully independent workload with no dependency on any other.
+#   Default media path: /var/lib/workloads/jellyfin/data/media
+#
+# Deployment tweak — to serve media from another location, replace the last
+# entry with an absolute host path, e.g. to share the smb-server library:
+#   "/var/lib/workloads/smb-server/data/exports/media:/media:ro"
+# (the workload user only needs read access to whatever path you choose).
+volumes = [
+    "./config:/config",
+    "./cache:/cache",
+    "./media:/media:ro",
+]
+
+[security]
+# keep-id:uid=0,gid=0 — the image runs as container root; map that to the
+# unprivileged _wl-jellyfin host user so volumes are writable without real
+# root. Not userns=host: no other host UID maps to the workload user.
+userns = "keep-id:uid=0,gid=0"
+# render — access the GPU VAAPI render node /dev/dri/renderD128.
+extra_groups = ["render"]
+
+[devices]
+# Just the render node — enough for VAAPI transcoding. Avoids pulling in
+# /dev/kfd and the card* node that gpu = "amd" would add.
+devices = ["/dev/dri/renderD128"]
+
+[network]
+mode = "pasta"
+ports = ["8096:8096"]
+
+[host]
+# Turns on the container_use_devices SELinux boolean so the container can
+# open the GPU render node. Idempotent; left in place on `disable` since
+# other GPU workloads may rely on it.
+setup = "setup.sh"
+
+[resources]
+shm_size = "256m"
+memory_high = "2G"
+memory_max = "4G"

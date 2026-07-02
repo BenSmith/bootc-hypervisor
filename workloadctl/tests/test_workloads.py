@@ -23,7 +23,18 @@ from pathlib import Path
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-WORKLOADS_DIR = Path(os.path.dirname(__file__), '..', 'workloads.d')
+# Shipped bundles live one-per-dir as workloads/<bundle>/workload.toml. The
+# bundle dir name is the workload identity; we present it as "<bundle>.toml" so
+# the filename-based assertions and skip set below read unchanged.
+WORKLOADS_DIR = Path(os.path.dirname(__file__), '..', 'workloads')
+
+
+def _bundle_tomls():
+    """Sorted (synthetic_filename, path) for every shipped bundle declaration."""
+    return sorted(
+        (f"{p.parent.name}.toml", p)
+        for p in WORKLOADS_DIR.glob("*/workload.toml")
+    )
 
 # Multi-container workloads use [[containers]] arrays; the assertions in this
 # file assume the single-container top-level [container] shape. Multi-container
@@ -54,8 +65,8 @@ def has_systemd_analyze():
 def load_all_workloads():
     """Load all real workload configs. Returns list of (filename, config_dict)."""
     workloads = []
-    for toml_path in sorted(WORKLOADS_DIR.glob("*.toml")):
-        if toml_path.name in SKIP_FILES:
+    for filename, toml_path in _bundle_tomls():
+        if filename in SKIP_FILES:
             continue
         try:
             if toml_path.resolve() == Path("/dev/null"):
@@ -64,7 +75,7 @@ def load_all_workloads():
             continue
         with open(toml_path, "rb") as f:
             config = tomllib.load(f)
-        workloads.append((toml_path.name, config))
+        workloads.append((filename, config))
     return workloads
 
 
@@ -76,10 +87,10 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 
     def test_all_configs_parseable(self):
         """Every .toml file in workloads.d/ parses without error."""
-        for toml_path in sorted(WORKLOADS_DIR.glob("*.toml")):
-            if toml_path.name in SKIP_FILES:
+        for filename, toml_path in _bundle_tomls():
+            if filename in SKIP_FILES:
                 continue
-            with self.subTest(config=toml_path.name):
+            with self.subTest(config=filename):
                 with open(toml_path, "rb") as f:
                     config = tomllib.load(f)
                 self.assertIsInstance(config, dict)
@@ -110,12 +121,13 @@ class TestWorkloadConfigParsing(unittest.TestCase):
                 self.assertTrue(image, f"{filename} missing container.image")
 
     def test_all_configs_disabled_by_default(self):
-        """Shipped configs should be disabled (enabled = false)."""
+        """Shipped bundles must ship disabled: no .enabled marker."""
         for filename, config in ALL_WORKLOADS:
             with self.subTest(config=filename):
-                enabled = config.get("workload", {}).get("enabled", True)
-                self.assertFalse(enabled,
-                                 f"{filename} is enabled by default — shipped configs should be disabled")
+                name = filename.removesuffix(".toml")
+                marker = WORKLOADS_DIR / name / ".enabled"
+                self.assertFalse(marker.exists(),
+                                 f"{filename} ships a .enabled marker — bundles must ship disabled")
 
     def test_name_is_valid(self):
         """Workload names follow the naming rules."""
@@ -232,14 +244,16 @@ class TestWorkloadGeneration(unittest.TestCase):
         cls.services_dir = tempfile.mkdtemp()
         cls.sysusers_dir = tempfile.mkdtemp()
 
-        # Copy all real workload configs but with enabled=true
+        # Copy all real workload configs and enable them (marker file) so the
+        # generator processes them.
         cls.configs = {}
         for filename, config in ALL_WORKLOADS:
-            # Rewrite with enabled=true so the generator processes them
             config_copy = _deep_copy_config(config)
-            config_copy.setdefault("workload", {})["enabled"] = True
             toml_text = _config_to_toml(config_copy)
-            (Path(cls.config_dir) / filename).write_text(toml_text)
+            name = filename.removesuffix(".toml")
+            (Path(cls.config_dir) / name).mkdir(exist_ok=True)
+            (Path(cls.config_dir) / name / "workload.toml").write_text(toml_text)
+            (Path(cls.config_dir) / name / ".enabled").touch()
             cls.configs[filename] = config_copy
 
         cls.gen_result = run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
@@ -521,9 +535,11 @@ class TestWorkloadSystemdVerify(unittest.TestCase):
 
         for filename, config in ALL_WORKLOADS:
             config_copy = _deep_copy_config(config)
-            config_copy.setdefault("workload", {})["enabled"] = True
             toml_text = _config_to_toml(config_copy)
-            (Path(cls.config_dir) / filename).write_text(toml_text)
+            wl_name = filename.removesuffix(".toml")
+            (Path(cls.config_dir) / wl_name).mkdir(exist_ok=True)
+            (Path(cls.config_dir) / wl_name / "workload.toml").write_text(toml_text)
+            (Path(cls.config_dir) / wl_name / ".enabled").touch()
 
         run_generator(cls.config_dir, cls.services_dir, cls.sysusers_dir)
 
@@ -690,7 +706,7 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Helpers for rewriting TOML configs with enabled=true
+# Helpers for materializing TOML configs in a temp dir
 # ---------------------------------------------------------------------------
 
 def _deep_copy_config(config):

@@ -1,0 +1,60 @@
+[workload]
+name = "vncdesktop-wayfire"
+
+[container]
+image = "localhost/vncdesktop-wayfire:latest"
+pull = "never"
+systemd = "always"
+
+[container.environment]
+CONTAINER_USER = "desktop"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
+LANG = "C.UTF-8"
+NO_AT_BRIDGE = "1"
+# Set a VNC password (recommended). Without this, VNC has no authentication.
+# VNC_PASSWORD = "changeme"
+# Or use an encrypted secret:
+# VNC_PASSWORD = "${SECRET:vncdesktop-wayfire-password}"
+# VNC_USERNAME = "desktop"
+
+[container.health]
+cmd = "pgrep -x wayfire > /dev/null || exit 1"
+interval = "30s"
+start_period = "15s"
+on_failure = "kill"
+
+[devices]
+# This configuration doesn't require a render node but the
+# cool visual effects don't happen without
+# https://www.kernel.org/doc/html/latest/gpu/drm-uapi.html#render-nodes
+gpu = "auto"
+
+[security]
+userns = "keep-id:uid=1000,gid=1000"
+capabilities = [
+    "CHOWN", "DAC_OVERRIDE", "FOWNER",
+    "SETUID", "SETGID", "FSETID",
+    "KILL",
+]
+extra_groups = ["video", "render"]
+extra_uidmaps = ["+0:@{UID}:1"]
+extra_gidmaps = ["+0:@{GID}:1"]
+selinux_policy = true
+
+[storage]
+volumes = [
+    "./home:/home/desktop",
+    "/run/udev:/run/udev:ro",
+    "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
+]
+
+[network]
+mode = "host"
+
+[resources]
+shm_size = "2G"
+memory_max = "4G"
+memory_high = "3G"
+cpu_quota = "200%"
+tasks_max = 16384

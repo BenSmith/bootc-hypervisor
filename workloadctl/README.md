@@ -1,9 +1,11 @@
 # workloadctl
 
-Declarative rootless container workload manager for Linux. Define workloads as
-TOML files, and workloadctl handles user creation, systemd service generation,
-volume management, secrets, and container lifecycle — all running as isolated
-unprivileged users with rootless podman.
+Declarative rootless workload manager for Linux. Define workloads as TOML files,
+and workloadctl handles user creation, systemd service generation, volume
+management, secrets, and lifecycle. A workload is either a **container** (rootless
+podman, running as an isolated unprivileged user — the common case) or a **VM**
+(KVM/QEMU, declared with a `[vm]` section); both share one TOML model and one
+command surface.
 
 ## What's different about Quadlets?
 
@@ -28,7 +30,7 @@ handled automatically."
 
 ## Requirements
 
-- Fedora 41+ (or any systemd + podman 5.3+ Linux)
+- Fedora 43+ (or any systemd + podman 5.3+ Linux)
 - Python 3.11+
 - No bootc or immutable OS required (works on standard Fedora too)
 
@@ -62,11 +64,13 @@ workloadctl logs webserver
 Or write a TOML config directly:
 
 ```bash
-sudo tee /etc/workloads.d/webserver.toml <<'EOF'
+sudo mkdir -p /etc/workloads.d/webserver
+sudo tee /etc/workloads.d/webserver/workload.toml <<'EOF'
 [workload]
 name = "webserver"
+
+[container]
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
-enabled = true
 
 [network]
 mode = "pasta"
@@ -88,7 +92,7 @@ Each workload gets:
 
 At boot, a tiny shell systemd generator emits an early-boot oneshot service
 (`workload-generate.service`) that runs the Python `workload-generate` script.
-The script reads `/etc/workloads.d/*.toml` and writes per-workload unit files
+The script reads `/etc/workloads.d/*/workload.toml` and writes per-workload unit files
 into `/run/systemd/system/` before `basic.target` is reached. The Python work
 is kept out of generator context because systemd expects generators to be
 fast and minimal (see `systemd.generator(7)`) — see `docs/workloads.md` for
@@ -99,15 +103,15 @@ the full architecture.
 | Command | Description |
 |---|---|
 | `workloadctl create` | Generate a workload TOML config |
-| `workloadctl enable` | Create user, transfer image, start service |
 | `workloadctl disable` | Stop service, optionally purge user/data |
-| `workloadctl status` | Show workload status and resource usage |
-| `workloadctl logs` | View workload container logs |
-| `workloadctl reboot` | Soft-reboot a systemd container (keeps overlay) |
-| `workloadctl recreate` | Recreate container from image (destroys overlay) |
-| `workloadctl update` | Pull new image and recreate |
+| `workloadctl enable` | Create user, transfer image, start service |
 | `workloadctl list` | List all configured workloads |
+| `workloadctl logs` | View workload logs (container output / VM journal) |
+| `workloadctl reboot` | Restart the workload (container: keeps overlay; VM: guest reboot) |
+| `workloadctl recreate` | Recreate from config (container: destroys overlay; VM: rotates disk) |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |
+| `workloadctl status` | Show workload status and resource usage |
+| `workloadctl update` | Pull new image or rebuild VM disk, then recreate (auto-rollback on failure) |
 
 Most mutating commands require `sudo`. Read-only commands work as any user.
 
@@ -117,7 +121,7 @@ Most mutating commands require `sudo`. Read-only commands work as any user.
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema
-- [Example configs](workloads.d/) — real-world workload definitions
+- [Example configs](workloads/) — real-world workload definitions, one bundle per directory
 
 ## License
 

@@ -558,7 +558,7 @@ class ContainerSubstrate(Substrate):
         no_stop = consistency == "crash"
         return _backup_container(self.config, output, no_stop=no_stop, quiet=quiet)
 
-    # ── step-2 primitives ────────────────────────────────────────────────────
+    # ── backup primitives ─────────────────────────────────────────────────────
 
     def gating_units(self) -> list[str]:
         return []
@@ -676,18 +676,51 @@ class ContainerSubstrate(Substrate):
         non-fatal — we log and continue so the destroy still proceeds.
         """
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        snapshot_ref = f"localhost/workload-snapshot/{self.config.name}:{ts}"
+        repo = f"localhost/workload-snapshot/{self.config.name}"
+        snapshot_ref = f"{repo}:{ts}"
+        committed = False
         try:
             pod.commit(container_name, snapshot_ref)
+            committed = True
             print(f"  ✓ Pet snapshot saved: {snapshot_ref}")
         except Exception as exc:
             print(
                 f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}",
                 file=sys.stderr,
             )
+        # Bound the snapshot repository so deliberate rebuilds don't leak disk
+        # forever (the VM path has rollback_keep; pets had no analog). Only
+        # prune after a fresh commit succeeded — nothing new was added otherwise.
+        if committed:
+            self._prune_pet_snapshots(pod, repo, self.config.snapshot_keep)
         # Remove the container so the service's ExecStartPre=-podman create
         # runs fresh on next start, picking up the (possibly new) image.
         pod.run("rm", "-f", container_name)
+
+    @staticmethod
+    def _prune_pet_snapshots(pod, repo: str, keep: int) -> None:
+        """Keep only the newest ``keep`` snapshots under ``repo``, remove the rest.
+
+        Snapshot tags are UTC timestamps (``%Y%m%dT%H%M%SZ``) which sort
+        lexicographically in chronological order, so the lexically largest tags
+        are the most recent. Best-effort: every failure here is logged and
+        swallowed so pruning can never block the destroy it follows.
+        """
+        try:
+            listed = pod.run(
+                "images", "--format", "{{.Tag}}", repo, capture_output=True,
+            )
+            if listed.returncode != 0:
+                return
+            tags = sorted(t for t in listed.stdout.split() if t)
+            stale = tags[:-keep] if len(tags) > keep else []
+            for tag in stale:
+                ref = f"{repo}:{tag}"
+                removed = pod.run("rmi", ref, capture_output=True)
+                if removed.returncode == 0:
+                    print(f"  ✓ Pruned old pet snapshot: {ref}")
+        except Exception as exc:
+            print(f"  ⚠ Pet snapshot prune skipped: {exc}", file=sys.stderr)
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         from workloadctl_core import restart_workload_service, ensure_runtime_dir
@@ -1217,45 +1250,6 @@ def get_substrate(config, manager) -> Substrate:
 # Credentials directory (matches workload-ensure-user)
 CREDSTORE_DIR = Path("/etc/credstore")
 
-# Pattern for image-store exclude (shared with cmd_backup)
-def _ignore_image_store(base_dir):
-    target_parent = Path(base_dir) / ".local" / "share"
-    def _ignore(src_dir, contents):
-        if Path(src_dir) == target_parent:
-            return {"containers"} & set(contents)
-        return set()
-    return _ignore
-
-
-# VM rebuild artifacts that should not be backed up (they are regenerated
-# by workload-vm-build-disk on next enable/update).
-# Each entry is either an exact basename or a suffix matched with endswith().
-# Prefix matches (e.g. "system.qcow2.gen-") use the "startswith:" convention.
-_VM_REBUILD_PATTERNS = (
-    "system.qcow2",            # exact
-    "startswith:system.qcow2.gen-",
-    "endswith:.image-cache",
-)
-
-
-def _ignore_vm_rebuild(base_dir):
-    """copytree ignore callable that skips VM rebuild artifacts."""
-    base = Path(base_dir)
-    def _ignore(src_dir, contents):
-        if Path(src_dir) != base:
-            return set()
-        skip = set()
-        for name in contents:
-            for pat in _VM_REBUILD_PATTERNS:
-                if pat.startswith("startswith:") and name.startswith(pat[len("startswith:"):]):
-                    skip.add(name)
-                elif pat.startswith("endswith:") and name.endswith(pat[len("endswith:"):]):
-                    skip.add(name)
-                elif name == pat:
-                    skip.add(name)
-        return skip
-    return _ignore
-
 
 def _backup_container(config, output: Path, *, no_stop: bool, quiet: bool) -> int:
     """Backup a container workload.  Returns archive size in bytes."""
@@ -1392,11 +1386,9 @@ def _backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
 
 def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -> None:
     """Internal backup implementation shared by container and VM paths."""
-    from workload_lib import WORKLOAD_CONFIG_DIR
-    workload_dir = WORKLOAD_CONFIG_DIR
+    from workload_lib import workload_config_path
     name = config.name
-    home_dir = config.home_dir
-    config_path = workload_dir / f"{name}.toml"
+    config_path = workload_config_path(name)
     service_name = config.service_name
 
     service_was_active = subprocess.run(
@@ -1425,18 +1417,19 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
                     elif not quiet:
                         print(f"  Warning: Credential '{cred_name}' not found, skipping")
 
-            if home_dir.is_dir():
-                if vm:
-                    ignore = _ignore_vm_rebuild(home_dir)
-                else:
-                    ignore = _ignore_image_store(home_dir)
+            # Capture only the precious data/ subtree — for every substrate.
+            # state/ (podman graphroot, VM system.qcow2 + gen snapshots,
+            # .image-cache) is reconstructible from registries/Containerfiles
+            # and is deliberately never in backup scope, so no exclude filtering
+            # is needed: the archive is a straight copy of data/.
+            data_dir = config.data_dir
+            if data_dir.is_dir():
                 shutil.copytree(
-                    home_dir, staging / "home",
+                    data_dir, staging / "data",
                     symlinks=True, dirs_exist_ok=False,
-                    ignore=ignore,
                 )
             else:
-                (staging / "home").mkdir()
+                (staging / "data").mkdir()
 
             output.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(

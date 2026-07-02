@@ -35,6 +35,7 @@ from workload_lib import (
     get_next_uid,
     infer_workload_kind,
     infer_workload_mode,
+    iter_workloads,
     MAX_NAME_LENGTH,
     NAME_PATTERN,
     normalize_containers,
@@ -47,26 +48,22 @@ from workload_lib import (
     validate_workload_name,
     VM_SOCKET_DIR,
     WORKLOADS_BASE,
+    WORKLOAD_BUNDLES_DIR,
     WORKLOAD_CONFIG_DIR,
+    workload_config_dir,
+    workload_config_path,
+    workload_is_enabled,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     vm_mac_address,
     workload_container_name,
+    workload_data_dir,
     workload_home_dir,
     workload_service_name,
+    workload_state_dir,
     workload_username,
 )
 from podman import Podman, PodmanError
-
-WORKLOAD_DIR = WORKLOAD_CONFIG_DIR
-
-
-def _get_workload_dir() -> "Path":
-    """Return the current WORKLOAD_DIR (indirection so patch.object on this
-    module's WORKLOAD_DIR is honored by WorkloadConfig/WorkloadManager at call
-    time)."""
-    return WORKLOAD_DIR
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -336,7 +333,7 @@ class WorkloadConfig:
 
     def __init__(self, filename: str):
         self.filename = filename
-        self.path = _get_workload_dir() / f"{filename}.toml"
+        self.path = workload_config_path(filename)
 
         # Masked workload: symlink to /dev/null (same semantics as systemd masking)
         if self.path.is_symlink() and self.path.resolve() == Path('/dev/null'):
@@ -377,7 +374,9 @@ class WorkloadConfig:
 
     @property
     def enabled(self) -> bool:
-        return self.config.get("workload", {}).get("enabled", False)
+        # Enabled-ness lives in a marker file, not workload.toml (see
+        # workload_lib.workload_enabled_marker).
+        return workload_is_enabled(self.name)
 
     @property
     def lifecycle(self) -> str:
@@ -393,34 +392,192 @@ class WorkloadConfig:
         return self.config.get("workload", {}).get("lifecycle", "cattle")
 
     @property
+    def snapshot_keep(self) -> int:
+        """How many pet-lifecycle overlay snapshots to retain (default 3).
+
+        Each destructive verb (update/recreate) on a pet container commits the
+        writable overlay to ``localhost/workload-snapshot/<name>:<ts>`` before
+        rebuilding. Without a bound these accumulate forever; this caps the
+        repository to the newest N, with older snapshots pruned after each new
+        commit. Invalid values fall back to the default so a bad config never
+        crashes a destroy (the validator surfaces the error separately).
+        """
+        val = self.config.get("workload", {}).get("snapshot_keep", 3)
+        if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+            return 3
+        return val
+
+    @property
+    def bundle(self) -> str:
+        """The bundle (kind) this workload draws shared control files from.
+
+        Control-file lookups all resolve under
+        `/usr/share/workloadctl/workloads/<bundle>/`: the build context
+        (Containerfile/`build.sh`), the host `setup.sh` (`[host].setup`), and
+        the SELinux CIL (`policy.cil`). Defaults to the workload name, so a
+        single shipped instance needs no `bundle` field; `duplicate`/`init`
+        set it to the source's resolved bundle so a copy shares one control
+        tree without copying it. Goes straight into a filesystem path, which is
+        why `bundle_dir` (the single point where it becomes a path) validates it
+        against NAME_PATTERN before any control file is resolved or executed.
+        """
+        val = self.config.get("workload", {}).get("bundle")
+        return val if val else self.name
+
+    @property
     def selinux_policy(self) -> bool:
         """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
 
         When set, enable/disable load/remove the bundle's CIL policy
-        (`<bundle>.cil`) as a name-keyed module, and the generator labels the
-        container with the matching type. See docs/workload-bundles.md.
-
-        `selinux_policy` may be `true` (source the bundle named after this
-        workload) or a string naming the bundle directory to source the CIL
-        from — see `selinux_bundle`.
+        (`policy.cil`) as a name-keyed module, and the generator labels the
+        container with the matching type. Boolean-only — the bundle the CIL is
+        sourced from is the resolved `[workload] bundle` (see `selinux_bundle`),
+        which subsumes the old string form of this field.
         """
         return bool(self.config.get("security", {}).get("selinux_policy", False))
 
     @property
     def selinux_bundle(self) -> str | None:
-        """The `containers/<bundle>/` directory to source the CIL from.
+        """Bundle dir to source the CIL (`policy.cil`) from, or None if policy off.
 
-        `selinux_policy = true` keys off the workload name (the bundle is named
-        after the workload); a string value names the bundle explicitly, which
-        decouples the policy source from the (renameable) workload name so a
-        renamed workload can keep using its original bundle. None when policy is
-        disabled. The loaded module and label stay keyed to the workload name
-        (`wl_<name>.process`) regardless.
+        Sources from the resolved `bundle` (defaults to the workload name); the
+        loaded module and container label stay keyed to the workload *name*
+        (`wl_<name>.process`) so teardown is 1:1 per enabled instance.
         """
-        val = self.config.get("security", {}).get("selinux_policy", False)
-        if not val:
-            return None
-        return val if isinstance(val, str) else self.name
+        return self.bundle if self.selinux_policy else None
+
+    @property
+    def bundle_dir(self) -> Path:
+        """The shipped /usr control-file tree for this workload's bundle.
+
+        This property is the single point where the `bundle` field becomes a
+        filesystem path — and that path is read *and executed as root* (build
+        context, `[host].setup`, `policy.cil`). So validate here: anything that
+        isn't a plain workload-style name (a stray `..`, a typo, an underscored
+        SELinux type name) is rejected before it can redirect control-file
+        resolution outside the bundles tree. Construction stays lenient (callers
+        like `validate`/`info` can still inspect a bad bundle); the guarantee is
+        that no path is ever *built* from an unvalidated bundle.
+        """
+        bundle = self.bundle
+        try:
+            validate_workload_name(bundle)
+        except ValueError as e:
+            hint = ""
+            if "_" in bundle:
+                hint = (f" — did you mean {bundle.replace('_', '-')!r}? the "
+                        f"bundle is a directory name and uses hyphens, not the "
+                        f"underscores of the SELinux type name")
+            raise ValueError(f"Invalid [workload] bundle {bundle!r}: {e}{hint}")
+        return WORKLOAD_BUNDLES_DIR / bundle
+
+    @property
+    def override_dir(self) -> Path:
+        """The operator's /etc/workloads.d/<name>/ control-file override tree.
+
+        Lazy: usually absent. `edit <name> <file>` seeds a copy-on-write
+        override here; resolve_control_file prefers it over the shipped bundle.
+        Keyed on *name* (not bundle) so a duplicate overrides independently of
+        its source. Resolves via workload_config_dir() so tests patching the
+        config dir are honored.
+        """
+        return workload_config_dir() / self.name
+
+    def resolve_control_file(self, relpath: str) -> Path:
+        """Resolve a bundle control file (build.sh, policy.cil, [host].setup, …)
+        through the lazy-override chain: the operator's
+        /etc/workloads.d/<name>/<relpath> wins if it exists, else the shipped
+        /usr bundle default. An absolute path bypasses resolution.
+
+        This is the single chokepoint every control-file lookup goes through so
+        overrides apply uniformly — the /usr→/etc vendor→admin drop-in idiom
+        (systemd's `systemctl edit`/`cat`). See docs/wip/workload-bundles.md
+        "Control files — lazy override".
+        """
+        return self.resolve_control_file_with_source(relpath)[0]
+
+    def resolve_control_file_with_source(self, relpath: str) -> tuple[Path, str]:
+        """Like resolve_control_file but also returns the winning source:
+        "etc" (operator override), "usr" (shipped default), or "abs" (a verbatim
+        absolute path) — the merged-view truth `info --files` reports.
+
+        This is the single chokepoint every control-file lookup goes through,
+        and a resolved relative path is read *and executed as root* (build
+        Containerfile/`[build].script`, `[host].setup`, `policy.cil`). So any
+        `..` traversal is rejected here — not just for `bundle` (validated in
+        `bundle_dir`), but for the relpath too, so a `[build] containerfile =
+        "../../etc/x"` or `script`/`setup` can't redirect resolution outside the
+        bundle/override trees. An absolute path is taken verbatim (the documented
+        escape hatch for a fully-qualified setup/script path) and reported as
+        "abs" — neither an override nor a shipped default.
+        """
+        p = Path(relpath)
+        if p.is_absolute():
+            return p, "abs"
+        if ".." in p.parts:
+            raise ValueError(
+                f"control-file path {relpath!r} must be relative with no '..' "
+                f"components (it resolves under the bundle/override tree)"
+            )
+        override = self.override_dir / relpath
+        if override.exists():
+            return override, "etc"
+        return self.bundle_dir / relpath, "usr"
+
+    # --- [build]: image build context (see lib/imagebuild.py) --------------
+
+    @property
+    def build_config(self) -> dict:
+        return self.config.get("build", {})
+
+    @property
+    def build_script(self) -> str | None:
+        """Escape-hatch build script (`[build] script`). When set, `build` runs
+        it against the merged context instead of the built-in podman builder.
+        Resolved through the override chain like any other control file."""
+        return self.build_config.get("script") or None
+
+    @property
+    def build_containerfile(self) -> str:
+        """Containerfile name within the (merged) build context. Default
+        `Containerfile`. Relative — it names a file inside the context dir."""
+        return self.build_config.get("containerfile", "Containerfile")
+
+    @property
+    def build_args(self) -> dict:
+        """Static `--build-arg` defaults (`[build] args`)."""
+        return self.build_config.get("args", {}) or {}
+
+    @property
+    def build_arg_env(self) -> list:
+        """Host env var names forwarded as `--build-arg` when set
+        (`[build] arg_env`); the transient override for a knob like an RPM URL
+        or GPU type. Env value wins over the `args` default. Build args land in
+        image history — keep these non-sensitive (use a secret, not arg_env, for
+        anything confidential)."""
+        return self.build_config.get("arg_env", []) or []
+
+    @property
+    def build_target(self) -> str | None:
+        """Optional multi-stage `--target` (`[build] target`)."""
+        return self.build_config.get("target") or None
+
+    def build_images(self) -> list[str]:
+        """Distinct `pull = never` images this workload builds locally, in TOML
+        order. The built image is tagged exactly as `[container].image`, so a
+        pull=never container always matches what gets built — there is no
+        separate build-tag to drift out of sync."""
+        seen: list[str] = []
+        for _cname, image, pull in self.container_specs():
+            if pull == "never" and image not in seen:
+                seen.append(image)
+        return seen
+
+    def has_build_context(self) -> bool:
+        """True if there's a local image to build and a Containerfile resolves
+        (in the /etc override or the /usr bundle). Gates the built-in builder."""
+        return bool(self.build_images()) and \
+            self.resolve_control_file(self.build_containerfile).exists()
 
     @property
     def username(self) -> str:
@@ -453,6 +610,16 @@ class WorkloadConfig:
     @property
     def home_dir(self) -> Path:
         return workload_home_dir(self.name)
+
+    @property
+    def state_dir(self) -> Path:
+        """Reconstructible state subtree (= $HOME / podman graphroot / VM disks)."""
+        return workload_state_dir(self.name)
+
+    @property
+    def data_dir(self) -> Path:
+        """Precious data subtree ('./' volume anchors resolve here; backup-captured)."""
+        return workload_data_dir(self.name)
 
     @property
     def vm_bridge(self) -> str:
@@ -561,8 +728,14 @@ class WorkloadConfig:
             if "path" not in entry:
                 continue
             path = entry["path"]
-            if path.startswith("./"):
-                path = str(self.home_dir) + "/" + path[2:]
+            # Resolve workload-relative anchors (./ @/ data/ state/) through the
+            # SAME logic as volume mounts so a required file lands where its
+            # volume actually mounts it. A bare path (no ':') round-trips through
+            # expand_volume_path as just the expanded host. Without this, a
+            # precious "./config.json" required-file resolved to state/ for the
+            # preflight auto-copy while its volume mounted from data/ — they
+            # diverged and the container mounted a missing path.
+            path = expand_volume_path(path, str(self.home_dir))
             result.append({"path": path, "hint": entry.get("hint")})
         return result
 
@@ -575,7 +748,7 @@ class WorkloadManager:
     """Manages workload operations"""
 
     def __init__(self):
-        self.workload_dir = _get_workload_dir()
+        self.workload_dir = workload_config_dir()
 
     def run_podman_exec(self, config: WorkloadConfig, args,
                         check=False, capture_output=False):
@@ -615,9 +788,9 @@ class WorkloadManager:
     def get_all_configs(self, enabled_only=False) -> list[WorkloadConfig]:
         """Get all workload configs"""
         configs = []
-        for path in sorted(self.workload_dir.glob("*.toml")):
+        for name, path in iter_workloads():
             try:
-                config = WorkloadConfig(path.stem)
+                config = WorkloadConfig(name)
                 if not enabled_only or config.enabled:
                     configs.append(config)
             except WorkloadMasked:

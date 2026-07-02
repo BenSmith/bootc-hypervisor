@@ -28,15 +28,97 @@
 
 ## Quick Start
 
-There are three ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
+There are several ways to create a workload — all produce the same result (a TOML config in `/etc/workloads.d/`):
 
 | Approach | Best for |
 |---|---|
-| **`workloadctl create`** (below) | Interactive use on a running system |
-| **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or working from an example |
+| **[From a bundle (`init`)](#bundle-approach)** | Enabling a shipped workload (alloy, jellyfin, vncdesktop, …) |
+| **`workloadctl init --scratch <name>`** | Novel container workload with no bundle — generates a stub TOML, no `/usr` fallback |
+| **`workloadctl init --scratch-vm <name>`** | Novel **VM** workload — stamps a Fedora Cloud `[vm]` stub + `cloud-init/` seed, enable-ready (see [Scaffolding a new VM](#scaffolding-a-new-vm)) |
+| **`workloadctl create`** (below) | From-scratch container workload with no bundle |
+| **[Manual TOML](#manual-toml)** | Fine-grained control, scripting, or adapting an example |
 | **[bootc image](#bootc-approach)** | Baking workloads into an immutable OS image |
 
 See [cli.md](cli.md) for the full command reference.
+
+---
+
+### Bundle-based approach (`init`) {#bundle-approach}
+
+Shipped workloads arrive as **bundles** — directories under
+`/usr/share/workloadctl/workloads/<bundle>/` that pair a template `workload.toml`
+with their control files (Containerfile, `setup.sh`, `policy.cil`, etc.). List
+what's available:
+
+```bash
+workloadctl catalog
+```
+
+Instantiate a bundle into `/etc/workloads.d/`:
+
+```bash
+sudo workloadctl init alloy
+```
+
+This stamps the bundle's template TOML at `/etc/workloads.d/alloy/workload.toml`. Control
+files are **not** copied — they're resolved from the `/usr` bundle tree at
+build/enable time, so the instance picks up changes automatically when the package
+upgrades.
+
+**Typical flows:**
+
+*Pull-only bundle (image is pre-built):*
+```bash
+sudo workloadctl init alloy
+sudo workloadctl edit alloy        # set CENTRAL_HOST, HOST_LABEL, etc.
+sudo workloadctl enable alloy
+```
+
+*Build-from-source bundle:*
+```bash
+sudo workloadctl init vncdesktop-sway
+sudo workloadctl edit vncdesktop-sway   # configure as needed
+sudo workloadctl build vncdesktop-sway
+sudo workloadctl enable vncdesktop-sway
+```
+
+*Override a control file (copy-on-write, like `systemctl edit`):*
+```bash
+sudo workloadctl init vncdesktop-sway
+sudo workloadctl edit vncdesktop-sway Containerfile   # seeds from /usr, opens $EDITOR
+sudo workloadctl build vncdesktop-sway
+sudo workloadctl enable vncdesktop-sway
+```
+
+The override is kept only if you change it — a byte-identical file is discarded so
+it never freezes the bundle's upgrade tracking. Use `info --files` to see the merged
+control-file view (which source wins for each file). See [`init`](cli.md#init) and
+[`edit`](cli.md#edit) in the command reference.
+
+**Multiple instances of the same bundle:**
+
+```bash
+sudo workloadctl init alloy --as alloy-lan
+```
+
+`--as` names the instance; `init` records `[workload] bundle = "alloy"` in the new
+TOML so control-file lookups still resolve to the source bundle. Both instances share
+the same Containerfile and support scripts; each has its own TOML, user, and state.
+
+**Installing a custom workload directory (`install`):**
+
+If you have a workload directory (e.g., checked out from a repo or written locally)
+that you want to promote into the system, use `install`:
+
+```bash
+sudo workloadctl install ./my-workloads/myapp/
+```
+
+This copies the entire directory into `/etc/workloads.d/<name>/` where `<name>` is
+taken from `[workload].name` in the source `workload.toml` (not the directory name).
+File modes are preserved, so an executable `setup.sh` stays executable. Errors if the
+workload already exists (edit in place or use `duplicate` to rename). The source is
+never modified. See [`install`](cli.md#install) in the command reference.
 
 ---
 
@@ -73,7 +155,7 @@ Useful when you want full control over the config or are adapting an existing ex
 
 1. Create a config file:
 ```bash
-sudo nano /etc/workloads.d/webserver.toml
+sudo nano /etc/workloads.d/webserver/workload.toml
 ```
 
 2. Add this minimal configuration:
@@ -106,7 +188,7 @@ For immutable OS images, place workload configs directly in the image:
 COPY workloads.d/ /etc/workloads.d/
 ```
 
-Workloads with `enabled = true` will be provisioned automatically on first boot. The TOML format is identical — only the delivery mechanism differs. See the [Bootc Integration section in secrets.md](secrets.md#bootc-integration) for handling secrets in immutable images.
+Workloads that carry a `.enabled` marker (created by `workloadctl enable`, or shipped alongside the config in the image) will be provisioned automatically on first boot. The TOML format is identical — only the delivery mechanism differs. See the [Bootc Integration section in secrets.md](secrets.md#bootc-integration) for handling secrets in immutable images.
 
 ---
 
@@ -174,7 +256,7 @@ The workload provisioning system allows you to declaratively define long-running
 ### Components
 
 - **Shell generator** (`/usr/lib/systemd/system-generators/workload-generator`, source: `generators/workload-generator`): A minimal shell generator that emits a single oneshot service unit (`workload-generate.service`). Does not read workload configs; its only job is to schedule the Python script as an early-boot service. Kept tiny so it fits comfortably inside the generator execution budget systemd enforces.
-- **Workload generator script** (`/usr/libexec/workloadctl/workload-generate`): The Python script that actually reads `/etc/workloads.d/*.toml` and emits per-workload unit files + sysusers configs into `/run/systemd/system/`. Runs as an early-boot oneshot service (not as a systemd generator — see "Why the split?" below).
+- **Workload generator script** (`/usr/libexec/workloadctl/workload-generate`): The Python script that actually reads `/etc/workloads.d/*/workload.toml` and emits per-workload unit files + sysusers configs into `/run/systemd/system/`. Runs as an early-boot oneshot service (not as a systemd generator — see "Why the split?" below).
 - **User Setup** (`/usr/libexec/workloadctl/workload-ensure-user`): Runs as `ExecStartPre` in each workload service to configure subordinate UID/GID ranges, create home and volume directories, write the EnvironmentFile, and enable linger. Handles all `/var` work, which must not happen from generator or early-boot-oneshot context.
 - **Workload Services**: Per-workload systemd services that run `podman run` as dedicated users
 - **Management Tool** (`workloadctl`): Docker/kubectl-like CLI for managing workloads
@@ -261,7 +343,6 @@ Workload configurations are TOML files in `/etc/workloads.d/`. See [schema-refer
 ```toml
 [workload]
 name = "webserver"
-enabled = true
 
 [container]
 image = "docker.io/nginxinc/nginx-unprivileged:alpine"
@@ -319,7 +400,7 @@ Some workloads need host-level configuration (kernel modules, udev rules, SELinu
 
 ```toml
 [host]
-setup = "setup.sh"  # relative to /usr/share/workloadctl/containers/{name}/
+setup = "setup.sh"  # relative to /usr/share/workloadctl/workloads/{name}/
 ```
 
 - `workloadctl enable` runs `setup.sh enable`
@@ -327,18 +408,17 @@ setup = "setup.sh"  # relative to /usr/share/workloadctl/containers/{name}/
 - The script runs as root and should be idempotent in both directions
 - Absolute paths are supported: `setup = "/home/myuser/my-setup.sh"`
 
-#### Customizing container build scripts and setup scripts
+#### Customizing control files (Containerfile, setup.sh, policy.cil)
 
-The bundled scripts in `/usr/share/workloadctl/containers/` are read-only on immutable (bootc/ostree) systems. To customize them, copy the entire container directory to a writable location and make your changes there:
+Control files ship read-only under `/usr/share/workloadctl/workloads/<bundle>/` (immutable on bootc/ostree). Don't copy the directory — use the copy-on-write override, the same `/usr`→`/etc` idiom systemd uses for unit drop-ins:
 
 ```bash
-cp -r /usr/share/workloadctl/containers/sunshine-game-streaming ~/sunshine-custom
-cd ~/sunshine-custom
-# edit Containerfile, setup.sh, etc.
-sudo ./build.sh
+workloadctl edit <name> Containerfile   # seeds /etc/workloads.d/<name>/Containerfile from the shipped default, then opens $EDITOR
+workloadctl info <name> --files         # merged view: which file wins — /etc (override) or /usr (shipped)
+sudo workloadctl build <name>           # rebuild the image from the override-resolved context
 ```
 
-All bundled scripts use `dirname "$0"` to locate sibling files (Containerfiles, SELinux policies, configs), so they work correctly from any directory.
+The override at `/etc/workloads.d/<name>/<file>` wins over the shipped default and is what `build` (and enable's setup/SELinux steps) resolve. Untouched control files keep tracking the image across upgrades; only the files you actually change live in `/etc`. An edit that ends up byte-identical to the shipped default is discarded, so nothing freezes needlessly.
 
 To use a custom setup script with `workloadctl enable`, set an absolute path in your workload config:
 
@@ -694,7 +774,6 @@ an array of `[[containers]]` tables, each with a unique `name`:
 ```toml
 [workload]
 name = "myapp"
-enabled = true
 mode = "pod"          # or "bridge" — see below
 
 [[containers]]
@@ -801,12 +880,34 @@ sudo dnf install qemu-kvm edk2-ovmf
 
 The `workloadctl preflight` command checks these and reports any missing pieces before you try to enable a VM workload.
 
+### Scaffolding a new VM {#scaffolding-a-new-vm}
+
+Rather than hand-writing the `[vm]` section, scaffold a self-contained VM workload the same way you would a container — two symmetric entry points:
+
+```bash
+# Stamp a blank, enable-ready VM stub directly into /etc/workloads.d/<name>/
+sudo workloadctl init --scratch-vm myvm
+
+# …or instantiate the shipped generic VM bundle (identical starting point)
+sudo workloadctl init vm-base --as myvm
+```
+
+Both create `/etc/workloads.d/myvm/` containing a `workload.toml` and a `cloud-init/user-data` seed. The stub is **enable-ready out of the box**: it pins the current Fedora Cloud-Base image (`cloud_image_url` + `cloud_image_checksum`) with the `local_image` and `image` alternatives stamped as commented one-line swaps, sane `vcpus`/`memory`/`system_disk_size` defaults, and `user = "fedora"`. It starts disabled (no `.enabled` marker) until you run `workloadctl enable`. The seed already wires up `${WORKLOADCTL_SSH_KEY}` and `${WORKLOADCTL_WORKLOAD_NAME}` (see [Bootstrapping a VM with cloud-init](#bootstrapping-a-vm-with-cloud-init)).
+
+Edit to taste, then enable:
+
+```bash
+sudo workloadctl edit myvm        # change base image, sizing, cloud-init
+sudo workloadctl enable myvm      # downloads the image, builds the disk, boots
+```
+
+> The default base image is a fixed Fedora Cloud-Base release (the download path requires a known checksum, so there is no base-image argument — swap it in the stub instead). Bump it alongside `fedora-versions.yml` when the host's Fedora version moves.
+
 ### Basic Configuration
 
 ```toml
 [workload]
 name = "fedora-vm"
-enabled = true
 
 [vm]
 vcpus = 2
@@ -987,7 +1088,7 @@ sudo chmod 0600 /etc/credstore.encrypted/runner-token
 
 The decrypted value is baked into the seed ISO at build time. The ISO lives in the workload's home dir (root-only path, mode 0640), so the secret is at rest on disk for the lifetime of the VM — rotate by re-encrypting and re-running `workloadctl enable` (the seed rebuilds when the user-data file's mtime changes).
 
-A complete worked example lives at [`vms/virtual-forgejo/`](../vms/virtual-forgejo/README.md) (workload TOML at [`workloads.d/virtual-forgejo.toml`](../workloads.d/virtual-forgejo.toml)): a Fedora 44 VM that boots, installs workloadctl from source, runs Forgejo + Caddy + Avahi as containerized sidecars, and registers a native `forgejo-runner` against the in-VM Forgejo. The split mirrors the existing `containers/` convention — `workloads.d/` holds the TOML; `vms/<name>/` holds the bootstrap content.
+A complete worked example lives at [`workloads/virtual-forgejo/`](../workloads/virtual-forgejo/README.md) (workload TOML at [`workloads/virtual-forgejo/workload.toml`](../workloads/virtual-forgejo/workload.toml)): a Fedora 44 VM that boots, installs workloadctl from source, runs Forgejo + Caddy + Avahi as containerized sidecars, and registers a native `forgejo-runner` against the in-VM Forgejo. Everything for the bundle is co-located under `workloads/virtual-forgejo/` — the workload TOML alongside its cloud-init bootstrap content.
 
 ---
 
@@ -1099,7 +1200,7 @@ Run `enable` once to create the directory structure, then copy the required file
 sudo workloadctl enable smb-server
 # → fails, but creates /var/lib/workloads/smb-server/ and all subdirectories
 
-sudo cp /usr/share/workloadctl/containers/smb-server/smb.conf /var/lib/workloads/smb-server/smb.conf
+sudo cp /usr/share/workloadctl/workloads/smb-server/smb.conf /var/lib/workloads/smb-server/smb.conf
 # → edit as needed
 
 sudo workloadctl enable smb-server
@@ -1175,11 +1276,12 @@ workloadctl images prune              # Remove unused images
 
 If you prefer to manage workloads manually:
 
+Enabled-ness is a marker file, `/etc/workloads.d/<name>/.enabled` — `workloadctl enable`/`disable` just create and remove it. To do the same by hand:
+
 **Enable a workload:**
 ```bash
-# 1. Edit the config file
-sudo nano /etc/workloads.d/example-webserver.toml
-# Change: enabled = false → enabled = true
+# 1. Create the enable marker (the generator only emits units when it's present)
+sudo touch /etc/workloads.d/example-webserver/.enabled
 
 # 2. Reload systemd and start
 sudo systemctl daemon-reload
@@ -1191,9 +1293,8 @@ sudo systemctl start workload-webserver.service
 # 1. Stop the service
 sudo systemctl stop workload-webserver.service
 
-# 2. Edit the config file
-sudo nano /etc/workloads.d/example-webserver.toml
-# Change: enabled = true → enabled = false
+# 2. Remove the enable marker
+sudo rm -f /etc/workloads.d/example-webserver/.enabled
 
 # 3. Reload systemd
 sudo systemctl daemon-reload
@@ -1203,7 +1304,7 @@ sudo systemctl daemon-reload
 ```bash
 # 1. Stop and disable
 sudo systemctl stop workload-webserver.service
-sudo nano /etc/workloads.d/example-webserver.toml  # Set enabled = false
+sudo rm -f /etc/workloads.d/example-webserver/.enabled
 sudo systemctl daemon-reload
 
 # 2. Get user info and remove
@@ -1345,7 +1446,7 @@ Alternatively, use `secret export/import` to transfer credentials portably with 
 
 ```
 pihole-20260315-120000.tar.zst
-├── workload.toml              # /etc/workloads.d/pihole.toml
+├── workload.toml              # /etc/workloads.d/pihole/workload.toml
 ├── credentials/               # Referenced credentials from /etc/credstore.encrypted/
 │   └── pihole-webpassword
 └── home/                      # /var/lib/workloads/pihole/
@@ -1684,7 +1785,7 @@ workloadctl stats NAME
 **Symptom:** Generator logs error about username length.
 
 ```
-workload-generate: ERROR processing /etc/workloads.d/my-workload.toml:
+workload-generate: ERROR processing /etc/workloads.d/my-workload/workload.toml:
 Username '_wl-my-very-long-workload-name' is 33 chars (max 32)
 ```
 
@@ -1722,19 +1823,15 @@ workloadctl info NAME
 sudo workloadctl edit NAME  # Change port mapping
 ```
 
-#### 3. Workload Not Starting (enabled = false)
+#### 3. Workload Not Starting (no `.enabled` marker)
 
 **Symptom:** Config file exists but service never starts.
 
-**Fix:**
-```toml
-[workload]
-enabled = true  # Must be true!
-```
+**Cause:** The workload has no enable marker (`/etc/workloads.d/<name>/.enabled`), so the generator skips it.
 
-Then reload: `sudo systemctl daemon-reload`
+**Fix:** `sudo workloadctl enable NAME`
 
-Or use: `sudo workloadctl enable NAME`
+Or by hand: `sudo touch /etc/workloads.d/NAME/.enabled && sudo systemctl daemon-reload`
 
 #### 4. SELinux Denying Device Access
 
@@ -1958,7 +2055,7 @@ RUN grep -E "^(video|render|input):" /usr/lib/group >> /etc/group || true
 
 #### 3. No Automatic Cleanup of Disabled Workloads
 
-When you disable a workload (`enabled = false`), the generator stops creating the service, but:
+When you disable a workload (`workloadctl disable`, which removes the `.enabled` marker), the generator stops creating the service, but:
 - The user account persists
 - Home directory remains
 - Subuid/subgid entries remain

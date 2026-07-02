@@ -3,7 +3,7 @@
 Workload service file generator for dynamic rootless workload provisioning.
 Called by workload-generate.service (a oneshot that runs early in boot).
 
-Reads workload configs from /etc/workloads.d/*.toml and generates:
+Reads workload configs from /etc/workloads.d/*/workload.toml and generates:
 - systemd-sysusers configs for user creation
 - systemd service files for rootless podman execution
 
@@ -59,14 +59,16 @@ try:
     from pathlib import Path
 
     from workload_lib import (
-        WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, GENERATOR_OWNED_DIRECTIVES,
+        WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
+        ENABLED_MARKER_NAME, iter_workloads,
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
-        workload_username, workload_home_dir, expand_volume_path, dq,
+        workload_username, workload_root_dir, workload_home_dir, workload_state_dir, workload_data_dir,
+        expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
         UID_MIN, UID_MAX, get_next_uid,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_IP, VM_DHCP_RANGE,
-        VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE,
+        VM_SOCKET_DIR, VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tag, parse_volume_spec,
         selinux_type_name,
@@ -132,7 +134,7 @@ def generate_sysuser_config(config, user_name, uid):
              support range syntax.
     """
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     extra_groups = config.get("security", {}).get("extra_groups", [])
 
     lines = [
@@ -380,7 +382,7 @@ def resolve_auto_gpu():
 def generate_pod_service(workload, user_name, uid):
     """Generate the workload-{name}-pod.service unit (pod mode only)."""
     name = workload["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
 
     network_config = workload.get("network", {})
@@ -419,10 +421,12 @@ def generate_pod_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
-        # Stale-pause cleanup (see the comment in generate_system_service):
+        # Fresh-pause cleanup (see the comment in generate_system_service):
         # this is the workload's first podman touch, so the recreated pause
         # namespace stays consistent for every member container.
         "ExecStartPre=-/usr/bin/podman system migrate",
+        f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+        f" /run/user/{uid}/libpod/tmp/ns_handles",
         f"ExecStartPre=-/usr/bin/podman pod rm -f --ignore workload-{name}",
         f"ExecStart=/usr/bin/podman pod create {pod_args_str}",
         f"ExecStop=/usr/bin/podman pod rm -f --ignore workload-{name}",
@@ -441,7 +445,7 @@ def generate_net_service(workload, user_name, uid):
     via --network, which gives them DNS resolution of each other by name.
     """
     name = workload["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     slice_name = workload.get("resources", {}).get("slice", "workloads.slice")
     net_name = f"workload-{name}-net"
 
@@ -466,10 +470,12 @@ def generate_net_service(workload, user_name, uid):
         f"Group={user_name}",
         f'Environment="HOME={home_dir}"',
         f"EnvironmentFile=-/run/workload-env/workload-{name}.env",
-        # Stale-pause cleanup (see the comment in generate_system_service):
+        # Fresh-pause cleanup (see the comment in generate_system_service):
         # this is the workload's first podman touch, so the recreated pause
         # namespace stays consistent for every member container.
         "ExecStartPre=-/usr/bin/podman system migrate",
+        f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+        f" /run/user/{uid}/libpod/tmp/ns_handles",
         f"ExecStartPre=-/usr/bin/podman network rm -f {net_name}",
         f"ExecStart=/usr/bin/podman network create {net_name}",
         f"ExecStop=/usr/bin/podman network rm -f {net_name}",
@@ -536,7 +542,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         container_name = f"workload-{name}"
     else:
         container_name = f"workload-{name}-{container['name']}"
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
 
     image = container["container"]["image"]
     command = container["container"].get("command", None)
@@ -616,9 +622,18 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     # service_type is read here (before podman_args) so --sdnotify can match.
     # Default is "exec": activates once podman starts, no READY handshake needed.
-    # "notify" + --sdnotify=conmon is broken systemically when linger is active
-    # because conmon migrates into the user session cgroup and systemd rejects its
-    # READY=1 (NotifyAccess=all only accepts PIDs in the service's own cgroup tree).
+    # "notify" is structurally incompatible with this rootless+linger architecture
+    # and stays unsupported in practice (settled, not a pending question; verified
+    # tp Fedora 44/systemd 259 2026-06-21). systemd attributes an sd_notify datagram
+    # to the unit owning the *sender's* cgroup, but the process that emits READY=1
+    # always lives in user@<uid>.service's cgroup, never workload-<name>.service's:
+    # with --sdnotify=conmon the sender is conmon; with --sdnotify=healthy podman
+    # does send READY once healthy, but from the re-exec'd libpod podman that has
+    # migrated into the same user-manager scope as conmon. Either way systemd
+    # credits user@<uid>.service (wrong unit, which rejects it) and the workload
+    # unit never goes active. No NotifyAccess tweak on the workload unit can fix
+    # this — the sender is not in its cgroup at all. Use --health-cmd + the CLI's
+    # health-verified flow for readiness instead. See ADR 001 and llms.txt.
     service_type = container.get("resources", {}).get("service_type", "exec")
     valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
     if service_type not in valid_types:
@@ -873,9 +888,10 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
             # Warn if host path escapes the workload home directory
             try:
                 resolved = str(Path(parts[0]).resolve())
-                if not resolved.startswith(home_dir + '/') and resolved != home_dir:
+                root = str(workload_root_dir(name))
+                if not resolved.startswith(root + '/') and resolved != root:
                     log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
-                            f"'{resolved}' outside home dir '{home_dir}'", level="warning")
+                            f"'{resolved}' outside workload dir '{root}'", level="warning")
             except Exception:
                 pass
             parts[0] = dq(parts[0])
@@ -1038,16 +1054,35 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         )
 
     if mode == "single":
-        # Kill any stale libpod pause process before the first podman touch of
-        # this invocation. A pause that outlives the previous invocation (it
-        # gets moved into podman-pause-*.scope under user@<uid> by any host-side
-        # podman call) pins a mount namespace whose PrivateTmp /tmp is already
-        # deleted; pasta then fails its sandbox mount of /tmp with ENOENT and
-        # the unit restart-loops until StartLimitBurst. Tolerant "-" so a
-        # missing rundir on first boot can't block startup. Pod/bridge members
-        # must NOT do this (it would kill the pause out from under the live
-        # pod infra / sibling containers) — their head units handle it.
+        # Force a *fresh* libpod pause process before the first podman touch of
+        # this invocation. Trigger: any pasta-networked workload. pasta's
+        # prefork isolation does mount("","/tmp","tmpfs")+pivot_root (passt
+        # isolation.c, TMPDIR==/tmp, compile-time) — if /tmp doesn't resolve in
+        # pasta's mount ns it dies with "Failed to mount empty tmpfs for
+        # pivot_root(): ENOENT" and the unit restart-loops to StartLimitBurst.
+        # How /tmp goes missing: a pause that outlives the previous activation
+        # (podman moves it into podman-pause-*.scope under user@<uid>, where it
+        # survives the unit stop) still pins that activation's PrivateTmp /tmp,
+        # which systemd already deleted. The next `podman run` takes the rootless
+        # join shortcut (rootless_linux.c can_use_shortcut → join_namespace_or_die
+        # "mnt") and *inherits that dead mount ns*. NB the join is userns-agnostic
+        # — keep-id vs userns=host is irrelevant; only pasta (vs --network=host,
+        # which spawns no pasta) is the trigger.
+        #   `podman system migrate` is necessary but not sufficient: it stops all
+        # running containers first and returns *before* killing the pause if any
+        # stop errors (runtime_migrate.go), and it's tolerant ("-"). So we also
+        # rm pause.pid + ns_handles unconditionally — that makes the shortcut
+        # fall through so `podman run` builds a fresh pause in the live (valid)
+        # mount ns. migrate runs first so it can still SIGKILL the tracked pause;
+        # the rm cleans up when migrate couldn't. Both tolerant so first boot
+        # (no rundir/handles yet) never blocks startup. Pod/bridge members must
+        # NOT do this (it would kill the pause out from under the live pod infra
+        # / sibling containers) — their head units handle it.
         lines.append("ExecStartPre=-/usr/bin/podman system migrate")
+        lines.append(
+            f"ExecStartPre=-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+            f" /run/user/{uid}/libpod/tmp/ns_handles"
+        )
 
     lines.append("")
 
@@ -1121,7 +1156,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         "",
         "# Filesystem hardening: restrict writes to workload home + podman runtime",
         "ProtectSystem=strict",
-        f'ReadWritePaths="{home_dir}" /run/user/{uid}',
+        f'ReadWritePaths="{str(workload_root_dir(name))}" /run/user/{uid}',
         "PrivateTmp=yes",
         "# Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and",
         "# AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list",
@@ -1155,7 +1190,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 def generate_sysuser_config_vm(config, user_name, uid):
     """Like generate_sysuser_config but adds implicit kvm group membership."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     extra_groups = config.get("security", {}).get("extra_groups", [])
 
     lines = [
@@ -1179,7 +1214,7 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     on sidecar stop and yank the VM's qmp/console sockets out from under it.
     """
     socket_path = f"/run/workload-vm/{name}/virtiofs-{tag}.sock"
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
 
     return "\n".join([
         f"# virtiofsd sidecar for {name}/{tag}",
@@ -1203,11 +1238,21 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
         # sharing inside the guest. --sandbox=chroot still confines the
         # daemon's view of the host filesystem; --socket-group lets the
         # unprivileged QEMU process connect.
+        #
+        # --translate-uid/--translate-gid bidirectionally remap the guest's
+        # primary user (VM_GUEST_UID, the cloud-init default user) to the host
+        # workload uid/gid. Without this the share is owned by _wl-<name>
+        # (uid>=10000) on the host while the guest writes as uid 1000, so the
+        # guest user gets EPERM. The map is internal to virtiofsd (no user
+        # namespace needed, compatible with --sandbox=chroot); all other guest
+        # uids/gids still pass through 1:1, preserving multi-user sharing.
         f'Environment="HOME={home_dir}"',
         f"ExecStart=/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
         f"--socket-group={user_name} "
         f"--shared-dir={dq(host_path)} "
+        f"--translate-uid=map:{VM_GUEST_UID}:{uid}:1 "
+        f"--translate-gid=map:{VM_GUEST_UID}:{uid}:1 "
         f"--cache=auto --sandbox=chroot",
         # Wait for virtiofsd to create the socket before QEMU starts.
         # virtiofsd creates the socket before blocking on accept(), so this
@@ -1340,7 +1385,7 @@ def generate_vm_bridge_service(subnet: str | None = None, dns: list | None = Non
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     system_disk = f"{home_dir}/system.qcow2"
     setup_service = f"workload-{name}-setup.service"
 
@@ -1370,7 +1415,10 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     """Generate the main VM service (QEMU, Type=notify via workload-vm-notify)."""
     name = config["workload"]["name"]
     vm_cfg = config.get("vm", {})
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
+    # data.qcow2 is the precious disk → lives in the backup-captured data/ subtree,
+    # apart from the reconstructible system.qcow2 (state/).
+    data_dir = str(workload_data_dir(name))
     socket_dir = f"/run/workload-vm/{name}"
 
     # Always pass QEMU an integer number of MiB so memfd's "size=NM" stays valid.
@@ -1439,7 +1487,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     )
     if has_data_disk:
         qemu_args.append(
-            f"-drive file={home_dir}/data.qcow2,if=virtio,format=qcow2,id=data"
+            f"-drive file={data_dir}/data.qcow2,if=virtio,format=qcow2,id=data"
         )
 
     # Cloud-init seed (always present; removed from command after first boot
@@ -1584,7 +1632,7 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
 def generate_vm_workload(config, user_name: str, uid: int):
     """Emit all unit files for a VM workload. Returns the workload name."""
     name = config["workload"]["name"]
-    home_dir = str(WORKLOADS_BASE / name)
+    home_dir = str(workload_state_dir(name))
     vm_cfg = config.get("vm", {})
     volumes = vm_cfg.get("volumes", [])
 
@@ -1626,11 +1674,8 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # virtiofsd sidecar services
     for i, vol_spec in enumerate(volumes):
         host_raw, guest_path, _opts = parse_volume_spec(vol_spec)
-        # Expand ./ relative to workload home
-        if host_raw.startswith("./"):
-            host_path = home_dir + "/" + host_raw[2:]
-        else:
-            host_path = host_raw
+        # Expand ./ @/ data/ state/ anchors relative to the workload dirs.
+        host_path = expand_volume_path(host_raw, home_dir).split(":", 2)[0]
         tag = virtiofs_tag(guest_path, i)
         vfs_content = generate_virtiofs_service(name, tag, host_path, user_name, uid)
         (SERVICES_DIR / f"workload-{name}-virtiofs-{tag}.service").write_text(vfs_content)
@@ -1670,21 +1715,30 @@ def main():
     # at the end of main() for why the wants symlinks alone don't suffice.
     written_workloads = []
 
-    # Process each workload config
-    config_files = list(WORKLOAD_CONFIG_DIR.glob("*.toml"))
+    # Process each workload config. Discovery goes through iter_workloads so the
+    # <name>/workload.toml layout lives in exactly one place (workload_lib); we
+    # keep just the paths since the loop below re-derives name from the parent.
+    config_files = [path for _name, path in iter_workloads(WORKLOAD_CONFIG_DIR)]
     log_msg(f"Found {len(config_files)} config files")
 
     # Pre-scan to build the set of all enabled workload names; used below to
     # validate [workload].requires / .after cross-references.
+    #
+    # NOTE: the generator only ever *writes* — it emits units for enabled
+    # workloads and never deletes anything. Removing a disabled workload's unit
+    # files from /run is `workloadctl disable`'s job (see cmd_disable /
+    # _workload_run_files); at boot /run is a fresh tmpfs so there is nothing to
+    # clean up here.
     all_workload_names: set[str] = set()
     for _cf in config_files:
         try:
+            if not (_cf.parent / ENABLED_MARKER_NAME).exists():
+                continue
             with open(_cf, "rb") as _f:
                 _c = tomllib.load(_f)
-            if _c.get("workload", {}).get("enabled", False):
-                _n = _c.get("workload", {}).get("name", "")
-                if _n:
-                    all_workload_names.add(_n)
+            _n = _c.get("workload", {}).get("name", "")
+            if _n:
+                all_workload_names.add(_n)
         except Exception:
             pass
 
@@ -1694,7 +1748,7 @@ def main():
             with open(config_file, "rb") as f:
                 config = tomllib.load(f)
 
-            enabled = config.get("workload", {}).get("enabled", False)
+            enabled = (config_file.parent / ENABLED_MARKER_NAME).exists()
             if not enabled:
                 log_msg(f"  Skipping {config_file} (disabled)")
                 continue
@@ -1704,6 +1758,19 @@ def main():
                 continue
 
             name = config["workload"]["name"]
+
+            # Identity is directory-based everywhere else (iter_workloads, the
+            # .enabled marker, WorkloadConfig which enforces name==dir), but the
+            # generator keys unit filenames off [workload].name. If the two
+            # disagree we'd emit workload-<tomlname>.service while the CLI and
+            # marker operate on the dir name — a split identity. Refuse it.
+            if config_file.parent.name != name:
+                log_msg(
+                    f"ERROR: {config_file}: [workload].name {name!r} does not "
+                    f"match bundle directory {config_file.parent.name!r}, skipping",
+                    level="err",
+                )
+                continue
 
             errors = validate_workload_config(config)
             if errors:

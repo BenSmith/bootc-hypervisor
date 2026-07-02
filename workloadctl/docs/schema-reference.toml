@@ -19,11 +19,19 @@
 # Home directory: /var/lib/workloads/{name}
 name = "schema-reference"
 
-# Optional: Whether this workload should be enabled
-# Type: boolean
-# Default: true
-# Set to false to disable without deleting the config file
-enabled = false
+# Optional: Bundle (kind) this workload draws shared control files from.
+# Type: string
+# Default: the workload name
+# The build context (Containerfile, plus an optional build.sh escape hatch via
+# [build].script), the [host].setup script, and the
+# SELinux CIL (policy.cil) are all looked up under
+# /usr/share/workloadctl/workloads/<bundle>/.  Defaults to the workload name, so
+# a single shipped instance needs no `bundle` field.  `workloadctl init <bundle>
+# --as <name>` and `workloadctl duplicate` set it so a copy shares one bundle's
+# control tree without copying it (sharing is just the absence of an override).
+# Goes straight into a filesystem path, so it must satisfy the same name rules as
+# `name` (lowercase letters, numbers, hyphen) — validated at config load.
+# bundle = "vncdesktop-wayfire"
 
 # Optional: Lifecycle policy — how the workload's writable state is treated.
 # Type: string
@@ -44,6 +52,16 @@ enabled = false
 #              served by a [vm] workload for full fidelity.
 #              TODO (P3): pet reclassifies home/ as backup-included.
 # lifecycle = "cattle"
+
+# Optional: How many pet-lifecycle overlay snapshots to retain.
+# Type: integer (>= 1)
+# Default: 3
+# Each destructive verb (update/recreate) on a "pet" container commits the
+# writable overlay to localhost/workload-snapshot/<name>:<timestamp> before
+# rebuilding it. This bounds that repository to the newest N snapshots; older
+# ones are pruned right after each new commit. The VM equivalent is
+# [vm].rollback_keep. Ignored for cattle workloads (they never snapshot).
+# snapshot_keep = 3
 
 # Optional: Workload mode — how many containers and how they network.
 # Type: string
@@ -246,7 +264,6 @@ enabled = false
 # ------------------------------------------------
 # [workload]
 # name = "fedora-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 2
@@ -260,7 +277,6 @@ enabled = false
 # -----------------------------------------------
 # [workload]
 # name = "dev-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 4
@@ -274,7 +290,6 @@ enabled = false
 # ---------------------------------------------------------------
 # [workload]
 # name = "lan-vm"
-# enabled = true
 #
 # [vm]
 # vcpus = 2
@@ -309,7 +324,7 @@ enabled = false
 #
 # Example:
 #   required_files = [
-#       { path = "./smb.conf", hint = "/usr/share/workloadctl/containers/smb-server/smb.conf" },
+#       { path = "./smb.conf", hint = "/usr/share/workloadctl/workloads/smb-server/smb.conf" },
 #       { path = "./app.conf" },   # No hint - just flags it as missing
 #   ]
 #
@@ -361,7 +376,7 @@ enabled = false
 #
 # --- Field allocation -------------------------------------------------------
 # Workload-level (declared once, at the top level):
-#   [workload]   name, enabled, mode
+#   [workload]   name, mode
 #   [setup]      required_files
 #   [host]       setup
 #   [network]    mode, ports          (pod mode only; ignored in bridge mode)
@@ -755,20 +770,17 @@ virtualization = true
 # security_opt = []
 
 # Optional: Ship a per-workload SELinux type
-# Type: bool OR string
+# Type: bool
 # Default: false
 # When true, `enable` loads the bundle's udica-style CIL policy
-# (containers/<bundle>/<bundle>.cil) as a name-keyed module (wl_<name>) and the
+# (workloads/<bundle>/policy.cil) as a name-keyed module (wl_<name>) and the
 # generator labels the container with type wl_<name>.process; `disable` removes
 # it.
 #
-# The bundle dir defaults to the workload name (true → containers/<name>/). Set
-# a string to source the CIL from a differently-named bundle instead — e.g.
-# `selinux_policy = "vncdesktop-sway"` loads containers/vncdesktop-sway/
-# vncdesktop-sway.cil. This decouples the policy source from the workload name,
-# so a renamed workload can keep using its original bundle (the loaded module
-# and label stay wl_<name>.process regardless). The string must be a valid
-# workload-style name ([a-z][a-z0-9-]*).
+# The CIL is sourced from the resolved `[workload] bundle` (which defaults to the
+# workload name), so a renamed copy keeps using its source bundle's policy with
+# no extra field — the loaded module and label stay wl_<name>.process regardless.
+# (The old string form of this field is subsumed by `bundle`.)
 #
 # The .cil is a CIL block using the __WL_MODULE__ placeholder (substituted
 # at enable time), e.g.:
@@ -846,13 +858,21 @@ extra_groups = ["video", "render", "input", "dialout", "audio"]
 # Default: []
 # Format: "host-path:container-path[:options]"
 #
-# Path substitution:
-#   ./ prefix expands to workload home directory (/var/lib/workloads/{name})
-#   Example: "./cache:/data" becomes "/var/lib/workloads/myapp/cache:/data"
+# Path substitution — workload-relative anchors (the /var/lib/workloads/{name}
+# tree is split into a precious data/ subtree and a reconstructible state/ one):
+#   ./sub   (sugar for data/sub)   -> {root}/data/sub          PRECIOUS  (backed up)
+#   @/sub   (sugar for state/sub)  -> {root}/state/volumes/sub  reconstructible (build caches/scratch, NOT backed up)
+#   /abs/path                      -> used verbatim (admin must create it)
+#   Example: "./cache:/data" becomes "/var/lib/workloads/myapp/data/cache:/data"
+#
+# Note: the bare host names "data" and "state" (and the data/ / state/ prefixes)
+# are reserved anchors — "data:/x" is rewritten to a bind from {root}/data, so
+# you cannot declare a *named volume* literally called "data" or "state" here.
+# A `..` or absolute escape inside an anchor (e.g. "./../x") is rejected.
 #
 # Examples:
-#   "./config:/config:ro"          - Workload home subdirectory (read-only)
-#   "./data:/data"                 - Workload home subdirectory (read-write)
+#   "./config:/config:ro"          - precious data/config, read-only
+#   "@/build-cache:/cache"         - reconstructible state scratch (excluded from backup)
 #   "/etc/config:/config:ro,z"     - Absolute path, SELinux relabeled
 #   "/mnt/data:/data:ro"           - Absolute path, read-only mount
 #   "/mnt/shared:/shared"          - Absolute path, read-write mount
@@ -899,7 +919,7 @@ ports = ["8080:80", "8443:443"]
 # disable runs `<script> disable`. The script is expected to be idempotent
 # in both directions.
 #
-# Container directory: /usr/share/workloadctl/containers/{name}/
+# Container directory: /usr/share/workloadctl/workloads/{name}/
 #
 # Use for host-level prerequisites that can't be handled by the container
 # itself, such as:
@@ -910,6 +930,47 @@ ports = ["8080:80", "8443:443"]
 #
 # The script runs as root (workloadctl requires root for enable/disable).
 # setup = "setup.sh"
+
+[build]
+# Optional: how `workloadctl build <name>` builds this workload's image.
+#
+# Only relevant for locally-built images, i.e. a [container] (or [[containers]])
+# with `pull = "never"`. With a Containerfile present in the bundle and no
+# [build] section at all, `build` Just Works: it runs `podman build` over the
+# resolved build context and tags the result exactly as [container].image.
+#
+# THE BUILD CONTEXT IS OVERRIDE-RESOLVED. workloadctl assembles a merged context
+# — the shipped /usr/share/workloadctl/workloads/<bundle>/ tree with your
+# /etc/workloads.d/<name>/ overrides laid on top, file by file — so editing the
+# Containerfile or a COPY-ed asset via `workloadctl edit <name> <file>` actually
+# takes effect. (workloadctl's control files — workload.toml, build.sh,
+# policy.cil, the [host].setup script — are stripped from the context so a bare
+# `COPY . /` can't sweep them into the image.)
+#
+# containerfile: Containerfile name inside the context. Relative (no '..').
+#                Default: "Containerfile".
+# containerfile = "Containerfile"
+#
+# args: static --build-arg values.
+# args = { GPU_TYPE = "amd" }
+#
+# arg_env: host env var names forwarded as --build-arg WHEN SET — the transient
+#          per-build knob (an RPM URL, a GPU type). The env value wins over the
+#          matching `args` default. Example:
+#            sudo GPU_TYPE=nvidia workloadctl build <name>
+# arg_env = ["GPU_TYPE"]
+#
+# target: optional multi-stage build --target.
+# target = "runtime"
+#
+# script: ESCAPE HATCH. Path to a build script (resolved through the override
+#         chain like any control file). When set, `build` runs it INSTEAD of the
+#         built-in builder, handing it the merged context dir and target tag as
+#         argv plus WL_BUILD_CONTEXT / WL_TAG / WL_IMAGE in the environment — so
+#         the script builds the override-resolved context rather than locating
+#         its own directory. Use only for genuinely imperative builds the
+#         declarative fields above can't express; prefer the built-in builder.
+# script = "build.sh"
 
 [resources]
 # Optional: Resource limits and constraints
@@ -1097,12 +1158,20 @@ ports = ["8080:80", "8443:443"]
 # Common values:
 #   "exec" (default)   - Activates once podman has exec'd the container process.
 #                        Correct for all workloads. Does not require a READY
-#                        notification, which avoids a systemic issue where
-#                        conmon migrates into the user session cgroup when linger
-#                        is active, causing systemd to silently drop its READY=1.
-#   "notify"           - Waits for READY=1 from conmon (--sdnotify=conmon).
-#                        Only use this if linger is disabled for the workload user
-#                        and you need accurate readiness tracking.
+#                        notification, which sidesteps the structural sd_notify
+#                        incompatibility described under "notify" below.
+#   "notify"           - Waits for READY=1 (--sdnotify=conmon). DO NOT USE: this
+#                        is structurally incompatible with the rootless+linger
+#                        design and the unit will hang in "activating". systemd
+#                        attributes an sd_notify message to the unit owning the
+#                        sender's cgroup, but the emitter (conmon, or the re-exec'd
+#                        podman under --sdnotify=healthy) always lives in
+#                        user@<uid>.service's cgroup, not the workload service's,
+#                        so READY=1 is misattributed to the user manager and the
+#                        workload unit never sees it. No NotifyAccess tweak fixes
+#                        it. For readiness tracking use [container.health] +
+#                        `workloadctl health`/`update` instead. (Verified 2026-06-21;
+#                        see docs/adr/001-container-cgroup-placement.md.)
 #   "simple"           - Consider service started immediately after fork.
 #
 # Systemd directive: Type=
@@ -1158,7 +1227,6 @@ ports = ["8080:80", "8443:443"]
 # ----------------------------------------
 # [workload]
 # name = "gaming"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/user/gaming-vm:latest"
@@ -1182,7 +1250,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------
 # [workload]
 # name = "sunshine"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/lizardbyte/sunshine:latest"
@@ -1204,7 +1271,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------
 # [workload]
 # name = "webserver"
-# enabled = true
 #
 # [container]
 # image = "docker.io/library/nginx:alpine"
@@ -1225,7 +1291,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------------
 # [workload]
 # name = "devenv"
-# enabled = true
 #
 # [container]
 # image = "localhost/my-devenv:latest"
@@ -1246,7 +1311,6 @@ ports = ["8080:80", "8443:443"]
 # ------------------------------------------------
 # [workload]
 # name = "homeassistant"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/home-assistant/home-assistant:stable"
@@ -1274,7 +1338,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------
 # [workload]
 # name = "groups-test"
-# enabled = true
 #
 # [container]
 # image = "docker.io/library/alpine:latest"
@@ -1291,7 +1354,6 @@ ports = ["8080:80", "8443:443"]
 # ---------------------------------------
 # [workload]
 # name = "plex"
-# enabled = true
 #
 # [container]
 # image = "docker.io/plexinc/pms-docker:latest"
@@ -1310,7 +1372,6 @@ ports = ["8080:80", "8443:443"]
 # -----------------------------------
 # [workload]
 # name = "frigate"
-# enabled = true
 #
 # [container]
 # image = "ghcr.io/blakeblackshear/frigate:stable"
@@ -1331,7 +1392,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------------
 # [workload]
 # name = "qemu-vm"
-# enabled = true
 #
 # [container]
 # image = "tianon/qemu:latest"
@@ -1352,7 +1412,6 @@ ports = ["8080:80", "8443:443"]
 # -----------------------------------------
 # [workload]
 # name = "webapp"
-# enabled = true
 #
 # [container]
 # image = "myapp:latest"
@@ -1376,7 +1435,6 @@ ports = ["8080:80", "8443:443"]
 # -------------------------------------------
 # [workload]
 # name = "postgres"
-# enabled = true
 #
 # [container]
 # image = "postgres:16"
@@ -1415,7 +1473,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "jellyfin"
-# enabled = true
 #
 # [container]
 # image = "jellyfin/jellyfin:latest"
@@ -1445,7 +1502,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "proxy-stack"
-# enabled = true
 # mode = "pod"
 #
 # # Pod-level: ports are published once, on the pod's infra container.
@@ -1471,7 +1527,6 @@ ports = ["8080:80", "8443:443"]
 # --------------------------------------------------------
 # [workload]
 # name = "forgejo-stack"
-# enabled = true
 # mode = "bridge"
 #
 # [[containers]]
@@ -1498,7 +1553,7 @@ ports = ["8080:80", "8443:443"]
 # FORGEJO__database__USER = "forgejo"
 # FORGEJO__database__PASSWD = "${SECRET:forgejo-db-password}"
 # [containers.storage]
-# volumes = ["./data:/var/lib/gitea"]
+# volumes = ["./gitea:/var/lib/gitea"]
 # [containers.network]
 # ports = ["3000:3000"]
 
@@ -1574,7 +1629,7 @@ ports = ["8080:80", "8443:443"]
 # - --init (catatonit) as PID 1 for zombie reaping (skipped when container.systemd is set)
 #
 # File Locations:
-# - Workload configs: /etc/workloads.d/*.toml
+# - Workload configs: /etc/workloads.d/*/workload.toml
 # - Generated sysusers configs: /run/sysusers.d/workload-{name}.conf
 # - Generated service files: /run/systemd/system/workload-{name}.service
 # - User home directory: /var/lib/workloads/{name}

@@ -34,7 +34,9 @@ for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
         sys.path.insert(0, str(_libdir))
         break
 
-from workload_lib import WORKLOAD_CONFIG_DIR, WORKLOADS_BASE
+from workload_lib import (
+    WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_state_dir, workload_data_dir,
+)
 
 
 def log(msg: str):
@@ -42,7 +44,7 @@ def log(msg: str):
 
 
 def load_config(name: str) -> dict:
-    config_path = WORKLOAD_CONFIG_DIR / f"{name}.toml"
+    config_path = workload_config_path(name)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
@@ -233,9 +235,14 @@ def build_from_bootc_image(image_ref: str, home_dir: Path, system_disk: Path):
     log(f"  System disk ready: {system_disk}")
 
 
-def create_data_disk(home_dir: Path, size: str):
-    """Create data.qcow2 if it doesn't exist. Size format: '20G', '100M', etc."""
-    data_disk = home_dir / "data.qcow2"
+def create_data_disk(data_dir: Path, size: str):
+    """Create data.qcow2 if it doesn't exist. Size format: '20G', '100M', etc.
+
+    The precious data disk lives in the backup-captured data/ subtree, apart
+    from the reconstructible system.qcow2 in state/.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    data_disk = data_dir / "data.qcow2"
     if data_disk.exists():
         return
     log(f"  Creating data disk: {data_disk.name} ({size})")
@@ -258,7 +265,7 @@ def main():
 
     config = load_config(name)
     vm_cfg = config.get("vm", {})
-    home_dir = WORKLOADS_BASE / name
+    home_dir = workload_state_dir(name)
     home_dir.mkdir(parents=True, exist_ok=True)
 
     system_disk = home_dir / "system.qcow2"
@@ -324,14 +331,15 @@ def main():
             )
             log(f"  System disk resized to {system_disk_size}")
 
-    # Create data disk if configured
+    # Create data disk if configured (in the precious data/ subtree)
     data_disk_size = vm_cfg.get("data_disk_size", "")
     if data_disk_size:
-        create_data_disk(home_dir, data_disk_size)
+        data_dir = workload_data_dir(name)
+        create_data_disk(data_dir, data_disk_size)
         try:
             import pwd
             pw = pwd.getpwnam(f"_wl-{name}")
-            data_disk = home_dir / "data.qcow2"
+            data_disk = data_dir / "data.qcow2"
             os.chown(data_disk, pw.pw_uid, pw.pw_gid)
         except (KeyError, OSError):
             pass

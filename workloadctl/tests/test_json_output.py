@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 _LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, _LIB)
 
+import workload_lib
 import cmd_admin
 import cmd_backup
 import cmd_inspect
@@ -49,7 +50,6 @@ def _args(**kwargs):
 MINIMAL_TOML = """\
 [workload]
 name = "test-wl"
-enabled = false
 
 [container]
 image = "example.com/test:latest"
@@ -58,7 +58,6 @@ image = "example.com/test:latest"
 ENABLED_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -71,7 +70,6 @@ ports = ["8080:80"]
 HOST_NET_TOML = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -84,7 +82,6 @@ ports = ["8080"]
 VM_TOML = """\
 [workload]
 name = "test-vm"
-enabled = false
 
 [vm]
 image = "example.com/guest:latest"
@@ -94,17 +91,21 @@ image = "example.com/guest:latest"
 class _WorkloadDir:
     """Temp WORKLOAD_DIR with one TOML, WORKLOAD_DIR patched on the module."""
 
-    def __init__(self, toml=MINIMAL_TOML, name='test-wl'):
+    def __init__(self, toml=MINIMAL_TOML, name='test-wl', enabled=False):
         self._toml = toml
         self._name = name
+        self._enabled = enabled
         self._tmp = None
         self._patcher = None
 
     def __enter__(self):
         self._tmp = tempfile.mkdtemp()
         tmp_path = Path(self._tmp)
-        (tmp_path / f'{self._name}.toml').write_text(self._toml)
-        self._patcher = patch.object(workloadctl_core, 'WORKLOAD_DIR', tmp_path)
+        (tmp_path / self._name).mkdir()
+        (tmp_path / self._name / 'workload.toml').write_text(self._toml)
+        if self._enabled:
+            (tmp_path / self._name / '.enabled').touch()
+        self._patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', tmp_path)
         self._patcher.start()
         return tmp_path
 
@@ -233,14 +234,14 @@ class TestListJson(unittest.TestCase):
         self.assertIsNone(data['workloads'][0]['state'])
 
     def test_enabled_workload_state_is_raw_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('inactive\n')):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
         self.assertEqual(data['workloads'][0]['state'], 'inactive')
 
     def test_activating_not_remapped(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('activating\n')):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
@@ -249,7 +250,7 @@ class TestListJson(unittest.TestCase):
         self.assertNotEqual(wl['state'], 'starting')
 
     def test_failed_not_remapped(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(json=True)
             with patch('subprocess.run', return_value=_ok('failed\n', returncode=3)):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager(user_exists=True)))
@@ -343,7 +344,7 @@ class TestPortsJson(unittest.TestCase):
     ContainerSubstrate.endpoints() / cmd_info's network section."""
 
     def test_bridge_entry_is_dict_with_host_and_container(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         self.assertEqual(len(result), 1)
         entry = result[0]
@@ -352,13 +353,13 @@ class TestPortsJson(unittest.TestCase):
         self.assertEqual(entry['container'], '80')
 
     def test_bridge_entry_not_a_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertNotIsInstance(entry, str)
 
     def test_host_network_container_field_is_null(self):
-        with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
+        with _WorkloadDir(HOST_NET_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         for entry in result:
             self.assertIn('container', entry)
@@ -373,7 +374,6 @@ class TestPortsJson(unittest.TestCase):
         toml = """\
 [workload]
 name = "test-wl"
-enabled = true
 
 [container]
 image = "example.com/test:latest"
@@ -389,7 +389,7 @@ ports = ["127.0.0.1:4317:4317"]
         self.assertEqual(entry['container'], '4317')
 
     def test_host_network_localhost_entry(self):
-        with _WorkloadDir(HOST_NET_TOML, 'test-wl'):
+        with _WorkloadDir(HOST_NET_TOML, 'test-wl', enabled=True):
             result = substrate._accessible_at_config(WorkloadConfig('test-wl'))
         hosts = [e['host'] for e in result]
         self.assertIn('localhost:8080', hosts)
@@ -408,7 +408,7 @@ class TestImagesListJson(unittest.TestCase):
         return m
 
     def test_size_bytes_is_int(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 129499136, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -416,21 +416,21 @@ class TestImagesListJson(unittest.TestCase):
         self.assertEqual(data['images'][0]['size_bytes'], 129499136)
 
     def test_created_is_int_from_iso_string(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': '2024-11-15T10:30:00Z'})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['created'], int)
 
     def test_created_null_when_none(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
         self.assertIsNone(data['images'][0]['created'])
 
     def test_no_human_strings_in_size(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 99000000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -439,7 +439,7 @@ class TestImagesListJson(unittest.TestCase):
         self.assertNotIn('GB', str(size))
 
     def test_image_keys(self):
-        with _WorkloadDir(ENABLED_TOML, 'test-wl'):
+        with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
             data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
@@ -861,14 +861,18 @@ class TestCleanupJson(unittest.TestCase):
 # ── selinux_policy bool-or-string → selinux_bundle ───────────────────────────
 
 class TestSelinuxBundleResolution(unittest.TestCase):
-    """`selinux_policy` may be true (bundle == workload name) or a string naming
-    the bundle dir; `selinux_bundle` resolves the source, decoupled from the
-    (renameable) workload name."""
+    """`selinux_policy` is boolean; the CIL is sourced from the resolved
+    `[workload] bundle` (defaults to the workload name). `selinux_bundle`
+    surfaces that source, decoupled from the (renameable) workload name."""
 
-    def _config(self, security_block=''):
+    def _config(self, security_block='', bundle=None):
         # config dict + name are loaded in __init__, so the object is usable
         # after the temp dir is torn down (selinux_bundle does no file I/O).
-        with _WorkloadDir(MINIMAL_TOML + security_block, 'test-wl'):
+        workload = '[workload]\nname = "test-wl"\n'
+        if bundle is not None:
+            workload += f'bundle = "{bundle}"\n'
+        toml = workload + '\n[container]\nimage = "example.com/test:latest"\n' + security_block
+        with _WorkloadDir(toml, 'test-wl'):
             return WorkloadConfig('test-wl')
 
     def test_true_keys_off_workload_name(self):
@@ -876,8 +880,8 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         self.assertTrue(cfg.selinux_policy)
         self.assertEqual(cfg.selinux_bundle, 'test-wl')
 
-    def test_string_names_bundle_explicitly(self):
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-sway"\n')
+    def test_bundle_field_names_source_explicitly(self):
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-sway')
         self.assertTrue(cfg.selinux_policy)
         self.assertEqual(cfg.selinux_bundle, 'vncdesktop-sway')
 
@@ -892,9 +896,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         self.assertIsNone(cfg.selinux_bundle)
 
     def test_apply_rejects_path_traversal_bundle(self):
-        # A bundle string goes straight into a filesystem path; a value that
-        # isn't a plain workload-style name must be rejected before lookup.
-        cfg = self._config('\n[security]\nselinux_policy = "../etc/evil"\n')
+        # `bundle` goes straight into a filesystem path; a value that isn't a
+        # plain workload-style name must be rejected before lookup.
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='../etc/evil')
         self.assertEqual(cfg.selinux_bundle, '../etc/evil')
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with self.assertRaises(SystemExit):
@@ -902,9 +906,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
 
     def test_underscore_bundle_suggests_hyphenated_form(self):
         # Footgun: users copy the SELinux *type* name (underscores) into
-        # selinux_policy, but the bundle is a hyphenated directory name. The
+        # `bundle`, but the bundle is a hyphenated directory name. The
         # invalid-bundle error should suggest the hyphenated form.
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop_wayfire"\n')
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop_wayfire')
         err = io.StringIO()
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
             with redirect_stderr(err):
@@ -915,7 +919,7 @@ class TestSelinuxBundleResolution(unittest.TestCase):
     def test_missing_bundle_lists_available(self):
         # A well-formed but nonexistent bundle should list the bundles that do
         # ship a CIL, plus a close-match suggestion.
-        cfg = self._config('\n[security]\nselinux_policy = "vncdesktop-wayfir"\n')
+        cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-wayfir')
         err = io.StringIO()
         with patch.object(cmd_lifecycle, '_selinux_available', return_value=True), \
                 patch.object(cmd_lifecycle, '_available_bundles',
@@ -1010,7 +1014,8 @@ class TestBackupJson(unittest.TestCase):
         # --consistency crash --all: both container and VM workloads are backed up.
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='crash')
                 mock_backup = MagicMock(return_value=4096)
@@ -1037,7 +1042,8 @@ class TestBackupJson(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='crash')
                 with patch.object(cmd_backup, 'require_root'):
@@ -1059,7 +1065,8 @@ class TestBackupJson(unittest.TestCase):
             out_file = Path(out_tmp) / "single.tar.zst"
             out_file.write_text("")  # exists as a regular file, not a dir
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=str(out_file), consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
@@ -1079,7 +1086,8 @@ class TestBackupJson(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_tmp:
             with _WorkloadDir(MINIMAL_TOML, 'test-wl') as wdir:
-                (wdir / 'test-vm.toml').write_text(VM_TOML)
+                (wdir / 'test-vm').mkdir()
+                (wdir / 'test-vm' / 'workload.toml').write_text(VM_TOML)
                 args = _args(workload=None, json=True, all=True,
                              output=out_tmp, consistency='cold')
                 with patch.object(cmd_backup, 'require_root'):
@@ -1128,44 +1136,6 @@ class TestBackupJson(unittest.TestCase):
                             with self.assertRaises(SystemExit) as cm:
                                 cmd_backup.cmd_backup(args, WorkloadManager())
         self.assertNotEqual(cm.exception.code, 0)
-
-
-class TestBackupImageStoreExclude(unittest.TestCase):
-    """_ignore_image_store excludes .local/share/containers from copytree."""
-
-    def _make_home(self, base):
-        """Create a fake workload home with container image storage."""
-        home = Path(base) / "home"
-        (home / ".local" / "share" / "containers" / "storage").mkdir(parents=True)
-        (home / ".local" / "share" / "containers" / "storage" / "layer.tar").write_text("data")
-        (home / "data" / "db").mkdir(parents=True)
-        (home / "data" / "db" / "mydb.sqlite").write_text("dbdata")
-        return home
-
-    def test_containers_excluded_from_copy(self):
-        """shutil.copytree with _ignore_image_store omits .local/share/containers."""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = self._make_home(tmp)
-            dst = Path(tmp) / "staging"
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=substrate._ignore_image_store(src))
-            self.assertFalse((dst / ".local" / "share" / "containers").exists(),
-                             ".local/share/containers should be excluded")
-            self.assertTrue((dst / "data" / "db" / "mydb.sqlite").exists(),
-                            "other home contents must be preserved")
-
-    def test_no_containers_dir_is_harmless(self):
-        """_ignore_image_store is a no-op when .local/share/containers doesn't exist."""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / "home"
-            (src / ".local" / "share").mkdir(parents=True)
-            (src / "config.txt").write_text("cfg")
-            dst = Path(tmp) / "staging"
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=False,
-                            ignore=substrate._ignore_image_store(src))
-            self.assertTrue((dst / "config.txt").exists())
-            # No error, just a no-op exclusion
-            self.assertFalse((dst / ".local" / "share" / "containers").exists())
 
 
 if __name__ == '__main__':

@@ -1,0 +1,87 @@
+# Pi-hole - Network-wide ad blocker
+# Blocks ads and trackers at the DNS level, network-wide.
+# Web interface: http://<host-ip>/admin
+#
+# Port 53 (DNS) is a privileged port — handled by ip_unprivileged_port_start = 0
+# in the system image, so pihole-FTL can bind directly as the workload user.
+# If running on a system without that sysctl, use a firewall redirect instead:
+#   sudo firewall-cmd --add-forward-port=port=53:proto=udp:toport=5353 --permanent
+#   sudo firewall-cmd --add-forward-port=port=53:proto=tcp:toport=5353 --permanent
+#   sudo firewall-cmd --reload
+# And set FTLCONF_dns_port = "5353" in [container.environment] below.
+#
+# Setup:
+#   1. Disable systemd-resolved (conflicts with pihole on port 53):
+#        sudo systemctl disable --now systemd-resolved.service
+#        sudo systemctl mask systemd-resolved.service
+#      Then replace /etc/resolv.conf with a static file:
+#        sudo rm /etc/resolv.conf
+#        echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+#      After pihole starts, the host will use pihole for DNS.
+#
+#   2. (Optional) Create an encrypted admin password:
+#        echo -n "your-password" | \
+#          sudo workloadctl secret create pihole-webpassword
+#      Then set WEBPASSWORD = "${SECRET:pihole-webpassword}"
+#      in [container.environment] below.
+#
+#   3. Enable (volume directories are created automatically):
+#        sudo workloadctl enable pihole
+#
+#   4. Configure firewall to allow DNS and HTTP:
+#        sudo firewall-cmd --add-service=dns --permanent
+#        sudo firewall-cmd --add-service=http --permanent
+#        sudo firewall-cmd --reload
+#
+#      Or restrict to local network only (more secure):
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="dns" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="http" accept'
+#        sudo firewall-cmd --reload
+#
+#   5. Run gravity to download blocklists (DNS does not work until this completes):
+#        sudo workloadctl exec pihole pihole -g
+#      See: https://github.com/pi-hole/docker-pi-hole/issues/1743
+#
+#   6. Point devices to <host-ip> for DNS.
+#
+# To change the admin password after setup:
+#   sudo workloadctl exec pihole pihole setpassword
+
+[workload]
+name = "pihole"
+
+[container]
+image = "docker.io/pihole/pihole:latest"
+
+[container.health]
+cmd = "dig +short +time=2 @127.0.0.1 pi.hole || exit 1"
+interval = "30s"
+start_period = "60s"
+on_failure = "kill"
+
+[container.environment]
+# TZ = "America/Los_Angeles"  # Uncomment and set to your timezone
+
+# Leave empty to disable web interface authentication, or use a secret:
+WEBPASSWORD = ""
+# WEBPASSWORD = "${SECRET:pihole-webpassword}"
+
+# Upstream DNS servers (Cloudflare — change as desired)
+PIHOLE_DNS_ = "1.1.1.1;1.0.0.1"
+
+[storage]
+volumes = [
+    "./etc-pihole:/etc/pihole",
+    "./etc-dnsmasq.d:/etc/dnsmasq.d",
+]
+
+[security]
+userns = "host"
+
+[network]
+mode = "host"
+
+[resources]
+memory_max = "256M"
+memory_high = "192M"
+cpu_quota = "25%"

@@ -22,8 +22,28 @@ from pathlib import Path
 # Config directory (override with WORKLOAD_CONFIG_DIR env var for testing)
 WORKLOAD_CONFIG_DIR = Path(os.environ.get("WORKLOAD_CONFIG_DIR", "/etc/workloads.d"))
 
+
+def workload_config_dir() -> Path:
+    """Canonical call-time reader for the workloads config dir. Resolves
+    WORKLOAD_CONFIG_DIR against this module at call time, so a single
+    patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", tmp) is honored everywhere.
+    Also re-checks the env var at call time so in-process module loaders that
+    set WORKLOAD_CONFIG_DIR in os.environ before exec_module() work correctly."""
+    env_val = os.environ.get("WORKLOAD_CONFIG_DIR")
+    if env_val:
+        return Path(env_val)
+    return WORKLOAD_CONFIG_DIR
+
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
+
+# Shipped bundle control-file tree (Containerfile/build.sh/setup.sh/policy.cil),
+# keyed by `[workload] bundle`. Env-overridable so the control-file resolver can
+# be unit-tested against a temp /usr tree. The operator override leg lives under
+# WORKLOAD_CONFIG_DIR/<name>/ (see WorkloadConfig.resolve_control_file).
+WORKLOAD_BUNDLES_DIR = Path(
+    os.environ.get("WORKLOAD_BUNDLES_DIR", "/usr/share/workloadctl/workloads")
+)
 
 # Username prefix for workload system users
 USERNAME_PREFIX = "_wl-"
@@ -57,6 +77,13 @@ GENERATOR_OWNED_DIRECTIVES = frozenset({
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
 VM_SOCKET_DIR = Path("/run/workload-vm")
 
+# UID/GID of the guest's primary interactive user. Cloud images assign the
+# first user (cloud-init's default user) uid/gid 1000, and our default
+# cloud-config pins it there explicitly. virtiofsd internally translates this
+# guest id <-> the host workload uid so the guest user can write the share
+# (which on the host is owned by _wl-<name>); see generate_virtiofs_service.
+VM_GUEST_UID = 1000
+
 # Default bridge for VM workloads.  _workload-br is the workloadctl-managed
 # isolated NAT bridge (auto-provisioned by workload-bridge.service). The name
 # is deliberately distinctive (and reserved) so the always-manage bridge setup
@@ -89,6 +116,47 @@ OVMF_VARS_CANDIDATES = [
     "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
     "/usr/share/ovmf/OVMF_VARS.fd",
 ]
+
+
+# --- Config locator ---
+
+def workload_config_path(name: str) -> Path:
+    """Instance config path for a workload, under the config dir."""
+    return workload_config_dir() / name / "workload.toml"
+
+
+# Enabled-ness is denoted by the presence of this marker file in the workload's
+# own config dir — NOT by a field in workload.toml. `enable`/`disable` touch and
+# unlink it; the boot generator and `WorkloadConfig.enabled` read it. This keeps
+# workload.toml purely declarative (no command ever rewrites it) and makes the
+# state a single atomic 1-byte file living right beside the config.
+ENABLED_MARKER_NAME = ".enabled"
+
+
+def workload_enabled_marker(name: str) -> Path:
+    """Path to a workload's enable marker; its presence == enabled."""
+    return workload_config_dir() / name / ENABLED_MARKER_NAME
+
+
+def workload_is_enabled(name: str) -> bool:
+    """Single source of truth for enabled-ness: the marker file is present."""
+    return workload_enabled_marker(name).exists()
+
+
+def iter_workloads(base: Path | None = None) -> list[tuple[str, Path]]:
+    """(name, config_path) for every workload under `base`, sorted by name.
+
+    `base` defaults to the config dir (the common case); pass BUNDLES_DIR to
+    discover shipped bundles instead. Either way the name is derived from the
+    directory so no caller knows the on-disk shape — this is the single place
+    discovery encodes the layout.
+    """
+    if base is None:
+        base = workload_config_dir()
+    return sorted(
+        (p.parent.name, p)                                    # name from dir, not stem
+        for p in base.glob("*/workload.toml")
+    )
 
 
 # --- Kind routing ---
@@ -331,9 +399,61 @@ def workload_container_name(name: str) -> str:
     return f"workload-{name}"
 
 
-def workload_home_dir(name: str) -> Path:
-    """Return the home directory path for a workload."""
+# Generated unit files live in the systemd runtime tree (transient; rewritten on
+# boot by workload-generate.service and on every `workloadctl enable`).
+RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
+
+
+def units_outdated(name: str) -> bool:
+    """True if the workload's config TOML is newer than its generated unit file.
+
+    `systemctl daemon-reload` re-runs the *shell* generator only (which emits a
+    boot oneshot), NOT the Python unit-writer — so editing a workload.toml does
+    not regenerate the per-workload units until `workloadctl enable <name>` is
+    re-run. This mtime comparison is the cheap heads-up for that foot-gun; the
+    authoritative content-level check is `workloadctl drift`.
+
+    Returns False if either file is absent (workload never enabled / no config)
+    so callers can treat "can't tell" as "nothing to warn about". A 1s slack
+    swallows same-second writes from an enable that wrote both.
+    """
+    try:
+        unit_mtime = (RUN_SYSTEMD_SYSTEM / workload_service_name(name)).stat().st_mtime
+        config_mtime = workload_config_path(name).stat().st_mtime
+    except OSError:
+        return False
+    return config_mtime > unit_mtime + 1.0
+
+
+STATE_SUBDIR = "state"
+DATA_SUBDIR = "data"
+
+
+def workload_root_dir(name: str) -> Path:
+    """Per-workload durable-state root: /var/lib/workloads/<name>.
+
+    Spans both the reconstructible state/ subtree and the precious data/ subtree;
+    use this for writable-path grants and containment checks.
+    """
     return WORKLOADS_BASE / name
+
+
+def workload_state_dir(name: str) -> Path:
+    """Reconstructible state subtree (= $HOME / podman graphroot / VM disks).
+
+    Backup-skipped (rebuildable from registries/Containerfiles).
+    """
+    return WORKLOADS_BASE / name / STATE_SUBDIR
+
+
+def workload_data_dir(name: str) -> Path:
+    """Precious data subtree. './' volume anchors resolve here. Backup-captured."""
+    return WORKLOADS_BASE / name / DATA_SUBDIR
+
+
+def workload_home_dir(name: str) -> Path:
+    """Workload $HOME — the state/ subdir (podman graphroot lives here)."""
+    return workload_state_dir(name)
 
 
 # Per-container keys that may appear at *either* nesting depth in a
@@ -643,21 +763,48 @@ def selinux_type_name(name: str) -> str:
 
 # --- Volume path expansion ---
 
+def _safe_anchor_subpath(sub: str) -> str:
+    """Reject traversal/absolute escapes from a workload-relative anchor."""
+    if sub.startswith("/") or ".." in Path(sub).parts:
+        raise ValueError(f"unsafe anchored volume subpath: {sub!r}")
+    return sub
+
+
+def _expand_anchor(host: str, home_dir: str) -> str:
+    """Resolve a workload-relative volume anchor to an absolute host path.
+
+    home_dir is the workload STATE dir (= $HOME). The DATA dir is its sibling.
+      data/sub  (sugar ./sub)  -> <root>/data/sub        (precious)
+      state/sub (sugar @/sub)  -> <root>/state/volumes/sub (reconstructible)
+    Anything else is returned unchanged.
+    """
+    data_root = str(Path(home_dir).parent / DATA_SUBDIR)
+    state_vol_root = home_dir + "/volumes"
+    # ./ and @/ are sugar for the canonical data/ and state/ prefixes. An empty
+    # subpath (e.g. "./" or bare "data") resolves to the anchor root itself.
+    for prefix, root in (("./", data_root), ("@/", state_vol_root),
+                         ("data/", data_root), ("state/", state_vol_root)):
+        if host.startswith(prefix):
+            sub = _safe_anchor_subpath(host[len(prefix):])
+            return root + "/" + sub if sub else root
+    if host == "data":
+        return data_root
+    if host == "state":
+        return state_vol_root
+    return host
+
+
 def expand_volume_path(vol_spec: str, home_dir: str) -> str:
-    """Expand ./ prefix in volume host path to the workload home directory.
+    """Expand a workload-relative anchor in a volume spec's host path.
 
     Args:
-        vol_spec: Volume specification like "./data:/container/path:rw"
-        home_dir: Workload home directory path (string)
+        vol_spec: "host:guest[:opts]" — host may use ./ @/ data/ state/ anchors.
+        home_dir: the workload STATE dir (= $HOME); data/ is its sibling.
 
-    Returns:
-        Volume spec with ./ expanded to home directory
+    Returns the spec with the host path made absolute, original arity preserved.
     """
     host, guest, opts = parse_volume_spec(vol_spec)
-    if host.startswith('./'):
-        host = home_dir + '/' + host[2:]
-    # Preserve the original arity: a bare path or a host:guest spec must not
-    # gain a synthesized opts field.
+    host = _expand_anchor(host, home_dir)
     ncolons = vol_spec.count(':')
     if ncolons == 0:
         return host
@@ -694,6 +841,25 @@ OPTIONAL_SECRET_PATTERN = re.compile(r'\$\{SECRET\?([a-zA-Z0-9_-]+)}')
 # by the plain template-var pass; the resolver below handles both.
 _TEMPLATE_VAR_PATTERN = re.compile(r'(?<!\$)\$\{([a-zA-Z_][a-zA-Z0-9_]*)}')
 
+# Single combined pattern for substitute_template. Folding the three forms into
+# one left-to-right pass (rather than three sequential .sub() calls) is a
+# security property, not just an optimization: re.sub never re-scans the text it
+# inserts, so a resolved value — e.g. a decrypted secret whose plaintext happens
+# to contain "${PATH}" or "${SECRET:other}" — is emitted verbatim instead of
+# being re-expanded by a later pass (which would leak host env/other secrets
+# into the rendered guest user-data). The SECRET? / SECRET: alternatives precede
+# VAR so a secret ref is never captured as a plain var. All three branches carry
+# the (?<!\$) lookbehind so `$$` escaping is uniform: `$${VAR}`, `$${SECRET:name}`
+# and `$${SECRET?name}` all survive the pass untouched and collapse to a literal
+# `${...}` in the final $$→$ step. (A missing lookbehind on the SECRET branches
+# silently broke that escape: `$${SECRET:name}` still matched and tried to resolve
+# a secret named "name", aborting substitution — see tests/test_substitution.)
+_SUBSTITUTION_PATTERN = re.compile(
+    r'(?<!\$)\$\{SECRET\?(?P<optsecret>[a-zA-Z0-9_-]+)}'
+    r'|(?<!\$)\$\{SECRET:(?P<secret>[a-zA-Z0-9_-]+)}'
+    r'|(?<!\$)\$\{(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}'
+)
+
 
 def substitute_template(
     text: str,
@@ -723,32 +889,31 @@ def substitute_template(
     template_vars = template_vars or {}
     env = env or {}
 
-    def _var(match):
-        name = match.group(1)
+    def _resolve(match):
+        opt = match.group("optsecret")
+        if opt is not None:
+            if secret_resolver is None:
+                return ""
+            try:
+                return secret_resolver(opt)
+            except (FileNotFoundError, KeyError):
+                return ""
+        secret = match.group("secret")
+        if secret is not None:
+            if secret_resolver is None:
+                raise KeyError(f"${{SECRET:{secret}}} present but no resolver provided")
+            return secret_resolver(secret)
+        name = match.group("var")
         if name in template_vars:
             return str(template_vars[name])
         if name in env:
             return env[name]
         raise KeyError(f"unresolved ${{{name}}} in cloud-init template")
 
-    def _secret(match):
-        name = match.group(1)
-        if secret_resolver is None:
-            raise KeyError(f"${{SECRET:{name}}} present but no resolver provided")
-        return secret_resolver(name)
-
-    def _optional_secret(match):
-        name = match.group(1)
-        if secret_resolver is None:
-            return ""
-        try:
-            return secret_resolver(name)
-        except (FileNotFoundError, KeyError):
-            return ""
-
-    out = OPTIONAL_SECRET_PATTERN.sub(_optional_secret, text)
-    out = SECRET_PATTERN.sub(_secret, out)
-    out = _TEMPLATE_VAR_PATTERN.sub(_var, out)
+    # One left-to-right pass: replacements are not re-scanned, so a resolved
+    # secret/var value can't be re-expanded by a "later" pass (see the pattern's
+    # comment). The $$→$ collapse stays a final step so `$${VAR}` escapes.
+    out = _SUBSTITUTION_PATTERN.sub(_resolve, text)
     return out.replace("$$", "$")
 
 

@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "generators" / "workload-generate"
 LIB_DIR = ROOT / "lib"
-WORKLOADS_DIR = ROOT / "workloads.d"
+WORKLOADS_DIR = ROOT / "workloads"
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 sys.path.insert(0, str(LIB_DIR))
@@ -46,13 +46,9 @@ _SYSUSERS_UID_RE = re.compile(r'^u\s+\S+\s+(\d+)\s', re.M)
 
 
 def _enable_toml(src: Path, dst: Path):
-    """Copy a TOML and force enabled = true so the generator processes it."""
-    text = src.read_text()
-    if "enabled = false" in text:
-        text = text.replace("enabled = false", "enabled = true", 1)
-    elif "enabled = true" not in text:
-        text = text.replace("[workload]", "[workload]\nenabled = true", 1)
-    dst.write_text(text)
+    """Copy a TOML and create the .enabled marker so the generator processes it."""
+    dst.write_text(src.read_text())
+    (dst.parent / ".enabled").touch()
 
 
 def _workload_uid(conf_text: str) -> str | None:
@@ -110,7 +106,9 @@ class TestWorkloadSnapshots(unittest.TestCase):
         strict = os.environ.get("STRICT_SNAPSHOTS") == "1"
         drift = []
 
-        tomls = sorted(WORKLOADS_DIR.glob("*.toml"))
+        # Each shipped bundle is workloads/<bundle>/workload.toml; the bundle
+        # dir name is the workload identity (snapshot stem + cfg filename).
+        tomls = sorted(WORKLOADS_DIR.glob("*/workload.toml"))
         self.assertGreater(len(tomls), 0, "no workload TOMLs found")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,7 +119,9 @@ class TestWorkloadSnapshots(unittest.TestCase):
             cfg.mkdir(); svc.mkdir(); sys_d.mkdir()
 
             for src in tomls:
-                _enable_toml(src, cfg / src.name)
+                name = src.parent.name
+                (cfg / name).mkdir(exist_ok=True)
+                _enable_toml(src, cfg / name / "workload.toml")
 
             env = os.environ.copy()
             env["WORKLOAD_CONFIG_DIR"] = str(cfg)
@@ -137,12 +137,12 @@ class TestWorkloadSnapshots(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
 
             for src in tomls:
-                stem = src.stem
+                stem = src.parent.name
                 conf_text = (sys_d / f"workload-{stem}.conf").read_text()
                 uid = _workload_uid(conf_text)
 
                 outputs = [(stem + ".conf", conf_text)]
-                for unit_name, suffix in _expected_units(stem, (cfg / src.name).read_text()):
+                for unit_name, suffix in _expected_units(stem, (cfg / stem / "workload.toml").read_text()):
                     unit_path = svc / unit_name
                     self.assertTrue(unit_path.is_file(),
                                     f"generator did not emit {unit_name} for {stem}")

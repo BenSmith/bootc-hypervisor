@@ -1,0 +1,30 @@
+FROM registry.fedoraproject.org/fedora:43
+
+LABEL org.opencontainers.image.title="Zot Registry"
+LABEL org.opencontainers.image.description="OCI-native container registry with pull-through cache and web UI"
+
+ARG ZOT_VERSION=2.1.16
+ARG ZOT_SHA256=f9b7e805056db94c97d34bcff4eab77ec8e7cdc2cb76fd6db3d7ad7143605dba
+
+# ca-certificates needed to verify TLS to upstream registries during sync.
+# tar/gzip not needed — zot ships as a single static binary.
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    ca-certificates curl \
+    && dnf clean all
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN curl -fsSL -o /usr/local/bin/zot \
+        "https://github.com/project-zot/zot/releases/download/v${ZOT_VERSION}/zot-linux-amd64" \
+    && echo "${ZOT_SHA256}  /usr/local/bin/zot" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/zot
+
+# Storage dir — volume-mounted at runtime, owned by workload user via
+# workload-ensure-user. Config is mounted read-only from the workload home dir.
+RUN mkdir -p /var/lib/registry /etc/zot
+
+COPY --link --chmod=0755 entrypoint.sh /entrypoint.sh
+
+# Registry HTTP port
+EXPOSE 5000
+
+CMD ["/entrypoint.sh"]
