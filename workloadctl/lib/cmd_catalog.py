@@ -290,6 +290,11 @@ def cmd_init(args, manager: WorkloadManager):
         _post_write_report(name, manager)
         return
 
+    if not bundle:
+        print("Error: no bundle specified (pass a bundle name, --scratch, or --scratch-vm)",
+              file=sys.stderr)
+        sys.exit(1)
+
     name = args.as_name or bundle
 
     # Validate the bundle before it's pathed (it's a directory name); the

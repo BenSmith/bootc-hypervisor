@@ -1285,7 +1285,7 @@ def generate_vm_bridge_service(subnet: str | None = None, dns: list | None = Non
     if subnet is not None:
         import ipaddress
         net = ipaddress.ip_network(subnet, strict=False)
-        bridge_ip = str(next(net.hosts()))
+        bridge_ip = str(next(iter(net.hosts())))
         bridge_cidr = f"{bridge_ip}/{net.prefixlen}"
         bridge_subnet = str(net)
     else:

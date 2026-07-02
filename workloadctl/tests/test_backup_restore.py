@@ -52,7 +52,9 @@ class TestRestoreNameValidation(unittest.TestCase):
 
     def _restore(self, archive: Path):
         args = argparse.Namespace(archive=str(archive), force=True, enable=False)
-        return cmd_backup.cmd_restore(args, manager=None)
+        # restore rejects bad names before it ever touches the manager, so the
+        # tests deliberately pass None rather than constructing a real one.
+        return cmd_backup.cmd_restore(args, manager=None)  # type: ignore[arg-type]
 
     def test_traversal_name_rejected(self):
         # A name with path separators / .. must be refused before any dest path

@@ -549,6 +549,11 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
     # the bundle dir (defaults to the workload name; a `selinux_policy` string
     # names it explicitly so a renamed workload keeps its original policy).
     bundle = config.selinux_bundle
+    if bundle is None:
+        # Reached only if a workload without selinux_policy is routed here.
+        print(f"  ERROR: no SELinux bundle resolved for '{config.name}' "
+              f"(selinux_policy not set)", file=sys.stderr)
+        sys.exit(1)
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
@@ -1196,10 +1201,10 @@ def cmd_cleanup(args, manager: WorkloadManager):
             print(f"Orphaned users ({len(orphaned_users)}):")
             for entry in orphaned_users:
                 has_subid_entries = False
-                for f in ["/etc/subuid", "/etc/subgid"]:
-                    if Path(f).exists() and any(
+                for subid_file in ["/etc/subuid", "/etc/subgid"]:
+                    if Path(subid_file).exists() and any(
                         line.startswith(f"{entry.pw_name}:")
-                        for line in Path(f).read_text().splitlines()
+                        for line in Path(subid_file).read_text().splitlines()
                     ):
                         has_subid_entries = True
                         break
@@ -1242,8 +1247,8 @@ def cmd_cleanup(args, manager: WorkloadManager):
         subprocess.run(["loginctl", "disable-linger", str(uid)], check=False,
                        capture_output=True)
 
-        for f in ["/etc/subuid", "/etc/subgid"]:
-            p = Path(f)
+        for subid_file in ["/etc/subuid", "/etc/subgid"]:
+            p = Path(subid_file)
             if p.exists():
                 lines = [line for line in p.read_text().splitlines()
                          if not line.startswith(f"{username}:")]

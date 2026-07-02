@@ -1066,8 +1066,8 @@ def cmd_edit(args, manager: WorkloadManager):
 
     try:
         config = WorkloadConfig(args.workload)
-        result = validate_single(config, manager, json_mode=False)
-        if not result["passed"]:
+        validation = validate_single(config, manager, json_mode=False)
+        if not validation["passed"]:
             print()
             if _ask_yes_no("Validation failed. Restore backup? [y/N] "):
                 shutil.copy2(backup_path, config_path)

@@ -122,7 +122,7 @@ def cmd_backup(args, manager: WorkloadManager):
         backups.append({"workload": name, "archive": str(output), "size_bytes": size_bytes})
 
     if args.json:
-        result = {"backups": backups}
+        result: dict[str, list] = {"backups": backups}
         if failed:
             result["failed"] = failed
         print(json.dumps(result, indent=2))
@@ -173,8 +173,8 @@ def cmd_restore(args, manager: WorkloadManager):
         sys.exit(1)
 
     # Extract to temp dir to inspect contents
-    with tempfile.TemporaryDirectory() as staging:
-        staging = Path(staging)
+    with tempfile.TemporaryDirectory() as staging_name:
+        staging = Path(staging_name)
         subprocess.run(
             ["tar", "-C", str(staging), "-xf", str(archive), "--zstd"],
             check=True,

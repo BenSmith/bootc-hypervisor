@@ -15,6 +15,7 @@ import re
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 
 # --- Constants ---
@@ -301,7 +302,7 @@ class QMPClient:
         Returns the full reply dict ({"return": ...} or {"error": ...}).
         Raises ConnectionError if no reply arrives within max_events messages.
         """
-        cmd = {"execute": command}
+        cmd: dict[str, Any] = {"execute": command}
         if arguments:
             cmd["arguments"] = arguments
         self._send(cmd)

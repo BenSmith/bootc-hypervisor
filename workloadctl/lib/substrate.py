@@ -224,7 +224,7 @@ def _accessible_at_config(config) -> list:
     """
     ports = config.get_ports()
     network_mode = config.get_network_mode()
-    result = []
+    result: list[dict] = []
     if not ports:
         return result
     if network_mode == "host":
@@ -400,6 +400,15 @@ class Substrate(ABC):
         ...
 
     @abstractmethod
+    def rollback(self) -> None:
+        """Roll back to the most recent rollback target and restart.
+
+        Convenience over ``rollback_to(rollback_targets()[...])`` for the
+        common "undo the last update" case.
+        """
+        ...
+
+    @abstractmethod
     def control(self, argv: list[str]) -> int:
         """Send a raw command to the workload's runtime control plane.
 
@@ -457,6 +466,9 @@ class Substrate(ABC):
         Raises NotApplicable if the substrate cannot determine endpoints.
         """
         self._check_primitive("endpoints")
+        # Reaching here means the primitive is declared but the subclass didn't
+        # override this stub — a programming error, not a runtime condition.
+        raise NotImplementedError(f"{type(self).__name__} must override endpoints()")
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         """Update / reprovision the workload to its latest version.
@@ -1399,8 +1411,8 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
         subprocess.run(["systemctl", "stop", service_name], check=True)
 
     try:
-        with tempfile.TemporaryDirectory() as staging:
-            staging = Path(staging)
+        with tempfile.TemporaryDirectory() as staging_name:
+            staging = Path(staging_name)
 
             shutil.copy2(config_path, staging / "workload.toml")
 

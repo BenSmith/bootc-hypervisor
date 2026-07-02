@@ -49,9 +49,22 @@ lint:
 lint-ruff:
   ruff check --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
 
-# Type-check lib/ with mypy (dev-only, advisory)
+# Type-check with mypy (dev-only, advisory). lib/ + tests/ run together
+# (--explicit-package-bases avoids a false "duplicate module" clash between
+# tests/test_lifecycle.py and tests/cli_surface/test_lifecycle.py); the
+# extension-less scripts have no unique module name of their own, so mypy
+# treats each as "__main__" and they must be checked one at a time or they
+# collide with each other.
 typecheck:
-  MYPYPATH=lib mypy lib/ --ignore-missing-imports
+  #!/usr/bin/env bash
+  set -uo pipefail
+  export MYPYPATH=lib
+  status=0
+  mypy lib/ tests/ --ignore-missing-imports --explicit-package-bases --check-untyped-defs || status=1
+  for f in bin/workloadctl generators/workload-generate libexec/workload-*; do
+    mypy "$f" --ignore-missing-imports --check-untyped-defs || status=1
+  done
+  exit "$status"
 
 # Lint all bundle Containerfiles with hadolint.
 # Intentionally suppressed:

@@ -766,7 +766,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             user_data_text = substitute_template(
                 raw,
                 template_vars=template_vars,
-                env=os.environ,
+                env=dict(os.environ),
                 secret_resolver=_decrypt_systemd_credential,
             )
         except (KeyError, FileNotFoundError, RuntimeError) as e:

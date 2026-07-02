@@ -28,6 +28,7 @@ if LIB not in sys.path:
 def _load(script: str, modname: str):
     loader = importlib.machinery.SourceFileLoader(modname, str(LIBEXEC / script))
     spec = importlib.util.spec_from_loader(modname, loader)
+    assert spec is not None
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
