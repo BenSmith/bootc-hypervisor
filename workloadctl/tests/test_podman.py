@@ -184,5 +184,154 @@ class RuntimeDirRetryTests(unittest.TestCase):
         mock_ensure.assert_not_called()
 
 
+class PodmanUncoveredMethodTests(unittest.TestCase):
+    """Cover the structured-read/mutator methods not yet exercised above."""
+
+    def setUp(self):
+        self.p = Podman.for_user("_wl-test", 5001, "/var/lib/workloads/test")
+        self.root = Podman.for_root()
+
+    @patch("subprocess.run")
+    def test_image_info_present(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps(
+            [{"Id": "sha256:abcd", "RepoTags": ["x:latest"]}]
+        ))
+        info = self.p.image_info("ref")
+        self.assertEqual(info["Id"], "sha256:abcd")
+
+    @patch("subprocess.run")
+    def test_image_info_missing_returns_none(self, mock_run):
+        mock_run.return_value = _fail("Error: image not known")
+        self.assertIsNone(self.p.image_info("ref"))
+
+    @patch("subprocess.run")
+    def test_container_status_matches_by_name(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps(
+            [{"Names": ["c1"], "Status": "Up 2 hours"},
+             {"Names": ["c2"], "Status": "Exited"}]
+        ))
+        self.assertEqual(self.p.container_status("c1"), "Up 2 hours")
+
+    @patch("subprocess.run")
+    def test_container_status_no_match_returns_none(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps(
+            [{"Names": ["other"], "Status": "Up"}]
+        ))
+        self.assertIsNone(self.p.container_status("c1"))
+
+    @patch("subprocess.run")
+    def test_container_status_empty_list(self, mock_run):
+        mock_run.return_value = _ok(stdout="null")
+        self.assertIsNone(self.p.container_status("c1"))
+
+    @patch("subprocess.run")
+    def test_container_exists_true(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "abc"}]))
+        self.assertTrue(self.p.container_exists("c1"))
+
+    @patch("subprocess.run")
+    def test_container_exists_false(self, mock_run):
+        mock_run.return_value = _fail("Error: no such container c1")
+        self.assertFalse(self.p.container_exists("c1"))
+
+    @patch("subprocess.run")
+    def test_list_containers_with_filters_passes_filter_args(self, mock_run):
+        mock_run.return_value = _ok(stdout="null")
+        self.p.list_containers(filters={"name": "c1", "status": "running"})
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("--filter", cmd)
+        self.assertIn("name=c1", cmd)
+        self.assertIn("status=running", cmd)
+
+    @patch("subprocess.run")
+    def test_list_containers_all_false_omits_all_flag(self, mock_run):
+        mock_run.return_value = _ok(stdout="null")
+        self.p.list_containers(all=False)
+        cmd = mock_run.call_args.args[0]
+        self.assertNotIn("--all", cmd)
+
+    @patch("subprocess.run")
+    def test_network_exists_true(self, mock_run):
+        mock_run.return_value = _ok()
+        self.assertTrue(self.p.network_exists("net1"))
+
+    @patch("subprocess.run")
+    def test_network_exists_false(self, mock_run):
+        mock_run.return_value = _fail("Error: network not found", code=1)
+        self.assertFalse(self.p.network_exists("net1"))
+
+    @patch("subprocess.run")
+    def test_network_exists_does_not_raise_on_failure(self, mock_run):
+        # network exists uses check=False, so a nonzero return must not raise.
+        mock_run.return_value = _fail("boom", code=125)
+        try:
+            self.p.network_exists("net1")
+        except PodmanError:
+            self.fail("network_exists must not raise on nonzero returncode")
+
+    @patch("subprocess.run")
+    def test_commit_success(self, mock_run):
+        mock_run.return_value = _ok()
+        self.p.commit("container1", "myimage:snap")  # no raise
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("commit", cmd)
+        self.assertIn("container1", cmd)
+        self.assertIn("myimage:snap", cmd)
+
+    @patch("subprocess.run")
+    def test_commit_failure_raises(self, mock_run):
+        mock_run.return_value = _fail("Error: no such container", code=125)
+        with self.assertRaises(PodmanError):
+            self.p.commit("container1", "myimage:snap")
+
+    @patch("subprocess.run")
+    def test_pull_success(self, mock_run):
+        mock_run.return_value = _ok()
+        self.p.pull("docker.io/library/alpine")  # no raise
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("pull", cmd)
+
+    @patch("subprocess.run")
+    def test_pull_failure_raises(self, mock_run):
+        mock_run.return_value = _fail("Error: unable to find image", code=125)
+        with self.assertRaises(PodmanError):
+            self.p.pull("nope:latest")
+
+    @patch("subprocess.run")
+    def test_network_create_success(self, mock_run):
+        mock_run.return_value = _ok()
+        self.p.network_create("mynet")  # no raise
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("network", cmd)
+        self.assertIn("create", cmd)
+        self.assertIn("mynet", cmd)
+
+    @patch("subprocess.run")
+    def test_run_escape_hatch_passes_through(self, mock_run):
+        mock_run.return_value = CompletedProcess(
+            args=[], returncode=0, stdout="hello\n", stderr="")
+        proc = self.p.run("exec", "c1", "echo", "hi", capture_output=True)
+        self.assertEqual(proc.stdout, "hello\n")
+        cmd = mock_run.call_args.args[0]
+        self.assertIn("exec", cmd)
+        # escape hatch does not raise-on-failure by default (check=False)
+        self.assertEqual(mock_run.call_args.kwargs.get("check"), False)
+
+    @patch("subprocess.run")
+    def test_run_escape_hatch_check_true_raises_on_failure(self, mock_run):
+        import subprocess as sp
+        mock_run.side_effect = sp.CalledProcessError(1, ["podman"])
+        with self.assertRaises(sp.CalledProcessError):
+            self.p.run("exec", "c1", "false", check=True)
+
+    @patch("subprocess.run")
+    def test_check_false_returns_failed_proc_without_raising(self, mock_run):
+        # Exercises the `if check: raise ...` else `return proc` branch (line 145)
+        # via network_exists, the only public method that passes check=False.
+        mock_run.return_value = _fail("some transient error", code=2)
+        proc = self.p.network_exists("net1")
+        self.assertFalse(proc)
+
+
 if __name__ == "__main__":
     unittest.main()

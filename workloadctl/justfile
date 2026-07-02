@@ -28,14 +28,20 @@ test-unit:
 test-integration:
   PYTHONPATH=lib python3 -m unittest tests.test_integration -v
 
-# Run the unit suite under coverage.py (dev-only), print a per-file report
+# Run the unit suite under coverage.py (dev-only), print a per-file report.
+# COVERAGE_PROCESS_START makes tests that shell out to our scripts route the
+# subprocess through `coverage run` too (see tests/covhelper.py); combine then
+# merges those per-process data files into the parent's.
 coverage:
-  PYTHONPATH=lib python3 -m coverage run --source=lib,bin,generators,libexec -m unittest discover -s tests
-  python3 -m coverage report --sort=cover
+  rm -f .coverage .coverage.*
+  PYTHONPATH=lib COVERAGE_PROCESS_START={{justfile_directory()}}/.coveragerc \
+    python3 -m coverage run --rcfile=.coveragerc -m unittest discover -s tests
+  python3 -m coverage combine --rcfile=.coveragerc
+  python3 -m coverage report --rcfile=.coveragerc --sort=cover
 
 # As `coverage`, plus write the HTML report to htmlcov/
 coverage-html: coverage
-  python3 -m coverage html
+  python3 -m coverage html --rcfile=.coveragerc
   @echo "HTML report: file://$(pwd)/htmlcov/index.html"
 
 # Lint: byte-compile every Python source (syntax check)

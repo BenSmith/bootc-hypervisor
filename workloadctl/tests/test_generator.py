@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+sys.path.insert(0, os.path.dirname(__file__))
+from covhelper import python_cmd
+
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
@@ -42,7 +45,7 @@ def run_generator(config_dir, services_dir, sysusers_dir):
     env["PYTHONPATH"] = LIB_DIR
     env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
     return subprocess.run(
-        [sys.executable, GENERATOR, str(services_dir)],
+        python_cmd(GENERATOR, str(services_dir)),
         capture_output=True, text=True, env=env,
     )
 
@@ -1374,6 +1377,23 @@ class TestGeneratorUserns(unittest.TestCase):
         service = (Path(self.services_dir) / "workload-badparam.service").read_text()
         self.assertIn("--userns=keep-id", service)
 
+    def test_keep_id_param_without_equals_defaults_to_keep_id(self):
+        # "keep-id:noequals" — a param with no '=' fails validation → plain keep-id
+        write_config(self.config_dir, "noeq", """\
+            [workload]
+            name = "noeq"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            userns = "keep-id:noequals"
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        service = (Path(self.services_dir) / "workload-noeq.service").read_text()
+        self.assertIn("--userns=keep-id", service)
+        self.assertNotIn("noequals", service)
+
 
 class TestGeneratorSelinuxLabel(unittest.TestCase):
     def setUp(self):
@@ -1912,6 +1932,640 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         with_vfs = self._read("workload-fedora-vm.service")
         self.assertIn("memory-backend-memfd", with_vfs)
         self.assertIn("size=2048M", with_vfs)
+
+
+class TestGeneratorContainerFlags(unittest.TestCase):
+    """Cover the many optional container flags emitted into the podman run line."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _gen(self, extra, name="app"):
+        write_config(self.config_dir, name, f"""\
+            [workload]
+            name = "{name}"
+
+            [container]
+            image = "myapp"
+            {extra}
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        svc = (Path(self.services_dir) / f"workload-{name}.service").read_text()
+        return svc, result
+
+    def test_container_user_override(self):
+        svc, _ = self._gen('user = "1000:1000"')
+        self.assertIn("--user=1000:1000", svc)
+
+    def test_capabilities_add(self):
+        svc, _ = self._gen("""
+            [security]
+            capabilities = ["NET_ADMIN", "SYS_TIME"]
+        """)
+        self.assertIn("--cap-add=NET_ADMIN", svc)
+        self.assertIn("--cap-add=SYS_TIME", svc)
+
+    def test_security_opt_passthrough(self):
+        svc, _ = self._gen("""
+            [security]
+            security_opt = ["no-new-privileges"]
+        """)
+        self.assertIn("--security-opt=no-new-privileges", svc)
+
+    def test_custom_seccomp_suppresses_baseline(self):
+        svc, _ = self._gen("""
+            [security]
+            security_opt = ["seccomp=/custom.json"]
+        """)
+        self.assertIn("--security-opt=seccomp=/custom.json", svc)
+        # baseline is suppressed when the workload provides its own seccomp
+        self.assertNotIn(f"seccomp=", svc.replace("seccomp=/custom.json", ""))
+
+    def test_privileged_emits_flag_and_warns(self):
+        svc, result = self._gen("""
+            [security]
+            privileged = true
+        """)
+        self.assertIn("--privileged", svc)
+        self.assertIn("privileged=true", result.stderr)
+        # privileged suppresses the seccomp baseline
+        self.assertNotIn("--security-opt=seccomp=", svc)
+
+    def test_extra_groups_adds_keep_groups(self):
+        import grp
+        # pick a group that definitely resolves on this host so the +GID map line lands
+        group = grp.getgrall()[0].gr_name
+        svc, _ = self._gen(f"""
+            [security]
+            extra_groups = ["{group}"]
+        """)
+        self.assertIn("--group-add=keep-groups", svc)
+
+    def test_shm_size(self):
+        svc, _ = self._gen("""
+            [resources]
+            shm_size = "256m"
+        """)
+        self.assertIn("--shm-size=256m", svc)
+
+    def test_cpu_quota_bad_value_warns_and_skips(self):
+        svc, result = self._gen("""
+            [resources]
+            cpu_quota = "notanumber"
+        """)
+        self.assertIn("cannot convert cpu_quota", result.stderr)
+        self.assertNotIn("--cpus=", svc)
+
+    def test_io_bandwidth_flags(self):
+        svc, _ = self._gen("""
+            [resources]
+            io_read_bandwidth_max = ["/dev/sda 10mb"]
+            io_write_bandwidth_max = ["/dev/sda 5mb"]
+        """)
+        self.assertIn("--device-read-bps=/dev/sda:10mb", svc)
+        self.assertIn("--device-write-bps=/dev/sda:5mb", svc)
+
+    def test_memory_high_per_container_warns(self):
+        svc, result = self._gen("""
+            [resources]
+            memory_high = "1G"
+        """)
+        self.assertIn("per-container memory_high is not settable", result.stderr)
+
+    def test_cpu_weight_flag(self):
+        svc, _ = self._gen("""
+            [resources]
+            cpu_weight = 500
+        """)
+        self.assertIn("--cpu-shares=500", svc)
+
+    def test_input_devices_shortcut(self):
+        svc, _ = self._gen("""
+            [devices]
+            input = true
+        """)
+        self.assertIn("--device /dev/input", svc)
+        self.assertIn("--device /dev/uinput", svc)
+
+    def test_audio_devices_shortcut(self):
+        svc, _ = self._gen("""
+            [devices]
+            audio = true
+        """)
+        self.assertIn("--device /dev/snd", svc)
+        self.assertIn("/pulse:${XDG_RUNTIME_DIR}/pulse:ro", svc)
+        self.assertIn("/pipewire-0:${XDG_RUNTIME_DIR}/pipewire-0:ro", svc)
+
+    def test_virtualization_devices_shortcut(self):
+        svc, _ = self._gen("""
+            [devices]
+            virtualization = true
+        """)
+        self.assertIn("--device /dev/kvm", svc)
+        self.assertIn("--device /dev/vhost-net", svc)
+        self.assertIn("--device /dev/vhost-vsock", svc)
+
+    def test_gpu_nvidia_all(self):
+        svc, _ = self._gen("""
+            [devices]
+            gpu = "nvidia"
+        """)
+        self.assertIn("--device=nvidia.com/gpu=all", svc)
+        self.assertIn("--device /dev/dri", svc)
+
+    def test_gpu_nvidia_specific_card(self):
+        svc, _ = self._gen("""
+            [devices]
+            gpu = "nvidia:1"
+        """)
+        self.assertIn("--device=nvidia.com/gpu=1", svc)
+        # single-card CDI injects its own DRM nodes; umbrella /dev/dri omitted
+        self.assertNotIn("--device /dev/dri", svc)
+
+    def test_gpu_intel_uses_render_node(self):
+        svc, _ = self._gen("""
+            [devices]
+            gpu = "intel"
+        """)
+        self.assertIn("--device /dev/dri", svc)
+
+    def test_health_check_directives(self):
+        svc, _ = self._gen("""
+            [container.health]
+            cmd = "curl -f localhost"
+            interval = "30s"
+            timeout = "5s"
+            retries = 3
+            start_period = "10s"
+            on_failure = "kill"
+        """)
+        self.assertIn("--health-cmd", svc)
+        self.assertIn("--health-interval=30s", svc)
+        self.assertIn("--health-timeout=5s", svc)
+        self.assertIn("--health-retries=3", svc)
+        self.assertIn("--health-start-period=10s", svc)
+        self.assertIn("--health-on-failure=kill", svc)
+
+    def test_command_as_list(self):
+        svc, _ = self._gen("""
+            command = ["sh", "-c", "echo hi"]
+        """)
+        self.assertIn('"sh"', svc)
+        self.assertIn('"-c"', svc)
+        self.assertIn('"echo hi"', svc)
+
+    def test_command_as_string(self):
+        svc, _ = self._gen("""
+            command = "run-me"
+        """)
+        self.assertIn('"run-me"', svc)
+
+    def test_timeout_start_sec_service_directive(self):
+        svc, _ = self._gen("""
+            [resources]
+            timeout_start_sec = 120
+        """)
+        self.assertIn("TimeoutStartSec=120", svc)
+        self.assertNotIn("TimeoutStartSec=300", svc)
+
+    def test_volume_escaping_workload_dir_warns(self):
+        svc, result = self._gen("""
+            [storage]
+            volumes = ["/etc/hosts:/mnt/hosts:ro"]
+        """)
+        self.assertIn("outside workload dir", result.stderr)
+        self.assertIn("/mnt/hosts", svc)
+
+    def test_pet_lifecycle(self):
+        write_config(self.config_dir, "pet", """\
+            [workload]
+            name = "pet"
+            lifecycle = "pet"
+
+            [container]
+            image = "myapp"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        svc = (Path(self.services_dir) / "workload-pet.service").read_text()
+        self.assertIn("/usr/bin/podman create", svc)
+        self.assertIn("Pet lifecycle: create-once", svc)
+        self.assertIn("ExecStart=/usr/bin/podman start -a", svc)
+        # pet must not carry --rm/--replace and must not force-rm on stop
+        self.assertNotIn("--rm", svc)
+        self.assertNotIn("ExecStopPost=-/usr/bin/podman rm", svc)
+
+    def test_invalid_env_key_skipped_with_warning(self):
+        svc, result = self._gen("""
+            [container.environment]
+            "BAD-KEY" = "x"
+            GOOD = "y"
+        """)
+        self.assertIn("skipping env var with invalid key", result.stderr)
+        self.assertIn("--env GOOD=", svc)
+        self.assertNotIn("BAD-KEY", svc)
+
+    def test_invalid_container_systemd_skips_single_service(self):
+        write_config(self.config_dir, "badsd", """\
+            [workload]
+            name = "badsd"
+
+            [container]
+            image = "myapp"
+            systemd = "bogus"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Invalid container.systemd='bogus'", result.stderr)
+        self.assertIn("Skipping badsd due to config errors", result.stderr)
+        self.assertFalse((Path(self.services_dir) / "workload-badsd.service").exists())
+
+    def test_custom_directive_shadowing_generator_owned_warns(self):
+        svc, result = self._gen("""
+            [resources.custom_directives]
+            Restart = "no"
+        """)
+        self.assertIn("managed", result.stderr)
+        self.assertIn("Restart=no", svc)
+
+    def test_named_volume_without_colon(self):
+        svc, _ = self._gen("""
+            [storage]
+            volumes = ["mydata"]
+        """)
+        self.assertIn('--volume "mydata"', svc)
+
+    def test_secrets_file_missing_credential_skipped(self):
+        svc, result = self._gen("""
+            [[secrets.files]]
+            path = "/run/secret"
+        """)
+        self.assertIn("missing 'credential' or 'path'", result.stderr)
+
+    def test_secrets_file_invalid_mode_defaults_ro(self):
+        svc, result = self._gen("""
+            [[secrets.files]]
+            credential = "mycred"
+            path = "/run/secret"
+            mode = "bogus"
+        """)
+        self.assertIn("Defaulting to 'ro'", result.stderr)
+        self.assertIn(":ro", svc)
+
+    def test_pet_lifecycle_multi_mode_falls_back_to_cattle(self):
+        write_config(self.config_dir, "petpod", """\
+            [workload]
+            name = "petpod"
+            mode = "pod"
+            lifecycle = "pet"
+
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "myapp"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("lifecycle=pet is only supported in single mode", result.stderr)
+
+
+class TestGeneratorAutoMaps(unittest.TestCase):
+    """keep-id auto UID/GID mapping (the +N:@N:1 branch that omits --userns)."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def _gen(self, extra):
+        write_config(self.config_dir, "maps", f"""\
+            [workload]
+            name = "maps"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            {extra}
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        return (Path(self.services_dir) / "workload-maps.service").read_text()
+
+    def test_extra_uidmaps_trigger_auto_maps(self):
+        svc = self._gen('extra_uidmaps = ["+1000:@{UID}:1"]')
+        # auto-maps branch omits --userns entirely
+        self.assertNotIn("--userns=", svc)
+        # workload user is auto-mapped (+UID:@UID:1)
+        self.assertRegex(svc, r"--uidmap \+\d+:@\d+:1")
+        # explicit map with {UID} placeholder substituted to the numeric uid
+        self.assertRegex(svc, r"--uidmap \+1000:@\d+:1")
+
+    def test_extra_gidmaps_placeholder_substitution(self):
+        svc = self._gen('extra_gidmaps = ["+2000:@{GID}:1"]')
+        self.assertNotIn("--userns=", svc)
+        self.assertRegex(svc, r"--gidmap \+2000:@\d+:1")
+
+    def test_keep_id_suffix_honored_in_auto_maps(self):
+        # keep-id:uid=/gid= remaps the workload user to a fixed in-container id
+        svc = self._gen("""userns = "keep-id:uid=1000,gid=1000"
+            extra_uidmaps = ["+5:@{UID}:1"]""")
+        self.assertNotIn("--userns=", svc)
+        self.assertRegex(svc, r"--uidmap \+1000:@\d+:1")
+        self.assertRegex(svc, r"--gidmap \+1000:@\d+:1")
+
+    def test_nonexistent_extra_group_skipped_in_maps(self):
+        # get_group_gid returns None for an unknown group; the +GID map is skipped
+        # but the workload's own auto-map still lands and --userns is omitted.
+        svc = self._gen('extra_groups = ["definitely_no_such_group_zzz"]')
+        self.assertNotIn("--userns=", svc)
+        self.assertIn("--group-add=keep-groups", svc)
+
+    def test_extra_groups_maps_group_gid(self):
+        import grp
+        group = grp.getgrall()[0].gr_name
+        gid = grp.getgrnam(group).gr_gid
+        svc = self._gen(f'extra_groups = ["{group}"]')
+        self.assertNotIn("--userns=", svc)
+        self.assertIn("--group-add=keep-groups", svc)
+        # gid 0 is already the mapped set seed; only assert the mapping when != workload gid
+        self.assertRegex(svc, r"--gidmap \+\d+:@\d+:1")
+
+
+class TestGeneratorMainEdgeCases(unittest.TestCase):
+    """main()-level validation and cross-reference branches."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def test_name_dir_mismatch_refused(self):
+        # bundle dir "realdir" but [workload].name "other" — split identity, refuse
+        d = Path(self.config_dir) / "realdir"
+        d.mkdir()
+        (d / "workload.toml").write_text(textwrap.dedent("""\
+            [workload]
+            name = "other"
+
+            [container]
+            image = "myapp"
+        """))
+        (d / ".enabled").touch()
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("does not match bundle directory", result.stderr)
+        self.assertFalse((Path(self.services_dir) / "workload-other.service").exists())
+
+    def test_unknown_dependency_warns(self):
+        write_config(self.config_dir, "dependent", """\
+            [workload]
+            name = "dependent"
+            requires = ["ghost"]
+
+            [container]
+            image = "myapp"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("references unknown workload 'ghost'", result.stderr)
+        # the workload itself is still generated despite the dangling ref
+        self.assertTrue((Path(self.services_dir) / "workload-dependent.service").exists())
+
+    def test_pod_member_userns_ignored_with_warning(self):
+        write_config(self.config_dir, "pns", """\
+            [workload]
+            name = "pns"
+            mode = "pod"
+
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "myapp"
+            [containers.security]
+            userns = "keep-id"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("ignored in pod mode", result.stderr)
+
+    def test_multi_container_invalid_systemd_skips_that_container(self):
+        write_config(self.config_dir, "badmulti", """\
+            [workload]
+            name = "badmulti"
+            mode = "pod"
+
+            [[containers]]
+            name = "good"
+            [containers.container]
+            image = "myapp"
+
+            [[containers]]
+            name = "bad"
+            [containers.container]
+            image = "myapp"
+            systemd = "bogus"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Skipping container bad due to config errors", result.stderr)
+        self.assertTrue((Path(self.services_dir) / "workload-badmulti-good.service").exists())
+        self.assertFalse((Path(self.services_dir) / "workload-badmulti-bad.service").exists())
+
+    def test_bridge_workload_level_ports_ignored_with_warning(self):
+        write_config(self.config_dir, "brw", """\
+            [workload]
+            name = "brw"
+            mode = "bridge"
+
+            [network]
+            ports = ["8080:80"]
+
+            [[containers]]
+            name = "a"
+            [containers.container]
+            image = "myapp"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("workload-level [network].ports is ignored in bridge mode", result.stderr)
+
+    def test_rerun_replaces_existing_wants_symlink(self):
+        # Second run must unlink the stale wants symlink before recreating it,
+        # rather than crashing on an existing path.
+        write_config(self.config_dir, "twice", """\
+            [workload]
+            name = "twice"
+
+            [container]
+            image = "myapp"
+        """)
+        r1 = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r1.returncode, 0, msg=r1.stderr)
+        link = Path(self.services_dir) / "multi-user.target.wants" / "workload-twice.service"
+        self.assertTrue(link.is_symlink())
+        r2 = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r2.returncode, 0, msg=r2.stderr)
+        self.assertTrue(link.is_symlink())
+
+    def test_enabled_workload_with_invalid_toml_survives_boot(self):
+        # Malformed TOML in an enabled bundle must be caught (both in the
+        # dependency pre-scan and the main loop) and never abort generation.
+        d = Path(self.config_dir) / "broken"
+        d.mkdir()
+        (d / "workload.toml").write_text('this is = = not valid toml [[[')
+        (d / ".enabled").touch()
+        # a healthy sibling still generates
+        write_config(self.config_dir, "healthy", """\
+            [workload]
+            name = "healthy"
+
+            [container]
+            image = "myapp"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue((Path(self.services_dir) / "workload-healthy.service").exists())
+
+    def test_disabled_workload_not_in_dep_scan(self):
+        write_config(self.config_dir, "consumer", """\
+            [workload]
+            name = "consumer"
+            requires = ["producer"]
+
+            [container]
+            image = "myapp"
+        """)
+        # producer exists but is disabled → still counts as unknown for the ref check
+        write_config(self.config_dir, "producer", """\
+            [workload]
+            name = "producer"
+
+            [container]
+            image = "myapp"
+        """, enabled=False)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("references unknown workload 'producer'", result.stderr)
+
+
+class TestGeneratorVmResources(unittest.TestCase):
+    """VM [resources] cgroup directives on the QEMU service unit."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.services_dir = tempfile.mkdtemp()
+        self.sysusers_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.services_dir, self.sysusers_dir):
+            shutil.rmtree(d)
+
+    def test_vm_resource_directives_emitted(self):
+        write_config(self.config_dir, "resvm", """\
+            [workload]
+            name = "resvm"
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            user = "fedora"
+
+            [resources]
+            memory_max = "4G"
+            cpu_quota = "200%"
+            cpu_weight = 300
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        svc = (Path(self.services_dir) / "workload-resvm.service").read_text()
+        self.assertIn("MemoryMax=4G", svc)
+        self.assertIn("CPUQuota=200%", svc)
+        self.assertIn("CPUWeight=300", svc)
+
+    def test_vm_rerun_replaces_bridge_and_main_symlinks(self):
+        write_config(self.config_dir, "revm", """\
+            [workload]
+            name = "revm"
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            user = "fedora"
+        """)
+        r1 = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r1.returncode, 0, msg=r1.stderr)
+        r2 = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(r2.returncode, 0, msg=r2.stderr)
+        wants = Path(self.services_dir) / "multi-user.target.wants"
+        self.assertTrue((wants / "workload-revm.service").is_symlink())
+        self.assertTrue((wants / "workload-bridge.service").is_symlink())
+
+    def test_vm_custom_subnet_derives_bridge_cidr(self):
+        write_config(self.config_dir, "subnetvm", """\
+            [workload]
+            name = "subnetvm"
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            user = "fedora"
+
+            [vm.network]
+            subnet = "10.99.7.0/24"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        bridge = (Path(self.services_dir) / "workload-bridge.service").read_text()
+        # first host of the subnet becomes the bridge IP, /prefixlen preserved
+        self.assertIn("10.99.7.1/24", bridge)
+
+    def test_vm_sysusers_extra_groups(self):
+        write_config(self.config_dir, "grpvm", """\
+            [workload]
+            name = "grpvm"
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            user = "fedora"
+
+            [security]
+            extra_groups = ["kvm", "render"]
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        sysusers = (Path(self.sysusers_dir) / "workload-grpvm.conf").read_text()
+        # implicit kvm membership present exactly once (extra_groups kvm de-duped)
+        self.assertEqual(sysusers.count("m _wl-grpvm kvm"), 1)
+        self.assertIn("m _wl-grpvm render", sysusers)
 
 
 if __name__ == "__main__":

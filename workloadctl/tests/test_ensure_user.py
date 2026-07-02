@@ -652,5 +652,878 @@ class TestResolveCloudInitInstanceId(unittest.TestCase):
         self.assertTrue(iid.startswith("myvm-"))
 
 
+class TestSetupSelinuxPolicy(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_creates_policy_when_absent(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if argv[:2] == ["semanage", "fcontext"] and argv[2] == "-l":
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+            self.mod.setup_selinux_policy()
+        add_calls = [c for c in calls if "-a" in c]
+        self.assertEqual(len(add_calls), 1)
+        self.assertIn("container_file_t", add_calls[0])
+
+    def test_noop_when_policy_already_present(self):
+        existing = f"{self.mod.WORKLOADS_BASE}(/.*)?  system_u:object_r:container_file_t:s0\n"
+
+        def fake_run(argv, **kw):
+            if "-l" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=existing, stderr="")
+            raise AssertionError("should not attempt to add when already present")
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+            self.mod.setup_selinux_policy()  # must not raise
+
+    def test_list_failure_warns_and_returns(self):
+        msgs = []
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="semanage broken")
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.setup_selinux_policy()
+        self.assertTrue(any("semanage fcontext -l failed" in m for m in msgs))
+
+    def test_exception_is_caught_and_logged(self):
+        msgs = []
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=OSError("boom")), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.setup_selinux_policy()  # must not raise
+        self.assertTrue(any("Failed to set up SELinux policy" in m for m in msgs))
+
+
+class TestSetupHomeDirectory(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_creates_state_and_data_dirs_with_perms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            data = root / "data"
+            pw = _fake_pw(state, uid=10001, gid=10001)
+            chown_calls = []
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: state), \
+                 mock.patch.object(self.mod, "workload_data_dir", lambda n: data), \
+                 mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))):
+                self.mod.setup_home_directory(pw, "myapp")
+            self.assertTrue(state.is_dir())
+            self.assertTrue(data.is_dir())
+            self.assertEqual(oct(state.stat().st_mode & 0o777), "0o700")
+            self.assertEqual(oct(data.stat().st_mode & 0o777), "0o700")
+            self.assertTrue(any(str(state) == c[0] for c in chown_calls))
+            self.assertTrue(any(str(data) == c[0] for c in chown_calls))
+
+    def test_idempotent_on_existing_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            data = root / "data"
+            state.mkdir()
+            data.mkdir()
+            pw = _fake_pw(state, uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: state), \
+                 mock.patch.object(self.mod, "workload_data_dir", lambda n: data), \
+                 mock.patch("os.chown"):
+                self.mod.setup_home_directory(pw, "myapp")  # must not raise
+            self.assertTrue(state.is_dir())
+            self.assertTrue(data.is_dir())
+
+
+class TestRestoreSelinuxLabels(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_invokes_restorecon_on_workload_root(self):
+        calls = []
+        with mock.patch.object(self.mod, "workload_root_dir", lambda n: Path("/var/lib/workloads/myapp")), \
+             mock.patch.object(self.mod.subprocess, "run",
+                               side_effect=lambda argv, **kw: (calls.append(argv),
+                                                                types.SimpleNamespace(returncode=0, stderr=""))[1]):
+            self.mod.restore_selinux_labels("myapp")
+        self.assertEqual(calls[0][:2], ["restorecon", "-R"])
+        self.assertIn("/var/lib/workloads/myapp", calls[0])
+
+    def test_logs_warning_on_failure(self):
+        msgs = []
+        with mock.patch.object(self.mod, "workload_root_dir", lambda n: Path("/x")), \
+             mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(returncode=1, stderr="denied")), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.restore_selinux_labels("myapp")
+        self.assertTrue(any("restorecon failed" in m for m in msgs))
+
+
+class TestDetectHostIp(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_parses_src_token(self):
+        out = "1.1.1.1 via 192.168.0.1 dev eth0 src 192.168.0.42 uid 0\n"
+        with mock.patch.object(self.mod.subprocess, "check_output", return_value=out):
+            self.assertEqual(self.mod._detect_host_ip(), "192.168.0.42")
+
+    def test_returns_empty_on_failure(self):
+        with mock.patch.object(self.mod.subprocess, "check_output",
+                               side_effect=self.mod.subprocess.CalledProcessError(1, "ip")):
+            self.assertEqual(self.mod._detect_host_ip(), "")
+
+    def test_returns_empty_when_no_src_token(self):
+        with mock.patch.object(self.mod.subprocess, "check_output",
+                               return_value="1.1.1.1 via 192.168.0.1 dev eth0\n"):
+            self.assertEqual(self.mod._detect_host_ip(), "")
+
+
+class TestWriteEnvironmentFile(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_writes_uid_and_host_ip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_dir = Path(tmp) / "run" / "workload-env"
+            pw = _fake_pw(Path(tmp), uid=10042, gid=10042)
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                env_dir if p == "/run/workload-env" else Path(p))), \
+                 mock.patch.object(self.mod, "_detect_host_ip", return_value="10.0.0.5"):
+                self.mod.write_environment_file("myapp", pw, {})
+            content = (env_dir / "workload-myapp.env").read_text()
+            self.assertIn("XDG_RUNTIME_DIR=/run/user/10042", content)
+            self.assertIn("HOST_IP=10.0.0.5", content)
+
+    def test_env_dir_created_mode_0700(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_dir = Path(tmp) / "run" / "workload-env"
+            pw = _fake_pw(Path(tmp), uid=10042, gid=10042)
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                env_dir if p == "/run/workload-env" else Path(p))), \
+                 mock.patch.object(self.mod, "_detect_host_ip", return_value=""):
+                self.mod.write_environment_file("myapp", pw, {})
+            self.assertEqual(oct(env_dir.stat().st_mode & 0o777), "0o700")
+
+
+class TestLingerManagerActive(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_active_returns_true(self):
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(stdout="active\n")):
+            self.assertTrue(self.mod._linger_manager_active("10001"))
+
+    def test_inactive_returns_false(self):
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(stdout="inactive\n")):
+            self.assertFalse(self.mod._linger_manager_active("10001"))
+
+
+class TestEnableLinger(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_enable_linger_success(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
+        pw.pw_name = "_wl-test"
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(self.mod, "_linger_manager_active", return_value=True), \
+             mock.patch.object(self.mod.Path, "is_dir", return_value=True), \
+             mock.patch.object(self.mod, "log"):
+            self.mod.enable_linger(pw)  # must not raise
+
+    def test_loginctl_failure_raises(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
+        pw.pw_name = "_wl-test"
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="no perm")):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.enable_linger(pw)
+            self.assertIn("loginctl enable-linger failed", str(ctx.exception))
+
+    def test_times_out_when_manager_never_active(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
+        pw.pw_name = "_wl-test"
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        deadlines = iter([0, 100])  # first call sets deadline base; loop exits fast
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(self.mod, "_linger_manager_active", return_value=False), \
+             mock.patch.object(self.mod.time, "monotonic", side_effect=[0, 100, 100]), \
+             mock.patch.object(self.mod.time, "sleep"), \
+             mock.patch.object(self.mod.Path, "is_dir", return_value=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.enable_linger(pw)
+            self.assertIn("did not become active", str(ctx.exception))
+
+
+class TestSetupVmBridge(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_creates_bridge_conf_and_adds_allow_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "qemu" / "bridge.conf"
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
+                self.mod.setup_vm_bridge("myvm", "_workload-br")
+            self.assertIn("allow _workload-br", conf.read_text())
+
+    def test_idempotent_when_allow_line_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "qemu" / "bridge.conf"
+            conf.parent.mkdir(parents=True)
+            conf.write_text("allow _workload-br\n")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
+                self.mod.setup_vm_bridge("myvm", "_workload-br")
+            self.assertEqual(conf.read_text().count("allow _workload-br"), 1)
+
+    def test_second_bridge_appended(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "qemu" / "bridge.conf"
+            conf.parent.mkdir(parents=True)
+            conf.write_text("allow br0\n")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
+                self.mod.setup_vm_bridge("myvm", "_workload-br")
+            text = conf.read_text()
+            self.assertIn("allow br0", text)
+            self.assertIn("allow _workload-br", text)
+
+
+class TestSetupNvram(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_copies_ovmf_vars_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            ovmf = Path(tmp) / "OVMF_VARS.fd"
+            ovmf.write_bytes(b"nvramdata")
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "find_ovmf_vars", return_value=str(ovmf)), \
+                 mock.patch("os.chown"):
+                self.mod.setup_nvram(pw, {})
+            dst = home / "nvram.fd"
+            self.assertTrue(dst.exists())
+            self.assertEqual(dst.read_bytes(), b"nvramdata")
+            self.assertEqual(oct(dst.stat().st_mode & 0o777), "0o600")
+
+    def test_noop_when_nvram_already_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            dst = home / "nvram.fd"
+            dst.write_bytes(b"existing")
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "find_ovmf_vars") as m:
+                self.mod.setup_nvram(pw, {})
+                m.assert_not_called()
+            self.assertEqual(dst.read_bytes(), b"existing")
+
+    def test_raises_when_ovmf_vars_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "find_ovmf_vars", return_value=None):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.setup_nvram(pw, {})
+                self.assertIn("OVMF_VARS.fd not found", str(ctx.exception))
+
+
+class TestSetupVmSocketDir(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_creates_socket_dir_mode_0750(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_base = Path(tmp) / "run" / "workload-vm"
+            pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
+                 mock.patch("os.chown"):
+                self.mod.setup_vm_socket_dir(pw, "myvm")
+            sock_dir = socket_base / "myvm"
+            self.assertTrue(sock_dir.is_dir())
+            self.assertEqual(oct(sock_dir.stat().st_mode & 0o777), "0o750")
+
+    def test_idempotent_on_existing_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_base = Path(tmp) / "run" / "workload-vm"
+            (socket_base / "myvm").mkdir(parents=True)
+            pw = _fake_pw(Path(tmp), uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "VM_SOCKET_DIR", socket_base), \
+                 mock.patch("os.chown"):
+                self.mod.setup_vm_socket_dir(pw, "myvm")  # must not raise
+
+
+class TestGenerateSshKeypair(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_generates_keypair_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home, uid=10001, gid=10001)
+
+            def fake_keygen(argv, **kw):
+                key_path = Path(argv[argv.index("-f") + 1])
+                key_path.write_text("PRIVATE")
+                key_path.with_suffix(".pub").write_text("PUBLIC")
+                return types.SimpleNamespace(returncode=0, stderr="")
+
+            with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_keygen), \
+                 mock.patch("os.chown"):
+                self.mod.generate_ssh_keypair(pw, "myvm")
+            self.assertTrue((home / ".ssh" / "id_ed25519").exists())
+            self.assertTrue((home / ".ssh" / "id_ed25519.pub").exists())
+            self.assertEqual(oct((home / ".ssh").stat().st_mode & 0o777), "0o700")
+
+    def test_noop_when_key_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".ssh").mkdir(parents=True)
+            (home / ".ssh" / "id_ed25519").write_text("EXISTING")
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod.subprocess, "run") as m, \
+                 mock.patch("os.chown"):
+                self.mod.generate_ssh_keypair(pw, "myvm")
+                m.assert_not_called()
+
+    def test_raises_on_keygen_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod.subprocess, "run",
+                                   return_value=types.SimpleNamespace(returncode=1, stderr="bad args")), \
+                 mock.patch("os.chown"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.generate_ssh_keypair(pw, "myvm")
+                self.assertIn("ssh-keygen failed", str(ctx.exception))
+
+
+class TestReadSshPubkey(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_returns_pubkey_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".ssh").mkdir(parents=True)
+            (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAA user@host\n")
+            pw = _fake_pw(home)
+            self.assertEqual(self.mod._read_ssh_pubkey(pw), "ssh-ed25519 AAA user@host")
+
+    def test_returns_empty_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home)
+            self.assertEqual(self.mod._read_ssh_pubkey(pw), "")
+
+
+class TestBundleWorkloadctlRpm(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_copies_when_cached_rpm_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cached = Path(tmp) / "cached.rpm"
+            cached.write_bytes(b"RPMDATA")
+            seed_dir = Path(tmp) / "seed"
+            seed_dir.mkdir()
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                cached if p == "/usr/share/workloadctl/workloadctl.rpm" else Path(p))):
+                result = self.mod._bundle_workloadctl_rpm(seed_dir)
+            self.assertTrue(result)
+            self.assertEqual((seed_dir / "workloadctl.rpm").read_bytes(), b"RPMDATA")
+
+    def test_returns_false_when_no_cached_rpm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "nope.rpm"
+            seed_dir = Path(tmp) / "seed"
+            seed_dir.mkdir()
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                missing if p == "/usr/share/workloadctl/workloadctl.rpm" else Path(p))):
+                result = self.mod._bundle_workloadctl_rpm(seed_dir)
+            self.assertFalse(result)
+            self.assertFalse((seed_dir / "workloadctl.rpm").exists())
+
+
+class TestLoadConfig(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_loads_toml_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "workload.toml"
+            cfg_path.write_text('[workload]\nname = "myapp"\n')
+            with mock.patch.object(self.mod, "workload_config_path", lambda n: cfg_path):
+                cfg = self.mod.load_config("myapp")
+            self.assertEqual(cfg["workload"]["name"], "myapp")
+
+
+class TestDecryptSystemdCredentialMore(unittest.TestCase):
+    """Additional coverage for the encrypted-success, encrypted-failure and
+    plain-fallback branches of _decrypt_systemd_credential."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_encrypted_success_decodes_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            enc_dir = Path(tmp) / "credstore.encrypted"
+            enc_dir.mkdir()
+            enc_file = enc_dir / "mysecret"
+            enc_file.write_bytes(b"ENCRYPTED")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                enc_file if p == "/etc/credstore.encrypted/mysecret" else Path(p))), \
+                 mock.patch.object(self.mod.subprocess, "run",
+                                   return_value=types.SimpleNamespace(
+                                       returncode=0, stdout=b"decrypted-value\n", stderr=b"")):
+                result = self.mod._decrypt_systemd_credential("mysecret")
+            self.assertEqual(result, "decrypted-value")
+
+    def test_encrypted_failure_raises_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            enc_dir = Path(tmp) / "credstore.encrypted"
+            enc_dir.mkdir()
+            enc_file = enc_dir / "mysecret"
+            enc_file.write_bytes(b"ENCRYPTED")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                enc_file if p == "/etc/credstore.encrypted/mysecret" else Path(p))), \
+                 mock.patch.object(self.mod.subprocess, "run",
+                                   return_value=types.SimpleNamespace(
+                                       returncode=1, stdout=b"", stderr=b"bad tpm")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod._decrypt_systemd_credential("mysecret")
+                self.assertIn("decrypt failed", str(ctx.exception))
+
+    def test_plain_fallback_when_no_encrypted_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            enc_file = Path(tmp) / "credstore.encrypted" / "mysecret"
+            plain_file = Path(tmp) / "credstore" / "mysecret"
+            plain_file.parent.mkdir(parents=True)
+            plain_file.write_text("plaintext-secret\n")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: {
+                "/etc/credstore.encrypted/mysecret": enc_file,
+                "/etc/credstore/mysecret": plain_file,
+            }.get(p, Path(p))):
+                result = self.mod._decrypt_systemd_credential("mysecret")
+            self.assertEqual(result, "plaintext-secret")
+
+
+class TestConfigureSubuidSubgidMore(unittest.TestCase):
+    """Additional coverage: uid-below-minimum, extra_groups, userns=host skip,
+    podman migrate success/failure/timeout branches."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_uid_below_minimum_raises(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=999)
+        pw.pw_name = "_wl-test"
+        with self.assertRaises(ValueError) as ctx:
+            self.mod.configure_subuid_subgid(pw, {})
+        self.assertIn("below minimum", str(ctx.exception))
+
+    def _run_with_lock(self, pw, config, subprocess_mock=None):
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            m.read = lambda: ""
+            m.write = lambda s: None
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod, "subprocess",
+                               subprocess_mock or mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+
+    def test_extra_groups_adds_subgid_entry(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["video"]}}
+        written = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam",
+                               return_value=types.SimpleNamespace(gr_gid=44)), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+        subgid_writes = [s for p, s in written if "subgid" in p]
+        self.assertTrue(any("_wl-test:44:1" in s for s in subgid_writes))
+
+    def test_missing_extra_group_logs_warning_and_skips(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["nonexistent-group"]}}
+        msgs = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam", side_effect=KeyError()), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.configure_subuid_subgid(pw, config)
+        self.assertTrue(any("not found" in m for m in msgs))
+
+    def test_userns_host_skips_extra_group_subgid(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"userns": "host", "extra_groups": ["video"]}}
+        written = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam") as gg, \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+        gg.assert_not_called()
+        subgid_writes = [s for p, s in written if "subgid" in p]
+        self.assertFalse(any(":44:1" in s or "video" in s for s in subgid_writes))
+
+    def test_podman_migrate_timeout_logs_warning(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        msgs = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.subprocess, "run",
+                               side_effect=self.mod.subprocess.TimeoutExpired("podman", 30)), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.configure_subuid_subgid(pw, {})
+        self.assertTrue(any("timed out" in m for m in msgs))
+
+    def test_podman_migrate_success_logs(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        msgs = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.configure_subuid_subgid(pw, {})
+        self.assertTrue(any("Migrated podman storage" in m for m in msgs))
+
+
+class TestSetupVolumeDirectoriesSkipBranches(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_required_files_path_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            config = {
+                "workload": {"name": "myapp"},
+                "setup": {"required_files": [{"path": "./secret.env"}]},
+                "storage": {"volumes": ["./secret.env:/etc/secret.env"]},
+            }
+            pw = _fake_pw(root / "state", uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_volume_directories(pw, config)
+            # required_files path must NOT be created as a directory
+            self.assertFalse((root / "data" / "secret.env").exists())
+
+    def test_path_outside_workload_root_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            config = {
+                "workload": {"name": "myapp"},
+                "storage": {"volumes": ["/etc/passwd:/etc/passwd"]},
+            }
+            pw = _fake_pw(root / "state", uid=10001, gid=10001)
+            with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
+                 mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                self.mod.setup_volume_directories(pw, config)  # must not raise
+
+
+class TestBuildCloudInitIsoValidation(unittest.TestCase):
+    """Guest-user validation and legacy-ISO cleanup branches."""
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        (self.home / ".ssh").mkdir()
+        (self.home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA user@host\n")
+        self.runtime = Path(self.tmp) / "run"
+        self.runtime.mkdir()
+        self.pw = _fake_pw(self.home)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_invalid_guest_user_raises(self):
+        cfg = {"vm": {"user": "Not Valid!"}}
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
+            self.assertIn("not a valid POSIX username", str(ctx.exception))
+
+    def test_missing_pubkey_raises(self):
+        (self.home / ".ssh" / "id_ed25519.pub").unlink()
+        cfg = {"vm": {}}
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
+            self.assertIn("SSH pubkey missing", str(ctx.exception))
+
+    def test_legacy_iso_removed(self):
+        legacy = self.home / "cloud-init.iso"
+        legacy.write_bytes(b"OLD")
+        cfg = {"vm": {}}
+        import shutil as _shutil
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
+             mock.patch.object(_shutil, "which", return_value=None):
+            self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
+        self.assertFalse(legacy.exists())
+
+    def test_no_iso_tool_warns_and_returns(self):
+        cfg = {"vm": {}}
+        msgs = []
+        import shutil as _shutil
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
+             mock.patch.object(_shutil, "which", return_value=None), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
+        self.assertTrue(any("No ISO tool found" in m for m in msgs))
+        self.assertFalse((self.runtime / "myvm" / "cloud-init.iso").exists())
+
+    def test_iso_build_subprocess_failure_warns(self):
+        cfg = {"vm": {}}
+        msgs = []
+        import shutil as _shutil
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
+             mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
+             mock.patch.object(self.mod, "workload_state_dir", lambda n: self.home), \
+             mock.patch.object(_shutil, "which",
+                               lambda name: "/usr/bin/genisoimage" if name == "genisoimage" else None), \
+             mock.patch.object(self.mod.subprocess, "run",
+                               return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="iso failed")), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
+        self.assertTrue(any("ISO build failed" in m for m in msgs))
+
+
+class TestMain(unittest.TestCase):
+    """main() argument handling and control flow (both kinds)."""
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.pw = _fake_pw(Path("/home/_wl-test"))
+
+    def _patch_common(self, kind):
+        """Patch out every side-effecting call main() makes; return the dict
+        of mocks so individual tests can assert on calls / raise from one."""
+        patches = {
+            "workload_username": mock.patch.object(self.mod, "workload_username", return_value="_wl-test"),
+            "getpwnam": mock.patch.object(self.mod.pwd, "getpwnam", return_value=self.pw),
+            "warn_if_stale_home": mock.patch.object(self.mod, "warn_if_stale_home"),
+            "mkdir": mock.patch.object(type(self.mod.WORKLOADS_BASE), "mkdir"),
+            "load_config": mock.patch.object(self.mod, "load_config", return_value={"workload": {"name": "test"}}),
+            "infer_workload_kind": mock.patch.object(self.mod, "infer_workload_kind", return_value=kind),
+            "setup_selinux_policy": mock.patch.object(self.mod, "setup_selinux_policy"),
+            "setup_home_directory": mock.patch.object(self.mod, "setup_home_directory"),
+            "configure_subuid_subgid": mock.patch.object(self.mod, "configure_subuid_subgid"),
+            "setup_volume_directories": mock.patch.object(self.mod, "setup_volume_directories"),
+            "write_environment_file": mock.patch.object(self.mod, "write_environment_file"),
+            "restore_selinux_labels": mock.patch.object(self.mod, "restore_selinux_labels"),
+            "enable_linger": mock.patch.object(self.mod, "enable_linger"),
+            "setup_vm_bridge": mock.patch.object(self.mod, "setup_vm_bridge"),
+            "setup_nvram": mock.patch.object(self.mod, "setup_nvram"),
+            "setup_vm_socket_dir": mock.patch.object(self.mod, "setup_vm_socket_dir"),
+            "setup_vm_volume_directories": mock.patch.object(self.mod, "setup_vm_volume_directories"),
+            "generate_ssh_keypair": mock.patch.object(self.mod, "generate_ssh_keypair"),
+            "build_cloud_init_iso": mock.patch.object(self.mod, "build_cloud_init_iso"),
+        }
+        mocks = {name: p.start() for name, p in patches.items()}
+        for p in patches.values():
+            self.addCleanup(p.stop)
+        return mocks
+
+    def test_usage_error_wrong_argc(self):
+        with mock.patch.object(self.mod.sys, "argv", ["workload-ensure-user"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+
+    def test_unknown_user_returns_1(self):
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]), \
+             mock.patch.object(self.mod, "workload_username", return_value="_wl-myapp"), \
+             mock.patch.object(self.mod.pwd, "getpwnam", side_effect=KeyError("no such user")):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+
+    def test_load_config_failure_returns_1(self):
+        mocks = self._patch_common("container")
+        mocks["load_config"].side_effect = Exception("bad toml")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+        mocks["setup_home_directory"].assert_not_called()
+
+    def test_container_kind_runs_full_sequence(self):
+        mocks = self._patch_common("container")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 0)
+        mocks["configure_subuid_subgid"].assert_called_once()
+        mocks["setup_volume_directories"].assert_called_once()
+        mocks["write_environment_file"].assert_called_once()
+        mocks["restore_selinux_labels"].assert_called_once()
+        mocks["enable_linger"].assert_called_once()
+        # VM-only steps must not run for container workloads
+        mocks["setup_vm_bridge"].assert_not_called()
+        mocks["setup_nvram"].assert_not_called()
+        mocks["generate_ssh_keypair"].assert_not_called()
+        mocks["build_cloud_init_iso"].assert_not_called()
+
+    def test_container_kind_continues_after_step_exception(self):
+        mocks = self._patch_common("container")
+        mocks["configure_subuid_subgid"].side_effect = Exception("boom")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
+            rc = self.mod.main()
+        # Failure of one best-effort step doesn't abort the rest or the run
+        self.assertEqual(rc, 0)
+        mocks["write_environment_file"].assert_called_once()
+        mocks["enable_linger"].assert_called_once()
+
+    def test_vm_kind_runs_full_sequence(self):
+        mocks = self._patch_common("vm")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 0)
+        mocks["setup_vm_bridge"].assert_called_once()
+        mocks["setup_nvram"].assert_called_once()
+        mocks["setup_vm_socket_dir"].assert_called_once()
+        mocks["setup_vm_volume_directories"].assert_called_once()
+        mocks["generate_ssh_keypair"].assert_called_once()
+        mocks["build_cloud_init_iso"].assert_called_once()
+        mocks["write_environment_file"].assert_called_once()
+        mocks["restore_selinux_labels"].assert_called_once()
+        # Container-only steps must not run for VM workloads
+        mocks["configure_subuid_subgid"].assert_not_called()
+        mocks["setup_volume_directories"].assert_not_called()
+        mocks["enable_linger"].assert_not_called()
+
+    def test_vm_nvram_failure_is_fatal(self):
+        mocks = self._patch_common("vm")
+        mocks["setup_nvram"].side_effect = Exception("nvram boom")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+        # main returns immediately after the fatal NVRAM failure
+        mocks["setup_vm_socket_dir"].assert_not_called()
+        mocks["generate_ssh_keypair"].assert_not_called()
+
+    def test_vm_ssh_keypair_failure_is_fatal(self):
+        mocks = self._patch_common("vm")
+        mocks["generate_ssh_keypair"].side_effect = Exception("ssh boom")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+        mocks["build_cloud_init_iso"].assert_not_called()
+
+    def test_vm_cloud_init_failure_is_fatal(self):
+        mocks = self._patch_common("vm")
+        mocks["build_cloud_init_iso"].side_effect = Exception("iso boom")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 1)
+        mocks["write_environment_file"].assert_not_called()
+
+    def test_vm_non_fatal_step_failures_still_succeed(self):
+        mocks = self._patch_common("vm")
+        mocks["setup_vm_bridge"].side_effect = Exception("bridge boom")
+        mocks["setup_vm_socket_dir"].side_effect = Exception("socket boom")
+        with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
+            rc = self.mod.main()
+        self.assertEqual(rc, 0)
+        mocks["generate_ssh_keypair"].assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

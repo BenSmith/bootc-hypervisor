@@ -666,5 +666,482 @@ class TestVMCgroupMetrics(unittest.TestCase):
             vm_finder.assert_not_called()
 
 
+class TestDiskBytes(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_parses_du_output(self):
+        cp = self.mock.Mock(returncode=0, stdout="4096\t/home/_wl-x\n")
+        with self.mock.patch.object(self.mod.subprocess, "run", return_value=cp):
+            self.assertEqual(self.mod.get_workload_disk_bytes("/home/_wl-x"), 4096)
+
+    def test_nonzero_returncode_is_none(self):
+        cp = self.mock.Mock(returncode=1, stdout="")
+        with self.mock.patch.object(self.mod.subprocess, "run", return_value=cp):
+            self.assertIsNone(self.mod.get_workload_disk_bytes("/x"))
+
+    def test_exception_is_none(self):
+        with self.mock.patch.object(self.mod.subprocess, "run",
+                                    side_effect=OSError("boom")):
+            self.assertIsNone(self.mod.get_workload_disk_bytes("/x"))
+
+
+class TestSystemdShow(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_parses_properties(self):
+        cp = self.mock.Mock(returncode=0,
+                            stdout="ActiveState=active\nSubState=running\n")
+        with self.mock.patch.object(self.mod.subprocess, "run", return_value=cp):
+            out = self.mod.systemd_show("x.service", "ActiveState", "SubState")
+        self.assertEqual(out, {"ActiveState": "active", "SubState": "running"})
+
+    def test_nonzero_returncode_empty(self):
+        cp = self.mock.Mock(returncode=1, stdout="")
+        with self.mock.patch.object(self.mod.subprocess, "run", return_value=cp):
+            self.assertEqual(self.mod.systemd_show("x.service", "ActiveState"), {})
+
+    def test_exception_empty(self):
+        with self.mock.patch.object(self.mod.subprocess, "run",
+                                    side_effect=OSError):
+            self.assertEqual(self.mod.systemd_show("x.service", "ActiveState"), {})
+
+
+class TestServiceMetrics(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_active_with_uptime(self):
+        props = {
+            "ActiveState": "active",
+            "NRestarts": "3",
+            "ActiveEnterTimestampMonotonic": "1",  # tiny → positive uptime
+        }
+        with self.mock.patch.object(self.mod, "systemd_show", return_value=props):
+            m = self.mod.get_service_metrics("app")
+        self.assertEqual(m["active"], 1)
+        self.assertEqual(m["failed"], 0)
+        self.assertEqual(m["restarts_total"], 3)
+        self.assertIn("uptime_seconds", m)
+
+    def test_failed_state(self):
+        with self.mock.patch.object(self.mod, "systemd_show",
+                                    return_value={"ActiveState": "failed"}):
+            m = self.mod.get_service_metrics("app")
+        self.assertEqual(m["failed"], 1)
+        self.assertEqual(m["active"], 0)
+        self.assertNotIn("uptime_seconds", m)
+
+    def test_missing_props_default_inactive(self):
+        with self.mock.patch.object(self.mod, "systemd_show", return_value={}):
+            m = self.mod.get_service_metrics("app")
+        self.assertEqual(m["active"], 0)
+        self.assertEqual(m["restarts_total"], 0)
+
+
+class TestCgroupReaders(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+        self.tmp = tempfile.mkdtemp()
+        self.cg = Path(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_read_metric_value(self):
+        (self.cg / "pids.current").write_text("42\n")
+        self.assertEqual(self.mod.read_cgroup_metric(self.cg, "pids.current"), 42)
+
+    def test_read_metric_max_is_none(self):
+        (self.cg / "memory.max").write_text("max\n")
+        self.assertIsNone(self.mod.read_cgroup_metric(self.cg, "memory.max"))
+
+    def test_read_metric_missing_is_none(self):
+        self.assertIsNone(self.mod.read_cgroup_metric(self.cg, "nope"))
+
+    def test_read_cpu_usage(self):
+        (self.cg / "cpu.stat").write_text("usage_usec 2500000\nuser_usec 1\n")
+        self.assertEqual(self.mod.read_cpu_usage(self.cg), 2.5)
+
+    def test_read_cpu_usage_missing_is_none(self):
+        self.assertIsNone(self.mod.read_cpu_usage(self.cg))
+
+    def test_get_cgroup_metrics_no_cgroup(self):
+        with self.mock.patch.object(self.mod, "find_workload_cgroup",
+                                    return_value=None):
+            self.assertEqual(self.mod.get_cgroup_metrics("app"), {})
+
+    def test_get_cgroup_metrics_full(self):
+        (self.cg / "cpu.stat").write_text("usage_usec 1000000\n")
+        (self.cg / "memory.current").write_text("1024\n")
+        (self.cg / "memory.max").write_text("max\n")
+        (self.cg / "pids.current").write_text("7\n")
+        with self.mock.patch.object(self.mod, "find_workload_cgroup",
+                                    return_value=self.cg):
+            m = self.mod.get_cgroup_metrics("app")
+        self.assertEqual(m["cpu_usage_seconds_total"], 1.0)
+        self.assertEqual(m["memory_current_bytes"], 1024)
+        self.assertEqual(m["pids_current"], 7)
+        self.assertNotIn("memory_max_bytes", m)  # "max" → skipped
+
+
+class TestContainerHealth(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_no_such_user_returns_none(self):
+        with self.mock.patch("pwd.getpwnam", side_effect=KeyError):
+            self.assertIsNone(self.mod.get_container_health("ghost"))
+
+    def test_health_queried_via_podman(self):
+        fake_pw = self.mock.Mock(pw_uid=10001, pw_dir="/home/_wl-app")
+        podman = self.mock.Mock()
+        podman.container_health.return_value = "healthy"
+        with self.mock.patch("pwd.getpwnam", return_value=fake_pw), \
+             self.mock.patch.object(self.mod.Podman, "for_user",
+                                    return_value=podman):
+            self.assertEqual(self.mod.get_container_health("app"), "healthy")
+
+    def test_podman_error_returns_none(self):
+        fake_pw = self.mock.Mock(pw_uid=10001, pw_dir="/home/_wl-app")
+        with self.mock.patch("pwd.getpwnam", return_value=fake_pw), \
+             self.mock.patch.object(self.mod.Podman, "for_user",
+                                    side_effect=RuntimeError):
+            self.assertIsNone(self.mod.get_container_health("app"))
+
+
+class TestFindWorkloadCgroup(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_no_such_user_returns_none(self):
+        with self.mock.patch("pwd.getpwnam", side_effect=KeyError):
+            self.assertIsNone(self.mod.find_workload_cgroup("ghost"))
+
+
+class TestVMQMPMetrics(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_missing_socket_returns_empty(self):
+        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR",
+                                    Path("/nonexistent-vm-sock-dir")):
+            self.assertEqual(self.mod.get_vm_qmp_metrics("vm"), {})
+
+    def test_balloon_metric_collected(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        sockdir = Path(tmp) / "vm"
+        sockdir.mkdir(parents=True)
+        (sockdir / "qmp-metrics.sock").write_bytes(b"")
+        qmp = self.mock.MagicMock()
+        qmp.execute.side_effect = lambda cmd: {
+            "query-balloon": {"return": {"actual": 2147483648}},
+            "query-cpus-fast": {"return": []},
+        }[cmd]
+        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", Path(tmp)), \
+             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+            m = self.mod.get_vm_qmp_metrics("vm")
+        self.assertEqual(m["balloon_actual_bytes"], 2147483648)
+
+
+class TestGetEnabledWorkloadsDirect(unittest.TestCase):
+    """Exercise get_enabled_workloads() branches without spawning a process."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_config_dir_not_a_dir_returns_empty(self):
+        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR",
+                                    Path("/nonexistent-config-dir-xyz")):
+            self.assertEqual(self.mod.get_enabled_workloads(), [])
+
+    def test_resolve_oserror_is_skipped(self):
+        bad_toml = self.mock.Mock()
+        bad_toml.resolve.side_effect = OSError
+        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(".")), \
+             self.mock.patch.object(self.mod, "iter_workloads",
+                                    return_value=[("bad", bad_toml)]):
+            self.assertEqual(self.mod.get_enabled_workloads(), [])
+
+    def test_missing_enabled_marker_is_skipped(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        toml_path = write_config(tmp, "off", """\
+            [workload]
+            name = "off"
+
+            [container]
+            image = "alpine:latest"
+        """, enabled=False)
+        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(tmp)), \
+             self.mock.patch.object(self.mod, "iter_workloads",
+                                    return_value=[("off", toml_path)]):
+            self.assertEqual(self.mod.get_enabled_workloads(), [])
+
+    def test_toml_parse_exception_is_skipped(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bad_path = Path(tmp) / "bad" / "workload.toml"
+        bad_path.parent.mkdir()
+        bad_path.write_text("not valid [[[ toml")
+        (bad_path.parent / ".enabled").touch()
+        with self.mock.patch.object(self.mod, "WORKLOAD_CONFIG_DIR", Path(tmp)), \
+             self.mock.patch.object(self.mod, "iter_workloads",
+                                    return_value=[("bad", bad_path)]):
+            self.assertEqual(self.mod.get_enabled_workloads(), [])
+
+
+class TestVMQMPVcpuMetrics(unittest.TestCase):
+    """Cover the per-vCPU /proc/<tid>/stat parsing loop."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def _sock_dir(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        sockdir = Path(tmp) / "vm"
+        sockdir.mkdir(parents=True)
+        (sockdir / "qmp-metrics.sock").write_bytes(b"")
+        return Path(tmp)
+
+    def test_vcpu_stat_parsed(self):
+        vm_dir = self._sock_dir()
+        real_path = self.mod.Path
+        fields = ["x"] * 20
+        fields[13] = "100"  # utime
+        fields[14] = "50"   # stime
+        stat_line = " ".join(fields)
+
+        class FakePath:
+            def __new__(cls, p):
+                if str(p) == "/proc/4242/stat":
+                    obj = object.__new__(cls)
+                    return obj
+                return real_path(p)
+
+            def read_text(self):
+                return stat_line
+
+        qmp = self.mock.MagicMock()
+        qmp.execute.side_effect = lambda cmd: {
+            "query-balloon": {"return": {}},
+            "query-cpus-fast": {"return": [
+                {"cpu-index": 0, "thread-id": 4242},
+                {"cpu-index": 1},  # no thread-id → skipped
+            ]},
+        }[cmd]
+        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp), \
+             self.mock.patch.object(self.mod, "Path", FakePath):
+            m = self.mod.get_vm_qmp_metrics("vm")
+        self.assertIn("vcpu_0_cpu_seconds_total", m)
+        self.assertNotIn("vcpu_1_cpu_seconds_total", m)
+
+    def test_vcpu_stat_read_error_skipped(self):
+        vm_dir = self._sock_dir()
+        qmp = self.mock.MagicMock()
+        qmp.execute.side_effect = lambda cmd: {
+            "query-balloon": {"return": {}},
+            "query-cpus-fast": {"return": [{"cpu-index": 0, "thread-id": 999999}]},
+        }[cmd]
+        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+            m = self.mod.get_vm_qmp_metrics("vm")
+        self.assertEqual(m, {})
+
+    def test_qmp_connect_exception_returns_empty(self):
+        vm_dir = self._sock_dir()
+        qmp = self.mock.MagicMock()
+        qmp.connect.side_effect = OSError("no such socket")
+        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+            m = self.mod.get_vm_qmp_metrics("vm")
+        self.assertEqual(m, {})
+        qmp.close.assert_called_once()
+
+
+class TestServiceMetricsUptimeException(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_uptime_exception_is_swallowed(self):
+        props = {
+            "ActiveState": "active",
+            "NRestarts": "0",
+            "ActiveEnterTimestampMonotonic": "1",
+        }
+        with self.mock.patch.object(self.mod, "systemd_show", return_value=props), \
+             self.mock.patch.object(self.mod.time, "monotonic_ns",
+                                    side_effect=Exception("boom")):
+            m = self.mod.get_service_metrics("app")
+        self.assertNotIn("uptime_seconds", m)
+        self.assertEqual(m["active"], 1)
+
+
+class TestFindWorkloadCgroupSuccess(unittest.TestCase):
+    """Cover the uid-resolved candidate/rglob search loop."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.real_path = self.mod.Path
+
+    def _redirecting_path(self, root):
+        real_path = self.real_path
+
+        def _fake(p):
+            s = str(p)
+            if s.startswith("/sys/fs/cgroup"):
+                return real_path(root) / s.lstrip("/")
+            return real_path(p)
+        return _fake
+
+    def test_finds_scope_under_workloads_slice(self):
+        scope = (Path(self.tmp) / "sys/fs/cgroup/workloads.slice"
+                  / "user@10001.service/some/libpod-abcdef.scope")
+        scope.mkdir(parents=True)
+        fake_pw = self.mock.Mock(pw_uid=10001)
+        with self.mock.patch("pwd.getpwnam", return_value=fake_pw), \
+             self.mock.patch.object(self.mod, "Path", self._redirecting_path(self.tmp)):
+            result = self.mod.find_workload_cgroup("app")
+        self.assertEqual(result, scope)
+
+    def test_no_candidate_dirs_returns_none(self):
+        fake_pw = self.mock.Mock(pw_uid=10002)
+        with self.mock.patch("pwd.getpwnam", return_value=fake_pw), \
+             self.mock.patch.object(self.mod, "Path", self._redirecting_path(self.tmp)):
+            result = self.mod.find_workload_cgroup("app")
+        self.assertIsNone(result)
+
+
+class TestFormatMetrics(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_exporter()
+
+    def test_full_metrics_rendered(self):
+        all_metrics = [
+            ("app", {"active": 1, "failed": 0, "restarts_total": 2,
+                      "uptime_seconds": 12.5, "health": 1},
+             {"cpu_usage_seconds_total": 3.5, "memory_current_bytes": 1024,
+              "memory_max_bytes": 2048, "pids_current": 4},
+             {"balloon_actual_bytes": 999, "vcpu_0_cpu_seconds_total": 1.25},
+             4096),
+            ("nodisk", {}, {}, {}, None),
+        ]
+        text = self.mod.format_metrics(all_metrics)
+        self.assertIn('workload_active{workload="app"} 1', text)
+        self.assertIn('workload_uptime_seconds{workload="app"} 12.50', text)
+        self.assertIn('workload_cpu_usage_seconds_total{workload="app"} 3.500000', text)
+        self.assertIn('workload_health{workload="app"} 1', text)
+        self.assertIn('workload_vm_balloon_actual_bytes{workload="app"} 999', text)
+        self.assertIn('workload_vm_vcpu_cpu_seconds_total{workload="app",vcpu="0"} 1.250000', text)
+        self.assertIn('workload_disk_bytes{workload="app"} 4096', text)
+        self.assertNotIn('workload_disk_bytes{workload="nodisk"}', text)
+        self.assertIn("workload_enabled_total 2", text)
+
+    def test_empty_metrics_still_has_footer(self):
+        text = self.mod.format_metrics([])
+        self.assertIn("workload_enabled_total 0", text)
+        self.assertIn("workload_metrics_last_collect_timestamp_seconds", text)
+
+
+class TestMetricsHandlerDirect(unittest.TestCase):
+    """Drive MetricsHandler.do_GET without a real socket/server."""
+
+    def setUp(self):
+        from unittest import mock
+        import io
+        self.mock = mock
+        self.io = io
+        self.mod = _load_exporter()
+
+    def _make_handler(self, path):
+        handler = self.mod.MetricsHandler.__new__(self.mod.MetricsHandler)
+        handler.path = path
+        handler.send_response = self.mock.Mock()
+        handler.send_header = self.mock.Mock()
+        handler.end_headers = self.mock.Mock()
+        handler.wfile = self.io.BytesIO()
+        return handler
+
+    def test_unknown_path_404(self):
+        handler = self._make_handler("/nope")
+        handler.do_GET()
+        handler.send_response.assert_called_once_with(404)
+
+    def test_metrics_path_returns_200_body(self):
+        handler = self._make_handler("/metrics")
+        with self.mock.patch.object(self.mod, "get_enabled_workloads", return_value=[]):
+            handler.do_GET()
+        handler.send_response.assert_called_once_with(200)
+        self.assertIn(b"workload_enabled_total 0", handler.wfile.getvalue())
+
+    def test_collection_error_returns_500(self):
+        handler = self._make_handler("/metrics")
+        with self.mock.patch.object(self.mod, "get_enabled_workloads",
+                                    side_effect=RuntimeError("boom")):
+            handler.do_GET()
+        handler.send_response.assert_called_once_with(500)
+
+    def test_full_workload_collection_path(self):
+        handler = self._make_handler("/metrics")
+        with self.mock.patch.object(self.mod, "get_enabled_workloads",
+                                    return_value=[("app", True, False)]), \
+             self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
+             self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
+             self.mock.patch.object(self.mod, "get_container_health", return_value="healthy"), \
+             self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=1000):
+            handler.do_GET()
+        handler.send_response.assert_called_once_with(200)
+        self.assertIn(b'workload="app"', handler.wfile.getvalue())
+
+    def test_log_message_noop(self):
+        handler = self._make_handler("/metrics")
+        self.assertIsNone(handler.log_message("%s", "ignored"))
+
+
+class TestMain(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_main_starts_server(self):
+        fake_server = self.mock.Mock()
+        with self.mock.patch.object(self.mod, "HTTPServer",
+                                    return_value=fake_server) as http_server_cls:
+            self.mod.main()
+        http_server_cls.assert_called_once()
+        args, _ = http_server_cls.call_args
+        self.assertEqual(args[0], ("0.0.0.0", self.mod.PORT))
+        fake_server.serve_forever.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -531,6 +531,14 @@ def _make_config(toml, name):
             return workloadctl_core.WorkloadConfig(name)
 
 
+def _patch_uid(uid):
+    """Patch pwd.getpwnam so WorkloadConfig.uid resolves without a real user."""
+    pw = MagicMock()
+    pw.pw_uid = uid
+    pw.pw_gid = uid
+    return patch('pwd.getpwnam', return_value=pw)
+
+
 class TestContainerLiveness(unittest.TestCase):
 
     def _substrate(self, toml, name, statuses):
@@ -1583,6 +1591,783 @@ class TestRemovedVerbs(unittest.TestCase):
     def test_network_verb_rejected(self):
         _, stderr, rc = self._invoke(['network', 'testnet', 'create', 'somewl'])
         self.assertNotEqual(rc, 0)
+
+
+# ── ContainerSubstrate.exec() / open_shell() ──────────────────────────────────
+
+class TestContainerExecShell(unittest.TestCase):
+
+    def _substrate(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        return ContainerSubstrate(config, manager), manager
+
+    def test_exec_returns_returncode(self):
+        substrate, manager = self._substrate()
+        manager.run_podman_exec.return_value = _ok(returncode=3)
+        rc = substrate.exec(["echo", "hi"])
+        self.assertEqual(rc, 3)
+        manager.run_podman_exec.assert_called_once()
+
+    def test_open_shell_console_raises_not_applicable(self):
+        substrate, _ = self._substrate()
+        with self.assertRaises(NotApplicable):
+            substrate.open_shell(console=True)
+
+    def test_open_shell_tries_bash_first(self):
+        substrate, manager = self._substrate()
+        manager.run_podman_exec.return_value = _ok(returncode=0)
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            substrate.open_shell()
+        # Only one call: bash succeeded (rc=0), no fallback to sh.
+        manager.run_podman_exec.assert_called_once()
+        args = manager.run_podman_exec.call_args[0][1]
+        self.assertIn('/bin/bash', args)
+
+    def test_open_shell_falls_back_to_sh_on_127(self):
+        substrate, manager = self._substrate()
+        manager.run_podman_exec.side_effect = [_ok(returncode=127), _ok(returncode=0)]
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            substrate.open_shell()
+        self.assertEqual(manager.run_podman_exec.call_count, 2)
+        second_args = manager.run_podman_exec.call_args_list[1][0][1]
+        self.assertIn('/bin/sh', second_args)
+
+    def test_open_shell_with_container_user_sets_env(self):
+        toml = """\
+[workload]
+name = "test-wl"
+
+[container]
+image = "example.com/test:latest"
+
+[container.environment]
+CONTAINER_USER = "appuser"
+CONTAINER_UID = "2000"
+"""
+        config = _make_config(toml, 'test-wl')
+        manager = MagicMock()
+        manager.run_podman_exec.return_value = _ok(returncode=0)
+        substrate = ContainerSubstrate(config, manager)
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            substrate.open_shell()
+        args = manager.run_podman_exec.call_args[0][1]
+        self.assertIn('--user', args)
+        self.assertIn('appuser', args)
+        self.assertIn('HOME=/home/appuser', args)
+
+
+# ── ContainerSubstrate.lifecycle() reboot / user_exists branches ─────────────
+
+class TestContainerLifecycleMore(unittest.TestCase):
+
+    def _substrate(self, user_exists=False):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.user_exists.return_value = user_exists
+        return ContainerSubstrate(config, manager), manager
+
+    def test_start_with_user_calls_restart_workload_service(self):
+        substrate, manager = self._substrate(user_exists=True)
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+            substrate.lifecycle("start")
+        mock_r.assert_called_once_with(
+            10001, substrate.config.service_name, action="start"
+        )
+
+    def test_start_with_user_calledprocesserror_exits(self):
+        import subprocess as sp
+        substrate, manager = self._substrate(user_exists=True)
+        with _patch_uid(10001), patch.object(
+            _substrate_mod, 'restart_workload_service',
+            side_effect=sp.CalledProcessError(returncode=5, cmd=['x']),
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.lifecycle("start")
+        self.assertEqual(cm.exception.code, 5)
+
+    def test_restart_with_user_calls_restart_workload_service(self):
+        substrate, manager = self._substrate(user_exists=True)
+        with _patch_uid(10001), patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+            substrate.lifecycle("restart")
+        mock_r.assert_called_once_with(10001, substrate.config.service_name)
+
+    def test_restart_without_user_calls_systemctl(self):
+        substrate, manager = self._substrate(user_exists=False)
+        with patch('subprocess.run', return_value=_ok()) as mock_run:
+            substrate.lifecycle("restart")
+        mock_run.assert_called_once()
+        self.assertIn('restart', mock_run.call_args[0][0])
+
+    def test_reboot_success_prints_confirmation(self):
+        substrate, manager = self._substrate()
+        manager.run_podman_exec.return_value = _ok(returncode=0)
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            substrate.lifecycle("reboot")
+        self.assertIn('soft-rebooted', buf.getvalue())
+
+    def test_reboot_failure_exits_1(self):
+        substrate, manager = self._substrate()
+        manager.run_podman_exec.return_value = _ok(returncode=1)
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.lifecycle("reboot")
+        self.assertEqual(cm.exception.code, 1)
+
+
+# ── ContainerSubstrate.reprovision() full pull/restart flow ──────────────────
+
+class TestContainerReprovisionFlow(unittest.TestCase):
+
+    def _substrate(self, user_exists=True):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.user_exists.return_value = user_exists
+        return ContainerSubstrate(config, manager), manager
+
+    def test_pull_never_raises_not_applicable(self):
+        toml = """\
+[workload]
+name = "test-wl"
+
+[container]
+image = "example.com/test:latest"
+pull = "never"
+"""
+        config = _make_config(toml, 'test-wl')
+        manager = MagicMock()
+        substrate = ContainerSubstrate(config, manager)
+        with self.assertRaises(NotApplicable):
+            substrate.reprovision()
+
+    def test_user_missing_returns_none(self):
+        substrate, manager = self._substrate(user_exists=False)
+        result = substrate.reprovision()
+        self.assertIsNone(result)
+
+    def test_no_change_returns_none(self):
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = 'same-id'
+        result = substrate.reprovision()
+        self.assertIsNone(result)
+        pod.pull.assert_called_once()
+
+    def test_changed_image_restarts_and_returns_config_and_ids(self):
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.side_effect = ['old-id', 'new-id']
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+            result = substrate.reprovision()
+        self.assertIsNotNone(result)
+        cfg, old_ids = result
+        self.assertEqual(old_ids['test-wl'], 'old-id')
+        mock_r.assert_called_once()
+        pod.tag.assert_called_once()
+
+    def test_pull_failure_raises_provision_failed(self):
+        from podman import PodmanError
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = 'old-id'
+        pod.pull.side_effect = PodmanError(1, "pull error", ["pull", "image"])
+        from substrate import ProvisionFailed
+        with patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(ProvisionFailed):
+                substrate.reprovision()
+
+    def test_force_restarts_even_without_change(self):
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = 'same-id'
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+            result = substrate.reprovision(force=True)
+        self.assertIsNotNone(result)
+        mock_r.assert_called_once()
+
+
+# ── ContainerSubstrate.rollback() ─────────────────────────────────────────────
+
+class TestContainerRollback(unittest.TestCase):
+
+    def _substrate(self, image_ids: dict):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.image_id.side_effect = lambda t: image_ids.get(t)
+        return ContainerSubstrate(config, manager), manager
+
+    def test_no_rollback_tag_exits_1(self):
+        substrate, manager = self._substrate({})
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.rollback()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn('No rollback image', buf.getvalue())
+
+    def test_already_at_rollback_image_no_restart(self):
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        # rollback tag exists but current == rollback (so rollback_targets()
+        # filters it out via current_id check being irrelevant — targets()
+        # only excludes on missing rollback_id, so simulate "already applied"
+        # by making current_id equal rollback_id too, which still appears as
+        # a target since rollback_targets() doesn't dedupe by equality).
+        # Instead: simulate rollback_targets() empty but a tag existing via
+        # _has_any_rollback_tag by having image_id for the working image AND
+        # rollback tag itself both defined only for `tag`, while
+        # container_images()'s live image isn't tagged (so targets() has an
+        # entry). To hit the "no targets but has_any_tag" branch, we patch
+        # rollback_targets directly.
+        substrate, manager = self._substrate({tag: 'abc'})
+        with patch.object(substrate, 'rollback_targets', return_value=[]), \
+             patch.object(substrate, '_has_any_rollback_tag', return_value=True):
+            buf = io.StringIO()
+            with patch('sys.stdout', buf):
+                substrate.rollback()
+        self.assertIn('Already running', buf.getvalue())
+
+    def test_rollback_applies_targets_and_restarts(self):
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        substrate, manager = self._substrate({
+            tag: 'abc123', 'example.com/test:latest': 'def456',
+        })
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+            buf = io.StringIO()
+            with patch('sys.stdout', buf):
+                substrate.rollback()
+        mock_r.assert_called_once()
+        self.assertIn('Rolled back', buf.getvalue())
+
+
+# ── VMSubstrate.exec() / open_shell() ─────────────────────────────────────────
+
+class TestVMExecShell(unittest.TestCase):
+
+    def _substrate(self):
+        config = _make_vm_config()
+        return VMSubstrate(config, None)
+
+    def test_exec_no_ip_exits_1(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.exec(["ls"])
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_exec_runs_ssh_and_returns_code(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=7)) as mock_run:
+            rc = substrate.exec(["ls"])
+        self.assertEqual(rc, 7)
+        ssh_argv = mock_run.call_args[0][0]
+        self.assertIn('ssh', ssh_argv)
+
+    def test_open_shell_ssh_success_exits_with_code(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=0)):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.open_shell()
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_open_shell_ssh_failure_falls_back_to_console(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=255)), \
+             patch('pathlib.Path.exists', return_value=False), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.open_shell()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_open_shell_no_ip_falls_to_console_missing_socket(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+             patch('pathlib.Path.exists', return_value=False), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.open_shell()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_open_shell_console_connects_via_socat(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('os.execvp') as mock_exec, \
+             patch('sys.stderr', io.StringIO()), \
+             patch('builtins.print'):
+            substrate.open_shell(console=True)
+        mock_exec.assert_called_once()
+        self.assertEqual(mock_exec.call_args[0][0], 'socat')
+
+
+# ── VMSubstrate.lifecycle() reboot ─────────────────────────────────────────────
+
+class TestVMLifecycleReboot(unittest.TestCase):
+
+    def _substrate(self):
+        config = _make_vm_config()
+        return VMSubstrate(config, None)
+
+    def test_reboot_no_ip_exits_1(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.lifecycle("reboot")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_reboot_ssh_success_prints_confirmation(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=0)):
+            buf = io.StringIO()
+            with patch('sys.stdout', buf):
+                substrate.lifecycle("reboot")
+        self.assertIn('soft-reboot initiated', buf.getvalue())
+
+    def test_reboot_ssh_failure_exits_1(self):
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=1)), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.lifecycle("reboot")
+        self.assertEqual(cm.exception.code, 1)
+
+
+# ── VMSubstrate.reprovision() (non-recreate) ──────────────────────────────────
+
+class TestVMReprovisionFlow(unittest.TestCase):
+
+    def _substrate(self, lifecycle="cattle"):
+        toml = f"""\
+[workload]
+name = "test-vm"
+lifecycle = "{lifecycle}"
+
+[vm]
+image = "example.com/guest:latest"
+"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-vm').mkdir()
+            (p / 'test-vm' / 'workload.toml').write_text(toml)
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                config = workloadctl_core.WorkloadConfig('test-vm')
+        return VMSubstrate(config, None)
+
+    def test_pet_vm_skips_rebuild_restarts_only(self):
+        substrate = self._substrate(lifecycle="pet")
+        with patch('subprocess.run', return_value=_ok(returncode=0)) as mock_run:
+            buf = io.StringIO()
+            with patch('sys.stdout', buf):
+                result = substrate.reprovision()
+        self.assertIsNone(result)
+        self.assertIn('restarted (disk unchanged)', buf.getvalue())
+        mock_run.assert_called_once()
+
+    def test_pet_vm_restart_failure_raises_provision_failed(self):
+        from substrate import ProvisionFailed
+        substrate = self._substrate(lifecycle="pet")
+        with patch('subprocess.run', return_value=_ok(returncode=1)), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(ProvisionFailed):
+                substrate.reprovision()
+
+    def test_cattle_vm_rebuild_and_restart_success(self):
+        substrate = self._substrate(lifecycle="cattle")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _ok(returncode=0)
+
+        with patch('subprocess.run', side_effect=fake_run):
+            buf = io.StringIO()
+            with patch('sys.stdout', buf):
+                result = substrate.reprovision()
+        self.assertIsNone(result)
+        self.assertIn('rebuilt and restarted', buf.getvalue())
+        self.assertTrue(any('workload-vm-build-disk' in str(c[0]) for c in calls))
+
+    def test_cattle_vm_build_failure_raises_provision_failed(self):
+        from substrate import ProvisionFailed
+        substrate = self._substrate(lifecycle="cattle")
+
+        def fake_run(cmd, **kw):
+            if 'workload-vm-build-disk' in str(cmd[0]):
+                return _ok(returncode=1)
+            return _ok(returncode=0)
+
+        with patch('subprocess.run', side_effect=fake_run), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(ProvisionFailed):
+                substrate.reprovision()
+
+    def test_cattle_vm_restart_failure_raises_provision_failed(self):
+        from substrate import ProvisionFailed
+        substrate = self._substrate(lifecycle="cattle")
+
+        def fake_run(cmd, **kw):
+            if 'workload-vm-build-disk' in str(cmd[0]):
+                return _ok(returncode=0)
+            return _ok(returncode=1)  # restart fails
+
+        with patch('subprocess.run', side_effect=fake_run), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(ProvisionFailed):
+                substrate.reprovision()
+
+
+# ── VMSubstrate.rollback() pet guard ──────────────────────────────────────────
+
+class TestVMRollbackPetGuard(unittest.TestCase):
+
+    def test_pet_vm_rollback_exits_1(self):
+        toml = """\
+[workload]
+name = "test-vm"
+lifecycle = "pet"
+
+[vm]
+image = "example.com/guest:latest"
+"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-vm').mkdir()
+            (p / 'test-vm' / 'workload.toml').write_text(toml)
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                config = workloadctl_core.WorkloadConfig('test-vm')
+        substrate = VMSubstrate(config, None)
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.rollback()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn('pet', buf.getvalue())
+
+    def test_no_targets_exits_1(self):
+        config = _make_vm_config()
+        substrate = VMSubstrate(config, None)
+        with patch.object(substrate, 'rollback_targets', return_value=[]), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                substrate.rollback()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_rollback_applies_latest_generation(self):
+        config = _make_vm_config()
+        substrate = VMSubstrate(config, None)
+        targets = [
+            {'label': 'system.qcow2.gen-1', 'gen': 1, 'path': Path('/tmp/g1')},
+            {'label': 'system.qcow2.gen-2', 'gen': 2, 'path': Path('/tmp/g2')},
+        ]
+        with patch.object(substrate, 'rollback_targets', return_value=targets), \
+             patch.object(substrate, 'rollback_to') as mock_rt:
+            substrate.rollback()
+        mock_rt.assert_called_once_with(targets[-1])
+
+
+# ── _backup_impl / _backup_container / _backup_vm / _print_backup_size ───────
+
+class TestBackupImplAndHelpers(unittest.TestCase):
+    """_backup_impl() reads the workload TOML via workload_config_path(name) at
+    call time (not just at WorkloadConfig construction), so the WORKLOAD_CONFIG_DIR
+    patch must stay active for the whole test body, not just during _make_config()."""
+
+    def setUp(self):
+        self._cfg_dir = tempfile.mkdtemp()
+        p = Path(self._cfg_dir)
+        (p / 'test-wl').mkdir()
+        (p / 'test-wl' / 'workload.toml').write_text(MINIMAL_TOML)
+        self._cfg_patcher = patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p)
+        self._cfg_patcher.start()
+        self.addCleanup(self._cfg_patcher.stop)
+        self.addCleanup(shutil.rmtree, self._cfg_dir, True)
+
+    def _make_config(self):
+        return workloadctl_core.WorkloadConfig('test-wl')
+
+    def test_backup_container_writes_tar_and_prints_size(self):
+        config = self._make_config()
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ['tar']:
+                # Simulate tar creating the output file.
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'x' * 42)
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'sub' / 'out.tar.zst'
+            buf = io.StringIO()
+            with _patch_uid(10001), \
+                 patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch('sys.stdout', buf):
+                size = _substrate_mod._backup_container(config, output, no_stop=False, quiet=False)
+        self.assertEqual(size, 42)
+        self.assertIn('Backup:', buf.getvalue())
+
+    def test_backup_impl_stops_and_restarts_active_service(self):
+        config = self._make_config()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'data')
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return _ok(returncode=0)  # active
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with _patch_uid(10001), \
+                 patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+                _substrate_mod._backup_impl(config, output, no_stop=False, quiet=True, vm=False)
+        stop_calls = [c for c in calls if 'stop' in c]
+        self.assertTrue(stop_calls, "service should be stopped when active and no_stop=False")
+        mock_r.assert_called_once_with(10001, config.service_name, action="start")
+
+    def test_backup_impl_vm_restart_uses_plain_systemctl(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'data')
+            return _ok(returncode=0)
+
+        # Override setUp's test-wl dir with a test-vm workload for this test.
+        p = Path(self._cfg_dir)
+        (p / 'test-vm').mkdir()
+        (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
+        config = workloadctl_core.WorkloadConfig('test-vm')
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()):
+                _substrate_mod._backup_impl(config, output, no_stop=False, quiet=True, vm=True)
+        start_calls = [c for c in calls if 'start' in c]
+        self.assertTrue(start_calls, "VM should be restarted via plain systemctl start")
+
+    def test_backup_impl_no_stop_skips_stop_start(self):
+        config = self._make_config()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'data')
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            with patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()):
+                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=True, vm=False)
+        self.assertFalse(any('stop' in c for c in calls))
+
+    def test_backup_impl_copies_credentials(self):
+        config = self._make_config()
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'data')
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as credstore_d, \
+             tempfile.TemporaryDirectory() as out_d:
+            credstore = Path(credstore_d)
+            (credstore / 'mycred').write_text('secret')
+            output = Path(out_d) / 'out.tar.zst'
+            with patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value={'mycred'}), \
+                 patch.object(_substrate_mod, 'CREDSTORE_DIR', credstore):
+                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=True, vm=False)
+        # No assertion failure means the credential copy path executed without error.
+
+    def test_backup_impl_missing_credential_warns(self):
+        config = self._make_config()
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'data')
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as out_d:
+            output = Path(out_d) / 'out.tar.zst'
+            buf = io.StringIO()
+            with patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value={'missing-cred'}), \
+                 patch.object(_substrate_mod, 'CREDSTORE_DIR', Path('/nonexistent-credstore')), \
+                 patch('sys.stdout', buf):
+                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=False, vm=False)
+        self.assertIn('not found', buf.getvalue())
+
+    def test_print_backup_size_formats_bytes(self):
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            _substrate_mod._print_backup_size(Path('/x'), 500)
+        self.assertIn('500B', buf.getvalue())
+
+    def test_print_backup_size_formats_kilobytes(self):
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            _substrate_mod._print_backup_size(Path('/x'), 5_000)
+        self.assertIn('5.0K', buf.getvalue())
+
+    def test_print_backup_size_formats_megabytes(self):
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            _substrate_mod._print_backup_size(Path('/x'), 5_000_000)
+        self.assertIn('5.0M', buf.getvalue())
+
+    def test_print_backup_size_formats_gigabytes(self):
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            _substrate_mod._print_backup_size(Path('/x'), 5_000_000_000)
+        self.assertIn('5.0G', buf.getvalue())
+
+
+# ── _vm_guest_ip() lookup chain ────────────────────────────────────────────────
+
+class TestVmGuestIp(unittest.TestCase):
+
+    def test_dnsmasq_lease_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_dir = Path(d) / 'run'
+            (run_dir).mkdir()
+            (run_dir / 'bridge-managed').touch()
+            lease_file = Path(d) / 'leases'
+            lease_file.write_text("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
+            with patch('substrate.Path') as mock_path_cls:
+                # Only patch the bridge-managed marker check and lease file path;
+                # simplest is to patch the two module-level Path constants directly.
+                pass
+        # Simpler: patch the two constants used inside the function.
+        with patch.object(_substrate_mod, 'VM_DHCP_LEASE_FILE') as mock_lease:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.leases', delete=False) as f:
+                f.write("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
+                lease_path = Path(f.name)
+            try:
+                mock_lease.exists.return_value = True
+                mock_lease.read_text.return_value = lease_path.read_text()
+                with patch('pathlib.Path.exists', return_value=True):
+                    ip = _substrate_mod._vm_guest_ip('myvm')
+            finally:
+                lease_path.unlink()
+        self.assertEqual(ip, '192.168.1.5')
+
+    def test_no_bridge_managed_falls_to_arp(self):
+        with patch('pathlib.Path.exists', return_value=False), \
+             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch('subprocess.run') as mock_run:
+            mock_run.side_effect = [
+                _ok(stdout="192.168.1.9 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"),  # ip neigh
+            ]
+            ip = _substrate_mod._vm_guest_ip('myvm')
+        self.assertEqual(ip, '192.168.1.9')
+
+    def test_arp_no_match_falls_to_mdns(self):
+        with patch('pathlib.Path.exists', return_value=False), \
+             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch('subprocess.run') as mock_run:
+            mock_run.side_effect = [
+                _ok(stdout="192.168.1.9 lladdr 11:22:33:44:55:66 REACHABLE\n"),  # no match
+                _ok(returncode=0, stdout="192.168.1.20 myvm.local\n"),  # getent
+            ]
+            ip = _substrate_mod._vm_guest_ip('myvm')
+        self.assertEqual(ip, '192.168.1.20')
+
+    def test_all_lookups_fail_returns_none(self):
+        with patch('pathlib.Path.exists', return_value=False), \
+             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch('subprocess.run') as mock_run:
+            mock_run.side_effect = [
+                _ok(stdout=""),
+                _ok(returncode=2, stdout=""),
+            ]
+            ip = _substrate_mod._vm_guest_ip('myvm')
+        self.assertIsNone(ip)
+
+
+# ── _accessible_at_config() endpoint parsing branches ─────────────────────────
+
+class TestAccessibleAtConfig(unittest.TestCase):
+
+    def test_host_network_mode(self):
+        toml = """\
+[workload]
+name = "test-ep"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+mode = "host"
+ports = ["8080/tcp"]
+"""
+        config = _make_config(toml, 'test-ep')
+        result = _substrate_mod._accessible_at_config(config)
+        self.assertEqual(result, [{"host": "localhost:8080", "container": None}])
+
+    def test_ip_host_container_triple(self):
+        toml = """\
+[workload]
+name = "test-ep"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+ports = ["127.0.0.1:8080:80"]
+"""
+        config = _make_config(toml, 'test-ep')
+        result = _substrate_mod._accessible_at_config(config)
+        self.assertEqual(result, [{"host": "127.0.0.1:8080", "container": "80"}])
+
+    def test_dynamic_host_port(self):
+        toml = """\
+[workload]
+name = "test-ep"
+
+[container]
+image = "example.com/test:latest"
+
+[network]
+ports = [":80"]
+"""
+        config = _make_config(toml, 'test-ep')
+        result = _substrate_mod._accessible_at_config(config)
+        self.assertEqual(result, [{"host": "localhost:(dynamic)", "container": "80"}])
+
+    def test_no_ports_returns_empty(self):
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        self.assertEqual(_substrate_mod._accessible_at_config(config), [])
 
 
 if __name__ == '__main__':

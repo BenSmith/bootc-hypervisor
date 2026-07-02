@@ -1,0 +1,16 @@
+# Coverage config for `just coverage`. parallel + combine lets us capture
+# scripts that some tests invoke as subprocesses (see tests/covhelper.py).
+[run]
+parallel = true
+# Record every filename relative to this tree so a script measured both
+# in-process and as a covhelper subprocess (absolute argv path) lands under one
+# identical name and `coverage combine` unions them — otherwise the subprocess
+# data for e.g. the systemd generator fails to merge and it under-reports.
+relative_files = true
+source = lib,bin,generators,libexec
+
+[paths]
+# Belt-and-suspenders: still collapse any stray absolute subprocess paths.
+source =
+    .
+    */workloadctl
