@@ -1,7 +1,5 @@
 #!/usr/bin/env just --justfile
 
-version := "0.1.0"
-
 # Run CLI-surface acceptance harness (all verbs, both substrates)
 test-cli target:
   pytest tests/cli_surface/ --target={{target}} -v
@@ -30,45 +28,25 @@ test-unit:
 test-integration:
   PYTHONPATH=lib python3 -m unittest tests.test_integration -v
 
-# coverage.py is a dev-only tool — never imported by lib/, never in the RPM.
-# It measures lib/ plus the extensionless scripts (bin, generators, libexec),
-# but can only auto-list never-run files that end in .py: a script shows up
-# only if a test loads it, so bin/workloadctl (never imported by tests) is
-# absent and generators/workload-generate reads low because most of its tests
-# drive it as a subprocess (see docs/).
-#
-# Run the unit suite under coverage, then print a per-file report
+# Run the unit suite under coverage.py (dev-only), print a per-file report
 coverage:
   PYTHONPATH=lib python3 -m coverage run --source=lib,bin,generators,libexec -m unittest discover -s tests
   python3 -m coverage report --sort=cover
 
-# As `coverage`, plus write the drill-down HTML report to htmlcov/
+# As `coverage`, plus write the HTML report to htmlcov/
 coverage-html: coverage
   python3 -m coverage html
   @echo "HTML report: file://$(pwd)/htmlcov/index.html"
 
-# Lint: check Python syntax
+# Lint: byte-compile every Python source (syntax check)
 lint:
-  python3 -m py_compile lib/workload_lib.py
-  python3 -m py_compile lib/podman.py
-  python3 -m py_compile generators/workload-generate
-  python3 -m py_compile bin/workloadctl
-  python3 -m py_compile libexec/workload-ensure-user
-  python3 -m py_compile libexec/workload-write-env
-  python3 -m py_compile libexec/workload-exporter
+  python3 -m py_compile lib/*.py bin/workloadctl generators/workload-generate libexec/workload-*
 
-# ruff is a dev-only tool; not a runtime dep. A directory scan only picks up
-# .py files, so the extensionless scripts are named explicitly to be checked.
-#
-# Style/lint check with ruff (exits non-zero on findings)
+# Lint with ruff (dev-only); scripts named explicitly since they lack .py
 lint-ruff:
-  ruff check lib/ tests/ bin/workloadctl generators/workload-generate libexec/*
+  ruff check lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
 
-# mypy is a dev-only tool. It is noisy on this untyped stdlib CLI (argparse
-# attrs / JSON dicts type as Any | None); treat as advisory until a
-# [tool.mypy] config narrows the scope.
-#
-# Static type check with mypy (advisory)
+# Type-check lib/ with mypy (dev-only, advisory)
 typecheck:
   MYPYPATH=lib mypy lib/ --ignore-missing-imports
 
