@@ -10,8 +10,8 @@ from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     require_root,
-    restart_workload_service,
 )
+from service_runtime import restart_workload_service
 from substrate import (
     get_substrate,
     VMSubstrate,

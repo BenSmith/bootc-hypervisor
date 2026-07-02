@@ -28,10 +28,10 @@ from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     WorkloadUserNotFound,
-    restart_workload_service,
     require_root,
     toml_string,
 )
+from service_runtime import restart_workload_service
 
 
 # ---------------------------------------------------------------------------

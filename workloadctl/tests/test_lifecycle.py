@@ -463,7 +463,7 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             sub = ContainerSubstrate(cfg, manager)
             # Patch uid to avoid passwd lookup and restart to avoid systemctl
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
-                with patch('workloadctl_core.restart_workload_service', return_value=None):
+                with patch('substrate.restart_workload_service', return_value=None):
                     with patch.object(sub, '_pet_snapshot_and_remove') as mock_snap:
                         sub.reprovision(recreate=True)
             mock_snap.assert_called_once()
@@ -473,7 +473,7 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             manager = _make_manager(user_exists=True)
             sub = ContainerSubstrate(cfg, manager)
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
-                with patch('workloadctl_core.restart_workload_service', return_value=None):
+                with patch('substrate.restart_workload_service', return_value=None):
                     with patch.object(sub, '_pet_snapshot_and_remove') as mock_snap:
                         sub.reprovision(recreate=True)
             mock_snap.assert_not_called()
@@ -486,7 +486,7 @@ class TestContainerReprovisionsSnapshot(unittest.TestCase):
             manager = _make_manager(user_exists=True)
             sub = ContainerSubstrate(cfg, manager)
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
-                with patch('workloadctl_core.restart_workload_service', return_value=None):
+                with patch('substrate.restart_workload_service', return_value=None):
                     with patch.object(sub, '_pet_snapshot_and_remove') as mock_snap:
                         sub.reprovision(recreate=True)
             mock_snap.assert_not_called()

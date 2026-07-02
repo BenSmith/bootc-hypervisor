@@ -21,6 +21,7 @@ from workload_lib import (
     workload_config_dir,
 )
 from podman import Podman
+from service_runtime import manager_active
 from substrate import NotApplicable, get_substrate
 from workloadctl_core import (
     WorkloadConfig,
@@ -1128,12 +1129,7 @@ def cmd_health(args, manager: WorkloadManager):
     if user_exists:
         uid = config.uid
         expected_slice = config.config.get("resources", {}).get("slice", "workloads.slice")
-        r = subprocess.run(
-            ["systemctl", "is-active", f"user@{uid}.service"],
-            capture_output=True, text=True,
-        )
-        user_manager_active = r.returncode == 0
-        if user_manager_active:
+        if manager_active(uid):
             r2 = subprocess.run(
                 ["systemctl", "show", f"user@{uid}.service", "-p", "Slice", "--value"],
                 capture_output=True, text=True,
