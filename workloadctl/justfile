@@ -1,7 +1,5 @@
 #!/usr/bin/env just --justfile
 
-version := "0.1.0"
-
 # Run CLI-surface acceptance harness (all verbs, both substrates)
 test-cli target:
   pytest tests/cli_surface/ --target={{target}} -v
@@ -30,15 +28,27 @@ test-unit:
 test-integration:
   PYTHONPATH=lib python3 -m unittest tests.test_integration -v
 
-# Lint: check Python syntax
+# Run the unit suite under coverage.py (dev-only), print a per-file report
+coverage:
+  PYTHONPATH=lib python3 -m coverage run --source=lib,bin,generators,libexec -m unittest discover -s tests
+  python3 -m coverage report --sort=cover
+
+# As `coverage`, plus write the HTML report to htmlcov/
+coverage-html: coverage
+  python3 -m coverage html
+  @echo "HTML report: file://$(pwd)/htmlcov/index.html"
+
+# Lint: byte-compile every Python source (syntax check)
 lint:
-  python3 -m py_compile lib/workload_lib.py
-  python3 -m py_compile lib/podman.py
-  python3 -m py_compile generators/workload-generate
-  python3 -m py_compile bin/workloadctl
-  python3 -m py_compile libexec/workload-ensure-user
-  python3 -m py_compile libexec/workload-write-env
-  python3 -m py_compile libexec/workload-exporter
+  python3 -m py_compile lib/*.py bin/workloadctl generators/workload-generate libexec/workload-*
+
+# Lint with ruff (dev-only); scripts named explicitly since they lack .py
+lint-ruff:
+  ruff check lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
+
+# Type-check lib/ with mypy (dev-only, advisory)
+typecheck:
+  MYPYPATH=lib mypy lib/ --ignore-missing-imports
 
 # Lint all bundle Containerfiles with hadolint.
 # Intentionally suppressed:

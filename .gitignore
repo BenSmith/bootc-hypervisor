@@ -11,6 +11,13 @@ bootc-src
 rpm/rpm-output/
 workloadctl/rpmbuild/
 __pycache__/
+
+# Dev-only test tooling artifacts (coverage.py, mypy, ruff caches)
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 bin/cosy
 man/cosy.1
 .reference/
