@@ -527,6 +527,89 @@ def generate_umbrella_service(workload_name, container_names, slice_name, mode):
     ])
 
 
+def _gpu_device_args(gpu_vendor, gpu_spec):
+    """--device flags for the [devices].gpu convenience flag.
+
+    gpu = "nvidia"           → all GPUs, all DRM nodes
+    gpu = "nvidia:<spec>"    → one GPU; CDI injects only that card's DRM
+                                nodes, so the umbrella /dev/dri is omitted.
+    <spec> is any CDI device name from `nvidia-ctk cdi list`: an index
+    ("1") or a stable GPU UUID ("GPU-...").
+    """
+    if gpu_vendor == "amd":
+        return ["--device /dev/kfd", "--device /dev/dri"]
+    elif gpu_vendor == "nvidia":
+        if gpu_spec:
+            return [f"--device=nvidia.com/gpu={gpu_spec}"]
+        return ["--device=nvidia.com/gpu=all", "--device /dev/dri"]
+    elif gpu_vendor in ("intel", "nouveau"):
+        # nouveau (and Intel) expose the GPU through the standard DRM render
+        # node — no CDI / Container Toolkit involved.
+        return ["--device /dev/dri"]
+    return []
+
+
+def _health_check_args(container):
+    """--health-* flags from [container.health]."""
+    health = container.get("container", {}).get("health", {})
+    health_cmd = health.get("cmd", "")
+    if not health_cmd:
+        return []
+    args = [f"--health-cmd {dq(health_cmd)}"]
+    if "interval" in health:
+        args.append(f"--health-interval={health['interval']}")
+    if "timeout" in health:
+        args.append(f"--health-timeout={health['timeout']}")
+    if "retries" in health:
+        args.append(f"--health-retries={health['retries']}")
+    if "start_period" in health:
+        args.append(f"--health-start-period={health['start_period']}")
+    on_failure = health.get("on_failure", "none")
+    args.append(f"--health-on-failure={on_failure}")
+    return args
+
+
+def _secret_mount_args(container, container_name):
+    """--volume flags bind-mounting [[secrets.files]] credentials.
+
+    Credentials are decrypted by systemd to
+    /run/credentials/{container_name}.service/{credential_name}; in
+    multi-container modes that's the per-container service unit, not the
+    umbrella, so the bind-mount source must use container_name, not the
+    workload name.
+    """
+    service_name = f"{container_name}.service"
+    secrets_config = container.get("secrets", {})
+    secrets_files = secrets_config.get("files", [])
+
+    args = []
+    for file_spec in secrets_files:
+        credential_name = file_spec.get("credential")
+        container_path = file_spec.get("path")
+
+        if not credential_name or not container_path:
+            log_msg("WARNING: secrets.files entry missing 'credential' or 'path', skipping", level="warning")
+            continue
+
+        # Credential will be decrypted to /run/credentials/{service}/
+        source_path = f"/run/credentials/{service_name}/{credential_name}"
+
+        # Validate and default to read-only for security.
+        file_mode = file_spec.get("mode", "ro")
+        valid_modes = ["ro", "rw"]
+        if file_mode not in valid_modes:
+            log_msg(
+                f"WARNING: Invalid mode '{file_mode}' for credential '{credential_name}', "
+                f"must be 'ro' or 'rw'. Defaulting to 'ro'.",
+                level="warning"
+            )
+            file_mode = "ro"
+
+        args.append(f"--volume {dq(source_path)}:{dq(container_path)}:{file_mode}")
+        log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {file_mode})")
+    return args
+
+
 def generate_system_service(workload, container, user_name, uid, mode="single"):
     """Generate systemd system service for rootless podman execution.
 
@@ -757,28 +840,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         podman_args.append("--group-add=keep-groups")
 
     # GPU devices (convenience flag)
-    if gpu_vendor == "amd":
-        podman_args.extend([
-            "--device /dev/kfd",
-            "--device /dev/dri",
-        ])
-    elif gpu_vendor == "nvidia":
-        # gpu = "nvidia"           → all GPUs, all DRM nodes
-        # gpu = "nvidia:<spec>"    → one GPU; CDI injects only that card's DRM
-        #                            nodes, so the umbrella /dev/dri is omitted.
-        # <spec> is any CDI device name from `nvidia-ctk cdi list`: an index
-        # ("1") or a stable GPU UUID ("GPU-...").
-        if gpu_spec:
-            podman_args.append(f"--device=nvidia.com/gpu={gpu_spec}")
-        else:
-            podman_args.extend([
-                "--device=nvidia.com/gpu=all",
-                "--device /dev/dri",
-            ])
-    elif gpu_vendor in ("intel", "nouveau"):
-        # nouveau (and Intel) expose the GPU through the standard DRM render
-        # node — no CDI / Container Toolkit involved.
-        podman_args.append("--device /dev/dri")
+    podman_args.extend(_gpu_device_args(gpu_vendor, gpu_spec))
 
     # Generic device passthrough
     devices_config = container.get("devices", {})
@@ -909,36 +971,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # In multi-container modes the credential is loaded onto the per-container
     # service unit, so systemd decrypts it to /run/credentials/<container-unit>/.
     # Using the umbrella name here would point the bind-mount at the wrong dir.
-    service_name = f"{container_name}.service"
-    secrets_config = container.get("secrets", {})
-    secrets_files = secrets_config.get("files", [])
-
-    for file_spec in secrets_files:
-        credential_name = file_spec.get("credential")
-        container_path = file_spec.get("path")
-
-        if not credential_name or not container_path:
-            log_msg("WARNING: secrets.files entry missing 'credential' or 'path', skipping", level="warning")
-            continue
-
-        # Credential will be decrypted to /run/credentials/{service}/
-        source_path = f"/run/credentials/{service_name}/{credential_name}"
-
-        # Validate and default to read-only for security. Careful: this loop
-        # runs inside generate_system_service(), whose `mode` parameter is the
-        # workload mode — don't shadow it.
-        file_mode = file_spec.get("mode", "ro")
-        valid_modes = ["ro", "rw"]
-        if file_mode not in valid_modes:
-            log_msg(
-                f"WARNING: Invalid mode '{file_mode}' for credential '{credential_name}', "
-                f"must be 'ro' or 'rw'. Defaulting to 'ro'.",
-                level="warning"
-            )
-            file_mode = "ro"
-
-        podman_args.append(f"--volume {dq(source_path)}:{dq(container_path)}:{file_mode}")
-        log_msg(f"  Mounting credential '{credential_name}' to {container_path} (mode: {file_mode})")
+    podman_args.extend(_secret_mount_args(container, container_name))
 
     # HOST_IP is auto-detected by workload-ensure-user and written to the
     # EnvironmentFile; pass it into the container so configs can use it.
@@ -961,20 +994,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         podman_args.append(f"--env-file {dq(secrets_env_file)}")
 
     # Health checks — podman's native user-manager timer works under 1b (non-split)
-    health = container.get("container", {}).get("health", {})
-    health_cmd = health.get("cmd", "")
-    if health_cmd:
-        podman_args.append(f"--health-cmd {dq(health_cmd)}")
-        if "interval" in health:
-            podman_args.append(f"--health-interval={health['interval']}")
-        if "timeout" in health:
-            podman_args.append(f"--health-timeout={health['timeout']}")
-        if "retries" in health:
-            podman_args.append(f"--health-retries={health['retries']}")
-        if "start_period" in health:
-            podman_args.append(f"--health-start-period={health['start_period']}")
-        on_failure = health.get("on_failure", "none")
-        podman_args.append(f"--health-on-failure={on_failure}")
+    podman_args.extend(_health_check_args(container))
 
     podman_args.append(dq(image))
 
