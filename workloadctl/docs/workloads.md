@@ -1473,7 +1473,7 @@ sudo workloadctl secret export api-key
 # ✓ Exported credential 'api-key' to api-key.secret
 ```
 
-The output `.secret` file is encrypted with AES-256-CBC (PBKDF2 key derivation) and can be safely transferred to another machine via scp, USB drive, etc.
+The output `.secret` file is encrypted with AES-256-CBC using PBKDF2 (600,000 iterations) and carries an HMAC-SHA256 integrity tag, so tampering or truncation is detected on import (format v2; import still accepts legacy v1 blobs — see [ADR 004](adr/004-secret-export-versioned-crypto.md)). It can be safely transferred to another machine via scp, USB drive, etc.
 
 ```bash
 # Export to a specific path

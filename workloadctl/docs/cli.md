@@ -780,6 +780,8 @@ sudo workloadctl secret delete [--force] <name>
 
 Export an encrypted credential as a passphrase-protected portable file (`.secret`). The exported file is not TPM-bound and can be transferred to another machine.
 
+The blob uses a versioned format (v2): AES-256-CBC with PBKDF2 (600,000 iterations) plus an HMAC-SHA256 integrity tag, so a tampered or truncated file is detected on import. `secret import` still reads legacy v1 exports (see [ADR 004](adr/004-secret-export-versioned-crypto.md)).
+
 ```
 sudo workloadctl secret export [--output FILE] <name>
 ```
