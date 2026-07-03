@@ -52,8 +52,8 @@ lint:
 # tests/ and libexec/ scripts insert lib/ onto sys.path before importing
 # from it (no venv/package manager here), which ruff flags as E402
 # (import not at top of file) — that pattern is intentional.
-lint-ruff:
-  ruff check --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
+lint-ruff *args:
+  ruff check {{args}} --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
 
 # Type-check with mypy (dev-only, advisory). lib/ + tests/ run together
 # (--explicit-package-bases avoids a false "duplicate module" clash between

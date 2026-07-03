@@ -161,9 +161,11 @@ class TestCmdBackup(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
 
     def test_json_success_reports_backups(self):
-        import io, json
+        import io
+        import json
         from contextlib import redirect_stdout
-        cfg = mock.Mock(); cfg.name = "app"
+        cfg = mock.Mock()
+        cfg.name = "app"
         with mock.patch.object(cmd_backup, "WorkloadConfig", return_value=cfg), \
              mock.patch.object(cmd_backup, "_backup_one", return_value=999):
             out = io.StringIO()
@@ -176,7 +178,8 @@ class TestCmdBackup(unittest.TestCase):
     def test_failed_workload_exits_nonzero(self):
         import io
         from contextlib import redirect_stdout, redirect_stderr
-        cfg = mock.Mock(); cfg.name = "app"
+        cfg = mock.Mock()
+        cfg.name = "app"
         with mock.patch.object(cmd_backup, "WorkloadConfig", return_value=cfg), \
              mock.patch.object(cmd_backup, "_backup_one",
                                side_effect=cmd_backup.BackupError("nope")):
@@ -189,8 +192,10 @@ class TestCmdBackup(unittest.TestCase):
 class TestRestoreFlow(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.etc = self.tmp / "etc"; self.etc.mkdir()
-        self.var = self.tmp / "var"; self.var.mkdir()
+        self.etc = self.tmp / "etc"
+        self.etc.mkdir()
+        self.var = self.tmp / "var"
+        self.var.mkdir()
         self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
         self.enterContext(mock.patch.object(
@@ -218,7 +223,8 @@ class TestRestoreFlow(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
 
     def test_archive_without_toml_errors(self):
-        stage = self.tmp / "s1"; stage.mkdir()
+        stage = self.tmp / "s1"
+        stage.mkdir()
         (stage / "other.txt").write_text("x")
         archive = self.tmp / "a1.tar.zst"
         subprocess.run(["tar", "-C", str(stage), "--zstd", "-cf",
@@ -265,7 +271,8 @@ class TestCmdBackupAllMode(unittest.TestCase):
         # workload is touched, since --all fans out one archive per workload.
         clash = self.tmp / "notadir"
         clash.write_text("x")
-        cfg = mock.Mock(); cfg.name = "app"
+        cfg = mock.Mock()
+        cfg.name = "app"
         self.manager.get_all_configs.return_value = [cfg]
         import io
         from contextlib import redirect_stderr
@@ -278,8 +285,10 @@ class TestCmdBackupAllMode(unittest.TestCase):
 
     def test_all_output_directory_is_used_for_each_archive(self):
         out_dir = self.tmp / "backups"
-        cfg1 = mock.Mock(); cfg1.name = "app1"
-        cfg2 = mock.Mock(); cfg2.name = "app2"
+        cfg1 = mock.Mock()
+        cfg1.name = "app1"
+        cfg2 = mock.Mock()
+        cfg2.name = "app2"
         self.manager.get_all_configs.return_value = [cfg1, cfg2]
         seen_outputs = []
 
@@ -304,7 +313,8 @@ class TestCmdBackupAllMode(unittest.TestCase):
         # dir itself as the archive path.
         out_dir = self.tmp / "somedir"
         out_dir.mkdir()
-        cfg = mock.Mock(); cfg.name = "app"
+        cfg = mock.Mock()
+        cfg.name = "app"
         seen = {}
 
         def fake_backup_one(config, output, consistency, quiet=False):
@@ -323,8 +333,10 @@ class TestCmdBackupAllMode(unittest.TestCase):
         self.assertTrue(seen["output"].name.endswith(".tar.zst"))
 
     def test_all_mode_partial_failure_reports_and_exits_nonzero(self):
-        cfg1 = mock.Mock(); cfg1.name = "good"
-        cfg2 = mock.Mock(); cfg2.name = "bad"
+        cfg1 = mock.Mock()
+        cfg1.name = "good"
+        cfg2 = mock.Mock()
+        cfg2.name = "bad"
         self.manager.get_all_configs.return_value = [cfg1, cfg2]
 
         def fake_backup_one(config, output, consistency, quiet=False):
@@ -345,8 +357,10 @@ class TestCmdBackupAllMode(unittest.TestCase):
         self.assertIn("bad", err.getvalue())
 
     def test_json_mode_reports_failed_list(self):
-        cfg = mock.Mock(); cfg.name = "bad"
-        import io, json
+        cfg = mock.Mock()
+        cfg.name = "bad"
+        import io
+        import json
         from contextlib import redirect_stdout
         with mock.patch.object(cmd_backup, "WorkloadConfig", return_value=cfg), \
              mock.patch.object(cmd_backup, "_backup_one",
@@ -367,8 +381,10 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.etc = self.tmp / "etc"; self.etc.mkdir()
-        self.var = self.tmp / "var"; self.var.mkdir()
+        self.etc = self.tmp / "etc"
+        self.etc.mkdir()
+        self.var = self.tmp / "var"
+        self.var.mkdir()
         self.credstore = self.tmp / "credstore"
         self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
@@ -399,12 +415,14 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
         (stage / "workload.toml").write_text(f'[workload]\nname = "{name}"\n')
         members = ["workload.toml"]
         if cred_files:
-            cdir = stage / "credentials"; cdir.mkdir()
+            cdir = stage / "credentials"
+            cdir.mkdir()
             for fname, content in cred_files.items():
                 (cdir / fname).write_text(content)
             members.append("credentials")
         if data_files:
-            ddir = stage / "data"; ddir.mkdir()
+            ddir = stage / "data"
+            ddir.mkdir()
             for relpath, content in data_files.items():
                 p = ddir / relpath
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -508,7 +526,8 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
         # not have copied anything into dest_data.
         stage = Path(tempfile.mkdtemp(dir=self.tmp))
         (stage / "workload.toml").write_text('[workload]\nname = "goodapp"\n')
-        ddir = stage / "data"; ddir.mkdir()
+        ddir = stage / "data"
+        ddir.mkdir()
         (ddir / "evil").symlink_to("/etc")
         archive = stage.parent / "evil.tar.zst"
         subprocess.run(

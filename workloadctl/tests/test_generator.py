@@ -1987,7 +1987,7 @@ class TestGeneratorContainerFlags(unittest.TestCase):
         """)
         self.assertIn("--security-opt=seccomp=/custom.json", svc)
         # baseline is suppressed when the workload provides its own seccomp
-        self.assertNotIn(f"seccomp=", svc.replace("seccomp=/custom.json", ""))
+        self.assertNotIn("seccomp=", svc.replace("seccomp=/custom.json", ""))
 
     def test_privileged_emits_flag_and_warns(self):
         svc, result = self._gen("""
@@ -2303,7 +2303,6 @@ class TestGeneratorAutoMaps(unittest.TestCase):
     def test_extra_groups_maps_group_gid(self):
         import grp
         group = grp.getgrall()[0].gr_name
-        gid = grp.getgrnam(group).gr_gid
         svc = self._gen(f'extra_groups = ["{group}"]')
         self.assertNotIn("--userns=", svc)
         self.assertIn("--group-add=keep-groups", svc)

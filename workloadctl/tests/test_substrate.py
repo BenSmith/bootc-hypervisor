@@ -1847,7 +1847,7 @@ pull = "never"
         # then new_id call for change detection.
         pod.image_id.side_effect = ['', '', '', 'old-id', 'new-id']
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r, \
+             patch.object(_substrate_mod, 'restart_workload_service'), \
              patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
              patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
             result = substrate.reprovision()
@@ -2409,7 +2409,7 @@ class TestVmGuestIp(unittest.TestCase):
             (run_dir / 'bridge-managed').touch()
             lease_file = Path(d) / 'leases'
             lease_file.write_text("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
-            with patch('substrate.Path') as mock_path_cls:
+            with patch('substrate.Path'):
                 # Only patch the bridge-managed marker check and lease file path;
                 # simplest is to patch the two module-level Path constants directly.
                 pass

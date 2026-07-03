@@ -283,7 +283,6 @@ class DiagnoseTest(unittest.TestCase):
     def test_json_reports_failure(self):
         code, out = self._run(json_mode=True)
         self.assertEqual(code, 1)
-        payload = tomllib  # noqa: keep import used
         import json as _json
         data = _json.loads(out)
         self.assertFalse(data["passed"])
@@ -693,7 +692,6 @@ class CmdValidateTest(unittest.TestCase):
         )
         self.manager = mock.Mock()
         self.manager.get_all_configs.return_value = [WorkloadConfig("app")]
-        fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir="/x")
         self.enterContext(mock.patch("pwd.getpwnam", side_effect=KeyError))
         self.enterContext(mock.patch.object(
             cmd_admin.grp, "getgrnam", side_effect=KeyError))

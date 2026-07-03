@@ -1034,9 +1034,7 @@ class TestPreflightChecks(unittest.TestCase):
 class TestProvisionUser(unittest.TestCase):
     def test_new_user_allocates_uid_and_runs_sysusers(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with tempfile.TemporaryDirectory() as run_dir:
-                sysusers_dir = Path(run_dir) / "sysusers.d"
-                lock_dir = Path(run_dir) / "lock"
+            with tempfile.TemporaryDirectory():
                 with patch.object(cmd_lifecycle, 'Path', wraps=Path) as _:
                     pass
                 with patch('pwd.getpwnam', side_effect=KeyError):
@@ -1616,14 +1614,14 @@ class TestCmdRecreate(unittest.TestCase):
 
 class TestCmdReboot(unittest.TestCase):
     def test_reboot_user_missing_exits(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
             manager = MagicMock()
             manager.user_exists.return_value = False
             with self.assertRaises(SystemExit):
                 cmd_lifecycle.cmd_reboot(_ns(workload="test-wl"), manager)
 
     def test_reboot_calls_substrate_lifecycle(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
             manager = MagicMock()
             manager.user_exists.return_value = True
             sub = MagicMock()

@@ -17,7 +17,6 @@ test_cmd_interact_dispatch.py (cmd_exec/cmd_logs dispatch) and test_cmd_cp.py
 import argparse
 import io
 import os
-import stat
 import sys
 import tempfile
 import types
