@@ -16,17 +16,21 @@ Usage pattern:
 
 Capability matrix
 -----------------
-Each concrete substrate declares a frozenset ``PRIMITIVES`` naming the
-primitives it actually implements.  Optional primitives in the ABC base
-class auto-raise ``NotApplicable`` with a generated reason when the
-subclass does not list them in ``PRIMITIVES``.  This makes unsupported
-combinations structurally impossible to miss at author time.
+Optional primitives have a base-class default. ``resource_usage`` and
+``endpoints`` default to raising ``NotApplicable`` with a hand-written
+reason; a concrete substrate that supports one overrides the method
+directly. ``logs`` defaults to running the given journalctl argv (both
+substrates' service journals land on the host journal), so it's optional
+in the sense that a substrate *may* override it, not that it's normally
+unsupported. ``reprovision`` is always overridden by both concrete
+substrates (each has its own not-applicable conditions), so the base
+implementation exists only as a documented contract.
 
 Required primitives (always present, ``@abstractmethod``):
     liveness, gating_units, capture, exec, open_shell, lifecycle,
     rollback_targets, rollback_to
 
-Optional primitives (auto-raise ``NotApplicable`` when absent):
+Optional primitives (base-class default, override to support):
     resource_usage, logs, endpoints, reprovision
 """
 
@@ -269,16 +273,6 @@ def _accessible_at_config(config) -> list:
     return result
 
 
-# Names of optional primitives — those for which a substrate may declare
-# non-support by omitting them from PRIMITIVES.  The base class provides a
-# default implementation for each that auto-raises NotApplicable.
-_OPTIONAL_PRIMITIVES = frozenset({
-    "resource_usage",
-    "endpoints",
-    "reprovision",
-})
-
-
 class Substrate(ABC):
     """Per-substrate primitive port (step-3 narrow waist).
 
@@ -286,37 +280,17 @@ class Substrate(ABC):
     Substrate-invariant verbs (create, list, validate, secret, …) bypass
     this layer entirely.
 
-    Each concrete subclass declares::
-
-        PRIMITIVES: frozenset[str]
-
-    listing the optional primitives it actually implements.  Optional
-    primitives absent from ``PRIMITIVES`` auto-raise ``NotApplicable`` with an
-    auto-generated reason — no hand-maintained per-method guard needed.
-
     Required primitives (abstract, always present):
         liveness, gating_units, capture, exec, open_shell,
         lifecycle, rollback_targets, rollback_to, control
 
-    Optional primitives (auto-raise when absent from PRIMITIVES):
-        resource_usage, endpoints, reprovision
+    Optional primitives (base-class default; override to support):
+        resource_usage, logs, endpoints, reprovision
     """
-
-    # Concrete subclasses override this.
-    PRIMITIVES: frozenset[str] = frozenset()
 
     def __init__(self, config, manager):
         self.config = config
         self.manager = manager
-
-    def _check_primitive(self, name: str) -> None:
-        """Raise NotApplicable if *name* is not in this substrate's PRIMITIVES."""
-        if name not in self.PRIMITIVES:
-            substrate_kind = "containers" if not self.config.is_vm else "VMs"
-            raise NotApplicable(
-                f"{name}: not applicable for {substrate_kind} "
-                f"(no {name} primitive)"
-            )
 
     # ── required primitives (abstract) ───────────────────────────────────────
 
@@ -450,7 +424,7 @@ class Substrate(ABC):
         """
         ...
 
-    # ── optional primitives (auto-raise when absent from PRIMITIVES) ──────────
+    # ── optional primitives (base default; override to support) ──────────────
 
     def resource_usage(
         self,
@@ -468,7 +442,11 @@ class Substrate(ABC):
         Raises NotApplicable if the substrate does not expose resource metrics
         through this primitive.
         """
-        self._check_primitive("resource_usage")
+        substrate_kind = "VMs" if self.config.is_vm else "containers"
+        raise NotApplicable(
+            f"resource_usage: not applicable for {substrate_kind} "
+            f"(no resource_usage primitive)"
+        )
 
     def logs(self, cmd_parts: list[str]) -> None:
         """Stream workload logs using the given journalctl argv.
@@ -488,10 +466,11 @@ class Substrate(ABC):
 
         Raises NotApplicable if the substrate cannot determine endpoints.
         """
-        self._check_primitive("endpoints")
-        # Reaching here means the primitive is declared but the subclass didn't
-        # override this stub — a programming error, not a runtime condition.
-        raise NotImplementedError(f"{type(self).__name__} must override endpoints()")
+        substrate_kind = "VMs" if self.config.is_vm else "containers"
+        raise NotApplicable(
+            f"endpoints: not applicable for {substrate_kind} "
+            f"(no endpoints primitive)"
+        )
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         """Update / reprovision the workload to its latest version.
@@ -509,7 +488,10 @@ class Substrate(ABC):
         VM substrates: rebuild the system disk and restart.  Returns None
         (no verification phase).  Raises ProvisionFailed on build/restart error.
         """
-        self._check_primitive("reprovision")
+        # Both concrete substrates override this with their own
+        # not-applicable conditions (e.g. pull=never); reaching the base
+        # implementation is a programming error, not a runtime condition.
+        raise NotImplementedError(f"{type(self).__name__} must override reprovision()")
 
 
 # ---------------------------------------------------------------------------
@@ -517,13 +499,11 @@ class Substrate(ABC):
 # ---------------------------------------------------------------------------
 
 class ContainerSubstrate(Substrate):
-    """Substrate for single / pod / bridge container workloads."""
+    """Substrate for single / pod / bridge container workloads.
 
-    PRIMITIVES: frozenset[str] = frozenset({
-        "resource_usage",
-        "endpoints",
-        "reprovision",
-    })
+    Implements the optional primitives resource_usage, endpoints,
+    reprovision (see the overrides below); logs uses the base default.
+    """
 
     # ── required primitives ───────────────────────────────────────────────────
 
@@ -980,12 +960,12 @@ class ContainerSubstrate(Substrate):
 # ---------------------------------------------------------------------------
 
 class VMSubstrate(Substrate):
-    """Substrate for VM workloads ([vm] section in TOML)."""
+    """Substrate for VM workloads ([vm] section in TOML).
 
-    PRIMITIVES: frozenset[str] = frozenset({
-        "reprovision",
-    })
-    # VMs do not implement: resource_usage, logs, endpoints
+    Overrides reprovision (see below); resource_usage and endpoints use the
+    base-class NotApplicable defaults (VMs implement neither), and logs uses
+    the base default (the VM's QEMU service journal is on the host journal).
+    """
 
     # ── required primitives ───────────────────────────────────────────────────
 
