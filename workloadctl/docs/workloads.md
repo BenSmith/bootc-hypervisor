@@ -2166,6 +2166,21 @@ With `network.mode = "pasta"` (default):
 
 Consider firewall rules for untrusted workloads.
 
+### VM SSH host-key verification
+
+`workloadctl exec`/`ssh` into a VM connect with `StrictHostKeyChecking=no` (host keys
+are not verified or pinned). This is an accepted tradeoff on the default managed
+bridge (`_workload-br`): it is an isolated, host-local NAT segment where the guest is
+reachable only from the host, so there is no meaningful man-in-the-middle position.
+
+The tradeoff is **weaker if you attach a VM to a shared LAN bridge** (e.g.
+`[vm.network].bridge = "br0"`): on a LAN, an unverified host key means a spoofed guest
+on the same segment could be connected to transparently. Each workload already has a
+generated SSH keypair, so known-hosts pinning is a viable future hardening for the
+LAN-bridge case; until then, prefer the managed NAT bridge for anything sensitive, or
+verify the guest's identity out of band. (Recorded as decision D4 in the 2026-07 code
+review: keep the current behavior, document the caveat.)
+
 ### Block Device Access
 
 **⚠️ WARNING:** Block device access grants low-level disk access and can:
