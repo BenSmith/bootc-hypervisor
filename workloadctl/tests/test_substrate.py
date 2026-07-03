@@ -225,25 +225,27 @@ class TestContainerBackupConsistency(unittest.TestCase):
                 return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_cold_passes_no_stop_false(self):
-        """consistency='cold' calls _backup_container with no_stop=False."""
+        """consistency='cold' calls _backup_impl with no_stop=False, vm=False."""
         config = self._make_config()
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=10) as mock_bc:
+            output.write_bytes(b'x' * 10)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='cold')
-        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 10)
 
     def test_crash_passes_no_stop_true(self):
-        """consistency='crash' calls _backup_container with no_stop=True (live copy)."""
+        """consistency='crash' calls _backup_impl with no_stop=True (live copy)."""
         config = self._make_config()
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=20) as mock_bc:
+            output.write_bytes(b'x' * 20)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='crash')
-        mock_bc.assert_called_once_with(config, output, no_stop=True, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=True, quiet=False, vm=False)
         self.assertEqual(result, 20)
 
     def test_default_consistency_is_cold(self):
@@ -252,9 +254,10 @@ class TestContainerBackupConsistency(unittest.TestCase):
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=5) as mock_bc:
+            output.write_bytes(b'x' * 5)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output)
-        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 5)
 
 
@@ -2300,7 +2303,7 @@ image = "example.com/guest:latest"
         mock_rt.assert_called_once_with(targets[-1])
 
 
-# ── _backup_impl / _backup_container / _backup_vm / _print_backup_size ───────
+# ── _backup_impl / ContainerSubstrate.capture / _backup_vm / _print_backup_size
 
 class TestBackupImplAndHelpers(unittest.TestCase):
     """_backup_impl() reads the workload TOML via workload_config_path(name) at
@@ -2321,6 +2324,8 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_backup_container_writes_tar_and_prints_size(self):
+        """ContainerSubstrate.capture() (cold) drives _backup_impl directly —
+        no intermediate _backup_container delegation (B9)."""
         config = self._make_config()
 
         def fake_run(cmd, **kw):
@@ -2337,7 +2342,7 @@ class TestBackupImplAndHelpers(unittest.TestCase):
                  patch('subprocess.run', side_effect=fake_run), \
                  patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
                  patch('sys.stdout', buf):
-                size = _substrate_mod._backup_container(config, output, no_stop=False, quiet=False)
+                size = ContainerSubstrate(config, None).capture(output, consistency='cold', quiet=False)
         self.assertEqual(size, 42)
         self.assertIn('Backup:', buf.getvalue())
 

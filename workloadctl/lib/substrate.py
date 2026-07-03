@@ -622,9 +622,16 @@ class ContainerSubstrate(Substrate):
         consistency: str = "cold",
         quiet: bool = False,
     ) -> int:
-        # cold → stop service before copy; crash → copy while running (no stop).
+        """Create a backup archive.  Returns archive size in bytes.
+
+        cold → stop service before copy; crash → copy while running (no stop).
+        """
         no_stop = consistency == "crash"
-        return _backup_container(self.config, output, no_stop=no_stop, quiet=quiet)
+        _backup_impl(self.config, output, no_stop=no_stop, quiet=quiet, vm=False)
+        size = output.stat().st_size
+        if not quiet:
+            _print_backup_size(output, size)
+        return size
 
     # ── backup primitives ─────────────────────────────────────────────────────
 
@@ -1341,15 +1348,6 @@ def get_substrate(config, manager) -> Substrate:
 # ---------------------------------------------------------------------------
 # Shared backup helpers
 # ---------------------------------------------------------------------------
-
-
-def _backup_container(config, output: Path, *, no_stop: bool, quiet: bool) -> int:
-    """Backup a container workload.  Returns archive size in bytes."""
-    _backup_impl(config, output, no_stop=no_stop, quiet=quiet, vm=False)
-    size = output.stat().st_size
-    if not quiet:
-        _print_backup_size(output, size)
-    return size
 
 
 def _backup_vm(config, output: Path, *, quiet: bool) -> int:
