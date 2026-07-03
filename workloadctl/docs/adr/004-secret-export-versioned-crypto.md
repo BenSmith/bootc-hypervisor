@@ -1,8 +1,8 @@
 # ADR 004: `secret export` uses a versioned, integrity-protected format
 
-**Status:** **Decided** 2026-07-03 (code review 2026-07 follow-up, item D5).
-Implementation pending — carded as B14 in
-`docs/wip/code-review-2026-07-open-items.md`.
+**Status:** **Implemented** 2026-07-03 (code review 2026-07 follow-up, item D5;
+carded as B14). `secret export` writes v2 (AES-256-CBC, pbkdf2 600k iters,
+encrypt-then-HMAC-SHA256); `import` detects and reads both v1 and v2.
 
 **Date:** 2026-07-03.
 

@@ -1,8 +1,9 @@
 # ADR 003: VM rollback is non-destructive (rotate, don't consume)
 
-**Status:** **Decided** 2026-07-03 (code review 2026-07 follow-up, item D2).
-Implementation pending — carded as B17 in
-`docs/wip/code-review-2026-07-open-items.md`.
+**Status:** **Implemented** 2026-07-03 (code review 2026-07 follow-up, item D2).
+Implemented 2026-07-03 (carded as B17) — `VMSubstrate.rollback_to` rotates the
+current disk out to a new generation before swapping the target in; `rollback_keep`
+prunes the rotated-out disk like any other generation.
 
 **Date:** 2026-07-03.
 

@@ -1,8 +1,9 @@
 # ADR 002: VM managed-bridge network config is host-level, not per-VM
 
-**Status:** **Decided** 2026-07-03 (code review 2026-07 follow-up, item D1).
-Implementation pending — carded as B16 in
-`docs/wip/code-review-2026-07-open-items.md`.
+**Status:** **Implemented** 2026-07-03 (code review 2026-07 follow-up, item D1;
+carded as B16). `managed_bridge_params` in `workload_lib.py` derives the gateway,
+CIDR, and DHCP range from `WORKLOADCTL_VM_BRIDGE_SUBNET`; per-VM subnet/dns are
+rejected.
 
 **Date:** 2026-07-03.
 
