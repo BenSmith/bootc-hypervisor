@@ -284,7 +284,11 @@ def _provision_user(config: WorkloadConfig):
 
     # Look up existing UID or allocate the next free one in the workload range.
     # Flock matches /run/lock/workload-subid.lock in workload-ensure-user so
-    # concurrent enables don't race on the same UID slot.
+    # concurrent enables don't race on the same UID slot. The lock MUST span
+    # allocation *through* systemd-sysusers: get_next_uid() dedupes against
+    # /etc/passwd (plus a per-process set), so the picked UID isn't visible to a
+    # concurrent enable until sysusers has created the user. Releasing after
+    # allocation (as before) let two enables pick the same free UID.
     _subid_lock = Path("/run/lock/workload-subid.lock")
     _subid_lock.parent.mkdir(parents=True, exist_ok=True)
     with open(_subid_lock, "w") as _lock_fd:
@@ -294,23 +298,24 @@ def _provision_user(config: WorkloadConfig):
         except KeyError:
             uid = get_next_uid()
 
-    # Write a temporary sysusers config (the generator creates the persistent
-    # copy at boot in /run/systemd/system/, but enable runs before boot)
-    sysusers_lines = [
-        f"# Workload user for {config.name}",
-        f'u {user_name} {uid} "{config.name} workload" {home_dir}',
-    ]
-    if config.is_vm:
-        sysusers_lines.append(f"m {user_name} kvm")
-    for group in extra_groups:
-        sysusers_lines.append(f"m {user_name} {group}")
+        # Write a temporary sysusers config (the generator creates the
+        # persistent copy at boot in /run/systemd/system/, but enable runs
+        # before boot)
+        sysusers_lines = [
+            f"# Workload user for {config.name}",
+            f'u {user_name} {uid} "{config.name} workload" {home_dir}',
+        ]
+        if config.is_vm:
+            sysusers_lines.append(f"m {user_name} kvm")
+        for group in extra_groups:
+            sysusers_lines.append(f"m {user_name} {group}")
 
-    sysusers_dir = Path("/run/sysusers.d")
-    sysusers_dir.mkdir(parents=True, exist_ok=True)
-    sysusers_file = sysusers_dir / f"workload-{config.name}.conf"
-    sysusers_file.write_text("\n".join(sysusers_lines) + "\n")
+        sysusers_dir = Path("/run/sysusers.d")
+        sysusers_dir.mkdir(parents=True, exist_ok=True)
+        sysusers_file = sysusers_dir / f"workload-{config.name}.conf"
+        sysusers_file.write_text("\n".join(sysusers_lines) + "\n")
 
-    subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
+        subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
 
     print("  Configuring workload user...")
     subprocess.run(["/usr/libexec/workloadctl/workload-ensure-user", config.name], check=True)
@@ -1164,8 +1169,13 @@ def cmd_cleanup(args, manager: WorkloadManager):
             # orphaned workload dir (`workloadctl backup` writes here).
             if d == workloads_base / BACKUP_DIR.name:
                 continue
+            # A dir with a live config but no user yet is NOT an orphan: the
+            # documented recovery flow (pre-flight failed -> stage required
+            # files in the dir -> re-run enable) leaves exactly that state, and
+            # rmtree'ing it would destroy operator-staged data. Mirror the
+            # configured_names guard used for orphan users above.
             expected_user = workload_username(d.name)
-            if expected_user not in existing_users:
+            if expected_user not in existing_users and d.name not in configured_names:
                 orphaned_dirs.append(d)
 
     if args.json and not apply:

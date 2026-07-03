@@ -273,6 +273,35 @@ class TestValidation(unittest.TestCase):
         validate_workload_name("a" * MAX_NAME_LENGTH)
 
 
+class TestVmNetworkValidation(unittest.TestCase):
+    """[vm.network].subnet/.dns are pinned to IP literals so they can't inject
+    shell metacharacters into the generated bridge unit (2026-07 review)."""
+
+    def _cfg(self, **network):
+        return {"workload": {"name": "v"},
+                "vm": {"image": "example/x:latest", "network": network}}
+
+    def _net_errors(self, **network):
+        return [e for e in workload_lib.validate_vm_config(self._cfg(**network))
+                if "network" in e]
+
+    def test_valid_subnet_and_dns_accepted(self):
+        self.assertEqual(
+            self._net_errors(subnet="10.100.0.0/24", dns=["1.1.1.1", "8.8.8.8"]), [])
+
+    def test_absent_network_ok(self):
+        self.assertEqual(self._net_errors(), [])
+
+    def test_bad_subnet_rejected(self):
+        self.assertTrue(self._net_errors(subnet="10.100.0.0/24; rm -rf /"))
+        self.assertTrue(self._net_errors(subnet="not-a-cidr"))
+
+    def test_bad_dns_rejected(self):
+        self.assertTrue(self._net_errors(dns=["1.1.1.1", "$(reboot)"]))
+        self.assertTrue(self._net_errors(dns="1.1.1.1"))   # must be a list
+        self.assertTrue(self._net_errors(dns=[123]))        # int not a literal
+
+
 class TestSelinuxIdentifiers(unittest.TestCase):
     def test_simple_name(self):
         self.assertEqual(selinux_module_name("alloy"), "wl_alloy")

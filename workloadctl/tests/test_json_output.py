@@ -818,6 +818,25 @@ class TestCleanupJson(unittest.TestCase):
                         data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
 
+    def test_configured_dir_without_user_not_orphan(self):
+        # Regression for the 2026-07 review: a workload whose config is present
+        # but whose _wl- user was never created (the documented "pre-flight
+        # failed -> stage files -> re-run enable" recovery state) must NOT be
+        # reported as an orphan dir, or --apply would rmtree operator-staged
+        # data. test-wl is configured by _WorkloadDir; only its dir + an
+        # unrelated orphan exist, no matching user.
+        with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
+            base = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+            (base / 'test-wl').mkdir()          # configured, user-less
+            (base / 'orphan').mkdir()           # genuinely orphaned
+            args = _args(json=True, apply=False)
+            with patch.object(cmd_lifecycle, 'require_root'):
+                with patch('pwd.getpwall', return_value=[]):
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
+                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+        self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
+
     @staticmethod
     def _semodule_l(modules):
         """side_effect for subprocess.run that fakes `semodule -l`."""

@@ -45,6 +45,7 @@ from pathlib import Path
 
 from workload_lib import (
     auto_detect_credentials,
+    CREDSTORE_DIR,
     QMPClient,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
@@ -1257,9 +1258,6 @@ def get_substrate(config, manager) -> Substrate:
 # Shared backup helpers
 # ---------------------------------------------------------------------------
 
-# Credentials directory (matches workload-ensure-user)
-CREDSTORE_DIR = Path("/etc/credstore")
-
 
 def _backup_container(config, output: Path, *, no_stop: bool, quiet: bool) -> int:
     """Backup a container workload.  Returns archive size in bytes."""
@@ -1441,11 +1439,18 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
             else:
                 (staging / "data").mkdir()
 
+            # Backups hold the precious data/ tree and credential blobs, so
+            # keep them root-only. Lock the dir to 0700 *before* tar writes so
+            # the archive (created with the default umask, typically 0644) is
+            # never traversable by non-root during the write window, then pin
+            # the archive itself to 0600.
             output.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(output.parent, 0o700)
             subprocess.run(
                 ["tar", "-C", str(staging), "-cf", str(output), "--zstd", "."],
                 check=True,
             )
+            os.chmod(output, 0o600)
     finally:
         if service_was_active and not no_stop:
             if not quiet:

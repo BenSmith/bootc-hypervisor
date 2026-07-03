@@ -2310,6 +2310,18 @@ class TestBackupImplAndHelpers(unittest.TestCase):
                 _substrate_mod._backup_impl(config, output, no_stop=True, quiet=False, vm=False)
         self.assertIn('not found', buf.getvalue())
 
+    def test_credstore_dir_is_shared_and_encrypted(self):
+        # Regression for the 2026-07 review: substrate carried a divergent
+        # CREDSTORE_DIR = /etc/credstore while secrets are created/loaded from
+        # /etc/credstore.encrypted, so backup captured nothing. Unit tests that
+        # patch CREDSTORE_DIR to a temp dir can't catch that divergence — pin
+        # the production default and that all consumers share one constant.
+        import cmd_backup
+        self.assertEqual(workload_lib.CREDSTORE_DIR,
+                         Path('/etc/credstore.encrypted'))
+        self.assertIs(_substrate_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(cmd_backup.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+
     def test_print_backup_size_formats_bytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):

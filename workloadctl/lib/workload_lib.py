@@ -38,6 +38,12 @@ def workload_config_dir() -> Path:
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
 
+# systemd-creds credential store. Secrets are created here (`workloadctl secret`),
+# loaded from here by the generator, and decrypted at runtime by
+# workload-ensure-user. Single source of truth so backup/restore/rotate can't
+# drift onto the wrong path (the plain /etc/credstore is only a legacy fallback).
+CREDSTORE_DIR = Path("/etc/credstore.encrypted")
+
 # Shipped bundle control-file tree (Containerfile/build.sh/setup.sh/policy.cil),
 # keyed by `[workload] bundle`. Env-overridable so the control-file resolver can
 # be unit-tested against a temp /usr tree. The operator override leg lives under
@@ -596,6 +602,43 @@ def validate_vm_config(config: dict) -> list[str]:
             f"[vm.network].bridge {bridge!r} is not a valid interface name "
             "(letters/digits/_/-, max 15 chars)"
         )
+
+    # [vm.network].subnet / .dns are interpolated into the bridge unit's
+    # `bash -c '…'` lines (ip addr / nft rules / dnsmasq --server). Root-authored
+    # so not an escalation, but pin them the way `bridge` is pinned: subnet to a
+    # parseable CIDR, dns to IP-address literals. This keeps shell metacharacters
+    # out of the generated unit entirely.
+    import ipaddress
+    net_cfg = vm.get("network", {})
+    subnet = net_cfg.get("subnet")
+    if subnet is not None:
+        if not isinstance(subnet, str):
+            errors.append(f"[vm.network].subnet must be a CIDR string, got {subnet!r}")
+        else:
+            try:
+                ipaddress.ip_network(subnet, strict=False)
+            except ValueError:
+                errors.append(f"[vm.network].subnet {subnet!r} is not a valid CIDR")
+
+    dns = net_cfg.get("dns")
+    if dns is not None:
+        if not isinstance(dns, list):
+            errors.append(f"[vm.network].dns must be a list of IP addresses, got {dns!r}")
+        else:
+            for server in dns:
+                # str-only: ip_address() also accepts ints, but the generator
+                # emits the value verbatim into --server=<s>, so require a literal.
+                if not isinstance(server, str):
+                    errors.append(
+                        f"[vm.network].dns entry {server!r} must be an IP-address string"
+                    )
+                    continue
+                try:
+                    ipaddress.ip_address(server)
+                except ValueError:
+                    errors.append(
+                        f"[vm.network].dns entry {server!r} is not a valid IP address"
+                    )
 
     # [vm.cloud_init] — optional override of the seed user-data.
     ci = vm.get("cloud_init", {})
