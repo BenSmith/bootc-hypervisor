@@ -1153,19 +1153,57 @@ class VMSubstrate(Substrate):
             for g in gens
         ]
 
+    @staticmethod
+    def _prune_generations(home_dir: Path, keep: int, exempt: int) -> None:
+        """Keep at most `keep` generations older than `exempt`, matching the
+        update-path rotation (rotate_generations in workload-vm-build-disk):
+        `exempt` (the freshly rotated-out disk) is always retained as the primary
+        restore point, so `keep + 1` gen files survive in total."""
+        gens = sorted(
+            int(p.suffix[5:])
+            for p in home_dir.glob("system.qcow2.gen-*")
+            if p.suffix[5:].isdigit() and int(p.suffix[5:]) != exempt
+        )
+        for gen_n in (gens[:-keep] if len(gens) > keep else []):
+            print(f"  Pruning old generation: system.qcow2.gen-{gen_n}")
+            (home_dir / f"system.qcow2.gen-{gen_n}").unlink(missing_ok=True)
+
     def rollback_to(self, target: dict) -> None:
-        """Apply a single VM rollback target from rollback_targets()."""
+        """Apply a single VM rollback target from rollback_targets().
+
+        Non-destructive (ADR 003): before swapping the target generation in,
+        rotate the CURRENT system.qcow2 out to a new generation so the
+        pre-rollback state survives and a roll-forward is possible — mirroring
+        container rollback, which keeps both images. The rotated-out disk is
+        pruned by rollback_keep like any other generation.
+        """
         home_dir = self.config.home_dir
         system_disk = home_dir / "system.qcow2"
         gen_path = Path(target["path"])
         gen = target["gen"]
+        rollback_keep = self.config.config.get("vm", {}).get("rollback_keep", 2)
         print(f"Rolling back VM '{self.config.name}':")
-        print(f"  system.qcow2.gen-{gen} → system.qcow2")
         # Stop the VM before swapping disks: QEMU holds the active qcow2 open,
         # and renaming a file out from under it leaves the running guest writing
         # to an unlinked inode while the new disk is mounted by the next start.
         subprocess.run(["systemctl", "stop", self.config.service_name], check=False)
+        # Rotate the current disk out to a fresh generation (highest number =
+        # newest) so rolling back is itself reversible.
+        rotated_gen = None
+        if system_disk.exists():
+            existing = [
+                int(p.suffix[5:])
+                for p in home_dir.glob("system.qcow2.gen-*")
+                if p.suffix[5:].isdigit()
+            ]
+            rotated_gen = (max(existing) + 1) if existing else 1
+            rotated = home_dir / f"system.qcow2.gen-{rotated_gen}"
+            print(f"  system.qcow2 → {rotated.name} (pre-rollback state preserved)")
+            system_disk.rename(rotated)
+        print(f"  system.qcow2.gen-{gen} → system.qcow2")
         gen_path.replace(system_disk)
+        if rotated_gen is not None:
+            self._prune_generations(home_dir, rollback_keep, exempt=rotated_gen)
         subprocess.run(["systemctl", "start", self.config.service_name], check=True)
         print(f"✓ Rolled back {self.config.name} to generation {gen}")
 

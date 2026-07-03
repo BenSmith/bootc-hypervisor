@@ -1220,6 +1220,55 @@ class TestVMRollbackTargets(unittest.TestCase):
         self.assertTrue(start_cmds, "start should be called after swapping disk")
         self.assertFalse(gen_path.exists(), "gen file should be renamed/removed after rollback_to")
 
+    def _rollback(self, home, target, config):
+        buf = io.StringIO()
+        with patch.object(type(config), 'home_dir',
+                          new_callable=lambda: property(lambda self: home)), \
+             patch('subprocess.run', return_value=_ok()), \
+             patch('sys.stdout', buf):
+            VMSubstrate(config, None).rollback_to(target)
+
+    def test_rollback_is_non_destructive(self):
+        # ADR 003: rolling back preserves the pre-rollback disk as a new
+        # generation so a roll-forward is possible.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            (home / "system.qcow2.gen-1").write_bytes(b"GEN1")
+            (home / "system.qcow2.gen-2").write_bytes(b"GEN2")
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            # Target became the active disk.
+            self.assertEqual((home / "system.qcow2").read_bytes(), b"GEN1")
+            # Pre-rollback disk survived as a new (highest) generation, gen-3.
+            self.assertTrue((home / "system.qcow2.gen-3").exists())
+            self.assertEqual((home / "system.qcow2.gen-3").read_bytes(), b"CURRENT")
+            # Roll-forward is possible: the preserved disk is a rollback target.
+            with patch.object(type(config), 'home_dir',
+                              new_callable=lambda: property(lambda self: home)):
+                gens = [t['gen'] for t in VMSubstrate(config, None).rollback_targets()]
+            self.assertIn(3, gens)
+
+    def test_rollback_respects_rollback_keep(self):
+        # rollback_keep (default 2) still bounds the generation count; the
+        # rotated-out disk is pruned like any other generation.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            for n in (1, 2, 3, 4):
+                (home / f"system.qcow2.gen-{n}").write_bytes(f"GEN{n}".encode())
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            remaining = sorted(
+                int(p.suffix[5:]) for p in home.glob("system.qcow2.gen-*"))
+        # keep=2 older + the exempt rotated-out gen-5 = 3 total; oldest (gen-2)
+        # pruned. gen-1 was consumed as the active disk.
+        self.assertEqual(remaining, [3, 4, 5])
+
 
 # ── lifecycle() primitive ──────────────────────────────────────────────────────
 
