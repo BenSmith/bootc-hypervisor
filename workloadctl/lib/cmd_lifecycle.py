@@ -31,8 +31,7 @@ from workload_lib import (
     workload_username,
     workload_root_dir,
     RUN_SYSTEMD_SYSTEM,
-    virtiofs_tag,
-    parse_volume_spec,
+    virtiofs_tags,
     SUBID_LOCK,
 )
 import imagebuild
@@ -618,8 +617,8 @@ def _workload_run_files(config: WorkloadConfig) -> list[Path]:
     ]
     if config.is_vm:
         files.append(run / f"workload-{name}-build.service")
-        for i, vol_spec in enumerate(config.config.get("vm", {}).get("volumes", [])):
-            tag = virtiofs_tag(parse_volume_spec(vol_spec)[1], i)
+        # Collision-safe tags, same set the generator emitted (B3).
+        for tag in virtiofs_tags(config.config.get("vm", {}).get("volumes", [])):
             files.append(run / f"workload-{name}-virtiofs-{tag}.service")
     else:
         # cgroup-placement drop-in (containers only; VMs have none). The path is

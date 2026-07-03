@@ -274,8 +274,8 @@ class TestValidation(unittest.TestCase):
 
 
 class TestVmNetworkValidation(unittest.TestCase):
-    """[vm.network].subnet/.dns are pinned to IP literals so they can't inject
-    shell metacharacters into the generated bridge unit (2026-07 review)."""
+    """The managed bridge's subnet/DNS are host-level (ADR 002), no longer
+    per-VM: [vm.network].subnet/.dns are removed and rejected."""
 
     def _cfg(self, **network):
         return {"workload": {"name": "v"},
@@ -285,21 +285,21 @@ class TestVmNetworkValidation(unittest.TestCase):
         return [e for e in workload_lib.validate_vm_config(self._cfg(**network))
                 if "network" in e]
 
-    def test_valid_subnet_and_dns_accepted(self):
-        self.assertEqual(
-            self._net_errors(subnet="10.100.0.0/24", dns=["1.1.1.1", "8.8.8.8"]), [])
-
     def test_absent_network_ok(self):
         self.assertEqual(self._net_errors(), [])
 
-    def test_bad_subnet_rejected(self):
-        self.assertTrue(self._net_errors(subnet="10.100.0.0/24; rm -rf /"))
-        self.assertTrue(self._net_errors(subnet="not-a-cidr"))
+    def test_bridge_only_still_ok(self):
+        self.assertEqual(self._net_errors(bridge="br0"), [])
 
-    def test_bad_dns_rejected(self):
-        self.assertTrue(self._net_errors(dns=["1.1.1.1", "$(reboot)"]))
-        self.assertTrue(self._net_errors(dns="1.1.1.1"))   # must be a list
-        self.assertTrue(self._net_errors(dns=[123]))        # int not a literal
+    def test_per_vm_subnet_rejected(self):
+        errs = self._net_errors(subnet="10.100.0.0/24")
+        self.assertTrue(errs)
+        self.assertIn("host-level", errs[0])
+
+    def test_per_vm_dns_rejected(self):
+        errs = self._net_errors(dns=["1.1.1.1"])
+        self.assertTrue(errs)
+        self.assertIn("host-level", errs[0])
 
 
 class TestSelinuxIdentifiers(unittest.TestCase):
@@ -615,6 +615,71 @@ class TestVirtiofsTag(unittest.TestCase):
         # from the same guest path or virtiofs mounts won't match.
         for guest in ("/data", "/var/lib/x", "/srv/share-one"):
             self.assertEqual(virtiofs_tag(guest), virtiofs_tag(guest, 99))
+
+
+class TestVirtiofsTags(unittest.TestCase):
+    """virtiofs_tags() disambiguates tags that collide after sanitize+truncate
+    so each volume gets a distinct sidecar unit / chardev tag (B3)."""
+
+    def test_distinct_paths_keep_base_tags(self):
+        self.assertEqual(
+            workload_lib.virtiofs_tags(["/data:/data", "/logs:/logs"]),
+            ["data", "logs"])
+
+    def test_sanitize_collision_is_disambiguated(self):
+        # "/a b" and "/a$b" both sanitize to "a-b" — must not collide.
+        tags = workload_lib.virtiofs_tags(["/host0:/a b", "/host1:/a$b"])
+        self.assertEqual(tags, ["a-b-0", "a-b-1"])
+        self.assertEqual(len(set(tags)), 2)
+
+    def test_truncation_collision_is_disambiguated(self):
+        # Two long guest paths sharing the first 36 chars collapse to the same
+        # truncated tag; the index suffix keeps them unique and within 36 chars.
+        base = "/" + "x" * 40
+        tags = workload_lib.virtiofs_tags([f"/h0:{base}/one", f"/h1:{base}/two"])
+        self.assertEqual(len(set(tags)), 2)
+        self.assertTrue(all(len(t) <= 36 for t in tags))
+
+    def test_order_preserved(self):
+        tags = workload_lib.virtiofs_tags(["/z:/z", "/a:/a"])
+        self.assertEqual(tags, ["z", "a"])
+
+
+class TestManagedBridgeConstants(unittest.TestCase):
+    """Host-level managed-bridge params are derived from the subnet (ADR 002),
+    with the DHCP range on the configured subnet — not a hardcoded window."""
+
+    def test_default_subnet_matches_historical_values(self):
+        # The /24 default must reproduce the pre-ADR hardcoded constants so the
+        # generated bridge unit stays byte-identical.
+        self.assertEqual(workload_lib.VM_BRIDGE_SUBNET, "192.168.200.0/24")
+        self.assertEqual(workload_lib.VM_BRIDGE_IP, "192.168.200.1")
+        self.assertEqual(workload_lib.VM_BRIDGE_CIDR, "192.168.200.1/24")
+        self.assertEqual(workload_lib.VM_DHCP_RANGE,
+                         "192.168.200.100,192.168.200.199,12h")
+
+    def test_default_derivation_matches_module_constants(self):
+        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("192.168.200.0/24")
+        self.assertEqual((ip, cidr, subnet, dhcp),
+                         (workload_lib.VM_BRIDGE_IP, workload_lib.VM_BRIDGE_CIDR,
+                          workload_lib.VM_BRIDGE_SUBNET, workload_lib.VM_DHCP_RANGE))
+
+    def test_dhcp_range_is_on_the_configured_subnet(self):
+        # The range must follow the subnet (the latent bug ADR 002 fixes:
+        # dhcp-range was hardcoded 192.168.200.x regardless of subnet).
+        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("10.100.0.0/24")
+        self.assertEqual(ip, "10.100.0.1")
+        self.assertEqual(cidr, "10.100.0.1/24")
+        self.assertEqual(dhcp, "10.100.0.100,10.100.0.199,12h")
+
+    def test_small_subnet_dhcp_range_clamped_in_bounds(self):
+        # A /26 (.0–.63) can't fit a .100–.199 window; it must clamp to usable.
+        import ipaddress
+        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/26")
+        start, end, _lease = dhcp.split(",")
+        net = ipaddress.ip_network("10.0.0.0/26")
+        self.assertIn(ipaddress.ip_address(start), net)
+        self.assertIn(ipaddress.ip_address(end), net)
 
 
 class TestParseVolumeSpec(unittest.TestCase):

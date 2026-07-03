@@ -2530,7 +2530,10 @@ class TestGeneratorVmResources(unittest.TestCase):
         self.assertTrue((wants / "workload-revm.service").is_symlink())
         self.assertTrue((wants / "workload-bridge.service").is_symlink())
 
-    def test_vm_custom_subnet_derives_bridge_cidr(self):
+    def test_host_level_subnet_override_derives_cidr_and_dhcp_range(self):
+        # The managed-bridge subnet is host-level (ADR 002): overriding it via
+        # WORKLOADCTL_VM_BRIDGE_SUBNET relocates the bridge AND — the ADR-002 fix
+        # — derives the dhcp-range from it, so guests get in-subnet addresses.
         write_config(self.config_dir, "subnetvm", """\
             [workload]
             name = "subnetvm"
@@ -2541,15 +2544,14 @@ class TestGeneratorVmResources(unittest.TestCase):
             cloud_image_url = "https://example.com/cloud.qcow2"
             cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             user = "fedora"
-
-            [vm.network]
-            subnet = "10.99.7.0/24"
         """)
-        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        with mock.patch.dict(os.environ,
+                             {"WORKLOADCTL_VM_BRIDGE_SUBNET": "10.99.7.0/24"}):
+            result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         bridge = (Path(self.services_dir) / "workload-bridge.service").read_text()
-        # first host of the subnet becomes the bridge IP, /prefixlen preserved
-        self.assertIn("10.99.7.1/24", bridge)
+        self.assertIn("10.99.7.1/24", bridge)                       # gateway CIDR
+        self.assertIn("--dhcp-range=10.99.7.100,10.99.7.199,12h", bridge)  # derived
 
     def test_vm_sysusers_extra_groups(self):
         write_config(self.config_dir, "grpvm", """\

@@ -8,6 +8,7 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import pwd
@@ -97,9 +98,35 @@ VM_GUEST_UID = 1000
 # won't adopt an unrelated interface; it must stay <=15 chars (Linux IFNAMSIZ).
 # Override to e.g. "br0" to attach VMs directly to a pre-existing LAN bridge.
 VM_BRIDGE_NAME = "_workload-br"
-VM_BRIDGE_SUBNET = "192.168.200.0/24"
-VM_BRIDGE_IP = "192.168.200.1"
-VM_DHCP_RANGE = "192.168.200.100,192.168.200.199,12h"
+# Managed-bridge network config is HOST-LEVEL, not per-VM (ADR 002): the bridge
+# is one host-global refcounted resource, so its subnet/DNS can't coherently
+# take per-VM overrides. Single source of truth = the subnet CIDR
+# (WORKLOADCTL_VM_BRIDGE_SUBNET), from which the gateway IP, CIDR, and — the
+# ADR-002 fix — the DHCP range are all DERIVED, so a relocated bridge hands
+# guests addresses on its own subnet instead of a stale hardcoded window.
+def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
+    """Derive (gateway_ip, gateway_cidr, normalized_subnet, dhcp_range) for the
+    managed VM bridge from a single subnet CIDR.
+
+    The gateway is the first host address; the DHCP window is offsets .100–.199
+    within the subnet (reproducing the historical 192.168.200.100–199 range on
+    the /24 default), clamped to the usable span so a smaller subnet stays
+    in-range. Deriving the range from the subnet is the ADR-002 fix: the range
+    used to be hardcoded, so a non-default subnet handed guests addresses off
+    the wrong subnet.
+    """
+    net = ipaddress.ip_network(subnet_cidr, strict=False)
+    gateway = net.network_address + 1
+    dhcp_end = min(net.network_address + 199, net.broadcast_address - 1)
+    dhcp_start = min(net.network_address + 100, dhcp_end)
+    return (str(gateway), f"{gateway}/{net.prefixlen}", str(net),
+            f"{dhcp_start},{dhcp_end},12h")
+
+
+VM_BRIDGE_IP, VM_BRIDGE_CIDR, VM_BRIDGE_SUBNET, VM_DHCP_RANGE = managed_bridge_params(
+    os.environ.get("WORKLOADCTL_VM_BRIDGE_SUBNET", "192.168.200.0/24"))
+VM_BRIDGE_DNS = [s.strip() for s in os.environ.get(
+    "WORKLOADCTL_VM_BRIDGE_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
 # dnsmasq for the bridge runs confined in the SELinux dnsmasq_t domain, which
 # may only write its lease/pid files in dnsmasq-owned, dnsmasq_lease_t-labeled
 # locations. /var/lib/workloads is labeled container_file_t (rootless podman),
@@ -348,6 +375,35 @@ def virtiofs_tag(container_path: str, index: int = 0) -> str:
     tag = container_path.lstrip("/").replace("/", "-") or f"vol{index}"
     tag = re.sub(r'[^a-zA-Z0-9_-]', '-', tag)
     return tag[:36]
+
+
+def virtiofs_tags(volume_specs) -> list[str]:
+    """Collision-free virtiofs tags for a VM's ordered volume list (B3).
+
+    virtiofs_tag() sanitizes then truncates a guest mountpoint to <=36 chars, so
+    two distinct mountpoints can collapse to the same tag. The generator keys
+    both the virtiofsd sidecar unit filename (workload-<name>-virtiofs-<tag>) and
+    the QEMU chardev/device tag off this string, so a collision silently
+    overwrites one sidecar unit and emits duplicate chardev tags. Disambiguate
+    any colliding tag by suffixing the volume index (kept inside the 36-char
+    budget). Order matches the input list.
+
+    Single source of truth: the generator, workload-ensure-user (cloud-init
+    mounts), and cmd_lifecycle purge must all derive the tag SET through this so
+    unit names / chardev tags / fstab entries stay in sync.
+    """
+    base = [virtiofs_tag(parse_volume_spec(v)[1], i)
+            for i, v in enumerate(volume_specs)]
+    counts = {}
+    for t in base:
+        counts[t] = counts.get(t, 0) + 1
+    tags = []
+    for i, t in enumerate(base):
+        if counts[t] > 1:
+            suffix = f"-{i}"
+            t = t[:36 - len(suffix)] + suffix
+        tags.append(t)
+    return tags
 
 
 def parse_volume_spec(vol_spec: str) -> tuple[str, str, str]:
@@ -608,42 +664,18 @@ def validate_vm_config(config: dict) -> list[str]:
             "(letters/digits/_/-, max 15 chars)"
         )
 
-    # [vm.network].subnet / .dns are interpolated into the bridge unit's
-    # `bash -c '…'` lines (ip addr / nft rules / dnsmasq --server). Root-authored
-    # so not an escalation, but pin them the way `bridge` is pinned: subnet to a
-    # parseable CIDR, dns to IP-address literals. This keeps shell metacharacters
-    # out of the generated unit entirely.
-    import ipaddress
+    # The managed bridge's subnet/DNS are HOST-LEVEL config (ADR 002), no longer
+    # per-VM: reject the removed fields with a pointer to the host-level knob
+    # rather than silently ignoring them.
     net_cfg = vm.get("network", {})
-    subnet = net_cfg.get("subnet")
-    if subnet is not None:
-        if not isinstance(subnet, str):
-            errors.append(f"[vm.network].subnet must be a CIDR string, got {subnet!r}")
-        else:
-            try:
-                ipaddress.ip_network(subnet, strict=False)
-            except ValueError:
-                errors.append(f"[vm.network].subnet {subnet!r} is not a valid CIDR")
-
-    dns = net_cfg.get("dns")
-    if dns is not None:
-        if not isinstance(dns, list):
-            errors.append(f"[vm.network].dns must be a list of IP addresses, got {dns!r}")
-        else:
-            for server in dns:
-                # str-only: ip_address() also accepts ints, but the generator
-                # emits the value verbatim into --server=<s>, so require a literal.
-                if not isinstance(server, str):
-                    errors.append(
-                        f"[vm.network].dns entry {server!r} must be an IP-address string"
-                    )
-                    continue
-                try:
-                    ipaddress.ip_address(server)
-                except ValueError:
-                    errors.append(
-                        f"[vm.network].dns entry {server!r} is not a valid IP address"
-                    )
+    for removed in ("subnet", "dns"):
+        if removed in net_cfg:
+            errors.append(
+                f"[vm.network].{removed} is no longer a per-VM setting — the "
+                f"managed bridge's subnet/DNS are host-level (set "
+                f"WORKLOADCTL_VM_BRIDGE_SUBNET / WORKLOADCTL_VM_BRIDGE_DNS). "
+                f"See ADR 002."
+            )
 
     # [vm.cloud_init] — optional override of the seed user-data.
     ci = vm.get("cloud_init", {})

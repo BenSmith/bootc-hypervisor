@@ -26,7 +26,7 @@ import service_runtime
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
-    virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
+    virtiofs_tags, parse_volume_spec, substitute_template, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir, SUBID_LOCK,
 )
 
@@ -785,10 +785,11 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             user_data_text = "#cloud-config\n" + user_data_text
     else:
         # Default mode: built-in cloud-config with SSH key + optional disks.
+        # Collision-safe tags, same set the generator emits sidecar units for (B3).
+        vm_volumes = vm_cfg.get("volumes", [])
         mounts = []
-        for i, vol_spec in enumerate(vm_cfg.get("volumes", [])):
+        for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
             _host, guest_path, opts_str = parse_volume_spec(vol_spec)
-            tag = virtiofs_tag(guest_path, i)
             mounts.append((tag, guest_path, "virtiofs", opts_str))
         user_data_text = _render_default_user_data(
             name=name,
