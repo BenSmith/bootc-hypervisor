@@ -21,7 +21,7 @@ ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__
 
 # Image pulling handled by podman run --pull=never
 
-ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=1G --cpus=1.0 --network="host" --volume "/var/lib/workloads/zot-registry/data/config.json":/etc/zot/config.json:ro --volume "/var/lib/workloads/zot-registry/data/registry":/var/lib/registry --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/zot-registry:latest"
+ExecStart=/usr/bin/podman run --name "workload-zot-registry" --hostname "zot-registry" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=1G --cpus=1.0 --network="host" --volume "/var/lib/workloads/zot-registry/data/config.json":"/etc/zot/config.json":"ro" --volume "/var/lib/workloads/zot-registry/data/registry":"/var/lib/registry" --env HOST_IP=${HOST_IP} --health-cmd "curl -fsS http://localhost:5050/v2/ > /dev/null || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/zot-registry:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-zot-registry"
 ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-zot-registry"
