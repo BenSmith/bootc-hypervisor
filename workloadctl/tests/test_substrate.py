@@ -287,6 +287,22 @@ class TestBackupVMCrash(unittest.TestCase):
         mock_cold.assert_called_once_with(config, output, quiet=True)
         self.assertEqual(result, 55)
 
+    def test_inactive_vm_falls_back_to_cold_prints_when_not_quiet(self):
+        """quiet=False: the fallback notice is printed before delegating."""
+        config = self._make_config()
+        inactive = MagicMock(return_value=MagicMock(returncode=1))
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            buf = io.StringIO()
+            with patch('substrate.subprocess.run', inactive), \
+                 patch.object(_substrate_mod, '_backup_vm', return_value=55) as mock_cold, \
+                 patch('sys.stdout', buf):
+                result = _substrate_mod._backup_vm_crash(config, output, quiet=False)
+        mock_cold.assert_called_once_with(config, output, quiet=False)
+        self.assertEqual(result, 55)
+        self.assertIn('not active', buf.getvalue())
+        self.assertIn('cold backup path', buf.getvalue())
+
     def _patch_active_vm(self, config_name, d):
         """Return a context-manager stack that makes the VM appear active + QMP socket present."""
         # Create the fake qmp.sock path so Path.exists() returns True
@@ -1772,6 +1788,46 @@ pull = "never"
         mock_r.assert_called_once()
         pod.tag.assert_called_once()
 
+    def test_empty_old_id_retries_and_recovers(self):
+        """A transient empty image_id() (just-restarted rootless store) must
+        be retried, not treated as 'no previous image' — otherwise a
+        successful update loses its rollback target."""
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        # 1st call (initial old_id) empty, 2nd+3rd retry empty, 4th recovers,
+        # then new_id call for change detection.
+        pod.image_id.side_effect = ['', '', '', 'old-id', 'new-id']
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service') as mock_r, \
+             patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
+             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+            result = substrate.reprovision()
+        mock_ensure.assert_called_once_with(10001)
+        cfg, old_ids = result
+        self.assertEqual(old_ids['test-wl'], 'old-id')
+        pod.tag.assert_called_once()
+        self.assertEqual(mock_sleep.call_count, 3)
+
+    def test_old_id_stays_empty_after_exhausting_retries(self):
+        """If image_id() never resolves within the retry budget, the old_id
+        is recorded as empty and no rollback tag is written for it — but the
+        update must still proceed rather than hang or crash."""
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        # Every image_id() call (initial + 10 retries + final new_id check)
+        # returns empty/None so nothing ever resolves.
+        pod.image_id.return_value = None
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'restart_workload_service'), \
+             patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
+             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+            result = substrate.reprovision(force=True)
+        mock_ensure.assert_called_once_with(10001)
+        self.assertEqual(mock_sleep.call_count, 10)
+        cfg, old_ids = result
+        self.assertIsNone(old_ids['test-wl'])
+        pod.tag.assert_not_called()
+
     def test_pull_failure_raises_provision_failed(self):
         from podman import PodmanError
         substrate, manager = self._substrate()
@@ -2121,6 +2177,32 @@ class TestBackupImplAndHelpers(unittest.TestCase):
                  patch('sys.stdout', buf):
                 size = _substrate_mod._backup_container(config, output, no_stop=False, quiet=False)
         self.assertEqual(size, 42)
+        self.assertIn('Backup:', buf.getvalue())
+
+    def test_backup_vm_writes_tar_and_prints_size(self):
+        """_backup_vm() (the cold VM backup path) is called directly here
+        rather than through _backup_vm_crash's fallback, so the mock in
+        TestBackupVMCrash.test_inactive_vm_falls_back_to_cold never exercises
+        its actual body."""
+        p = Path(self._cfg_dir)
+        (p / 'test-vm').mkdir()
+        (p / 'test-vm' / 'workload.toml').write_text(VM_TOML)
+        config = workloadctl_core.WorkloadConfig('test-vm')
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ['tar']:
+                out_idx = cmd.index('-cf') + 1
+                Path(cmd[out_idx]).write_bytes(b'y' * 99)
+            return _ok(returncode=0)
+
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'out.tar.zst'
+            buf = io.StringIO()
+            with patch('subprocess.run', side_effect=fake_run), \
+                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch('sys.stdout', buf):
+                size = _substrate_mod._backup_vm(config, output, quiet=False)
+        self.assertEqual(size, 99)
         self.assertIn('Backup:', buf.getvalue())
 
     def test_backup_impl_stops_and_restarts_active_service(self):

@@ -1143,6 +1143,22 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             self.mod.configure_subuid_subgid(pw, {})
         self.assertIn("below minimum", str(ctx.exception))
 
+    def test_subuid_range_overflow_raises(self):
+        """A UID far enough past the normal allocation range makes the
+        subid_start + count - 1 formula exceed uint32 max — the guard must
+        raise rather than write an unusable subuid/subgid entry."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=66379)
+        pw.pw_name = "_wl-test"
+        with self.assertRaises(ValueError) as ctx:
+            self.mod.configure_subuid_subgid(pw, {})
+        self.assertIn("would overflow uint32", str(ctx.exception))
+
+    def test_subuid_range_just_below_overflow_succeeds(self):
+        """One UID below the overflow boundary must not raise."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=66378)
+        pw.pw_name = "_wl-test"
+        self._run_with_lock(pw, {})
+
     def _run_with_lock(self, pw, config, subprocess_mock=None):
         def fake_open(path, mode="r"):
             m = mock.MagicMock()

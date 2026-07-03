@@ -1689,6 +1689,50 @@ class TestCmdCleanup(unittest.TestCase):
             self.assertIn("_wl-orphan", userdel_calls[0].args[0])
             self.assertIn("Cleanup complete", buf.getvalue())
 
+    def test_apply_rewrites_subuid_subgid_without_dropping_other_entries(self):
+        """Removing an orphaned user's subuid/subgid range must strip only
+        that user's line — a prefix-matching bug here would corrupt the UID
+        mapping of a different, still-active workload sharing the file."""
+        orphan = self._fake_pwent("_wl-orphan", 15001)
+        subuid_content = "_wl-orphan:600100000:65536\n_wl-keep:600200000:65536\n"
+        subgid_content = "_wl-orphan:600100000:65536\n_wl-keep:600200000:65536\n"
+
+        def fake_exists(self):
+            return str(self) in ("/etc/subuid", "/etc/subgid")
+
+        def fake_read_text(self):
+            if str(self) == "/etc/subuid":
+                return subuid_content
+            if str(self) == "/etc/subgid":
+                return subgid_content
+            return ""
+
+        written = {}
+
+        def fake_write_text(self, content):
+            written[str(self)] = content
+
+        with _RootBypass():
+            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+                with patch('pwd.getpwall', return_value=[orphan]):
+                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
+                            with patch.object(cmd_lifecycle.subprocess, 'run',
+                                               return_value=MagicMock(returncode=0)):
+                                with patch.object(Path, 'exists', new=fake_exists), \
+                                     patch.object(Path, 'read_text', new=fake_read_text), \
+                                     patch.object(Path, 'write_text', new=fake_write_text):
+                                    buf = io.StringIO()
+                                    with redirect_stdout(buf):
+                                        cmd_lifecycle.cmd_cleanup(_ns(apply=True, json=True), MagicMock())
+
+        self.assertIn("/etc/subuid", written)
+        self.assertIn("/etc/subgid", written)
+        self.assertNotIn("_wl-orphan", written["/etc/subuid"])
+        self.assertIn("_wl-keep:600200000:65536", written["/etc/subuid"])
+        self.assertNotIn("_wl-orphan", written["/etc/subgid"])
+        self.assertIn("_wl-keep:600200000:65536", written["/etc/subgid"])
+
     def test_orphaned_dir_detected_and_removed_on_apply(self):
         with tempfile.TemporaryDirectory() as base_dir:
             base = Path(base_dir)

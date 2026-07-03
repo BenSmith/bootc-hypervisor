@@ -282,6 +282,41 @@ class VerifyAllTest(unittest.TestCase):
         self.assertEqual(n, 1)
         rb.assert_called_once()
 
+    def test_starting_then_healthy_no_rollback(self):
+        """A container still 'starting' at the first check gets one more
+        wait (its health-check interval) before being judged — recovering
+        to healthy must not trigger a rollback."""
+        cfg = self._cfg("app", health=True, active_ok=True)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {"interval": "5s"})]
+        pod = mock.Mock()
+        pod.container_health.side_effect = ["starting", "healthy"]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep") as mock_sleep, \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 0)
+        rb.assert_not_called()
+        # Once for the initial max_wait, once for the extra "starting" grace period.
+        self.assertEqual(mock_sleep.call_count, 2)
+        mock_sleep.assert_called_with(5)
+
+    def test_starting_then_still_unhealthy_rolls_back(self):
+        """If the grace-period recheck still isn't healthy, roll back."""
+        cfg = self._cfg("app", health=True, active_ok=False)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {"interval": "5s"})]
+        pod = mock.Mock()
+        pod.container_health.side_effect = ["starting", "unhealthy"]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep"), \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 1)
+        rb.assert_called_once()
+
     def test_no_health_service_crash_rolls_back(self):
         cfg = self._cfg("app", health=False, active_ok=False)
         mgr = mock.Mock()
