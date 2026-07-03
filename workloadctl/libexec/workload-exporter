@@ -220,6 +220,12 @@ def get_container_health(name, container_name=None):
     except (KeyError, ImportError):
         return None
 
+    # Boundary note (B13): built from a raw pwd.getpwnam() lookup rather
+    # than a WorkloadConfig/WorkloadManager (the exporter is a standalone
+    # scrape loop with no manager instance) — but this still goes through
+    # the typed Podman.for_user() constructor, not a hand-built subprocess
+    # call, so the identity plumbing (sudo -u / XDG_RUNTIME_DIR / HOME) is
+    # the same as every other caller.
     try:
         return Podman.for_user(
             username, uid, pw.pw_dir, timeout=5

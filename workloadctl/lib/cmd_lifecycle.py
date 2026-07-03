@@ -344,6 +344,14 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
     Compares image IDs between root and user stores; transfers if the user
     store is missing the image or has a stale copy after a rebuild.
     Exits the process on failure.
+
+    Boundary note (B13): the `podman load` step below hand-builds its own
+    sudo invocation instead of going through `Podman.run()`. It needs a
+    `TMPDIR=config.home_dir` override the wrapper's `_build_cmd()` doesn't
+    expose (podman load's staging files must land somewhere the target user
+    can write — the wrapper only carries XDG_RUNTIME_DIR/HOME) and a `cwd`
+    set to the same dir for consistency. Documented here rather than growing
+    the wrapper's env handling for this one call site (see `Podman.run()`).
     """
     user_image_id = manager.podman(config).image_id(image)
     root_image_id = Podman.for_root().image_id(image)
@@ -377,6 +385,9 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 )
                 sys.exit(1)
 
+            # TMPDIR=config.home_dir: Podman.run()/_build_cmd() has no env
+            # override hook, so this bypasses the wrapper (see the class
+            # docstring note on Podman.run()).
             load_result = subprocess.run(
                 ["sudo", "-n", "-u", config.username,
                  "-E", f"XDG_RUNTIME_DIR=/run/user/{config.uid}",
