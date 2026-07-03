@@ -172,6 +172,28 @@ class RotateTest(SecretTestBase):
         self.assertIn("web", out)        # the env-ref user is listed
         self.assertNotIn("- other", out)  # the non-user is not
 
+    def test_detects_multi_container_env_ref(self):
+        # Regression for A1: the old scan only walked top-level
+        # [container.environment], so a credential used solely by a
+        # [[containers]] block (pod/bridge shape) was missed and its workload
+        # never restarted. Route through auto_detect_credentials → detected.
+        self._seed_cred("api-key")
+        (self.wl_dir / "pod").mkdir()
+        (self.wl_dir / "pod" / "workload.toml").write_text(
+            '[workload]\nname = "pod"\nmode = "pod"\n'
+            '[[containers]]\nname = "app"\nimage = "x"\n'
+            '[containers.environment]\nTOKEN = "${SECRET:api-key}"\n')
+
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: types.SimpleNamespace(returncode=0)), \
+             mock.patch.object(cmd_secret, "restart_workload_service", lambda *a, **k: None), \
+             mock.patch.object(cmd_secret, "WorkloadConfig",
+                               lambda n: types.SimpleNamespace(
+                                   is_vm=False, uid=10001, service_name=f"workload-{n}.service")):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertIn("pod", out)  # the multi-container env-ref user is listed
+
 
 class ImportExportTest(SecretTestBase):
     def test_import_missing_file_errors(self):

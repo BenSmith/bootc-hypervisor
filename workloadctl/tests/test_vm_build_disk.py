@@ -242,6 +242,29 @@ class TestBuildFromSources(unittest.TestCase):
         self.assertIn("qemu-img", run.call_args[0][0])
         self.assertIn("convert", run.call_args[0][0])
 
+    def test_cloud_vmdk_converted_with_detected_format(self):
+        src = self.home / "src.vmdk"
+        src.write_bytes(b"v")
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["qemu-img", "info"]:
+                return mock.Mock(stdout='{"format": "vmdk"}', returncode=0)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(self.mod, "download_cloud_image", return_value=src), \
+             mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run) as run:
+            self.mod.build_from_cloud_image("u", "c", self.home, self.system_disk)
+
+        convert_calls = [c for c in run.call_args_list if c.args[0][1] == "convert"]
+        self.assertEqual(len(convert_calls), 1)
+        argv = convert_calls[0].args[0]
+        # Must not hardcode -f raw for a vmdk source; the probed format
+        # ("vmdk") should be used instead.
+        self.assertNotIn("raw", argv)
+        self.assertIn("vmdk", argv)
+        self.assertIn("-O", argv)
+        self.assertIn("qcow2", argv)
+
     def test_local_image_missing_raises(self):
         with self.assertRaises(FileNotFoundError):
             self.mod.build_from_local_image(str(self.home / "nope.qcow2"),

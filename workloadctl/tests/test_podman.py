@@ -83,6 +83,13 @@ class PodmanWrapperTests(unittest.TestCase):
         self.assertEqual(cm.exception.returncode, 125)
         self.assertIn("image not known", cm.exception.stderr)
 
+    def test_podman_error_preserves_cmd_args(self):
+        # BaseException.__init__ overwrites .args, so PodmanError must expose
+        # the argv under a different attribute (.cmd_args) that survives
+        # construction.
+        exc = PodmanError(125, "boom", ["image", "inspect", "x"])
+        self.assertEqual(exc.cmd_args, ("image", "inspect", "x"))
+
     @patch("subprocess.run")
     def test_for_root_no_sudo_prefix(self, mock_run):
         mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))

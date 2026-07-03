@@ -15,6 +15,7 @@ import tomllib
 
 from workload_lib import (
     auto_detect_credentials,
+    CREDSTORE_DIR,
     iter_workloads,
 )
 from workloadctl_core import (
@@ -80,7 +81,7 @@ def _strip_trailing_newline(text: str) -> str:
 
 def cmd_secret(args, manager: WorkloadManager):
     """Manage secrets (systemd credentials)"""
-    cred_dir = Path("/etc/credstore.encrypted")
+    cred_dir = Path(CREDSTORE_DIR)
 
     if args.subcommand == "create":
         require_root()
@@ -123,7 +124,7 @@ def cmd_secret(args, manager: WorkloadManager):
             ]
 
         try:
-            result = subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True)
             os.chmod(cred_file, 0o600)
             print(f"✓ Created encrypted credential: {cred_file}")
             print(f"  Encryption: {key_type}")
@@ -219,24 +220,14 @@ def cmd_secret(args, manager: WorkloadManager):
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
             sys.exit(1)
 
-        # Find workloads using this credential (via secrets.files or ${SECRET:name} env refs)
+        # Find workloads using this credential (via secrets.files or ${SECRET:name}
+        # env refs, in any of single/pod/bridge shape) — same scan `import` uses.
         affected_workloads = []
-        cred_env_pattern = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
         for _, workload_file in iter_workloads():
             try:
                 with open(workload_file, "rb") as f:
                     wl_config = tomllib.load(f)
-                uses_cred = False
-                for file_spec in wl_config.get("secrets", {}).get("files", []):
-                    if file_spec.get("credential") == name:
-                        uses_cred = True
-                        break
-                if not uses_cred:
-                    for val in wl_config.get("container", {}).get("environment", {}).values():
-                        if any(m.group(1) == name for m in cred_env_pattern.finditer(str(val))):
-                            uses_cred = True
-                            break
-                if uses_cred:
+                if name in auto_detect_credentials(wl_config):
                     affected_workloads.append(wl_config["workload"]["name"])
             except Exception:
                 pass

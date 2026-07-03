@@ -38,8 +38,8 @@ class PodmanError(Exception):
     def __init__(self, returncode: int, stderr: str, args: Iterable[str]):
         self.returncode = returncode
         self.stderr = stderr
-        self.args = tuple(args)
-        joined = " ".join(self.args)
+        self.cmd_args = tuple(args)
+        joined = " ".join(self.cmd_args)
         super().__init__(
             f"podman {joined} failed ({returncode}): {stderr.strip()}"
         )

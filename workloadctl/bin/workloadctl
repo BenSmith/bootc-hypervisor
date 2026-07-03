@@ -41,10 +41,12 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
     cp_parser = subparsers.add_parser("cp", help="Copy files to/from container")
+    cp_parser.set_defaults(func=cmd_cp)
     cp_parser.add_argument("source", help="Source (workload:path or path)")
     cp_parser.add_argument("destination", help="Destination (workload:path or path)")
 
     create_parser = subparsers.add_parser("create", help="Create a new workload configuration")
+    create_parser.set_defaults(func=cmd_create)
     create_parser.add_argument("--audio", action="store_true", help="Enable audio (/dev/snd + auto-mount PulseAudio/PipeWire) - convenience flag")
     create_parser.add_argument("--device", metavar="DEVICE", action="append", help="Generic device passthrough; repeat per device (e.g., --device /dev/ttyUSB0 --device /dev/video0)")
     create_parser.add_argument("--enable", action="store_true", help="Enable and start the workload immediately")
@@ -71,10 +73,12 @@ def main():
     create_parser.add_argument("--tasks-max", type=int, metavar="NUM", help="Maximum number of tasks/threads")
 
     catalog_parser = subparsers.add_parser("catalog", help="List shippable workload bundles")
+    catalog_parser.set_defaults(func=cmd_catalog)
     catalog_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     init_parser = subparsers.add_parser(
         "init", help="Instantiate a catalog bundle into /etc/workloads.d/")
+    init_parser.set_defaults(func=cmd_init)
     init_parser.add_argument("bundle", nargs="?", help="Bundle name (see 'workloadctl catalog')")
     init_parser.add_argument("--as", dest="as_name", metavar="NAME",
                              help="Instance name (default: the bundle name)")
@@ -85,18 +89,22 @@ def main():
 
     duplicate_parser = subparsers.add_parser(
         "duplicate", aliases=["clone"], help="Copy a live workload under a new name")
+    duplicate_parser.set_defaults(func=cmd_duplicate)
     duplicate_parser.add_argument("source", help="Existing workload to copy")
     duplicate_parser.add_argument("new", help="Name for the copy")
 
     install_parser = subparsers.add_parser(
         "install", help="Promote a local workload directory into /etc/workloads.d/")
+    install_parser.set_defaults(func=cmd_install)
     install_parser.add_argument("src", help="Source directory containing workload.toml")
 
     build_parser = subparsers.add_parser(
         "build", help="Build a workload's container image from its bundle build context")
+    build_parser.set_defaults(func=cmd_build)
     build_parser.add_argument("workload", help="Workload name")
 
     backup_parser = subparsers.add_parser("backup", help="Backup workload data and config")
+    backup_parser.set_defaults(func=cmd_backup)
     backup_parser.add_argument("--all", action="store_true", help="Backup all workloads")
     backup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     # 'app' is the deferred ideas.md slot (guest fsfreeze / guest-agent channel);
@@ -109,6 +117,7 @@ def main():
     backup_parser.add_argument("workload", nargs="?", help="Workload name")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Remove orphaned workload users, directories, and SELinux modules")
+    cleanup_parser.set_defaults(func=cmd_cleanup)
     cleanup_parser.add_argument("--apply", action="store_true",
                                 help="Actually remove orphaned users/dirs (default is dry run)")
     cleanup_parser.add_argument("--json", action="store_true", help="Output in JSON format")
@@ -117,6 +126,7 @@ def main():
         "drift",
         help="Show diff between running units and what would be generated from current TOMLs",
     )
+    drift_parser.set_defaults(func=cmd_drift)
     drift_parser.add_argument(
         "workload", nargs="?", metavar="WORKLOAD",
         help="Filter to units belonging to a specific workload (default: all workloads)",
@@ -127,11 +137,13 @@ def main():
     )
 
     disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)")
+    disable_parser.set_defaults(func=cmd_disable)
     disable_parser.add_argument("--purge", action="store_true",
                                help="Also remove user, home, and subuid/subgid")
     disable_parser.add_argument("workload", help="Workload name")
 
     edit_parser = subparsers.add_parser("edit", help="Edit config, or a named control file (copy-on-write override)")
+    edit_parser.set_defaults(func=cmd_edit)
     edit_parser.add_argument("workload", help="Workload name")
     edit_parser.add_argument(
         "file", nargs="?",
@@ -145,9 +157,11 @@ def main():
     )
 
     enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
+    enable_parser.set_defaults(func=cmd_enable)
     enable_parser.add_argument("workload", help="Workload name")
 
     exec_parser = subparsers.add_parser("exec", help="Execute command in workload container or VM (via SSH)")
+    exec_parser.set_defaults(func=cmd_exec)
     # Order matters and is NOT alphabetizable: WORKLOAD must come before the
     # COMMAND positional. argparse.REMAINDER is greedy, so it has to be the LAST
     # positional — first token binds to WORKLOAD, the rest are the command
@@ -159,6 +173,7 @@ def main():
                              help="Command to execute (a leading -- is optional)")
 
     health_parser = subparsers.add_parser("health", help="Check workload health")
+    health_parser.set_defaults(func=cmd_health)
     health_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     health_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                                help="Workload, or workload/container for multi-container workloads")
@@ -176,6 +191,7 @@ def main():
             "when they cover your use case."
         ),
     )
+    incant_parser.set_defaults(func=cmd_incant)
     incant_parser.add_argument(
         "workload", metavar="WORKLOAD[/CONTAINER]",
         help="Workload, or workload/container for multi-container workloads",
@@ -186,6 +202,7 @@ def main():
     )
 
     info_parser = subparsers.add_parser("info", help="Show detailed workload information")
+    info_parser.set_defaults(func=cmd_info)
     info_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     info_parser.add_argument(
         "--files", action="store_true",
@@ -195,13 +212,16 @@ def main():
     info_parser.add_argument("workload", help="Workload name")
 
     images_parser = subparsers.add_parser("images", help="Show images or prune unused")
+    images_parser.set_defaults(func=cmd_images)
     images_parser.add_argument("--json", action="store_true", help="Output in JSON format (for list)")
     images_parser.add_argument("subcommand", nargs="?", default="list",
                                choices=["list", "prune"], help="Subcommand (list or prune)")
     list_parser = subparsers.add_parser("list", help="List all available workloads")
+    list_parser.set_defaults(func=cmd_list)
     list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     logs_parser = subparsers.add_parser("logs", help="View workload logs (journalctl wrapper)")
+    logs_parser.set_defaults(func=cmd_logs)
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines (default: 50)")
     logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
@@ -210,12 +230,15 @@ def main():
                              help="Workload, or workload/container for multi-container workloads")
 
     reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
+    reboot_parser.set_defaults(func=cmd_reboot)
     reboot_parser.add_argument("workload", help="Workload name")
 
     recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
+    recreate_parser.set_defaults(func=cmd_recreate)
     recreate_parser.add_argument("workload", help="Workload name")
 
     restore_parser = subparsers.add_parser("restore", help="Restore a workload from backup")
+    restore_parser.set_defaults(func=cmd_restore)
     restore_parser.add_argument("--enable", action="store_true",
                                 help="Enable the workload after restore")
     restore_parser.add_argument("--force", action="store_true",
@@ -223,10 +246,12 @@ def main():
     restore_parser.add_argument("archive", help="Path to backup archive (.tar.zst)")
 
     rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
+    rollback_parser.set_defaults(func=cmd_rollback)
     rollback_parser.add_argument("workload", help="Workload name")
     rollback_parser.add_argument("--list", action="store_true", help="List available rollback targets instead of rolling back")
 
     secret_parser = subparsers.add_parser("secret", help="Manage secrets (systemd credentials)")
+    secret_parser.set_defaults(func=cmd_secret)
     secret_subparsers = secret_parser.add_subparsers(dest="subcommand", required=True, help="Secret operation")
 
     secret_create = secret_subparsers.add_parser("create", help="Create a new encrypted credential")
@@ -270,37 +295,45 @@ def main():
     secret_import.add_argument("file", help="Passphrase-encrypted file to import")
 
     shell_parser = subparsers.add_parser("shell", help="Open interactive shell in container, or SSH into VM workloads (serial console fallback)")
+    shell_parser.set_defaults(func=cmd_shell)
     shell_parser.add_argument("--console", action="store_true",
                               help="VM only: skip SSH and connect directly to the serial console (recovery path)")
     shell_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                               help="Workload, or workload/container for multi-container workloads")
 
     stats_parser = subparsers.add_parser("stats", help="Show resource usage statistics")
+    stats_parser.set_defaults(func=cmd_stats)
     stats_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     stats_parser.add_argument("-f", "--follow", action="store_true", help="Follow stats (live updating)")
     stats_parser.add_argument("workload", nargs="?", help="Workload name (or show all)")
 
     status_parser = subparsers.add_parser("status", help="Show workload service status")
+    status_parser.set_defaults(func=cmd_status)
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
 
     start_parser = subparsers.add_parser("start", help="Start a workload service")
+    start_parser.set_defaults(func=cmd_start)
     start_parser.add_argument("workload", help="Workload name")
 
     stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
+    stop_parser.set_defaults(func=cmd_stop)
     stop_parser.add_argument("workload", help="Workload name")
 
     update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
+    update_parser.set_defaults(func=cmd_update)
     update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
     update_parser.add_argument("workload", nargs="?", help="Workload name")
 
     validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")
+    validate_parser.set_defaults(func=cmd_validate)
     validate_parser.add_argument("--all", action="store_true", help="Validate all workloads")
     validate_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     validate_parser.add_argument("workload", nargs="?", help="Workload name")
 
     diagnose_parser = subparsers.add_parser("diagnose", help="Diagnose workload runtime setup (user, subids, linger, SELinux)")
+    diagnose_parser.set_defaults(func=cmd_diagnose)
     diagnose_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     diagnose_parser.add_argument("workload", help="Workload name")
 
@@ -309,44 +342,9 @@ def main():
     # Create manager
     manager = WorkloadManager()
 
-    command_map = {
-        "backup": cmd_backup,
-        "build": cmd_build,
-        "catalog": cmd_catalog,
-        "cleanup": cmd_cleanup,
-        "clone": cmd_duplicate,
-        "cp": cmd_cp,
-        "create": cmd_create,
-        "diagnose": cmd_diagnose,
-        "disable": cmd_disable,
-        "drift": cmd_drift,
-        "duplicate": cmd_duplicate,
-        "edit": cmd_edit,
-        "init": cmd_init,
-        "install": cmd_install,
-        "enable": cmd_enable,
-        "exec": cmd_exec,
-        "health": cmd_health,
-        "images": cmd_images,
-        "incant": cmd_incant,
-        "info": cmd_info,
-        "list": cmd_list,
-        "logs": cmd_logs,
-        "reboot": cmd_reboot,
-        "recreate": cmd_recreate,
-        "restore": cmd_restore,
-        "rollback": cmd_rollback,
-        "secret": cmd_secret,
-        "shell": cmd_shell,
-        "start": cmd_start,
-        "stats": cmd_stats,
-        "status": cmd_status,
-        "stop": cmd_stop,
-        "update": cmd_update,
-        "validate": cmd_validate,
-    }
-
-    handler = command_map.get(args.command)
+    # Each subparser above sets its own `func` default (set_defaults(func=...)),
+    # so dispatch is just calling whichever handler argparse resolved.
+    handler = getattr(args, "func", None)
     if handler:
         handler(args, manager)
     else:

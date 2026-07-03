@@ -22,11 +22,16 @@ UID-dependent values deferred to EnvironmentFile written by workload-ensure-user
 """
 
 # Early logging before any imports
+def _write_kmsg(priority, msg):
+    """Write one line to /dev/kmsg. No fallback -- callers handle failure."""
+    with open("/dev/kmsg", "w") as kmsg:
+        kmsg.write(f"<{priority}>{msg}\n")
+
+
 def _early_log(msg):
     """Log to kmsg before imports complete"""
     try:
-        with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<6>workload-generate[EARLY]: {msg}\n")
+        _write_kmsg(6, f"workload-generate[EARLY]: {msg}")
     except OSError:
         pass  # Silently fail if kmsg unavailable
 
@@ -81,9 +86,9 @@ except Exception as e:
 
 # Output directory for generated service files and sysusers configs.
 # Called by workload-generate.service with /run/systemd/system as argv[1],
-# or by tests with a temp directory. Falls back to /tmp if no arg given.
-NORMAL_DIR = sys.argv[1] if len(sys.argv) > 1 else "/tmp"
-SERVICES_DIR = Path(NORMAL_DIR) if len(sys.argv) > 1 else Path("/run/systemd/system")
+# or by tests with a temp directory.
+NORMAL_DIR = sys.argv[1] if len(sys.argv) > 1 else None
+SERVICES_DIR = Path(NORMAL_DIR) if NORMAL_DIR else Path("/run/systemd/system")
 # Allow override for testing
 SYSUSERS_DIR = Path(os.environ.get("SYSUSERS_DIR", str(SERVICES_DIR)))
 
@@ -114,8 +119,7 @@ def log_msg(msg, level="info"):
         print(f"workload-generate: {msg}", file=sys.stderr, flush=True)
         return
     try:
-        with open("/dev/kmsg", "w") as kmsg:
-            kmsg.write(f"<{priority}>workload-generate: {msg}\n")
+        _write_kmsg(priority, f"workload-generate: {msg}")
     except Exception:
         # /dev/kmsg isn't writable (not running as a boot-time generator, or
         # in a test); fall back to stderr so the message isn't lost.
@@ -797,10 +801,13 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # Audio devices (device + socket auto-detection)
     if devices_config.get("audio", False):
         podman_args.append("--device /dev/snd")
-        # Mount PulseAudio/PipeWire sockets via XDG_RUNTIME_DIR (resolved at exec
-        # time from EnvironmentFile written by workload-ensure-user).
+        # Mount PulseAudio/PipeWire sockets. XDG_RUNTIME_DIR is deterministically
+        # /run/user/<uid> (set by workload-ensure-user's EnvironmentFile), and uid
+        # is already known at generation time -- embed it directly rather than
+        # relying on ${XDG_RUNTIME_DIR} runtime expansion, which resolves to an
+        # empty string (mounting host "/pulse") if the EnvironmentFile is missing.
         for suffix in ["pulse", "pipewire-0"]:
-            podman_args.append(f"--volume ${{XDG_RUNTIME_DIR}}/{suffix}:${{XDG_RUNTIME_DIR}}/{suffix}:ro")
+            podman_args.append(f"--volume /run/user/{uid}/{suffix}:/run/user/{uid}/{suffix}:ro")
 
     # Virtualization devices (3 devices)
     if devices_config.get("virtualization", False):
@@ -893,8 +900,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
                             f"'{resolved}' outside workload dir '{root}'", level="warning")
             except Exception:
                 pass
-            parts[0] = dq(parts[0])
-            expanded = ':'.join(parts)
+            expanded = ':'.join(dq(p) for p in parts)
         else:
             expanded = dq(expanded)
         podman_args.append(f"--volume {expanded}")

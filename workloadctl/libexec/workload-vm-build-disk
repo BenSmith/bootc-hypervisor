@@ -16,6 +16,7 @@ Image sources (from [vm] TOML section, exactly one required):
   vm.image                                        bootc image ref (via bootc-image-builder)
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -154,6 +155,23 @@ def download_cloud_image(url: str, checksum: str, home_dir: Path) -> Path:
     return cached
 
 
+def _probe_image_format(path: Path) -> str | None:
+    """Detect the on-disk format of an image via `qemu-img info`. Returns
+    None (let qemu-img autodetect) if the probe fails or is inconclusive."""
+    try:
+        result = subprocess.run(
+            ["qemu-img", "info", "--output=json", str(path)],
+            check=True, capture_output=True, text=True,
+        )
+        info = json.loads(result.stdout)
+        return info.get("format")
+    except Exception:
+        # Best-effort probe only -- any failure (missing binary, bad JSON,
+        # a test double returning a non-string stdout, etc.) just falls
+        # back to qemu-img autodetect.
+        return None
+
+
 def build_from_cloud_image(url: str, checksum: str, home_dir: Path, system_disk: Path):
     source = download_cloud_image(url, checksum, home_dir)
     if source.suffix == ".qcow2":
@@ -166,13 +184,16 @@ def build_from_cloud_image(url: str, checksum: str, home_dir: Path, system_disk:
         except subprocess.CalledProcessError:
             shutil.copy2(source, system_disk)
     else:
-        # Convert raw/vmdk/etc to qcow2
+        # Convert raw/vmdk/vdi/etc to qcow2. Probe the actual source format
+        # rather than assuming raw -- forcing -f raw on a vmdk/vdi source
+        # corrupts the read.
         log("  Converting image to qcow2...")
-        subprocess.run(
-            ["qemu-img", "convert", "-f", "raw", "-O", "qcow2",
-             str(source), str(system_disk)],
-            check=True
-        )
+        src_format = _probe_image_format(source)
+        convert_cmd = ["qemu-img", "convert"]
+        if src_format:
+            convert_cmd += ["-f", src_format]
+        convert_cmd += ["-O", "qcow2", str(source), str(system_disk)]
+        subprocess.run(convert_cmd, check=True)
     log(f"  System disk ready: {system_disk}")
 
 

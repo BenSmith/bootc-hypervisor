@@ -230,7 +230,7 @@ class DoRollbackTest(unittest.TestCase):
         mgr = mock.Mock(); mgr.podman.return_value = pod
         with mock.patch.object(cmd_update, "restart_workload_service") as restart, \
              redirect_stdout(io.StringIO()):
-            cmd_update._do_rollback(cfg, mgr, {"app": "sha256:new"})
+            cmd_update._do_rollback(cfg, mgr)
         pod.tag.assert_called_once_with("localhost/workload-rollback/app:latest",
                                         "localhost/app:latest")
         restart.assert_called_once()
@@ -244,7 +244,7 @@ class DoRollbackTest(unittest.TestCase):
         mgr = mock.Mock(); mgr.podman.return_value = pod
         with mock.patch.object(cmd_update, "restart_workload_service"), \
              redirect_stdout(io.StringIO()):
-            cmd_update._do_rollback(cfg, mgr, {"app": "sha256:new"})
+            cmd_update._do_rollback(cfg, mgr)
         pod.tag.assert_not_called()
 
 

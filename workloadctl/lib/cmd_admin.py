@@ -1045,10 +1045,10 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path = Path(backup_str)
     shutil.copy2(config_path, backup_path)
 
-    editor = os.environ.get("EDITOR", "nano")
+    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
 
     # Open editor
-    result = subprocess.run([editor, str(config_path)])
+    result = subprocess.run(editor_argv + [str(config_path)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
         backup_path.unlink()

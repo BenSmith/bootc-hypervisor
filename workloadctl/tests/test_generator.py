@@ -2061,8 +2061,14 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             audio = true
         """)
         self.assertIn("--device /dev/snd", svc)
-        self.assertIn("/pulse:${XDG_RUNTIME_DIR}/pulse:ro", svc)
-        self.assertIn("/pipewire-0:${XDG_RUNTIME_DIR}/pipewire-0:ro", svc)
+        # uid is embedded directly (not via ${XDG_RUNTIME_DIR} runtime expansion,
+        # which resolves to "" -- mounting host "/pulse" -- if the workload's
+        # EnvironmentFile is missing at start time).
+        self.assertNotIn("XDG_RUNTIME_DIR", svc)
+        self.assertRegex(svc, r"--volume /run/user/\d+/pulse:/run/user/\d+/pulse:ro")
+        self.assertRegex(
+            svc, r"--volume /run/user/\d+/pipewire-0:/run/user/\d+/pipewire-0:ro"
+        )
 
     def test_virtualization_devices_shortcut(self):
         svc, _ = self._gen("""

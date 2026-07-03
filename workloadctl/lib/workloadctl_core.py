@@ -77,7 +77,7 @@ def resolve_container_target(config, container, workload):
     return config.podman_container_name(container)
 
 
-def _format_size(n: int) -> str:
+def format_size(n: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
     f = float(n)
     for u in units:
@@ -87,7 +87,7 @@ def _format_size(n: int) -> str:
     return f"{n} B"
 
 
-def _format_created(ts: str | int | None) -> str:
+def format_created(ts: str | int | None) -> str:
     """Render podman's image Created (Unix int or ISO string) as 'N days ago'."""
     if ts is None or ts == "":
         return "unknown"
@@ -113,7 +113,7 @@ def _format_created(ts: str | int | None) -> str:
         return "unknown"
 
 
-def _created_unix(ts) -> int | None:
+def created_unix(ts) -> int | None:
     """Convert podman Created field (int, ISO string, or float string) to Unix int."""
     if ts is None or ts == "":
         return None
@@ -132,7 +132,7 @@ def _created_unix(ts) -> int | None:
         return None
 
 
-def _parse_size_bytes(s) -> int:
+def parse_size_bytes(s) -> int:
     """Parse podman size strings like '1.23 GB', '456B', '0 B' to bytes."""
     if isinstance(s, int):
         return s
@@ -583,6 +583,15 @@ class WorkloadConfig:
         if not self.is_multi:
             return self.container_name
         return f"workload-{self.name}-{container_name}"
+
+    def podman_targets(self) -> list[str]:
+        """Podman --name for every container this workload runs, in
+        container_names() order. Collapses the recurring
+        `[podman_container_name(c) for c in ...] if is_multi else [container_name]`
+        ternary used by liveness/stats/health/diagnose call sites."""
+        if self.is_multi:
+            return [self.podman_container_name(c) for c in self.container_names()]
+        return [self.container_name]
 
     def get_required_files(self) -> list[dict]:
         """Return list of {path, hint} dicts from [setup].required_files."""

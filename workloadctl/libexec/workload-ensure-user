@@ -475,7 +475,6 @@ def setup_nvram(pw, config: dict):
             "and would fail to boot. Install edk2-ovmf (Fedora) or ovmf (Debian)."
         )
 
-    import shutil
     shutil.copy2(ovmf_vars, nvram_dst)
     os.chown(nvram_dst, pw.pw_uid, pw.pw_gid)
     os.chmod(nvram_dst, 0o600)
@@ -618,13 +617,11 @@ def _bundle_workloadctl_rpm(seed_dir: Path) -> bool:
     /usr/share/workloadctl/workloadctl.rpm (placed there by `dnf download`
     during the image build so the ISO is self-contained).
     """
-    import shutil as _shutil
-
     dest = seed_dir / "workloadctl.rpm"
 
     cached = Path("/usr/share/workloadctl/workloadctl.rpm")
     if cached.exists():
-        _shutil.copy2(cached, dest)
+        shutil.copy2(cached, dest)
         log("  Bundled workloadctl RPM (cached copy)")
         return True
 
@@ -839,8 +836,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     # Build ISO using genisoimage or mkisofs
     iso_tool = None
     for tool in ("genisoimage", "mkisofs", "xorriso"):
-        import shutil as _shutil
-        if _shutil.which(tool):
+        if shutil.which(tool):
             iso_tool = tool
             break
 

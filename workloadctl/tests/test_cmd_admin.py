@@ -1334,6 +1334,25 @@ class CmdEditTomlTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not found", err)
 
+    def test_editor_with_flags_is_split(self):
+        # EDITOR="code --wait" must be shlex-split into argv, not passed as a
+        # single literal executable name (which would fail to exec).
+        ns = argparse.Namespace(workload="app", file=None, yes=False)
+        captured = []
+
+        def run_side_effect(argv, **kw):
+            captured.append(list(argv))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"EDITOR": "code --wait"}):
+            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_admin.cmd_edit(ns, self.manager)
+
+        self.assertEqual(captured[0][:-1], ["code", "--wait"])
+        self.assertEqual(Path(captured[0][-1]), self.cfg_path)
+
     def test_editor_failure_removes_backup_exits_1(self):
         code, out, err = self._run(edited_content=None, editor_rc=1)
         self.assertEqual(code, 1)

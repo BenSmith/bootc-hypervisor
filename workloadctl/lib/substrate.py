@@ -517,12 +517,10 @@ class ContainerSubstrate(Substrate):
         container_status_str = None
         if service_active and self.manager.user_exists(self.config):
             podman = self.manager.podman(self.config)
-            names = self.config.container_names() if self.config.is_multi else [self.config.container_name]
+            names = self.config.podman_targets()
             statuses = []
             for cname in names:
-                status = podman.container_status(
-                    f"workload-{self.config.name}-{cname}" if self.config.is_multi else cname
-                )
+                status = podman.container_status(cname)
                 statuses.append(status)
             # For multi-container workloads, "running" means every named
             # container is up — a partially-down pod is not healthy. For a

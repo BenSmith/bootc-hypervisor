@@ -2317,10 +2317,12 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         # patch CREDSTORE_DIR to a temp dir can't catch that divergence — pin
         # the production default and that all consumers share one constant.
         import cmd_backup
+        import cmd_secret
         self.assertEqual(workload_lib.CREDSTORE_DIR,
                          Path('/etc/credstore.encrypted'))
         self.assertIs(_substrate_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
         self.assertIs(cmd_backup.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(cmd_secret.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
 
     def test_print_backup_size_formats_bytes(self):
         buf = io.StringIO()
