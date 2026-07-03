@@ -55,9 +55,12 @@ from workload_lib import (
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
     vm_mac_address,
+    workload_config_path,
     workload_service_units,
 )
 from service_runtime import ensure_runtime_dir, restart_workload_service
+from podman import PodmanError
+from workloadctl_core import resolve_container_target
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +647,6 @@ class ContainerSubstrate(Substrate):
         *,
         container: str | None = None,
     ) -> int:
-        from workloadctl_core import resolve_container_target
         target = resolve_container_target(self.config, container, self.config.name)
         result = self.manager.run_podman_exec(
             self.config, [*_interactive_exec_flags(), target, *argv]
@@ -662,7 +664,6 @@ class ContainerSubstrate(Substrate):
                 "containers have no serial console; use 'shell' or 'exec' instead"
             )
 
-        from workloadctl_core import resolve_container_target
         target = resolve_container_target(self.config, container, self.config.name)
 
         env = self.config.config.get("container", {}).get("environment", {})
@@ -797,8 +798,6 @@ class ContainerSubstrate(Substrate):
             print(f"  ⚠ Pet snapshot prune skipped: {exc}", file=sys.stderr)
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
-        from podman import PodmanError
-
         if recreate:
             # recreate path: skip pull, just restart to recreate the overlay.
             print(f"Recreating {self.config.name}...")
@@ -915,7 +914,6 @@ class ContainerSubstrate(Substrate):
 
     def rollback_to(self, target: dict) -> None:
         """Apply a single rollback target from rollback_targets()."""
-        from podman import PodmanError
         pod = self.manager.podman(self.config)
         try:
             pod.tag(target["tag"], target["image"])
@@ -1476,7 +1474,6 @@ def _backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
 
 def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -> None:
     """Internal backup implementation shared by container and VM paths."""
-    from workload_lib import workload_config_path
     name = config.name
     config_path = workload_config_path(name)
     service_name = config.service_name
