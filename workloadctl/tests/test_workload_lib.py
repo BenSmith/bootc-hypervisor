@@ -391,6 +391,26 @@ class TestDq(unittest.TestCase):
     def test_with_spaces(self):
         self.assertEqual(dq("hello world"), '"hello world"')
 
+    def test_dollar_is_doubled(self):
+        # systemd expands $VAR/${VAR} in Exec args after quote removal, so a
+        # literal $ must be $$ (B2).
+        self.assertEqual(dq("$HOME"), '"$$HOME"')
+        self.assertEqual(dq("${FOO}/x"), '"$${FOO}/x"')
+        self.assertEqual(dq("price$5"), '"price$$5"')
+
+    def test_percent_is_doubled(self):
+        # systemd expands % specifiers at unit load, before quote parsing (B2).
+        self.assertEqual(dq("100%"), '"100%%"')
+        self.assertEqual(dq("%H/path"), '"%%H/path"')
+
+    def test_single_quote_needs_no_escape_inside_double_quotes(self):
+        # The old shlex.quote path emitted shell '"'"' for this; inside systemd
+        # double quotes a single quote is literal.
+        self.assertEqual(dq("it's"), '"it\'s"')
+
+    def test_combined_specials_all_escaped(self):
+        self.assertEqual(dq('a"b\\c$d%e'), '"a\\"b\\\\c$$d%%e"')
+
 
 class TestSecretPattern(unittest.TestCase):
     def test_matches_simple(self):

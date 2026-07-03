@@ -1049,11 +1049,33 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
 # --- Quoting ---
 
 def dq(s: str) -> str:
-    """Double-quote a string for systemd ExecStart (and shell wrapper) contexts.
+    """Quote a string as a LITERAL token for a systemd Exec* command line.
 
-    Use for all tokens: paths, image names, command args, container names, env keys.
+    Use for all tokens: paths, image names, command args, container names, env
+    keys, and plain env VALUES.
 
-    The one exception is plain env var VALUES — use shlex.quote() for those,
-    because single quotes prevent $-expansion in both systemd and shell contexts.
+    systemd applies two expansions to Exec directives that shell-style quoting
+    does NOT suppress, so a bare double-quote is not enough:
+
+      * `%` specifiers (`%i`, `%H`, …) are expanded at unit load, before quote
+        parsing — a literal `%` must be written `%%`.
+      * `$VAR` / `${VAR}` environment expansion runs on each argument *after*
+        the command line is split and quotes are removed — so neither single nor
+        double quotes stop it; a literal `$` must be written `$$`.
+
+    (This is why single-quoting env values with shlex.quote was wrong: systemd
+    still expands `$` inside them, and shlex's `'"'"'` escaping for an embedded
+    single quote is shell syntax, not systemd's.)
+
+    Backslash and double-quote are escaped for the surrounding double quotes;
+    `$` and `%` are doubled to defeat the two expansions above. A single quote
+    needs no escaping inside double quotes.
     """
-    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return (
+        '"'
+        + s.replace('\\', '\\\\')
+           .replace('"', '\\"')
+           .replace('$', '$$')
+           .replace('%', '%%')
+        + '"'
+    )

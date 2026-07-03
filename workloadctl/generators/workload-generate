@@ -57,7 +57,6 @@ try:
 
     import tomllib
     import traceback
-    import shlex
     import pwd
     import grp
     from pathlib import Path
@@ -268,8 +267,11 @@ def build_plain_env_args(container):
             continue
         if SECRET_PATTERN.search(str(value)):
             continue  # Handled by workload-write-env via --env-file
-        # shlex.quote uses single quotes, preventing $-expansion in systemd
-        env_args.append(f'--env {key}={shlex.quote(str(value))}')
+        # dq() gives systemd-correct literal quoting: double-quote + escape
+        # \ " and DOUBLE $ / % so systemd doesn't expand a literal $VAR or %
+        # specifier in the value (single-quoting via shlex did NOT stop that —
+        # systemd expands after quote removal). See dq()'s docstring.
+        env_args.append(f'--env {key}={dq(str(value))}')
 
     return env_args
 

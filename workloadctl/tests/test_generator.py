@@ -429,8 +429,8 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         r = self.run_gen()
         self.assertEqual(r.returncode, 0, r.stderr)
         web = (Path(self.services_dir) / "workload-app-web.service").read_text()
-        self.assertIn("--env APP_ENV=production", web)
-        self.assertIn("--env APP_PORT=8080", web)
+        self.assertIn('--env APP_ENV="production"', web)
+        self.assertIn('--env APP_PORT="8080"', web)
 
     def test_per_container_environment_nested_form(self):
         """[containers.container.environment] (nested under [containers.container])
@@ -451,7 +451,7 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         r = self.run_gen()
         self.assertEqual(r.returncode, 0, r.stderr)
         web = (Path(self.services_dir) / "workload-app-web.service").read_text()
-        self.assertIn("--env APP_ENV=production", web)
+        self.assertIn('--env APP_ENV="production"', web)
 
     def test_per_container_environment_both_forms_rejected(self):
         """Setting env at both [containers.environment] AND
