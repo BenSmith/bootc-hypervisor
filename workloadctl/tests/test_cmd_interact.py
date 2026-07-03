@@ -271,7 +271,8 @@ class CpStagingAndChownTreeTest(unittest.TestCase):
                     self.assertTrue(d.is_dir())
                     self.assertTrue(str(d).startswith(home))
                     created = d
-                chown_mock.assert_called_once_with(created, cfg.uid, cfg.gid)
+                chown_mock.assert_called_once_with(
+                    created, cfg.uid, cfg.gid, follow_symlinks=False)
                 chmod_mock.assert_called_once_with(created, 0o700)
             # Removed on exit even though chown/chmod were mocked out.
             self.assertFalse(created.exists())

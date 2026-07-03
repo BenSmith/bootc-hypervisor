@@ -22,6 +22,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
+import service_runtime
 from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
@@ -229,6 +230,66 @@ def setup_home_directory(pw, name):
     os.chmod(data_path, 0o700)
 
 
+def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
+    """Create `host_path` (a descendant of `root_dir`) and chown/chmod it to the
+    workload user WITHOUT ever following a symlink (B1 — root-TOCTOU hardening).
+
+    This runs as **root** on every service start inside a tree the *workload
+    user* owns, so a `resolve()`-then-`os.chown()` sequence is racy: the workload
+    user can swap a path component to a symlink between the containment check and
+    the chown, tricking root into chowning an arbitrary host file. We instead
+    descend from `root_dir` one literal component at a time with
+    `O_NOFOLLOW|O_DIRECTORY` (openat) and `fchown`/`fchmod` the final fd. A
+    symlink anywhere on the path makes the openat fail (ELOOP) and we refuse —
+    the walk itself enforces containment, so a swapped component can only abort
+    provisioning, never escape the tree. `root_dir` is root-created and trusted
+    as the anchor.
+
+    Returns True on success, False if a component was unsafe (symlink/non-dir).
+    """
+    # Walk the LITERAL path components (not host_path.resolve(), which would
+    # collapse away the very symlink we must refuse). `root_dir` is the trusted,
+    # root-created anchor; every component below it is opened O_NOFOLLOW.
+    try:
+        parts = host_path.relative_to(root_dir).parts
+    except ValueError:
+        return False  # not lexically under the root — caller also gates this
+    if ".." in parts:
+        log(f"  WARNING: refusing to provision {host_path}: '..' in path")
+        return False
+    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            child_fd = None
+            for _ in range(2):
+                try:
+                    child_fd = os.open(
+                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=dir_fd)
+                    break
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, mode, dir_fd=dir_fd)
+                    except FileExistsError:
+                        pass  # created concurrently — retry the O_NOFOLLOW open
+                except OSError as exc:
+                    # ELOOP (symlink) or ENOTDIR — refuse to traverse.
+                    log(f"  WARNING: refusing to provision {host_path}: unsafe "
+                        f"path component {part!r} ({exc.strerror})")
+                    return False
+            if child_fd is None:
+                log(f"  WARNING: refusing to provision {host_path}: unsafe "
+                    f"path component {part!r}")
+                return False
+            os.close(dir_fd)
+            dir_fd = child_fd
+        os.fchown(dir_fd, uid, gid)
+        os.fchmod(dir_fd, mode)
+        return True
+    finally:
+        os.close(dir_fd)
+
+
 def setup_volume_directories(pw, config):
     """Ensure volume mount directories under the workload home exist
     and are owned by the workload user.
@@ -238,6 +299,10 @@ def setup_volume_directories(pw, config):
     Paths outside the home directory are skipped (admin must create them).
     Required-files paths are skipped — those must be supplied by the user
     as files; auto-creating them as directories would break the bind mount.
+
+    Directory creation + chown goes through _provision_dir_secure so a symlink
+    swap by the (untrusted) workload user can never redirect root's chown outside
+    the tree (B1).
     """
     name = config["workload"]["name"]
     state_dir = workload_state_dir(name)
@@ -279,10 +344,7 @@ def setup_volume_directories(pw, config):
 
         if not host_path.exists():
             log(f"  Creating volume directory {host_path}")
-            host_path.mkdir(parents=True, exist_ok=True)
-
-        os.chown(host_path, pw.pw_uid, pw.pw_gid)
-        os.chmod(host_path, 0o755)
+        _provision_dir_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid, 0o755)
 
 
 def setup_vm_volume_directories(pw, config):
@@ -307,9 +369,7 @@ def setup_vm_volume_directories(pw, config):
             continue  # Outside the workload dir — admin's responsibility
         if not host_path.exists():
             log(f"  Creating virtiofs host directory {host_path}")
-            host_path.mkdir(parents=True, exist_ok=True)
-        os.chown(host_path, pw.pw_uid, pw.pw_gid)
-        os.chmod(host_path, 0o755)
+        _provision_dir_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid, 0o755)
 
 
 def restore_selinux_labels(name):
@@ -370,75 +430,28 @@ def write_environment_file(name, pw, config):
     log(f"  Wrote environment file {env_file}")
 
 
-def _linger_manager_active(uid_str):
-    """True iff the persistent user manager (user@<uid>.service) is running.
-
-    This — NOT the mere existence of /run/user/<uid> — is the real signal that
-    linger is effective. A transient `sudo -u … podman` login session makes
-    pam_systemd create /run/user/<uid> on session-open and tear it down on
-    session-close; that flapping dir can satisfy a naive "is the dir there?"
-    check while no lingering manager exists at all.
-    """
-    r = subprocess.run(
-        ["systemctl", "is-active", f"user@{uid_str}.service"],
-        capture_output=True, text=True,
-    )
-    return r.stdout.strip() == "active"
-
-
 def enable_linger(pw):
     """Enable lingering for the workload user — effectively and synchronously.
 
     Creates a persistent systemd user manager (user@UID.service) that maintains
     /run/user/<uid> and the D-Bus session rootless podman needs.
 
-    We gate on `user@<uid>.service` being *active*, not on /run/user/<uid>
-    merely existing. A transient `sudo -u … podman` login session makes
-    pam_systemd create /run/user/<uid> on session-open and remove it on
-    session-close; under rapid UID recycling those flapping login-session dirs
-    can satisfy a naive existence check, so a dir-only wait would return
-    "success" while NO lingering manager is running. The dir then vanishes the
-    instant that transient session ends — GC'd out from under the workload's own
-    container (conmon: "/run/user/<uid>/…: No such file or directory") and
-    making CLI podman calls (health/images/status/logs/…) intermittently see an
-    empty store. Only a live user@<uid>.service keeps /run/user/<uid> pinned
-    across session churn.
-
-    We also do NOT short-circuit on `show-user … Linger=yes`: the linger marker
-    (/var/lib/systemd/linger/<name>) survives `userdel`, so logind can report
-    Linger=yes while user@<uid>.service is not actually running.
-
-    Re-issuing `enable-linger` sets the marker; we then explicitly *start*
-    user@<uid>.service (systemd serializes this after any in-flight stop of a
-    prior occupant of this recycled UID, so we never latch onto a dying
-    session's runtime dir) and wait for it to be genuinely active.
+    The heavy lifting — enable-linger, explicitly *starting* user@<uid>.service
+    (serialized after any in-flight stop of a recycled UID's prior occupant, so
+    we never latch onto a dying session's runtime dir), and gating on the
+    manager being *active* rather than on /run/user/<uid> merely existing — lives
+    in service_runtime.ensure_runtime_dir (the same primitive the CLI restart
+    paths and podman.py retry use; see its docstring for the flapping-session /
+    UID-recycle rationale). This provisioning path differs only in that it must
+    fail *loudly*: linger not coming up here means the workload can't run, so we
+    raise rather than best-effort return.
     """
-    uid_str = str(pw.pw_uid)
-    service = f"user@{uid_str}.service"
-
-    result = subprocess.run(
-        ["loginctl", "enable-linger", uid_str],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
-
-    # Explicitly start the persistent manager. Queued after any in-flight stop
-    # of this UID's previous occupant, so the wait below can't false-positive on
-    # a dying session's /run/user/<uid>.
-    subprocess.run(["systemctl", "start", service],
-                   check=False, capture_output=True, timeout=30)
-
-    runtime_dir = Path(f"/run/user/{pw.pw_uid}")
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if _linger_manager_active(uid_str) and runtime_dir.is_dir():
-            log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
-            return
-        time.sleep(0.2)
-
+    if service_runtime.ensure_runtime_dir(pw.pw_uid, timeout=15):
+        log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
+        return
     raise RuntimeError(
-        f"linger enabled but {service} did not become active for {pw.pw_name}"
+        f"linger enabled but user@{pw.pw_uid}.service did not become active "
+        f"for {pw.pw_name}"
     )
 
 

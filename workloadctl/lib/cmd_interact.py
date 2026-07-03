@@ -186,7 +186,10 @@ def _cp_staging(config: "WorkloadConfig"):
         sys.exit(1)
     d = Path(tempfile.mkdtemp(prefix=".workloadctl-cp-", dir=str(home)))
     try:
-        os.chown(d, config.uid, config.gid)
+        # follow_symlinks=False for parity with _chown_tree: d is a real dir
+        # root just minted, but never chown through a symlink from a home the
+        # workload user owns (B1).
+        os.chown(d, config.uid, config.gid, follow_symlinks=False)
         os.chmod(d, 0o700)
         yield d
     finally:

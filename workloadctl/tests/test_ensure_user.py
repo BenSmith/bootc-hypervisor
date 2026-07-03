@@ -394,7 +394,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             (root / "state").mkdir()
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
             self.assertTrue((root / "data" / "shared").is_dir())
 
@@ -405,7 +405,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             config = {"workload": {"name": "vmx"},
                       "vm": {"volumes": ["/etc/passwd:/etc/passwd"]}}
             ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(_fake_pw(root / "state"), config)
             self.assertFalse((root / "etc" / "passwd").exists())
 
@@ -414,7 +414,7 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             root = Path(tmp)
             (root / "state").mkdir()
             ps, pd, pr = self._patch(root)
-            with ps, pd, pr, mock.patch("os.chown"), mock.patch("os.chmod"):
+            with ps, pd, pr, mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(
                     _fake_pw(root / "state"), {"workload": {"name": "vmx"}, "vm": {}})
 
@@ -426,13 +426,45 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             existing.mkdir(parents=True)
             config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
             chown_calls = []
+
+            def rec_fchown(fd, u, g):
+                # provisioning fchowns an O_NOFOLLOW fd, not a path — resolve it
+                # back to a path via /proc to assert on the target.
+                chown_calls.append((os.readlink(f"/proc/self/fd/{fd}"), u, g))
+
             ps, pd, pr = self._patch(root)
             with ps, pd, pr, \
-                 mock.patch("os.chown", side_effect=lambda p, u, g: chown_calls.append((str(p), u, g))), \
-                 mock.patch("os.chmod"):
+                 mock.patch("os.fchown", side_effect=rec_fchown), \
+                 mock.patch("os.fchmod"):
                 self.mod.setup_vm_volume_directories(
                     _fake_pw(root / "state", uid=1234, gid=1234), config)
             self.assertTrue(any(str(existing) in c[0] for c in chown_calls))
+
+    def test_symlink_component_is_refused_not_chowned(self):
+        # B1 (root TOCTOU): the volume path's final component is a symlink whose
+        # target is INSIDE the workload root, so the resolve()-based containment
+        # gate passes — but provisioning must still refuse to follow it, or root
+        # would chown the symlink target. The O_NOFOLLOW walk aborts and never
+        # fchowns anything for that path.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / "data").mkdir()
+            target = root / "data" / "real"
+            target.mkdir()
+            # ./shared -> data/real  (target legitimately inside root)
+            os.symlink(target, root / "data" / "shared")
+            config = {"workload": {"name": "vmx"}, "vm": {"volumes": ["./shared:/data"]}}
+            fchown_fds = []
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, \
+                 mock.patch("os.fchown", side_effect=lambda fd, u, g: fchown_fds.append(fd)), \
+                 mock.patch("os.fchmod"), \
+                 mock.patch.object(self.mod, "log"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state", uid=1234, gid=1234), config)
+            # Refused: nothing was chowned via the symlinked component.
+            self.assertEqual(fchown_fds, [])
 
 
 class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
@@ -464,7 +496,7 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
             }
             with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
                  mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
-                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                 mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_volume_directories(pw, config)
             # ./X anchors now resolve to the sibling data/ subdir
             self.assertTrue((root / "data" / "web-data").is_dir())
@@ -485,7 +517,7 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
             }
             with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
                  mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
-                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                 mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_volume_directories(stale_pw, config)
             self.assertTrue((root / "data" / "web-data").is_dir())
 
@@ -810,60 +842,29 @@ class TestWriteEnvironmentFile(unittest.TestCase):
             self.assertEqual(oct(env_dir.stat().st_mode & 0o777), "0o700")
 
 
-class TestLingerManagerActive(unittest.TestCase):
-    def setUp(self):
-        self.mod = _load_script()
-
-    def test_active_returns_true(self):
-        with mock.patch.object(self.mod.subprocess, "run",
-                               return_value=types.SimpleNamespace(stdout="active\n")):
-            self.assertTrue(self.mod._linger_manager_active("10001"))
-
-    def test_inactive_returns_false(self):
-        with mock.patch.object(self.mod.subprocess, "run",
-                               return_value=types.SimpleNamespace(stdout="inactive\n")):
-            self.assertFalse(self.mod._linger_manager_active("10001"))
-
-
 class TestEnableLinger(unittest.TestCase):
+    """enable_linger now delegates the enable/start/wait to
+    service_runtime.ensure_runtime_dir (B5); the provisioning path only adds
+    fail-loud semantics on top."""
+
     def setUp(self):
         self.mod = _load_script()
 
     def test_enable_linger_success(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
         pw.pw_name = "_wl-test"
-
-        def fake_run(argv, **kw):
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
-             mock.patch.object(self.mod, "_linger_manager_active", return_value=True), \
-             mock.patch.object(self.mod.Path, "is_dir", return_value=True), \
+        with mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+                               return_value=True) as ensure, \
              mock.patch.object(self.mod, "log"):
             self.mod.enable_linger(pw)  # must not raise
+        ensure.assert_called_once_with(10001, timeout=15)
 
-    def test_loginctl_failure_raises(self):
+    def test_raises_when_manager_never_active(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
         pw.pw_name = "_wl-test"
-        with mock.patch.object(self.mod.subprocess, "run",
-                               return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="no perm")):
-            with self.assertRaises(RuntimeError) as ctx:
-                self.mod.enable_linger(pw)
-            self.assertIn("loginctl enable-linger failed", str(ctx.exception))
-
-    def test_times_out_when_manager_never_active(self):
-        pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
-        pw.pw_name = "_wl-test"
-
-        def fake_run(argv, **kw):
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        deadlines = iter([0, 100])  # first call sets deadline base; loop exits fast
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
-             mock.patch.object(self.mod, "_linger_manager_active", return_value=False), \
-             mock.patch.object(self.mod.time, "monotonic", side_effect=[0, 100, 100]), \
-             mock.patch.object(self.mod.time, "sleep"), \
-             mock.patch.object(self.mod.Path, "is_dir", return_value=True):
+        with mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+                               return_value=False), \
+             mock.patch.object(self.mod, "log"):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.enable_linger(pw)
             self.assertIn("did not become active", str(ctx.exception))
@@ -1322,7 +1323,7 @@ class TestSetupVolumeDirectoriesSkipBranches(unittest.TestCase):
             pw = _fake_pw(root / "state", uid=10001, gid=10001)
             with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
                  mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
-                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                 mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_volume_directories(pw, config)
             # required_files path must NOT be created as a directory
             self.assertFalse((root / "data" / "secret.env").exists())
@@ -1338,7 +1339,7 @@ class TestSetupVolumeDirectoriesSkipBranches(unittest.TestCase):
             pw = _fake_pw(root / "state", uid=10001, gid=10001)
             with mock.patch.object(self.mod, "workload_state_dir", lambda n: root / "state"), \
                  mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
-                 mock.patch("os.chown"), mock.patch("os.chmod"):
+                 mock.patch("os.fchown"), mock.patch("os.fchmod"):
                 self.mod.setup_volume_directories(pw, config)  # must not raise
 
 
