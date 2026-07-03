@@ -52,6 +52,16 @@ from substrate import get_substrate, service_active
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
 RECOMMENDED_EXECUTABLES = ["semanage", "udica"]
 
+
+class SelinuxPolicyError(Exception):
+    """Raised by _apply_selinux_policy() when loading/removing a workload's
+    SELinux type fails.
+
+    Same contract as substrate.ProvisionFailed: the diagnostic has already
+    been printed, so the caller exits 1 without printing again (the enable
+    path) or lets it fold into the disable path's best-effort failure list.
+    """
+
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
 _BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
@@ -532,7 +542,7 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
                   f"would fail to start under enforcing mode. Install container-selinux "
                   f"and policycoreutils, then re-run enable.",
                   file=sys.stderr)
-            sys.exit(1)
+            raise SelinuxPolicyError(f"selinux tooling missing for '{config.name}'")
         print(f"  WARNING: SELinux tooling (semodule + udica templates) not "
               f"found; skipping policy {action} for '{config.name}'",
               file=sys.stderr)
@@ -555,7 +565,7 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
         # Reached only if a workload without selinux_policy is routed here.
         print(f"  ERROR: no SELinux bundle resolved for '{config.name}' "
               f"(selinux_policy not set)", file=sys.stderr)
-        sys.exit(1)
+        raise SelinuxPolicyError(f"no SELinux bundle resolved for '{config.name}'")
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
@@ -568,13 +578,13 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
             print(f"         did you mean {bundle.replace('_', '-')!r}? "
                   f"(the bundle is a directory name and uses hyphens, not the "
                   f"underscores of the SELinux type name)", file=sys.stderr)
-        sys.exit(1)
+        raise SelinuxPolicyError(f"invalid bundle {bundle!r} for '{config.name}'")
     template = config.resolve_control_file("policy.cil")
     if not template.exists():
         print(f"  ERROR: SELinux policy template not found: {template}",
               file=sys.stderr)
         _print_available_bundles(bundle)
-        sys.exit(1)
+        raise SelinuxPolicyError(f"policy template not found for '{config.name}'")
 
     bases = sorted(str(p) for p in UDICA_TEMPLATE_DIR.glob("*.cil"))
     src = template.read_text().replace("__WL_MODULE__", module)
@@ -588,7 +598,7 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
         except subprocess.CalledProcessError as e:
             print(f"  Error: SELinux policy install failed (exit {e.returncode})",
                   file=sys.stderr)
-            sys.exit(1)
+            raise SelinuxPolicyError(f"semodule -i failed for '{config.name}'")
 
 
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
@@ -673,8 +683,12 @@ def cmd_enable(args, manager: WorkloadManager):
     _run_host_setup(config, "enable")
 
     # Load the per-workload SELinux type (before the service starts, so the
-    # container's label resolves).
-    _apply_selinux_policy(config, "enable")
+    # container's label resolves). The error is already printed by
+    # _apply_selinux_policy(); exit without printing again.
+    try:
+        _apply_selinux_policy(config, "enable")
+    except SelinuxPolicyError:
+        sys.exit(1)
 
     print()
     _provision_user(config)

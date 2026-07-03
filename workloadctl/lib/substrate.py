@@ -94,6 +94,19 @@ class BackupError(Exception):
     """
 
 
+class LifecycleError(Exception):
+    """Raised by lifecycle() when a start/stop/restart/reboot step fails.
+
+    Carries the returncode the caller should exit with — mirrors the exact
+    exit code of the systemctl/podman invocation that failed, so the CLI
+    layer's ``sys.exit(e.returncode)`` reproduces the pre-exception behavior
+    of exiting directly from library code.
+    """
+    def __init__(self, returncode: int):
+        self.returncode = returncode
+        super().__init__(f"lifecycle action failed (exit {returncode})")
+
+
 # ---------------------------------------------------------------------------
 # Shared liveness primitive
 # ---------------------------------------------------------------------------
@@ -688,15 +701,15 @@ class ContainerSubstrate(Substrate):
                         self.config.uid, self.config.service_name, action="start"
                     )
                 except subprocess.CalledProcessError as e:
-                    sys.exit(e.returncode or 1)
+                    raise LifecycleError(e.returncode or 1)
             else:
                 result = subprocess.run(["systemctl", "start", self.config.service_name])
                 if result.returncode != 0:
-                    sys.exit(result.returncode)
+                    raise LifecycleError(result.returncode)
         elif action == "stop":
             result = subprocess.run(["systemctl", "stop", self.config.service_name])
             if result.returncode != 0:
-                sys.exit(result.returncode)
+                raise LifecycleError(result.returncode)
         elif action == "restart":
             if self.manager.user_exists(self.config):
                 restart_workload_service(self.config.uid, self.config.service_name)
@@ -711,7 +724,7 @@ class ContainerSubstrate(Substrate):
             )
             if result.returncode != 0:
                 print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
-                sys.exit(1)
+                raise LifecycleError(1)
             print(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
         else:
             raise ValueError(f"Unknown lifecycle action: {action!r}")
@@ -904,7 +917,7 @@ class ContainerSubstrate(Substrate):
                 f"Error: Failed to retag rollback image for {target['label']}: {e.stderr}",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            raise LifecycleError(1)
         current_id = target.get("current_id")
         rollback_id = target["rollback_id"]
         print(

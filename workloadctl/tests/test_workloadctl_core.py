@@ -630,18 +630,16 @@ class ResolveContainerTargetTest(unittest.TestCase):
         cfg = self._fake_config(False, container_name="workload-foo")
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, "extra", "foo")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("single-container", buf.getvalue())
 
     def test_multi_container_missing_suffix_errors(self):
         cfg = self._fake_config(True, names=["web", "db"])
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, None, "multi")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("multiple containers", buf.getvalue())
         self.assertIn("web, db", buf.getvalue())
 
@@ -649,9 +647,8 @@ class ResolveContainerTargetTest(unittest.TestCase):
         cfg = self._fake_config(True, names=["web", "db"])
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, "cache", "multi")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("not in workload", buf.getvalue())
 
     def test_multi_container_valid_name_resolves(self):

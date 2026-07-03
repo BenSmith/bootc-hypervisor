@@ -56,24 +56,25 @@ def resolve_container_target(config, container, workload):
 
     For single-container workloads, `container` must be None. For
     multi-container workloads, `container` is required; a bare workload name
-    errors with the list of available containers (exit 2).
+    raises UsageError (mapped to exit 2) with the list of available
+    containers.
     """
     if not config.is_multi:
         if container is not None:
             print(f"Error: workload '{workload}' is single-container; "
                   f"drop the '/{container}' suffix.", file=sys.stderr)
-            sys.exit(2)
+            raise UsageError(f"'{workload}' is single-container")
         return config.container_name
     names = config.container_names()
     if container is None:
         print(f"Error: workload '{workload}' has multiple containers; "
                "specify with NAME/CTR.", file=sys.stderr)
         print(f"  Available: {', '.join(names)}", file=sys.stderr)
-        sys.exit(2)
+        raise UsageError(f"'{workload}' requires a container name")
     if container not in names:
         print(f"Error: container '{container}' not in workload '{workload}'. "
               f"Available: {', '.join(names)}", file=sys.stderr)
-        sys.exit(2)
+        raise UsageError(f"container '{container}' not in '{workload}'")
     return config.podman_container_name(container)
 
 
@@ -155,6 +156,14 @@ def parse_size_bytes(s) -> int:
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
+class UsageError(Exception):
+    """Raised for a CLI usage error whose message has already been printed.
+
+    Maps to exit code 2 (argparse's own convention for usage errors) in the
+    __main__ except-ladder of bin/workloadctl.
+    """
+
 
 class WorkloadMasked(Exception):
     """Raised when a workload config is masked (symlinked to /dev/null)."""

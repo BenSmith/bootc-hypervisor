@@ -1256,7 +1256,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=False):
                 with patch.object(cmd_lifecycle, '_selinux_enforcing', return_value=True):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
 
     def test_enable_warns_when_tooling_missing_and_permissive(self):
@@ -1302,7 +1302,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
                 self.assertIn("invalid", buf.getvalue())
 
@@ -1311,7 +1311,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
                 self.assertIn("template not found", buf.getvalue())
 
@@ -1341,7 +1341,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
                         with patch.object(cmd_lifecycle, 'UDICA_TEMPLATE_DIR', Path(td)):
                             with patch.object(cmd_lifecycle.subprocess, 'run',
                                               side_effect=cmd_lifecycle.subprocess.CalledProcessError(1, ["semodule"])):
-                                with self.assertRaises(SystemExit):
+                                with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                                     cmd_lifecycle._apply_selinux_policy(cfg, "enable")
 
 
@@ -1408,6 +1408,32 @@ class TestCmdEnable(unittest.TestCase):
                         marker = workload_lib.workload_enabled_marker("test-wl")
                         self.assertTrue(marker.exists())
                         self.assertIn("enabled and starting", buf.getvalue())
+
+    def test_selinux_policy_failure_exits_1_without_reprinting(self):
+        # _apply_selinux_policy() prints its own diagnostic and raises
+        # SelinuxPolicyError; cmd_enable must exit 1 without printing a
+        # second "Error: ..." line (the message is already on stderr).
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as wl_base:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                    with _RootBypass():
+                        manager = MagicMock()
+                        with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
+                                with patch.object(cmd_lifecycle, '_run_host_setup'):
+                                    with patch.object(
+                                        cmd_lifecycle, '_apply_selinux_policy',
+                                        side_effect=cmd_lifecycle.SelinuxPolicyError("boom"),
+                                    ):
+                                        buf = io.StringIO()
+                                        with redirect_stderr(buf):
+                                            with self.assertRaises(SystemExit) as cm:
+                                                cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                        self.assertEqual(cm.exception.code, 1)
+                                        self.assertEqual(buf.getvalue(), "")
 
     def test_vm_workload_skips_image_transfer(self):
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as wl_base:

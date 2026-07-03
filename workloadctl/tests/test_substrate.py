@@ -26,6 +26,7 @@ from substrate import (
     VMSubstrate,
     NotApplicable,
     BackupError,
+    LifecycleError,
     service_active,
 )
 import cmd_drift
@@ -1252,8 +1253,26 @@ class TestContainerRollbackTargets(unittest.TestCase):
         with patch('sys.stdout', buf):
             substrate.rollback_to(target)
         manager.podman.return_value.tag.assert_called_once_with(tag, 'example.com/test:latest')
-        self.assertIn('def456de', buf.getvalue())
-        self.assertIn('abc123ab', buf.getvalue())
+
+    def test_rollback_to_retag_failure_raises_lifecycle_error(self):
+        from podman import PodmanError
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.tag.side_effect = PodmanError(1, "tag error", ["tag"])
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        substrate = ContainerSubstrate(config, manager)
+        target = {
+            'label': 'test-wl',
+            'tag': tag,
+            'image': 'example.com/test:latest',
+            'current_id': 'def456de',
+            'rollback_id': 'abc123ab',
+        }
+        with patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(LifecycleError) as cm:
+                substrate.rollback_to(target)
+        self.assertEqual(cm.exception.returncode, 1)
 
 
 class TestVMRollbackTargets(unittest.TestCase):
@@ -1845,9 +1864,9 @@ class TestContainerLifecycleMore(unittest.TestCase):
             _substrate_mod, 'restart_workload_service',
             side_effect=sp.CalledProcessError(returncode=5, cmd=['x']),
         ):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("start")
-        self.assertEqual(cm.exception.code, 5)
+        self.assertEqual(cm.exception.returncode, 5)
 
     def test_restart_with_user_calls_restart_workload_service(self):
         substrate, manager = self._substrate(user_exists=True)
@@ -1875,9 +1894,9 @@ class TestContainerLifecycleMore(unittest.TestCase):
         manager.run_podman_exec.return_value = _ok(returncode=1)
         buf = io.StringIO()
         with patch('sys.stderr', buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
 
 # ── ContainerSubstrate.reprovision() full pull/restart flow ──────────────────
