@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_root_dir, workload_username
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_root_dir, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -52,7 +52,14 @@ def get_workload_disk_bytes(home_dir):
 def get_enabled_workloads():
     """Read all enabled workload configs from config directory.
 
-    Returns list of (name, has_health_check, is_vm) tuples.
+    Returns list of (name, health_targets, is_vm) tuples, where health_targets
+    is a list of (local_container_name, podman_container_name) pairs — one per
+    container that declares a health check. For single-container workloads
+    podman_container_name is `workload-<name>`; for pod/bridge ([[containers]])
+    workloads each container has its own podman name, `workload-<name>-<container>`
+    (see WorkloadConfig.podman_container_name in lib/workloadctl_core.py — mirrored
+    here rather than constructed via WorkloadConfig, since this function reads the
+    TOML directly). An empty list means no health checks (falsy, like the old bool).
     """
     workloads: list[tuple] = []
     if not WORKLOAD_CONFIG_DIR.is_dir():
@@ -74,12 +81,20 @@ def get_enabled_workloads():
                 config = tomllib.load(f)
             name = config.get("workload", {}).get("name", "")
             is_vm = bool(config.get("vm"))
-            has_health = any(
-                bool(ctr.get("container", {}).get("health", {}).get("cmd", ""))
-                for ctr in normalize_containers(config)
-            ) if not is_vm else False
+            is_multi = "containers" in config
+            health_targets = []
+            if not is_vm:
+                for ctr in normalize_containers(config):
+                    if not ctr.get("container", {}).get("health", {}).get("cmd", ""):
+                        continue
+                    local_name = ctr.get("name", name)
+                    podman_name = (
+                        f"workload-{name}-{local_name}" if is_multi
+                        else workload_container_name(name)
+                    )
+                    health_targets.append((local_name, podman_name))
             if name:
-                workloads.append((name, has_health, is_vm))
+                workloads.append((name, health_targets, is_vm))
         except Exception:
             continue
 
@@ -186,8 +201,13 @@ def get_service_metrics(name):
     return metrics
 
 
-def get_container_health(name):
+def get_container_health(name, container_name=None):
     """Query podman container health status for a workload.
+
+    `container_name` is the podman --name to inspect; defaults to
+    `workload-<name>` (the single-container name) but callers pass the
+    per-container name (`workload-<name>-<container>`) for pod/bridge
+    workloads, since those containers don't exist under the bare name.
 
     Returns "healthy", "unhealthy", "starting", or None if no health check.
     Runs podman inspect as the workload user.
@@ -203,7 +223,7 @@ def get_container_health(name):
     try:
         return Podman.for_user(
             username, uid, pw.pw_dir, timeout=5
-        ).container_health(f"workload-{name}")
+        ).container_health(container_name or f"workload-{name}")
     except Exception:
         return None
 
@@ -333,6 +353,19 @@ def format_metrics(all_metrics):
         lines.append(f"# HELP {metric_name} {help_text}")
         lines.append(f"# TYPE {metric_name} {metric_type}")
 
+        if metric_name == "workload_health":
+            # Per-container: svc_metrics["health"] is {local_container_name:
+            # 0/1}, one entry per container that has a health check (pod/bridge
+            # workloads can have several; single-container workloads have one,
+            # keyed by the workload name).
+            for workload_name, svc_metrics, _cgroup, _vm, _disk in all_metrics:
+                for container, value in svc_metrics.get("health", {}).items():
+                    lines.append(
+                        f'workload_health{{workload="{workload_name}",container="{container}"}} {value}'
+                    )
+            lines.append("")
+            continue
+
         for workload_name, svc_metrics, cgroup_metrics, _vm_metrics, _disk in all_metrics:
             key = metric_name.replace("workload_", "")
             if key in svc_metrics:
@@ -402,13 +435,17 @@ class MetricsHandler(BaseHTTPRequestHandler):
         try:
             workloads = get_enabled_workloads()
             all_metrics = []
-            for name, has_health, is_vm in workloads:
+            for name, health_targets, is_vm in workloads:
                 svc = get_service_metrics(name) or {}
                 cgroup = get_cgroup_metrics(name, is_vm)
-                if has_health:
-                    health = get_container_health(name)
-                    if health is not None:
-                        svc["health"] = 1 if health == "healthy" else 0
+                if health_targets:
+                    health_by_container = {}
+                    for local_name, podman_name in health_targets:
+                        health = get_container_health(name, podman_name)
+                        if health is not None:
+                            health_by_container[local_name] = 1 if health == "healthy" else 0
+                    if health_by_container:
+                        svc["health"] = health_by_container
                 vm = get_vm_qmp_metrics(name) if is_vm else {}
                 disk = get_workload_disk_bytes(workload_root_dir(name))
                 all_metrics.append((name, svc, cgroup, vm, disk))

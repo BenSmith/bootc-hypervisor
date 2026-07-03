@@ -33,6 +33,7 @@ from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
     virtiofs_tag,
     parse_volume_spec,
+    SUBID_LOCK,
 )
 import imagebuild
 from podman import Podman
@@ -289,7 +290,7 @@ def _provision_user(config: WorkloadConfig):
     # /etc/passwd (plus a per-process set), so the picked UID isn't visible to a
     # concurrent enable until sysusers has created the user. Releasing after
     # allocation (as before) let two enables pick the same free UID.
-    _subid_lock = Path("/run/lock/workload-subid.lock")
+    _subid_lock = SUBID_LOCK
     _subid_lock.parent.mkdir(parents=True, exist_ok=True)
     with open(_subid_lock, "w") as _lock_fd:
         fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX)
@@ -914,7 +915,7 @@ def cmd_disable(args, manager: WorkloadManager):
         else:
             try:
                 print("  Removing subuid/subgid entries...")
-                subid_lock = Path("/run/lock/workload-subid.lock")
+                subid_lock = SUBID_LOCK
                 subid_lock.parent.mkdir(parents=True, exist_ok=True)
                 with open(subid_lock, "w") as lock_fd:
                     fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)

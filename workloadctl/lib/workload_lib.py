@@ -412,6 +412,11 @@ def workload_container_name(name: str) -> str:
 # boot by workload-generate.service and on every `workloadctl enable`).
 RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
 
+# Flock guarding the subuid/subgid UID-allocation critical section (#4). Must be
+# the identical path across every participant (workload-ensure-user, cmd_lifecycle
+# enable + disable/purge) or the flock stops mutexing.
+SUBID_LOCK = Path("/run/lock/workload-subid.lock")
+
 
 def units_outdated(name: str) -> bool:
     """True if the workload's config TOML is newer than its generated unit file.

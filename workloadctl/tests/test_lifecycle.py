@@ -705,6 +705,18 @@ from contextlib import redirect_stdout, redirect_stderr
 import cmd_lifecycle
 
 
+class TestSubidLockSharedConstant(unittest.TestCase):
+    """A11: the subuid/subgid flock only mutexes if every participant names
+    the identical path — cmd_lifecycle must import workload_lib.SUBID_LOCK
+    rather than re-spelling the literal."""
+
+    def test_cmd_lifecycle_imports_shared_lock_path(self):
+        self.assertIs(cmd_lifecycle.SUBID_LOCK, workload_lib.SUBID_LOCK)
+        self.assertEqual(
+            cmd_lifecycle.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
+        )
+
+
 def _ns(**kw):
     return argparse.Namespace(**kw)
 

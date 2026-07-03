@@ -903,6 +903,21 @@ class TestSetupVmBridge(unittest.TestCase):
             self.assertIn("allow br0", text)
             self.assertIn("allow _workload-br", text)
 
+    def test_prefix_collision_does_not_suppress_allow_line(self):
+        # Regression: an existing "allow br0-lan" line must not suppress adding
+        # "allow br0" — a substring check (`"allow br0" in existing`) would
+        # false-positive on "allow br0-lan" and silently skip the append.
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "qemu" / "bridge.conf"
+            conf.parent.mkdir(parents=True)
+            conf.write_text("allow br0-lan\n")
+            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
+                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
+                self.mod.setup_vm_bridge("myvm", "br0")
+            lines = conf.read_text().splitlines()
+            self.assertIn("allow br0-lan", lines)
+            self.assertIn("allow br0", lines)
+
 
 class TestSetupNvram(unittest.TestCase):
     def setUp(self):

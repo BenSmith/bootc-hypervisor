@@ -26,10 +26,8 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
     virtiofs_tag, parse_volume_spec, substitute_template, normalize_containers,
-    workload_state_dir, workload_data_dir, workload_root_dir,
+    workload_state_dir, workload_data_dir, workload_root_dir, SUBID_LOCK,
 )
-
-SUBID_LOCK = Path("/run/lock/workload-subid.lock")
 
 
 def log(msg):
@@ -455,7 +453,7 @@ def setup_vm_bridge(name: str, bridge: str):
     bridge_conf = Path("/etc/qemu/bridge.conf")
     bridge_conf.parent.mkdir(parents=True, exist_ok=True)
     existing = bridge_conf.read_text() if bridge_conf.exists() else ""
-    if f"allow {bridge}" not in existing:
+    if f"allow {bridge}" not in existing.splitlines():
         with open(bridge_conf, "a") as f:
             f.write(f"allow {bridge}\n")
         log(f"  Added 'allow {bridge}' to {bridge_conf}")
