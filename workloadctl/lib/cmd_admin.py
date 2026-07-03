@@ -97,13 +97,13 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # Check name uniqueness (workload names must be unique)
     all_configs = manager.get_all_configs()
     conflicts = [c for c in all_configs
-                 if c.name == config.name and c.filename != config.filename]
+                 if c.name == config.name and c.path != config.path]
     if conflicts:
         checks.append({
             "check": "name_uniqueness",
             "passed": False,
             "severity": "error",
-            "message": f"Name conflict: '{config.name}' also used in {conflicts[0].filename}"
+            "message": f"Name conflict: '{config.name}' also used in {conflicts[0].path}"
         })
         errors += 1
     else:
@@ -297,7 +297,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
 
     passed = errors == 0
     result = {
-        "workload": config.filename,
+        "workload": config.name,
         "passed": passed,
         "errors": errors,
         "warnings": warnings,
@@ -306,7 +306,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
 
     # Human-readable output if not JSON mode
     if not json_mode:
-        print(f"Validating: {config.filename}")
+        print(f"Validating: {config.name}")
         print()
 
         for check in checks:

@@ -126,7 +126,6 @@ def cmd_list(args, manager: WorkloadManager):
             else:
                 primary_image = config.image
             workloads.append({
-                "filename": config.filename,
                 "name": config.name,
                 "kind": config.kind,
                 "enabled": config.enabled,
@@ -360,7 +359,7 @@ def cmd_images(args, manager: WorkloadManager):
                 if info:
                     size_bytes = info.get("Size") or 0
                     images_data.append({
-                        "workload": config.filename,
+                        "workload": config.name,
                         "container": cname,
                         "image": image,
                         "size_bytes": size_bytes,
@@ -554,7 +553,7 @@ def cmd_info(args, manager: WorkloadManager):
         active_since = _parse_active_since(svc_props.get("ActiveEnterTimestamp", ""))
 
         vm_info = {
-            "workload": {"name": config.name, "filename": config.filename,
+            "workload": {"name": config.name,
                          "config_path": str(config.path), "enabled": config.enabled},
             "vm": {
                 "memory": vm_cfg.get("memory", "1024M"),
@@ -622,12 +621,12 @@ def cmd_info(args, manager: WorkloadManager):
             print(f"  Active: {service_state}")
         print()
         print("Quick commands:")
-        print(f"  Console:  workloadctl shell {config.filename}")
+        print(f"  Console:  workloadctl shell {config.name}")
         if guest_ip:
-            print(f"  SSH:      workloadctl exec {config.filename} -- bash")
-        print(f"  Logs:     workloadctl logs -f {config.filename}")
-        print(f"  Update:   sudo workloadctl update {config.filename}")
-        print(f"  Rollback: sudo workloadctl rollback {config.filename}")
+            print(f"  SSH:      workloadctl exec {config.name} -- bash")
+        print(f"  Logs:     workloadctl logs -f {config.name}")
+        print(f"  Update:   sudo workloadctl update {config.name}")
+        print(f"  Rollback: sudo workloadctl rollback {config.name}")
         return
 
     # Container(s)
@@ -692,7 +691,6 @@ def cmd_info(args, manager: WorkloadManager):
     info_data: dict[str, Any] = {
         "workload": {
             "name": config.name,
-            "filename": config.filename,
             "config_path": str(config.path),
             "enabled": config.enabled,
             "mode": config.mode,
@@ -803,9 +801,9 @@ def cmd_info(args, manager: WorkloadManager):
     print()
 
     print("Quick commands:")
-    print(f"  Shell:    workloadctl shell {config.filename}")
-    print(f"  Logs:     workloadctl logs -f {config.filename}")
-    print(f"  Recreate: workloadctl recreate {config.filename}")
+    print(f"  Shell:    workloadctl shell {config.name}")
+    print(f"  Logs:     workloadctl logs -f {config.name}")
+    print(f"  Recreate: workloadctl recreate {config.name}")
 
 
 # ---------------------------------------------------------------------------

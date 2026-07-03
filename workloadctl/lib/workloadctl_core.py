@@ -204,13 +204,12 @@ def require_root():
 class WorkloadConfig:
     """Represents a workload configuration file"""
 
-    def __init__(self, filename: str):
-        self.filename = filename
-        self.path = workload_config_path(filename)
+    def __init__(self, name: str):
+        self.path = workload_config_path(name)
 
         # Masked workload: symlink to /dev/null (same semantics as systemd masking)
         if self.path.is_symlink() and self.path.resolve() == Path('/dev/null'):
-            raise WorkloadMasked(filename)
+            raise WorkloadMasked(name)
 
         if not self.path.exists():
             raise FileNotFoundError(f"Config not found: {self.path}")
@@ -218,12 +217,12 @@ class WorkloadConfig:
         with open(self.path, "rb") as f:
             self.config = tomllib.load(f)
 
-        name = self.config["workload"]["name"]
+        config_name = self.config["workload"]["name"]
 
-        if name != filename:
-            raise ValueError(f"Workload name '{name}' must match filename '{filename}'")
+        if config_name != name:
+            raise ValueError(f"Workload name '{config_name}' must match directory '{name}'")
 
-        validate_workload_name(name)
+        validate_workload_name(config_name)
 
     @property
     def name(self) -> str:

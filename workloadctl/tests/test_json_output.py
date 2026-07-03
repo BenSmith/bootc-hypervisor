@@ -262,7 +262,7 @@ class TestListJson(unittest.TestCase):
                 data = _capture_json(lambda: cmd_inspect.cmd_list(args, self._manager()))
         self.assertIn('workloads', data)
         wl = data['workloads'][0]
-        for key in ('filename', 'name', 'enabled', 'state', 'image', 'image_id', 'ports'):
+        for key in ('name', 'enabled', 'state', 'image', 'image_id', 'ports'):
             self.assertIn(key, wl, f'missing key: {key}')
 
 

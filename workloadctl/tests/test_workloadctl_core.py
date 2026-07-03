@@ -235,6 +235,13 @@ class WorkloadConfigConstructionTest(WorkloadConfigTestBase):
         self.assertFalse(cfg.is_vm)
         self.assertEqual(cfg.image, "localhost/x:latest")
 
+    def test_no_filename_alias(self):
+        # `name` is the single identity attribute; the old `.filename` alias
+        # (which duplicated `.name`) is gone. Guard against reintroducing it.
+        cfg = self._config("ok", '[workload]\nname = "ok"\n\n'
+                                  '[container]\nimage = "x"\n')
+        self.assertFalse(hasattr(cfg, "filename"))
+
 
 class WorkloadConfigVmImageTest(WorkloadConfigTestBase):
     def test_vm_image_field(self):

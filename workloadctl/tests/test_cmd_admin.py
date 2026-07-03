@@ -880,7 +880,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
 
     def test_name_conflict_is_error(self):
         cfg = self._cfg('[workload]\nname = "app"\n\n[container]\nimage = "x"\n')
-        other = types.SimpleNamespace(name="app", filename="other-file")
+        other = types.SimpleNamespace(name="app", path="other-file")
         self.manager.get_all_configs.return_value = [other]
         res = self._validate(cfg)
         c = self._check(res, "name_uniqueness")
