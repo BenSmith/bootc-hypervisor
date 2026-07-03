@@ -403,5 +403,193 @@ class CatalogListTest(CatalogTestBase):
             self.assertIn("No bundles found", buf.getvalue())
 
 
+class TestWriteNewRace(unittest.TestCase):
+    def test_write_new_returns_false_on_existing_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "f.txt"
+            self.assertTrue(cmd_catalog._write_new(p, "one"))
+            self.assertFalse(cmd_catalog._write_new(p, "two"))
+            self.assertEqual(p.read_text(), "one")
+
+
+class TestConfigImagesHelpers(CatalogTestBase):
+    def test_config_images_vm_returns_empty(self):
+        from workloadctl_core import WorkloadConfig
+        (self.tmp / "vmw").mkdir()
+        (self.tmp / "vmw" / "workload.toml").write_text(
+            '[workload]\nname = "vmw"\n[vm]\ncloud_image_url = "http://x/y.qcow2"\n'
+            'cloud_image_checksum = "sha256:aa"\n')
+        cfg = WorkloadConfig("vmw")
+        self.assertEqual(cmd_catalog._config_images(cfg), set())
+
+    def test_config_images_exception_returns_empty(self):
+        from workloadctl_core import WorkloadConfig
+        (self.tmp / "badc").mkdir()
+        # [container] present but missing the required "image" key -> container_images()
+        # raises KeyError internally; the helper must swallow it, not crash duplicate.
+        (self.tmp / "badc" / "workload.toml").write_text(
+            '[workload]\nname = "badc"\n[container]\npull = "newer"\n')
+        cfg = WorkloadConfig("badc")
+        self.assertEqual(cmd_catalog._config_images(cfg), set())
+
+    def test_referenced_secrets_from_files_credential(self):
+        from workloadctl_core import WorkloadConfig
+        (self.tmp / "secf").mkdir()
+        (self.tmp / "secf" / "workload.toml").write_text(
+            '[workload]\nname = "secf"\n[container]\nimage = "x"\n'
+            '[[secrets.files]]\npath = "/run/x"\ncredential = "db-pass"\n')
+        cfg = WorkloadConfig("secf")
+        self.assertEqual(cmd_catalog._referenced_secrets(cfg), ["db-pass"])
+
+
+class TestSetFieldNoSection(unittest.TestCase):
+    def test_appends_workload_section_when_absent(self):
+        out = cmd_catalog._set_workload_field('[container]\nimage = "y"\n', "name", '"new"')
+        data = tomllib.loads(out)
+        self.assertEqual(data["workload"]["name"], "new")
+        self.assertEqual(data["container"]["image"], "y")
+
+    def test_appends_workload_section_no_trailing_newline(self):
+        out = cmd_catalog._set_workload_field('[container]\nimage = "y"', "name", '"new"')
+        data = tomllib.loads(out)
+        self.assertEqual(data["workload"]["name"], "new")
+
+
+class TestBundleKindMalformed(CatalogTestBase):
+    def test_bundle_kind_unparsable_toml_returns_qmark(self):
+        (self.tmp / "broken").mkdir()
+        (self.tmp / "broken" / "workload.toml").write_text("not [ valid toml")
+        with mock.patch.object(cmd_catalog, "BUNDLES_DIR", self.tmp):
+            self.assertEqual(cmd_catalog._bundle_kind("broken"), "?")
+
+
+class TestSuggestBundle(CatalogTestBase):
+    def test_suggest_bundle_no_bundles_prints_nothing(self):
+        with mock.patch.object(cmd_catalog, "BUNDLES_DIR", self.tmp / "empty"):
+            buf = io.StringIO()
+            with mock.patch("sys.stderr", buf):
+                cmd_catalog._suggest_bundle("whatever")
+            self.assertEqual(buf.getvalue(), "")
+
+    def test_suggest_bundle_close_match_hint(self):
+        buf = io.StringIO()
+        with mock.patch("sys.stderr", buf):
+            cmd_catalog._suggest_bundle("alllloy")  # close to "alloy"
+        out = buf.getvalue()
+        self.assertIn("did you mean", out)
+        self.assertIn("available bundles", out)
+
+
+class TestInitErrorPaths(CatalogTestBase):
+    def test_no_bundle_no_scratch_errors(self):
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr", buf):
+                cmd_catalog.cmd_init(_ns(bundle=None, scratch=None, scratch_vm=None, as_name=None),
+                                      self.manager)
+        self.assertIn("no bundle specified", buf.getvalue())
+
+    def test_invalid_as_name_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(_ns(bundle="alloy", as_name="bad/name"), self.manager)
+
+    def test_scratch_invalid_name_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_init(_ns(scratch="bad/name", bundle=None, as_name=None), self.manager)
+
+    def test_scratch_write_race_exits(self):
+        # dst.parent didn't exist at check time but _write_new still reports
+        # a collision (TOCTOU) -> must still error out cleanly.
+        with mock.patch.object(cmd_catalog, "_write_new", return_value=False):
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_init(_ns(scratch="racer", bundle=None, as_name=None), self.manager)
+
+    def test_scratch_vm_write_race_exits(self):
+        with mock.patch.object(cmd_catalog, "_write_new", return_value=False):
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_init(
+                    _ns(scratch_vm="racervm", bundle=None, scratch=None, as_name=None),
+                    self.manager)
+
+    def test_bundle_write_race_exits(self):
+        with mock.patch.object(cmd_catalog, "_write_new", return_value=False):
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
+
+
+class TestDuplicateErrorPaths(CatalogTestBase):
+    def test_invalid_source_name_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_duplicate(_ns(source="bad/name", new="x"), self.manager)
+
+    def test_invalid_new_name_exits(self):
+        cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_duplicate(_ns(source="alloy", new="bad/name"), self.manager)
+
+    def test_new_name_already_exists_exits(self):
+        cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
+        cmd_catalog.cmd_init(_ns(bundle="alloy", as_name="alloy2"), self.manager)
+        with self.assertRaises(SystemExit):
+            cmd_catalog.cmd_duplicate(_ns(source="alloy", new="alloy2"), self.manager)
+
+    def test_write_race_exits(self):
+        cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)
+        with mock.patch.object(cmd_catalog, "_write_new", return_value=False):
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_duplicate(_ns(source="alloy", new="alloy-b"), self.manager)
+
+    def test_workloadconfig_load_failure_falls_back_to_raw_toml(self):
+        # Source workload.toml with no [workload].bundle and a shape that makes
+        # WorkloadConfig(src_name) raise (missing required container image) ->
+        # cmd_duplicate must fall back to a raw tomllib parse and default the
+        # bundle to the source's own name.
+        (self.tmp / "raw").mkdir()
+        # name != dir name -> WorkloadConfig("raw") raises ValueError in its
+        # constructor, forcing cmd_duplicate's raw-tomllib fallback path.
+        (self.tmp / "raw" / "workload.toml").write_text(
+            '[workload]\nname = "mismatch"\n[container]\nimage = "x"\n')
+        cmd_catalog.cmd_duplicate(_ns(source="raw", new="raw-b"), self.manager)
+        data = self._read("raw-b")
+        self.assertEqual(data["workload"]["bundle"], "raw")
+
+
+class TestLintDuplicateUnreadable(CatalogTestBase):
+    def test_lint_swallows_unreadable_config(self):
+        # WorkloadConfig(name) raising inside _lint_duplicate must not propagate;
+        # it should just skip the lint silently.
+        with mock.patch("cmd_catalog.WorkloadConfig", side_effect=RuntimeError("boom")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_catalog._lint_duplicate("whatever", self.manager)
+            self.assertEqual(buf.getvalue(), "")
+
+
+class TestPostWriteReportValidateFailure(CatalogTestBase):
+    def test_validate_exception_is_reported_not_raised(self):
+        with mock.patch("cmd_catalog.WorkloadConfig", side_effect=RuntimeError("nope")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_catalog._post_write_report("whatever", self.manager)
+            self.assertIn("could not validate yet", buf.getvalue())
+
+
+class TestInstallErrorPaths(CatalogTestBase):
+    def test_missing_name_field_exits(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "workload.toml").write_text('[workload]\n[container]\nimage = "x"\n')
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_install(_ns(src=d), self.manager)
+
+    def test_invalid_name_field_exits(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "workload.toml").write_text('[workload]\nname = "bad/name"\n')
+            with self.assertRaises(SystemExit):
+                cmd_catalog.cmd_install(_ns(src=d), self.manager)
+
+
 if __name__ == "__main__":
     unittest.main()

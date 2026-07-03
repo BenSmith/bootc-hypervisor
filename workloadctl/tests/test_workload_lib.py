@@ -1004,6 +1004,113 @@ class TestQMPClient(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 qmp.connect(missing, timeout=0.3, recv_timeout=0.3)
 
+    def test_readline_raises_connectionerror_when_peer_closes(self):
+        # If the monitor dies mid-negotiate (closes without acking
+        # qmp_capabilities), the reader must not loop forever on an empty
+        # recv() — it must surface a clear ConnectionError.
+        tmp = Path(tempfile.mkdtemp())
+        sock_path = tmp / "qmp.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock_path))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+
+        def serve():
+            conn, _ = srv.accept()
+            with conn:
+                conn.sendall(b'{"QMP": {"version": {}, "capabilities": []}}\n')
+                conn.recv(4096)  # qmp_capabilities
+                # Close without sending the ack.
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+
+        qmp = QMPClient()
+        try:
+            qmp.connect(sock_path, timeout=2.0, recv_timeout=2.0)
+            with self.assertRaises(ConnectionError):
+                qmp.negotiate()
+        finally:
+            qmp.close()
+
+    def test_execute_raises_connectionerror_after_max_events(self):
+        # A reply that never arrives (or arrives after more async events than
+        # max_events allows) must not hang execute() forever.
+        tmp = Path(tempfile.mkdtemp())
+        sock_path = tmp / "qmp.sock"
+        self._serve_once(
+            sock_path,
+            b'{"event": "A"}\n{"event": "B"}\n{"event": "C"}\n',
+        )
+        qmp = QMPClient()
+        try:
+            qmp.connect(sock_path, timeout=2.0, recv_timeout=2.0)
+            qmp.negotiate()
+            with self.assertRaises(ConnectionError) as ctx:
+                qmp.execute("query-status", max_events=3)
+        finally:
+            qmp.close()
+        self.assertIn("no QMP reply", str(ctx.exception))
+
+    def test_context_manager_closes_socket_on_exit(self):
+        tmp = Path(tempfile.mkdtemp())
+        sock_path = tmp / "qmp.sock"
+        self._serve_once(sock_path, b'{"return": {}}\n')
+        with QMPClient() as qmp:
+            qmp.connect(sock_path, timeout=2.0, recv_timeout=2.0)
+            qmp.negotiate()
+            qmp.execute("query-status")
+            self.assertIsNotNone(qmp._sock)
+        self.assertIsNone(qmp._sock)
+
+
+class TestGetNextUid(unittest.TestCase):
+    """get_next_uid() assigns each workload's dedicated system UID — a
+    collision here breaks the per-workload isolation model, so the scan and
+    exhaustion logic (never exercised elsewhere; callers always mock this
+    function outright) needs direct coverage."""
+
+    def _pw(self, uid):
+        import types
+        return types.SimpleNamespace(pw_uid=uid)
+
+    def test_returns_uid_min_when_nothing_allocated(self):
+        with patch.object(workload_lib, '_allocated_uids', set()), \
+             patch.object(workload_lib.pwd, 'getpwall', return_value=[]):
+            uid = workload_lib.get_next_uid()
+        self.assertEqual(uid, workload_lib.UID_MIN)
+
+    def test_skips_uids_in_live_passwd_and_already_allocated(self):
+        live = [self._pw(workload_lib.UID_MIN)]
+        with patch.object(workload_lib, '_allocated_uids', {workload_lib.UID_MIN + 1}), \
+             patch.object(workload_lib.pwd, 'getpwall', return_value=live):
+            uid = workload_lib.get_next_uid()
+        self.assertEqual(uid, workload_lib.UID_MIN + 2)
+
+    def test_second_call_does_not_reuse_uid_from_first(self):
+        # Two calls within the same process (no /etc/passwd entry written
+        # yet in between) must not hand out the same slot twice.
+        with patch.object(workload_lib, '_allocated_uids', set()), \
+             patch.object(workload_lib.pwd, 'getpwall', return_value=[]):
+            first = workload_lib.get_next_uid()
+            second = workload_lib.get_next_uid()
+        self.assertNotEqual(first, second)
+
+    def test_getpwall_failure_falls_back_to_allocated_set_only(self):
+        with patch.object(workload_lib, '_allocated_uids', set()), \
+             patch.object(workload_lib.pwd, 'getpwall', side_effect=OSError("boom")):
+            uid = workload_lib.get_next_uid()
+        self.assertEqual(uid, workload_lib.UID_MIN)
+
+    def test_raises_runtime_error_when_range_exhausted(self):
+        with patch.object(workload_lib, 'UID_MIN', 10000), \
+             patch.object(workload_lib, 'UID_MAX', 10000), \
+             patch.object(workload_lib, '_allocated_uids', set()), \
+             patch.object(workload_lib.pwd, 'getpwall', return_value=[self._pw(10000)]):
+            with self.assertRaises(RuntimeError) as ctx:
+                workload_lib.get_next_uid()
+        self.assertIn("No free UIDs", str(ctx.exception))
+
 
 class TestUnitsOutdated(unittest.TestCase):
     """units_outdated(): config-edited-since-enable mtime heads-up (gotcha #3)."""

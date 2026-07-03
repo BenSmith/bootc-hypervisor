@@ -73,6 +73,16 @@ class NotifyTest(unittest.TestCase):
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
         notify.wait_running(fake, timeout=5.0)  # should not raise
 
+    def test_wait_running_sleeps_between_polls(self):
+        # running False on the first poll, True on the second: the loop must
+        # sleep once (covers the poll-interval sleep) then return on the retry.
+        seq = iter([False, True])
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": next(seq)}})
+        with mock.patch.object(notify.time, "sleep") as sl:
+            notify.wait_running(fake, timeout=5.0)  # should not raise
+        sl.assert_called_once_with(0.5)
+        self.assertEqual([c for c, _ in fake.sent], ["query-status", "query-status"])
+
     def test_wait_running_times_out(self):
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": False}})
         # timeout=0 => deadline already passed => immediate TimeoutError, no sleep.
@@ -83,6 +93,117 @@ class NotifyTest(unittest.TestCase):
         # NOTIFY_SOCKET unset: must return quietly, not raise.
         with mock.patch.dict(os.environ, {}, clear=True):
             notify.sd_notify("READY=1")
+
+    def test_sd_notify_sends_to_socket(self):
+        fake_sock = mock.MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with mock.patch.dict(os.environ, {"NOTIFY_SOCKET": "/run/n.sock"}), \
+             mock.patch.object(notify.socket, "socket", return_value=fake_sock):
+            notify.sd_notify("READY=1")
+        fake_sock.connect.assert_called_once_with("/run/n.sock")
+        fake_sock.sendall.assert_called_once_with(b"READY=1")
+
+    def test_sd_notify_abstract_socket_translated(self):
+        fake_sock = mock.MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with mock.patch.dict(os.environ, {"NOTIFY_SOCKET": "@abstract"}), \
+             mock.patch.object(notify.socket, "socket", return_value=fake_sock):
+            notify.sd_notify("READY=1")
+        # leading @ becomes a NUL for the abstract namespace
+        fake_sock.connect.assert_called_once_with("\0abstract")
+
+    def test_sd_notify_oserror_swallowed(self):
+        fake_sock = mock.MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect.side_effect = OSError("no such socket")
+        with mock.patch.dict(os.environ, {"NOTIFY_SOCKET": "/run/n.sock"}), \
+             mock.patch.object(notify.socket, "socket", return_value=fake_sock):
+            notify.sd_notify("READY=1")  # must not raise
+
+    def test_main_usage_error_exits_1(self):
+        with mock.patch.object(notify.sys, "argv", ["notify", "onlyname"]), \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                notify.main()
+        self.assertEqual(cm.exception.code, 1)
+
+    def _run_main(self, fake_qmp, wait_rc=0):
+        proc = mock.Mock()
+        proc.wait.return_value = wait_rc
+        with mock.patch.object(notify.sys, "argv",
+                               ["notify", "vm1", "qemu", "-nographic"]), \
+             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(notify, "QMPClient", return_value=fake_qmp), \
+             mock.patch.object(notify.signal, "signal"), \
+             mock.patch.object(notify, "sd_notify") as sd, \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                notify.main()
+        return cm.exception.code, sd, fake_qmp
+
+    def test_main_happy_path_sends_ready_and_propagates_rc(self):
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
+        code, sd, fake = self._run_main(fake, wait_rc=0)
+        self.assertEqual(code, 0)
+        sd.assert_any_call("READY=1")
+        self.assertTrue(fake.closed)
+
+    def test_main_qmp_connect_error_still_readies(self):
+        fake = FakeQMP(connect_raises=RuntimeError("no qmp"))
+        code, sd, fake = self._run_main(fake, wait_rc=7)
+        self.assertEqual(code, 7)  # QEMU's exit code propagates
+        sd.assert_any_call("READY=1")  # degraded path still readies the unit
+
+    def test_main_wait_timeout_does_not_ready_and_propagates_rc(self):
+        # QMP connects/negotiates fine but the guest never enters "running":
+        # wait_running raises TimeoutError. The unit must NOT be marked READY
+        # (that path deliberately defers to systemd's TimeoutStartSec) but must
+        # still surface a STATUS= and propagate QEMU's exit code.
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": False}})
+        proc = mock.Mock()
+        proc.wait.return_value = 4
+        with mock.patch.object(notify.sys, "argv",
+                               ["notify", "vm1", "qemu", "-nographic"]), \
+             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(notify, "QMPClient", return_value=fake), \
+             mock.patch.object(notify.signal, "signal"), \
+             mock.patch.object(notify, "wait_running",
+                               side_effect=TimeoutError("no run")), \
+             mock.patch.object(notify, "sd_notify") as sd, \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                notify.main()
+        self.assertEqual(cm.exception.code, 4)
+        self.assertNotIn(mock.call("READY=1"), sd.call_args_list)
+        self.assertTrue(any("STATUS=Timeout" in c.args[0]
+                            for c in sd.call_args_list))
+        self.assertTrue(fake.closed)
+
+    def test_main_installs_signal_forwarder(self):
+        # main() registers a SIGTERM/SIGINT forwarder closure. Capture it and
+        # drive both branches: a live QEMU (send_signal) and an already-dead one
+        # (ProcessLookupError must be swallowed).
+        proc = mock.Mock()
+        proc.wait.return_value = 0
+        handlers: dict = {}
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
+        with mock.patch.object(notify.sys, "argv",
+                               ["notify", "vm1", "qemu", "-nographic"]), \
+             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(notify, "QMPClient", return_value=fake), \
+             mock.patch.object(notify.signal, "signal",
+                               lambda sig, h: handlers.__setitem__(sig, h)), \
+             mock.patch.object(notify, "sd_notify"), \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                notify.main()
+        fwd = handlers[notify.signal.SIGTERM]
+        self.assertIs(fwd, handlers[notify.signal.SIGINT])
+        fwd(notify.signal.SIGTERM, None)
+        proc.send_signal.assert_called_once_with(notify.signal.SIGTERM)
+        # QEMU already reaped: forwarder must not propagate ProcessLookupError.
+        proc.send_signal.side_effect = ProcessLookupError()
+        fwd(notify.signal.SIGTERM, None)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +246,31 @@ class QmpTest(unittest.TestCase):
         # key=value tokens become the args dict; bare tokens are ignored.
         self.assertEqual(seen["command"], "block_resize")
         self.assertEqual(seen["arguments"], {"device": "foo", "size": "123"})
+
+    def test_main_usage_error_exits_1(self):
+        # Fewer than <name> <command> => usage message on stderr, exit 1.
+        with mock.patch.object(sys, "argv", ["prog", "onlyname"]), \
+             mock.patch.object(qmp, "qmp_send_cmd") as send:
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as cm, redirect_stderr(err):
+                qmp.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Usage:", err.getvalue())
+        send.assert_not_called()
+
+    def test_main_missing_socket_exits_1(self):
+        # Valid argv but the QMP socket file doesn't exist => exit 1 before
+        # any connection attempt, with a "not running?" hint.
+        with mock.patch.object(qmp, "qmp_send_cmd") as send, \
+             mock.patch.object(qmp, "VM_SOCKET_DIR", Path("/sockroot")), \
+             mock.patch.object(qmp.Path, "exists", lambda self: False), \
+             mock.patch.object(sys, "argv", ["prog", "myvm", "query-status"]):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as cm, redirect_stderr(err):
+                qmp.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("socket not found", err.getvalue())
+        send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +322,83 @@ class ShutdownTest(unittest.TestCase):
         fake = FakeQMP(handler=handler)
         with mock.patch.object(shutdown, "QMPClient", lambda: fake):
             self.assertFalse(shutdown.shutdown_and_wait("/sock", timeout=0))
+
+    def test_running_status_polls_then_succeeds(self):
+        # First query-status is "running" (guest still up) => sleep and poll
+        # again; second poll sees the monitor drop => success. Exercises the
+        # time.sleep(0.5) poll-loop body.
+        replies = iter(["running", "gone"])
+
+        def handler(cmd, args=None):
+            if cmd == "system_powerdown":
+                return {"return": {}}
+            if next(replies) == "gone":
+                raise ConnectionError("monitor closed")
+            return {"return": {"status": "running"}}
+
+        fake = FakeQMP(handler=handler)
+        slept = []
+        with mock.patch.object(shutdown, "QMPClient", lambda: fake), \
+             mock.patch.object(shutdown.time, "sleep", slept.append), \
+             mock.patch.object(shutdown.time, "monotonic",
+                               side_effect=[0.0, 0.0, 1.0]):
+            self.assertTrue(shutdown.shutdown_and_wait("/sock", timeout=5.0))
+        self.assertEqual(slept, [0.5])  # slept once between the two polls
+        self.assertTrue(fake.closed)
+
+
+# ---------------------------------------------------------------------------
+# workload-vm-shutdown: main() argv handling
+# ---------------------------------------------------------------------------
+
+class ShutdownMainTest(unittest.TestCase):
+    def _run_main(self, argv, sock_exists, wait_result=True):
+        sock = mock.MagicMock()
+        sock.exists.return_value = sock_exists
+        sock.__str__.return_value = "/fake/qmp.sock"
+        sock_dir = mock.MagicMock()
+        sock_dir.__truediv__ = lambda self, other: sock_dir
+        # VM_SOCKET_DIR / name / "qmp.sock" => sock
+        chain = mock.MagicMock()
+        chain.__truediv__ = mock.MagicMock(return_value=sock)
+        vm_socket_dir = mock.MagicMock()
+        vm_socket_dir.__truediv__ = mock.MagicMock(return_value=chain)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(shutdown, "VM_SOCKET_DIR", vm_socket_dir), \
+             mock.patch.object(shutdown, "shutdown_and_wait",
+                               return_value=wait_result) as waited, \
+             mock.patch.object(sys, "argv", argv), \
+             redirect_stdout(out), redirect_stderr(err):
+            shutdown.main()
+        return out.getvalue(), err.getvalue(), waited
+
+    def test_no_args_exits_1(self):
+        with mock.patch.object(sys, "argv", ["workload-vm-shutdown"]), \
+             redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                shutdown.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Usage:", err.getvalue())
+
+    def test_missing_socket_is_noop(self):
+        out, err, waited = self._run_main(
+            ["workload-vm-shutdown", "vm1"], sock_exists=False)
+        waited.assert_not_called()
+        self.assertEqual(out, "")
+
+    def test_clean_poweroff_prints_success(self):
+        out, err, waited = self._run_main(
+            ["workload-vm-shutdown", "vm1"], sock_exists=True, wait_result=True)
+        # default timeout used when no arg given
+        self.assertEqual(waited.call_args[0][1], shutdown.DEFAULT_TIMEOUT)
+        self.assertIn("powered off cleanly", out)
+
+    def test_timeout_defers_to_systemd_kill(self):
+        out, err, waited = self._run_main(
+            ["workload-vm-shutdown", "vm1", "30"], sock_exists=True,
+            wait_result=False)
+        self.assertEqual(waited.call_args[0][1], 30.0)  # arg parsed as float
+        self.assertIn("deferring to systemd kill", err)
 
 
 if __name__ == "__main__":

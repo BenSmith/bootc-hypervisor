@@ -17,15 +17,18 @@ WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-w
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
 
-def run_write_env(name, config_dir, creds_dir, env_dir):
+def run_write_env(name, config_dir, creds_dir, env_dir, container=None):
     """Run workload-write-env and return the CompletedProcess."""
     env = os.environ.copy()
     env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
     env["CREDENTIALS_DIRECTORY"] = str(creds_dir)
     env["WORKLOAD_ENV_DIR"] = str(env_dir)
     env["PYTHONPATH"] = LIB_DIR
+    argv = [sys.executable, WRITE_ENV, name]
+    if container is not None:
+        argv.append(container)
     return subprocess.run(
-        [sys.executable, WRITE_ENV, name],
+        argv,
         capture_output=True, text=True, env=env,
     )
 
@@ -332,6 +335,120 @@ class TestWriteEnvEdgeCases(unittest.TestCase):
 
         content = (Path(self.env_dir) / "workload-combo.secrets").read_text()
         self.assertEqual(content.strip(), "AUTH=admin:s3cret")
+
+
+class TestWriteEnvMultiContainer(unittest.TestCase):
+    """Exercise the [[containers]] / <workload> <container> dispatch paths."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.creds_dir = tempfile.mkdtemp()
+        self.env_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.creds_dir, self.env_dir):
+            shutil.rmtree(d)
+
+    POD_TOML = """\
+        [workload]
+        name = "pod"
+        mode = "pod"
+
+        [[containers]]
+        name = "web"
+        [containers.container]
+        image = "web-img"
+        [containers.container.environment]
+        WEB_KEY = "${SECRET:web-secret}"
+
+        [[containers]]
+        name = "db"
+        [containers.container]
+        image = "db-img"
+        [containers.container.environment]
+        DB_KEY = "${SECRET:db-secret}"
+    """
+
+    def test_multi_container_without_container_arg_fails(self):
+        """A multi-container workload called with no container name errors out."""
+        write_config(self.config_dir, "pod", self.POD_TOML)
+        write_credential(self.creds_dir, "web-secret", "w")
+        write_credential(self.creds_dir, "db-secret", "d")
+
+        result = run_write_env("pod", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("multiple containers", result.stderr)
+        # Nothing should have been written.
+        self.assertFalse(any(Path(self.env_dir).iterdir()))
+
+    def test_container_not_found_fails(self):
+        """Requesting a container that isn't in the workload errors out."""
+        write_config(self.config_dir, "pod", self.POD_TOML)
+        write_credential(self.creds_dir, "web-secret", "w")
+        write_credential(self.creds_dir, "db-secret", "d")
+
+        result = run_write_env(
+            "pod", self.config_dir, self.creds_dir, self.env_dir, container="nope"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nope", result.stderr)
+        self.assertIn("not in workload", result.stderr)
+        self.assertFalse(any(Path(self.env_dir).iterdir()))
+
+    def test_container_arg_writes_per_container_file(self):
+        """A valid container name writes only that container's secrets."""
+        write_config(self.config_dir, "pod", self.POD_TOML)
+        write_credential(self.creds_dir, "web-secret", "web-val")
+        write_credential(self.creds_dir, "db-secret", "db-val")
+
+        result = run_write_env(
+            "pod", self.config_dir, self.creds_dir, self.env_dir, container="db"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        db_file = Path(self.env_dir) / "workload-pod-db.secrets"
+        web_file = Path(self.env_dir) / "workload-pod-web.secrets"
+        self.assertTrue(db_file.exists())
+        # Only the requested container's file is written.
+        self.assertFalse(web_file.exists())
+        self.assertEqual(db_file.read_text().strip(), "DB_KEY=db-val")
+        self.assertEqual(oct(db_file.stat().st_mode & 0o777), "0o600")
+
+
+class TestWriteEnvKeyValidation(unittest.TestCase):
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.creds_dir = tempfile.mkdtemp()
+        self.env_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.creds_dir, self.env_dir):
+            shutil.rmtree(d)
+
+    def test_invalid_env_key_rejected(self):
+        """A key that isn't a valid POSIX name is rejected (guard must hold)."""
+        write_config(self.config_dir, "badkey", """\
+            [workload]
+            name = "badkey"
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            "1INVALID" = "${SECRET:k}"
+        """)
+        write_credential(self.creds_dir, "k", "v")
+
+        result = run_write_env("badkey", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Invalid env var key", result.stderr)
+        # The guard must fail closed: no secrets file left behind with a bad key.
+        self.assertFalse(
+            (Path(self.env_dir) / "workload-badkey.secrets").exists()
+            and (Path(self.env_dir) / "workload-badkey.secrets").read_text()
+        )
 
 
 if __name__ == "__main__":

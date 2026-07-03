@@ -122,7 +122,10 @@ def _created_unix(ts) -> int | None:
             return int(ts)
         s = str(ts).rstrip("Z").split(".")[0]
         try:
-            return int(datetime.datetime.fromisoformat(s).timestamp())
+            parsed = datetime.datetime.fromisoformat(s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            return int(parsed.timestamp())
         except ValueError:
             return int(float(ts))
     except Exception:

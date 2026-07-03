@@ -173,5 +173,163 @@ class UpdateDispatchTest(unittest.TestCase):
         self.assertEqual(seen["updated"], [("x", {})])
 
 
+class RollbackDispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.object(cmd_update, "require_root", lambda: None))
+        self.manager = mock.Mock()
+
+    def _run(self, ns, sub, user_exists=True):
+        cfg = mock.Mock(); cfg.name = "x"; cfg.username = "_wl-x"
+        self.manager.user_exists.return_value = user_exists
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg), \
+             mock.patch.object(cmd_update, "get_substrate", lambda c, m: sub):
+            try:
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_update.cmd_rollback(ns, self.manager)
+            except SystemExit as e:
+                code = e.code
+        return out.getvalue(), err.getvalue(), code
+
+    def test_user_missing_exits(self):
+        _out, err, code = self._run(_ns(workload="x", list=False), mock.Mock(),
+                                    user_exists=False)
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", err)
+
+    def test_plain_rollback_invokes_substrate(self):
+        sub = mock.Mock()
+        self._run(_ns(workload="x", list=False), sub)
+        sub.rollback.assert_called_once_with()
+
+    def test_list_empty_targets(self):
+        sub = mock.Mock(); sub.rollback_targets.return_value = []
+        out, _err, _code = self._run(_ns(workload="x", list=True), sub)
+        self.assertIn("No rollback targets", out)
+        sub.rollback.assert_not_called()
+
+    def test_list_prints_targets(self):
+        sub = mock.Mock()
+        sub.rollback_targets.return_value = [{"label": "gen-1 (2d ago)"},
+                                             {"label": "gen-2 (1h ago)"}]
+        out, _err, _code = self._run(_ns(workload="x", list=True), sub)
+        self.assertIn("gen-1 (2d ago)", out)
+        self.assertIn("gen-2 (1h ago)", out)
+        sub.rollback.assert_not_called()
+
+
+class DoRollbackTest(unittest.TestCase):
+    def test_retags_when_rollback_image_present(self):
+        pod = mock.Mock()
+        pod.image_id.return_value = "sha256:old"
+        cfg = mock.Mock()
+        cfg.name = "app"; cfg.is_multi = False; cfg.uid = 10001
+        cfg.service_name = "workload-app.service"
+        cfg.container_images.return_value = [("app", "localhost/app:latest")]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update, "restart_workload_service") as restart, \
+             redirect_stdout(io.StringIO()):
+            cmd_update._do_rollback(cfg, mgr, {"app": "sha256:new"})
+        pod.tag.assert_called_once_with("localhost/workload-rollback/app:latest",
+                                        "localhost/app:latest")
+        restart.assert_called_once()
+
+    def test_no_retag_when_rollback_image_absent(self):
+        pod = mock.Mock(); pod.image_id.return_value = None
+        cfg = mock.Mock()
+        cfg.name = "app"; cfg.is_multi = False; cfg.uid = 10001
+        cfg.service_name = "workload-app.service"
+        cfg.container_images.return_value = [("app", "localhost/app:latest")]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update, "restart_workload_service"), \
+             redirect_stdout(io.StringIO()):
+            cmd_update._do_rollback(cfg, mgr, {"app": "sha256:new"})
+        pod.tag.assert_not_called()
+
+
+class VerifyAllTest(unittest.TestCase):
+    def _cfg(self, name, health, active_ok, is_multi=False):
+        c = mock.Mock()
+        c.name = name
+        c.has_health_check.return_value = health
+        c.is_multi = is_multi
+        c.service_name = f"workload-{name}.service"
+        c.sub_service_names.return_value = [f"workload-{name}.service"]
+        return c
+
+    def test_healthy_no_rollback(self):
+        cfg = self._cfg("app", health=True, active_ok=True)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {})]
+        pod = mock.Mock(); pod.container_health.return_value = "healthy"
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep"), \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 0)
+
+    def test_unhealthy_with_old_rolls_back(self):
+        cfg = self._cfg("app", health=True, active_ok=False)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {})]
+        pod = mock.Mock(); pod.container_health.return_value = "unhealthy"
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep"), \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 1)
+        rb.assert_called_once()
+
+    def test_starting_then_healthy_no_rollback(self):
+        """A container still 'starting' at the first check gets one more
+        wait (its health-check interval) before being judged — recovering
+        to healthy must not trigger a rollback."""
+        cfg = self._cfg("app", health=True, active_ok=True)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {"interval": "5s"})]
+        pod = mock.Mock()
+        pod.container_health.side_effect = ["starting", "healthy"]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep") as mock_sleep, \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 0)
+        rb.assert_not_called()
+        # Once for the initial max_wait, once for the extra "starting" grace period.
+        self.assertEqual(mock_sleep.call_count, 2)
+        mock_sleep.assert_called_with(5)
+
+    def test_starting_then_still_unhealthy_rolls_back(self):
+        """If the grace-period recheck still isn't healthy, roll back."""
+        cfg = self._cfg("app", health=True, active_ok=False)
+        cfg.container_health_blocks.return_value = [("app", "workload-app", {"interval": "5s"})]
+        pod = mock.Mock()
+        pod.container_health.side_effect = ["starting", "unhealthy"]
+        mgr = mock.Mock(); mgr.podman.return_value = pod
+        with mock.patch.object(cmd_update.time, "sleep"), \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 1)
+        rb.assert_called_once()
+
+    def test_no_health_service_crash_rolls_back(self):
+        cfg = self._cfg("app", health=False, active_ok=False)
+        mgr = mock.Mock()
+        with mock.patch.object(cmd_update.time, "sleep"), \
+             mock.patch.object(cmd_update, "_health_wait_seconds", return_value=0), \
+             mock.patch.object(cmd_update.subprocess, "run",
+                               return_value=mock.Mock(returncode=3)), \
+             mock.patch.object(cmd_update, "_do_rollback") as rb, \
+             redirect_stdout(io.StringIO()):
+            n = cmd_update._verify_all([(cfg, {"app": "old"})], mgr)
+        self.assertEqual(n, 1)
+        rb.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

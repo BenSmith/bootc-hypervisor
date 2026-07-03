@@ -199,6 +199,293 @@ class ImportExportTest(SecretTestBase):
         self.assertIn("not found", err)
 
 
+class CreateFailureTest(SecretTestBase):
+    def test_subprocess_failure_errors(self):
+        def fake_run(cmd, **kw):
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="create", name="api",
+                                      force=False, key_type=None, file=None))
+        self.assertEqual(code, 1)
+        self.assertIn("Failed to create credential", err)
+
+
+class ListTest(SecretTestBase):
+    def test_no_dir_text(self):
+        out, err, code = _run(_ns(subcommand="list", json=False))
+        self.assertIsNone(code)
+        self.assertIn("does not exist", out)
+
+    def test_no_dir_json(self):
+        out, err, code = _run(_ns(subcommand="list", json=True))
+        self.assertEqual(cmd_secret.json.loads(out), {"credentials": []})
+
+    def test_empty_dir_text(self):
+        self.cred_dir.mkdir()
+        out, err, code = _run(_ns(subcommand="list", json=False))
+        self.assertIn("No credentials found", out)
+
+    def test_populated_text(self):
+        self._seed_cred("api")
+        self._seed_cred("db")
+        out, err, code = _run(_ns(subcommand="list", json=False))
+        self.assertIn("api", out)
+        self.assertIn("db", out)
+        self.assertIn("Total: 2", out)
+
+    def test_populated_json(self):
+        self._seed_cred("api", b"hello")
+        out, err, code = _run(_ns(subcommand="list", json=True))
+        data = cmd_secret.json.loads(out)
+        self.assertEqual(data["credentials"][0]["name"], "api")
+        self.assertEqual(data["credentials"][0]["size"], 5)
+
+
+class ShowTest(SecretTestBase):
+    def test_missing_errors(self):
+        out, err, code = _run(_ns(subcommand="show", name="ghost"))
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err)
+
+    def test_decrypt_failure(self):
+        self._seed_cred("api")
+
+        def fake_run(cmd, **kw):
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="show", name="api"))
+        self.assertEqual(code, 1)
+        self.assertIn("Failed to decrypt", err)
+
+    def test_decrypt_success_adds_newline(self):
+        self._seed_cred("api")
+        with mock.patch.object(
+                cmd_secret.subprocess, "run",
+                lambda *a, **k: types.SimpleNamespace(stdout="secretval")):
+            out, err, code = _run(_ns(subcommand="show", name="api"))
+        self.assertIsNone(code)
+        self.assertIn("Value: secretval\n", out)
+
+    def test_decrypt_success_no_extra_newline(self):
+        self._seed_cred("api")
+        with mock.patch.object(
+                cmd_secret.subprocess, "run",
+                lambda *a, **k: types.SimpleNamespace(stdout="secretval\n")):
+            out, err, code = _run(_ns(subcommand="show", name="api"))
+        self.assertIsNone(code)
+        self.assertEqual(out.count("secretval"), 1)
+
+
+class RotateExtraTest(SecretTestBase):
+    def test_bad_toml_ignored(self):
+        self._seed_cred("api-key")
+        (self.wl_dir / "broken").mkdir()
+        (self.wl_dir / "broken" / "workload.toml").write_text("not valid toml [[[")
+
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: types.SimpleNamespace(returncode=0)):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertNotIn("following workloads", out)
+
+    def test_detects_via_secrets_files(self):
+        self._seed_cred("api-key")
+        (self.wl_dir / "web").mkdir()
+        (self.wl_dir / "web" / "workload.toml").write_text(
+            '[workload]\nname = "web"\n[container]\nimage = "x"\n'
+            '[[secrets.files]]\ncredential = "api-key"\npath = "/run/x"\n')
+
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: types.SimpleNamespace(returncode=0)), \
+             mock.patch.object(cmd_secret, "restart_workload_service", lambda *a, **k: None), \
+             mock.patch.object(cmd_secret, "WorkloadConfig",
+                               lambda n: types.SimpleNamespace(
+                                   is_vm=False, uid=10001, service_name=f"workload-{n}.service")):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertIn("web", out)
+        self.assertIn("Restarted web", out)
+
+    def test_vm_restart_uses_systemctl(self):
+        self._seed_cred("api-key")
+        (self.wl_dir / "vmwl").mkdir()
+        (self.wl_dir / "vmwl" / "workload.toml").write_text(
+            '[workload]\nname = "vmwl"\n[container]\nimage = "x"\n'
+            '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret, "WorkloadConfig",
+                               lambda n: types.SimpleNamespace(
+                                   is_vm=True, uid=10001, service_name=f"workload-{n}.service")):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertIn(["systemctl", "restart", "workload-vmwl.service"], calls)
+        self.assertIn("Restarted vmwl", out)
+
+    def test_restart_failure_reported(self):
+        self._seed_cred("api-key")
+        (self.wl_dir / "web").mkdir()
+        (self.wl_dir / "web" / "workload.toml").write_text(
+            '[workload]\nname = "web"\n[container]\nimage = "x"\n'
+            '[container.environment]\nTOKEN = "${SECRET:api-key}"\n')
+
+        def boom(*a, **k):
+            raise RuntimeError("nope")
+
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: types.SimpleNamespace(returncode=0)), \
+             mock.patch.object(cmd_secret, "restart_workload_service", boom), \
+             mock.patch.object(cmd_secret, "WorkloadConfig",
+                               lambda n: types.SimpleNamespace(
+                                   is_vm=False, uid=10001, service_name=f"workload-{n}.service")):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertIn("Failed to restart web", err)
+
+    def test_encrypt_failure_errors(self):
+        self._seed_cred("api-key")
+
+        def fake_run(cmd, **kw):
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertEqual(code, 1)
+        self.assertIn("Failed to rotate credential", err)
+
+
+class ExportImportFlowTest(SecretTestBase):
+    def test_export_decrypt_failure(self):
+        self._seed_cred("api")
+
+        def fake_run(cmd, **kw):
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            out, err, code = _run(_ns(subcommand="export", name="api", output=None,
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertEqual(code, 1)
+        self.assertIn("TPM unavailable", err)
+
+    def test_export_success_full_flow_with_stdin_passphrase(self):
+        self._seed_cred("api")
+        output = self.tmp / "out.secret"
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:2] == ["systemd-creds", "decrypt"]:
+                return types.SimpleNamespace(stdout=b"plaintext")
+            Path(cmd[cmd.index("-out") + 1]).write_bytes(b"encblob")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret.sys, "stdin",
+                               types.SimpleNamespace(buffer=io.BytesIO(b"pw123\n"))):
+            out, err, code = _run(_ns(subcommand="export", name="api",
+                                      output=str(output),
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertIsNone(code)
+        self.assertIn("Exported credential", out)
+        openssl_calls = [c for c in calls if c[0] == "openssl"]
+        self.assertEqual(len(openssl_calls), 1)
+        self.assertIn("-pbkdf2", openssl_calls[0])
+
+    def test_export_openssl_failure(self):
+        self._seed_cred("api")
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["systemd-creds", "decrypt"]:
+                return types.SimpleNamespace(stdout=b"plaintext")
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret.sys, "stdin",
+                               types.SimpleNamespace(buffer=io.BytesIO(b"pw123\n"))):
+            out, err, code = _run(_ns(subcommand="export", name="api", output=None,
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertEqual(code, 1)
+        self.assertIn("Failed to encrypt with passphrase", err)
+
+    def test_import_decrypt_failure_wrong_passphrase(self):
+        infile = self.tmp / "in.secret"
+        infile.write_bytes(b"enc")
+
+        def fake_run(cmd, **kw):
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret.sys, "stdin",
+                               types.SimpleNamespace(buffer=io.BytesIO(b"pw123\n"))):
+            out, err, code = _run(_ns(subcommand="import", name="api",
+                                      file=str(infile), force=False, key_type=None,
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertEqual(code, 1)
+        self.assertIn("wrong passphrase", err)
+
+    def test_import_encrypt_failure(self):
+        infile = self.tmp / "in.secret"
+        infile.write_bytes(b"enc")
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "openssl":
+                return types.SimpleNamespace(stdout=b"plaintext", returncode=0)
+            raise cmd_secret.subprocess.CalledProcessError(1, cmd)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret.sys, "stdin",
+                               types.SimpleNamespace(buffer=io.BytesIO(b"pw123\n"))):
+            out, err, code = _run(_ns(subcommand="import", name="api",
+                                      file=str(infile), force=False, key_type=None,
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertEqual(code, 1)
+        self.assertIn("Failed to encrypt with systemd-creds", err)
+
+    def test_import_success_suggests_restart(self):
+        infile = self.tmp / "in.secret"
+        infile.write_bytes(b"enc")
+        (self.wl_dir / "web").mkdir()
+        (self.wl_dir / "web" / "workload.toml").write_text(
+            '[workload]\nname = "web"\n[container]\nimage = "x"\n'
+            '[container.environment]\nTOKEN = "${SECRET:api}"\n')
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "openssl":
+                return types.SimpleNamespace(stdout=b"plaintext", returncode=0)
+            Path(cmd[-1]).write_bytes(b"x")  # systemd-creds writes the blob
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
+             mock.patch.object(cmd_secret.sys, "stdin",
+                               types.SimpleNamespace(buffer=io.BytesIO(b"pw123\n"))):
+            out, err, code = _run(_ns(subcommand="import", name="api",
+                                      file=str(infile), force=False, key_type=None,
+                                      passphrase_stdin=True, passphrase_file=None))
+        self.assertIsNone(code)
+        self.assertIn("Imported credential", out)
+        self.assertIn("sudo workloadctl recreate web", out)
+        self.assertTrue((self.cred_dir / "api").exists())
+
+
+class PassphraseFileErrorTest(unittest.TestCase):
+    def test_unreadable_file_errors(self):
+        args = _ns(passphrase_stdin=False, passphrase_file="/nonexistent/nope.pass")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, \
+             redirect_stdout(io.StringIO()), redirect_stderr(err):
+            cmd_secret._read_passphrase(args, prompt="P: ", confirm=False)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Cannot read passphrase file", err.getvalue())
+
+
 class PassphraseTest(unittest.TestCase):
     """_read_passphrase / _strip_trailing_newline — the export/import secret
     handling. Pure, no credstore, security-relevant."""
