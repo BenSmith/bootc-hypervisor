@@ -15,6 +15,7 @@ import pwd
 import re
 import socket
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +473,174 @@ RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
 # the identical path across every participant (workload-ensure-user, cmd_lifecycle
 # enable + disable/purge) or the flock stops mutexing.
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
+
+
+# --- Workload run-files (B15) ---------------------------------------------- #
+#
+# The single source of truth for "the per-workload files a workload owns" — see
+# docs/workload-run-files.md for the authoritative table and rationale.
+#
+# Every caller slices this one list along whichever axis it cares about, instead
+# of re-deriving the set:
+#   * emitted view (rf.emitted True) — files that exist for THIS exact config;
+#     used by the generator-parity oracle, drift, inspect, and metrics.
+#   * removable superset (all kinds but env-file) — the mode-family union the
+#     disable/purge path may safely unlink() with missing_ok; over-lists -pod/-net
+#     for every container workload so disabling can never miss a topology's unit.
+#   * env-tree files (kind == 'env-file') — the runtime-written .env/.secrets that
+#     only --purge removes.
+# Filter by `kind` for tree/lifecycle and by `role` for a specific unit family.
+
+
+def workload_env_dir() -> Path:
+    """Runtime env tree (.env/.secrets). Honors WORKLOAD_ENV_DIR for tests."""
+    return Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
+
+
+@dataclass(frozen=True)
+class WorkloadRunFile:
+    """One file a workload owns, tagged so every caller can filter one list.
+
+    kind  — which tree + removal lifecycle it belongs to:
+            'unit' | 'wants-symlink' | 'sysusers' | 'dropin' | 'env-file'.
+    role  — which unit family, for callers that want a specific member:
+            'main' | 'setup' | 'build' | 'pod' | 'net' | 'container' |
+            'virtiofs' | 'sysusers' | 'dropin' | 'env' | 'secrets'.
+    emitted — True iff the generator writes this file for THIS config (the
+            emitted view). False marks the removable-only superset entries
+            (-pod/-net listed for non-matching modes) and the runtime-written
+            env-files the generator never produces.
+    """
+
+    path: Path
+    kind: str
+    role: str
+    emitted: bool
+
+
+def workload_run_files(config) -> list[WorkloadRunFile]:
+    """The complete set of run-files owned by one workload.
+
+    MUST stay in sync with generators/workload-generate (generate_*_workload) and
+    with the removal path. Never includes shared infra (workload-generate.service,
+    workload-bridge.service, dnsmasq) or references to *other* workloads' units.
+
+    Superset semantics: -pod.service and -net.service are listed for every
+    container workload (emitted only for the matching mode) so the removable view
+    can unlink() the full topology with missing_ok. The cgroup drop-in is keyed by
+    the workload UID from the passwd db; if the user is gone the UID can't be
+    reconstructed, so it is omitted rather than raising.
+    """
+    # Lazy import: workloadctl_core imports this module, so a top-level import
+    # would be circular.
+    from workloadctl_core import WorkloadUserNotFound
+
+    run = RUN_SYSTEMD_SYSTEM
+    env = workload_env_dir()
+    name = config.name
+    files: list[WorkloadRunFile] = [
+        WorkloadRunFile(run / f"workload-{name}.conf", "sysusers", "sysusers", True),
+        WorkloadRunFile(run / f"workload-{name}-setup.service", "unit", "setup", True),
+        WorkloadRunFile(run / f"workload-{name}.service", "unit", "main", True),
+        WorkloadRunFile(
+            run / "multi-user.target.wants" / f"workload-{name}.service",
+            "wants-symlink", "main", True,
+        ),
+    ]
+
+    if config.is_vm:
+        files.append(
+            WorkloadRunFile(run / f"workload-{name}-build.service", "unit", "build", True)
+        )
+        for tag in virtiofs_tags(config.config.get("vm", {}).get("volumes", [])):
+            files.append(WorkloadRunFile(
+                run / f"workload-{name}-virtiofs-{tag}.service", "unit", "virtiofs", True
+            ))
+    else:
+        # cgroup-placement drop-in (containers only). Keyed by the workload UID
+        # from the passwd db; omitted once the user is gone (UID unreconstructable).
+        # A pure query helper must not allocate a UID.
+        try:
+            files.append(WorkloadRunFile(
+                run / f"user@{config.uid}.service.d" / "50-workload.conf",
+                "dropin", "dropin", True,
+            ))
+        except WorkloadUserNotFound:
+            pass
+        mode = config.mode
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-pod.service", "unit", "pod", mode == "pod"
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-net.service", "unit", "net", mode == "bridge"
+        ))
+        if config.is_multi:
+            for cname in config.container_names():
+                files.append(WorkloadRunFile(
+                    run / f"workload-{name}-{cname}.service", "unit", "container", True
+                ))
+
+    # Runtime-written env tree — never produced by the generator (emitted False),
+    # removed only on --purge. .secrets is over-listed per container (missing_ok).
+    files.append(WorkloadRunFile(env / f"workload-{name}.env", "env-file", "env", False))
+    files.append(
+        WorkloadRunFile(env / f"workload-{name}.secrets", "env-file", "secrets", False)
+    )
+    if config.is_multi:
+        for cname in config.container_names():
+            files.append(WorkloadRunFile(
+                env / f"workload-{name}-{cname}.secrets", "env-file", "secrets", False
+            ))
+
+    return files
+
+
+def workload_service_units(config, *, roles=None) -> list[str]:
+    """Emitted systemd .service unit names for THIS config.
+
+    A convenience view over workload_run_files(): the services the generator
+    actually writes — main, setup, the matching pod/net helper or per-container
+    services, and for VMs the build and virtiofs units. Pass roles to keep only
+    a subset, e.g. roles={"setup", "build"} for a VM's gating units.
+    """
+    return [
+        rf.path.name
+        for rf in workload_run_files(config)
+        if rf.kind == "unit" and rf.emitted and (roles is None or rf.role in roles)
+    ]
+
+
+def render_sysusers_config(
+    *,
+    name: str,
+    user_name: str,
+    uid: int,
+    home_dir: str,
+    extra_groups=(),
+    is_vm: bool = False,
+) -> str:
+    """Render the systemd-sysusers config for a workload's dedicated user.
+
+    Single source of truth shared by enable-time provisioning
+    (cmd_lifecycle._provision_user) and the boot generator, so the .conf a
+    workload is enabled with is byte-identical to the one regenerated at boot.
+    UID must be pre-allocated by the caller — this is a pure render and never
+    allocates. A VM gets implicit `kvm` membership, de-duplicated against
+    extra_groups so it is never emitted twice.
+    """
+    lines = [
+        f"# Workload user for {name}" + (" (VM)" if is_vm else ""),
+        f'u {user_name} {uid} "{name} workload" {home_dir}',
+    ]
+    groups: list[str] = []
+    if is_vm:
+        groups.append("kvm")
+    for group in extra_groups:
+        if group not in groups:
+            groups.append(group)
+    for group in groups:
+        lines.append(f"m {user_name} {group}")
+    return "\n".join(lines) + "\n"
 
 
 def units_outdated(name: str) -> bool:

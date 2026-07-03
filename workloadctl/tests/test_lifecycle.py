@@ -1819,7 +1819,11 @@ class TestCmdCleanup(unittest.TestCase):
 
 
 class TestWorkloadRunFiles(unittest.TestCase):
-    """_workload_run_files: VM and multi-container branches."""
+    """The removable run-file set: VM and multi-container branches."""
+
+    def _removable_names(self, cfg):
+        return [rf.path.name for rf in workload_lib.workload_run_files(cfg)
+                if rf.kind != "env-file"]
 
     def test_vm_includes_build_service_and_virtiofs_units(self):
         toml = _VM_TOML.replace(
@@ -1828,15 +1832,13 @@ class TestWorkloadRunFiles(unittest.TestCase):
             'volumes = ["/srv/shared:/mnt/shared"]',
         )
         with _cfg(toml, 'test-vm') as cfg:
-            files = cmd_lifecycle._workload_run_files(cfg)
-            names = [p.name for p in files]
+            names = self._removable_names(cfg)
             self.assertIn("workload-test-vm-build.service", names)
             self.assertTrue(any("virtiofs" in n for n in names))
 
     def test_multi_container_includes_per_container_services(self):
         with _cfg(_MULTI_TOML, 'multi-wl') as cfg:
-            files = cmd_lifecycle._workload_run_files(cfg)
-            names = [p.name for p in files]
+            names = self._removable_names(cfg)
             self.assertIn("workload-multi-wl-web.service", names)
             self.assertIn("workload-multi-wl-db.service", names)
 

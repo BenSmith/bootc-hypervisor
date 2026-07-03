@@ -31,7 +31,9 @@ from workload_lib import (
     workload_username,
     workload_root_dir,
     RUN_SYSTEMD_SYSTEM,
-    virtiofs_tags,
+    workload_run_files,
+    workload_service_units,
+    render_sysusers_config,
     SUBID_LOCK,
 )
 import imagebuild
@@ -44,7 +46,7 @@ from workloadctl_core import (
     VM_BRIDGE_NAME,
 )
 from cmd_backup import BACKUP_DIR
-from substrate import get_substrate
+from substrate import get_substrate, service_active
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -66,17 +68,11 @@ def _effective_state(config):
     """Return (state, failed_unit) for display. If the main service isn't
     active but a gating unit has failed, report 'failed' and name the culprit
     so the cause isn't buried behind a bland 'inactive'."""
-    main = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True,
-    ).stdout.strip()
+    _, main = service_active(config.service_name)
     if main == "active":
         return main, None
     for unit in _gating_units(config):
-        st = subprocess.run(
-            ["systemctl", "is-active", unit],
-            capture_output=True, text=True,
-        ).stdout.strip()
+        _, st = service_active(unit)
         if st == "failed":
             return "failed", unit
     return main, None
@@ -300,20 +296,21 @@ def _provision_user(config: WorkloadConfig):
 
         # Write a temporary sysusers config (the generator creates the
         # persistent copy at boot in /run/systemd/system/, but enable runs
-        # before boot)
-        sysusers_lines = [
-            f"# Workload user for {config.name}",
-            f'u {user_name} {uid} "{config.name} workload" {home_dir}',
-        ]
-        if config.is_vm:
-            sysusers_lines.append(f"m {user_name} kvm")
-        for group in extra_groups:
-            sysusers_lines.append(f"m {user_name} {group}")
+        # before boot). Rendered by the shared helper so the enable-time .conf
+        # is byte-identical to the generator's boot-time output.
+        sysusers_content = render_sysusers_config(
+            name=config.name,
+            user_name=user_name,
+            uid=uid,
+            home_dir=home_dir,
+            extra_groups=extra_groups,
+            is_vm=config.is_vm,
+        )
 
         sysusers_dir = Path("/run/sysusers.d")
         sysusers_dir.mkdir(parents=True, exist_ok=True)
         sysusers_file = sysusers_dir / f"workload-{config.name}.conf"
-        sysusers_file.write_text("\n".join(sysusers_lines) + "\n")
+        sysusers_file.write_text(sysusers_content)
 
         subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
 
@@ -594,51 +591,6 @@ def _apply_selinux_policy(config: WorkloadConfig, action: str):
             sys.exit(1)
 
 
-def _workload_run_files(config: WorkloadConfig) -> list[Path]:
-    """Every file the generator writes into /run/systemd/system for THIS workload.
-
-    The generator only ever writes (idempotent emit from the enabled set); it
-    never deletes. Removing a workload's units on disable is the CLI's job, so
-    this lists them by exact name from the current config — no glob, so disabling
-    'foo' can never touch a sibling 'foo-bar'. Removing a name that isn't present
-    is harmless (callers use missing_ok), so we list the full superset for the
-    topology rather than branching on pod/bridge. Never includes the shared
-    workload-bridge.service.
-
-    MUST be kept in sync with generators/workload-generate (generate_*_workload).
-    """
-    run = RUN_SYSTEMD_SYSTEM
-    name = config.name
-    files = [
-        run / f"workload-{name}.conf",                                  # sysusers
-        run / f"workload-{name}-setup.service",
-        run / f"workload-{name}.service",                              # umbrella / main
-        run / "multi-user.target.wants" / f"workload-{name}.service",  # autostart symlink
-    ]
-    if config.is_vm:
-        files.append(run / f"workload-{name}-build.service")
-        # Collision-safe tags, same set the generator emitted (B3).
-        for tag in virtiofs_tags(config.config.get("vm", {}).get("volumes", [])):
-            files.append(run / f"workload-{name}-virtiofs-{tag}.service")
-    else:
-        # cgroup-placement drop-in (containers only; VMs have none). The path is
-        # keyed by the workload user's UID, which comes from the passwd db — gone
-        # once the user is removed (e.g. a second disable, or disabling after an
-        # out-of-band userdel). The drop-in went with the user's runtime in that
-        # case, and we can't reconstruct the UID, so just omit it rather than
-        # letting WorkloadUserNotFound abort the whole removal.
-        try:
-            files.append(run / f"user@{config.uid}.service.d" / "50-workload.conf")
-        except WorkloadUserNotFound:
-            pass
-        files.append(run / f"workload-{name}-pod.service")    # pod mode
-        files.append(run / f"workload-{name}-net.service")    # bridge mode
-        if config.is_multi:
-            for cname in config.container_names():
-                files.append(run / f"workload-{name}-{cname}.service")
-    return files
-
-
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
     """Delete a workload's /run/workload-env files on purge. Returns names removed.
 
@@ -646,26 +598,17 @@ def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
     ${SECRET:…} values → .secrets) and workload-ensure-user
     (XDG_RUNTIME_DIR/HOST_IP → .env). Nothing rewrites them once the workload is
     gone, so without this a purge leaves decrypted secrets readable in /run
-    until the next reboot. Uses exact basenames (not a glob) so e.g. purging
-    'git' never touches 'github's files. Honors WORKLOAD_ENV_DIR for tests,
-    matching workload-write-env.
+    until the next reboot. The env-tree entries of workload_run_files() name
+    them by exact basename (not a glob), so purging 'git' never touches
+    'github's files, and honor WORKLOAD_ENV_DIR for tests.
     """
-    env_dir = Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
-    basenames = [
-        f"workload-{config.name}.env",
-        f"workload-{config.name}.secrets",
-    ]
-    if config.is_multi:
-        basenames += [
-            f"workload-{config.name}-{cname}.secrets"
-            for cname in config.container_names()
-        ]
     removed = []
-    for basename in basenames:
-        path = env_dir / basename
-        if path.exists():
-            path.unlink()
-            removed.append(basename)
+    for rf in workload_run_files(config):
+        if rf.kind != "env-file":
+            continue
+        if rf.path.exists():
+            rf.path.unlink()
+            removed.append(rf.path.name)
     return removed
 
 
@@ -818,19 +761,16 @@ def cmd_disable(args, manager: WorkloadManager):
     # `sudo -u … podman` session and is GC'd in between — making every CLI podman
     # call (health/images/status/logs/exec/cp) intermittently fail with
     # "lstat /run/user/<uid>: no such file or directory".
-    helper_services = [f"workload-{config.name}-setup.service"]
-    if config.is_vm:
-        helper_services.append(f"workload-{config.name}-build.service")
-    else:
-        # Pod/bridge helper oneshots + per-container sub-services share the same
-        # RemainAfterExit staleness; stopping absent units is a harmless no-op.
-        helper_services.append(f"workload-{config.name}-pod.service")
-        helper_services.append(f"workload-{config.name}-net.service")
-        if config.is_multi:
-            helper_services += [
-                f"workload-{config.name}-{cname}.service"
-                for cname in config.container_names()
-            ]
+    # Every emitted service except the umbrella (stopped above): the setup/build
+    # oneshots, the matching pod/net helper or per-container sub-services, and a
+    # VM's virtiofs mounts. They share the RemainAfterExit staleness, so all must
+    # be stopped + reset for a same-name re-enable to re-run them; stopping an
+    # absent unit is a harmless no-op. Sourced from workload_run_files() so this
+    # set never drifts from what the generator actually writes.
+    helper_services = [
+        svc for svc in workload_service_units(config)
+        if svc != config.service_name
+    ]
     for svc in helper_services:
         attempt(f"stop {svc}",
                 lambda svc=svc: subprocess.run(["systemctl", "stop", svc], check=False, capture_output=True))
@@ -856,11 +796,17 @@ def cmd_disable(args, manager: WorkloadManager):
     # reboot wipes the tmpfs. Each unlink is independent (one failure never skips
     # the rest), then daemon-reload drops them from systemd's view.
     def _remove_run_files():
-        for p in _workload_run_files(config):
+        # Removable (superset) view: every systemd-side file the workload owns,
+        # -pod and -net listed for the whole topology so missing_ok covers the
+        # mode we didn't emit. The env-tree files are removed separately, on
+        # --purge only, by _remove_runtime_env_files.
+        for rf in workload_run_files(config):
+            if rf.kind == "env-file":
+                continue
             try:
-                p.unlink(missing_ok=True)
+                rf.path.unlink(missing_ok=True)
             except OSError as e:
-                failures.append(f"remove {p}: {e}")
+                failures.append(f"remove {rf.path}: {e}")
         if not config.is_vm:
             # Prune the now-empty user@<uid>.service.d drop-in dir. The UID lookup
             # raises once the user is gone; nothing to prune in that case.

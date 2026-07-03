@@ -26,6 +26,7 @@ from substrate import (
     VMSubstrate,
     NotApplicable,
     BackupError,
+    service_active,
 )
 import cmd_drift
 import cmd_inspect
@@ -612,6 +613,99 @@ class TestContainerLiveness(unittest.TestCase):
         self.assertFalse(live['service_active'])
         self.assertFalse(live['healthy'])
         substrate.manager.podman.assert_not_called()
+
+
+class TestServiceActive(unittest.TestCase):
+    """The shared is-active primitive every health path now routes through."""
+
+    def test_active_returns_true_and_state(self):
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            active, state = service_active('workload-x.service')
+        self.assertTrue(active)
+        self.assertEqual(state, 'active')
+
+    def test_inactive_returns_false_and_word(self):
+        with patch('subprocess.run',
+                   return_value=_ok(stdout='inactive\n', returncode=3)):
+            active, state = service_active('workload-x.service')
+        self.assertFalse(active)
+        self.assertEqual(state, 'inactive')
+
+    def test_empty_stdout_yields_bare_string(self):
+        # Callers apply their own default; the primitive returns the raw ''.
+        with patch('subprocess.run', return_value=_ok(stdout='', returncode=4)):
+            active, state = service_active('workload-x.service')
+        self.assertFalse(active)
+        self.assertEqual(state, '')
+
+
+class TestContainerLivenessRows(unittest.TestCase):
+    """Per-container liveness rows — the single source _multi_container_health
+    and diagnose now consume instead of re-deriving name/unit math."""
+
+    def _substrate(self, toml, name, *, unit_states, statuses, user_exists=True):
+        config = _make_config(toml, name)
+        manager = MagicMock()
+        manager.user_exists.return_value = user_exists
+        manager.podman.return_value.container_status.side_effect = (
+            lambda cname: statuses.get(cname)
+        )
+        sub = ContainerSubstrate(config, manager)
+
+        def fake_is_active(argv, *a, **k):
+            unit = argv[-1]
+            state = unit_states.get(unit, 'inactive')
+            return _ok(stdout=state + '\n', returncode=0 if state == 'active' else 3)
+
+        self._is_active = fake_is_active
+        return sub
+
+    def test_single_row_keyed_on_main_service(self):
+        sub = self._substrate(
+            SINGLE_TOML, 'test-wl',
+            unit_states={'workload-test-wl.service': 'active'},
+            statuses={'workload-test-wl': 'running'},
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r['container'], 'test-wl')
+        self.assertEqual(r['podman_name'], 'workload-test-wl')
+        self.assertEqual(r['unit'], 'workload-test-wl.service')
+        self.assertTrue(r['healthy'])
+
+    def test_multi_rows_per_container_units(self):
+        sub = self._substrate(
+            POD_TOML, 'test-pod',
+            unit_states={
+                'workload-test-pod-web.service': 'active',
+                'workload-test-pod-db.service': 'failed',
+            },
+            statuses={'workload-test-pod-web': 'running',
+                      'workload-test-pod-db': None},
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        by = {r['container']: r for r in rows}
+        self.assertEqual(set(by), {'web', 'db'})
+        self.assertEqual(by['web']['unit'], 'workload-test-pod-web.service')
+        self.assertTrue(by['web']['healthy'])
+        self.assertFalse(by['db']['healthy'])   # failed unit + not running
+
+    def test_absent_user_leaves_all_not_running(self):
+        sub = self._substrate(
+            POD_TOML, 'test-pod',
+            unit_states={'workload-test-pod-web.service': 'active',
+                         'workload-test-pod-db.service': 'active'},
+            statuses={'workload-test-pod-web': 'running'},
+            user_exists=False,
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        self.assertTrue(all(not r['running'] for r in rows))
+        self.assertTrue(all(not r['healthy'] for r in rows))
+        sub.manager.podman.assert_not_called()
 
 
 class TestContainerResourceUsage(unittest.TestCase):

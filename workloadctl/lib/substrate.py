@@ -51,6 +51,7 @@ from workload_lib import (
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
     vm_mac_address,
+    workload_service_units,
 )
 from service_runtime import ensure_runtime_dir, restart_workload_service
 
@@ -87,6 +88,25 @@ class BackupError(Exception):
     per-workload (a single bad workload must not abort a --all run) and
     exit nonzero at the end.
     """
+
+
+# ---------------------------------------------------------------------------
+# Shared liveness primitive
+# ---------------------------------------------------------------------------
+
+def service_active(unit: str) -> tuple[bool, str]:
+    """`systemctl is-active` for one unit, as (active, state).
+
+    active — True iff systemctl exits 0. state — the raw is-active word it
+    prints ('active' / 'inactive' / 'failed' / 'activating' / …), or '' when
+    it prints nothing. This single call was hand-copied across every
+    health/liveness/diagnose path; callers apply their own empty-state default
+    ('unknown' for display, bare '' for diagnose's message).
+    """
+    r = subprocess.run(
+        ["systemctl", "is-active", unit], capture_output=True, text=True
+    )
+    return r.returncode == 0, r.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +352,12 @@ class Substrate(ABC):
     def gating_units(self) -> list[str]:
         """Systemd units that must succeed before the main service starts.
 
-        Empty for container substrates (setup is an ExecStartPre of the main
-        unit). VMs use separate RemainAfterExit=yes setup and build units; a
-        failure there is otherwise hidden behind a bland 'inactive' on the
-        main service.
+        Empty for container substrates: their setup unit is a hard
+        Requires=/After= dependency of the main service, so a setup failure
+        already surfaces as the main unit's own dependency failure. VMs use
+        separate RemainAfterExit=yes setup and build units whose failure would
+        otherwise hide behind a bland 'inactive' on the main service, so they
+        are reported explicitly.
         """
         ...
 
@@ -506,16 +528,12 @@ class ContainerSubstrate(Substrate):
     # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
-        svc = subprocess.run(
-            ["systemctl", "is-active", self.config.service_name],
-            capture_output=True, text=True,
-        )
-        service_active = svc.returncode == 0
-        service_state = svc.stdout.strip() or "unknown"
+        active, state = service_active(self.config.service_name)
+        service_state = state or "unknown"
 
         container_running = False
         container_status_str = None
-        if service_active and self.manager.user_exists(self.config):
+        if active and self.manager.user_exists(self.config):
             podman = self.manager.podman(self.config)
             names = self.config.podman_targets()
             statuses = []
@@ -529,14 +547,59 @@ class ContainerSubstrate(Substrate):
             # Surface the first running container's status string for display.
             container_status_str = next((s for s in statuses if s), None)
 
-        healthy = service_active and container_running
+        healthy = active and container_running
         return {
-            "service_active": service_active,
+            "service_active": active,
             "service_state": service_state,
             "container_running": container_running,
             "container_status": container_status_str,
             "healthy": healthy,
         }
+
+    def container_liveness(self) -> list[dict]:
+        """Per-container liveness rows in container_names() order.
+
+        Each row: ``{container, podman_name, unit, service_active,
+        service_state, status, running, healthy}``. Single-container workloads
+        yield one row keyed on the main service and the bare container name;
+        multi-container yield one row per member with its own
+        ``workload-<name>-<ctr>.service`` unit. The running check needs the
+        rootless podman store, so an absent workload user leaves every row
+        not-running. This is the single source the per-container health and
+        diagnose paths consume instead of re-deriving the name/unit math.
+        """
+        name = self.config.name
+        if self.config.is_multi:
+            rows_meta = [
+                (c, self.config.podman_container_name(c),
+                 f"workload-{name}-{c}.service")
+                for c in self.config.container_names()
+            ]
+        else:
+            rows_meta = [
+                (name, self.config.container_name, self.config.service_name)
+            ]
+
+        podman = None
+        if self.manager.user_exists(self.config):
+            podman = self.manager.podman(self.config)
+
+        rows = []
+        for cname, podman_name, unit in rows_meta:
+            active, state = service_active(unit)
+            status = podman.container_status(podman_name) if podman else None
+            running = bool(status)
+            rows.append({
+                "container": cname,
+                "podman_name": podman_name,
+                "unit": unit,
+                "service_active": active,
+                "service_state": state or "unknown",
+                "status": status,
+                "running": running,
+                "healthy": active and running,
+            })
+        return rows
 
     def resource_usage(
         self,
@@ -927,18 +990,13 @@ class VMSubstrate(Substrate):
     # ── required primitives ───────────────────────────────────────────────────
 
     def liveness(self) -> dict:
-        svc = subprocess.run(
-            ["systemctl", "is-active", self.config.service_name],
-            capture_output=True, text=True,
-        )
-        service_active = svc.returncode == 0
-        service_state = svc.stdout.strip() or "unknown"
+        active, state = service_active(self.config.service_name)
         return {
-            "service_active": service_active,
-            "service_state": service_state,
+            "service_active": active,
+            "service_state": state or "unknown",
             "container_running": None,
             "container_status": None,
-            "healthy": service_active,
+            "healthy": active,
         }
 
     # resource_usage, logs, endpoints: inherited base auto-raises NotApplicable.
@@ -956,10 +1014,7 @@ class VMSubstrate(Substrate):
         return _backup_vm(self.config, output, quiet=quiet)
 
     def gating_units(self) -> list[str]:
-        return [
-            f"workload-{self.config.name}-setup.service",
-            f"workload-{self.config.name}-build.service",
-        ]
+        return workload_service_units(self.config, roles={"setup", "build"})
 
     def exec(
         self,

@@ -53,10 +53,6 @@ class _FakePod:
         return ["workload-app-api.service", "workload-app-db.service"]
 
 
-class _FakeBridge(_FakePod):
-    mode = "bridge"
-
-
 class _LogsBase(unittest.TestCase):
     def setUp(self):
         self.captured: dict = {}
@@ -94,23 +90,25 @@ class LogsUnitListTest(_LogsBase):
         self.assertEqual(self.captured["cmd"],
                          ["journalctl", "-u", "workload-web.service", "-n", "50"])
 
-    def test_pod_lists_setup_umbrella_pod_helper_and_each_container(self):
-        self.assertIsNone(self._run(_FakePod(), "app"))
-        cmd = self.captured["cmd"]
-        units = [cmd[i + 1] for i, t in enumerate(cmd) if t == "-u"]
-        self.assertEqual(units, [
+    def test_multi_threads_service_units_into_journalctl(self):
+        # The multi unit list is workload_service_units(config), in order.
+        # Its per-mode contents (pod vs net, containers) are pinned in
+        # test_workload_run_files; here we assert cmd_logs threads that list
+        # verbatim into `journalctl -u ...`.
+        service_units = [
             "workload-app-setup.service",
             "workload-app.service",
-            "workload-app-pod.service",      # mode=pod -> the pod helper
+            "workload-app-pod.service",
             "workload-app-api.service",
             "workload-app-db.service",
-        ])
-
-    def test_bridge_uses_net_helper(self):
-        self.assertIsNone(self._run(_FakeBridge(), "app"))
+        ]
+        with mock.patch.object(cmd_interact, "workload_service_units",
+                               return_value=service_units) as m:
+            self.assertIsNone(self._run(_FakePod(), "app"))
+        m.assert_called_once()
         cmd = self.captured["cmd"]
-        self.assertIn("workload-app-net.service", cmd)        # mode=bridge -> net
-        self.assertNotIn("workload-app-pod.service", cmd)
+        units = [cmd[i + 1] for i, t in enumerate(cmd) if t == "-u"]
+        self.assertEqual(units, service_units)
 
     def test_container_target_single_unit(self):
         self.assertIsNone(self._run(_FakePod(), "app/api"))

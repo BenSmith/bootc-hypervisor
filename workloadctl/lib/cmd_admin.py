@@ -30,6 +30,7 @@ from workloadctl_core import (
     toml_string,
 )
 from service_runtime import restart_workload_service
+from substrate import service_active
 
 
 # ---------------------------------------------------------------------------
@@ -737,12 +738,8 @@ def cmd_diagnose(args, manager: WorkloadManager):
                fix="Service should be auto-enabled via generator")
 
     # Check 9: Service active
-    result = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True
-    )
-    service_state = result.stdout.strip()
-    if result.returncode == 0:
+    svc_active, service_state = service_active(config.service_name)
+    if svc_active:
         _check("service_active", True, f"Service active: {service_state}")
     else:
         fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"

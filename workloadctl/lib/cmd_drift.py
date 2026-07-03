@@ -79,18 +79,22 @@ def cmd_drift(args, manager):
         def _normalize(text: str) -> str:
             return text.replace(_tmpdir_prefix, _live_prefix)
 
+        def _belongs(stem: str) -> bool:
+            # With no --workload filter every workload-* file is in scope.
+            # Otherwise keep workload-NAME.service and workload-NAME-*.service
+            # (main unit and its per-container/helper units + sysusers .conf).
+            if not workload_name:
+                return True
+            return (
+                stem == f"workload-{workload_name}"
+                or stem.startswith(f"workload-{workload_name}-")
+            )
+
         diffs = []  # list of (filename, live_text, gen_text)
 
         for gen_file in sorted(gen_dir.glob("workload-*.service")):
-            if workload_name:
-                # Filter to units that belong to the named workload
-                stem = gen_file.stem
-                # matches workload-NAME.service and workload-NAME-*.service
-                if not (
-                    stem == f"workload-{workload_name}"
-                    or stem.startswith(f"workload-{workload_name}-")
-                ):
-                    continue
+            if not _belongs(gen_file.stem):
+                continue
 
             live_file = LIVE_UNITS_DIR / gen_file.name
             gen_text = _normalize(gen_file.read_text())
@@ -99,21 +103,67 @@ def cmd_drift(args, manager):
             if gen_text != live_text:
                 diffs.append((gen_file.name, live_text, gen_text))
 
-        # Also check for live units that have no generated counterpart
-        # (workload removed from /etc/workloads.d but service still running)
-        gen_names = {f.name for f in gen_dir.glob("workload-*.service")}
+        # Same owned-vs-live content diff for the sysusers .conf — an edited
+        # extra_groups/UID that was never re-enabled drifts exactly like a unit,
+        # and a generated-but-absent .conf (owned-but-missing) surfaces here too.
+        for gen_file in sorted(gen_dir.glob("workload-*.conf")):
+            if not _belongs(gen_file.stem):
+                continue
+            live_file = LIVE_UNITS_DIR / gen_file.name
+            gen_text = _normalize(gen_file.read_text())
+            live_text = live_file.read_text() if live_file.exists() else ""
+            if gen_text != live_text:
+                diffs.append((gen_file.name, live_text, gen_text))
+
+        # Owned-but-missing enablement symlink: the generator wants it but the
+        # live tree lacks it, so the workload would not auto-start on boot.
+        gen_wants_dir_check = gen_dir / "multi-user.target.wants"
+        live_wants_dir_check = LIVE_UNITS_DIR / "multi-user.target.wants"
+        if gen_wants_dir_check.is_dir():
+            for link in sorted(gen_wants_dir_check.glob("workload-*.service")):
+                if not _belongs(link.stem):
+                    continue
+                if not (live_wants_dir_check / link.name).exists():
+                    target = os.readlink(link) if link.is_symlink() else ""
+                    diffs.append((
+                        f"multi-user.target.wants/{link.name}",
+                        "",
+                        f"# missing enablement symlink -> {target}\n",
+                    ))
+
+        # Live files with no generated counterpart — a workload removed from
+        # /etc/workloads.d whose run-files still linger in the tmpfs (until the
+        # next reboot wipes it). The generator only writes, so a skipped or
+        # partial `disable` strands them; reporting every kind it emits into this
+        # tree keeps "No drift detected" from being a false all-clear. Covered:
+        # the .service units, the sysusers .conf, and the enablement symlink —
+        # the same run-file set `workload disable` is responsible for removing.
         if LIVE_UNITS_DIR.is_dir():
+            gen_services = {f.name for f in gen_dir.glob("workload-*.service")}
             for live_file in sorted(LIVE_UNITS_DIR.glob("workload-*.service")):
-                if workload_name:
-                    stem = live_file.stem
-                    if not (
-                        stem == f"workload-{workload_name}"
-                        or stem.startswith(f"workload-{workload_name}-")
-                    ):
-                        continue
-                if live_file.name not in gen_names:
-                    live_text = live_file.read_text()
-                    diffs.append((live_file.name, live_text, ""))
+                if _belongs(live_file.stem) and live_file.name not in gen_services:
+                    diffs.append((live_file.name, live_file.read_text(), ""))
+
+            gen_sysusers = {f.name for f in gen_dir.glob("workload-*.conf")}
+            for live_file in sorted(LIVE_UNITS_DIR.glob("workload-*.conf")):
+                if _belongs(live_file.stem) and live_file.name not in gen_sysusers:
+                    diffs.append((live_file.name, live_file.read_text(), ""))
+
+            gen_wants_dir = gen_dir / "multi-user.target.wants"
+            gen_wants = (
+                {f.name for f in gen_wants_dir.glob("workload-*.service")}
+                if gen_wants_dir.is_dir() else set()
+            )
+            live_wants_dir = LIVE_UNITS_DIR / "multi-user.target.wants"
+            if live_wants_dir.is_dir():
+                for link in sorted(live_wants_dir.glob("workload-*.service")):
+                    if _belongs(link.stem) and link.name not in gen_wants:
+                        target = os.readlink(link) if link.is_symlink() else ""
+                        diffs.append((
+                            f"multi-user.target.wants/{link.name}",
+                            f"# orphaned enablement symlink -> {target}\n",
+                            "",
+                        ))
 
         # Compare user@<uid>.service.d/50-workload.conf drop-ins (ADR 001 option
         # 1b): these carry the Slice= redirect and workload-level caps, so they

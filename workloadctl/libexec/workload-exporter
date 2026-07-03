@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_root_dir, workload_username
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_root_dir, workload_service_name, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -173,7 +173,7 @@ def systemd_show(service, *properties):
 
 def get_service_metrics(name):
     """Get systemd service metrics for a workload."""
-    service = f"workload-{name}.service"
+    service = workload_service_name(name)
     props = systemd_show(
         service,
         "ActiveState",
@@ -267,7 +267,7 @@ def find_vm_cgroup(name):
     Resolved via systemd's ControlGroup property so a custom resources.slice is
     honoured. Returns the absolute cgroup Path, or None if not active.
     """
-    props = systemd_show(f"workload-{name}.service", "ControlGroup")
+    props = systemd_show(workload_service_name(name), "ControlGroup")
     cgroup = props.get("ControlGroup", "")
     if not cgroup:
         return None

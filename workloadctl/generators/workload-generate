@@ -74,7 +74,7 @@ try:
         VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tags, parse_volume_spec,
-        selinux_type_name,
+        selinux_type_name, render_sysusers_config,
     )
     _early_log("Python imports complete")
 except Exception as e:
@@ -136,18 +136,13 @@ def generate_sysuser_config(config, user_name, uid):
              support range syntax.
     """
     name = config["workload"]["name"]
-    home_dir = str(workload_state_dir(name))
-    extra_groups = config.get("security", {}).get("extra_groups", [])
-
-    lines = [
-        f"# Workload user for {name}",
-        f"u {user_name} {uid} \"{name} workload\" {home_dir}",
-    ]
-
-    for group in extra_groups:
-        lines.append(f"m {user_name} {group}")
-
-    return "\n".join(lines) + "\n"
+    return render_sysusers_config(
+        name=name,
+        user_name=user_name,
+        uid=uid,
+        home_dir=str(workload_state_dir(name)),
+        extra_groups=config.get("security", {}).get("extra_groups", []),
+    )
 
 
 
@@ -1197,19 +1192,14 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 def generate_sysuser_config_vm(config, user_name, uid):
     """Like generate_sysuser_config but adds implicit kvm group membership."""
     name = config["workload"]["name"]
-    home_dir = str(workload_state_dir(name))
-    extra_groups = config.get("security", {}).get("extra_groups", [])
-
-    lines = [
-        f"# Workload user for {name} (VM)",
-        f"u {user_name} {uid} \"{name} workload\" {home_dir}",
-        f"m {user_name} kvm",
-    ]
-    for group in extra_groups:
-        if group != "kvm":  # avoid duplicate
-            lines.append(f"m {user_name} {group}")
-
-    return "\n".join(lines) + "\n"
+    return render_sysusers_config(
+        name=name,
+        user_name=user_name,
+        uid=uid,
+        home_dir=str(workload_state_dir(name)),
+        extra_groups=config.get("security", {}).get("extra_groups", []),
+        is_vm=True,
+    )
 
 
 def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: str, uid: int) -> str:

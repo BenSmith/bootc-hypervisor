@@ -238,7 +238,7 @@ class TestPurgeBestEffort(unittest.TestCase):
                  patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_workload_run_files', MagicMock(return_value=[])), \
+                 patch.object(cmd_lifecycle, 'workload_run_files', MagicMock(return_value=[])), \
                  patch.object(cmd_lifecycle, '_remove_runtime_env_files', MagicMock()), \
                  patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
                  patch.object(cmd_lifecycle, 'workload_enabled_marker',
@@ -283,8 +283,9 @@ class TestPurgeBestEffort(unittest.TestCase):
                  patch.object(cmd_lifecycle, '_run_host_setup',
                               MagicMock(side_effect=RuntimeError("boom"))), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_workload_run_files',
-                              MagicMock(return_value=[stranded])), \
+                 patch.object(cmd_lifecycle, 'workload_run_files',
+                              MagicMock(return_value=[
+                                  SimpleNamespace(kind='unit', path=stranded)])), \
                  patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
                  patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
                  patch.object(cmd_lifecycle, 'workload_enabled_marker',
@@ -325,6 +326,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             args = SimpleNamespace(workload='pp', purge=False)
             with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
                  patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
@@ -349,7 +351,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         # user is removed — this must be tolerated (drop-in skipped), and the
         # UID-independent /run units must still be removed. /run removal runs for
         # both purge and plain disable, so purge=False exercises it without the
-        # purge block's host-file mutation. Uses the REAL _workload_run_files (not
+        # purge block's host-file mutation. Uses the REAL workload_run_files (not
         # a stub), since the stub hid this bug.
         run = Path(tempfile.mkdtemp())
         with _Env(SINGLE_TOML, 'pp') as (config, _env_dir):
@@ -370,6 +372,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             exit_code = None
             with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
                  patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \

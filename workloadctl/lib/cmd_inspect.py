@@ -19,10 +19,11 @@ from workload_lib import (
     VM_SOCKET_DIR,
     units_outdated,
     workload_config_dir,
+    workload_service_units,
 )
 from podman import Podman
 from service_runtime import manager_active
-from substrate import NotApplicable, get_substrate
+from substrate import NotApplicable, get_substrate, service_active
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -285,10 +286,7 @@ def cmd_status(args, manager: WorkloadManager):
               f"(daemon-reload does not regenerate units).\n", flush=True)
 
     if config.is_multi:
-        units = [config.service_name]
-        helper = "pod" if config.mode == "pod" else "net"
-        units.append(f"workload-{config.name}-{helper}.service")
-        units.extend(config.sub_service_names())
+        units = workload_service_units(config)
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
@@ -970,35 +968,22 @@ def _multi_container_health(config, manager, only_container):
     `only_container` restricts the report to one container (for NAME/CTR);
     None reports every container. Returns (data_dict, all_healthy)."""
     names = config.container_names()
+    if only_container is not None and only_container not in names:
+        print(f"Error: container '{only_container}' not in workload "
+              f"'{config.name}'. Available: {', '.join(names)}", file=sys.stderr)
+        sys.exit(2)
+
+    rows = get_substrate(config, manager).container_liveness()
     if only_container is not None:
-        if only_container not in names:
-            print(f"Error: container '{only_container}' not in workload "
-                  f"'{config.name}'. Available: {', '.join(names)}", file=sys.stderr)
-            sys.exit(2)
-        names = [only_container]
+        rows = [r for r in rows if r["container"] == only_container]
 
-    all_healthy = True
-    containers = []
-    for ctr in names:
-        unit = f"workload-{config.name}-{ctr}.service"
-        r = subprocess.run(["systemctl", "is-active", unit],
-                           capture_output=True, text=True)
-        state = r.stdout.strip() or "unknown"
-        svc_active = r.returncode == 0
-
-        running = False
-        if manager.user_exists(config):
-            running = bool(manager.podman(config).container_status(
-                config.podman_container_name(ctr)))
-
-        healthy = svc_active and running
-        all_healthy = all_healthy and healthy
-        containers.append({
-            "container": ctr,
-            "healthy": healthy,
-            "service_state": state,
-            "running": running,
-        })
+    all_healthy = all(r["healthy"] for r in rows)
+    containers = [{
+        "container": r["container"],
+        "healthy": r["healthy"],
+        "service_state": r["service_state"],
+        "running": r["running"],
+    } for r in rows]
     return {
         "workload": config.name,
         "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
@@ -1015,18 +1000,18 @@ def cmd_health(args, manager: WorkloadManager):
     if config.is_vm:
         substrate = get_substrate(config, manager)
         liveness = substrate.liveness()
-        service_active = liveness["service_active"]
+        svc_active = liveness["service_active"]
         service_state = liveness["service_state"]
         user_exists = manager.user_exists(config)
-        all_healthy = service_active and user_exists
+        all_healthy = svc_active and user_exists
         health_data: dict[str, Any] = {
             "workload": config.name,
             "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
             "checks": [
                 {
                     "check": "service_status",
-                    "healthy": service_active,
-                    "message": "Service active" if service_active else f"Service {service_state}",
+                    "healthy": svc_active,
+                    "message": "Service active" if svc_active else f"Service {service_state}",
                     "details": {"state": service_state},
                 },
                 {
@@ -1071,20 +1056,16 @@ def cmd_health(args, manager: WorkloadManager):
     all_healthy = True
 
     # Check 1: Service status
-    result = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True
-    )
-    service_active = result.returncode == 0
-    service_state = result.stdout.strip() if result.stdout else "unknown"
+    svc_active, svc_state = service_active(config.service_name)
+    service_state = svc_state or "unknown"
 
     health_data["checks"].append({
         "check": "service_status",
-        "healthy": service_active,
-        "message": "Service active and running" if service_active else f"Service {service_state}",
+        "healthy": svc_active,
+        "message": "Service active and running" if svc_active else f"Service {service_state}",
         "details": {"state": service_state}
     })
-    if not service_active:
+    if not svc_active:
         all_healthy = False
 
     # Check 2: User exists
@@ -1201,7 +1182,7 @@ def cmd_health(args, manager: WorkloadManager):
                 pass  # Skip invalid port numbers
 
     # Check 7: Uptime (if service active)
-    if service_active:
+    if svc_active:
         result = subprocess.run(
             ["systemctl", "show", config.service_name,
              "--property=ActiveEnterTimestamp", "--value"],
