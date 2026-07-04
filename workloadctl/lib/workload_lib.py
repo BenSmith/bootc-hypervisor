@@ -8,12 +8,14 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import pwd
 import re
 import socket
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,12 @@ def workload_config_dir() -> Path:
 
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
+
+# systemd-creds credential store. Secrets are created here (`workloadctl secret`),
+# loaded from here by the generator, and decrypted at runtime by
+# workload-ensure-user. Single source of truth so backup/restore/rotate can't
+# drift onto the wrong path (the plain /etc/credstore is only a legacy fallback).
+CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 
 # Shipped bundle control-file tree (Containerfile/build.sh/setup.sh/policy.cil),
 # keyed by `[workload] bundle`. Env-overridable so the control-file resolver can
@@ -91,9 +99,46 @@ VM_GUEST_UID = 1000
 # won't adopt an unrelated interface; it must stay <=15 chars (Linux IFNAMSIZ).
 # Override to e.g. "br0" to attach VMs directly to a pre-existing LAN bridge.
 VM_BRIDGE_NAME = "_workload-br"
-VM_BRIDGE_SUBNET = "192.168.200.0/24"
-VM_BRIDGE_IP = "192.168.200.1"
-VM_DHCP_RANGE = "192.168.200.100,192.168.200.199,12h"
+# Managed-bridge network config is HOST-LEVEL, not per-VM (ADR 002): the bridge
+# is one host-global refcounted resource, so its subnet/DNS can't coherently
+# take per-VM overrides. Single source of truth = the subnet CIDR
+# (WORKLOADCTL_VM_BRIDGE_SUBNET), from which the gateway IP, CIDR, and — the
+# ADR-002 fix — the DHCP range are all DERIVED, so a relocated bridge hands
+# guests addresses on its own subnet instead of a stale hardcoded window.
+def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
+    """Derive (gateway_ip, gateway_cidr, normalized_subnet, dhcp_range) for the
+    managed VM bridge from a single subnet CIDR.
+
+    The gateway is the first host address; the DHCP window is offsets .100–.199
+    within the subnet (reproducing the historical 192.168.200.100–199 range on
+    the /24 default). On a subnet too small for that window the range falls
+    back to the full usable span (first host after the gateway through the
+    last host) instead of collapsing onto a single clamped address. Deriving
+    the range from the subnet is the ADR-002 fix: the range used to be
+    hardcoded, so a non-default subnet handed guests addresses off the wrong
+    subnet. Raises ValueError if the subnet leaves no leasable address after
+    the gateway (/31, /32).
+    """
+    net = ipaddress.ip_network(subnet_cidr, strict=False)
+    gateway = net.network_address + 1
+    first_usable = net.network_address + 2  # +1 is the gateway
+    last_usable = net.broadcast_address - 1
+    if last_usable < first_usable:
+        raise ValueError(
+            f"VM bridge subnet {net} has no leasable address after the "
+            f"gateway; use a /30 or larger")
+    dhcp_start = net.network_address + 100
+    dhcp_end = min(net.network_address + 199, last_usable)
+    if dhcp_start > dhcp_end:
+        dhcp_start = first_usable
+    return (str(gateway), f"{gateway}/{net.prefixlen}", str(net),
+            f"{dhcp_start},{dhcp_end},12h")
+
+
+VM_BRIDGE_IP, VM_BRIDGE_CIDR, VM_BRIDGE_SUBNET, VM_DHCP_RANGE = managed_bridge_params(
+    os.environ.get("WORKLOADCTL_VM_BRIDGE_SUBNET", "192.168.200.0/24"))
+VM_BRIDGE_DNS = [s.strip() for s in os.environ.get(
+    "WORKLOADCTL_VM_BRIDGE_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
 # dnsmasq for the bridge runs confined in the SELinux dnsmasq_t domain, which
 # may only write its lease/pid files in dnsmasq-owned, dnsmasq_lease_t-labeled
 # locations. /var/lib/workloads is labeled container_file_t (rootless podman),
@@ -344,6 +389,43 @@ def virtiofs_tag(container_path: str, index: int = 0) -> str:
     return tag[:36]
 
 
+def virtiofs_tags(volume_specs) -> list[str]:
+    """Collision-free virtiofs tags for a VM's ordered volume list (B3).
+
+    virtiofs_tag() sanitizes then truncates a guest mountpoint to <=36 chars, so
+    two distinct mountpoints can collapse to the same tag. The generator keys
+    both the virtiofsd sidecar unit filename (workload-<name>-virtiofs-<tag>) and
+    the QEMU chardev/device tag off this string, so a collision silently
+    overwrites one sidecar unit and emits duplicate chardev tags. Disambiguate
+    any colliding tag by suffixing the volume index (kept inside the 36-char
+    budget). Order matches the input list.
+
+    Single source of truth: the generator, workload-ensure-user (cloud-init
+    mounts), and cmd_lifecycle purge must all derive the tag SET through this so
+    unit names / chardev tags / fstab entries stay in sync.
+    """
+    base = [virtiofs_tag(parse_volume_spec(v)[1], i)
+            for i, v in enumerate(volume_specs)]
+    counts = {}
+    for t in base:
+        counts[t] = counts.get(t, 0) + 1
+    # Every assigned tag is checked against ALL previously assigned tags, not
+    # just the base counts: a suffixed tag ("data" -> "data-1") could otherwise
+    # re-collide with another volume's natural un-suffixed tag ("data-1").
+    used = set()
+    tags = []
+    for i, t in enumerate(base):
+        cand = t
+        bump = i
+        while cand in used or (cand == t and counts[t] > 1):
+            suffix = f"-{bump}"
+            cand = t[:36 - len(suffix)] + suffix
+            bump += 1
+        used.add(cand)
+        tags.append(cand)
+    return tags
+
+
 def parse_volume_spec(vol_spec: str) -> tuple[str, str, str]:
     """Parse a "host:guest[:opts]" volume spec, returning (host, guest, opts).
 
@@ -402,9 +484,254 @@ def workload_container_name(name: str) -> str:
     return f"workload-{name}"
 
 
+def workload_podman_container_name(
+    name: str, container_name: str, *, is_multi: bool
+) -> str:
+    """The podman --name for one container of a workload.
+
+    Single source of the single-vs-multi name formula shared by
+    WorkloadConfig.podman_container_name and the metrics exporter (which reads
+    raw TOML and can't build a WorkloadConfig). Single-container workloads use
+    the bare `workload-<name>`; each member of a pod/bridge workload gets
+    `workload-<name>-<container>`.
+    """
+    if not is_multi:
+        return workload_container_name(name)
+    return f"workload-{name}-{container_name}"
+
+
 # Generated unit files live in the systemd runtime tree (transient; rewritten on
 # boot by workload-generate.service and on every `workloadctl enable`).
 RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
+
+# Flock guarding the subuid/subgid UID-allocation critical section (#4). Must be
+# the identical path across every participant (workload-ensure-user, cmd_lifecycle
+# enable + disable/purge) or the flock stops mutexing.
+SUBID_LOCK = Path("/run/lock/workload-subid.lock")
+
+
+# --- Workload run-files (B15) ---------------------------------------------- #
+#
+# The single source of truth for "the per-workload files a workload owns" — see
+# docs/workload-run-files.md for the authoritative table and rationale.
+#
+# Every caller slices this one list along whichever axis it cares about, instead
+# of re-deriving the set:
+#   * emitted view (rf.emitted True) — files that exist for THIS exact config;
+#     used by the generator-parity oracle, drift, inspect, and metrics.
+#   * removable superset (all kinds but env-file) — the mode-family union the
+#     disable/purge path may safely unlink() with missing_ok; over-lists -pod/-net
+#     for every container workload so disabling can never miss a topology's unit.
+#   * env-tree files (kind == 'env-file') — the runtime-written .env/.secrets that
+#     only --purge removes.
+# Filter by `kind` for tree/lifecycle and by `role` for a specific unit family.
+
+
+def workload_env_dir() -> Path:
+    """Runtime env tree (.env/.secrets). Honors WORKLOAD_ENV_DIR for tests."""
+    return Path(os.environ.get("WORKLOAD_ENV_DIR", "/run/workload-env"))
+
+
+@dataclass(frozen=True)
+class WorkloadRunFile:
+    """One file a workload owns, tagged so every caller can filter one list.
+
+    kind  — which tree + removal lifecycle it belongs to:
+            'unit' | 'wants-symlink' | 'sysusers' | 'dropin' | 'env-file'.
+    role  — which unit family, for callers that want a specific member:
+            'main' | 'setup' | 'build' | 'pod' | 'net' | 'container' |
+            'virtiofs' | 'sysusers' | 'dropin' | 'env' | 'secrets'.
+    emitted — True iff the generator writes this file for THIS config (the
+            emitted view). False marks the removable-only superset entries
+            (-pod/-net listed for non-matching modes) and the runtime-written
+            env-files the generator never produces.
+    """
+
+    path: Path
+    kind: str
+    role: str
+    emitted: bool
+
+
+def workload_run_files(config) -> list[WorkloadRunFile]:
+    """The complete set of run-files owned by one workload.
+
+    MUST stay in sync with generators/workload-generate (generate_*_workload) and
+    with the removal path. Never includes shared infra (workload-generate.service,
+    workload-bridge.service, dnsmasq) or references to *other* workloads' units.
+
+    Superset semantics: -pod.service and -net.service are listed for every
+    container workload (emitted only for the matching mode) so the removable view
+    can unlink() the full topology with missing_ok. The cgroup drop-in is keyed by
+    the workload UID from the passwd db; if the user is gone the UID can't be
+    reconstructed, so it is omitted rather than raising.
+    """
+    # Lazy import: workloadctl_core imports this module, so a top-level import
+    # would be circular.
+    from workloadctl_core import WorkloadUserNotFound
+
+    run = RUN_SYSTEMD_SYSTEM
+    env = workload_env_dir()
+    name = config.name
+    files: list[WorkloadRunFile] = [
+        WorkloadRunFile(run / f"workload-{name}.conf", "sysusers", "sysusers", True),
+        WorkloadRunFile(run / f"workload-{name}-setup.service", "unit", "setup", True),
+        WorkloadRunFile(run / f"workload-{name}.service", "unit", "main", True),
+        WorkloadRunFile(
+            run / "multi-user.target.wants" / f"workload-{name}.service",
+            "wants-symlink", "main", True,
+        ),
+    ]
+
+    if config.is_vm:
+        files.append(
+            WorkloadRunFile(run / f"workload-{name}-build.service", "unit", "build", True)
+        )
+        for tag in virtiofs_tags(config.config.get("vm", {}).get("volumes", [])):
+            files.append(WorkloadRunFile(
+                run / f"workload-{name}-virtiofs-{tag}.service", "unit", "virtiofs", True
+            ))
+    else:
+        # cgroup-placement drop-in (containers only). Keyed by the workload UID
+        # from the passwd db; omitted once the user is gone (UID unreconstructable).
+        # A pure query helper must not allocate a UID.
+        try:
+            files.append(WorkloadRunFile(
+                run / f"user@{config.uid}.service.d" / "50-workload.conf",
+                "dropin", "dropin", True,
+            ))
+        except WorkloadUserNotFound:
+            pass
+        mode = config.mode
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-pod.service", "unit", "pod", mode == "pod"
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-net.service", "unit", "net", mode == "bridge"
+        ))
+        # Per-container units key on topology, matching the generator and the
+        # -pod/-net gates above; the per-container .secrets below key on the same
+        # `mode != "single"` so disable/purge lists units and secrets together.
+        if mode != "single":
+            for cname in config.container_names():
+                files.append(WorkloadRunFile(
+                    run / f"workload-{name}-{cname}.service", "unit", "container", True
+                ))
+
+    # Runtime-written env tree — never produced by the generator (emitted False),
+    # removed only on --purge. .secrets is over-listed per container (missing_ok).
+    files.append(WorkloadRunFile(env / f"workload-{name}.env", "env-file", "env", False))
+    files.append(
+        WorkloadRunFile(env / f"workload-{name}.secrets", "env-file", "secrets", False)
+    )
+    # Per-container .secrets gate on the SAME discriminator as the per-container
+    # units above (mode != "single"), not is_multi — a split discriminator here
+    # strands loaded units when the two disagree (cmd_disable would unlink these
+    # .secrets but never list the matching .service units). Correctly False for
+    # VMs too (mode "single"; they own no per-container secrets).
+    if config.mode != "single":
+        for cname in config.container_names():
+            files.append(WorkloadRunFile(
+                env / f"workload-{name}-{cname}.secrets", "env-file", "secrets", False
+            ))
+
+    return files
+
+
+@dataclass(frozen=True)
+class RunTreeScan:
+    """How to find one run-file kind when scanning the whole run tree.
+
+    Companion to workload_run_files(): that lists the files ONE config owns;
+    this lists the glob per kind so a tree-walker (workloadctl drift) can compare
+    generated-vs-live for every workload at once, in both directions, without
+    re-deriving the workload-<name>* name formulas. Kinds mirror
+    WorkloadRunFile.kind for the files that land under RUN_SYSTEMD_SYSTEM — the
+    env-file kinds live in the env tree and never appear here.
+
+    glob          — pattern under the run root (drift's scratch dir or the live
+                    tree); may descend a subdir (wants/, user@*.service.d/).
+    content       — True: drift is a byte diff of the file. False: the file is an
+                    enablement symlink whose only drift is presence/absence.
+    name_filtered — True: the file is named workload-<name>* so `drift <name>`
+                    can scope to it. False: drop-ins are keyed by UID, so the
+                    name filter can't apply and they are always in scope.
+    """
+
+    kind: str
+    glob: str
+    content: bool
+    name_filtered: bool
+
+
+# Every run-file kind that lands under RUN_SYSTEMD_SYSTEM, as a scan table for
+# drift. Adding a kind here (alongside its workload_run_files entry) is all drift
+# needs to start comparing it — there is no per-kind block to duplicate.
+# test_run_tree_scans_cover_run_files pins this to workload_run_files' tree kinds.
+RUN_TREE_SCANS: list[RunTreeScan] = [
+    RunTreeScan("unit", "workload-*.service", content=True, name_filtered=True),
+    RunTreeScan("sysusers", "workload-*.conf", content=True, name_filtered=True),
+    RunTreeScan(
+        "wants-symlink",
+        "multi-user.target.wants/workload-*.service",
+        content=False,
+        name_filtered=True,
+    ),
+    RunTreeScan(
+        "dropin",
+        "user@*.service.d/50-workload.conf",
+        content=True,
+        name_filtered=False,
+    ),
+]
+
+
+def workload_service_units(config, *, roles=None) -> list[str]:
+    """Emitted systemd .service unit names for THIS config.
+
+    A convenience view over workload_run_files(): the services the generator
+    actually writes — main, setup, the matching pod/net helper or per-container
+    services, and for VMs the build and virtiofs units. Pass roles to keep only
+    a subset, e.g. roles={"setup", "build"} for a VM's gating units.
+    """
+    return [
+        rf.path.name
+        for rf in workload_run_files(config)
+        if rf.kind == "unit" and rf.emitted and (roles is None or rf.role in roles)
+    ]
+
+
+def render_sysusers_config(
+    *,
+    name: str,
+    user_name: str,
+    uid: int,
+    home_dir: str,
+    extra_groups=(),
+    is_vm: bool = False,
+) -> str:
+    """Render the systemd-sysusers config for a workload's dedicated user.
+
+    Single source of truth shared by enable-time provisioning
+    (cmd_lifecycle._provision_user) and the boot generator, so the .conf a
+    workload is enabled with is byte-identical to the one regenerated at boot.
+    UID must be pre-allocated by the caller — this is a pure render and never
+    allocates. A VM gets implicit `kvm` membership, de-duplicated against
+    extra_groups so it is never emitted twice.
+    """
+    lines = [
+        f"# Workload user for {name}" + (" (VM)" if is_vm else ""),
+        f'u {user_name} {uid} "{name} workload" {home_dir}',
+    ]
+    groups: list[str] = []
+    if is_vm:
+        groups.append("kvm")
+    for group in extra_groups:
+        if group not in groups:
+            groups.append(group)
+    for group in groups:
+        lines.append(f"m {user_name} {group}")
+    return "\n".join(lines) + "\n"
 
 
 def units_outdated(name: str) -> bool:
@@ -597,6 +924,19 @@ def validate_vm_config(config: dict) -> list[str]:
             "(letters/digits/_/-, max 15 chars)"
         )
 
+    # The managed bridge's subnet/DNS are HOST-LEVEL config (ADR 002), no longer
+    # per-VM: reject the removed fields with a pointer to the host-level knob
+    # rather than silently ignoring them.
+    net_cfg = vm.get("network", {})
+    for removed in ("subnet", "dns"):
+        if removed in net_cfg:
+            errors.append(
+                f"[vm.network].{removed} is no longer a per-VM setting — the "
+                f"managed bridge's subnet/DNS are host-level (set "
+                f"WORKLOADCTL_VM_BRIDGE_SUBNET / WORKLOADCTL_VM_BRIDGE_DNS). "
+                f"See ADR 002."
+            )
+
     # [vm.cloud_init] — optional override of the seed user-data.
     ci = vm.get("cloud_init", {})
     if ci:
@@ -708,6 +1048,23 @@ def validate_workload_config(config: dict) -> list[str]:
         infer_workload_mode(config)
     except ValueError as e:
         errors.append(str(e))
+
+    # Keep the shape (is_multi = "containers" in config) and the topology
+    # (mode) in lockstep so `is_multi <=> mode != "single"` holds. The generator
+    # emits per-container units on mode, while ~30 call sites read is_multi as
+    # the same discriminator; an explicit mode that contradicts the block shape
+    # would desync them (orphaned units, dropped containers).
+    explicit_mode = config.get("workload", {}).get("mode")
+    if explicit_mode in ("pod", "bridge") and not has_containers:
+        errors.append(
+            f"workload.mode = {explicit_mode!r} requires [[containers]] "
+            f"(a single [container] block is always 'single' mode)"
+        )
+    if explicit_mode == "single" and has_containers:
+        errors.append(
+            "workload.mode = 'single' is incompatible with [[containers]]; "
+            "use [container] for a single-container workload"
+        )
 
     # [workload].requires / .after — must be lists of valid workload name strings
     wl = config.get("workload", {})
@@ -1001,11 +1358,33 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
 # --- Quoting ---
 
 def dq(s: str) -> str:
-    """Double-quote a string for systemd ExecStart (and shell wrapper) contexts.
+    """Quote a string as a LITERAL token for a systemd Exec* command line.
 
-    Use for all tokens: paths, image names, command args, container names, env keys.
+    Use for all tokens: paths, image names, command args, container names, env
+    keys, and plain env VALUES.
 
-    The one exception is plain env var VALUES — use shlex.quote() for those,
-    because single quotes prevent $-expansion in both systemd and shell contexts.
+    systemd applies two expansions to Exec directives that shell-style quoting
+    does NOT suppress, so a bare double-quote is not enough:
+
+      * `%` specifiers (`%i`, `%H`, …) are expanded at unit load, before quote
+        parsing — a literal `%` must be written `%%`.
+      * `$VAR` / `${VAR}` environment expansion runs on each argument *after*
+        the command line is split and quotes are removed — so neither single nor
+        double quotes stop it; a literal `$` must be written `$$`.
+
+    (This is why single-quoting env values with shlex.quote was wrong: systemd
+    still expands `$` inside them, and shlex's `'"'"'` escaping for an embedded
+    single quote is shell syntax, not systemd's.)
+
+    Backslash and double-quote are escaped for the surrounding double quotes;
+    `$` and `%` are doubled to defeat the two expansions above. A single quote
+    needs no escaping inside double quotes.
     """
-    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return (
+        '"'
+        + s.replace('\\', '\\\\')
+           .replace('"', '\\"')
+           .replace('$', '$$')
+           .replace('%', '%%')
+        + '"'
+    )

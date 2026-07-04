@@ -560,7 +560,7 @@ class TestCmdInfo(unittest.TestCase):
             self.assertIn('Quick commands:', out)
 
     def test_info_files_json_and_human(self):
-        with _WorkloadDir(MINIMAL_TOML) as p:
+        with _WorkloadDir(MINIMAL_TOML):
             manager = MagicMock()
             buf = io.StringIO()
             with patch('sys.stdout', buf):
@@ -581,7 +581,7 @@ class TestCmdInfo(unittest.TestCase):
 
 class TestCollectControlFiles(unittest.TestCase):
     def test_collect_control_files_merges_override_and_bundle_and_invalid_setup(self):
-        with _WorkloadDir(MINIMAL_TOML) as p:
+        with _WorkloadDir(MINIMAL_TOML):
             config = WorkloadConfig('test-wl')
             config.config = {**config.config, 'host': {'setup': '../../etc/passwd'}}
             files = cmd_inspect._collect_control_files(config)

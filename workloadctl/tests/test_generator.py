@@ -429,8 +429,8 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         r = self.run_gen()
         self.assertEqual(r.returncode, 0, r.stderr)
         web = (Path(self.services_dir) / "workload-app-web.service").read_text()
-        self.assertIn("--env APP_ENV=production", web)
-        self.assertIn("--env APP_PORT=8080", web)
+        self.assertIn('--env APP_ENV="production"', web)
+        self.assertIn('--env APP_PORT="8080"', web)
 
     def test_per_container_environment_nested_form(self):
         """[containers.container.environment] (nested under [containers.container])
@@ -451,7 +451,7 @@ class TestGeneratorMultiContainer(unittest.TestCase):
         r = self.run_gen()
         self.assertEqual(r.returncode, 0, r.stderr)
         web = (Path(self.services_dir) / "workload-app-web.service").read_text()
-        self.assertIn("--env APP_ENV=production", web)
+        self.assertIn('--env APP_ENV="production"', web)
 
     def test_per_container_environment_both_forms_rejected(self):
         """Setting env at both [containers.environment] AND
@@ -1987,7 +1987,7 @@ class TestGeneratorContainerFlags(unittest.TestCase):
         """)
         self.assertIn("--security-opt=seccomp=/custom.json", svc)
         # baseline is suppressed when the workload provides its own seccomp
-        self.assertNotIn(f"seccomp=", svc.replace("seccomp=/custom.json", ""))
+        self.assertNotIn("seccomp=", svc.replace("seccomp=/custom.json", ""))
 
     def test_privileged_emits_flag_and_warns(self):
         svc, result = self._gen("""
@@ -2061,8 +2061,14 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             audio = true
         """)
         self.assertIn("--device /dev/snd", svc)
-        self.assertIn("/pulse:${XDG_RUNTIME_DIR}/pulse:ro", svc)
-        self.assertIn("/pipewire-0:${XDG_RUNTIME_DIR}/pipewire-0:ro", svc)
+        # uid is embedded directly (not via ${XDG_RUNTIME_DIR} runtime expansion,
+        # which resolves to "" -- mounting host "/pulse" -- if the workload's
+        # EnvironmentFile is missing at start time).
+        self.assertNotIn("XDG_RUNTIME_DIR", svc)
+        self.assertRegex(svc, r"--volume /run/user/\d+/pulse:/run/user/\d+/pulse:ro")
+        self.assertRegex(
+            svc, r"--volume /run/user/\d+/pipewire-0:/run/user/\d+/pipewire-0:ro"
+        )
 
     def test_virtualization_devices_shortcut(self):
         svc, _ = self._gen("""
@@ -2297,7 +2303,6 @@ class TestGeneratorAutoMaps(unittest.TestCase):
     def test_extra_groups_maps_group_gid(self):
         import grp
         group = grp.getgrall()[0].gr_name
-        gid = grp.getgrnam(group).gr_gid
         svc = self._gen(f'extra_groups = ["{group}"]')
         self.assertNotIn("--userns=", svc)
         self.assertIn("--group-add=keep-groups", svc)
@@ -2524,7 +2529,10 @@ class TestGeneratorVmResources(unittest.TestCase):
         self.assertTrue((wants / "workload-revm.service").is_symlink())
         self.assertTrue((wants / "workload-bridge.service").is_symlink())
 
-    def test_vm_custom_subnet_derives_bridge_cidr(self):
+    def test_host_level_subnet_override_derives_cidr_and_dhcp_range(self):
+        # The managed-bridge subnet is host-level (ADR 002): overriding it via
+        # WORKLOADCTL_VM_BRIDGE_SUBNET relocates the bridge AND — the ADR-002 fix
+        # — derives the dhcp-range from it, so guests get in-subnet addresses.
         write_config(self.config_dir, "subnetvm", """\
             [workload]
             name = "subnetvm"
@@ -2535,15 +2543,14 @@ class TestGeneratorVmResources(unittest.TestCase):
             cloud_image_url = "https://example.com/cloud.qcow2"
             cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             user = "fedora"
-
-            [vm.network]
-            subnet = "10.99.7.0/24"
         """)
-        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        with mock.patch.dict(os.environ,
+                             {"WORKLOADCTL_VM_BRIDGE_SUBNET": "10.99.7.0/24"}):
+            result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         bridge = (Path(self.services_dir) / "workload-bridge.service").read_text()
-        # first host of the subnet becomes the bridge IP, /prefixlen preserved
-        self.assertIn("10.99.7.1/24", bridge)
+        self.assertIn("10.99.7.1/24", bridge)                       # gateway CIDR
+        self.assertIn("--dhcp-range=10.99.7.100,10.99.7.199,12h", bridge)  # derived
 
     def test_vm_sysusers_extra_groups(self):
         write_config(self.config_dir, "grpvm", """\

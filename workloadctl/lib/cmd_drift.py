@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from workload_lib import workload_config_dir
+from workload_lib import RUN_TREE_SCANS, workload_config_dir
 
 
 # The generator script location (installed path first, dev checkout fallback)
@@ -79,66 +79,69 @@ def cmd_drift(args, manager):
         def _normalize(text: str) -> str:
             return text.replace(_tmpdir_prefix, _live_prefix)
 
+        def _in_scope(rel: Path, scan) -> bool:
+            # With no --workload filter every run-file is in scope. Drop-ins are
+            # keyed by UID (name_filtered False), so the name filter can't apply
+            # to them either — they are always compared. Otherwise keep
+            # workload-NAME.service and workload-NAME-*.service (the main unit and
+            # its per-container/helper units + sysusers .conf + wants symlink).
+            if not workload_name or not scan.name_filtered:
+                return True
+            return (
+                rel.stem == f"workload-{workload_name}"
+                or rel.stem.startswith(f"workload-{workload_name}-")
+            )
+
         diffs = []  # list of (filename, live_text, gen_text)
 
-        for gen_file in sorted(gen_dir.glob("workload-*.service")):
-            if workload_name:
-                # Filter to units that belong to the named workload
-                stem = gen_file.stem
-                # matches workload-NAME.service and workload-NAME-*.service
-                if not (
-                    stem == f"workload-{workload_name}"
-                    or stem.startswith(f"workload-{workload_name}-")
-                ):
+        # One pass per run-file kind (RUN_TREE_SCANS is the single source of which
+        # kinds land in this tree), each comparing generated-vs-live in both
+        # directions. Forward catches content drift and owned-but-missing files;
+        # the orphan sweep catches live run-files a removed/partially-disabled
+        # workload stranded in the tmpfs. Reporting every kind keeps "No drift
+        # detected" from being a false all-clear.
+        for scan in RUN_TREE_SCANS:
+            gen_rels = set()
+            for gen_file in sorted(gen_dir.glob(scan.glob)):
+                rel = gen_file.relative_to(gen_dir)
+                if not _in_scope(rel, scan):
                     continue
+                gen_rels.add(rel)
+                live_file = LIVE_UNITS_DIR / rel
+                if scan.content:
+                    gen_text = _normalize(gen_file.read_text())
+                    live_text = (
+                        live_file.read_text() if live_file.exists() else ""
+                    )
+                    if gen_text != live_text:
+                        diffs.append((str(rel), live_text, gen_text))
+                else:
+                    # Enablement symlink: the only drift is presence. is_symlink()
+                    # covers a *dangling* live link (target removed out from under
+                    # it) — the link file is present, so enablement is not
+                    # "missing" even though exists() follows it and returns False.
+                    if not (live_file.exists() or live_file.is_symlink()):
+                        target = os.readlink(gen_file) if gen_file.is_symlink() else ""
+                        diffs.append((
+                            str(rel), "",
+                            f"# missing enablement symlink -> {target}\n",
+                        ))
 
-            live_file = LIVE_UNITS_DIR / gen_file.name
-            gen_text = _normalize(gen_file.read_text())
-            live_text = live_file.read_text() if live_file.exists() else ""
-
-            if gen_text != live_text:
-                diffs.append((gen_file.name, live_text, gen_text))
-
-        # Also check for live units that have no generated counterpart
-        # (workload removed from /etc/workloads.d but service still running)
-        gen_names = {f.name for f in gen_dir.glob("workload-*.service")}
-        if LIVE_UNITS_DIR.is_dir():
-            for live_file in sorted(LIVE_UNITS_DIR.glob("workload-*.service")):
-                if workload_name:
-                    stem = live_file.stem
-                    if not (
-                        stem == f"workload-{workload_name}"
-                        or stem.startswith(f"workload-{workload_name}-")
-                    ):
-                        continue
-                if live_file.name not in gen_names:
-                    live_text = live_file.read_text()
-                    diffs.append((live_file.name, live_text, ""))
-
-        # Compare user@<uid>.service.d/50-workload.conf drop-ins (ADR 001 option
-        # 1b): these carry the Slice= redirect and workload-level caps, so they
-        # are as load-bearing as the service units themselves.
-        for gen_dropin_dir in sorted(gen_dir.glob("user@*.service.d")):
-            dropin_name = f"{gen_dropin_dir.name}/50-workload.conf"
-            gen_dropin = gen_dropin_dir / "50-workload.conf"
-            if not gen_dropin.exists():
+            if not LIVE_UNITS_DIR.is_dir():
                 continue
-            gen_text = _normalize(gen_dropin.read_text())
-            live_dropin = LIVE_UNITS_DIR / gen_dropin_dir.name / "50-workload.conf"
-            live_text = live_dropin.read_text() if live_dropin.exists() else ""
-            if gen_text != live_text:
-                diffs.append((dropin_name, live_text, gen_text))
-
-        # Orphan drop-ins: live drop-in exists but no generated counterpart
-        gen_dropin_dirs = {d.name for d in gen_dir.glob("user@*.service.d")}
-        if LIVE_UNITS_DIR.is_dir():
-            for live_dropin_dir in sorted(LIVE_UNITS_DIR.glob("user@*.service.d")):
-                live_dropin = live_dropin_dir / "50-workload.conf"
-                if not live_dropin.exists():
+            for live_file in sorted(LIVE_UNITS_DIR.glob(scan.glob)):
+                rel = live_file.relative_to(LIVE_UNITS_DIR)
+                if not _in_scope(rel, scan) or rel in gen_rels:
                     continue
-                if live_dropin_dir.name not in gen_dropin_dirs:
-                    dropin_name = f"{live_dropin_dir.name}/50-workload.conf"
-                    diffs.append((dropin_name, live_dropin.read_text(), ""))
+                if scan.content:
+                    diffs.append((str(rel), live_file.read_text(), ""))
+                else:
+                    target = os.readlink(live_file) if live_file.is_symlink() else ""
+                    diffs.append((
+                        str(rel),
+                        f"# orphaned enablement symlink -> {target}\n",
+                        "",
+                    ))
 
     if json_output:
         import json

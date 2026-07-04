@@ -33,7 +33,9 @@ from workload_lib import (
     workload_container_name,
     workload_data_dir,
     workload_home_dir,
+    workload_podman_container_name,
     workload_service_name,
+    workload_service_units,
     workload_state_dir,
     workload_username,
 )
@@ -56,28 +58,29 @@ def resolve_container_target(config, container, workload):
 
     For single-container workloads, `container` must be None. For
     multi-container workloads, `container` is required; a bare workload name
-    errors with the list of available containers (exit 2).
+    raises UsageError (mapped to exit 2) with the list of available
+    containers.
     """
     if not config.is_multi:
         if container is not None:
             print(f"Error: workload '{workload}' is single-container; "
                   f"drop the '/{container}' suffix.", file=sys.stderr)
-            sys.exit(2)
+            raise UsageError(f"'{workload}' is single-container")
         return config.container_name
     names = config.container_names()
     if container is None:
         print(f"Error: workload '{workload}' has multiple containers; "
                "specify with NAME/CTR.", file=sys.stderr)
         print(f"  Available: {', '.join(names)}", file=sys.stderr)
-        sys.exit(2)
+        raise UsageError(f"'{workload}' requires a container name")
     if container not in names:
         print(f"Error: container '{container}' not in workload '{workload}'. "
               f"Available: {', '.join(names)}", file=sys.stderr)
-        sys.exit(2)
+        raise UsageError(f"container '{container}' not in '{workload}'")
     return config.podman_container_name(container)
 
 
-def _format_size(n: int) -> str:
+def format_size(n: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
     f = float(n)
     for u in units:
@@ -87,7 +90,7 @@ def _format_size(n: int) -> str:
     return f"{n} B"
 
 
-def _format_created(ts: str | int | None) -> str:
+def format_created(ts: str | int | None) -> str:
     """Render podman's image Created (Unix int or ISO string) as 'N days ago'."""
     if ts is None or ts == "":
         return "unknown"
@@ -113,7 +116,7 @@ def _format_created(ts: str | int | None) -> str:
         return "unknown"
 
 
-def _created_unix(ts) -> int | None:
+def created_unix(ts) -> int | None:
     """Convert podman Created field (int, ISO string, or float string) to Unix int."""
     if ts is None or ts == "":
         return None
@@ -132,7 +135,7 @@ def _created_unix(ts) -> int | None:
         return None
 
 
-def _parse_size_bytes(s) -> int:
+def parse_size_bytes(s) -> int:
     """Parse podman size strings like '1.23 GB', '456B', '0 B' to bytes."""
     if isinstance(s, int):
         return s
@@ -155,6 +158,14 @@ def _parse_size_bytes(s) -> int:
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
+class UsageError(Exception):
+    """Raised for a CLI usage error whose message has already been printed.
+
+    Maps to exit code 2 (argparse's own convention for usage errors) in the
+    __main__ except-ladder of bin/workloadctl.
+    """
+
 
 class WorkloadMasked(Exception):
     """Raised when a workload config is masked (symlinked to /dev/null)."""
@@ -195,13 +206,12 @@ def require_root():
 class WorkloadConfig:
     """Represents a workload configuration file"""
 
-    def __init__(self, filename: str):
-        self.filename = filename
-        self.path = workload_config_path(filename)
+    def __init__(self, name: str):
+        self.path = workload_config_path(name)
 
         # Masked workload: symlink to /dev/null (same semantics as systemd masking)
         if self.path.is_symlink() and self.path.resolve() == Path('/dev/null'):
-            raise WorkloadMasked(filename)
+            raise WorkloadMasked(name)
 
         if not self.path.exists():
             raise FileNotFoundError(f"Config not found: {self.path}")
@@ -209,12 +219,12 @@ class WorkloadConfig:
         with open(self.path, "rb") as f:
             self.config = tomllib.load(f)
 
-        name = self.config["workload"]["name"]
+        config_name = self.config["workload"]["name"]
 
-        if name != filename:
-            raise ValueError(f"Workload name '{name}' must match filename '{filename}'")
+        if config_name != name:
+            raise ValueError(f"Workload name '{config_name}' must match directory '{name}'")
 
-        validate_workload_name(name)
+        validate_workload_name(config_name)
 
     @property
     def name(self) -> str:
@@ -541,7 +551,7 @@ class WorkloadConfig:
         """systemd unit names for each container (multi) or [service_name]."""
         if not self.is_multi:
             return [self.service_name]
-        return [f"workload-{self.name}-{c}.service" for c in self.container_names()]
+        return workload_service_units(self, roles={"container"})
 
     def container_image(self, container_name: str) -> str:
         """Image for a given container name. For single workloads, self.image."""
@@ -580,9 +590,18 @@ class WorkloadConfig:
 
     def podman_container_name(self, container_name: str) -> str:
         """Podman --name for a given container."""
-        if not self.is_multi:
-            return self.container_name
-        return f"workload-{self.name}-{container_name}"
+        return workload_podman_container_name(
+            self.name, container_name, is_multi=self.is_multi
+        )
+
+    def podman_targets(self) -> list[str]:
+        """Podman --name for every container this workload runs, in
+        container_names() order. Collapses the recurring
+        `[podman_container_name(c) for c in ...] if is_multi else [container_name]`
+        ternary used by liveness/stats/health/diagnose call sites."""
+        if self.is_multi:
+            return [self.podman_container_name(c) for c in self.container_names()]
+        return [self.container_name]
 
     def get_required_files(self) -> list[dict]:
         """Return list of {path, hint} dicts from [setup].required_files."""
@@ -619,9 +638,12 @@ class WorkloadManager:
         """Run `podman exec <args>` against a workload container.
 
         Under ADR 001 option 1b, containers run inside the user manager
-        (user@<uid>.service → workloads.slice), so crun's cgroup migration stays
-        within the delegated subtree and plain sudo -u exec works without any
-        cgroup placement shim.
+        (user@<uid>.service → workloads.slice). crun's cgroup migration only
+        stays within that delegated subtree if podman drives placement through
+        the workload user's systemd manager, which it does when the session bus
+        is reachable -- see the DBUS_SESSION_BUS_ADDRESS note in
+        Podman._build_cmd. Without it, exec from a foreign session cgroup fails
+        with an EPERM writing the container's cgroup.procs.
         """
         return self.podman(config).run("exec", *args,
                                        check=check, capture_output=capture_output)

@@ -952,6 +952,8 @@ VM workloads use a shared host bridge `_workload-br` (`192.168.200.0/24`). DHCP 
 
 VMs are not accessible from outside the host without explicit port forwarding on the host. To expose a VM service, add an iptables/nftables DNAT rule or a host-side proxy.
 
+The managed bridge's subnet and upstream DNS are **host-level** configuration, not per-VM (see [ADR 002](adr/002-vm-bridge-host-level-network-config.md)) — the bridge is a single host-global resource shared by all VMs. Override them for the whole host via `WORKLOADCTL_VM_BRIDGE_SUBNET` (a CIDR, e.g. `10.100.0.0/24`) and `WORKLOADCTL_VM_BRIDGE_DNS` (comma-separated IPs); the gateway IP and the DHCP range are derived from the subnet. There is no `[vm.network].subnet` / `[vm.network].dns` — setting them is rejected.
+
 #### Custom bridge
 
 To put a VM directly on an existing host bridge (e.g. a LAN bridge `br0` managed by NetworkManager or `systemd-networkd`), set `[vm.network].bridge`:
@@ -1471,7 +1473,7 @@ sudo workloadctl secret export api-key
 # ✓ Exported credential 'api-key' to api-key.secret
 ```
 
-The output `.secret` file is encrypted with AES-256-CBC (PBKDF2 key derivation) and can be safely transferred to another machine via scp, USB drive, etc.
+The output `.secret` file is encrypted with AES-256-CBC using PBKDF2 (600,000 iterations) and carries an HMAC-SHA256 integrity tag, so tampering or truncation is detected on import (format v2; import still accepts legacy v1 blobs — see [ADR 004](adr/004-secret-export-versioned-crypto.md)). It can be safely transferred to another machine via scp, USB drive, etc.
 
 ```bash
 # Export to a specific path
@@ -2165,6 +2167,21 @@ With `network.mode = "pasta"` (default):
 - Better security for untrusted workloads
 
 Consider firewall rules for untrusted workloads.
+
+### VM SSH host-key verification
+
+`workloadctl exec`/`ssh` into a VM connect with `StrictHostKeyChecking=no` (host keys
+are not verified or pinned). This is an accepted tradeoff on the default managed
+bridge (`_workload-br`): it is an isolated, host-local NAT segment where the guest is
+reachable only from the host, so there is no meaningful man-in-the-middle position.
+
+The tradeoff is **weaker if you attach a VM to a shared LAN bridge** (e.g.
+`[vm.network].bridge = "br0"`): on a LAN, an unverified host key means a spoofed guest
+on the same segment could be connected to transparently. Each workload already has a
+generated SSH keypair, so known-hosts pinning is a viable future hardening for the
+LAN-bridge case; until then, prefer the managed NAT bridge for anything sensitive, or
+verify the guest's identity out of band. (Recorded as decision D4 in the 2026-07 code
+review: keep the current behavior, document the caveat.)
 
 ### Block Device Access
 

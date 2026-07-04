@@ -26,6 +26,8 @@ from substrate import (
     VMSubstrate,
     NotApplicable,
     BackupError,
+    LifecycleError,
+    service_active,
 )
 import cmd_drift
 import cmd_inspect
@@ -223,25 +225,27 @@ class TestContainerBackupConsistency(unittest.TestCase):
                 return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_cold_passes_no_stop_false(self):
-        """consistency='cold' calls _backup_container with no_stop=False."""
+        """consistency='cold' calls _backup_impl with no_stop=False, vm=False."""
         config = self._make_config()
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=10) as mock_bc:
+            output.write_bytes(b'x' * 10)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='cold')
-        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 10)
 
     def test_crash_passes_no_stop_true(self):
-        """consistency='crash' calls _backup_container with no_stop=True (live copy)."""
+        """consistency='crash' calls _backup_impl with no_stop=True (live copy)."""
         config = self._make_config()
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=20) as mock_bc:
+            output.write_bytes(b'x' * 20)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='crash')
-        mock_bc.assert_called_once_with(config, output, no_stop=True, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=True, quiet=False, vm=False)
         self.assertEqual(result, 20)
 
     def test_default_consistency_is_cold(self):
@@ -250,9 +254,10 @@ class TestContainerBackupConsistency(unittest.TestCase):
         substrate = ContainerSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_container', return_value=5) as mock_bc:
+            output.write_bytes(b'x' * 5)
+            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
                 result = substrate.capture(output)
-        mock_bc.assert_called_once_with(config, output, no_stop=False, quiet=False)
+        mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 5)
 
 
@@ -612,6 +617,99 @@ class TestContainerLiveness(unittest.TestCase):
         self.assertFalse(live['service_active'])
         self.assertFalse(live['healthy'])
         substrate.manager.podman.assert_not_called()
+
+
+class TestServiceActive(unittest.TestCase):
+    """The shared is-active primitive every health path now routes through."""
+
+    def test_active_returns_true_and_state(self):
+        with patch('subprocess.run', return_value=_ok(stdout='active\n')):
+            active, state = service_active('workload-x.service')
+        self.assertTrue(active)
+        self.assertEqual(state, 'active')
+
+    def test_inactive_returns_false_and_word(self):
+        with patch('subprocess.run',
+                   return_value=_ok(stdout='inactive\n', returncode=3)):
+            active, state = service_active('workload-x.service')
+        self.assertFalse(active)
+        self.assertEqual(state, 'inactive')
+
+    def test_empty_stdout_yields_bare_string(self):
+        # Callers apply their own default; the primitive returns the raw ''.
+        with patch('subprocess.run', return_value=_ok(stdout='', returncode=4)):
+            active, state = service_active('workload-x.service')
+        self.assertFalse(active)
+        self.assertEqual(state, '')
+
+
+class TestContainerLivenessRows(unittest.TestCase):
+    """Per-container liveness rows — the single source _multi_container_health
+    and diagnose now consume instead of re-deriving name/unit math."""
+
+    def _substrate(self, toml, name, *, unit_states, statuses, user_exists=True):
+        config = _make_config(toml, name)
+        manager = MagicMock()
+        manager.user_exists.return_value = user_exists
+        manager.podman.return_value.container_status.side_effect = (
+            lambda cname: statuses.get(cname)
+        )
+        sub = ContainerSubstrate(config, manager)
+
+        def fake_is_active(argv, *a, **k):
+            unit = argv[-1]
+            state = unit_states.get(unit, 'inactive')
+            return _ok(stdout=state + '\n', returncode=0 if state == 'active' else 3)
+
+        self._is_active = fake_is_active
+        return sub
+
+    def test_single_row_keyed_on_main_service(self):
+        sub = self._substrate(
+            SINGLE_TOML, 'test-wl',
+            unit_states={'workload-test-wl.service': 'active'},
+            statuses={'workload-test-wl': 'running'},
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r['container'], 'test-wl')
+        self.assertEqual(r['podman_name'], 'workload-test-wl')
+        self.assertEqual(r['unit'], 'workload-test-wl.service')
+        self.assertTrue(r['healthy'])
+
+    def test_multi_rows_per_container_units(self):
+        sub = self._substrate(
+            POD_TOML, 'test-pod',
+            unit_states={
+                'workload-test-pod-web.service': 'active',
+                'workload-test-pod-db.service': 'failed',
+            },
+            statuses={'workload-test-pod-web': 'running',
+                      'workload-test-pod-db': None},
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        by = {r['container']: r for r in rows}
+        self.assertEqual(set(by), {'web', 'db'})
+        self.assertEqual(by['web']['unit'], 'workload-test-pod-web.service')
+        self.assertTrue(by['web']['healthy'])
+        self.assertFalse(by['db']['healthy'])   # failed unit + not running
+
+    def test_absent_user_leaves_all_not_running(self):
+        sub = self._substrate(
+            POD_TOML, 'test-pod',
+            unit_states={'workload-test-pod-web.service': 'active',
+                         'workload-test-pod-db.service': 'active'},
+            statuses={'workload-test-pod-web': 'running'},
+            user_exists=False,
+        )
+        with patch('subprocess.run', side_effect=self._is_active):
+            rows = sub.container_liveness()
+        self.assertTrue(all(not r['running'] for r in rows))
+        self.assertTrue(all(not r['healthy'] for r in rows))
+        sub.manager.podman.assert_not_called()
 
 
 class TestContainerResourceUsage(unittest.TestCase):
@@ -1158,8 +1256,26 @@ class TestContainerRollbackTargets(unittest.TestCase):
         with patch('sys.stdout', buf):
             substrate.rollback_to(target)
         manager.podman.return_value.tag.assert_called_once_with(tag, 'example.com/test:latest')
-        self.assertIn('def456de', buf.getvalue())
-        self.assertIn('abc123ab', buf.getvalue())
+
+    def test_rollback_to_retag_failure_raises_lifecycle_error(self):
+        from podman import PodmanError
+        from substrate import rollback_tag
+        tag = rollback_tag('test-wl')
+        manager = MagicMock()
+        manager.podman.return_value.tag.side_effect = PodmanError(1, "tag error", ["tag"])
+        config = _make_config(SINGLE_TOML, 'test-wl')
+        substrate = ContainerSubstrate(config, manager)
+        target = {
+            'label': 'test-wl',
+            'tag': tag,
+            'image': 'example.com/test:latest',
+            'current_id': 'def456de',
+            'rollback_id': 'abc123ab',
+        }
+        with patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(LifecycleError) as cm:
+                substrate.rollback_to(target)
+        self.assertEqual(cm.exception.returncode, 1)
 
 
 class TestVMRollbackTargets(unittest.TestCase):
@@ -1219,6 +1335,102 @@ class TestVMRollbackTargets(unittest.TestCase):
         self.assertTrue(stop_cmds, "stop should be called before swapping disk")
         self.assertTrue(start_cmds, "start should be called after swapping disk")
         self.assertFalse(gen_path.exists(), "gen file should be renamed/removed after rollback_to")
+
+    def _rollback(self, home, target, config):
+        buf = io.StringIO()
+        with patch.object(type(config), 'home_dir',
+                          new_callable=lambda: property(lambda self: home)), \
+             patch('subprocess.run', return_value=_ok()), \
+             patch('sys.stdout', buf):
+            VMSubstrate(config, None).rollback_to(target)
+
+    def test_rollback_is_non_destructive(self):
+        # ADR 003: rolling back preserves the pre-rollback disk as a new
+        # generation so a roll-forward is possible.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            (home / "system.qcow2.gen-1").write_bytes(b"GEN1")
+            (home / "system.qcow2.gen-2").write_bytes(b"GEN2")
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            # Target became the active disk.
+            self.assertEqual((home / "system.qcow2").read_bytes(), b"GEN1")
+            # Pre-rollback disk survived as a new (highest) generation, gen-3.
+            self.assertTrue((home / "system.qcow2.gen-3").exists())
+            self.assertEqual((home / "system.qcow2.gen-3").read_bytes(), b"CURRENT")
+            # Roll-forward is possible: the preserved disk is a rollback target.
+            with patch.object(type(config), 'home_dir',
+                              new_callable=lambda: property(lambda self: home)):
+                gens = [t['gen'] for t in VMSubstrate(config, None).rollback_targets()]
+            self.assertIn(3, gens)
+
+    def test_rollback_respects_rollback_keep(self):
+        # rollback_keep (default 2) still bounds the generation count; the
+        # rotated-out disk is pruned like any other generation.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            for n in (1, 2, 3, 4):
+                (home / f"system.qcow2.gen-{n}").write_bytes(f"GEN{n}".encode())
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            remaining = sorted(
+                int(p.suffix[5:]) for p in home.glob("system.qcow2.gen-*"))
+        # keep=2 older + the exempt rotated-out gen-5 = 3 total; oldest (gen-2)
+        # pruned. gen-1 was consumed as the active disk.
+        self.assertEqual(remaining, [3, 4, 5])
+
+    def test_rollback_keep_zero_prunes_all_rotated_generations(self):
+        # Regression: rollback_keep=0 must prune every generation except the
+        # exempt rotated-out disk. The old `gens[:-keep]` slice degenerated to
+        # gens[:0] == [] for keep==0, so nothing was pruned and gen files grew
+        # without bound.
+        config = _make_vm_config()
+        config.config.setdefault("vm", {})["rollback_keep"] = 0
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            for n in (1, 2, 3):
+                (home / f"system.qcow2.gen-{n}").write_bytes(f"GEN{n}".encode())
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            remaining = sorted(
+                int(p.suffix[5:]) for p in home.glob("system.qcow2.gen-*"))
+        # keep=0: only the exempt rotated-out gen-4 (the pre-rollback disk)
+        # survives; gen-2 and gen-3 are pruned, gen-1 became the active disk.
+        self.assertEqual(remaining, [4])
+
+    def test_rollback_restores_current_disk_when_swap_fails(self):
+        # Regression (ADR 003 atomicity): if swapping the target generation in
+        # fails after the current disk was already rotated out, the pre-rollback
+        # disk must be put back so the VM still has an active system.qcow2 —
+        # rather than being left with none and an unhandled traceback.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            (home / "system.qcow2.gen-1").write_bytes(b"GEN1")
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            buf = io.StringIO()
+            with patch.object(type(config), 'home_dir',
+                              new_callable=lambda: property(lambda self: home)), \
+                 patch('subprocess.run', return_value=_ok()), \
+                 patch('sys.stdout', buf), patch('sys.stderr', buf), \
+                 patch.object(Path, 'replace', side_effect=OSError("no space")):
+                with self.assertRaises(LifecycleError):
+                    VMSubstrate(config, None).rollback_to(target)
+            # The active disk is restored to the pre-rollback contents, not left
+            # missing; the target generation is untouched (swap never completed).
+            self.assertTrue((home / "system.qcow2").exists())
+            self.assertEqual((home / "system.qcow2").read_bytes(), b"CURRENT")
+            self.assertTrue((home / "system.qcow2.gen-1").exists())
 
 
 # ── lifecycle() primitive ──────────────────────────────────────────────────────
@@ -1702,9 +1914,9 @@ class TestContainerLifecycleMore(unittest.TestCase):
             _substrate_mod, 'restart_workload_service',
             side_effect=sp.CalledProcessError(returncode=5, cmd=['x']),
         ):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("start")
-        self.assertEqual(cm.exception.code, 5)
+        self.assertEqual(cm.exception.returncode, 5)
 
     def test_restart_with_user_calls_restart_workload_service(self):
         substrate, manager = self._substrate(user_exists=True)
@@ -1732,9 +1944,9 @@ class TestContainerLifecycleMore(unittest.TestCase):
         manager.run_podman_exec.return_value = _ok(returncode=1)
         buf = io.StringIO()
         with patch('sys.stderr', buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
 
 # ── ContainerSubstrate.reprovision() full pull/restart flow ──────────────────
@@ -1798,7 +2010,7 @@ pull = "never"
         # then new_id call for change detection.
         pod.image_id.side_effect = ['', '', '', 'old-id', 'new-id']
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r, \
+             patch.object(_substrate_mod, 'restart_workload_service'), \
              patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
              patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
             result = substrate.reprovision()
@@ -2138,7 +2350,7 @@ image = "example.com/guest:latest"
         mock_rt.assert_called_once_with(targets[-1])
 
 
-# ── _backup_impl / _backup_container / _backup_vm / _print_backup_size ───────
+# ── _backup_impl / ContainerSubstrate.capture / _backup_vm / _print_backup_size
 
 class TestBackupImplAndHelpers(unittest.TestCase):
     """_backup_impl() reads the workload TOML via workload_config_path(name) at
@@ -2159,6 +2371,8 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         return workloadctl_core.WorkloadConfig('test-wl')
 
     def test_backup_container_writes_tar_and_prints_size(self):
+        """ContainerSubstrate.capture() (cold) drives _backup_impl directly —
+        no intermediate _backup_container delegation (B9)."""
         config = self._make_config()
 
         def fake_run(cmd, **kw):
@@ -2175,7 +2389,7 @@ class TestBackupImplAndHelpers(unittest.TestCase):
                  patch('subprocess.run', side_effect=fake_run), \
                  patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
                  patch('sys.stdout', buf):
-                size = _substrate_mod._backup_container(config, output, no_stop=False, quiet=False)
+                size = ContainerSubstrate(config, None).capture(output, consistency='cold', quiet=False)
         self.assertEqual(size, 42)
         self.assertIn('Backup:', buf.getvalue())
 
@@ -2310,6 +2524,20 @@ class TestBackupImplAndHelpers(unittest.TestCase):
                 _substrate_mod._backup_impl(config, output, no_stop=True, quiet=False, vm=False)
         self.assertIn('not found', buf.getvalue())
 
+    def test_credstore_dir_is_shared_and_encrypted(self):
+        # Regression for the 2026-07 review: substrate carried a divergent
+        # CREDSTORE_DIR = /etc/credstore while secrets are created/loaded from
+        # /etc/credstore.encrypted, so backup captured nothing. Unit tests that
+        # patch CREDSTORE_DIR to a temp dir can't catch that divergence — pin
+        # the production default and that all consumers share one constant.
+        import cmd_backup
+        import cmd_secret
+        self.assertEqual(workload_lib.CREDSTORE_DIR,
+                         Path('/etc/credstore.encrypted'))
+        self.assertIs(_substrate_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(cmd_backup.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(cmd_secret.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+
     def test_print_backup_size_formats_bytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):
@@ -2346,7 +2574,7 @@ class TestVmGuestIp(unittest.TestCase):
             (run_dir / 'bridge-managed').touch()
             lease_file = Path(d) / 'leases'
             lease_file.write_text("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
-            with patch('substrate.Path') as mock_path_cls:
+            with patch('substrate.Path'):
                 # Only patch the bridge-managed marker check and lease file path;
                 # simplest is to patch the two module-level Path constants directly.
                 pass

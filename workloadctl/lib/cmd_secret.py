@@ -4,6 +4,8 @@ cmd_secret — secret management commands (systemd credentials).
 
 import datetime
 import getpass
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ import tomllib
 
 from workload_lib import (
     auto_detect_credentials,
+    CREDSTORE_DIR,
     iter_workloads,
 )
 from workloadctl_core import (
@@ -23,6 +26,76 @@ from workloadctl_core import (
     require_root,
 )
 from service_runtime import restart_workload_service
+
+
+# --- Portable secret export format (ADR 004) ---
+#
+# v1 was `openssl enc -aes-256-cbc -pbkdf2` with no explicit iteration count and
+# no integrity — a stored, off-host blob with a weak KDF and no tamper
+# detection. v2 adds a modern KDF (pbkdf2, 600k iters) AND integrity via
+# encrypt-then-HMAC-SHA256: `openssl enc` cannot safely do AEAD/GCM (the CLI
+# doesn't handle the auth tag), so we authenticate the ciphertext explicitly.
+# `import` detects the version by header, so existing v1 blobs stay restorable.
+SECRET_EXPORT_V2_MAGIC = b"WLCTLsecret-v2\n"
+_SECRET_PBKDF2_ITERS = 600000
+_SECRET_MAC_SALT_LEN = 16
+_SECRET_MAC_LEN = 32  # HMAC-SHA256 digest size
+
+
+def _openssl_pass_enc(openssl_args: list, data: bytes, passphrase: str) -> bytes:
+    """Run `openssl enc` with the passphrase supplied via a 0600 temp file
+    (never argv, so it can't leak through /proc/*/cmdline)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pass") as pf:
+        pf.write(passphrase)
+        pf.flush()
+        os.chmod(pf.name, 0o600)
+        return subprocess.run(
+            ["openssl", "enc", *openssl_args, "-pass", f"file:{pf.name}"],
+            input=data, capture_output=True, check=True,
+        ).stdout
+
+
+def _secret_export_encrypt_v2(plaintext: bytes, passphrase: str) -> bytes:
+    """Encrypt-then-MAC: AES-256-CBC (pbkdf2, 600k iters) + HMAC-SHA256 over the
+    ciphertext, keyed by a separately-salted passphrase-derived key."""
+    ciphertext = _openssl_pass_enc(
+        ["-aes-256-cbc", "-pbkdf2", "-iter", str(_SECRET_PBKDF2_ITERS), "-salt"],
+        plaintext, passphrase)
+    mac_salt = os.urandom(_SECRET_MAC_SALT_LEN)
+    mac_key = hashlib.pbkdf2_hmac(
+        "sha256", passphrase.encode(), mac_salt, _SECRET_PBKDF2_ITERS, dklen=32)
+    tag = hmac.new(
+        mac_key, SECRET_EXPORT_V2_MAGIC + mac_salt + ciphertext, hashlib.sha256
+    ).digest()
+    return SECRET_EXPORT_V2_MAGIC + mac_salt + tag + ciphertext
+
+
+def _secret_export_decrypt(blob: bytes, passphrase: str) -> bytes:
+    """Decrypt a v1 or v2 exported blob, detected by header.
+
+    Raises ValueError on v2 integrity failure (a tampered blob or a wrong
+    passphrase — the MAC key is passphrase-derived, so both fail here before any
+    decryption is attempted). Propagates subprocess.CalledProcessError on an
+    openssl decrypt failure (v1 wrong passphrase).
+    """
+    if blob.startswith(SECRET_EXPORT_V2_MAGIC):
+        body = blob[len(SECRET_EXPORT_V2_MAGIC):]
+        mac_salt = body[:_SECRET_MAC_SALT_LEN]
+        tag = body[_SECRET_MAC_SALT_LEN:_SECRET_MAC_SALT_LEN + _SECRET_MAC_LEN]
+        ciphertext = body[_SECRET_MAC_SALT_LEN + _SECRET_MAC_LEN:]
+        mac_key = hashlib.pbkdf2_hmac(
+            "sha256", passphrase.encode(), mac_salt, _SECRET_PBKDF2_ITERS, dklen=32)
+        expected = hmac.new(
+            mac_key, SECRET_EXPORT_V2_MAGIC + mac_salt + ciphertext, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(expected, tag):
+            raise ValueError(
+                "integrity check failed — tampered export or wrong passphrase")
+        return _openssl_pass_enc(
+            ["-d", "-aes-256-cbc", "-pbkdf2", "-iter", str(_SECRET_PBKDF2_ITERS)],
+            ciphertext, passphrase)
+    # Legacy v1: openssl enc -aes-256-cbc -pbkdf2 (default iters), no integrity.
+    return _openssl_pass_enc(["-d", "-aes-256-cbc", "-pbkdf2"], blob, passphrase)
 
 
 def _read_passphrase(args, *, prompt: str, confirm: bool) -> str:
@@ -80,7 +153,7 @@ def _strip_trailing_newline(text: str) -> str:
 
 def cmd_secret(args, manager: WorkloadManager):
     """Manage secrets (systemd credentials)"""
-    cred_dir = Path("/etc/credstore.encrypted")
+    cred_dir = Path(CREDSTORE_DIR)
 
     if args.subcommand == "create":
         require_root()
@@ -123,7 +196,7 @@ def cmd_secret(args, manager: WorkloadManager):
             ]
 
         try:
-            result = subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True)
             os.chmod(cred_file, 0o600)
             print(f"✓ Created encrypted credential: {cred_file}")
             print(f"  Encryption: {key_type}")
@@ -219,24 +292,14 @@ def cmd_secret(args, manager: WorkloadManager):
             print(f"Error: Credential '{name}' not found", file=sys.stderr)
             sys.exit(1)
 
-        # Find workloads using this credential (via secrets.files or ${SECRET:name} env refs)
+        # Find workloads using this credential (via secrets.files or ${SECRET:name}
+        # env refs, in any of single/pod/bridge shape) — same scan `import` uses.
         affected_workloads = []
-        cred_env_pattern = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
         for _, workload_file in iter_workloads():
             try:
                 with open(workload_file, "rb") as f:
                     wl_config = tomllib.load(f)
-                uses_cred = False
-                for file_spec in wl_config.get("secrets", {}).get("files", []):
-                    if file_spec.get("credential") == name:
-                        uses_cred = True
-                        break
-                if not uses_cred:
-                    for val in wl_config.get("container", {}).get("environment", {}).values():
-                        if any(m.group(1) == name for m in cred_env_pattern.finditer(str(val))):
-                            uses_cred = True
-                            break
-                if uses_cred:
+                if name in auto_detect_credentials(wl_config):
                     affected_workloads.append(wl_config["workload"]["name"])
             except Exception:
                 pass
@@ -307,22 +370,14 @@ def cmd_secret(args, manager: WorkloadManager):
         passphrase = _read_passphrase(args, prompt="Passphrase for export: ",
                                       confirm=True)
 
-        # Encrypt with openssl (passphrase-based, portable)
-        # Use a temp file for the passphrase to avoid leaking it in /proc/*/cmdline
+        # Encrypt with the versioned, integrity-protected v2 format (ADR 004).
         output = Path(args.output) if args.output else Path(f"{name}.secret")
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pass') as pf:
-            pf.write(passphrase)
-            pf.flush()
-            os.chmod(pf.name, 0o600)
-            try:
-                subprocess.run(
-                    ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
-                     "-pass", f"file:{pf.name}", "-out", str(output)],
-                    input=plaintext, check=True,
-                )
-            except subprocess.CalledProcessError:
-                print("Error: Failed to encrypt with passphrase", file=sys.stderr)
-                sys.exit(1)
+        try:
+            blob = _secret_export_encrypt_v2(plaintext, passphrase)
+        except subprocess.CalledProcessError:
+            print("Error: Failed to encrypt with passphrase", file=sys.stderr)
+            sys.exit(1)
+        output.write_bytes(blob)
 
         print(f"✓ Exported credential '{name}' to {output}")
         print("  Transfer this file to the target machine, then import with:")
@@ -345,21 +400,15 @@ def cmd_secret(args, manager: WorkloadManager):
         # Read passphrase (non-interactive source or interactive prompt)
         passphrase = _read_passphrase(args, prompt="Passphrase: ", confirm=False)
 
-        # Decrypt with openssl
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pass') as pf:
-            pf.write(passphrase)
-            pf.flush()
-            os.chmod(pf.name, 0o600)
-            try:
-                result = subprocess.run(
-                    ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
-                     "-pass", f"file:{pf.name}", "-in", str(input_file)],
-                    capture_output=True, check=True,
-                )
-                plaintext = result.stdout
-            except subprocess.CalledProcessError:
-                print("Error: Failed to decrypt (wrong passphrase?)", file=sys.stderr)
-                sys.exit(1)
+        # Decrypt — detects v2 (integrity-checked) vs legacy v1 by header.
+        try:
+            plaintext = _secret_export_decrypt(input_file.read_bytes(), passphrase)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError:
+            print("Error: Failed to decrypt (wrong passphrase?)", file=sys.stderr)
+            sys.exit(1)
 
         # Re-encrypt with systemd-creds (TPM-bound)
         key_type = args.key_type or "tpm2"

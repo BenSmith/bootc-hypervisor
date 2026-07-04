@@ -96,6 +96,42 @@ class TestMultiContainerValidation(unittest.TestCase):
         errs = validate_workload_config(config)
         self.assertTrue(any("'health' set both" in e for e in errs))
 
+    def test_rejects_pod_mode_with_single_container(self):
+        config = {
+            "workload": {"name": "x", "mode": "pod"},
+            "container": {"image": "i"},
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("requires [[containers]]" in e for e in errs))
+
+    def test_rejects_bridge_mode_with_single_container(self):
+        config = {
+            "workload": {"name": "x", "mode": "bridge"},
+            "container": {"image": "i"},
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("requires [[containers]]" in e for e in errs))
+
+    def test_rejects_single_mode_with_containers(self):
+        config = {
+            "workload": {"name": "x", "mode": "single"},
+            "containers": [{"name": "a", "container": {"image": "i"}}],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("incompatible with [[containers]]" in e for e in errs))
+
+    def test_accepts_consistent_explicit_modes(self):
+        pod = {
+            "workload": {"name": "x", "mode": "pod"},
+            "containers": [{"name": "a", "container": {"image": "i"}}],
+        }
+        self.assertEqual(validate_workload_config(pod), [])
+        single = {
+            "workload": {"name": "x", "mode": "single"},
+            "container": {"image": "i"},
+        }
+        self.assertEqual(validate_workload_config(single), [])
+
 
 class TestNormalizeContainers(unittest.TestCase):
     def test_single_container_unchanged(self):
@@ -273,6 +309,35 @@ class TestValidation(unittest.TestCase):
         validate_workload_name("a" * MAX_NAME_LENGTH)
 
 
+class TestVmNetworkValidation(unittest.TestCase):
+    """The managed bridge's subnet/DNS are host-level (ADR 002), no longer
+    per-VM: [vm.network].subnet/.dns are removed and rejected."""
+
+    def _cfg(self, **network):
+        return {"workload": {"name": "v"},
+                "vm": {"image": "example/x:latest", "network": network}}
+
+    def _net_errors(self, **network):
+        return [e for e in workload_lib.validate_vm_config(self._cfg(**network))
+                if "network" in e]
+
+    def test_absent_network_ok(self):
+        self.assertEqual(self._net_errors(), [])
+
+    def test_bridge_only_still_ok(self):
+        self.assertEqual(self._net_errors(bridge="br0"), [])
+
+    def test_per_vm_subnet_rejected(self):
+        errs = self._net_errors(subnet="10.100.0.0/24")
+        self.assertTrue(errs)
+        self.assertIn("host-level", errs[0])
+
+    def test_per_vm_dns_rejected(self):
+        errs = self._net_errors(dns=["1.1.1.1"])
+        self.assertTrue(errs)
+        self.assertIn("host-level", errs[0])
+
+
 class TestSelinuxIdentifiers(unittest.TestCase):
     def test_simple_name(self):
         self.assertEqual(selinux_module_name("alloy"), "wl_alloy")
@@ -361,6 +426,26 @@ class TestDq(unittest.TestCase):
 
     def test_with_spaces(self):
         self.assertEqual(dq("hello world"), '"hello world"')
+
+    def test_dollar_is_doubled(self):
+        # systemd expands $VAR/${VAR} in Exec args after quote removal, so a
+        # literal $ must be $$ (B2).
+        self.assertEqual(dq("$HOME"), '"$$HOME"')
+        self.assertEqual(dq("${FOO}/x"), '"$${FOO}/x"')
+        self.assertEqual(dq("price$5"), '"price$$5"')
+
+    def test_percent_is_doubled(self):
+        # systemd expands % specifiers at unit load, before quote parsing (B2).
+        self.assertEqual(dq("100%"), '"100%%"')
+        self.assertEqual(dq("%H/path"), '"%%H/path"')
+
+    def test_single_quote_needs_no_escape_inside_double_quotes(self):
+        # The old shlex.quote path emitted shell '"'"' for this; inside systemd
+        # double quotes a single quote is literal.
+        self.assertEqual(dq("it's"), '"it\'s"')
+
+    def test_combined_specials_all_escaped(self):
+        self.assertEqual(dq('a"b\\c$d%e'), '"a\\"b\\\\c$$d%%e"')
 
 
 class TestSecretPattern(unittest.TestCase):
@@ -566,6 +651,88 @@ class TestVirtiofsTag(unittest.TestCase):
         # from the same guest path or virtiofs mounts won't match.
         for guest in ("/data", "/var/lib/x", "/srv/share-one"):
             self.assertEqual(virtiofs_tag(guest), virtiofs_tag(guest, 99))
+
+
+class TestVirtiofsTags(unittest.TestCase):
+    """virtiofs_tags() disambiguates tags that collide after sanitize+truncate
+    so each volume gets a distinct sidecar unit / chardev tag (B3)."""
+
+    def test_distinct_paths_keep_base_tags(self):
+        self.assertEqual(
+            workload_lib.virtiofs_tags(["/data:/data", "/logs:/logs"]),
+            ["data", "logs"])
+
+    def test_sanitize_collision_is_disambiguated(self):
+        # "/a b" and "/a$b" both sanitize to "a-b" — must not collide.
+        tags = workload_lib.virtiofs_tags(["/host0:/a b", "/host1:/a$b"])
+        self.assertEqual(tags, ["a-b-0", "a-b-1"])
+        self.assertEqual(len(set(tags)), 2)
+
+    def test_truncation_collision_is_disambiguated(self):
+        # Two long guest paths sharing the first 36 chars collapse to the same
+        # truncated tag; the index suffix keeps them unique and within 36 chars.
+        base = "/" + "x" * 40
+        tags = workload_lib.virtiofs_tags([f"/h0:{base}/one", f"/h1:{base}/two"])
+        self.assertEqual(len(set(tags)), 2)
+        self.assertTrue(all(len(t) <= 36 for t in tags))
+
+    def test_order_preserved(self):
+        tags = workload_lib.virtiofs_tags(["/z:/z", "/a:/a"])
+        self.assertEqual(tags, ["z", "a"])
+
+    def test_suffixed_tag_cannot_recollide_with_natural_tag(self):
+        # Disambiguating the two "/data" volumes yields "data-1", which must
+        # not collide with the third volume's natural "data-1" tag (from
+        # "/data/1") — uniqueness is enforced against the final set, not just
+        # the base counts.
+        tags = workload_lib.virtiofs_tags(
+            ["/h1:/data", "/h2:/data", "/h3:/data/1"])
+        self.assertEqual(len(set(tags)), 3)
+        self.assertEqual(tags[:2], ["data-0", "data-1"])
+        self.assertTrue(all(len(t) <= 36 for t in tags))
+
+
+class TestManagedBridgeConstants(unittest.TestCase):
+    """Host-level managed-bridge params are derived from the subnet (ADR 002),
+    with the DHCP range on the configured subnet — not a hardcoded window."""
+
+    def test_default_subnet_matches_historical_values(self):
+        # The /24 default must reproduce the pre-ADR hardcoded constants so the
+        # generated bridge unit stays byte-identical.
+        self.assertEqual(workload_lib.VM_BRIDGE_SUBNET, "192.168.200.0/24")
+        self.assertEqual(workload_lib.VM_BRIDGE_IP, "192.168.200.1")
+        self.assertEqual(workload_lib.VM_BRIDGE_CIDR, "192.168.200.1/24")
+        self.assertEqual(workload_lib.VM_DHCP_RANGE,
+                         "192.168.200.100,192.168.200.199,12h")
+
+    def test_default_derivation_matches_module_constants(self):
+        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("192.168.200.0/24")
+        self.assertEqual((ip, cidr, subnet, dhcp),
+                         (workload_lib.VM_BRIDGE_IP, workload_lib.VM_BRIDGE_CIDR,
+                          workload_lib.VM_BRIDGE_SUBNET, workload_lib.VM_DHCP_RANGE))
+
+    def test_dhcp_range_is_on_the_configured_subnet(self):
+        # The range must follow the subnet (the latent bug ADR 002 fixes:
+        # dhcp-range was hardcoded 192.168.200.x regardless of subnet).
+        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("10.100.0.0/24")
+        self.assertEqual(ip, "10.100.0.1")
+        self.assertEqual(cidr, "10.100.0.1/24")
+        self.assertEqual(dhcp, "10.100.0.100,10.100.0.199,12h")
+
+    def test_small_subnet_dhcp_range_falls_back_to_full_span(self):
+        # A /26 (.0–.63) can't fit the .100–.199 window; instead of collapsing
+        # to a single clamped address it must span first-usable..last-usable.
+        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/26")
+        self.assertEqual(dhcp, "10.0.0.2,10.0.0.62,12h")
+
+    def test_tiny_subnet_dhcp_range_still_spans_usable_hosts(self):
+        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/28")
+        self.assertEqual(dhcp, "10.0.0.2,10.0.0.14,12h")
+
+    def test_subnet_with_no_leasable_address_is_rejected(self):
+        for cidr in ("10.0.0.0/31", "10.0.0.0/32"):
+            with self.assertRaises(ValueError):
+                workload_lib.managed_bridge_params(cidr)
 
 
 class TestParseVolumeSpec(unittest.TestCase):

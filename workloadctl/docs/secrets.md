@@ -37,6 +37,28 @@ The workload system uses **systemd credentials** (`systemd-creds`) for secure se
 
 ## Security Model
 
+### Trust model: secrets are a host-global namespace
+
+Secret references (`${SECRET:name}`) resolve against a single **flat, host-global**
+credential store (`/etc/credstore.encrypted`). Any workload TOML — and any VM
+cloud-init template — can reference *any* credential by name, and decryption is
+host-wide (TPM- or host-key-bound, not scoped per workload). There is deliberately
+**no per-workload secret isolation at the reference layer**.
+
+This is safe under the tool's foundational assumption: **workload TOMLs are authored
+by root.** The whole system already trusts whoever writes `/etc/workloads.d/*` with
+root-equivalent power (they choose images, devices, mounts, SELinux policy). A secret
+namespace scoped per workload would add enforcement machinery without changing that
+trust boundary. If you ever expose TOML authoring to non-root parties, this assumption
+no longer holds and secret scoping would need to be revisited (recorded as decision D3
+in the 2026-07 code review).
+
+The runtime *decrypted* secret **is** isolated: it lands in the workload service's own
+`/run/credentials/workload-<name>.service/` tmpfs, `0400` and owned by that workload's
+`_wl-<name>` user — so a running workload cannot read another's decrypted material.
+The global namespace is only about which names a TOML may *reference*, not about
+runtime access.
+
 ### The Complete Flow
 
 ```

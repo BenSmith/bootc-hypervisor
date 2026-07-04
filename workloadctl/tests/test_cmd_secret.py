@@ -172,6 +172,28 @@ class RotateTest(SecretTestBase):
         self.assertIn("web", out)        # the env-ref user is listed
         self.assertNotIn("- other", out)  # the non-user is not
 
+    def test_detects_multi_container_env_ref(self):
+        # Regression for A1: the old scan only walked top-level
+        # [container.environment], so a credential used solely by a
+        # [[containers]] block (pod/bridge shape) was missed and its workload
+        # never restarted. Route through auto_detect_credentials → detected.
+        self._seed_cred("api-key")
+        (self.wl_dir / "pod").mkdir()
+        (self.wl_dir / "pod" / "workload.toml").write_text(
+            '[workload]\nname = "pod"\nmode = "pod"\n'
+            '[[containers]]\nname = "app"\nimage = "x"\n'
+            '[containers.environment]\nTOKEN = "${SECRET:api-key}"\n')
+
+        with mock.patch.object(cmd_secret.subprocess, "run",
+                               lambda *a, **k: types.SimpleNamespace(returncode=0)), \
+             mock.patch.object(cmd_secret, "restart_workload_service", lambda *a, **k: None), \
+             mock.patch.object(cmd_secret, "WorkloadConfig",
+                               lambda n: types.SimpleNamespace(
+                                   is_vm=False, uid=10001, service_name=f"workload-{n}.service")):
+            out, err, code = _run(_ns(subcommand="rotate", name="api-key", key_type=None))
+        self.assertIsNone(code)
+        self.assertIn("pod", out)  # the multi-container env-ref user is listed
+
 
 class ImportExportTest(SecretTestBase):
     def test_import_missing_file_errors(self):
@@ -384,8 +406,9 @@ class ExportImportFlowTest(SecretTestBase):
             calls.append(cmd)
             if cmd[:2] == ["systemd-creds", "decrypt"]:
                 return types.SimpleNamespace(stdout=b"plaintext")
-            Path(cmd[cmd.index("-out") + 1]).write_bytes(b"encblob")
-            return types.SimpleNamespace(returncode=0)
+            # openssl enc now streams the ciphertext on stdout (no -out); the
+            # HMAC + header are added in-process and written by output.write_bytes.
+            return types.SimpleNamespace(stdout=b"encblob", returncode=0)
 
         with mock.patch.object(cmd_secret.subprocess, "run", fake_run), \
              mock.patch.object(cmd_secret.sys, "stdin",
@@ -395,9 +418,12 @@ class ExportImportFlowTest(SecretTestBase):
                                       passphrase_stdin=True, passphrase_file=None))
         self.assertIsNone(code)
         self.assertIn("Exported credential", out)
+        # v2 output carries the version header + HMAC over the openssl ciphertext.
+        self.assertTrue(output.read_bytes().startswith(cmd_secret.SECRET_EXPORT_V2_MAGIC))
         openssl_calls = [c for c in calls if c[0] == "openssl"]
         self.assertEqual(len(openssl_calls), 1)
         self.assertIn("-pbkdf2", openssl_calls[0])
+        self.assertIn("600000", openssl_calls[0])
 
     def test_export_openssl_failure(self):
         self._seed_cred("api")
@@ -547,6 +573,52 @@ class PassphraseTest(unittest.TestCase):
                 cmd_secret._read_passphrase(args, prompt="P: ", confirm=True)
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("do not match", err.getvalue())
+
+
+import shutil
+import subprocess
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl not available")
+class SecretExportCryptoTest(unittest.TestCase):
+    """The versioned, integrity-protected v2 export format (ADR 004 / B14),
+    exercised against real openssl."""
+
+    PW = "correct horse battery staple"
+    PT = b"api-token-value\x00\x01\xff binary-safe"
+
+    def test_v2_roundtrip(self):
+        blob = cmd_secret._secret_export_encrypt_v2(self.PT, self.PW)
+        self.assertTrue(blob.startswith(cmd_secret.SECRET_EXPORT_V2_MAGIC))
+        self.assertEqual(cmd_secret._secret_export_decrypt(blob, self.PW), self.PT)
+
+    def test_v2_tamper_is_detected(self):
+        blob = bytearray(cmd_secret._secret_export_encrypt_v2(self.PT, self.PW))
+        blob[-1] ^= 0xFF  # flip a ciphertext byte
+        with self.assertRaises(ValueError):
+            cmd_secret._secret_export_decrypt(bytes(blob), self.PW)
+
+    def test_v2_wrong_passphrase_fails_integrity(self):
+        blob = cmd_secret._secret_export_encrypt_v2(self.PT, self.PW)
+        with self.assertRaises(ValueError):
+            cmd_secret._secret_export_decrypt(blob, "not-the-passphrase")
+
+    def test_v1_legacy_blob_still_imports(self):
+        # A v1 blob (openssl aes-256-cbc -pbkdf2, no header) stays restorable.
+        with tempfile.NamedTemporaryFile("w", suffix=".pass") as pf:
+            pf.write(self.PW)
+            pf.flush()
+            os.chmod(pf.name, 0o600)
+            v1 = subprocess.run(
+                ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
+                 "-pass", f"file:{pf.name}"],
+                input=self.PT, capture_output=True, check=True,
+            ).stdout
+        self.assertFalse(v1.startswith(cmd_secret.SECRET_EXPORT_V2_MAGIC))
+        self.assertEqual(cmd_secret._secret_export_decrypt(v1, self.PW), self.PT)
+
+    def test_v2_uses_high_iteration_pbkdf2(self):
+        self.assertGreaterEqual(cmd_secret._SECRET_PBKDF2_ITERS, 600000)
 
 
 if __name__ == "__main__":

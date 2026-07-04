@@ -48,6 +48,18 @@ image = "example.com/db:latest"
 """
 
 
+BRIDGE_TOML = """\
+[workload]
+name = "{name}"
+mode = "bridge"
+
+[[containers]]
+name = "web"
+[containers.container]
+image = "example.com/web:latest"
+"""
+
+
 VM_TOML = """\
 [workload]
 name = "{name}"
@@ -238,7 +250,7 @@ class TestPurgeBestEffort(unittest.TestCase):
                  patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_workload_run_files', MagicMock(return_value=[])), \
+                 patch.object(cmd_lifecycle, 'workload_run_files', MagicMock(return_value=[])), \
                  patch.object(cmd_lifecycle, '_remove_runtime_env_files', MagicMock()), \
                  patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
                  patch.object(cmd_lifecycle, 'workload_enabled_marker',
@@ -283,8 +295,9 @@ class TestPurgeBestEffort(unittest.TestCase):
                  patch.object(cmd_lifecycle, '_run_host_setup',
                               MagicMock(side_effect=RuntimeError("boom"))), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_workload_run_files',
-                              MagicMock(return_value=[stranded])), \
+                 patch.object(cmd_lifecycle, 'workload_run_files',
+                              MagicMock(return_value=[
+                                  SimpleNamespace(kind='unit', path=stranded)])), \
                  patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
                  patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
                  patch.object(cmd_lifecycle, 'workload_enabled_marker',
@@ -325,6 +338,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             args = SimpleNamespace(workload='pp', purge=False)
             with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
                  patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
@@ -349,7 +363,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         # user is removed — this must be tolerated (drop-in skipped), and the
         # UID-independent /run units must still be removed. /run removal runs for
         # both purge and plain disable, so purge=False exercises it without the
-        # purge block's host-file mutation. Uses the REAL _workload_run_files (not
+        # purge block's host-file mutation. Uses the REAL workload_run_files (not
         # a stub), since the stub hid this bug.
         run = Path(tempfile.mkdtemp())
         with _Env(SINGLE_TOML, 'pp') as (config, _env_dir):
@@ -370,6 +384,7 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             exit_code = None
             with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
                  patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
                  patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
@@ -386,6 +401,53 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
         self.assertIsNone(exit_code, "absent user must not abort disable")
         for p in mine:
             self.assertFalse(p.exists(), f"{p} should still be removed with user gone")
+
+
+class TestDisableStopsWholeTopology(unittest.TestCase):
+    """cmd_disable must stop BOTH the -pod and -net helpers regardless of the
+    workload's CURRENT mode.
+
+    Regression guard: the stop-list is sourced from the run-file superset, not
+    the emitted subset. If a workload was enabled as mode="pod" and the TOML is
+    later edited to mode="bridge" before `disable` runs, the config now reflects
+    bridge — but the still-active pod helper (whose fragment _remove_run_files
+    unlinks anyway) must still be stopped, or it lingers loaded until reboot.
+    """
+
+    def _stopped_units(self, toml, name):
+        run = Path(tempfile.mkdtemp())
+        with _Env(toml, name) as (config, _env_dir):
+            args = SimpleNamespace(workload=name, purge=False)
+            fake_run = MagicMock()
+            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
+                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(cmd_lifecycle.subprocess, 'run', fake_run), \
+                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                              MagicMock(return_value=MagicMock())):
+                cmd_lifecycle.cmd_disable(args, MagicMock())
+        stopped = set()
+        for c in fake_run.call_args_list:
+            argv = c.args[0]
+            if len(argv) >= 3 and argv[0] == 'systemctl' and argv[1] == 'stop':
+                stopped.add(argv[2])
+        return stopped
+
+    def test_bridge_mode_still_stops_pod_helper(self):
+        stopped = self._stopped_units(BRIDGE_TOML, 'wp')
+        # The other mode's helper (not emitted for bridge) must still be stopped.
+        self.assertIn('workload-wp-pod.service', stopped)
+        self.assertIn('workload-wp-net.service', stopped)
+
+    def test_pod_mode_still_stops_net_helper(self):
+        stopped = self._stopped_units(MULTI_TOML, 'stack')  # mode = "pod"
+        # The other mode's helper (not emitted for pod) must still be stopped.
+        self.assertIn('workload-stack-net.service', stopped)
+        self.assertIn('workload-stack-pod.service', stopped)
 
 
 if __name__ == '__main__':

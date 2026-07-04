@@ -335,9 +335,12 @@ class TestMetricsDiscovery(unittest.TestCase):
 
         workloads = _exporter_get_enabled_workloads(self.config_dir)
         self.assertEqual(len(workloads), 1)
-        name, has_health, is_vm = workloads[0]
+        name, health_targets, is_vm = workloads[0]
         self.assertEqual(name, "multi")
-        self.assertTrue(has_health)
+        self.assertTrue(health_targets)
+        # A6: the health target must be the container's own podman name
+        # (workload-<name>-<container>), not the nonexistent workload-<name>.
+        self.assertEqual(health_targets, [("db", "workload-multi-db")])
 
     def test_multi_container_no_health(self):
         """[[containers]] with no health checks reports has_health=False."""
@@ -360,26 +363,31 @@ class TestMetricsDiscovery(unittest.TestCase):
 
         workloads = _exporter_get_enabled_workloads(self.config_dir)
         self.assertEqual(len(workloads), 1)
-        name, has_health, is_vm = workloads[0]
-        self.assertFalse(has_health)
+        name, health_targets, is_vm = workloads[0]
+        self.assertFalse(health_targets)
 
 
 class TestMetricsFormat(unittest.TestCase):
     """Validate Prometheus exposition format correctness."""
 
-    def setUp(self):
-        self.config_dir = tempfile.mkdtemp()
-        write_config(self.config_dir, "app", """\
+    # One shared scrape: the config is identical for every test in this class
+    # and the tests only parse the exposition text, so a per-test exporter
+    # launch is pure overhead.
+    @classmethod
+    def setUpClass(cls):
+        cls.config_dir = tempfile.mkdtemp()
+        write_config(cls.config_dir, "app", """\
             [workload]
             name = "app"
 
             [container]
             image = "myapp:latest"
         """)
-        self.prom = scrape(self.config_dir)
+        cls.prom = scrape(cls.config_dir)
 
-    def tearDown(self):
-        shutil.rmtree(self.config_dir)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.config_dir)
 
     def test_has_type_declarations(self):
         """All expected metric types are declared."""
@@ -807,11 +815,12 @@ class TestContainerHealth(unittest.TestCase):
     def test_health_queried_via_podman(self):
         fake_pw = self.mock.Mock(pw_uid=10001, pw_dir="/home/_wl-app")
         podman = self.mock.Mock()
-        podman.container_health.return_value = "healthy"
+        podman.container_healths.return_value = {"workload-app": "healthy"}
         with self.mock.patch("pwd.getpwnam", return_value=fake_pw), \
              self.mock.patch.object(self.mod.Podman, "for_user",
                                     return_value=podman):
             self.assertEqual(self.mod.get_container_health("app"), "healthy")
+        podman.container_healths.assert_called_once_with(["workload-app"])
 
     def test_podman_error_returns_none(self):
         fake_pw = self.mock.Mock(pw_uid=10001, pw_dir="/home/_wl-app")
@@ -1047,7 +1056,7 @@ class TestFormatMetrics(unittest.TestCase):
     def test_full_metrics_rendered(self):
         all_metrics = [
             ("app", {"active": 1, "failed": 0, "restarts_total": 2,
-                      "uptime_seconds": 12.5, "health": 1},
+                      "uptime_seconds": 12.5, "health": {"app": 1}},
              {"cpu_usage_seconds_total": 3.5, "memory_current_bytes": 1024,
               "memory_max_bytes": 2048, "pids_current": 4},
              {"balloon_actual_bytes": 999, "vcpu_0_cpu_seconds_total": 1.25},
@@ -1058,12 +1067,24 @@ class TestFormatMetrics(unittest.TestCase):
         self.assertIn('workload_active{workload="app"} 1', text)
         self.assertIn('workload_uptime_seconds{workload="app"} 12.50', text)
         self.assertIn('workload_cpu_usage_seconds_total{workload="app"} 3.500000', text)
+        # Single-container health keeps the historical label-less series.
         self.assertIn('workload_health{workload="app"} 1', text)
+        self.assertNotIn('workload_health{workload="app",container=', text)
         self.assertIn('workload_vm_balloon_actual_bytes{workload="app"} 999', text)
         self.assertIn('workload_vm_vcpu_cpu_seconds_total{workload="app",vcpu="0"} 1.250000', text)
         self.assertIn('workload_disk_bytes{workload="app"} 4096', text)
         self.assertNotIn('workload_disk_bytes{workload="nodisk"}', text)
         self.assertIn("workload_enabled_total 2", text)
+
+    def test_pod_health_rendered_per_container(self):
+        """Multi-container workloads emit one workload_health line per
+        container, distinguished by the container label (the A6 fix)."""
+        all_metrics = [
+            ("multi", {"health": {"web": 1, "db": 0}}, {}, {}, None),
+        ]
+        text = self.mod.format_metrics(all_metrics)
+        self.assertIn('workload_health{workload="multi",container="web"} 1', text)
+        self.assertIn('workload_health{workload="multi",container="db"} 0', text)
 
     def test_empty_metrics_still_has_footer(self):
         text = self.mod.format_metrics([])
@@ -1111,15 +1132,50 @@ class TestMetricsHandlerDirect(unittest.TestCase):
 
     def test_full_workload_collection_path(self):
         handler = self._make_handler("/metrics")
-        with self.mock.patch.object(self.mod, "get_enabled_workloads",
-                                    return_value=[("app", True, False)]), \
+        with self.mock.patch.object(
+                self.mod, "get_enabled_workloads",
+                return_value=[("app", [("app", "workload-app")], False)]), \
              self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
-             self.mock.patch.object(self.mod, "get_container_health", return_value="healthy"), \
+             self.mock.patch.object(self.mod, "get_container_healths",
+                                    return_value={"workload-app": "healthy"}), \
              self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=1000):
             handler.do_GET()
         handler.send_response.assert_called_once_with(200)
         self.assertIn(b'workload="app"', handler.wfile.getvalue())
+        self.assertIn(b'workload_health{workload="app"} 1', handler.wfile.getvalue())
+
+    def test_pod_workload_collection_queries_per_container_names(self):
+        """Regression for A6: a pod/bridge workload's health must be queried
+        by its actual podman names (`workload-<name>-<container>`), not the
+        nonexistent bare `workload-<name>` — and workload_health must appear
+        for each container. Fails pre-fix because the old code always queried
+        `workload-<name>` and reported a single scalar."""
+        handler = self._make_handler("/metrics")
+        queried_names = []
+
+        def fake_healths(name, container_names):
+            queried_names.extend(container_names)
+            return {n: ("healthy" if n == "workload-multi-web" else "unhealthy")
+                    for n in container_names}
+
+        with self.mock.patch.object(
+                self.mod, "get_enabled_workloads",
+                return_value=[("multi", [
+                    ("web", "workload-multi-web"),
+                    ("db", "workload-multi-db"),
+                ], False)]), \
+             self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
+             self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
+             self.mock.patch.object(self.mod, "get_container_healths", side_effect=fake_healths), \
+             self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=None):
+            handler.do_GET()
+
+        self.assertEqual(sorted(queried_names), ["workload-multi-db", "workload-multi-web"])
+        self.assertNotIn("workload-multi", queried_names)
+        body = handler.wfile.getvalue()
+        self.assertIn(b'workload_health{workload="multi",container="web"} 1', body)
+        self.assertIn(b'workload_health{workload="multi",container="db"} 0', body)
 
     def test_log_message_noop(self):
         handler = self._make_handler("/metrics")
@@ -1134,7 +1190,7 @@ class TestMain(unittest.TestCase):
 
     def test_main_starts_server(self):
         fake_server = self.mock.Mock()
-        with self.mock.patch.object(self.mod, "HTTPServer",
+        with self.mock.patch.object(self.mod, "_ExporterServer",
                                     return_value=fake_server) as http_server_cls:
             self.mod.main()
         http_server_cls.assert_called_once()

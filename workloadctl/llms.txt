@@ -216,6 +216,7 @@ workloads/<bundle>/                # Shipped bundles: workload.toml (template de
                                    #   co-located with control files (Containerfile, build.sh,
                                    #   setup.sh, policy.cil, cloud-init user-data — any subset)
 docs/workloads.md                  # Full configuration guide
+docs/workload-run-files.md         # Authoritative per-workload run-file topology (what disable/drift/inspect enumerate)
 docs/cli.md                        # Complete CLI reference
 docs/secrets.md                    # Secrets management guide
 docs/schema-reference.toml         # Annotated TOML schema with all options
@@ -242,6 +243,7 @@ Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`)
 ## Documentation
 
 - [Workload guide](docs/workloads.md) — full configuration reference with examples
+- [Workload run-files](docs/workload-run-files.md) — authoritative per-workload run-file topology (units + secrets env + wants symlink; what disable/drift/inspect must agree on)
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options

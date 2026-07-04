@@ -18,7 +18,7 @@ import shutil
 import sys
 import tomllib
 
-from workload_lib import iter_workloads, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
+from workload_lib import iter_workloads, SECRET_PATTERN, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -48,9 +48,6 @@ def _write_new(path: Path, text: str) -> bool:
     except FileExistsError:
         return False
 
-
-# Matches a ${SECRET:name} env reference (mirrors cmd_secret's pattern).
-_SECRET_REF_RE = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)\}')
 
 
 def _config_images(cfg: WorkloadConfig) -> set[str]:
@@ -82,7 +79,7 @@ def _referenced_secrets(cfg: WorkloadConfig) -> list[str]:
         container_envs.append(c.get("environment", {}))
     for env in container_envs:
         for val in env.values():
-            for m in _SECRET_REF_RE.finditer(str(val)):
+            for m in SECRET_PATTERN.finditer(str(val)):
                 found.add(m.group(1))
     return sorted(found)
 

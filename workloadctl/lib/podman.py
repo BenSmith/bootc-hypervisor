@@ -38,8 +38,8 @@ class PodmanError(Exception):
     def __init__(self, returncode: int, stderr: str, args: Iterable[str]):
         self.returncode = returncode
         self.stderr = stderr
-        self.args = tuple(args)
-        joined = " ".join(self.args)
+        self.cmd_args = tuple(args)
+        joined = " ".join(self.cmd_args)
         super().__init__(
             f"podman {joined} failed ({returncode}): {stderr.strip()}"
         )
@@ -93,6 +93,18 @@ class Podman:
                 "-u", self._username,
                 "-E", f"XDG_RUNTIME_DIR=/run/user/{self._uid}",
                 "-E", f"HOME={self._home_dir}",
+                # Point podman at the workload user's own session bus so it
+                # drives cgroup placement through that user's systemd manager
+                # (user@<uid>.service, which owns the delegated workloads.slice
+                # subtree). Without it, rootless crun writes the container's
+                # cgroup.procs directly; when the caller is in a foreign
+                # session cgroup (e.g. an admin's login), the two cgroups' only
+                # common ancestor is the root cgroup, which the unprivileged
+                # workload user cannot write -> `podman exec` fails with
+                # "write to .../cgroup.procs: Permission denied". The bulk of
+                # calls (ps/inspect/pull) don't migrate cgroups and never hit
+                # this, which is why only exec/shell surfaced it.
+                "-E", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{self._uid}/bus",
             ]
         cmd += ["podman", "--log-level=error", *args]
         return cmd
@@ -188,6 +200,29 @@ class Podman:
         status = health.get("Status")
         return status or None
 
+    def container_healths(self, names: Iterable[str]) -> dict[str, str | None]:
+        """Health status per container, via ONE inspect for all names.
+
+        Containers that don't exist are absent from the result; podman exits
+        nonzero on a partial batch but still prints the found subset, so we
+        parse stdout ourselves instead of going through json_out/check.
+        """
+        names = list(names)
+        if not names:
+            return {}
+        proc = self._run(
+            "inspect", "--type=container", "--format=json", *names, check=False)
+        try:
+            infos = json.loads(proc.stdout) or []
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        result: dict[str, str | None] = {}
+        for info in infos:
+            cname = (info.get("Name") or "").lstrip("/")
+            health = (info.get("State") or {}).get("Health") or {}
+            result[cname] = health.get("Status") or None
+        return result
+
     def container_status(self, name: str) -> str | None:
         """Container status string, or None if not running / not found."""
         rows = self.list_containers(filters={"name": name})
@@ -245,7 +280,21 @@ class Podman:
         input: str | bytes | None = None,
         cwd: str = "/tmp",
     ) -> subprocess.CompletedProcess:
-        """Run an arbitrary podman command (e.g. exec, stats, cp, attach)."""
+        """Run an arbitrary podman command (e.g. exec, stats, cp, attach).
+
+        This is the deliberate escape hatch for verbs that don't warrant a
+        typed structured-read/write method above. It still carries every
+        caller through the same sudo -u / XDG_RUNTIME_DIR / HOME identity as
+        the typed methods (via `_build_cmd`), so it's a thin convenience, not
+        a raw subprocess call. Boundary note (B13): a couple of call sites
+        legitimately bypass even this — `cmd_lifecycle._transfer_one_image`
+        needs a `TMPDIR` override this class doesn't expose (podman load's
+        temp files must land somewhere the target user can write), and the
+        exporter builds a `Podman.for_user(...)` instance straight from a
+        `pwd.getpwnam()` lookup because it has no `WorkloadConfig` to hand
+        this class. Both are documented at their call sites rather than
+        grown into this API, which isn't worth complicating for two sites.
+        """
         return subprocess.run(
             self._build_cmd(*args),
             capture_output=capture_output, text=True, check=check,

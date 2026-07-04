@@ -52,7 +52,7 @@ def _health_wait_seconds(config: WorkloadConfig) -> int:
     return max(waits) if waits else 0
 
 
-def _do_rollback(config: WorkloadConfig, manager: WorkloadManager, old_ids: dict):
+def _do_rollback(config: WorkloadConfig, manager: WorkloadManager):
     """Roll back every container to its previous image and restart."""
     pod = manager.podman(config)
     for cname, image in config.container_images():
@@ -120,13 +120,13 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                     detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                        if s != "healthy")
                     print(f" {detail}")
-                    _do_rollback(config, manager, old_ids)
+                    _do_rollback(config, manager)
                     rolled_back += 1
             elif have_old:
                 detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                    if s != "healthy")
                 print(f"  ✗ {config.name}: {detail}")
-                _do_rollback(config, manager, old_ids)
+                _do_rollback(config, manager)
                 rolled_back += 1
             else:
                 detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
@@ -143,7 +143,7 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                 print(f"  ✓ {config.name}: active")
             elif have_old:
                 print(f"  ✗ {config.name}: service crashed ({', '.join(failed)})")
-                _do_rollback(config, manager, old_ids)
+                _do_rollback(config, manager)
                 rolled_back += 1
             else:
                 print(f"  ⚠ {config.name}: service crashed (no previous image to roll back)")

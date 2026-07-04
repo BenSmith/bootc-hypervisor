@@ -19,18 +19,19 @@ from workload_lib import (
     VM_SOCKET_DIR,
     units_outdated,
     workload_config_dir,
+    workload_service_units,
 )
 from podman import Podman
 from service_runtime import manager_active
-from substrate import NotApplicable, get_substrate
+from substrate import NotApplicable, get_substrate, service_active
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     WorkloadUserNotFound,
-    _created_unix,
-    _format_created,
-    _format_size,
-    _parse_size_bytes,
+    created_unix,
+    format_created,
+    format_size,
+    parse_size_bytes,
     parse_workload_ref,
     require_root,
 )
@@ -58,6 +59,18 @@ def _systemctl_show(unit: str, properties: list[str], extra_args: list[str] | No
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _parse_active_since(ts_raw: str):
+    """Parse a `systemctl show --timestamp=unix` ActiveEnterTimestamp value
+    (`@<epoch>`, or empty/`[n/a]` when never active) into a unix-epoch int,
+    or None if unset/unparseable."""
+    if not ts_raw or not ts_raw.startswith("@"):
+        return None
+    try:
+        return int(float(ts_raw[1:]))
+    except ValueError:
+        return None
+
 
 def _read_subid(username: str, path: str) -> tuple:
     """Return (start, count) from /etc/subuid or /etc/subgid, or (None, None)."""
@@ -113,7 +126,6 @@ def cmd_list(args, manager: WorkloadManager):
             else:
                 primary_image = config.image
             workloads.append({
-                "filename": config.filename,
                 "name": config.name,
                 "kind": config.kind,
                 "enabled": config.enabled,
@@ -237,16 +249,6 @@ def cmd_status(args, manager: WorkloadManager):
             except ValueError:
                 return None
 
-        def _ts_or_null(v):
-            if not v or v == "[n/a]":
-                return None
-            if v.startswith("@"):
-                try:
-                    return int(float(v[1:]))
-                except ValueError:
-                    return None
-            return None
-
         enabled_result = subprocess.run(
             ["systemctl", "is-enabled", config.service_name],
             capture_output=True, text=True
@@ -256,7 +258,7 @@ def cmd_status(args, manager: WorkloadManager):
             "service": config.service_name,
             "state": props.get("ActiveState") or None,
             "enabled": enabled_result.returncode == 0,
-            "active_since": _ts_or_null(props.get("ActiveEnterTimestamp", "")),
+            "active_since": _parse_active_since(props.get("ActiveEnterTimestamp", "")),
             "main_pid": _int_or_null(props.get("MainPID", "")),
             "memory_current": _int_or_null(props.get("MemoryCurrent", "")),
             "tasks_current": _int_or_null(props.get("TasksCurrent", "")),
@@ -283,10 +285,7 @@ def cmd_status(args, manager: WorkloadManager):
               f"(daemon-reload does not regenerate units).\n", flush=True)
 
     if config.is_multi:
-        units = [config.service_name]
-        helper = "pod" if config.mode == "pod" else "net"
-        units.append(f"workload-{config.name}-{helper}.service")
-        units.extend(config.sub_service_names())
+        units = workload_service_units(config)
         subprocess.run(["systemctl", "status", "--no-pager"] + units)
         return
 
@@ -360,11 +359,11 @@ def cmd_images(args, manager: WorkloadManager):
                 if info:
                     size_bytes = info.get("Size") or 0
                     images_data.append({
-                        "workload": config.filename,
+                        "workload": config.name,
                         "container": cname,
                         "image": image,
                         "size_bytes": size_bytes,
-                        "created": _created_unix(info.get("Created"))
+                        "created": created_unix(info.get("Created"))
                     })
 
         if args.json:
@@ -379,8 +378,8 @@ def cmd_images(args, manager: WorkloadManager):
             image = img["image"]
             if len(image) > 50:
                 image = image[:47] + "..."
-            size_str = _format_size(img["size_bytes"]) if img["size_bytes"] else "unknown"
-            pulled_str = _format_created(img["created"])
+            size_str = format_size(img["size_bytes"]) if img["size_bytes"] else "unknown"
+            pulled_str = format_created(img["created"])
             print(f"{img['workload']:<20} {img['container']:<16} {image:<50} {size_str:<10} {pulled_str:<15}")
 
         print()
@@ -551,16 +550,10 @@ def cmd_info(args, manager: WorkloadManager):
             extra_args=["--timestamp=unix"],
         )
         service_state = svc_props.get("ActiveState", "") or "inactive"
-        ts_raw = svc_props.get("ActiveEnterTimestamp", "")
-        active_since = None
-        if ts_raw and ts_raw.startswith("@"):
-            try:
-                active_since = int(float(ts_raw[1:]))
-            except ValueError:
-                pass
+        active_since = _parse_active_since(svc_props.get("ActiveEnterTimestamp", ""))
 
         vm_info = {
-            "workload": {"name": config.name, "filename": config.filename,
+            "workload": {"name": config.name,
                          "config_path": str(config.path), "enabled": config.enabled},
             "vm": {
                 "memory": vm_cfg.get("memory", "1024M"),
@@ -628,12 +621,12 @@ def cmd_info(args, manager: WorkloadManager):
             print(f"  Active: {service_state}")
         print()
         print("Quick commands:")
-        print(f"  Console:  workloadctl shell {config.filename}")
+        print(f"  Console:  workloadctl shell {config.name}")
         if guest_ip:
-            print(f"  SSH:      workloadctl exec {config.filename} -- bash")
-        print(f"  Logs:     workloadctl logs -f {config.filename}")
-        print(f"  Update:   sudo workloadctl update {config.filename}")
-        print(f"  Rollback: sudo workloadctl rollback {config.filename}")
+            print(f"  SSH:      workloadctl exec {config.name} -- bash")
+        print(f"  Logs:     workloadctl logs -f {config.name}")
+        print(f"  Update:   sudo workloadctl update {config.name}")
+        print(f"  Rollback: sudo workloadctl rollback {config.name}")
         return
 
     # Container(s)
@@ -693,18 +686,11 @@ def cmd_info(args, manager: WorkloadManager):
         extra_args=["--timestamp=unix"],
     )
     service_state = svc_props.get("ActiveState", "") or "inactive"
-    ts_raw = svc_props.get("ActiveEnterTimestamp", "")
-    active_since = None
-    if ts_raw and ts_raw.startswith("@"):
-        try:
-            active_since = int(float(ts_raw[1:]))
-        except ValueError:
-            pass
+    active_since = _parse_active_since(svc_props.get("ActiveEnterTimestamp", ""))
 
     info_data: dict[str, Any] = {
         "workload": {
             "name": config.name,
-            "filename": config.filename,
             "config_path": str(config.path),
             "enabled": config.enabled,
             "mode": config.mode,
@@ -815,9 +801,9 @@ def cmd_info(args, manager: WorkloadManager):
     print()
 
     print("Quick commands:")
-    print(f"  Shell:    workloadctl shell {config.filename}")
-    print(f"  Logs:     workloadctl logs -f {config.filename}")
-    print(f"  Recreate: workloadctl recreate {config.filename}")
+    print(f"  Shell:    workloadctl shell {config.name}")
+    print(f"  Logs:     workloadctl logs -f {config.name}")
+    print(f"  Recreate: workloadctl recreate {config.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +822,7 @@ def _stats_parse_percent(v) -> float:
 def _stats_parse_io(s: str) -> tuple[int, int]:
     parts = str(s).split(" / ")
     if len(parts) == 2:
-        return _parse_size_bytes(parts[0]), _parse_size_bytes(parts[1])
+        return parse_size_bytes(parts[0]), parse_size_bytes(parts[1])
     return 0, 0
 
 
@@ -849,8 +835,29 @@ def _stats_parse_mem(row: dict) -> tuple[int, int]:
     raw = row.get("mem_usage") or row.get("MemUsage", "0")
     if isinstance(raw, str) and " / " in raw:
         return _stats_parse_io(raw)
-    return (_parse_size_bytes(raw),
-            _parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
+    return (parse_size_bytes(raw),
+            parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
+
+
+def _stats_parse_row(row: dict, config, target_names: list[str]) -> dict:
+    """Build one `workloadctl stats --json` row from a raw podman stats row."""
+    net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
+    blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
+    mem_u, mem_l = _stats_parse_mem(row)
+    return {
+        "workload": config.name,
+        "username": config.username,
+        "container": row.get("name") or row.get("Name", target_names[0]),
+        "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
+        "mem_usage": mem_u,
+        "mem_limit": mem_l,
+        "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
+        "net_input": net_in,
+        "net_output": net_out,
+        "block_input": blk_in,
+        "block_output": blk_out,
+        "pids": int(row.get("pids") or row.get("PIDs", 0)),
+    }
 
 
 def _stats_one(config, manager, target_names, *, json_out, follow):
@@ -889,10 +896,7 @@ def cmd_stats(args, manager: WorkloadManager):
             sys.exit(1)
 
         # substrate already resolved above
-        target_names = (
-            [config.podman_container_name(c) for c in config.container_names()]
-            if config.is_multi else [config.container_name]
-        )
+        target_names = config.podman_targets()
 
         try:
             result = substrate.resource_usage(
@@ -907,23 +911,7 @@ def cmd_stats(args, manager: WorkloadManager):
             if result is not None and result.returncode == 0 and result.stdout.strip():
                 raw = json.loads(result.stdout)
                 for row in (raw if isinstance(raw, list) else [raw]):
-                    net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
-                    blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
-                    mem_u, mem_l = _stats_parse_mem(row)
-                    stats_list.append({
-                        "workload": config.name,
-                        "username": config.username,
-                        "container": row.get("name") or row.get("Name", target_names[0]),
-                        "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
-                        "mem_usage": mem_u,
-                        "mem_limit": mem_l,
-                        "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
-                        "net_input": net_in,
-                        "net_output": net_out,
-                        "block_input": blk_in,
-                        "block_output": blk_out,
-                        "pids": int(row.get("pids") or row.get("PIDs", 0))
-                    })
+                    stats_list.append(_stats_parse_row(row, config, target_names))
             print(json.dumps({"stats": stats_list}, indent=2))
     else:
         configs = manager.get_all_configs(enabled_only=True)
@@ -931,8 +919,7 @@ def cmd_stats(args, manager: WorkloadManager):
         def _running_targets(c):
             if c.is_vm or not manager.user_exists(c):
                 return []
-            names = ([c.podman_container_name(n) for n in c.container_names()]
-                     if c.is_multi else [c.container_name])
+            names = c.podman_targets()
             return [n for n in names if manager.podman(c).container_exists(n)]
 
         running = [(c, names) for c in configs for names in [_running_targets(c)] if names]
@@ -948,23 +935,7 @@ def cmd_stats(args, manager: WorkloadManager):
                 if result is not None and result.returncode == 0 and result.stdout.strip():
                     raw = json.loads(result.stdout)
                     for row in (raw if isinstance(raw, list) else [raw]):
-                        net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
-                        blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
-                        mem_u, mem_l = _stats_parse_mem(row)
-                        stats_list.append({
-                            "workload": config.name,
-                            "username": config.username,
-                            "container": row.get("name") or row.get("Name", target_names[0]),
-                            "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
-                            "mem_usage": mem_u,
-                            "mem_limit": mem_l,
-                            "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
-                            "net_input": net_in,
-                            "net_output": net_out,
-                            "block_input": blk_in,
-                            "block_output": blk_out,
-                            "pids": int(row.get("pids") or row.get("PIDs", 0))
-                        })
+                        stats_list.append(_stats_parse_row(row, config, target_names))
             print(json.dumps({"stats": stats_list}, indent=2))
             return
 
@@ -995,35 +966,22 @@ def _multi_container_health(config, manager, only_container):
     `only_container` restricts the report to one container (for NAME/CTR);
     None reports every container. Returns (data_dict, all_healthy)."""
     names = config.container_names()
+    if only_container is not None and only_container not in names:
+        print(f"Error: container '{only_container}' not in workload "
+              f"'{config.name}'. Available: {', '.join(names)}", file=sys.stderr)
+        sys.exit(2)
+
+    rows = get_substrate(config, manager).container_liveness()
     if only_container is not None:
-        if only_container not in names:
-            print(f"Error: container '{only_container}' not in workload "
-                  f"'{config.name}'. Available: {', '.join(names)}", file=sys.stderr)
-            sys.exit(2)
-        names = [only_container]
+        rows = [r for r in rows if r["container"] == only_container]
 
-    all_healthy = True
-    containers = []
-    for ctr in names:
-        unit = f"workload-{config.name}-{ctr}.service"
-        r = subprocess.run(["systemctl", "is-active", unit],
-                           capture_output=True, text=True)
-        state = r.stdout.strip() or "unknown"
-        svc_active = r.returncode == 0
-
-        running = False
-        if manager.user_exists(config):
-            running = bool(manager.podman(config).container_status(
-                config.podman_container_name(ctr)))
-
-        healthy = svc_active and running
-        all_healthy = all_healthy and healthy
-        containers.append({
-            "container": ctr,
-            "healthy": healthy,
-            "service_state": state,
-            "running": running,
-        })
+    all_healthy = all(r["healthy"] for r in rows)
+    containers = [{
+        "container": r["container"],
+        "healthy": r["healthy"],
+        "service_state": r["service_state"],
+        "running": r["running"],
+    } for r in rows]
     return {
         "workload": config.name,
         "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
@@ -1040,18 +998,18 @@ def cmd_health(args, manager: WorkloadManager):
     if config.is_vm:
         substrate = get_substrate(config, manager)
         liveness = substrate.liveness()
-        service_active = liveness["service_active"]
+        svc_active = liveness["service_active"]
         service_state = liveness["service_state"]
         user_exists = manager.user_exists(config)
-        all_healthy = service_active and user_exists
+        all_healthy = svc_active and user_exists
         health_data: dict[str, Any] = {
             "workload": config.name,
             "overall": "HEALTHY" if all_healthy else "UNHEALTHY",
             "checks": [
                 {
                     "check": "service_status",
-                    "healthy": service_active,
-                    "message": "Service active" if service_active else f"Service {service_state}",
+                    "healthy": svc_active,
+                    "message": "Service active" if svc_active else f"Service {service_state}",
                     "details": {"state": service_state},
                 },
                 {
@@ -1096,20 +1054,16 @@ def cmd_health(args, manager: WorkloadManager):
     all_healthy = True
 
     # Check 1: Service status
-    result = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True
-    )
-    service_active = result.returncode == 0
-    service_state = result.stdout.strip() if result.stdout else "unknown"
+    svc_active, svc_state = service_active(config.service_name)
+    service_state = svc_state or "unknown"
 
     health_data["checks"].append({
         "check": "service_status",
-        "healthy": service_active,
-        "message": "Service active and running" if service_active else f"Service {service_state}",
+        "healthy": svc_active,
+        "message": "Service active and running" if svc_active else f"Service {service_state}",
         "details": {"state": service_state}
     })
-    if not service_active:
+    if not svc_active:
         all_healthy = False
 
     # Check 2: User exists
@@ -1226,7 +1180,7 @@ def cmd_health(args, manager: WorkloadManager):
                 pass  # Skip invalid port numbers
 
     # Check 7: Uptime (if service active)
-    if service_active:
+    if svc_active:
         result = subprocess.run(
             ["systemctl", "show", config.service_name,
              "--property=ActiveEnterTimestamp", "--value"],

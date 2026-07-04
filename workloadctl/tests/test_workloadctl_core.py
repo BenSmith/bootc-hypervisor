@@ -40,99 +40,99 @@ class ParseWorkloadRefTest(unittest.TestCase):
 
 class FormatSizeTest(unittest.TestCase):
     def test_bytes(self):
-        self.assertEqual(core._format_size(500), "500.0 B")
+        self.assertEqual(core.format_size(500), "500.0 B")
 
     def test_kb(self):
-        self.assertEqual(core._format_size(2048), "2.0 KB")
+        self.assertEqual(core.format_size(2048), "2.0 KB")
 
     def test_gb(self):
-        self.assertEqual(core._format_size(3 * 1024**3), "3.0 GB")
+        self.assertEqual(core.format_size(3 * 1024**3), "3.0 GB")
 
     def test_caps_at_tb(self):
         huge = 5 * 1024**5
-        self.assertTrue(core._format_size(huge).endswith("TB"))
+        self.assertTrue(core.format_size(huge).endswith("TB"))
 
 
 class FormatCreatedTest(unittest.TestCase):
     def test_none_is_unknown(self):
-        self.assertEqual(core._format_created(None), "unknown")
+        self.assertEqual(core.format_created(None), "unknown")
 
     def test_empty_string_is_unknown(self):
-        self.assertEqual(core._format_created(""), "unknown")
+        self.assertEqual(core.format_created(""), "unknown")
 
     def test_unix_int_days_ago(self):
         import datetime
         ts = int((datetime.datetime.now() - datetime.timedelta(days=3)).timestamp())
-        self.assertEqual(core._format_created(ts), "3 days ago")
+        self.assertEqual(core.format_created(ts), "3 days ago")
 
     def test_iso_string_hours_ago(self):
         import datetime
         dt = datetime.datetime.now() - datetime.timedelta(hours=2)
-        self.assertEqual(core._format_created(dt.isoformat()), "2 hours ago")
+        self.assertEqual(core.format_created(dt.isoformat()), "2 hours ago")
 
     def test_iso_string_with_z_and_fraction(self):
         import datetime
         dt = datetime.datetime.now() - datetime.timedelta(minutes=5)
         s = dt.strftime("%Y-%m-%dT%H:%M:%S.123456Z")
-        result = core._format_created(s)
+        result = core.format_created(s)
         self.assertTrue(result.endswith("ago"))
 
     def test_unparseable_is_unknown(self):
-        self.assertEqual(core._format_created("not-a-date-at-all!!"), "unknown")
+        self.assertEqual(core.format_created("not-a-date-at-all!!"), "unknown")
 
     def test_minute_ago_floor(self):
         import datetime
         dt = datetime.datetime.now() - datetime.timedelta(seconds=5)
-        result = core._format_created(dt.isoformat())
+        result = core.format_created(dt.isoformat())
         self.assertEqual(result, "1 minute ago")
 
 
 class CreatedUnixTest(unittest.TestCase):
     def test_none(self):
-        self.assertIsNone(core._created_unix(None))
+        self.assertIsNone(core.created_unix(None))
 
     def test_empty(self):
-        self.assertIsNone(core._created_unix(""))
+        self.assertIsNone(core.created_unix(""))
 
     def test_int_passthrough(self):
-        self.assertEqual(core._created_unix(1700000000), 1700000000)
+        self.assertEqual(core.created_unix(1700000000), 1700000000)
 
     def test_iso_string(self):
-        self.assertEqual(core._created_unix("2023-11-14T22:13:20"), 1700000000)
+        self.assertEqual(core.created_unix("2023-11-14T22:13:20"), 1700000000)
 
     def test_float_string_fallback(self):
         # Not valid isoformat -> falls back to float() parse.
-        self.assertEqual(core._created_unix("1700000000.5"), 1700000000)
+        self.assertEqual(core.created_unix("1700000000.5"), 1700000000)
 
     def test_unparseable_returns_none(self):
-        self.assertIsNone(core._created_unix("garbage!!"))
+        self.assertIsNone(core.created_unix("garbage!!"))
 
 
 class ParseSizeBytesTest(unittest.TestCase):
     def test_int_passthrough(self):
-        self.assertEqual(core._parse_size_bytes(42), 42)
+        self.assertEqual(core.parse_size_bytes(42), 42)
 
     def test_plain_bytes(self):
-        self.assertEqual(core._parse_size_bytes("100B"), 100)
+        self.assertEqual(core.parse_size_bytes("100B"), 100)
 
     def test_kb_decimal(self):
-        self.assertEqual(core._parse_size_bytes("1.5kB"), int(1.5 * 10**3))
+        self.assertEqual(core.parse_size_bytes("1.5kB"), int(1.5 * 10**3))
 
     def test_gib_binary(self):
-        self.assertEqual(core._parse_size_bytes("2GiB"), 2 * 1024**3)
+        self.assertEqual(core.parse_size_bytes("2GiB"), 2 * 1024**3)
 
     def test_zero_b(self):
-        self.assertEqual(core._parse_size_bytes("0 B"), 0)
+        self.assertEqual(core.parse_size_bytes("0 B"), 0)
 
     def test_bare_number_string(self):
-        self.assertEqual(core._parse_size_bytes("123"), 123)
+        self.assertEqual(core.parse_size_bytes("123"), 123)
 
     def test_unparseable_returns_zero(self):
-        self.assertEqual(core._parse_size_bytes("nonsense"), 0)
+        self.assertEqual(core.parse_size_bytes("nonsense"), 0)
 
     def test_malformed_suffix_number_returns_zero(self):
         # Ends in "b" (matches the bare "b" suffix) but prefix isn't a float.
-        self.assertEqual(core._parse_size_bytes("xyzb"), 0)
+        self.assertEqual(core.parse_size_bytes("xyzb"), 0)
 
 
 class TomlStringTest(unittest.TestCase):
@@ -234,6 +234,13 @@ class WorkloadConfigConstructionTest(WorkloadConfigTestBase):
         self.assertEqual(cfg.kind, "container")
         self.assertFalse(cfg.is_vm)
         self.assertEqual(cfg.image, "localhost/x:latest")
+
+    def test_no_filename_alias(self):
+        # `name` is the single identity attribute; the old `.filename` alias
+        # (which duplicated `.name`) is gone. Guard against reintroducing it.
+        cfg = self._config("ok", '[workload]\nname = "ok"\n\n'
+                                  '[container]\nimage = "x"\n')
+        self.assertFalse(hasattr(cfg, "filename"))
 
 
 class WorkloadConfigVmImageTest(WorkloadConfigTestBase):
@@ -535,6 +542,39 @@ class WorkloadConfigSingleContainerTest(WorkloadConfigTestBase):
         self.assertEqual(result[0]["path"], str(cfg.data_dir / "secret.env"))
 
 
+class WorkloadConfigPodmanTargetsTest(WorkloadConfigTestBase):
+    """Table test over single/pod/bridge/multi modes for podman_targets()."""
+
+    def test_podman_targets_by_mode(self):
+        cases = [
+            ("single", '[workload]\nname = "single"\n\n'
+                       '[container]\nimage = "x:latest"\n',
+             ["workload-single"]),
+            ("podmode", '[workload]\nname = "podmode"\nmode = "pod"\n\n'
+                        '[[containers]]\nname = "web"\n'
+                        '[containers.container]\nimage = "web:latest"\n\n'
+                        '[[containers]]\nname = "db"\n'
+                        '[containers.container]\nimage = "db:latest"\n',
+             ["workload-podmode-web", "workload-podmode-db"]),
+            ("bridgemode", '[workload]\nname = "bridgemode"\nmode = "bridge"\n\n'
+                           '[[containers]]\nname = "web"\n'
+                           '[containers.container]\nimage = "web:latest"\n\n'
+                           '[[containers]]\nname = "db"\n'
+                           '[containers.container]\nimage = "db:latest"\n',
+             ["workload-bridgemode-web", "workload-bridgemode-db"]),
+            ("multi", '[workload]\nname = "multi"\n\n'
+                      '[[containers]]\nname = "web"\n'
+                      '[containers.container]\nimage = "web:latest"\n\n'
+                      '[[containers]]\nname = "db"\n'
+                      '[containers.container]\nimage = "db:latest"\n',
+             ["workload-multi-web", "workload-multi-db"]),
+        ]
+        for name, body, expected in cases:
+            with self.subTest(name=name):
+                cfg = self._config(name, body)
+                self.assertEqual(cfg.podman_targets(), expected)
+
+
 class WorkloadConfigMiscPropsTest(WorkloadConfigTestBase):
     def test_vm_bridge_default(self):
         cfg = self._config("vmb1", '[workload]\nname = "vmb1"\n\n[vm]\n')
@@ -597,18 +637,16 @@ class ResolveContainerTargetTest(unittest.TestCase):
         cfg = self._fake_config(False, container_name="workload-foo")
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, "extra", "foo")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("single-container", buf.getvalue())
 
     def test_multi_container_missing_suffix_errors(self):
         cfg = self._fake_config(True, names=["web", "db"])
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, None, "multi")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("multiple containers", buf.getvalue())
         self.assertIn("web, db", buf.getvalue())
 
@@ -616,9 +654,8 @@ class ResolveContainerTargetTest(unittest.TestCase):
         cfg = self._fake_config(True, names=["web", "db"])
         buf = io.StringIO()
         with redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(core.UsageError):
                 core.resolve_container_target(cfg, "cache", "multi")
-        self.assertEqual(cm.exception.code, 2)
         self.assertIn("not in workload", buf.getvalue())
 
     def test_multi_container_valid_name_resolves(self):

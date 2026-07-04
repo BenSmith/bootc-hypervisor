@@ -198,6 +198,32 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         self.assertNotIn("(vm)", joined)
 
 
+class ValidateSingleSchemaTest(unittest.TestCase):
+    """validate_single runs the same schema checks as the boot generator, so a
+    mode/shape mismatch is caught by `validate`/`install` before a boot."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / "clitest-badmode").mkdir()
+        (self.tmp / "clitest-badmode" / "workload.toml").write_text(
+            '[workload]\nname = "clitest-badmode"\nmode = "pod"\n\n'
+            '[container]\nimage = "x:latest"\n'
+        )
+
+    def test_schema_error_surfaced(self):
+        config = WorkloadConfig("clitest-badmode")
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+
+        result = cmd_admin.validate_single(config, manager, json_mode=True)
+
+        schema = [c for c in result["checks"] if c["check"] == "schema"]
+        self.assertTrue(schema and not schema[0]["passed"])
+        self.assertIn("requires [[containers]]", schema[0]["message"])
+
+
 class CleanupOverrideDirTest(unittest.TestCase):
     """_cleanup_override_dir must not delete the instance dir when workload.toml
     lives inside it (post-subdir flip).  A naive rmdir-to-base would evict the
@@ -283,7 +309,6 @@ class DiagnoseTest(unittest.TestCase):
     def test_json_reports_failure(self):
         code, out = self._run(json_mode=True)
         self.assertEqual(code, 1)
-        payload = tomllib  # noqa: keep import used
         import json as _json
         data = _json.loads(out)
         self.assertFalse(data["passed"])
@@ -693,7 +718,6 @@ class CmdValidateTest(unittest.TestCase):
         )
         self.manager = mock.Mock()
         self.manager.get_all_configs.return_value = [WorkloadConfig("app")]
-        fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir="/x")
         self.enterContext(mock.patch("pwd.getpwnam", side_effect=KeyError))
         self.enterContext(mock.patch.object(
             cmd_admin.grp, "getgrnam", side_effect=KeyError))
@@ -882,7 +906,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
 
     def test_name_conflict_is_error(self):
         cfg = self._cfg('[workload]\nname = "app"\n\n[container]\nimage = "x"\n')
-        other = types.SimpleNamespace(name="app", filename="other-file")
+        other = types.SimpleNamespace(name="app", path="other-file")
         self.manager.get_all_configs.return_value = [other]
         res = self._validate(cfg)
         c = self._check(res, "name_uniqueness")
@@ -1333,6 +1357,45 @@ class CmdEditTomlTest(unittest.TestCase):
         code, out, err = self._run(edited_content=None)
         self.assertEqual(code, 1)
         self.assertIn("not found", err)
+
+    def test_editor_with_flags_is_split(self):
+        # EDITOR="code --wait" must be shlex-split into argv, not passed as a
+        # single literal executable name (which would fail to exec).
+        ns = argparse.Namespace(workload="app", file=None, yes=False)
+        captured = []
+
+        def run_side_effect(argv, **kw):
+            captured.append(list(argv))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"EDITOR": "code --wait"}):
+            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_admin.cmd_edit(ns, self.manager)
+
+        self.assertEqual(captured[0][:-1], ["code", "--wait"])
+        self.assertEqual(Path(captured[0][-1]), self.cfg_path)
+
+    def test_malformed_editor_falls_back_to_nano(self):
+        # Regression: a malformed $EDITOR (unbalanced quote) must not crash
+        # cmd_edit with an uncaught shlex ValueError — it falls back to nano.
+        ns = argparse.Namespace(workload="app", file=None, yes=False)
+        captured = []
+
+        def run_side_effect(argv, **kw):
+            captured.append(list(argv))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"EDITOR": '"vim'}):
+            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_admin.cmd_edit(ns, self.manager)
+
+        self.assertEqual(captured[0][0], "nano")
+        self.assertEqual(Path(captured[0][-1]), self.cfg_path)
+        self.assertIn("malformed", err.getvalue())
 
     def test_editor_failure_removes_backup_exits_1(self):
         code, out, err = self._run(edited_content=None, editor_rc=1)

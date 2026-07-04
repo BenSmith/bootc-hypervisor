@@ -705,6 +705,18 @@ from contextlib import redirect_stdout, redirect_stderr
 import cmd_lifecycle
 
 
+class TestSubidLockSharedConstant(unittest.TestCase):
+    """A11: the subuid/subgid flock only mutexes if every participant names
+    the identical path — cmd_lifecycle must import workload_lib.SUBID_LOCK
+    rather than re-spelling the literal."""
+
+    def test_cmd_lifecycle_imports_shared_lock_path(self):
+        self.assertIs(cmd_lifecycle.SUBID_LOCK, workload_lib.SUBID_LOCK)
+        self.assertEqual(
+            cmd_lifecycle.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
+        )
+
+
 def _ns(**kw):
     return argparse.Namespace(**kw)
 
@@ -1022,9 +1034,7 @@ class TestPreflightChecks(unittest.TestCase):
 class TestProvisionUser(unittest.TestCase):
     def test_new_user_allocates_uid_and_runs_sysusers(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with tempfile.TemporaryDirectory() as run_dir:
-                sysusers_dir = Path(run_dir) / "sysusers.d"
-                lock_dir = Path(run_dir) / "lock"
+            with tempfile.TemporaryDirectory():
                 with patch.object(cmd_lifecycle, 'Path', wraps=Path) as _:
                     pass
                 with patch('pwd.getpwnam', side_effect=KeyError):
@@ -1246,7 +1256,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=False):
                 with patch.object(cmd_lifecycle, '_selinux_enforcing', return_value=True):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
 
     def test_enable_warns_when_tooling_missing_and_permissive(self):
@@ -1292,7 +1302,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
                 self.assertIn("invalid", buf.getvalue())
 
@@ -1301,7 +1311,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                         cmd_lifecycle._apply_selinux_policy(cfg, "enable")
                 self.assertIn("template not found", buf.getvalue())
 
@@ -1331,7 +1341,7 @@ class TestApplySelinuxPolicy(unittest.TestCase):
                         with patch.object(cmd_lifecycle, 'UDICA_TEMPLATE_DIR', Path(td)):
                             with patch.object(cmd_lifecycle.subprocess, 'run',
                                               side_effect=cmd_lifecycle.subprocess.CalledProcessError(1, ["semodule"])):
-                                with self.assertRaises(SystemExit):
+                                with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
                                     cmd_lifecycle._apply_selinux_policy(cfg, "enable")
 
 
@@ -1398,6 +1408,32 @@ class TestCmdEnable(unittest.TestCase):
                         marker = workload_lib.workload_enabled_marker("test-wl")
                         self.assertTrue(marker.exists())
                         self.assertIn("enabled and starting", buf.getvalue())
+
+    def test_selinux_policy_failure_exits_1_without_reprinting(self):
+        # _apply_selinux_policy() prints its own diagnostic and raises
+        # SelinuxPolicyError; cmd_enable must exit 1 without printing a
+        # second "Error: ..." line (the message is already on stderr).
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as wl_base:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
+                    with _RootBypass():
+                        manager = MagicMock()
+                        with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
+                                with patch.object(cmd_lifecycle, '_run_host_setup'):
+                                    with patch.object(
+                                        cmd_lifecycle, '_apply_selinux_policy',
+                                        side_effect=cmd_lifecycle.SelinuxPolicyError("boom"),
+                                    ):
+                                        buf = io.StringIO()
+                                        with redirect_stderr(buf):
+                                            with self.assertRaises(SystemExit) as cm:
+                                                cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                        self.assertEqual(cm.exception.code, 1)
+                                        self.assertEqual(buf.getvalue(), "")
 
     def test_vm_workload_skips_image_transfer(self):
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as wl_base:
@@ -1591,27 +1627,55 @@ class TestCmdRecreate(unittest.TestCase):
                 sub = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
                     with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
-                        buf = io.StringIO()
-                        with redirect_stdout(buf):
-                            cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
+                        with patch.object(cmd_lifecycle, '_transfer_image'):
+                            buf = io.StringIO()
+                            with redirect_stdout(buf):
+                                cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
                 sub.reprovision.assert_called_once_with(recreate=True)
                 cmds = [c.args[0] for c in run_mock.call_args_list]
                 self.assertTrue(any("workload-generate" in c[0] for c in cmds))
                 self.assertIn("recreated", buf.getvalue())
+
+    def test_recreate_transfers_freshly_built_image(self):
+        # Regression: recreate previously restarted against whatever image was
+        # already in the workload user's rootless store, never picking up a
+        # rebuild — the user had to disable+enable instead. recreate must now
+        # call the same root->user image transfer enable does.
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                            cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
+                transfer.assert_called_once()
+                self.assertEqual(transfer.call_args.args[1], manager)
+
+    def test_recreate_skips_image_transfer_for_vm(self):
+        with _cfg(_VM_TOML, 'test-vm'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                            cmd_lifecycle.cmd_recreate(_ns(workload="test-vm"), manager)
+                transfer.assert_not_called()
 
 
 # ── cmd_reboot ────────────────────────────────────────────────────────────────
 
 class TestCmdReboot(unittest.TestCase):
     def test_reboot_user_missing_exits(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
             manager = MagicMock()
             manager.user_exists.return_value = False
             with self.assertRaises(SystemExit):
                 cmd_lifecycle.cmd_reboot(_ns(workload="test-wl"), manager)
 
     def test_reboot_calls_substrate_lifecycle(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
             manager = MagicMock()
             manager.user_exists.return_value = True
             sub = MagicMock()
@@ -1809,7 +1873,11 @@ class TestCmdCleanup(unittest.TestCase):
 
 
 class TestWorkloadRunFiles(unittest.TestCase):
-    """_workload_run_files: VM and multi-container branches."""
+    """The removable run-file set: VM and multi-container branches."""
+
+    def _removable_names(self, cfg):
+        return [rf.path.name for rf in workload_lib.workload_run_files(cfg)
+                if rf.kind != "env-file"]
 
     def test_vm_includes_build_service_and_virtiofs_units(self):
         toml = _VM_TOML.replace(
@@ -1818,15 +1886,13 @@ class TestWorkloadRunFiles(unittest.TestCase):
             'volumes = ["/srv/shared:/mnt/shared"]',
         )
         with _cfg(toml, 'test-vm') as cfg:
-            files = cmd_lifecycle._workload_run_files(cfg)
-            names = [p.name for p in files]
+            names = self._removable_names(cfg)
             self.assertIn("workload-test-vm-build.service", names)
             self.assertTrue(any("virtiofs" in n for n in names))
 
     def test_multi_container_includes_per_container_services(self):
         with _cfg(_MULTI_TOML, 'multi-wl') as cfg:
-            files = cmd_lifecycle._workload_run_files(cfg)
-            names = [p.name for p in files]
+            names = self._removable_names(cfg)
             self.assertIn("workload-multi-wl-web.service", names)
             self.assertIn("workload-multi-wl-db.service", names)
 

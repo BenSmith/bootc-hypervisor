@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 
 from workload_lib import (
+    CREDSTORE_DIR,
     validate_workload_name,
     workload_config_path,
     WORKLOADS_BASE,
@@ -26,7 +27,6 @@ from workloadctl_core import (
 )
 from substrate import get_substrate, BackupError
 
-CREDSTORE_DIR = Path("/etc/credstore.encrypted")
 BACKUP_DIR = WORKLOADS_BASE / "backups"
 
 

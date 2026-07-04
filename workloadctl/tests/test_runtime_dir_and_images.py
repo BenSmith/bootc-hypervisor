@@ -151,7 +151,7 @@ class TestImagesSkipsVM(unittest.TestCase):
         vm.is_vm = True
         ctr = MagicMock()
         ctr.is_vm = False
-        ctr.filename = "web"
+        ctr.name = "web"
         ctr.container_specs.return_value = [("web", "example.com/web:latest", "missing")]
         manager, pod = self._run([vm, ctr])
         # podman() / image_info only called for the container, never the VM.

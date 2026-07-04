@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 
+from workload_lib import workload_service_units
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -72,20 +73,16 @@ def cmd_logs(args, manager: WorkloadManager):
             print(f"Error: container '{container}' not in workload '{workload}'. "
                   f"Available: {', '.join(config.container_names())}", file=sys.stderr)
             sys.exit(2)
-        unit = f"workload-{workload}-{container}.service"
+        # container_names() and sub_service_names() are index-aligned; for a
+        # single-container workload NAME/NAME this maps to the main unit.
+        unit = dict(zip(config.container_names(),
+                        config.sub_service_names()))[container]
         cmd = ["journalctl", "-u", unit]
     elif config.is_multi:
         # journalctl's `-u 'glob*'` is unreliable (fails with "No data
         # available" when a matching unit has no journal entries yet), so
-        # pass every unit explicitly: setup, umbrella, the pod/net helper,
-        # and each container service.
-        helper = "pod" if config.mode == "pod" else "net"
-        units = [
-            f"workload-{workload}-setup.service",
-            config.service_name,
-            f"workload-{workload}-{helper}.service",
-            *config.sub_service_names(),
-        ]
+        # pass every emitted unit explicitly.
+        units = workload_service_units(config)
         cmd = ["journalctl"]
         for u in units:
             cmd += ["-u", u]
@@ -186,7 +183,10 @@ def _cp_staging(config: "WorkloadConfig"):
         sys.exit(1)
     d = Path(tempfile.mkdtemp(prefix=".workloadctl-cp-", dir=str(home)))
     try:
-        os.chown(d, config.uid, config.gid)
+        # follow_symlinks=False for parity with _chown_tree: d is a real dir
+        # root just minted, but never chown through a symlink from a home the
+        # workload user owns (B1).
+        os.chown(d, config.uid, config.gid, follow_symlinks=False)
         os.chmod(d, 0o700)
         yield d
     finally:

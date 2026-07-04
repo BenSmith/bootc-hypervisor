@@ -19,8 +19,10 @@ from workload_lib import (
     selinux_module_name,
     selinux_type_name,
     units_outdated,
+    validate_workload_config,
     validate_workload_name,
     workload_config_path,
+    workload_service_units,
 )
 from workloadctl_core import (
     WorkloadConfig,
@@ -30,6 +32,7 @@ from workloadctl_core import (
     toml_string,
 )
 from service_runtime import restart_workload_service
+from substrate import service_active
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,26 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         "severity": "ok",
         "message": f"Required fields present: name={config.name}"
     })
+
+    # Schema validation — the same checks the boot generator runs, surfaced here
+    # so `validate`/`install` catch config errors before a boot rather than after.
+    schema_errors = validate_workload_config(config.config)
+    if schema_errors:
+        for msg in schema_errors:
+            checks.append({
+                "check": "schema",
+                "passed": False,
+                "severity": "error",
+                "message": msg,
+            })
+            errors += 1
+    else:
+        checks.append({
+            "check": "schema",
+            "passed": True,
+            "severity": "ok",
+            "message": "Schema valid"
+        })
 
     username_len = len(config.username)
     if username_len >= 32:
@@ -96,13 +119,13 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
     # Check name uniqueness (workload names must be unique)
     all_configs = manager.get_all_configs()
     conflicts = [c for c in all_configs
-                 if c.name == config.name and c.filename != config.filename]
+                 if c.name == config.name and c.path != config.path]
     if conflicts:
         checks.append({
             "check": "name_uniqueness",
             "passed": False,
             "severity": "error",
-            "message": f"Name conflict: '{config.name}' also used in {conflicts[0].filename}"
+            "message": f"Name conflict: '{config.name}' also used in {conflicts[0].path}"
         })
         errors += 1
     else:
@@ -296,7 +319,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
 
     passed = errors == 0
     result = {
-        "workload": config.filename,
+        "workload": config.name,
         "passed": passed,
         "errors": errors,
         "warnings": warnings,
@@ -305,7 +328,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
 
     # Human-readable output if not JSON mode
     if not json_mode:
-        print(f"Validating: {config.filename}")
+        print(f"Validating: {config.name}")
         print()
 
         for check in checks:
@@ -737,12 +760,8 @@ def cmd_diagnose(args, manager: WorkloadManager):
                fix="Service should be auto-enabled via generator")
 
     # Check 9: Service active
-    result = subprocess.run(
-        ["systemctl", "is-active", config.service_name],
-        capture_output=True, text=True
-    )
-    service_state = result.stdout.strip()
-    if result.returncode == 0:
+    svc_active, service_state = service_active(config.service_name)
+    if svc_active:
         _check("service_active", True, f"Service active: {service_state}")
     else:
         fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"
@@ -935,6 +954,21 @@ def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
     print(f"    Revert to shipped:      sudo rm {config.override_dir / rel}")
 
 
+def _editor_argv() -> list:
+    """Return the argv for the user's $EDITOR.
+
+    Split so a value carrying flags (e.g. "code --wait", "emacs -nw") is honored
+    instead of being treated as one impossible argv[0]. Falls back to nano if
+    $EDITOR is unset/empty, or malformed (unbalanced quotes make shlex.split
+    raise ValueError) rather than crashing `workloadctl edit`.
+    """
+    try:
+        return shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    except ValueError:
+        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
+        return ["nano"]
+
+
 def _edit_control_file(args, manager: WorkloadManager):
     """Edit a bundle control file, seeding an /etc override copy-on-write.
 
@@ -983,10 +1017,7 @@ def _edit_control_file(args, manager: WorkloadManager):
             print(f"  No shipped default — created a new control file: {override}")
         seeded = True
 
-    # Split $EDITOR so a value carrying flags (e.g. "code --wait", "emacs -nw")
-    # is honored instead of being treated as one impossible argv[0]. Fall back
-    # to nano if the var is set but empty/whitespace.
-    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    editor_argv = _editor_argv()
     result = subprocess.run([*editor_argv, str(override)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
@@ -1045,10 +1076,9 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path = Path(backup_str)
     shutil.copy2(config_path, backup_path)
 
-    editor = os.environ.get("EDITOR", "nano")
-
     # Open editor
-    result = subprocess.run([editor, str(config_path)])
+    editor_argv = _editor_argv()
+    result = subprocess.run(editor_argv + [str(config_path)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
         backup_path.unlink()
@@ -1113,7 +1143,8 @@ def cmd_edit(args, manager: WorkloadManager):
                 # / template_vars are re-rendered into a fresh seed before the
                 # main service reboots QEMU onto it.
                 subprocess.run(
-                    ["systemctl", "restart", f"workload-{config.name}-setup.service"],
+                    ["systemctl", "restart",
+                     workload_service_units(config, roles={"setup"})[0]],
                     check=True,
                 )
                 subprocess.run(["systemctl", "restart", config.service_name], check=True)
