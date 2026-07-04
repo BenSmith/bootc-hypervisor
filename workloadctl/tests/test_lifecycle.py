@@ -1627,13 +1627,41 @@ class TestCmdRecreate(unittest.TestCase):
                 sub = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
                     with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
-                        buf = io.StringIO()
-                        with redirect_stdout(buf):
-                            cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
+                        with patch.object(cmd_lifecycle, '_transfer_image'):
+                            buf = io.StringIO()
+                            with redirect_stdout(buf):
+                                cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
                 sub.reprovision.assert_called_once_with(recreate=True)
                 cmds = [c.args[0] for c in run_mock.call_args_list]
                 self.assertTrue(any("workload-generate" in c[0] for c in cmds))
                 self.assertIn("recreated", buf.getvalue())
+
+    def test_recreate_transfers_freshly_built_image(self):
+        # Regression: recreate previously restarted against whatever image was
+        # already in the workload user's rootless store, never picking up a
+        # rebuild — the user had to disable+enable instead. recreate must now
+        # call the same root->user image transfer enable does.
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                            cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
+                transfer.assert_called_once()
+                self.assertEqual(transfer.call_args.args[1], manager)
+
+    def test_recreate_skips_image_transfer_for_vm(self):
+        with _cfg(_VM_TOML, 'test-vm'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                            cmd_lifecycle.cmd_recreate(_ns(workload="test-vm"), manager)
+                transfer.assert_not_called()
 
 
 # ── cmd_reboot ────────────────────────────────────────────────────────────────

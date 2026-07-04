@@ -1019,6 +1019,8 @@ def cmd_recreate(args, manager: WorkloadManager):
         ["systemctl", "reset-failed", config.service_name],
         check=False, capture_output=True,
     )
+    if not config.is_vm:
+        _transfer_image(config, manager)
     substrate = get_substrate(config, manager)
     substrate.reprovision(recreate=True)
     print(f"✓ Workload '{args.workload}' recreated")
