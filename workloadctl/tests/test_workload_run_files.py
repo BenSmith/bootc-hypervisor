@@ -116,6 +116,26 @@ name = "back"
 image = "example.com/back:latest"
 """
 
+# Adversarial: [[containers]] present but mode explicitly forced to "single".
+# validate_workload_config rejects this, but `edit`/hand-authored TOML can reach
+# workload_run_files without re-validating. The two per-container gates
+# (units, .secrets) must agree on such a config so disable/purge stays complete.
+CONTRADICTION_TOML = """\
+[workload]
+name = "{name}"
+mode = "single"
+
+[[containers]]
+name = "web"
+[containers.container]
+image = "example.com/web:latest"
+
+[[containers]]
+name = "db"
+[containers.container]
+image = "example.com/db:latest"
+"""
+
 VM_TOML = """\
 [workload]
 name = "{name}"
@@ -320,6 +340,40 @@ class TestRunFilesMembership(unittest.TestCase):
             self.assertIn('workload-stack.service', by_kind.get('unit', set()))
             # env-files are owned run-files too, not systemd units:
             self.assertTrue(by_kind.get('env-file'))
+
+    def _per_container_names(self, config):
+        """(units, secrets): container-local names carried by the per-container
+        .service units and by the per-container .secrets env-files."""
+        prefix = f'workload-{config.name}-'
+        units, secrets = set(), set()
+        for rf in workload_run_files(config):
+            base = Path(rf.path).name
+            if not base.startswith(prefix):
+                continue
+            if rf.kind == 'unit' and rf.role == 'container':
+                units.add(base[len(prefix):-len('.service')])
+            elif rf.kind == 'env-file' and rf.role == 'secrets':
+                secrets.add(base[len(prefix):-len('.secrets')])
+        return units, secrets
+
+    def test_per_container_units_and_secrets_share_one_gate(self):
+        # Both sets must key off the same discriminator; a split lets disable
+        # unlink per-container .secrets while never listing the matching units.
+        for toml, name in ((POD_TOML, 'stack'), (BRIDGE_TOML, 'mesh')):
+            with self.subTest(name=name), _Config(toml, name) as config:
+                units, secrets = self._per_container_names(config)
+                self.assertTrue(units)
+                self.assertEqual(units, secrets)
+
+    def test_contradicting_mode_gates_units_and_secrets_together(self):
+        # is_multi is True (has [[containers]]) but mode == "single": both
+        # per-container sets must be empty, not split.
+        with _Config(CONTRADICTION_TOML, 'skew') as config:
+            self.assertTrue(config.is_multi)
+            self.assertEqual(config.mode, 'single')
+            units, secrets = self._per_container_names(config)
+            self.assertEqual(units, set())
+            self.assertEqual(secrets, set())
 
 
 @PENDING

@@ -843,9 +843,11 @@ class TestWriteEnvironmentFile(unittest.TestCase):
 
 
 class TestEnableLinger(unittest.TestCase):
-    """enable_linger now delegates the enable/start/wait to
-    service_runtime.ensure_runtime_dir (B5); the provisioning path only adds
-    fail-loud semantics on top."""
+    """enable_linger delegates the start/wait to service_runtime.ensure_runtime_dir
+    (B5), but first sets the persistent linger marker unconditionally: ensure_
+    runtime_dir short-circuits (skipping `loginctl enable-linger`) when a possibly
+    transient user@<uid>.service is already active, so the provisioning path must
+    guarantee the marker itself. It also adds fail-loud semantics on top."""
 
     def setUp(self):
         self.mod = _load_script()
@@ -853,16 +855,38 @@ class TestEnableLinger(unittest.TestCase):
     def test_enable_linger_success(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
         pw.pw_name = "_wl-test"
-        with mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stderr="")) as run, \
+             mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
                                return_value=True) as ensure, \
              mock.patch.object(self.mod, "log"):
             self.mod.enable_linger(pw)  # must not raise
+        # The marker is set unconditionally, before ensure_runtime_dir.
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0],
+                         ["loginctl", "enable-linger", "10001"])
         ensure.assert_called_once_with(10001, timeout=15)
+
+    def test_raises_when_enable_linger_fails(self):
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
+        pw.pw_name = "_wl-test"
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=mock.Mock(returncode=1, stderr="boom")), \
+             mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+                               return_value=True) as ensure, \
+             mock.patch.object(self.mod, "log"):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.enable_linger(pw)
+            self.assertIn("enable-linger failed", str(ctx.exception))
+        # Marker set failed → never bother waiting on the runtime dir.
+        ensure.assert_not_called()
 
     def test_raises_when_manager_never_active(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10001, gid=10001)
         pw.pw_name = "_wl-test"
-        with mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stderr="")), \
+             mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
                                return_value=False), \
              mock.patch.object(self.mod, "log"):
             with self.assertRaises(RuntimeError) as ctx:

@@ -1192,14 +1192,20 @@ class VMSubstrate(Substrate):
         print(f"  ✓ {self.config.name}: rebuilt and restarted")
         return None  # no verification phase for VMs
 
+    @staticmethod
+    def _generation_numbers(home_dir: Path, exclude: int | None = None) -> list:
+        """Sorted generation numbers N of the `system.qcow2.gen-N` snapshots in
+        `home_dir` (ascending; highest == newest), optionally omitting `exclude`."""
+        return sorted(
+            n
+            for p in home_dir.glob("system.qcow2.gen-*")
+            if (s := p.suffix[5:]).isdigit() and (n := int(s)) != exclude
+        )
+
     def rollback_targets(self) -> list:
         """Return available VM rollback targets (system.qcow2.gen-N snapshots)."""
         home_dir = self.config.home_dir
-        gens = sorted(
-            int(p.suffix[5:])
-            for p in home_dir.glob("system.qcow2.gen-*")
-            if p.suffix[5:].isdigit()
-        )
+        gens = self._generation_numbers(home_dir)
         return [
             {
                 "label": f"system.qcow2.gen-{g}",
@@ -1215,11 +1221,7 @@ class VMSubstrate(Substrate):
         update-path rotation (rotate_generations in workload-vm-build-disk):
         `exempt` (the freshly rotated-out disk) is always retained as the primary
         restore point, so `keep + 1` gen files survive in total."""
-        gens = sorted(
-            int(p.suffix[5:])
-            for p in home_dir.glob("system.qcow2.gen-*")
-            if p.suffix[5:].isdigit() and int(p.suffix[5:]) != exempt
-        )
+        gens = VMSubstrate._generation_numbers(home_dir, exclude=exempt)
         for gen_n in (gens[:-keep] if keep > 0 else gens):
             print(f"  Pruning old generation: system.qcow2.gen-{gen_n}")
             (home_dir / f"system.qcow2.gen-{gen_n}").unlink(missing_ok=True)
@@ -1247,11 +1249,7 @@ class VMSubstrate(Substrate):
         # newest) so rolling back is itself reversible.
         rotated_gen = None
         if system_disk.exists():
-            existing = [
-                int(p.suffix[5:])
-                for p in home_dir.glob("system.qcow2.gen-*")
-                if p.suffix[5:].isdigit()
-            ]
+            existing = self._generation_numbers(home_dir)
             rotated_gen = (max(existing) + 1) if existing else 1
             rotated = home_dir / f"system.qcow2.gen-{rotated_gen}"
             print(f"  system.qcow2 → {rotated.name} (pre-rollback state preserved)")
@@ -1533,13 +1531,16 @@ def _backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) 
             else:
                 (staging / "data").mkdir()
 
-            # Backups hold the precious data/ tree and credential blobs, so
-            # keep them root-only. Lock the dir to 0700 *before* tar writes so
-            # the archive (created with the default umask, typically 0644) is
-            # never traversable by non-root during the write window, then pin
-            # the archive itself to 0600.
+            # Backups hold the precious data/ tree and credential blobs, so keep
+            # the archive root-only. Pre-create it as 0600 *before* tar writes so
+            # it is never traversable by non-root during the write window (tar
+            # truncates but leaves an existing file's mode intact), then re-pin to
+            # 0600 after. We deliberately do NOT touch output.parent's mode: it's
+            # the operator-chosen --output location (e.g. /tmp or a shared mount),
+            # and chmodding it to 0700 as root would clobber a directory the
+            # operator meant to share.
             output.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(output.parent, 0o700)
+            os.close(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
             subprocess.run(
                 ["tar", "-C", str(staging), "-cf", str(output), "--zstd", "."],
                 check=True,

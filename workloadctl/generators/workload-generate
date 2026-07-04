@@ -1462,8 +1462,12 @@ def generate_vm_build_service(config, user_name) -> str:
     ])
 
 
-def generate_vm_service(config, user_name: str, uid: int) -> str:
-    """Generate the main VM service (QEMU, Type=notify via workload-vm-notify)."""
+def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
+    """Generate the main VM service (QEMU, Type=notify via workload-vm-notify).
+
+    `vfs_tags` (the collision-safe virtiofs tags) is passed in by the caller so
+    the boot generator computes it once per VM; falls back to deriving it here so
+    the function stays callable standalone (tests)."""
     name = config["workload"]["name"]
     vm_cfg = config.get("vm", {})
     home_dir = str(workload_state_dir(name))
@@ -1481,9 +1485,10 @@ def generate_vm_service(config, user_name: str, uid: int) -> str:
     mac = vm_mac_address(name)
 
     # Parse virtiofs volumes — collision-safe tags shared with the sidecar loop,
-    # ensure-user, and purge (B3).
+    # ensure-user, and purge (B3). Computed once by the caller and threaded in.
     volumes = vm_cfg.get("volumes", [])
-    vfs_tags = virtiofs_tags(volumes)
+    if vfs_tags is None:
+        vfs_tags = virtiofs_tags(volumes)
 
     # Bridge: default to _workload-br (workloadctl-managed via workload-bridge.service).
     # Any other value names an existing host bridge the user provisions
@@ -1733,7 +1738,7 @@ def generate_vm_workload(config, user_name: str, uid: int):
     log_msg("  Created build service")
 
     # Main VM service
-    vm_service_content = generate_vm_service(config, user_name, uid)
+    vm_service_content = generate_vm_service(config, user_name, uid, vfs_tags)
     paths[("unit", "main")][0].write_text(vm_service_content)
     log_msg("  Created VM service")
 

@@ -591,8 +591,8 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
             run / f"workload-{name}-net.service", "unit", "net", mode == "bridge"
         ))
         # Per-container units key on topology, matching the generator and the
-        # -pod/-net gates above; validate_workload_config keeps this equivalent
-        # to is_multi (mode != "single" <=> "containers" in config).
+        # -pod/-net gates above; the per-container .secrets below key on the same
+        # `mode != "single"` so disable/purge lists units and secrets together.
         if mode != "single":
             for cname in config.container_names():
                 files.append(WorkloadRunFile(
@@ -605,9 +605,12 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     files.append(
         WorkloadRunFile(env / f"workload-{name}.secrets", "env-file", "secrets", False)
     )
-    # Per-container .secrets keyed on is_multi (not mode): this line also runs for
-    # VMs, whose mode is "single" but which own no per-container secrets anyway.
-    if config.is_multi:
+    # Per-container .secrets gate on the SAME discriminator as the per-container
+    # units above (mode != "single"), not is_multi — a split discriminator here
+    # strands loaded units when the two disagree (cmd_disable would unlink these
+    # .secrets but never list the matching .service units). Correctly False for
+    # VMs too (mode "single"; they own no per-container secrets).
+    if config.mode != "single":
         for cname in config.container_names():
             files.append(WorkloadRunFile(
                 env / f"workload-{name}-{cname}.secrets", "env-file", "secrets", False

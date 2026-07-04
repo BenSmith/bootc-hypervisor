@@ -441,10 +441,22 @@ def enable_linger(pw):
     manager being *active* rather than on /run/user/<uid> merely existing — lives
     in service_runtime.ensure_runtime_dir (the same primitive the CLI restart
     paths and podman.py retry use; see its docstring for the flapping-session /
-    UID-recycle rationale). This provisioning path differs only in that it must
-    fail *loudly*: linger not coming up here means the workload can't run, so we
-    raise rather than best-effort return.
+    UID-recycle rationale). This provisioning path differs in two ways: it must
+    fail *loudly* (linger not coming up here means the workload can't run, so we
+    raise rather than best-effort return), and it must *guarantee* the persistent
+    marker (/var/lib/systemd/linger/<name>) is set. ensure_runtime_dir
+    short-circuits — skipping `loginctl enable-linger` — when user@<uid>.service
+    is already active, which at provisioning time can be a transient login
+    session (e.g. from the preceding `podman system migrate`). Without the marker
+    the manager dies with that session and the workload loses /run/user/<uid>, so
+    we set the marker unconditionally here first.
     """
+    result = subprocess.run(
+        ["loginctl", "enable-linger", str(pw.pw_uid)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"loginctl enable-linger failed: {result.stderr}")
     if service_runtime.ensure_runtime_dir(pw.pw_uid, timeout=15):
         log(f"  Enabled linger for {pw.pw_name} (UID {pw.pw_uid})")
         return

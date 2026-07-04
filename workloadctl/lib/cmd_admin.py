@@ -953,6 +953,21 @@ def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
     print(f"    Revert to shipped:      sudo rm {config.override_dir / rel}")
 
 
+def _editor_argv() -> list:
+    """Return the argv for the user's $EDITOR.
+
+    Split so a value carrying flags (e.g. "code --wait", "emacs -nw") is honored
+    instead of being treated as one impossible argv[0]. Falls back to nano if
+    $EDITOR is unset/empty, or malformed (unbalanced quotes make shlex.split
+    raise ValueError) rather than crashing `workloadctl edit`.
+    """
+    try:
+        return shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    except ValueError:
+        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
+        return ["nano"]
+
+
 def _edit_control_file(args, manager: WorkloadManager):
     """Edit a bundle control file, seeding an /etc override copy-on-write.
 
@@ -1001,16 +1016,7 @@ def _edit_control_file(args, manager: WorkloadManager):
             print(f"  No shipped default — created a new control file: {override}")
         seeded = True
 
-    # Split $EDITOR so a value carrying flags (e.g. "code --wait", "emacs -nw")
-    # is honored instead of being treated as one impossible argv[0]. Fall back
-    # to nano if the var is set but empty/whitespace.
-    # A malformed $EDITOR (e.g. unbalanced quotes) makes shlex.split raise
-    # ValueError; fall back to nano rather than crashing `workloadctl edit`.
-    try:
-        editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
-    except ValueError:
-        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
-        editor_argv = ["nano"]
+    editor_argv = _editor_argv()
     result = subprocess.run([*editor_argv, str(override)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
@@ -1069,15 +1075,8 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path = Path(backup_str)
     shutil.copy2(config_path, backup_path)
 
-    # A malformed $EDITOR (e.g. unbalanced quotes) makes shlex.split raise
-    # ValueError; fall back to nano rather than crashing `workloadctl edit`.
-    try:
-        editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
-    except ValueError:
-        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
-        editor_argv = ["nano"]
-
     # Open editor
+    editor_argv = _editor_argv()
     result = subprocess.run(editor_argv + [str(config_path)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
