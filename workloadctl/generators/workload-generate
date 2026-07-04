@@ -75,6 +75,7 @@ try:
         vm_mac_address, find_ovmf_code,
         parse_memory_mib, virtiofs_tags, parse_volume_spec,
         selinux_type_name, render_sysusers_config,
+        RUN_SYSTEMD_SYSTEM, workload_run_files,
     )
     _early_log("Python imports complete")
 except Exception as e:
@@ -93,6 +94,49 @@ SYSUSERS_DIR = Path(os.environ.get("SYSUSERS_DIR", str(SERVICES_DIR)))
 
 # Baseline seccomp profile applied to all workloads unless overridden via security_opt
 SECCOMP_BASELINE = "/usr/share/containers/seccomp-workload-baseline.json"
+
+
+class _RunFileConfig:
+    """Minimal WorkloadConfig stand-in so the generator can drive the single
+    canonical run-file enumeration (workload_lib.workload_run_files) from its
+    raw-dict context. Carries exactly the attributes that helper reads; uid is
+    the value the generator already allocated, not a passwd lookup (WorkloadConfig
+    would drag workloadctl_core onto the generate step and raise before the user
+    exists)."""
+
+    def __init__(self, *, config, name, uid, is_vm, mode=None):
+        self.config = config
+        self.name = name
+        self.uid = uid
+        self.is_vm = is_vm
+        self.mode = mode  # container mode; unread (and None) for VMs
+
+    @property
+    def is_multi(self):
+        return "containers" in self.config
+
+    def container_names(self):
+        if self.is_multi:
+            return [c["name"] for c in self.config["containers"]]
+        return [self.name]
+
+
+def emitted_run_paths(view):
+    """(kind, role) -> [dest Path, ...] for the files the generator writes,
+    sourced from workload_run_files() so the generator no longer hand-spells any
+    run-file path. The helper's paths are rooted at RUN_SYSTEMD_SYSTEM; remap that
+    root onto the generator's output dirs — SYSUSERS_DIR for the sysusers .conf
+    (tests may point it elsewhere), SERVICES_DIR for everything else. Per-container
+    and per-virtiofs entries preserve the helper's order (== the generator's), so
+    callers zip them against their content sources."""
+    out = {}
+    for rf in workload_run_files(view):
+        if not rf.emitted or rf.kind == "env-file":
+            continue
+        base = SYSUSERS_DIR if rf.kind == "sysusers" else SERVICES_DIR
+        dest = base / rf.path.relative_to(RUN_SYSTEMD_SYSTEM)
+        out.setdefault((rf.kind, rf.role), []).append(dest)
+    return out
 
 
 def log_msg(msg, level="info"):
@@ -1640,16 +1684,17 @@ def generate_vm_workload(config, user_name: str, uid: int):
     home_dir = str(workload_state_dir(name))
     vm_cfg = config.get("vm", {})
     volumes = vm_cfg.get("volumes", [])
+    view = _RunFileConfig(config=config, name=name, uid=uid, is_vm=True)
+    paths = emitted_run_paths(view)
 
     # Sysusers (with implicit kvm)
     sysuser_content = generate_sysuser_config_vm(config, user_name, uid)
-    sysuser_file = SYSUSERS_DIR / f"workload-{name}.conf"
-    sysuser_file.write_text(sysuser_content)
+    paths[("sysusers", "sysusers")][0].write_text(sysuser_content)
     log_msg("  Created VM sysusers config (implicit kvm group)")
 
     # Setup service (same as container)
     setup_content = generate_setup_service(config, user_name)
-    (SERVICES_DIR / f"workload-{name}-setup.service").write_text(setup_content)
+    paths[("unit", "setup")][0].write_text(setup_content)
     log_msg("  Created setup service")
 
     # Only emit the shared workload-bridge.service when this VM actually uses
@@ -1673,26 +1718,27 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # virtiofsd sidecar services — collision-safe tags, same order/set as the
     # VM service's chardevs and the purge/cloud-init sites (B3).
     vfs_tags = virtiofs_tags(volumes)
-    for tag, vol_spec in zip(vfs_tags, volumes):
+    vfs_dests = paths.get(("unit", "virtiofs"), [])
+    for (tag, vol_spec), vfs_dest in zip(zip(vfs_tags, volumes), vfs_dests):
         host_raw, _guest_path, _opts = parse_volume_spec(vol_spec)
         # Expand ./ @/ data/ state/ anchors relative to the workload dirs.
         host_path = expand_volume_path(host_raw, home_dir).split(":", 2)[0]
         vfs_content = generate_virtiofs_service(name, tag, host_path, user_name, uid)
-        (SERVICES_DIR / f"workload-{name}-virtiofs-{tag}.service").write_text(vfs_content)
+        vfs_dest.write_text(vfs_content)
         log_msg(f"  Created virtiofsd service for tag '{tag}'")
 
     # Build service
     build_content = generate_vm_build_service(config, user_name)
-    (SERVICES_DIR / f"workload-{name}-build.service").write_text(build_content)
+    paths[("unit", "build")][0].write_text(build_content)
     log_msg("  Created build service")
 
     # Main VM service
     vm_service_content = generate_vm_service(config, user_name, uid)
-    (SERVICES_DIR / f"workload-{name}.service").write_text(vm_service_content)
+    paths[("unit", "main")][0].write_text(vm_service_content)
     log_msg("  Created VM service")
 
     # Wants symlink for main service
-    symlink_path = wants_dir / f"workload-{name}.service"
+    symlink_path = paths[("wants-symlink", "main")][0]
     if symlink_path.exists() or symlink_path.is_symlink():
         symlink_path.unlink()
     symlink_path.symlink_to(f"../workload-{name}.service")
@@ -1809,22 +1855,24 @@ def main():
 
             # --- container path ---
             mode = infer_workload_mode(config)
+            view = _RunFileConfig(config=config, name=name, uid=uid, is_vm=False, mode=mode)
+            paths = emitted_run_paths(view)
 
             sysuser_content = generate_sysuser_config(config, user_name, uid)
-            sysuser_file = SYSUSERS_DIR / f"workload-{name}.conf"
+            sysuser_file = paths[("sysusers", "sysusers")][0]
             sysuser_file.write_text(sysuser_content)
             log_msg(f"  Created sysusers config with UID {uid}")
 
             # user@<uid>.service.d drop-in: redirect the user manager into
             # workloads.slice and apply workload-level cgroup limits (ADR 001 option 1b).
-            dropin_dir = SERVICES_DIR / f"user@{uid}.service.d"
-            dropin_dir.mkdir(parents=True, exist_ok=True)
-            (dropin_dir / "50-workload.conf").write_text(generate_user_dropin(config, uid))
+            dropin_file = paths[("dropin", "dropin")][0]
+            dropin_file.parent.mkdir(parents=True, exist_ok=True)
+            dropin_file.write_text(generate_user_dropin(config, uid))
             log_msg(f"  Created user@{uid} drop-in (workloads.slice placement)")
 
             # Setup service: creates user (runs as root, no User= directive)
             setup_content = generate_setup_service(config, user_name)
-            setup_file = SERVICES_DIR / f"workload-{name}-setup.service"
+            setup_file = paths[("unit", "setup")][0]
             setup_file.write_text(setup_content)
             log_msg(f"  Created setup service at {setup_file}")
 
@@ -1836,7 +1884,7 @@ def main():
                 if service_content is None:
                     log_msg(f"  Skipping {name} due to config errors", level="err")
                     continue
-                service_file = SERVICES_DIR / f"workload-{name}.service"
+                service_file = paths[("unit", "main")][0]
                 service_file.write_text(service_content)
                 log_msg(f"  Created system service at {service_file}")
             else:
@@ -1844,7 +1892,7 @@ def main():
                 # network-create (bridge mode).
                 if mode == "pod":
                     helper = generate_pod_service(config, user_name, uid)
-                    (SERVICES_DIR / f"workload-{name}-pod.service").write_text(helper)
+                    paths[("unit", "pod")][0].write_text(helper)
                 else:  # bridge
                     if config.get("network", {}).get("ports"):
                         log_msg(f"  WARNING: {name}: workload-level [network].ports "
@@ -1852,27 +1900,27 @@ def main():
                                 f"container under [containers.network]",
                                 level="warning")
                     helper = generate_net_service(config, user_name, uid)
-                    (SERVICES_DIR / f"workload-{name}-net.service").write_text(helper)
+                    paths[("unit", "net")][0].write_text(helper)
                 # Per-container services (podman's native user-manager healthcheck
                 # timer works under option 1b — no system-manager timer needed)
+                container_dest = dict(zip(view.container_names(), paths[("unit", "container")]))
                 for c in containers:
                     sc = generate_system_service(config, c, user_name, uid, mode=mode)
                     if sc is None:
                         log_msg(f"  Skipping container {c.get('name')} due to config errors", level="err")
                         continue
-                    (SERVICES_DIR / f"workload-{name}-{c['name']}.service").write_text(sc)
+                    container_dest[c['name']].write_text(sc)
                 # Umbrella
                 slice_name = config.get("resources", {}).get("slice", "workloads.slice")
                 umbrella = generate_umbrella_service(
                     name, [c["name"] for c in containers], slice_name, mode=mode
                 )
-                (SERVICES_DIR / f"workload-{name}.service").write_text(umbrella)
+                paths[("unit", "main")][0].write_text(umbrella)
                 log_msg(f"  Created {mode}-mode units for {name} ({len(containers)} containers)")
 
             # Create symlink for auto-start (equivalent to systemctl enable)
-            wants_dir = SERVICES_DIR / "multi-user.target.wants"
-            wants_dir.mkdir(parents=True, exist_ok=True)
-            symlink_path = wants_dir / f"workload-{name}.service"
+            symlink_path = paths[("wants-symlink", "main")][0]
+            symlink_path.parent.mkdir(parents=True, exist_ok=True)
 
             if symlink_path.exists() or symlink_path.is_symlink():
                 symlink_path.unlink()
