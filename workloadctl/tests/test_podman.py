@@ -107,6 +107,28 @@ class PodmanWrapperTests(unittest.TestCase):
         self.assertIn("_wl-test", cmd)
 
     @patch("subprocess.run")
+    def test_for_user_passes_session_bus_for_cgroup_placement(self, mock_run):
+        # Without DBUS_SESSION_BUS_ADDRESS pointing at the workload user's own
+        # bus, rootless crun writes the container cgroup.procs directly and
+        # `podman exec` from a foreign session cgroup fails with EPERM. The
+        # value must match the user's runtime-dir bus for the migration to be
+        # routed through user@<uid>.service.
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        self.p.image_id("ref")
+        cmd = mock_run.call_args.args[0]
+        self.assertIn(
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5001/bus", cmd
+        )
+
+    @patch("subprocess.run")
+    def test_for_root_omits_session_bus(self, mock_run):
+        # Root talks to the system store directly; no per-user bus applies.
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        Podman.for_root().image_id("ref")
+        cmd = mock_run.call_args.args[0]
+        self.assertFalse(any("DBUS_SESSION_BUS_ADDRESS" in a for a in cmd))
+
+    @patch("subprocess.run")
     def test_log_level_error_passed(self, mock_run):
         mock_run.return_value = _ok(stdout="null")
         self.p.list_containers()

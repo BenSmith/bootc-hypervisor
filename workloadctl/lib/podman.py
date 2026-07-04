@@ -93,6 +93,18 @@ class Podman:
                 "-u", self._username,
                 "-E", f"XDG_RUNTIME_DIR=/run/user/{self._uid}",
                 "-E", f"HOME={self._home_dir}",
+                # Point podman at the workload user's own session bus so it
+                # drives cgroup placement through that user's systemd manager
+                # (user@<uid>.service, which owns the delegated workloads.slice
+                # subtree). Without it, rootless crun writes the container's
+                # cgroup.procs directly; when the caller is in a foreign
+                # session cgroup (e.g. an admin's login), the two cgroups' only
+                # common ancestor is the root cgroup, which the unprivileged
+                # workload user cannot write -> `podman exec` fails with
+                # "write to .../cgroup.procs: Permission denied". The bulk of
+                # calls (ps/inspect/pull) don't migrate cgroups and never hit
+                # this, which is why only exec/shell surfaced it.
+                "-E", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{self._uid}/bus",
             ]
         cmd += ["podman", "--log-level=error", *args]
         return cmd

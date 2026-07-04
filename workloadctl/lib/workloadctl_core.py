@@ -638,9 +638,12 @@ class WorkloadManager:
         """Run `podman exec <args>` against a workload container.
 
         Under ADR 001 option 1b, containers run inside the user manager
-        (user@<uid>.service → workloads.slice), so crun's cgroup migration stays
-        within the delegated subtree and plain sudo -u exec works without any
-        cgroup placement shim.
+        (user@<uid>.service → workloads.slice). crun's cgroup migration only
+        stays within that delegated subtree if podman drives placement through
+        the workload user's systemd manager, which it does when the session bus
+        is reachable -- see the DBUS_SESSION_BUS_ADDRESS note in
+        Podman._build_cmd. Without it, exec from a foreign session cgroup fails
+        with an EPERM writing the container's cgroup.procs.
         """
         return self.podman(config).run("exec", *args,
                                        check=check, capture_output=capture_output)
