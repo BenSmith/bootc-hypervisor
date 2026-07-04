@@ -16,10 +16,10 @@ _workload_ctl_completion() {
         bundles=$(cd "$bundles_dir" 2>/dev/null && for d in */; do [[ -f "${d}workload.toml" ]] && echo "${d%/}"; done)
     fi
 
-    # Get list of workload names (without .toml extension)
+    # Get list of workload names (subdir layout: <name>/workload.toml)
     local workloads=""
     if [[ -d "$workload_dir" ]]; then
-        workloads=$(cd "$workload_dir" 2>/dev/null && ls -1 *.toml 2>/dev/null | sed 's/\.toml$//')
+        workloads=$(cd "$workload_dir" 2>/dev/null && for d in */; do [[ -f "${d}workload.toml" ]] && echo "${d%/}"; done)
     fi
 
     # For commands that accept <workload>/<container>: if $cur looks like
