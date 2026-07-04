@@ -1004,7 +1004,13 @@ def _edit_control_file(args, manager: WorkloadManager):
     # Split $EDITOR so a value carrying flags (e.g. "code --wait", "emacs -nw")
     # is honored instead of being treated as one impossible argv[0]. Fall back
     # to nano if the var is set but empty/whitespace.
-    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    # A malformed $EDITOR (e.g. unbalanced quotes) makes shlex.split raise
+    # ValueError; fall back to nano rather than crashing `workloadctl edit`.
+    try:
+        editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    except ValueError:
+        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
+        editor_argv = ["nano"]
     result = subprocess.run([*editor_argv, str(override)])
     if result.returncode != 0:
         print(f"Editor exited with error code {result.returncode}", file=sys.stderr)
@@ -1063,7 +1069,13 @@ def cmd_edit(args, manager: WorkloadManager):
     backup_path = Path(backup_str)
     shutil.copy2(config_path, backup_path)
 
-    editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    # A malformed $EDITOR (e.g. unbalanced quotes) makes shlex.split raise
+    # ValueError; fall back to nano rather than crashing `workloadctl edit`.
+    try:
+        editor_argv = shlex.split(os.environ.get("EDITOR", "") or "nano") or ["nano"]
+    except ValueError:
+        print("Warning: $EDITOR is malformed; falling back to nano", file=sys.stderr)
+        editor_argv = ["nano"]
 
     # Open editor
     result = subprocess.run(editor_argv + [str(config_path)])

@@ -32,7 +32,6 @@ from workload_lib import (
     workload_root_dir,
     RUN_SYSTEMD_SYSTEM,
     workload_run_files,
-    workload_service_units,
     render_sysusers_config,
     SUBID_LOCK,
 )
@@ -786,15 +785,22 @@ def cmd_disable(args, manager: WorkloadManager):
     # `sudo -u … podman` session and is GC'd in between — making every CLI podman
     # call (health/images/status/logs/exec/cp) intermittently fail with
     # "lstat /run/user/<uid>: no such file or directory".
-    # Every emitted service except the umbrella (stopped above): the setup/build
-    # oneshots, the matching pod/net helper or per-container sub-services, and a
-    # VM's virtiofs mounts. They share the RemainAfterExit staleness, so all must
-    # be stopped + reset for a same-name re-enable to re-run them; stopping an
-    # absent unit is a harmless no-op. Sourced from workload_run_files() so this
-    # set never drifts from what the generator actually writes.
+    # Every service unit the workload owns except the umbrella (stopped above):
+    # the setup/build oneshots, BOTH the pod and net helpers, per-container
+    # sub-services, and a VM's virtiofs mounts. They share the RemainAfterExit
+    # staleness, so all must be stopped + reset for a same-name re-enable to
+    # re-run them; stopping an absent unit is a harmless no-op.
+    #
+    # Sourced from the run-file SUPERSET (workload_run_files), NOT the emitted
+    # subset — this MUST match _remove_run_files below, which unlinks both the
+    # -pod and -net fragments regardless of the current mode. If the TOML's mode
+    # is changed (e.g. pod -> bridge) between enable and disable, the old mode's
+    # still-active helper would otherwise have its fragment removed but never be
+    # stopped, stranding a loaded unit (and its pod) until the next reboot.
     helper_services = [
-        svc for svc in workload_service_units(config)
-        if svc != config.service_name
+        rf.path.name
+        for rf in workload_run_files(config)
+        if rf.kind == "unit" and rf.path.name != config.service_name
     ]
     for svc in helper_services:
         attempt(f"stop {svc}",

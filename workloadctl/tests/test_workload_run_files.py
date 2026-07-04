@@ -322,6 +322,40 @@ class TestRunFilesMembership(unittest.TestCase):
             self.assertTrue(by_kind.get('env-file'))
 
 
+@PENDING
+class TestRunTreeScansCoverRunFiles(unittest.TestCase):
+    """`RUN_TREE_SCANS` (drift's tree-walk table) must name exactly the run-file
+    kinds that land under RUN_SYSTEMD_SYSTEM.
+
+    workload_run_files() is the per-config source of truth; RUN_TREE_SCANS is its
+    tree-walking companion. If a new tree kind is added to one without the other,
+    drift silently stops comparing (or over-globs) it — the exact drift hazard the
+    shared helpers exist to kill. This test pins the two together.
+    """
+
+    # env-file kinds live under WORKLOAD_ENV_DIR, not the systemd run tree, so
+    # drift never scans them.
+    _ENV_KINDS = {'env-file'}
+
+    def test_scans_match_emitted_tree_kinds(self):
+        import collections
+        emitted_kinds = set()
+        fake_pw = collections.namedtuple('pw', 'pw_uid')(12345)
+        for toml, name in (
+            (SINGLE_TOML, 'app'), (POD_TOML, 'stack'),
+            (BRIDGE_TOML, 'mesh'), (VM_TOML, 'forge'),
+        ):
+            with _Config(toml, name) as config:
+                # Force the with-user branch so the UID-keyed drop-in is included.
+                with patch('workloadctl_core.pwd.getpwnam', return_value=fake_pw):
+                    for rf in workload_run_files(config):
+                        if rf.emitted and rf.kind not in self._ENV_KINDS:
+                            emitted_kinds.add(rf.kind)
+
+        scan_kinds = {s.kind for s in workload_lib.RUN_TREE_SCANS}
+        self.assertEqual(scan_kinds, emitted_kinds)
+
+
 # --------------------------------------------------------------------------- #
 # Stage 0 — owned/excluded boundary, asserted as a property of the helper.
 # Locked before any consumer trusts the output (not deferred to Stage 3).

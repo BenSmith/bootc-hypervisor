@@ -465,6 +465,22 @@ def workload_container_name(name: str) -> str:
     return f"workload-{name}"
 
 
+def workload_podman_container_name(
+    name: str, container_name: str, *, is_multi: bool
+) -> str:
+    """The podman --name for one container of a workload.
+
+    Single source of the single-vs-multi name formula shared by
+    WorkloadConfig.podman_container_name and the metrics exporter (which reads
+    raw TOML and can't build a WorkloadConfig). Single-container workloads use
+    the bare `workload-<name>`; each member of a pod/bridge workload gets
+    `workload-<name>-<container>`.
+    """
+    if not is_multi:
+        return workload_container_name(name)
+    return f"workload-{name}-{container_name}"
+
+
 # Generated unit files live in the systemd runtime tree (transient; rewritten on
 # boot by workload-generate.service and on every `workloadctl enable`).
 RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
@@ -598,6 +614,54 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
             ))
 
     return files
+
+
+@dataclass(frozen=True)
+class RunTreeScan:
+    """How to find one run-file kind when scanning the whole run tree.
+
+    Companion to workload_run_files(): that lists the files ONE config owns;
+    this lists the glob per kind so a tree-walker (workloadctl drift) can compare
+    generated-vs-live for every workload at once, in both directions, without
+    re-deriving the workload-<name>* name formulas. Kinds mirror
+    WorkloadRunFile.kind for the files that land under RUN_SYSTEMD_SYSTEM — the
+    env-file kinds live in the env tree and never appear here.
+
+    glob          — pattern under the run root (drift's scratch dir or the live
+                    tree); may descend a subdir (wants/, user@*.service.d/).
+    content       — True: drift is a byte diff of the file. False: the file is an
+                    enablement symlink whose only drift is presence/absence.
+    name_filtered — True: the file is named workload-<name>* so `drift <name>`
+                    can scope to it. False: drop-ins are keyed by UID, so the
+                    name filter can't apply and they are always in scope.
+    """
+
+    kind: str
+    glob: str
+    content: bool
+    name_filtered: bool
+
+
+# Every run-file kind that lands under RUN_SYSTEMD_SYSTEM, as a scan table for
+# drift. Adding a kind here (alongside its workload_run_files entry) is all drift
+# needs to start comparing it — there is no per-kind block to duplicate.
+# test_run_tree_scans_cover_run_files pins this to workload_run_files' tree kinds.
+RUN_TREE_SCANS: list[RunTreeScan] = [
+    RunTreeScan("unit", "workload-*.service", content=True, name_filtered=True),
+    RunTreeScan("sysusers", "workload-*.conf", content=True, name_filtered=True),
+    RunTreeScan(
+        "wants-symlink",
+        "multi-user.target.wants/workload-*.service",
+        content=False,
+        name_filtered=True,
+    ),
+    RunTreeScan(
+        "dropin",
+        "user@*.service.d/50-workload.conf",
+        content=True,
+        name_filtered=False,
+    ),
+]
 
 
 def workload_service_units(config, *, roles=None) -> list[str]:

@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_root_dir, workload_service_name, workload_username
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -54,12 +54,11 @@ def get_enabled_workloads():
 
     Returns list of (name, health_targets, is_vm) tuples, where health_targets
     is a list of (local_container_name, podman_container_name) pairs — one per
-    container that declares a health check. For single-container workloads
-    podman_container_name is `workload-<name>`; for pod/bridge ([[containers]])
-    workloads each container has its own podman name, `workload-<name>-<container>`
-    (see WorkloadConfig.podman_container_name in lib/workloadctl_core.py — mirrored
-    here rather than constructed via WorkloadConfig, since this function reads the
-    TOML directly). An empty list means no health checks (falsy, like the old bool).
+    container that declares a health check. The podman name comes from the
+    shared workload_podman_container_name() helper (single source of the
+    single-vs-multi formula, also backing WorkloadConfig.podman_container_name);
+    this function reads raw TOML and can't build a WorkloadConfig. An empty list
+    means no health checks (falsy, like the old bool).
     """
     workloads: list[tuple] = []
     if not WORKLOAD_CONFIG_DIR.is_dir():
@@ -88,9 +87,8 @@ def get_enabled_workloads():
                     if not ctr.get("container", {}).get("health", {}).get("cmd", ""):
                         continue
                     local_name = ctr.get("name", name)
-                    podman_name = (
-                        f"workload-{name}-{local_name}" if is_multi
-                        else workload_container_name(name)
+                    podman_name = workload_podman_container_name(
+                        name, local_name, is_multi=is_multi
                     )
                     health_targets.append((local_name, podman_name))
             if name:

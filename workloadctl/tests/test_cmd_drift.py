@@ -131,6 +131,19 @@ class OrphanDetectionTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("multi-user.target.wants/workload-keep.service", out)
 
+    def test_dangling_enablement_symlink_not_reported_missing(self):
+        # Regression: a present-but-dangling enablement symlink (its target
+        # moved/removed) must NOT be reported as a missing symlink. The link
+        # file exists, so enablement is present even though exists() follows the
+        # link to a nonexistent target and returns False.
+        (self.live / "workload-keep.service").write_text("KEEP\n")
+        (self.live / "workload-keep.conf").write_text("u keep 10000\n")
+        os.symlink("../does-not-exist.service",
+                   self.live / "multi-user.target.wants" / "workload-keep.service")
+        code, out = self._run()
+        self.assertEqual(code, 0)
+        self.assertNotIn("missing enablement symlink", out)
+
     def test_missing_sysusers_conf_reported(self):
         self._stage_keep()
         (self.live / "workload-keep.conf").unlink()

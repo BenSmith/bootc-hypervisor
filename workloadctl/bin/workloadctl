@@ -354,28 +354,40 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def _run_cli() -> int:
+    """Run main() and map library exceptions to the process exit code.
+
+    Split out from the __main__ guard so the exception→exit-code contract is
+    unit-testable. Returns the code the process should exit with; SystemExit
+    raised inside main() (handlers that call sys.exit directly) propagates
+    unchanged, exactly as before.
+    """
     try:
         main()
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
-        sys.exit(130)
+        return 130
     except UsageError:
         # Message already printed by the raiser; usage errors exit 2.
-        sys.exit(2)
+        return 2
     except LifecycleError as e:
         # Diagnostic (if any) already printed by the raiser; reproduce the
         # exact returncode of the systemctl/podman invocation that failed.
-        sys.exit(e.returncode)
+        return e.returncode
     except WorkloadMasked as e:
         print(str(e), file=sys.stderr)
-        sys.exit(1)
+        return 1
     except WorkloadUserNotFound as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_run_cli())

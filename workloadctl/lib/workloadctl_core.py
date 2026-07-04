@@ -33,6 +33,7 @@ from workload_lib import (
     workload_container_name,
     workload_data_dir,
     workload_home_dir,
+    workload_podman_container_name,
     workload_service_name,
     workload_state_dir,
     workload_username,
@@ -588,9 +589,9 @@ class WorkloadConfig:
 
     def podman_container_name(self, container_name: str) -> str:
         """Podman --name for a given container."""
-        if not self.is_multi:
-            return self.container_name
-        return f"workload-{self.name}-{container_name}"
+        return workload_podman_container_name(
+            self.name, container_name, is_multi=self.is_multi
+        )
 
     def podman_targets(self) -> list[str]:
         """Podman --name for every container this workload runs, in

@@ -564,16 +564,19 @@ class ContainerSubstrate(Substrate):
         not-running. This is the single source the per-container health and
         diagnose paths consume instead of re-deriving the name/unit math.
         """
-        name = self.config.name
         if self.config.is_multi:
+            # Per-container .service names from the run-file model (container_names
+            # order), so this never re-derives the workload-<name>-<ctr>.service
+            # formula the generator owns.
+            units = workload_service_units(self.config, roles={"container"})
             rows_meta = [
-                (c, self.config.podman_container_name(c),
-                 f"workload-{name}-{c}.service")
-                for c in self.config.container_names()
+                (c, self.config.podman_container_name(c), unit)
+                for c, unit in zip(self.config.container_names(), units)
             ]
         else:
             rows_meta = [
-                (name, self.config.container_name, self.config.service_name)
+                (self.config.name, self.config.container_name,
+                 self.config.service_name)
             ]
 
         podman = None
@@ -1217,7 +1220,7 @@ class VMSubstrate(Substrate):
             for p in home_dir.glob("system.qcow2.gen-*")
             if p.suffix[5:].isdigit() and int(p.suffix[5:]) != exempt
         )
-        for gen_n in (gens[:-keep] if len(gens) > keep else []):
+        for gen_n in (gens[:-keep] if keep > 0 else gens):
             print(f"  Pruning old generation: system.qcow2.gen-{gen_n}")
             (home_dir / f"system.qcow2.gen-{gen_n}").unlink(missing_ok=True)
 
@@ -1254,7 +1257,19 @@ class VMSubstrate(Substrate):
             print(f"  system.qcow2 → {rotated.name} (pre-rollback state preserved)")
             system_disk.rename(rotated)
         print(f"  system.qcow2.gen-{gen} → system.qcow2")
-        gen_path.replace(system_disk)
+        try:
+            gen_path.replace(system_disk)
+        except OSError as e:
+            # The current disk was already rotated out to `rotated`. If swapping
+            # the target generation in fails now (ENOSPC, permissions, …),
+            # system.qcow2 is missing and the VM has no active disk. Put the
+            # pre-rollback disk back so the guest still boots, then surface a
+            # clean failure instead of an unhandled traceback.
+            if rotated_gen is not None and not system_disk.exists():
+                rotated.rename(system_disk)
+            print(f"Error: VM rollback failed swapping in generation {gen}: {e}",
+                  file=sys.stderr)
+            raise LifecycleError(1) from e
         if rotated_gen is not None:
             self._prune_generations(home_dir, rollback_keep, exempt=rotated_gen)
         subprocess.run(["systemctl", "start", self.config.service_name], check=True)

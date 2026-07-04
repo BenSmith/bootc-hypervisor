@@ -1377,6 +1377,26 @@ class CmdEditTomlTest(unittest.TestCase):
         self.assertEqual(captured[0][:-1], ["code", "--wait"])
         self.assertEqual(Path(captured[0][-1]), self.cfg_path)
 
+    def test_malformed_editor_falls_back_to_nano(self):
+        # Regression: a malformed $EDITOR (unbalanced quote) must not crash
+        # cmd_edit with an uncaught shlex ValueError — it falls back to nano.
+        ns = argparse.Namespace(workload="app", file=None, yes=False)
+        captured = []
+
+        def run_side_effect(argv, **kw):
+            captured.append(list(argv))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"EDITOR": '"vim'}):
+            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_admin.cmd_edit(ns, self.manager)
+
+        self.assertEqual(captured[0][0], "nano")
+        self.assertEqual(Path(captured[0][-1]), self.cfg_path)
+        self.assertIn("malformed", err.getvalue())
+
     def test_editor_failure_removes_backup_exits_1(self):
         code, out, err = self._run(edited_content=None, editor_rc=1)
         self.assertEqual(code, 1)

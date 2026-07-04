@@ -1385,6 +1385,53 @@ class TestVMRollbackTargets(unittest.TestCase):
         # pruned. gen-1 was consumed as the active disk.
         self.assertEqual(remaining, [3, 4, 5])
 
+    def test_rollback_keep_zero_prunes_all_rotated_generations(self):
+        # Regression: rollback_keep=0 must prune every generation except the
+        # exempt rotated-out disk. The old `gens[:-keep]` slice degenerated to
+        # gens[:0] == [] for keep==0, so nothing was pruned and gen files grew
+        # without bound.
+        config = _make_vm_config()
+        config.config.setdefault("vm", {})["rollback_keep"] = 0
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            for n in (1, 2, 3):
+                (home / f"system.qcow2.gen-{n}").write_bytes(f"GEN{n}".encode())
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            self._rollback(home, target, config)
+            remaining = sorted(
+                int(p.suffix[5:]) for p in home.glob("system.qcow2.gen-*"))
+        # keep=0: only the exempt rotated-out gen-4 (the pre-rollback disk)
+        # survives; gen-2 and gen-3 are pruned, gen-1 became the active disk.
+        self.assertEqual(remaining, [4])
+
+    def test_rollback_restores_current_disk_when_swap_fails(self):
+        # Regression (ADR 003 atomicity): if swapping the target generation in
+        # fails after the current disk was already rotated out, the pre-rollback
+        # disk must be put back so the VM still has an active system.qcow2 —
+        # rather than being left with none and an unhandled traceback.
+        config = _make_vm_config()
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "system.qcow2").write_bytes(b"CURRENT")
+            (home / "system.qcow2.gen-1").write_bytes(b"GEN1")
+            target = {'label': 'system.qcow2.gen-1', 'gen': 1,
+                      'path': home / "system.qcow2.gen-1"}
+            buf = io.StringIO()
+            with patch.object(type(config), 'home_dir',
+                              new_callable=lambda: property(lambda self: home)), \
+                 patch('subprocess.run', return_value=_ok()), \
+                 patch('sys.stdout', buf), patch('sys.stderr', buf), \
+                 patch.object(Path, 'replace', side_effect=OSError("no space")):
+                with self.assertRaises(LifecycleError):
+                    VMSubstrate(config, None).rollback_to(target)
+            # The active disk is restored to the pre-rollback contents, not left
+            # missing; the target generation is untouched (swap never completed).
+            self.assertTrue((home / "system.qcow2").exists())
+            self.assertEqual((home / "system.qcow2").read_bytes(), b"CURRENT")
+            self.assertTrue((home / "system.qcow2.gen-1").exists())
+
 
 # ── lifecycle() primitive ──────────────────────────────────────────────────────
 
