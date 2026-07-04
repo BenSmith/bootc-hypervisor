@@ -253,6 +253,12 @@ def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
         parts = host_path.relative_to(root_dir).parts
     except ValueError:
         return False  # not lexically under the root — caller also gates this
+    if not parts:
+        # host_path == root_dir: chowning the anchor would hand the workload
+        # user ownership of the root-owned trust boundary this walk relies on.
+        log(f"  WARNING: refusing to provision {host_path}: it is the "
+            f"workload root itself")
+        return False
     if ".." in parts:
         log(f"  WARNING: refusing to provision {host_path}: '..' in path")
         return False

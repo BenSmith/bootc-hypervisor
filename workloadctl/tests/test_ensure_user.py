@@ -466,6 +466,26 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             # Refused: nothing was chowned via the symlinked component.
             self.assertEqual(fchown_fds, [])
 
+    def test_workload_root_itself_is_refused_not_chowned(self):
+        # An absolute volume spec equal to the workload root passes the
+        # containment gate (relative path "."), but provisioning must refuse:
+        # chowning the anchor would hand the workload user ownership of the
+        # root-owned trust boundary the O_NOFOLLOW walk relies on.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            config = {"workload": {"name": "vmx"},
+                      "vm": {"volumes": [f"{root}:/mnt"]}}
+            fchown_fds = []
+            ps, pd, pr = self._patch(root)
+            with ps, pd, pr, \
+                 mock.patch("os.fchown", side_effect=lambda fd, u, g: fchown_fds.append(fd)), \
+                 mock.patch("os.fchmod"), \
+                 mock.patch.object(self.mod, "log"):
+                self.mod.setup_vm_volume_directories(
+                    _fake_pw(root / "state", uid=1234, gid=1234), config)
+            self.assertEqual(fchown_fds, [])
+
 
 class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
     """C1: multi-container workload volume dirs are created."""

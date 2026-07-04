@@ -188,6 +188,29 @@ class Podman:
         status = health.get("Status")
         return status or None
 
+    def container_healths(self, names: Iterable[str]) -> dict[str, str | None]:
+        """Health status per container, via ONE inspect for all names.
+
+        Containers that don't exist are absent from the result; podman exits
+        nonzero on a partial batch but still prints the found subset, so we
+        parse stdout ourselves instead of going through json_out/check.
+        """
+        names = list(names)
+        if not names:
+            return {}
+        proc = self._run(
+            "inspect", "--type=container", "--format=json", *names, check=False)
+        try:
+            infos = json.loads(proc.stdout) or []
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        result: dict[str, str | None] = {}
+        for info in infos:
+            cname = (info.get("Name") or "").lstrip("/")
+            health = (info.get("State") or {}).get("Health") or {}
+            result[cname] = health.get("Status") or None
+        return result
+
     def container_status(self, name: str) -> str | None:
         """Container status string, or None if not running / not found."""
         rows = self.list_containers(filters={"name": name})

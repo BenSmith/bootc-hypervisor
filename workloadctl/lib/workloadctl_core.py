@@ -35,6 +35,7 @@ from workload_lib import (
     workload_home_dir,
     workload_podman_container_name,
     workload_service_name,
+    workload_service_units,
     workload_state_dir,
     workload_username,
 )
@@ -550,7 +551,7 @@ class WorkloadConfig:
         """systemd unit names for each container (multi) or [service_name]."""
         if not self.is_multi:
             return [self.service_name]
-        return [f"workload-{self.name}-{c}.service" for c in self.container_names()]
+        return workload_service_units(self, roles={"container"})
 
     def container_image(self, container_name: str) -> str:
         """Image for a given container name. For single workloads, self.image."""

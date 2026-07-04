@@ -1098,7 +1098,8 @@ class VMSubstrate(Substrate):
             # re-run. Restart it first so config edits (template_vars, volumes, …)
             # are re-rendered into a fresh seed before QEMU boots onto it.
             subprocess.run(
-                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                ["systemctl", "restart",
+                 workload_service_units(self.config, roles={"setup"})[0]],
                 check=True,
             )
             subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
@@ -1149,7 +1150,8 @@ class VMSubstrate(Substrate):
             # For pet VMs this is safe — it does not touch system.qcow2.
             print(f"Recreating VM workload {self.config.name}...")
             subprocess.run(
-                ["systemctl", "restart", f"workload-{self.config.name}-setup.service"],
+                ["systemctl", "restart",
+                 workload_service_units(self.config, roles={"setup"})[0]],
                 check=True,
             )
             subprocess.run(["systemctl", "restart", self.config.service_name], check=True)

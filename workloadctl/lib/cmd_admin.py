@@ -22,6 +22,7 @@ from workload_lib import (
     validate_workload_config,
     validate_workload_name,
     workload_config_path,
+    workload_service_units,
 )
 from workloadctl_core import (
     WorkloadConfig,
@@ -1142,7 +1143,8 @@ def cmd_edit(args, manager: WorkloadManager):
                 # / template_vars are re-rendered into a fresh seed before the
                 # main service reboots QEMU onto it.
                 subprocess.run(
-                    ["systemctl", "restart", f"workload-{config.name}-setup.service"],
+                    ["systemctl", "restart",
+                     workload_service_units(config, roles={"setup"})[0]],
                     check=True,
                 )
                 subprocess.run(["systemctl", "restart", config.service_name], check=True)

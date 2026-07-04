@@ -73,7 +73,10 @@ def cmd_logs(args, manager: WorkloadManager):
             print(f"Error: container '{container}' not in workload '{workload}'. "
                   f"Available: {', '.join(config.container_names())}", file=sys.stderr)
             sys.exit(2)
-        unit = f"workload-{workload}-{container}.service"
+        # container_names() and sub_service_names() are index-aligned; for a
+        # single-container workload NAME/NAME this maps to the main unit.
+        unit = dict(zip(config.container_names(),
+                        config.sub_service_names()))[container]
         cmd = ["journalctl", "-u", unit]
     elif config.is_multi:
         # journalctl's `-u 'glob*'` is unreliable (fails with "No data

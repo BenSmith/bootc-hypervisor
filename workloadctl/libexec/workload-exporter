@@ -14,6 +14,7 @@ Usage: workload-exporter [port]
 """
 
 import os
+import socketserver
 import subprocess
 import sys
 import time
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
+from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
 
 
 WORKLOAD_CONFIG_DIR = Path(
@@ -199,16 +200,13 @@ def get_service_metrics(name):
     return metrics
 
 
-def get_container_health(name, container_name=None):
-    """Query podman container health status for a workload.
+def get_container_healths(name, container_names):
+    """Query podman health for a workload's containers in ONE inspect call.
 
-    `container_name` is the podman --name to inspect; defaults to
-    `workload-<name>` (the single-container name) but callers pass the
-    per-container name (`workload-<name>-<container>`) for pod/bridge
-    workloads, since those containers don't exist under the bare name.
-
-    Returns "healthy", "unhealthy", "starting", or None if no health check.
-    Runs podman inspect as the workload user.
+    `container_names` are the podman --name values (per-container
+    `workload-<name>-<container>` for pod/bridge workloads). Returns
+    {podman_name: "healthy"|"unhealthy"|"starting"|None}; containers that
+    don't exist are absent. Runs podman inspect as the workload user.
     """
     username = workload_username(name)
     try:
@@ -216,7 +214,7 @@ def get_container_health(name, container_name=None):
         pw = _pwd.getpwnam(username)
         uid = pw.pw_uid
     except (KeyError, ImportError):
-        return None
+        return {}
 
     # Boundary note (B13): built from a raw pwd.getpwnam() lookup rather
     # than a WorkloadConfig/WorkloadManager (the exporter is a standalone
@@ -227,9 +225,15 @@ def get_container_health(name, container_name=None):
     try:
         return Podman.for_user(
             username, uid, pw.pw_dir, timeout=5
-        ).container_health(container_name or f"workload-{name}")
+        ).container_healths(container_names)
     except Exception:
-        return None
+        return {}
+
+
+def get_container_health(name, container_name=None):
+    """Single-container convenience over get_container_healths()."""
+    target = container_name or workload_container_name(name)
+    return get_container_healths(name, [target]).get(target)
 
 
 def find_workload_cgroup(name):
@@ -364,9 +368,17 @@ def format_metrics(all_metrics):
             # keyed by the workload name).
             for workload_name, svc_metrics, _cgroup, _vm, _disk in all_metrics:
                 for container, value in svc_metrics.get("health", {}).items():
-                    lines.append(
-                        f'workload_health{{workload="{workload_name}",container="{container}"}} {value}'
-                    )
+                    if container == workload_name:
+                        # Single-container workloads key health by the workload
+                        # name; keep their historical label-less series so
+                        # existing dashboards/alerts keep matching.
+                        lines.append(
+                            f'workload_health{{workload="{workload_name}"}} {value}'
+                        )
+                    else:
+                        lines.append(
+                            f'workload_health{{workload="{workload_name}",container="{container}"}} {value}'
+                        )
             lines.append("")
             continue
 
@@ -444,8 +456,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 cgroup = get_cgroup_metrics(name, is_vm)
                 if health_targets:
                     health_by_container = {}
+                    healths = get_container_healths(
+                        name, [p for _local, p in health_targets])
                     for local_name, podman_name in health_targets:
-                        health = get_container_health(name, podman_name)
+                        health = healths.get(podman_name)
                         if health is not None:
                             health_by_container[local_name] = 1 if health == "healthy" else 0
                     if health_by_container:
@@ -468,13 +482,24 @@ class MetricsHandler(BaseHTTPRequestHandler):
         pass  # suppress per-request access logs
 
 
+class _ExporterServer(HTTPServer):
+    """HTTPServer minus the server_bind() socket.getfqdn() reverse-DNS lookup,
+    which can block startup for ~8s on hosts without working DNS. The looked-up
+    name is never used in responses, so set it statically."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "workload-exporter"
+        self.server_port = self.server_address[1]
+
+
 def main():
     # Bind all interfaces. The alloy agent scrapes this exporter as
     # host.containers.internal:9110; under pasta networking that name resolves
     # to the host's routable interface, never loopback, so a 127.0.0.1 bind is
     # unreachable by the very agent meant to scrape it. Port 9110 is kept out
     # of the firewall, so 0.0.0.0 here is not a LAN exposure.
-    server = HTTPServer(("0.0.0.0", PORT), MetricsHandler)
+    server = _ExporterServer(("0.0.0.0", PORT), MetricsHandler)
     print(f"workload-exporter: listening on 0.0.0.0:{PORT}", flush=True)
     server.serve_forever()
 

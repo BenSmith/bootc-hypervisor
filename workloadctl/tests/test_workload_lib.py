@@ -680,6 +680,17 @@ class TestVirtiofsTags(unittest.TestCase):
         tags = workload_lib.virtiofs_tags(["/z:/z", "/a:/a"])
         self.assertEqual(tags, ["z", "a"])
 
+    def test_suffixed_tag_cannot_recollide_with_natural_tag(self):
+        # Disambiguating the two "/data" volumes yields "data-1", which must
+        # not collide with the third volume's natural "data-1" tag (from
+        # "/data/1") — uniqueness is enforced against the final set, not just
+        # the base counts.
+        tags = workload_lib.virtiofs_tags(
+            ["/h1:/data", "/h2:/data", "/h3:/data/1"])
+        self.assertEqual(len(set(tags)), 3)
+        self.assertEqual(tags[:2], ["data-0", "data-1"])
+        self.assertTrue(all(len(t) <= 36 for t in tags))
+
 
 class TestManagedBridgeConstants(unittest.TestCase):
     """Host-level managed-bridge params are derived from the subnet (ADR 002),
@@ -708,14 +719,20 @@ class TestManagedBridgeConstants(unittest.TestCase):
         self.assertEqual(cidr, "10.100.0.1/24")
         self.assertEqual(dhcp, "10.100.0.100,10.100.0.199,12h")
 
-    def test_small_subnet_dhcp_range_clamped_in_bounds(self):
-        # A /26 (.0–.63) can't fit a .100–.199 window; it must clamp to usable.
-        import ipaddress
+    def test_small_subnet_dhcp_range_falls_back_to_full_span(self):
+        # A /26 (.0–.63) can't fit the .100–.199 window; instead of collapsing
+        # to a single clamped address it must span first-usable..last-usable.
         _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/26")
-        start, end, _lease = dhcp.split(",")
-        net = ipaddress.ip_network("10.0.0.0/26")
-        self.assertIn(ipaddress.ip_address(start), net)
-        self.assertIn(ipaddress.ip_address(end), net)
+        self.assertEqual(dhcp, "10.0.0.2,10.0.0.62,12h")
+
+    def test_tiny_subnet_dhcp_range_still_spans_usable_hosts(self):
+        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/28")
+        self.assertEqual(dhcp, "10.0.0.2,10.0.0.14,12h")
+
+    def test_subnet_with_no_leasable_address_is_rejected(self):
+        for cidr in ("10.0.0.0/31", "10.0.0.0/32"):
+            with self.assertRaises(ValueError):
+                workload_lib.managed_bridge_params(cidr)
 
 
 class TestParseVolumeSpec(unittest.TestCase):

@@ -111,15 +111,26 @@ def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
 
     The gateway is the first host address; the DHCP window is offsets .100–.199
     within the subnet (reproducing the historical 192.168.200.100–199 range on
-    the /24 default), clamped to the usable span so a smaller subnet stays
-    in-range. Deriving the range from the subnet is the ADR-002 fix: the range
-    used to be hardcoded, so a non-default subnet handed guests addresses off
-    the wrong subnet.
+    the /24 default). On a subnet too small for that window the range falls
+    back to the full usable span (first host after the gateway through the
+    last host) instead of collapsing onto a single clamped address. Deriving
+    the range from the subnet is the ADR-002 fix: the range used to be
+    hardcoded, so a non-default subnet handed guests addresses off the wrong
+    subnet. Raises ValueError if the subnet leaves no leasable address after
+    the gateway (/31, /32).
     """
     net = ipaddress.ip_network(subnet_cidr, strict=False)
     gateway = net.network_address + 1
-    dhcp_end = min(net.network_address + 199, net.broadcast_address - 1)
-    dhcp_start = min(net.network_address + 100, dhcp_end)
+    first_usable = net.network_address + 2  # +1 is the gateway
+    last_usable = net.broadcast_address - 1
+    if last_usable < first_usable:
+        raise ValueError(
+            f"VM bridge subnet {net} has no leasable address after the "
+            f"gateway; use a /30 or larger")
+    dhcp_start = net.network_address + 100
+    dhcp_end = min(net.network_address + 199, last_usable)
+    if dhcp_start > dhcp_end:
+        dhcp_start = first_usable
     return (str(gateway), f"{gateway}/{net.prefixlen}", str(net),
             f"{dhcp_start},{dhcp_end},12h")
 
@@ -398,12 +409,20 @@ def virtiofs_tags(volume_specs) -> list[str]:
     counts = {}
     for t in base:
         counts[t] = counts.get(t, 0) + 1
+    # Every assigned tag is checked against ALL previously assigned tags, not
+    # just the base counts: a suffixed tag ("data" -> "data-1") could otherwise
+    # re-collide with another volume's natural un-suffixed tag ("data-1").
+    used = set()
     tags = []
     for i, t in enumerate(base):
-        if counts[t] > 1:
-            suffix = f"-{i}"
-            t = t[:36 - len(suffix)] + suffix
-        tags.append(t)
+        cand = t
+        bump = i
+        while cand in used or (cand == t and counts[t] > 1):
+            suffix = f"-{bump}"
+            cand = t[:36 - len(suffix)] + suffix
+            bump += 1
+        used.add(cand)
+        tags.append(cand)
     return tags
 
 
