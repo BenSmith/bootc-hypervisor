@@ -44,6 +44,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     jetbrains-mono-fonts \
     labwc \
     labwc-menu-generator \
+    less \
     libevdev \
     libinput \
     lsb_release \
