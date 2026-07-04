@@ -198,6 +198,32 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         self.assertNotIn("(vm)", joined)
 
 
+class ValidateSingleSchemaTest(unittest.TestCase):
+    """validate_single runs the same schema checks as the boot generator, so a
+    mode/shape mismatch is caught by `validate`/`install` before a boot."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / "clitest-badmode").mkdir()
+        (self.tmp / "clitest-badmode" / "workload.toml").write_text(
+            '[workload]\nname = "clitest-badmode"\nmode = "pod"\n\n'
+            '[container]\nimage = "x:latest"\n'
+        )
+
+    def test_schema_error_surfaced(self):
+        config = WorkloadConfig("clitest-badmode")
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+
+        result = cmd_admin.validate_single(config, manager, json_mode=True)
+
+        schema = [c for c in result["checks"] if c["check"] == "schema"]
+        self.assertTrue(schema and not schema[0]["passed"])
+        self.assertIn("requires [[containers]]", schema[0]["message"])
+
+
 class CleanupOverrideDirTest(unittest.TestCase):
     """_cleanup_override_dir must not delete the instance dir when workload.toml
     lives inside it (post-subdir flip).  A naive rmdir-to-base would evict the

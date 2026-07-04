@@ -96,6 +96,42 @@ class TestMultiContainerValidation(unittest.TestCase):
         errs = validate_workload_config(config)
         self.assertTrue(any("'health' set both" in e for e in errs))
 
+    def test_rejects_pod_mode_with_single_container(self):
+        config = {
+            "workload": {"name": "x", "mode": "pod"},
+            "container": {"image": "i"},
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("requires [[containers]]" in e for e in errs))
+
+    def test_rejects_bridge_mode_with_single_container(self):
+        config = {
+            "workload": {"name": "x", "mode": "bridge"},
+            "container": {"image": "i"},
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("requires [[containers]]" in e for e in errs))
+
+    def test_rejects_single_mode_with_containers(self):
+        config = {
+            "workload": {"name": "x", "mode": "single"},
+            "containers": [{"name": "a", "container": {"image": "i"}}],
+        }
+        errs = validate_workload_config(config)
+        self.assertTrue(any("incompatible with [[containers]]" in e for e in errs))
+
+    def test_accepts_consistent_explicit_modes(self):
+        pod = {
+            "workload": {"name": "x", "mode": "pod"},
+            "containers": [{"name": "a", "container": {"image": "i"}}],
+        }
+        self.assertEqual(validate_workload_config(pod), [])
+        single = {
+            "workload": {"name": "x", "mode": "single"},
+            "container": {"image": "i"},
+        }
+        self.assertEqual(validate_workload_config(single), [])
+
 
 class TestNormalizeContainers(unittest.TestCase):
     def test_single_container_unchanged(self):

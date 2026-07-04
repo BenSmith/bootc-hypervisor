@@ -574,7 +574,10 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-net.service", "unit", "net", mode == "bridge"
         ))
-        if config.is_multi:
+        # Per-container units key on topology, matching the generator and the
+        # -pod/-net gates above; validate_workload_config keeps this equivalent
+        # to is_multi (mode != "single" <=> "containers" in config).
+        if mode != "single":
             for cname in config.container_names():
                 files.append(WorkloadRunFile(
                     run / f"workload-{name}-{cname}.service", "unit", "container", True
@@ -586,6 +589,8 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     files.append(
         WorkloadRunFile(env / f"workload-{name}.secrets", "env-file", "secrets", False)
     )
+    # Per-container .secrets keyed on is_multi (not mode): this line also runs for
+    # VMs, whose mode is "single" but which own no per-container secrets anyway.
     if config.is_multi:
         for cname in config.container_names():
             files.append(WorkloadRunFile(
@@ -957,6 +962,23 @@ def validate_workload_config(config: dict) -> list[str]:
         infer_workload_mode(config)
     except ValueError as e:
         errors.append(str(e))
+
+    # Keep the shape (is_multi = "containers" in config) and the topology
+    # (mode) in lockstep so `is_multi <=> mode != "single"` holds. The generator
+    # emits per-container units on mode, while ~30 call sites read is_multi as
+    # the same discriminator; an explicit mode that contradicts the block shape
+    # would desync them (orphaned units, dropped containers).
+    explicit_mode = config.get("workload", {}).get("mode")
+    if explicit_mode in ("pod", "bridge") and not has_containers:
+        errors.append(
+            f"workload.mode = {explicit_mode!r} requires [[containers]] "
+            f"(a single [container] block is always 'single' mode)"
+        )
+    if explicit_mode == "single" and has_containers:
+        errors.append(
+            "workload.mode = 'single' is incompatible with [[containers]]; "
+            "use [container] for a single-container workload"
+        )
 
     # [workload].requires / .after — must be lists of valid workload name strings
     wl = config.get("workload", {})

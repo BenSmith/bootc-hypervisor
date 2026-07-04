@@ -19,6 +19,7 @@ from workload_lib import (
     selinux_module_name,
     selinux_type_name,
     units_outdated,
+    validate_workload_config,
     validate_workload_name,
     workload_config_path,
 )
@@ -49,6 +50,26 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         "severity": "ok",
         "message": f"Required fields present: name={config.name}"
     })
+
+    # Schema validation — the same checks the boot generator runs, surfaced here
+    # so `validate`/`install` catch config errors before a boot rather than after.
+    schema_errors = validate_workload_config(config.config)
+    if schema_errors:
+        for msg in schema_errors:
+            checks.append({
+                "check": "schema",
+                "passed": False,
+                "severity": "error",
+                "message": msg,
+            })
+            errors += 1
+    else:
+        checks.append({
+            "check": "schema",
+            "passed": True,
+            "severity": "ok",
+            "message": "Schema valid"
+        })
 
     username_len = len(config.username)
     if username_len >= 32:
