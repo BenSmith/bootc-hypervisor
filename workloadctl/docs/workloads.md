@@ -448,6 +448,39 @@ case "${1:-}" in
 esac
 ```
 
+#### Tuning the per-workload SELinux policy
+
+When `selinux_policy = true`, each workload runs under its own type `wl_<name>.process` (dashes become underscores), loaded from the bundle's `policy.cil` by `workloadctl enable`. That file is a [udica](https://github.com/containers/udica)-generated CIL module — a `blockinherit container` scaffold plus hand-appended `(allow …)` rules. **udica is the authoring tool**; reach for it instead of writing `.te`/`checkpolicy` by hand.
+
+**1. Generate the base** from the container's *static* access surface (devices, mounts, ports, caps):
+
+```bash
+u=$(id -u _wl-<name>)
+sudo -u _wl-<name> XDG_RUNTIME_DIR=/run/user/$u podman inspect <container> > /tmp/<name>.json
+udica -j /tmp/<name>.json wl_<name>
+```
+
+**2. Capture runtime denials.** The access an app only needs once it's *running* — JIT `execmem`, a debugger's `ptrace`, GTK/glycin's `bwrap` image-decode sandbox mounts — never appears in the container config, so you collect it by exercising the app. Mark **just this workload's type** permissive so it runs unimpeded, and disable `dontaudit` so suppressed denials are logged too (many userns-mount denials are `dontaudit`'d and are otherwise invisible even to `ausearch`):
+
+```bash
+sudo semanage permissive -a wl_<name>.process   # log-but-allow — this domain only, rest of host stays enforcing
+sudo semodule -DB                                # also log dontaudit-suppressed denials
+#   … exercise the app: launch it, open a project, index, build, run the debugger …
+sudo ausearch -m avc -ts recent | grep wl_<name> > /tmp/<name>-avcs.log
+```
+
+**3. Fold them in** with udica's append mode (`-a`), then return to enforcing:
+
+```bash
+udica -j /tmp/<name>.json -a /tmp/<name>-avcs.log wl_<name>   # regenerate CIL including the runtime rules
+sudo semodule -B
+sudo semanage permissive -d wl_<name>.process                # back to enforcing — do not skip this
+```
+
+**4. Transplant into the bundle.** The bundle's `policy.cil` uses a `__WL_MODULE__` placeholder that `enable` substitutes with the name-keyed block, so don't drop udica's whole module in verbatim — lift its generated `(allow process … )` lines into the existing `__WL_MODULE__ (block …)`. Then edit the bundle (or `workloadctl edit <name> policy.cil` for a CoW override) and re-run `sudo workloadctl enable <name>` to reinstall the module. A policy-only change applies **live** to the running container — no `recreate` needed.
+
+> **If a denial never appears even under `semanage permissive`**, it's usually `dontaudit`-suppressed — capture with `semodule -DB` as above (and remember `semodule -B` afterward). Symptom-level tell: if a syscall is *allowed by seccomp* but the operation still fails with `EPERM`, suspect a missing SELinux `allow` rather than seccomp.
+
 ---
 
 ### Extra UID/GID Maps
@@ -2231,6 +2264,8 @@ security_opt = ["seccomp=unconfined"]
 ```
 
 Note: `privileged = true` disables seccomp automatically, as privileged containers bypass all filtering.
+
+Some operations are gated by **both** seccomp and the per-workload SELinux type — e.g. a debugger's `ptrace` must be unblocked here *and* have an `allow` in the SELinux policy. If a syscall is permitted by seccomp but the operation still fails with `EPERM`, see [Tuning the per-workload SELinux policy](#tuning-the-per-workload-selinux-policy).
 
 ### Secrets Management
 
