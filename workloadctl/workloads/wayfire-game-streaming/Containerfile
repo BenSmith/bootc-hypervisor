@@ -596,8 +596,18 @@ set -e
 CONF="$HOME/.config/sunshine/sunshine.conf"
 mkdir -p "$(dirname "$CONF")"
 
+# Base port — every Sunshine port derives from it. Overridable per workload via
+# the SUNSHINE_PORT env so this desktop can coexist with another Sunshine host on
+# the same machine (host networking shares the port space). Default 47989 is
+# Sunshine's standard base; the web UI is base + 1. In Moonlight, add this host
+# manually as <ip>:<SUNSHINE_PORT> when it isn't on the default base.
+SUNSHINE_PORT="${SUNSHINE_PORT:-47989}"
+WEB_PORT=$((SUNSHINE_PORT + 1))
+
 # Wipe the lines we're about to rewrite.
-sed -i '/^adapter_name=/d;/^encoder=/d;/^csrf_allowed_origins=/d' "$CONF" 2>/dev/null || true
+sed -i '/^port=/d;/^adapter_name=/d;/^encoder=/d;/^csrf_allowed_origins=/d' "$CONF" 2>/dev/null || true
+
+echo "port=${SUNSHINE_PORT}" >> "$CONF"
 
 # Detect adapter + encoder from PCI vendor of the visible render node.
 # 0x10de = NVIDIA → nvenc; 0x1002 = AMD, 0x8086 = Intel → vaapi (mesa).
@@ -619,9 +629,9 @@ unset _drm _node _vendor _encoder
 ORIGINS=""
 for ip in $(hostname -I 2>/dev/null); do
     [ -n "$ORIGINS" ] && ORIGINS="${ORIGINS},"
-    ORIGINS="${ORIGINS}https://${ip}:47990"
+    ORIGINS="${ORIGINS}https://${ip}:${WEB_PORT}"
 done
-ORIGINS="${ORIGINS},https://localhost:47990,https://$(hostname):47990"
+ORIGINS="${ORIGINS},https://localhost:${WEB_PORT},https://$(hostname):${WEB_PORT}"
 echo "csrf_allowed_origins=${ORIGINS}" >> "$CONF"
 
 # Serve a Homelab-CA-signed cert when the host minted one (setup.sh mounts it
@@ -644,7 +654,7 @@ Requires=wayfire-wayland-ready.service
 Type=simple
 Restart=on-failure
 RestartSec=3
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER SUNSHINE_PORT
 
 # CUDA opens hundreds of FDs per context (one per /sys/bus/pci/.../drm entry,
 # plus libcuda's own pool). The default 1024 trips an EMFILE during the sysfs

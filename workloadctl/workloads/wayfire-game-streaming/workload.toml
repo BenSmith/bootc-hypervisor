@@ -11,6 +11,11 @@ CONTAINER_USER = "desktop"
 CONTAINER_UID = "1000"
 CONTAINER_GID = "1000"
 DESKTOP_RESOLUTION = "1920x1080"
+# Sunshine base port (all its ports derive from this; web UI = base + 1).
+# Defaults to Sunshine's standard 47989. Only set this to coexist with another
+# Sunshine host on the same machine (host networking → shared port space); then
+# add this host in Moonlight manually as <ip>:<SUNSHINE_PORT>.
+# SUNSHINE_PORT = "48989"
 
 [container.health]
 cmd = "pgrep -x sunshine > /dev/null || exit 1"
