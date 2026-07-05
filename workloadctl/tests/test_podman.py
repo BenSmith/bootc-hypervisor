@@ -3,7 +3,9 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
@@ -211,6 +213,32 @@ class RuntimeDirRetryTests(unittest.TestCase):
         result = self.p.image_id("ref")
         self.assertEqual(result, "")
         mock_ensure.assert_not_called()
+
+
+class EnsureRuntimeDirGateTests(unittest.TestCase):
+    """The read-path self-heal only fires for an already-lingering user; it
+    must never enable-linger for a disabled workload (which would trigger a
+    set-user-linger polkit prompt / silently re-linger under sudo)."""
+
+    def setUp(self):
+        self.p = Podman.for_user("_wl-test", 5001, "/var/lib/workloads/test")
+
+    @patch("podman.ensure_runtime_dir")
+    def test_skips_when_linger_off(self, mock_ensure):
+        """No linger marker → runtime dir is legitimately absent; don't heal."""
+        with tempfile.TemporaryDirectory() as d:
+            with patch("podman._LINGER_DIR", Path(d)):
+                self.p._ensure_runtime_dir()
+        mock_ensure.assert_not_called()
+
+    @patch("podman.ensure_runtime_dir")
+    def test_heals_when_linger_on(self, mock_ensure):
+        """Linger marker present → an enabled workload's dir was GC'd; heal it."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "_wl-test").touch()
+            with patch("podman._LINGER_DIR", Path(d)):
+                self.p._ensure_runtime_dir()
+        mock_ensure.assert_called_once_with(5001, timeout=5.0)
 
 
 class PodmanUncoveredMethodTests(unittest.TestCase):

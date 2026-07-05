@@ -23,6 +23,11 @@ _RUNTIME_DIR_MISSING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# logind records enabled-linger as an (unprivileged-readable) empty file named
+# for the user here. Presence == linger is on. Used to keep the read-path
+# self-heal from ever *enabling* linger (see _ensure_runtime_dir).
+_LINGER_DIR = Path("/var/lib/systemd/linger")
+
 
 _NOT_FOUND_PHRASES = (
     "no such container",
@@ -119,7 +124,19 @@ class Podman:
         (the read path retries once and should fail fast) vs. the restart
         path's default 8s. Swallows all errors — if it can't fix it, the
         subsequent retry falls through to normal error handling.
+
+        Gated on the user's linger already being enabled: this heals a runtime
+        dir that logind GC'd out from under a *lingering* (enabled) workload —
+        it must never *enable* linger. A read path (status/list) inspects every
+        workload, disabled ones included, and their runtime dir is legitimately
+        absent; enable-linger is a privileged polkit (set-user-linger) mutation
+        that would otherwise prompt when the read runs unprivileged, or silently
+        re-linger a workload the operator disabled when it runs as root.
         """
+        if self._username is None:
+            return
+        if not (_LINGER_DIR / self._username).exists():
+            return
         ensure_runtime_dir(self._uid, timeout=5.0)
 
     def _run(
