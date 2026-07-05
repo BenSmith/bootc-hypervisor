@@ -26,6 +26,21 @@ COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d
 # the build; recreate it at boot so fail2ban-server can open its sqlite db.
 COPY tmpfiles.d/fail2ban-statedir.conf /usr/lib/tmpfiles.d/fail2ban-statedir.conf
 
+# Virtual-input support for the game-streaming workloads (Sunshine/Wolf). They
+# run their compositor + Sunshine as a rootless container user in the `input`
+# group and synthesize the client's mouse/keyboard/gamepad through /dev/uinput.
+# The module autoload + the group-access rule are shipped in the image (not
+# written to /etc by each workload's enable hook) so they survive bootc
+# upgrades: the ostree /etc 3-way merge was dropping the enable-time
+# /etc/udev/rules.d rule, leaving /dev/uinput 0600 root:root, so Sunshine hit
+# "Unable to create virtual mouse: Permission denied" and the stream took no
+# input. Image-owned files under /usr are immutable and can't drift.
+RUN printf 'uinput\n' > /usr/lib/modules-load.d/uinput.conf && \
+    printf '# Virtual input devices for rootless game-streaming workloads\n' \
+        > /usr/lib/udev/rules.d/72-uinput-input.rules && \
+    printf 'KERNEL=="uinput", GROUP="input", MODE="0660"\n' \
+        >> /usr/lib/udev/rules.d/72-uinput-input.rules
+
 # CI-injectable trust anchors. The Forgejo pipeline drops the homelab root CA
 # (public cert) into ca-trust-inject/ from the HOMELAB_ROOT_CA secret before
 # building, so internal images trust the shared homelab CA. The dir is empty in

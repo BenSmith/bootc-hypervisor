@@ -9,9 +9,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODULES_LOAD="/etc/modules-load.d/uinput.conf"
-UDEV_RULE="/etc/udev/rules.d/99-uinput-input.rules"
-UDEV_RULE_LINE='KERNEL=="uinput", GROUP="input", MODE="0660"'
 RELAY_SERVICE="wayfire-udev-relay.service"
 RELAY_UNIT="/etc/systemd/system/${RELAY_SERVICE}"
 WORKLOAD_NAME="wayfire-game-streaming"
@@ -85,26 +82,16 @@ mint_tls_cert() {
 }
 
 enable() {
-    echo "  [host] Configuring uinput kernel module..."
-
-    # Load module now if not loaded
-    if ! lsmod | grep -q '^uinput'; then
-        modprobe uinput
-    fi
-
-    # Persist at boot
-    if [ ! -f "$MODULES_LOAD" ]; then
-        echo 'uinput' > "$MODULES_LOAD"
-    fi
-
-    echo "  [host] Configuring udev rule for /dev/uinput..."
-    if [ ! -f "$UDEV_RULE" ] || ! grep -qF "$UDEV_RULE_LINE" "$UDEV_RULE"; then
-        echo "$UDEV_RULE_LINE" > "$UDEV_RULE"
-        udevadm control --reload-rules
-    fi
-
-    # Apply rule to already-loaded device
-    udevadm trigger --action=change /sys/class/misc/uinput 2>/dev/null || true
+    # The uinput module autoload and the /dev/uinput group-access rule
+    # (KERNEL=="uinput", GROUP="input", MODE="0660") ship in the hypervisor
+    # image (/usr/lib/modules-load.d/uinput.conf +
+    # /usr/lib/udev/rules.d/72-uinput-input.rules), so they persist across bootc
+    # upgrades and can't be clobbered when a sibling streaming workload is
+    # disabled. Just load the module now so /dev/uinput exists before the
+    # container starts on a first enable that precedes a reboot; the image udev
+    # rule already sets its perms to 0660 root:input.
+    echo "  [host] Ensuring uinput kernel module is loaded..."
+    modprobe uinput 2>/dev/null || true
 
     # Host-side udev relay. The container's libudev drops the host udevd's
     # hotplug events (sender UID maps to "nobody" in the container user
@@ -140,15 +127,8 @@ UNIT
 }
 
 disable() {
-    echo "  [host] Removing uinput boot configuration..."
-    # Don't rmmod uinput — other services may depend on it even if this loaded it first.
-    rm -f "$MODULES_LOAD"
-
-    echo "  [host] Removing udev rule..."
-    if [ -f "$UDEV_RULE" ]; then
-        rm -f "$UDEV_RULE"
-        udevadm control --reload-rules
-    fi
+    # The uinput module autoload + /dev/uinput udev rule are image-owned and
+    # shared by every game-streaming workload, so disable() leaves them in place.
 
     echo "  [host] Removing udev input-event relay..."
     if [ -e "$RELAY_UNIT" ]; then
