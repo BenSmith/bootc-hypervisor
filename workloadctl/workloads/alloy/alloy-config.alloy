@@ -14,6 +14,11 @@ prometheus.exporter.unix "host" {
   set_collectors = [
     "cpu",
     "diskstats",
+    // "drm" reads amdgpu sysfs (gpu_busy_percent, VRAM used/total) → AMD GPU
+    // utilisation/memory with no extra process. No-op on NVIDIA (proprietary
+    // driver doesn't populate this sysfs; use the nvidia-gpu-exporter workload
+    // there) and on hosts without a GPU.
+    "drm",
     "filesystem",
     "hwmon",
     "loadavg",
@@ -62,6 +67,24 @@ prometheus.scrape "workload_exporter" {
   forward_to      = [otelcol.receiver.prometheus.default.receiver]
   scrape_interval = "30s"
 }
+
+// -----------------------------------------------------------------------
+// NVIDIA GPU exporter (the nvidia-gpu-exporter workload) — GPU hosts ONLY
+// -----------------------------------------------------------------------
+// UNCOMMENT this on hosts running the nvidia-gpu-exporter workload. Left
+// commented by default so non-GPU hosts don't carry a permanently-down
+// target. The workload publishes :9835 on the host; reach it via the same
+// pasta gateway as the workload-exporter above. AMD GPUs need nothing here —
+// enable node_exporter's "drm" collector in set_collectors instead.
+//
+// prometheus.scrape "nvidia_gpu_exporter" {
+//   targets = [{
+//     __address__ = "host.containers.internal:9835",
+//     job         = "nvidia-gpu-exporter",
+//   }]
+//   forward_to      = [otelcol.receiver.prometheus.default.receiver]
+//   scrape_interval = "30s"
+// }
 
 // -----------------------------------------------------------------------
 // Convert scraped Prometheus metrics into OTLP metrics
