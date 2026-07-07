@@ -19,12 +19,25 @@ prometheus.exporter.unix "host" {
     // driver doesn't populate this sysfs; use the nvidia-gpu-exporter workload
     // there) and on hosts without a GPU.
     "drm",
+    // "edac" surfaces ECC memory error counters (correctable/uncorrectable) —
+    // the early warning for a failing DIMM on ECC boxes. No-op without EDAC.
+    "edac",
     "filesystem",
     "hwmon",
     "loadavg",
     "meminfo",
     "netdev",
+    // "netstat"/"sockstat" add TCP retransmits + socket-state counts — useful
+    // on hosts running lots of network services (DNS, proxies, VPNs). Low card.
+    "netstat",
+    // "nvme" exposes NVMe device info/health from sysfs (media/error counts,
+    // spare thresholds) — early warning for a wearing/failing SSD.
+    "nvme",
     "pressure",
+    // "rapl" reports package power draw (powercap). Solid on Intel; on AMD it
+    // may be absent (power then only via hwmon/k10temp) — harmless no-op if so.
+    "rapl",
+    "sockstat",
     "stat",
     "thermal_zone",
     "time",
@@ -66,6 +79,21 @@ prometheus.scrape "workload_exporter" {
   }]
   forward_to      = [otelcol.receiver.prometheus.default.receiver]
   scrape_interval = "30s"
+}
+
+// -----------------------------------------------------------------------
+// Alloy self-metrics — pipeline health (queue depth, dropped samples/spans,
+// WAL, component errors). Scraped from inside alloy's own netns, where its
+// HTTP server listens on 127.0.0.1:12345 — so no port needs publishing.
+// -----------------------------------------------------------------------
+
+prometheus.scrape "alloy_self" {
+  targets = [{
+    __address__ = "localhost:12345",
+    job         = "alloy",
+  }]
+  forward_to      = [otelcol.receiver.prometheus.default.receiver]
+  scrape_interval = "60s"
 }
 
 // -----------------------------------------------------------------------
