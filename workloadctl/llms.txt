@@ -263,6 +263,30 @@ These patterns were considered and explicitly rejected:
 
 - **Rootful `--userns=auto` (per-container UID remapping).** Rejected; see `docs/adr/001-container-cgroup-placement.md` option 4. Rootful podman with `--userns=auto` remaps container UIDs to an unprivileged range but still runs the container manager as root — any container escape exposes the full root privilege of the host. workloadctl's dedicated `_wl-<name>` users run the podman *process* itself unprivileged. The blast radius of a container escape is bounded to the workload user, not root.
 
+## Deliberate non-features
+
+These capabilities are out of scope for a single-host homelab workload manager and there are no intentions to add them:
+
+- **Multi-node scheduling and cluster orchestration.** Workloads bind to one host; there is no distributed scheduling, workload migration, or peer discovery.
+
+- **Service mesh.** No sidecar injection, no transparent network policies, no distributed tracing substrate.
+
+- **HA/failover.** No active-active clustering or automatic restart on a different node. If the host is down, workloads are down.
+
+- **Secret rotation policy engine.** Secrets are operator-managed at deployment time; there is no automatic key rotation or credential freshening.
+
+- **Cross-host orchestration.** Each host is managed independently. There is no global policy engine, topology discovery, or fleet-wide coordination.
+
+## Trust model
+
+While workloads run as individual user accounts, workload configs under `/etc/workloads.d/` are **root-equivalent, fully-trusted inputs**. The provisioning pipeline assumes configs are trusted:
+
+- `[host].setup` hooks run arbitrary root scripts at enable time.
+- `install`, `duplicate`, and `restore` write configs with root privilege.
+- The generator and provisioning scripts execute all TOML directives without validation.
+
+**Untrusted or third-party configs are out of scope for this tool.** A config with access to `/etc/workloads.d/` can request arbitrary capabilities, mount any path, and run setup commands as root. Never enable a workload from an untrusted TOML source.
+
 ## License
 
 MIT

@@ -1537,15 +1537,50 @@ class TestMain(unittest.TestCase):
         mocks["generate_ssh_keypair"].assert_not_called()
         mocks["build_cloud_init_iso"].assert_not_called()
 
-    def test_container_kind_continues_after_step_exception(self):
+    # The container provisioning steps split into two contracts: must-succeed
+    # steps (a failure leaves the workload running-but-wrong, so main() aborts
+    # nonzero) and best-effort steps (a failure is logged but provisioning
+    # continues). These two tests pin each step to its contract individually so
+    # a regression flipping either direction is caught.
+    CONTAINER_MUST_SUCCEED = (
+        "configure_subuid_subgid",
+        "setup_volume_directories",
+        "write_environment_file",
+        "enable_linger",
+    )
+    CONTAINER_BEST_EFFORT = (
+        "setup_selinux_policy",
+        "setup_home_directory",
+        "restore_selinux_labels",
+    )
+
+    def test_container_must_succeed_step_failures_are_fatal(self):
         mocks = self._patch_common("container")
-        mocks["configure_subuid_subgid"].side_effect = Exception("boom")
-        with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
-            rc = self.mod.main()
-        # Failure of one best-effort step doesn't abort the rest or the run
-        self.assertEqual(rc, 0)
-        mocks["write_environment_file"].assert_called_once()
-        mocks["enable_linger"].assert_called_once()
+        for step in self.CONTAINER_MUST_SUCCEED:
+            with self.subTest(step=step):
+                for m in mocks.values():
+                    m.reset_mock()
+                    m.side_effect = None
+                mocks[step].side_effect = RuntimeError("boom")
+                with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
+                    rc = self.mod.main()
+                # A must-succeed step's failure aborts main() nonzero
+                self.assertEqual(rc, 1)
+
+    def test_container_best_effort_step_failures_are_nonfatal(self):
+        mocks = self._patch_common("container")
+        for step in self.CONTAINER_BEST_EFFORT:
+            with self.subTest(step=step):
+                for m in mocks.values():
+                    m.reset_mock()
+                    m.side_effect = None
+                mocks[step].side_effect = Exception("boom")
+                with mock.patch.object(self.mod.sys, "argv", ["prog", "myapp"]):
+                    rc = self.mod.main()
+                # A best-effort failure neither aborts main() nor skips the
+                # later must-succeed steps (enable_linger still runs)
+                self.assertEqual(rc, 0)
+                mocks["enable_linger"].assert_called_once()
 
     def test_vm_kind_runs_full_sequence(self):
         mocks = self._patch_common("vm")

@@ -10,6 +10,7 @@ base-images/
 bootc-src
 rpm/rpm-output/
 workloadctl/rpmbuild/
+workloadctl/lib/_version.py
 __pycache__/
 
 # Dev-only test tooling artifacts (coverage.py, mypy, ruff caches)

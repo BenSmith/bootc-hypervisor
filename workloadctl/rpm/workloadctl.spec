@@ -64,6 +64,13 @@ install -dm 0755 %{buildroot}%{_libexecdir}/workloadctl
 for _f in %{_sourcedir}/lib/*.py; do
     install -pm 0644 "$_f" %{buildroot}%{_libexecdir}/workloadctl/
 done
+
+# Generate version module with the full package version-release (buildserial
+# lives in Release), so workloadctl --version matches the RPM NEVR.
+cat > %{buildroot}%{_libexecdir}/workloadctl/_version.py << 'EOF'
+__version__ = "%{version}-%{release}"
+EOF
+chmod 0644 %{buildroot}%{_libexecdir}/workloadctl/_version.py
 install -dm 0755 %{buildroot}%{python3_sitelib}
 echo '%{_libexecdir}/workloadctl' > %{buildroot}%{python3_sitelib}/workloadctl.pth
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \

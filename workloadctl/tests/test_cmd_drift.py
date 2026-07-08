@@ -151,6 +151,19 @@ class OrphanDetectionTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("workload-keep.conf", out)
 
+    def test_collect_drift_returns_tuples(self):
+        # The collector API doctor consumes: (filename, live, gen) tuples,
+        # no printing, no SystemExit.
+        self._stage_keep()
+        self._stage_gone()
+        diffs = cmd_drift.collect_drift(None)
+        names = [fname for fname, _, _ in diffs]
+        self.assertIn("workload-gone.service", names)
+        self.assertNotIn("workload-keep.service", names)
+        for _, live, gen in diffs:
+            self.assertIsInstance(live, str)
+            self.assertIsInstance(gen, str)
+
     def test_workload_filter_scopes_orphans(self):
         # Filtering to the still-present workload hides an unrelated orphan.
         self._stage_keep()

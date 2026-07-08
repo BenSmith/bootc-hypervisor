@@ -563,11 +563,13 @@ def cmd_validate(args, manager: WorkloadManager):
 # cmd_diagnose
 # ---------------------------------------------------------------------------
 
-def cmd_diagnose(args, manager: WorkloadManager):
-    """Diagnose workload runtime setup (user, subids, linger, SELinux)"""
-    require_root()
-    config = WorkloadConfig(args.workload)
+def collect_diagnose_checks(config, manager: WorkloadManager):
+    """Run the diagnose check battery and return (checks, passed).
 
+    checks is the ordered list of {check, passed, message[, fix]} dicts;
+    passed is True iff every check passed. Pure collection — no root
+    check, no printing, no exit — shared by cmd_diagnose and doctor.
+    """
     checks = []
     linger_enabled = False  # set by Check 3; referenced by the session/runtime checks
 
@@ -827,9 +829,17 @@ def cmd_diagnose(args, manager: WorkloadManager):
         except Exception as e:
             _check("uid_mapping", False, f"Error reading subuid: {e}")
 
+    return checks, all(c["passed"] for c in checks)
+
+
+def cmd_diagnose(args, manager: WorkloadManager):
+    """Diagnose workload runtime setup (user, subids, linger, SELinux)"""
+    require_root()
+    config = WorkloadConfig(args.workload)
+
+    checks, passed = collect_diagnose_checks(config, manager)
     checks_passed = sum(1 for c in checks if c["passed"])
     checks_total = len(checks)
-    passed = all(c["passed"] for c in checks)
 
     if args.json:
         print(json.dumps({
