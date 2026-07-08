@@ -14,7 +14,7 @@ import io
 import os
 import sys
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -96,6 +96,31 @@ class RunCliExitCodeTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 cli._run_cli()
         self.assertEqual(cm.exception.code, 7)
+
+
+class VersionFlagTest(unittest.TestCase):
+    """`workloadctl --version` prints the baked version and exits 0."""
+
+    def _run_version(self):
+        """Drive main()'s argparse --version action; return (exit_code, stdout)."""
+        buf = io.StringIO()
+        with mock.patch.object(cli.sys, 'argv', ['workloadctl', '--version']), \
+                redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main()
+        return cm.exception.code, buf.getvalue()
+
+    def test_version_exits_0_and_prints_single_line(self):
+        code, out = self._run_version()
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], f"workloadctl {cli.__version__}")
+
+    def test_source_checkout_reports_dev_fallback(self):
+        # No _version.py is generated in a source checkout, so the CLI falls
+        # back to the sentinel rather than crashing on the missing import.
+        self.assertEqual(cli.__version__, "0-dev")
 
 
 if __name__ == '__main__':

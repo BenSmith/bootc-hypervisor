@@ -9,6 +9,12 @@ running as system services with rootless podman.
 import argparse
 import sys
 
+# Import version with a fallback for source checkouts where _version.py is absent.
+try:
+    from _version import __version__
+except ImportError:
+    __version__ = "0-dev"
+
 from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
@@ -38,6 +44,10 @@ def main():
         prog="workloadctl",
         description="Manage rootless system workloads",
         epilog="For more information, see /usr/share/doc/workloadctl/"
+    )
+
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")

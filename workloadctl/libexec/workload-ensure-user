@@ -943,7 +943,10 @@ def main():
 
     kind = infer_workload_kind(config)
 
-    # Each step runs independently so a failure in one doesn't skip the rest
+    # Best-effort steps run independently so a failure in one doesn't skip the
+    # rest; must-succeed steps (marked ERROR + return 1) abort the remaining
+    # steps instead, since a workload missing a prerequisite has no reason to
+    # continue provisioning
     try:
         setup_selinux_policy()
     except Exception as e:
@@ -1019,17 +1022,20 @@ def main():
         try:
             configure_subuid_subgid(pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to configure subuid/subgid for {username}: {e}")
+            log(f"  ERROR: Failed to configure subuid/subgid for {username}: {e}")
+            return 1
 
         try:
             setup_volume_directories(pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to create volume directories for {username}: {e}")
+            log(f"  ERROR: Failed to create volume directories for {username}: {e}")
+            return 1
 
         try:
             write_environment_file(name, pw, config)
         except Exception as e:
-            log(f"  WARNING: Failed to write environment file for {name}: {e}")
+            log(f"  ERROR: Failed to write environment file for {name}: {e}")
+            return 1
 
         try:
             restore_selinux_labels(name)
@@ -1039,7 +1045,8 @@ def main():
         try:
             enable_linger(pw)
         except Exception as e:
-            log(f"  WARNING: Failed to enable linger for {username}: {e}")
+            log(f"  ERROR: Failed to enable linger for {username}: {e}")
+            return 1
 
     log(f"User setup complete for {name} ({kind})")
     return 0
