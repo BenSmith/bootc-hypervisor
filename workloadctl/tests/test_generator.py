@@ -1614,7 +1614,7 @@ class TestResolveAutoGpu(unittest.TestCase):
             target.mkdir(parents=True, exist_ok=True)
             (device / "driver").symlink_to(target)
 
-    def _resolve(self):
+    def _resolve(self, name=None):
         """Run resolve_auto_gpu() with /sys/class/drm redirected to the fake tree."""
         real_path = self.wg.Path
         drm = self.drm
@@ -1625,7 +1625,7 @@ class TestResolveAutoGpu(unittest.TestCase):
             return real_path(arg)
 
         with mock.patch.object(self.wg, "Path", side_effect=fake_path):
-            return self.wg.resolve_auto_gpu()
+            return self.wg.resolve_auto_gpu(name)
 
     def test_amd(self):
         self._add_card("card0", "0x1002")
@@ -1654,6 +1654,24 @@ class TestResolveAutoGpu(unittest.TestCase):
     def test_unknown_vendor_skipped(self):
         self._add_card("card0", "0xbeef")
         self.assertEqual(self._resolve(), "none")
+
+    def test_multi_gpu_warns_and_picks_first_in_sort_order(self):
+        self._add_card("card0", "0x10de", driver="nvidia")
+        self._add_card("card1", "0x10de", driver="nvidia")
+        with mock.patch.object(self.wg, "log_msg") as mock_log:
+            self.assertEqual(self._resolve(name="mygame"), "nvidia")
+        mock_log.assert_called_once()
+        (msg,), kwargs = mock_log.call_args
+        self.assertEqual(kwargs.get("level"), "warning")
+        self.assertIn("mygame", msg)
+        self.assertIn("card0", msg)
+        self.assertIn("card1", msg)
+
+    def test_single_gpu_does_not_warn(self):
+        self._add_card("card0", "0x10de", driver="nvidia")
+        with mock.patch.object(self.wg, "log_msg") as mock_log:
+            self._resolve(name="mygame")
+        mock_log.assert_not_called()
 
 
 class TestGeneratorVmWorkload(unittest.TestCase):
