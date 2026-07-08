@@ -8,6 +8,7 @@ running as system services with rootless podman.
 
 import argparse
 import sys
+import traceback
 
 # Import version with a fallback for source checkouts where _version.py is absent.
 try:
@@ -399,8 +400,17 @@ def _run_cli() -> int:
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except Exception:
+        # Unexpected: not one of the typed errors above, so it's likely a bug
+        # in workloadctl rather than an operator/environment condition. Print
+        # the full traceback (not just the message) so a bug report has
+        # something to act on.
+        traceback.print_exc(file=sys.stderr)
+        print(
+            "This looks like a workloadctl bug, not a usage error. "
+            "Please re-run the command and include the traceback above in a bug report.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

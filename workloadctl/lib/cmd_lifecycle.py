@@ -45,7 +45,7 @@ from workloadctl_core import (
     VM_BRIDGE_NAME,
 )
 from cmd_backup import BACKUP_DIR
-from substrate import get_substrate, service_active
+from substrate import get_substrate, service_active, LifecycleError
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -301,7 +301,13 @@ def _provision_user(config: WorkloadConfig):
         try:
             uid = pwd.getpwnam(user_name).pw_uid
         except KeyError:
-            uid = get_next_uid()
+            try:
+                uid = get_next_uid()
+            except RuntimeError as e:
+                # UID-range exhaustion is an operator-fixable environment
+                # condition, not a bug — surface it as the CLI's clean
+                # one-line error rather than a traceback.
+                raise LifecycleError(str(e)) from e
 
         # Write a temporary sysusers config (the generator creates the
         # persistent copy at boot in /run/systemd/system/, but enable runs
