@@ -2,7 +2,7 @@
 
 > Idea capture and planning. No commitment.
 
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-08
 
 ---
 
@@ -53,6 +53,27 @@
 - Workloads get LVM provisioned to cap or flex storage
 - make missing host setup script an error not a warning
 - put all control surfaces in wireguard/vpn
+
+### Freshness alert for the workload metrics textfile
+**Why:** The metrics exporter is now a root oneshot+timer that writes an atomic
+`workloads.prom` textfile which Alloy ingests via node_exporter's textfile
+collector (shipped 2026-07-08, replacing the `:9110` HTTP listener). The HTTP
+model surfaced a dead exporter as target-down; the textfile drop does not — if the
+oneshot fails, Alloy silently keeps serving the last good file. That silent
+degradation is the exact failure mode the redesign exists to kill, reappearing one
+layer up.
+
+**Fix:** an alert on `node_textfile_mtime_seconds{file=~".*workloads.prom"}` going
+stale (mtime older than a few scrape intervals) — the textfile collector already
+publishes that metric, so this is purely an alert-rule addition, no code.
+
+- **Effort:** Small (one alert rule).
+- **Value:** Medium — closes the only regression the exporter redesign introduced.
+- **Interest:** Deferred. We have **no Grafana charts or alerts in any workload
+  yet** ([[project_grafana_observability_setup]] built dashboards via the API, not
+  repo-provisioned, and there are zero alert rules). Wire this in whenever we stand
+  up a real alerting surface — until then there's nothing to hang it on. Do this
+  before relying on the exporter for anything load-bearing in prod.
 
 ### Unified TLS: hybrid internal CA + Let's Encrypt
 **Why:** Today every Caddy uses `local_certs`, minting its own internal
