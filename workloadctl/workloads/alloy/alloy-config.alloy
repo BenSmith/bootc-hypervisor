@@ -14,25 +14,56 @@ prometheus.exporter.unix "host" {
   set_collectors = [
     "cpu",
     "diskstats",
+    // "drm" reads amdgpu sysfs (gpu_busy_percent, VRAM used/total) → AMD GPU
+    // utilisation/memory with no extra process. No-op on NVIDIA (proprietary
+    // driver doesn't populate this sysfs; use the nvidia-gpu-exporter workload
+    // there) and on hosts without a GPU.
+    "drm",
+    // "edac" surfaces ECC memory error counters (correctable/uncorrectable) —
+    // the early warning for a failing DIMM on ECC boxes. No-op without EDAC.
+    "edac",
     "filesystem",
     "hwmon",
     "loadavg",
     "meminfo",
     "netdev",
+    // "netstat"/"sockstat" add TCP retransmits + socket-state counts — useful
+    // on hosts running lots of network services (DNS, proxies, VPNs). Low card.
+    "netstat",
+    // "nvme" exposes NVMe device info/health from sysfs (media/error counts,
+    // spare thresholds) — early warning for a wearing/failing SSD.
+    "nvme",
     "pressure",
+    // "rapl" reports package power draw (powercap). Solid on Intel; on AMD it
+    // may be absent (power then only via hwmon/k10temp) — harmless no-op if so.
+    "rapl",
+    "sockstat",
     "stat",
     "thermal_zone",
     "time",
     "uname",
+    // "textfile" reads *.prom files dropped by the workload-exporter oneshot
+    // (workload-exporter.timer). The exporter is a root-only local producer
+    // (reads every workload's cgroups + rootless-podman), so it writes a file
+    // rather than listening on a socket; node_exporter surfaces it inline here.
+    "textfile",
   ]
   // Collectors intentionally not enabled:
   //   "systemd" - node_exporter's systemd collector uses /run/systemd/private
   //               (root-only socket, not the DBus system bus), and Alloy
   //               doesn't expose the upstream --collector.systemd.private=false
-  //               flag. workload-exporter on :9110 already publishes
-  //               per-workload restart counts, task counts, CPU/memory
-  //               usage, and podman health — strictly more than the
-  //               node_exporter systemd collector would give us anyway.
+  //               flag. The workload-exporter textfile (see the "textfile"
+  //               collector below) already publishes per-workload restart
+  //               counts, task counts, CPU/memory usage, and podman health —
+  //               strictly more than the node_exporter systemd collector would.
+
+  textfile {
+    // Bind-mounted from the host at /run/workload-exporter (see
+    // [storage].volumes in workload.toml). node_exporter ingests every
+    // workloads.prom drop here and tags each series with
+    // node_textfile_mtime_seconds for freshness alerting.
+    directory = "/run/workload-exporter"
+  }
 
   filesystem {
     // Exclude common virtual/ephemeral filesystems.
@@ -47,21 +78,43 @@ prometheus.scrape "node_exporter" {
   scrape_interval = "30s"
 }
 
+// Workload-specific metrics (per-workload systemd state, cgroup usage, podman
+// health, VM QMP) are collected by the workload-exporter oneshot into the
+// textfile drop and picked up by the "textfile" node_exporter collector above
+// — there is no HTTP scrape to configure here.
+
 // -----------------------------------------------------------------------
-// Workload exporter (workloadctl-specific metrics, plan 02)
+// Alloy self-metrics — pipeline health (queue depth, dropped samples/spans,
+// WAL, component errors). Scraped from inside alloy's own netns, where its
+// HTTP server listens on 127.0.0.1:12345 — so no port needs publishing.
 // -----------------------------------------------------------------------
 
-prometheus.scrape "workload_exporter" {
+prometheus.scrape "alloy_self" {
   targets = [{
-    // host.containers.internal (169.254.1.2) is pasta's gateway address — the
-    // only way to reach host-side sockets (not pasta-forwarded container ports)
-    // from inside the container's network namespace.
-    __address__ = "host.containers.internal:9110",
-    job         = "workload-exporter",
+    __address__ = "localhost:12345",
+    job         = "alloy",
   }]
   forward_to      = [otelcol.receiver.prometheus.default.receiver]
-  scrape_interval = "30s"
+  scrape_interval = "60s"
 }
+
+// -----------------------------------------------------------------------
+// NVIDIA GPU exporter (the nvidia-gpu-exporter workload) — GPU hosts ONLY
+// -----------------------------------------------------------------------
+// UNCOMMENT this on hosts running the nvidia-gpu-exporter workload. Left
+// commented by default so non-GPU hosts don't carry a permanently-down
+// target. The workload publishes :9835 on the host; reach it via pasta's
+// host.containers.internal gateway. AMD GPUs need nothing here —
+// enable node_exporter's "drm" collector in set_collectors instead.
+//
+// prometheus.scrape "nvidia_gpu_exporter" {
+//   targets = [{
+//     __address__ = "host.containers.internal:9835",
+//     job         = "nvidia-gpu-exporter",
+//   }]
+//   forward_to      = [otelcol.receiver.prometheus.default.receiver]
+//   scrape_interval = "30s"
+// }
 
 // -----------------------------------------------------------------------
 // Convert scraped Prometheus metrics into OTLP metrics
@@ -131,6 +184,17 @@ otelcol.processor.transform "add_host_info" {
     context = "resource"
     statements = [
       `set(attributes["host.name"], "` + env("HOST_LABEL") + `")`,
+      `set(attributes["host.role"], "` + env("ROLE_LABEL") + `")`,
+    ]
+  }
+
+  // host.name is a well-known attribute the backend promotes to a per-series
+  // label; host.role is custom, so as a resource attribute it lands only on
+  // target_info. Set it at datapoint scope too so it becomes a real label on
+  // every metric series, queryable directly without a target_info join.
+  metric_statements {
+    context = "datapoint"
+    statements = [
       `set(attributes["host.role"], "` + env("ROLE_LABEL") + `")`,
     ]
   }

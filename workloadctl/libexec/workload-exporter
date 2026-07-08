@@ -1,25 +1,27 @@
 #!/usr/bin/python3
 """
-Prometheus metrics HTTP server for workloadctl workloads.
+Prometheus metrics textfile writer for workloadctl workloads.
 
-Serves /metrics on port 9110. Collects per-workload systemd state,
-cgroup v2 resource usage, and podman health check status.
+Collects per-workload systemd state, cgroup v2 resource usage, and podman
+health check status, and writes them as a Prometheus exposition textfile for
+node_exporter's textfile collector to pick up.
 
-Designed to run as a long-lived systemd service (Type=simple).
-Safe to scrape concurrently — collection is synchronous per request,
-no shared mutable state.
+Runs as a root oneshot on a timer (workload-exporter.timer). Collection needs
+root — it reads every workload's cgroups and shells into each rootless-podman
+instance — while the only consumer, the local Alloy agent, is rootless in a
+pasta netns and can do neither. So the producer drops an atomic file and Alloy
+ingests it over a read-only bind mount rather than scraping a socket. There is
+no network listener.
 
-Usage: workload-exporter [port]
-  port: TCP port to listen on (default: 9110)
+Usage: workload-exporter [output_path]
+  output_path: file to write (default: /run/workload-exporter/workloads.prom)
 """
 
 import os
-import socketserver
 import subprocess
 import sys
 import time
 import tomllib
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from podman import Podman
@@ -33,7 +35,11 @@ VM_SOCKET_DIR = Path("/run/workload-vm")
 # Unified cgroup v2 mount. A module constant so tests can redirect it.
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9110
+# Where the rendered exposition is dropped for node_exporter's textfile
+# collector. Overridable via argv[1] so tests can write to a scratch path.
+OUTPUT_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
+    "/run/workload-exporter/workloads.prom"
+)
 
 
 def get_workload_disk_bytes(home_dir):
@@ -436,72 +442,63 @@ def format_metrics(all_metrics):
     return "\n".join(lines)
 
 
-# Scrape-scaling note: collection is synchronous — one `sudo -u _wl-<name>
-# podman` round-trip per enabled workload, serialised within a single request.
-# At ~50 workloads the wall-clock scrape latency is measurable but acceptable
-# for a 15s Prometheus interval. If it becomes a bottleneck, a 5s TTL in-
-# process cache (collect once, serve N scrapers from the cache, refresh in a
-# background thread) is the natural next step.
-class MetricsHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path not in ("/metrics", "/metrics/"):
-            self.send_response(404)
-            self.end_headers()
-            return
-        try:
-            workloads = get_enabled_workloads()
-            all_metrics = []
-            for name, health_targets, is_vm in workloads:
-                svc = get_service_metrics(name) or {}
-                cgroup = get_cgroup_metrics(name, is_vm)
-                if health_targets:
-                    health_by_container = {}
-                    healths = get_container_healths(
-                        name, [p for _local, p in health_targets])
-                    for local_name, podman_name in health_targets:
-                        health = healths.get(podman_name)
-                        if health is not None:
-                            health_by_container[local_name] = 1 if health == "healthy" else 0
-                    if health_by_container:
-                        svc["health"] = health_by_container
-                vm = get_vm_qmp_metrics(name) if is_vm else {}
-                disk = get_workload_disk_bytes(workload_root_dir(name))
-                all_metrics.append((name, svc, cgroup, vm, disk))
-            body = format_metrics(all_metrics).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        except Exception as e:
-            self.send_response(500)
-            self.end_headers()
-            print(f"workload-exporter: collection error: {e}", file=sys.stderr)
+# Collection-scaling note: collection is synchronous — one `sudo -u _wl-<name>
+# podman` round-trip per enabled workload, serialised within a single run. At
+# ~50 workloads the wall-clock latency is measurable but acceptable for a 30s
+# timer interval. If it becomes a bottleneck, collecting workloads concurrently
+# (one thread per rootless-podman round-trip) is the natural next step.
+def collect_all():
+    """Collect metrics for every enabled workload.
 
-    def log_message(self, fmt, *args):
-        pass  # suppress per-request access logs
+    Returns the list of (name, svc, cgroup, vm, disk) tuples that
+    format_metrics() renders.
+    """
+    all_metrics = []
+    for name, health_targets, is_vm in get_enabled_workloads():
+        svc = get_service_metrics(name) or {}
+        cgroup = get_cgroup_metrics(name, is_vm)
+        if health_targets:
+            health_by_container = {}
+            healths = get_container_healths(
+                name, [p for _local, p in health_targets])
+            for local_name, podman_name in health_targets:
+                health = healths.get(podman_name)
+                if health is not None:
+                    health_by_container[local_name] = 1 if health == "healthy" else 0
+            if health_by_container:
+                svc["health"] = health_by_container
+        vm = get_vm_qmp_metrics(name) if is_vm else {}
+        disk = get_workload_disk_bytes(workload_root_dir(name))
+        all_metrics.append((name, svc, cgroup, vm, disk))
+    return all_metrics
 
 
-class _ExporterServer(HTTPServer):
-    """HTTPServer minus the server_bind() socket.getfqdn() reverse-DNS lookup,
-    which can block startup for ~8s on hosts without working DNS. The looked-up
-    name is never used in responses, so set it statically."""
+def write_metrics(output_path):
+    """Render the exposition and write it atomically to output_path.
 
-    def server_bind(self):
-        socketserver.TCPServer.server_bind(self)
-        self.server_name = "workload-exporter"
-        self.server_port = self.server_address[1]
+    Writes a sibling temp file and renames it onto the final name so a
+    concurrently-reading textfile collector never sees a partial file. The
+    parent dir is created 0755 and the file 0644 (world-readable): the only
+    reader is the rootless Alloy container, which reads the file across a
+    read-only bind mount and cannot chown a root-owned file (see the
+    homelab-root.crt pattern), so it must be readable as-is.
+    """
+    output_path = Path(output_path)
+    parent = output_path.parent
+    if not parent.exists():
+        # In production tmpfiles owns this dir (0755); only set the mode when we
+        # create it ourselves, so we never loosen an existing dir's perms.
+        parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(parent, 0o755)
+    body = format_metrics(collect_all())
+    tmp = output_path.with_name("." + output_path.name + ".tmp")
+    tmp.write_text(body)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, output_path)
 
 
 def main():
-    # Bind all interfaces. The alloy agent scrapes this exporter as
-    # host.containers.internal:9110; under pasta networking that name resolves
-    # to the host's routable interface, never loopback, so a 127.0.0.1 bind is
-    # unreachable by the very agent meant to scrape it. Port 9110 is kept out
-    # of the firewall, so 0.0.0.0 here is not a LAN exposure.
-    server = _ExporterServer(("0.0.0.0", PORT), MetricsHandler)
-    print(f"workload-exporter: listening on 0.0.0.0:{PORT}", flush=True)
-    server.serve_forever()
+    write_metrics(OUTPUT_PATH)
 
 
 if __name__ == "__main__":

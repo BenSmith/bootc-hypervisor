@@ -1,22 +1,20 @@
 [Unit]
-Description=Workload metrics HTTP exporter
+Description=Write the workload metrics textfile for node_exporter
 Documentation=man:workload-exporter
-After=network.target
 
 [Service]
-Type=simple
+Type=oneshot
 ExecStart=/usr/libexec/workloadctl/workload-exporter
-Restart=on-failure
-RestartSec=10s
-# Hardening — root and 0.0.0.0 bind are deliberate (scrapes cgroups as root,
-# alloy reaches it via host.containers.internal which never resolves to loopback)
+
+# Hardening. No network role: collects from cgroups, rootless-podman, and VM
+# QMP sockets, then drops a textfile under /run/workload-exporter.
+PrivateNetwork=yes
 ProtectHome=yes
 ProtectSystem=strict
+# The only writable path. ProtectSystem=strict makes the rest read-only; the
+# drop dir is pre-created by tmpfiles (workloads-dirs.conf) so this bind exists.
+ReadWritePaths=/run/workload-exporter
 PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 SystemCallArchitectures=native
-
-[Install]
-WantedBy=multi-user.target

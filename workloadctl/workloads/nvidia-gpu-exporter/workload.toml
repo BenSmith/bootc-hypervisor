@@ -1,0 +1,76 @@
+# nvidia-gpu-exporter - Prometheus GPU metrics for NVIDIA cards
+#
+# Runs utkuozdemir/nvidia_gpu_exporter: a tiny agent that shells out to
+# nvidia-smi and exposes every field as Prometheus metrics on :9835/metrics
+# (nvidia_smi_utilization_gpu_ratio, nvidia_smi_memory_used_bytes,
+# nvidia_smi_temperature_gpu, nvidia_smi_power_draw_watts, clocks, fan, ...).
+#
+# Why a dedicated workload (not the alloy agent): NVIDIA's proprietary driver
+# exposes GPU state only through NVML/nvidia-smi, and alloy has no NVML
+# component. This container gets nvidia-smi injected by CDI ([devices] gpu),
+# runs NVML confined in its own workload user, and alloy simply scrapes its
+# HTTP endpoint — keeping the fleet-wide agent free of GPU userspace/devices.
+# (AMD needs none of this: node_exporter's built-in "drm" collector reads
+# amdgpu sysfs directly — just add "drm" to alloy's set_collectors.)
+#
+# Image source: pulled from Docker Hub, which the host signature policy allows
+# (insecureAcceptAnything) — unlike third-party ghcr.io, which is default-
+# rejected. So a normal pull works; no stage-into-user-store dance needed.
+#
+# Runs only on hosts with NVIDIA GPUs. On other hosts, don't enable it.
+#
+# Setup:
+#   1. Enable (pulls the image, injects all NVIDIA GPUs via CDI):
+#        sudo workloadctl enable nvidia-gpu-exporter
+#   2. Point alloy at it — uncomment the "nvidia_gpu_exporter" scrape block in
+#      /var/lib/workloads/alloy/data/alloy-config.alloy, then:
+#        sudo workloadctl recreate alloy
+#   3. Metrics flow to the central otel-lgtm backend, labelled with this host's
+#      host_name/host_role (added by alloy). Build/point a Grafana GPU
+#      dashboard at the nvidia_smi_* series.
+#
+# Verify locally:  curl -s localhost:9835/metrics | grep nvidia_smi_utilization
+
+[workload]
+name = "nvidia-gpu-exporter"
+
+[container]
+image = "docker.io/utkuozdemir/nvidia_gpu_exporter:1.10.0"
+# "newer" pulls when a newer tag is published; falls back to the local copy if
+# the registry is unreachable.
+pull = "newer"
+# No command override: the image's default entrypoint serves /metrics on
+# 0.0.0.0:9835 and calls nvidia-smi (injected below) on each scrape.
+
+[container.health]
+# The exporter image is Ubuntu-based (bash present); probe the metrics port
+# without needing curl. If a future image drops bash, switch to a curl/wget
+# probe or drop this block.
+cmd = "bash -c 'exec 3<>/dev/tcp/localhost/9835' || exit 1"
+interval = "30s"
+start_period = "20s"
+on_failure = "kill"
+
+[devices]
+# All NVIDIA GPUs on the host. Expands to
+# `--device=nvidia.com/gpu=all --device /dev/dri`, which the nvidia-ctk CDI
+# hook uses to inject the driver libraries + nvidia-smi + every /dev/nvidia*.
+gpu = "nvidia"
+
+[security]
+extra_groups = ["video"]
+
+[network]
+mode = "pasta"
+# Published on all host interfaces so alloy (its own netns) can scrape it via
+# host.containers.internal:9835 — the same reach the workload-exporter uses.
+# GPU telemetry is low-sensitivity, but if this host faces an untrusted LAN,
+# bind it to a specific interface ("192.168.x.y:9835:9835") or firewall :9835.
+ports = ["9835:9835"]
+
+[resources]
+# nvidia-smi forks per scrape and briefly needs ~50-100 MB; 256 MB leaves head-
+# room. The exporter's own RSS is a few MB.
+memory_max = "256M"
+memory_high = "192M"
+cpu_quota = "25%"

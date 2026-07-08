@@ -57,6 +57,11 @@ volumes = [
     # Journal access (read-only)
     "/run/log/journal:/run/log/journal:ro",
     "/var/log/journal:/var/log/journal:ro",
+    # Workload metrics textfile drop (written by the workload-exporter oneshot
+    # as root, 0644). node_exporter's textfile collector reads it here. Plain
+    # :ro, never :U — a rootless container can't chown a root-owned file
+    # (lchown EPERM); the file is world-readable so it doesn't need to.
+    "/run/workload-exporter:/run/workload-exporter:ro",
     # Host rootfs (recursive, slave propagation) so node_exporter can read
     # the real /host/proc, /host/sys, and stat host mount points. Matching
     # procfs_path/sysfs_path/rootfs_path are set in alloy-config.alloy.
