@@ -14,7 +14,8 @@ and traces to the central otel-lgtm backend.
 ## What it collects
 
 - **Metrics**: host CPU, memory, disk, network, filesystem (node_exporter)
-  and per-workload systemd state + cgroup metrics (workload-exporter on :9110)
+  and per-workload systemd state + cgroup metrics (from the workload-exporter
+  textfile drop, read by node_exporter's textfile collector)
 - **Logs**: all systemd journal entries
 - **Traces**: OTLP from workloadctl CLI and any other local apps that send to
   the local receiver on `4317` (gRPC) / `4318` (HTTP)

@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-"""Integration tests for the workload-exporter metrics server.
+"""Integration tests for the workload-exporter metrics textfile writer.
 
-Spawns the actual workload-exporter HTTP server on a free port with an
-overridden config directory (WORKLOAD_CONFIG_DIR) and validates the
-Prometheus exposition served at /metrics. On a dev machine systemd and
-cgroup queries return empty/defaults, so we test:
+Runs the actual workload-exporter oneshot against an overridden config
+directory (WORKLOAD_CONFIG_DIR), writing to a scratch path, and validates the
+Prometheus exposition it drops. On a dev machine systemd and cgroup queries
+return empty/defaults, so we test:
 - Config discovery (enabled, disabled, masked workloads)
 - Output format (valid Prometheus exposition with correct TYPE/HELP)
 - Empty/no-config edge cases
 - Meta-metrics (workload_enabled_total, last_collect_timestamp)
-- Robustness (bad configs are skipped, the server keeps serving)
-- Live collection (each scrape re-reads configs)
+- Robustness (bad configs are skipped, a file is still written)
+- Live collection (each run re-reads configs)
+- Atomic write (temp + rename, world-readable, no partial file left behind)
 """
 
-import http.client
 import importlib.machinery
 import importlib.util
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -32,76 +31,23 @@ EXPORTER_SCRIPT = os.path.join(
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
 
-def _free_port():
-    """Pick an unused TCP port on the loopback interface."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class ExporterProcess:
-    """Context manager: run workload-exporter on a free port.
-
-    Spawns the server against the given config dir, waits for it to accept
-    connections, and exposes get() to scrape it. Terminates the process on
-    exit.
-    """
-
-    def __init__(self, config_dir):
-        self.config_dir = config_dir
-        self.port = _free_port()
-        self.proc = None
-
-    def __enter__(self):
-        env = os.environ.copy()
-        env["WORKLOAD_CONFIG_DIR"] = str(self.config_dir)
-        env["PYTHONPATH"] = LIB_DIR
-        self.proc = subprocess.Popen(
-            [sys.executable, EXPORTER_SCRIPT, str(self.port)],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(
-                    f"exporter exited early (rc={self.proc.returncode})")
-            try:
-                with socket.create_connection(("127.0.0.1", self.port), 0.2):
-                    return self
-            except OSError:
-                time.sleep(0.05)
-        raise RuntimeError("exporter did not start listening in time")
-
-    def __exit__(self, *exc):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
-
-    def get(self, path="/metrics"):
-        """GET path from the running exporter; return (status, body)."""
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        try:
-            conn.request("GET", path)
-            resp = conn.getresponse()
-            return resp.status, resp.read().decode()
-        finally:
-            conn.close()
+def run_writer(config_dir, output_path):
+    """Run workload-exporter as a subprocess, writing to output_path."""
+    env = os.environ.copy()
+    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
+    env["PYTHONPATH"] = LIB_DIR
+    subprocess.run(
+        [sys.executable, EXPORTER_SCRIPT, str(output_path)],
+        env=env, check=True, capture_output=True, text=True, timeout=30,
+    )
 
 
 def scrape(config_dir):
-    """Start the exporter against config_dir, GET /metrics once, return body.
-
-    Asserts a 200 response — the exposition text is returned for parsing.
-    """
-    with ExporterProcess(config_dir) as exp:
-        status, body = exp.get("/metrics")
-        if status != 200:
-            raise AssertionError(f"GET /metrics returned {status}")
-        return body
+    """Run the exporter against config_dir once, return the written exposition."""
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "workloads.prom"
+        run_writer(config_dir, out)
+        return out.read_text()
 
 
 def write_config(config_dir, name, toml_content, enabled=True):
@@ -464,20 +410,6 @@ class TestMetricsFormat(unittest.TestCase):
         self.assertEqual(types["workload_disk_bytes"], "gauge")
         self.assertIn("# HELP workload_disk_bytes ", self.prom)
 
-    def test_content_type_is_prometheus(self):
-        """/metrics is served with the Prometheus exposition content type."""
-        with ExporterProcess(self.config_dir) as exp:
-            conn = http.client.HTTPConnection("127.0.0.1", exp.port, timeout=5)
-            try:
-                conn.request("GET", "/metrics")
-                resp = conn.getresponse()
-                resp.read()
-                self.assertEqual(resp.status, 200)
-                self.assertIn("text/plain",
-                              resp.getheader("Content-Type", ""))
-            finally:
-                conn.close()
-
 
 class TestMetricsRobustness(unittest.TestCase):
     """Test that bad input is tolerated and the server keeps serving."""
@@ -528,25 +460,9 @@ class TestMetricsRobustness(unittest.TestCase):
         prom = scrape(self.config_dir)
         self.assertEqual(parse_metric_value(prom, "workload_enabled_total"), "1")
 
-    def test_unknown_path_returns_404(self):
-        """A request for anything other than /metrics returns 404."""
-        with ExporterProcess(self.config_dir) as exp:
-            status, _ = exp.get("/not-metrics")
-            self.assertEqual(status, 404)
-
-    def test_server_survives_bad_config(self):
-        """A malformed config doesn't 500 the endpoint or crash the server."""
-        (Path(self.config_dir) / "bad.toml").write_text("not valid [[[ toml")
-        with ExporterProcess(self.config_dir) as exp:
-            status, _ = exp.get("/metrics")
-            self.assertEqual(status, 200)
-            # Still alive and serving on a second request.
-            status2, _ = exp.get("/metrics")
-            self.assertEqual(status2, 200)
-
 
 class TestMetricsLiveCollection(unittest.TestCase):
-    """Each scrape re-reads configs from disk (no cached snapshot)."""
+    """Each run re-reads configs from disk (no cached snapshot)."""
 
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
@@ -554,8 +470,8 @@ class TestMetricsLiveCollection(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.config_dir)
 
-    def test_rescrape_reflects_config_change(self):
-        """A config change between two scrapes is reflected on the second."""
+    def test_rerun_reflects_config_change(self):
+        """A config change between two runs is reflected on the second."""
         write_config(self.config_dir, "v1", """\
             [workload]
             name = "v1"
@@ -563,27 +479,21 @@ class TestMetricsLiveCollection(unittest.TestCase):
             [container]
             image = "alpine:latest"
         """)
+        prom1 = scrape(self.config_dir)
+        self.assertIn('workload="v1"', prom1)
 
-        with ExporterProcess(self.config_dir) as exp:
-            status, prom1 = exp.get("/metrics")
-            self.assertEqual(status, 200)
-            self.assertIn('workload="v1"', prom1)
+        # Remove v1, add v2 — a fresh run must reflect the new state.
+        shutil.rmtree(Path(self.config_dir) / "v1")
+        write_config(self.config_dir, "v2", """\
+            [workload]
+            name = "v2"
 
-            # Remove v1, add v2 — same running server.
-            import shutil as _shutil
-            _shutil.rmtree(Path(self.config_dir) / "v1")
-            write_config(self.config_dir, "v2", """\
-                [workload]
-                name = "v2"
-
-                [container]
-                image = "alpine:latest"
-            """)
-
-            status, prom2 = exp.get("/metrics")
-            self.assertEqual(status, 200)
-            self.assertIn('workload="v2"', prom2)
-            self.assertNotIn('workload="v1"', prom2)
+            [container]
+            image = "alpine:latest"
+        """)
+        prom2 = scrape(self.config_dir)
+        self.assertIn('workload="v2"', prom2)
+        self.assertNotIn('workload="v1"', prom2)
 
 
 def _load_exporter():
@@ -1092,46 +1002,15 @@ class TestFormatMetrics(unittest.TestCase):
         self.assertIn("workload_metrics_last_collect_timestamp_seconds", text)
 
 
-class TestMetricsHandlerDirect(unittest.TestCase):
-    """Drive MetricsHandler.do_GET without a real socket/server."""
+class TestCollectAll(unittest.TestCase):
+    """Drive collect_all() — the collection loop the writer renders."""
 
     def setUp(self):
         from unittest import mock
-        import io
         self.mock = mock
-        self.io = io
         self.mod = _load_exporter()
 
-    def _make_handler(self, path):
-        handler = self.mod.MetricsHandler.__new__(self.mod.MetricsHandler)
-        handler.path = path
-        handler.send_response = self.mock.Mock()
-        handler.send_header = self.mock.Mock()
-        handler.end_headers = self.mock.Mock()
-        handler.wfile = self.io.BytesIO()
-        return handler
-
-    def test_unknown_path_404(self):
-        handler = self._make_handler("/nope")
-        handler.do_GET()
-        handler.send_response.assert_called_once_with(404)
-
-    def test_metrics_path_returns_200_body(self):
-        handler = self._make_handler("/metrics")
-        with self.mock.patch.object(self.mod, "get_enabled_workloads", return_value=[]):
-            handler.do_GET()
-        handler.send_response.assert_called_once_with(200)
-        self.assertIn(b"workload_enabled_total 0", handler.wfile.getvalue())
-
-    def test_collection_error_returns_500(self):
-        handler = self._make_handler("/metrics")
-        with self.mock.patch.object(self.mod, "get_enabled_workloads",
-                                    side_effect=RuntimeError("boom")):
-            handler.do_GET()
-        handler.send_response.assert_called_once_with(500)
-
     def test_full_workload_collection_path(self):
-        handler = self._make_handler("/metrics")
         with self.mock.patch.object(
                 self.mod, "get_enabled_workloads",
                 return_value=[("app", [("app", "workload-app")], False)]), \
@@ -1140,18 +1019,21 @@ class TestMetricsHandlerDirect(unittest.TestCase):
              self.mock.patch.object(self.mod, "get_container_healths",
                                     return_value={"workload-app": "healthy"}), \
              self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=1000):
-            handler.do_GET()
-        handler.send_response.assert_called_once_with(200)
-        self.assertIn(b'workload="app"', handler.wfile.getvalue())
-        self.assertIn(b'workload_health{workload="app"} 1', handler.wfile.getvalue())
+            all_metrics = self.mod.collect_all()
+        self.assertEqual(len(all_metrics), 1)
+        name, svc, _cgroup, _vm, disk = all_metrics[0]
+        self.assertEqual(name, "app")
+        self.assertEqual(svc["health"], {"app": 1})
+        self.assertEqual(disk, 1000)
+        body = self.mod.format_metrics(all_metrics)
+        self.assertIn('workload_health{workload="app"} 1', body)
 
-    def test_pod_workload_collection_queries_per_container_names(self):
+    def test_pod_workload_queries_per_container_names(self):
         """Regression for A6: a pod/bridge workload's health must be queried
         by its actual podman names (`workload-<name>-<container>`), not the
         nonexistent bare `workload-<name>` — and workload_health must appear
         for each container. Fails pre-fix because the old code always queried
         `workload-<name>` and reported a single scalar."""
-        handler = self._make_handler("/metrics")
         queried_names = []
 
         def fake_healths(name, container_names):
@@ -1169,17 +1051,61 @@ class TestMetricsHandlerDirect(unittest.TestCase):
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
              self.mock.patch.object(self.mod, "get_container_healths", side_effect=fake_healths), \
              self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=None):
-            handler.do_GET()
+            all_metrics = self.mod.collect_all()
 
         self.assertEqual(sorted(queried_names), ["workload-multi-db", "workload-multi-web"])
         self.assertNotIn("workload-multi", queried_names)
-        body = handler.wfile.getvalue()
-        self.assertIn(b'workload_health{workload="multi",container="web"} 1', body)
-        self.assertIn(b'workload_health{workload="multi",container="db"} 0', body)
+        _name, svc, *_ = all_metrics[0]
+        self.assertEqual(svc["health"], {"web": 1, "db": 0})
+        body = self.mod.format_metrics(all_metrics)
+        self.assertIn('workload_health{workload="multi",container="web"} 1', body)
+        self.assertIn('workload_health{workload="multi",container="db"} 0', body)
 
-    def test_log_message_noop(self):
-        handler = self._make_handler("/metrics")
-        self.assertIsNone(handler.log_message("%s", "ignored"))
+
+class TestWriteMetrics(unittest.TestCase):
+    """The atomic textfile writer that replaced the HTTP serving layer."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_writes_expected_contents_and_creates_parent(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "sub" / "workloads.prom"  # parent must be created
+            with self.mock.patch.object(self.mod, "collect_all", return_value=[]):
+                self.mod.write_metrics(out)
+            self.assertTrue(out.exists())
+            self.assertIn("workload_enabled_total 0", out.read_text())
+
+    def test_body_matches_format_metrics(self):
+        """The file holds exactly what format_metrics() renders — the writer
+        swapped the transport (was HTTP), not the metrics."""
+        sample = [("app", {"active": 1}, {}, {}, None)]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads.prom"
+            with self.mock.patch.object(self.mod, "collect_all", return_value=sample):
+                self.mod.write_metrics(out)
+            self.assertEqual(out.read_text(), self.mod.format_metrics(sample))
+
+    def test_write_is_atomic_no_tmp_left(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads.prom"
+            with self.mock.patch.object(self.mod, "collect_all", return_value=[]):
+                self.mod.write_metrics(out)
+            # Only the final file survives — the sibling temp is renamed away.
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["workloads.prom"])
+
+    def test_file_is_world_readable(self):
+        """Rootless Alloy reads the root-written file across a :ro mount and
+        can't chown it, so it must land world-readable (0644)."""
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads.prom"
+            with self.mock.patch.object(self.mod, "collect_all", return_value=[]):
+                self.mod.write_metrics(out)
+            mode = stat.S_IMODE(os.stat(out).st_mode)
+            self.assertTrue(mode & stat.S_IROTH, f"not world-readable: {oct(mode)}")
 
 
 class TestMain(unittest.TestCase):
@@ -1188,15 +1114,14 @@ class TestMain(unittest.TestCase):
         self.mock = mock
         self.mod = _load_exporter()
 
-    def test_main_starts_server(self):
-        fake_server = self.mock.Mock()
-        with self.mock.patch.object(self.mod, "_ExporterServer",
-                                    return_value=fake_server) as http_server_cls:
-            self.mod.main()
-        http_server_cls.assert_called_once()
-        args, _ = http_server_cls.call_args
-        self.assertEqual(args[0], ("0.0.0.0", self.mod.PORT))
-        fake_server.serve_forever.assert_called_once()
+    def test_main_writes_output_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads.prom"
+            with self.mock.patch.object(self.mod, "OUTPUT_PATH", out), \
+                 self.mock.patch.object(self.mod, "collect_all", return_value=[]):
+                self.mod.main()
+            self.assertTrue(out.exists())
+            self.assertIn("workload_enabled_total 0", out.read_text())
 
 
 if __name__ == "__main__":

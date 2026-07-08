@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the workload metrics textfile periodically
+
+[Timer]
+# Match the old scrape cadence (30s). OnBootSec lets the workload units and
+# their rootless-podman instances settle before the first collection.
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

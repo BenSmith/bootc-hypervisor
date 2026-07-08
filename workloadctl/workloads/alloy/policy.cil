@@ -28,4 +28,11 @@
     ; traverse into it and file read to read the mounts file.
     (allow process init_t (dir (search getattr open read)))
     (allow process init_t (file (open read getattr)))
+
+    ; Workload metrics textfile: the workload-exporter oneshot drops
+    ; /run/workload-exporter/workloads.prom (default label var_run_t for files
+    ; under /run), bind-mounted :ro. node_exporter's textfile collector opens
+    ; the directory and reads the .prom file across the mount.
+    (allow process var_run_t (dir (open read search getattr)))
+    (allow process var_run_t (file (open read getattr)))
 )

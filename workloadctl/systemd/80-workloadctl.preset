@@ -1,0 +1,7 @@
+# Preset policy for workloadctl's own units.
+#
+# The vendor default preset is `disable *`, so any unit this package ships is
+# left disabled by %systemd_post unless a preset here says otherwise. The timer
+# drives the metrics-textfile oneshot (workload-exporter.service); without it
+# enabled the exporter never runs and no workload metrics are produced.
+enable workload-exporter.timer
