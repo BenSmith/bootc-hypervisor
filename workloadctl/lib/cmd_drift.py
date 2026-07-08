@@ -30,24 +30,19 @@ def _find_generator() -> Path:
     for p in _GENERATOR_CANDIDATES:
         if p.is_file():
             return p
-    print(
-        "Error: workload-generate script not found. "
-        "Is workloadctl installed?",
-        file=sys.stderr,
+    raise RuntimeError(
+        "workload-generate script not found. Is workloadctl installed?"
     )
-    sys.exit(1)
 
 
-def cmd_drift(args, manager):
-    """Show diff between TOML-generated units and running units.
+def collect_drift(workload_name=None) -> list:
+    """Return the drift set as a list of (filename, live_text, gen_text).
 
-    Runs the generator in a scratch directory and diffs the output against
-    /run/systemd/system.  No changes are applied.  Exits 1 if drift exists,
-    0 if everything is in sync.
+    Runs the generator into a scratch dir and compares its output against
+    LIVE_UNITS_DIR without touching either. Raises RuntimeError if the
+    generator is missing or fails. Shared by cmd_drift and doctor.
     """
     generator = _find_generator()
-    workload_name = getattr(args, "workload", None)
-    json_output = getattr(args, "json", False)
 
     with tempfile.TemporaryDirectory(prefix="workload-drift-") as tmpdir:
         env = {
@@ -62,11 +57,9 @@ def cmd_drift(args, manager):
             text=True,
         )
         if result.returncode != 0:
-            print(
-                f"Error: generator failed:\n{result.stderr.strip()}",
-                file=sys.stderr,
+            raise RuntimeError(
+                f"generator failed:\n{result.stderr.strip()}"
             )
-            sys.exit(1)
 
         gen_dir = Path(tmpdir)
 
@@ -142,6 +135,25 @@ def cmd_drift(args, manager):
                         f"# orphaned enablement symlink -> {target}\n",
                         "",
                     ))
+
+    return diffs
+
+
+def cmd_drift(args, manager):
+    """Show diff between TOML-generated units and running units.
+
+    Runs the generator in a scratch directory and diffs the output against
+    /run/systemd/system.  No changes are applied.  Exits 1 if drift exists,
+    0 if everything is in sync.
+    """
+    workload_name = getattr(args, "workload", None)
+    json_output = getattr(args, "json", False)
+
+    try:
+        diffs = collect_drift(workload_name)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if json_output:
         import json

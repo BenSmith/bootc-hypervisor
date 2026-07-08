@@ -18,6 +18,7 @@ except ImportError:
 from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
+from cmd_doctor import cmd_doctor
 from cmd_drift import cmd_drift
 from cmd_inspect import (
     cmd_health, cmd_images, cmd_info, cmd_list,
@@ -348,6 +349,11 @@ def main():
     diagnose_parser.set_defaults(func=cmd_diagnose)
     diagnose_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     diagnose_parser.add_argument("workload", help="Workload name")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Aggregate diagnosis: generator log, unit states, setup checks, drift, health")
+    doctor_parser.set_defaults(func=cmd_doctor)
+    doctor_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    doctor_parser.add_argument("workload", help="Workload name")
 
     args = parser.parse_args()
 

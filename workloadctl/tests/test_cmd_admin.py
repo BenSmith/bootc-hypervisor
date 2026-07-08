@@ -306,6 +306,16 @@ class DiagnoseTest(unittest.TestCase):
             code = e.code
         return code, out.getvalue()
 
+    def test_collector_returns_checks_without_printing(self):
+        # The seam doctor consumes: (checks, passed), no root gate, no output.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            checks, passed = cmd_admin.collect_diagnose_checks(
+                cmd_admin.WorkloadConfig("app"), self.manager)
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(passed)
+        self.assertIn("user_exists", {c["check"] for c in checks})
+
     def test_json_reports_failure(self):
         code, out = self._run(json_mode=True)
         self.assertEqual(code, 1)
