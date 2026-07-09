@@ -8,7 +8,6 @@ workloadctl enable.  Idempotent — safe to run on every service start.
 Usage: workload-ensure-user <workload-name>
 """
 
-import fcntl
 import grp
 import hashlib
 import os
@@ -26,7 +25,7 @@ from workload_lib import (
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind, VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars,
     virtiofs_tags, parse_volume_spec, substitute_template, normalize_containers,
-    workload_state_dir, workload_data_dir, workload_root_dir, SUBID_LOCK,
+    workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
 )
 
 
@@ -127,11 +126,11 @@ def configure_subuid_subgid(pw, config):
                 continue
             required_gid_entries.add(f"{username}:{gid}:1")
 
-    # Lock around check-then-write to handle parallel ExecStartPre
-    SUBID_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(SUBID_LOCK, "w") as lock_fd:
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-
+    # Lock around check-then-write to handle parallel ExecStartPre. The shared
+    # subid_lock() is the same SUBID_LOCK flock the allocators hold; this script
+    # only reconciles subid ranges from an already-assigned pw.pw_uid (it never
+    # calls get_next_uid), so there's no nested re-acquire.
+    with subid_lock():
         changed = False
         for path, required_entries in [("/etc/subuid", required_uid_entries),
                                         ("/etc/subgid", required_gid_entries)]:

@@ -7,6 +7,7 @@ and cloud-init template substitution paths without running the rest of
 the (root-only) user-provisioning flow.
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import os
@@ -587,7 +588,7 @@ class TestConfigureSubuidSubgid(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod, "subprocess", mock.MagicMock()), \
              mock.patch.object(self.mod.Path, "mkdir"):
             self.mod.configure_subuid_subgid(pw, config)
@@ -1230,7 +1231,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod, "subprocess",
                                subprocess_mock or mock.MagicMock()):
@@ -1252,7 +1253,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.grp, "getgrnam",
                                return_value=types.SimpleNamespace(gr_gid=44)), \
@@ -1275,7 +1276,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.grp, "getgrnam", side_effect=KeyError()), \
              mock.patch.object(self.mod, "subprocess", mock.MagicMock()), \
@@ -1299,7 +1300,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.grp, "getgrnam") as gg, \
              mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
@@ -1321,7 +1322,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.subprocess, "run",
                                side_effect=self.mod.subprocess.TimeoutExpired("podman", 30)), \
@@ -1342,7 +1343,7 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             return m
 
         with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(self.mod.fcntl, "flock"), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
              mock.patch.object(self.mod.Path, "mkdir"), \
              mock.patch.object(self.mod.subprocess, "run",
                                return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \

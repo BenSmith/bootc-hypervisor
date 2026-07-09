@@ -69,7 +69,7 @@ try:
         expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
         infer_workload_kind,
-        get_next_uid,
+        get_next_uid, subid_lock,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
         VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code,
@@ -187,6 +187,27 @@ def generate_sysuser_config(config, user_name, uid):
         home_dir=str(workload_state_dir(name)),
         extra_groups=config.get("security", {}).get("extra_groups", []),
     )
+
+
+def pin_allocated_uid(config, user_name, uid, *, is_vm):
+    """Durably record a freshly-allocated UID by writing its sysusers .conf.
+
+    Called under subid_lock() the instant a UID is allocated, before the lock is
+    released, so a concurrent allocator's get_next_uid() (which scans pending
+    sysusers configs) sees the slot as taken — this is what closes the
+    allocate-then-create window (the user isn't in /etc/passwd until the
+    workload's setup service runs systemd-sysusers, potentially much later). The
+    per-kind emit later in the loop rewrites this file with identical content."""
+    name = config["workload"]["name"]
+    view = _RunFileConfig(config=config, name=name, uid=uid, is_vm=is_vm)
+    dest = emitted_run_paths(view)[("sysusers", "sysusers")][0]
+    content = (
+        generate_sysuser_config_vm(config, user_name, uid)
+        if is_vm
+        else generate_sysuser_config(config, user_name, uid)
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content)
 
 
 
@@ -1869,7 +1890,16 @@ def main():
                 uid = pwd.getpwnam(user_name).pw_uid
                 log_msg(f"  User {user_name} exists with UID {uid}")
             except KeyError:
-                uid = get_next_uid()
+                # Allocate and durably pin the UID under a single lock hold:
+                # get_next_uid() scans pending sysusers configs, so writing this
+                # workload's .conf before releasing the lock stops a concurrent
+                # enable from handing out the same slot in the window before
+                # systemd-sysusers creates the user.
+                with subid_lock():
+                    uid = get_next_uid()
+                    pin_allocated_uid(
+                        config, user_name, uid, is_vm=(kind == "vm")
+                    )
                 log_msg(f"  User {user_name} not found; allocated UID {uid}")
 
             if kind == "vm":

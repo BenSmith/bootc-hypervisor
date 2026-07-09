@@ -17,6 +17,7 @@ Covers:
      cattle continues normally.
 """
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -706,14 +707,15 @@ import cmd_lifecycle
 
 
 class TestSubidLockSharedConstant(unittest.TestCase):
-    """A11: the subuid/subgid flock only mutexes if every participant names
-    the identical path — cmd_lifecycle must import workload_lib.SUBID_LOCK
-    rather than re-spelling the literal."""
+    """A11/A5: the subuid/subgid flock only mutexes if every participant uses
+    the identical primitive — cmd_lifecycle must go through workload_lib's
+    shared subid_lock() context manager (which names the one SUBID_LOCK path)
+    rather than re-spelling its own flock."""
 
-    def test_cmd_lifecycle_imports_shared_lock_path(self):
-        self.assertIs(cmd_lifecycle.SUBID_LOCK, workload_lib.SUBID_LOCK)
+    def test_cmd_lifecycle_uses_shared_lock(self):
+        self.assertIs(cmd_lifecycle.subid_lock, workload_lib.subid_lock)
         self.assertEqual(
-            cmd_lifecycle.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
+            workload_lib.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
         )
 
 
@@ -1042,7 +1044,7 @@ class TestProvisionUser(unittest.TestCase):
                         with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
                             run_mock.return_value = MagicMock(returncode=0)
                             with patch('builtins.open', unittest.mock.mock_open()):
-                                with patch.object(cmd_lifecycle.fcntl, 'flock'):
+                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
                                     with patch.object(Path, 'mkdir'):
                                         with patch.object(Path, 'write_text'):
                                             cmd_lifecycle._provision_user(cfg)
@@ -1061,7 +1063,7 @@ class TestProvisionUser(unittest.TestCase):
                     with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
                         run_mock.return_value = MagicMock(returncode=0)
                         with patch('builtins.open', unittest.mock.mock_open()):
-                            with patch.object(cmd_lifecycle.fcntl, 'flock'):
+                            with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
                                 with patch.object(Path, 'mkdir'):
                                     with patch.object(Path, 'write_text'):
                                         cmd_lifecycle._provision_user(cfg)
@@ -1471,7 +1473,7 @@ class TestCmdDisableAdditional(unittest.TestCase):
                     with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=Path(d) / "nope"):
-                                with patch.object(cmd_lifecycle.fcntl, 'flock'):
+                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
                                     with patch.object(cmd_lifecycle, 'open', unittest.mock.mock_open(), create=True):
                                         with _no_subid_files():
                                             buf = io.StringIO()
@@ -1518,7 +1520,7 @@ class TestCmdDisableAdditional(unittest.TestCase):
                     with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
-                                with patch.object(cmd_lifecycle.fcntl, 'flock'):
+                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
                                     with patch.object(cmd_lifecycle, 'open', unittest.mock.mock_open(), create=True):
                                         with _no_subid_files():
                                             cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=True), manager)

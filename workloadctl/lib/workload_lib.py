@@ -7,6 +7,7 @@ Installed to /usr/libexec/workloadctl/workload_lib.py.
 """
 
 import contextlib
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -448,30 +449,132 @@ def workload_username(name: str) -> str:
     return f"{USERNAME_PREFIX}{name}"
 
 
+# Flock guarding the subuid/subgid UID-allocation critical section (#4). Must be
+# the identical path across every participant (workload-ensure-user, cmd_lifecycle
+# enable + disable/purge) or the flock stops mutexing.
+SUBID_LOCK = Path("/run/lock/workload-subid.lock")
+
+# Reentrancy state for subid_lock(): the enable path holds the lock across
+# allocation *through* the sysusers write, and get_next_uid() (called inside
+# that span) now takes the lock too. Nesting on a single cached fd makes the
+# inner acquire a no-op instead of a same-process deadlock (a second fd's
+# flock() would block against the outer hold). Single-threaded by design —
+# both callers (the boot generator, the CLI) run one allocation at a time.
+_subid_lock_fd = None
+_subid_lock_depth = 0
+
+
+@contextlib.contextmanager
+def subid_lock():
+    """Hold SUBID_LOCK for the UID/subid allocation critical section.
+
+    Reentrant within a process (see _subid_lock_depth): only the outermost
+    acquire flocks, only the outermost release unlocks. Cross-process this is a
+    plain exclusive flock, so a boot-time generate and a concurrent
+    `workloadctl enable` can't hand out the same UID.
+
+    Best-effort *only* for a permission failure: if the caller can't open the
+    root-owned lock (an unprivileged caller — /run/lock is root-owned) the body
+    runs unlocked rather than blocking. Any other OSError (a transient flock
+    EINTR, ENOSPC, EIO …) propagates so allocation fails loudly instead of
+    silently running without the mutex — the isolation stakes are too high to
+    swallow those. Both real callers run as root where the open+flock succeed,
+    so the guarantee holds where allocation actually happens; the permission
+    escape hatch only keeps the exit-0 boot generator (whose per-workload loop
+    already logs-and-continues) from being the thing that trips.
+    """
+    global _subid_lock_fd, _subid_lock_depth
+    if _subid_lock_depth == 0:
+        try:
+            SUBID_LOCK.parent.mkdir(parents=True, exist_ok=True)
+            _subid_lock_fd = open(SUBID_LOCK, "w")
+            fcntl.flock(_subid_lock_fd.fileno(), fcntl.LOCK_EX)
+        except OSError as e:
+            # Drop any half-open fd first (the finally below never runs — we
+            # raise before _subid_lock_depth is incremented — so clean up here).
+            if _subid_lock_fd is not None:
+                _subid_lock_fd.close()
+            _subid_lock_fd = None
+            # Permission failure → unprivileged caller can't take the root-owned
+            # lock; degrade to unlocked. Anything else is a real fault.
+            if not isinstance(e, PermissionError):
+                raise
+    _subid_lock_depth += 1
+    try:
+        yield
+    finally:
+        _subid_lock_depth -= 1
+        if _subid_lock_depth == 0 and _subid_lock_fd is not None:
+            fcntl.flock(_subid_lock_fd.fileno(), fcntl.LOCK_UN)
+            _subid_lock_fd.close()
+            _subid_lock_fd = None
+
+
 # Per-run tracking set: `get_next_uid` records UIDs allocated during this
 # process invocation so multiple workloads enabled in the same run don't race.
 _allocated_uids: set[int] = set()
+
+
+def _reserved_uids_in_pending_sysusers() -> set[int]:
+    """UIDs handed out in pending sysusers configs but not yet in /etc/passwd.
+
+    Between allocation and `systemd-sysusers` creating the user, a workload's
+    UID lives only in its sysusers .conf: the boot generator writes it into
+    /run/systemd/system and defers user creation to the workload's setup
+    service (potentially much later), while enable stages a copy in
+    /run/sysusers.d. During that gap the UID is invisible to `pwd.getpwall()`,
+    so a concurrent allocator would re-hand-out the slot. get_next_uid() unions
+    these in — provided every allocator writes its .conf while still holding
+    SUBID_LOCK — to close that window. /run is tmpfs (no cross-boot staleness)
+    and disable removes the conf, so this set tracks live allocations.
+    """
+    reserved: set[int] = set()
+    for d in (RUN_SYSTEMD_SYSTEM, RUN_SYSUSERS_D):
+        try:
+            confs = list(d.glob("workload-*.conf"))
+        except OSError:
+            continue
+        for conf in confs:
+            try:
+                text = conf.read_text()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                # sysusers user line: `u <name> <uid|uid:gid> "gecos" <home>`.
+                fields = line.split()
+                if len(fields) >= 3 and fields[0] == "u":
+                    try:
+                        reserved.add(int(fields[2].split(":", 1)[0]))
+                    except ValueError:
+                        pass
+    return reserved
 
 
 def get_next_uid() -> int:
     """Return the next free UID in the workload range [UID_MIN, UID_MAX].
 
     Combines the live /etc/passwd snapshot with UIDs already allocated in this
-    process invocation.  Caller holds /run/lock/workload-subid.lock to prevent
-    concurrent processes from picking the same slot.
+    process invocation and UIDs pinned in pending sysusers configs (see
+    _reserved_uids_in_pending_sysusers — covers slots handed out but not yet
+    created). Takes SUBID_LOCK itself so every caller — including the boot
+    generator, which used to allocate unlocked — is mutexed against a concurrent
+    allocator picking the same free slot. Reentrant, so the enable path can keep
+    the lock held across the subsequent sysusers write.
     """
-    used = set(_allocated_uids)
-    try:
-        for pw in pwd.getpwall():
-            if UID_MIN <= pw.pw_uid <= UID_MAX:
-                used.add(pw.pw_uid)
-    except Exception:
-        pass
-    for uid in range(UID_MIN, UID_MAX + 1):
-        if uid not in used:
-            _allocated_uids.add(uid)
-            return uid
-    raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
+    with subid_lock():
+        used = set(_allocated_uids)
+        used |= _reserved_uids_in_pending_sysusers()
+        try:
+            for pw in pwd.getpwall():
+                if UID_MIN <= pw.pw_uid <= UID_MAX:
+                    used.add(pw.pw_uid)
+        except Exception:
+            pass
+        for uid in range(UID_MIN, UID_MAX + 1):
+            if uid not in used:
+                _allocated_uids.add(uid)
+                return uid
+        raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
 
 
 def workload_service_name(name: str) -> str:
@@ -504,11 +607,10 @@ def workload_podman_container_name(
 # boot by workload-generate.service and on every `workloadctl enable`).
 RUN_SYSTEMD_SYSTEM = Path("/run/systemd/system")
 
-# Flock guarding the subuid/subgid UID-allocation critical section (#4). Must be
-# the identical path across every participant (workload-ensure-user, cmd_lifecycle
-# enable + disable/purge) or the flock stops mutexing.
-SUBID_LOCK = Path("/run/lock/workload-subid.lock")
-
+# Where enable stages a workload's sysusers .conf to apply immediately (the
+# generator writes its copy into RUN_SYSTEMD_SYSTEM). Both are scanned by
+# _reserved_uids_in_pending_sysusers to spot pinned-but-uncreated UIDs.
+RUN_SYSUSERS_D = Path("/run/sysusers.d")
 
 # --- Workload run-files (B15) ---------------------------------------------- #
 #
