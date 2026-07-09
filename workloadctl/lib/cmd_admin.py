@@ -16,6 +16,7 @@ import tempfile
 from workload_lib import (
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
+    parse_memory_mib,
     selinux_module_name,
     selinux_type_name,
     units_outdated,
@@ -304,6 +305,29 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 "group": group
             })
             errors += 1
+
+    # vm.memory in 'K' notation truncates via integer division to MiB
+    # (parse_memory_mib rounds down: qemu accepts K but it's not a useful VM
+    # RAM unit) — surface the precision loss so an operator doesn't silently
+    # end up with a smaller VM than the config implies.
+    vm_memory = config.config.get("vm", {}).get("memory")
+    if isinstance(vm_memory, str) and vm_memory.strip().upper().endswith("K"):
+        try:
+            n = int(vm_memory.strip()[:-1])
+            mib = parse_memory_mib(vm_memory)
+        except (ValueError, TypeError):
+            pass  # malformed value is already reported by the schema check above
+        else:
+            if n % 1024 != 0:
+                checks.append({
+                    "check": "vm_memory_precision",
+                    "passed": True,
+                    "severity": "warning",
+                    "message": f"vm.memory = {vm_memory!r} is not an exact number "
+                               f"of MiB; truncated to {mib}M.",
+                    "fix": f'memory = "{mib}M"',
+                })
+                warnings += 1
 
     # Warn if custom_directives overrides something the generator already sets.
     custom_directives = config.config.get("resources", {}).get("custom_directives", {})

@@ -7,17 +7,39 @@ These tests verify that components work together correctly:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+from unittest import mock
 import unittest
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-write-env')
 LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+WORKLOADS_DIR = ROOT / "workloads"
+
+sys.path.insert(0, LIB_DIR)
+import workload_lib  # noqa: E402
+from workload_lib import workload_service_units  # noqa: E402
+from workloadctl_core import WorkloadConfig  # noqa: E402
+
+
+def expected_service_filenames(name, config_dir):
+    """Return the exact *.service file names the generator emits for one
+    bundle, via the canonical workload_service_units() helper — the single
+    source of unit topology — so the expected set (including VM build/virtiofs
+    units) can never drift from what the generator writes. Exact names rather
+    than a glob prefix match, so bundle names that are prefixes of other
+    bundle names (e.g. "pihole" / "pihole-vpn") can't cross-match each
+    other's units.
+    """
+    with mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", Path(config_dir)):
+        return workload_service_units(WorkloadConfig(name))
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
@@ -57,6 +79,31 @@ def write_config(config_dir, name, toml_content, enabled=True):
 
 def write_credential(creds_dir, name, value):
     Path(creds_dir, name).write_text(value)
+
+
+def patch_service_for_verify(text, label=None):
+    """Patch ExecStart/ExecStartPre commands that reference binaries not
+    present on a dev machine, so systemd-analyze can validate unit syntax
+    without those binaries actually being installed.
+
+    Returns the patched text. Logs (prints) when the /usr/bin/podman shim
+    is applied, so a dev box missing podman is visible in test output
+    rather than silently masking a real "podman not found" problem.
+    """
+    # Any workloadctl libexec helper (workload-ensure-user, workload-write-env,
+    # workload-vm-notify, ...) lives in the installed package, not the test
+    # env. Replace generically so a new helper never silently breaks verify.
+    patched = re.sub(r"/usr/libexec/workloadctl/[\w-]+", "/bin/true", text)
+    # Dev containers don't ship podman; systemd-analyze fails the unit on a
+    # non-executable ExecStart. Patch only when actually absent so real
+    # hosts keep strict verify.
+    if not os.path.exists("/usr/bin/podman"):
+        if "/usr/bin/podman" in patched:
+            print(f"[test_integration] podman not found at /usr/bin/podman; "
+                  f"shimming to /bin/true for systemd-analyze verify"
+                  f"{f' ({label})' if label else ''}", file=sys.stderr)
+        patched = patched.replace("/usr/bin/podman", "/bin/true")
+    return patched
 
 
 def has_systemd_analyze():
@@ -360,19 +407,9 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
 
         # Keep original for assertions, patch a copy for verify
         original = service_path.read_text()
-        patched = original
-        # Replace ExecStartPre commands pointing to helpers not on this host
-        patched = patched.replace(
-            "/usr/libexec/workloadctl/workload-ensure-user", "/bin/true")
-        patched = patched.replace(
-            "/usr/libexec/workloadctl/workload-write-env", "/bin/true")
-        # Dev containers don't ship podman; systemd-analyze fails the unit on a
-        # non-executable ExecStart. Patch only when actually absent so real
-        # hosts keep strict verify.
-        if not os.path.exists("/usr/bin/podman"):
-            patched = patched.replace("/usr/bin/podman", "/bin/true")
         # sysusers conf is now in services_dir (generator output) — no patching needed
         # EnvironmentFile already has - prefix (optional) — no patching needed
+        patched = patch_service_for_verify(original, label=name)
         service_path.write_text(patched)
 
         verify_result = subprocess.run(
@@ -612,6 +649,76 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
         # No "Unknown key" warnings
         self.assertNotIn("Unknown key", result.stderr,
                          f"Generated service has unknown directives:\n{result.stderr}")
+
+
+@unittest.skipUnless(has_systemd_analyze(), "systemd-analyze not available")
+class TestShippedBundlesSystemdAnalyzeVerify(unittest.TestCase):
+    """Run systemd-analyze verify on every service file emitted for every
+    shipped bundle in workloads/*/workload.toml.
+
+    The hand-built configs in TestSystemdAnalyzeVerify above cover specific
+    feature combinations; this class is the sweep that catches a malformed
+    unit in any real, shipped bundle.
+    """
+
+    def test_all_shipped_bundles_verify(self):
+        tomls = sorted(WORKLOADS_DIR.glob("*/workload.toml"))
+        self.assertGreater(len(tomls), 0, "no workload TOMLs found under workloads/")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_dir = tmp_path / "cfg"
+            services_dir = tmp_path / "svc"
+            sysusers_dir = tmp_path / "sys"
+            config_dir.mkdir()
+            services_dir.mkdir()
+            sysusers_dir.mkdir()
+
+            for src in tomls:
+                name = src.parent.name
+                write_config(config_dir, name, src.read_text())
+
+            gen_result = run_generator(config_dir, services_dir, sysusers_dir)
+            self.assertEqual(gen_result.returncode, 0, gen_result.stderr)
+
+            # GPU workloads Require= nvidia-cdi-generator.service, shipped by
+            # the hypervisor image. systemd-analyze resolves unit references
+            # relative to the unit's own directory, so stub it there when the
+            # dev host lacks it (no NVIDIA hardware/driver stack).
+            if not os.path.exists("/usr/lib/systemd/system/nvidia-cdi-generator.service"):
+                print("[test_integration] nvidia-cdi-generator.service not found; "
+                      "stubbing it for systemd-analyze verify", file=sys.stderr)
+                (services_dir / "nvidia-cdi-generator.service").write_text(
+                    "[Unit]\nDescription=verify stub\n"
+                    "[Service]\nType=oneshot\nExecStart=/bin/true\n"
+                )
+
+            for src in tomls:
+                name = src.parent.name
+                with self.subTest(bundle=name):
+                    unit_names = expected_service_filenames(name, config_dir)
+                    service_files = []
+                    for unit_name in unit_names:
+                        unit_path = services_dir / unit_name
+                        self.assertTrue(
+                            unit_path.is_file(),
+                            f"generator did not emit {unit_name} for bundle {name}")
+                        service_files.append(unit_path)
+
+                    for service_path in service_files:
+                        with self.subTest(bundle=name, unit=service_path.name):
+                            original = service_path.read_text()
+                            patched = patch_service_for_verify(original, label=service_path.name)
+                            service_path.write_text(patched)
+
+                            verify_result = subprocess.run(
+                                ["systemd-analyze", "verify", str(service_path)],
+                                capture_output=True, text=True,
+                            )
+                            self.assertEqual(
+                                verify_result.returncode, 0,
+                                f"systemd-analyze verify failed for {service_path.name} "
+                                f"(bundle {name}):\n{verify_result.stderr}")
 
 
 if __name__ == "__main__":

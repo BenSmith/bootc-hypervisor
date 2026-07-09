@@ -79,10 +79,15 @@ class RunCliExitCodeTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Error:", err)
 
-    def test_generic_exception_returns_1(self):
+    def test_generic_exception_prints_traceback_and_returns_1(self):
+        # Unexpected exceptions (not one of the typed errors above) are a
+        # likely workloadctl bug, so the full traceback must reach stderr
+        # rather than being flattened to a one-line message.
         code, err = self._run_with_main(ValueError("boom"))
         self.assertEqual(code, 1)
-        self.assertIn("Error:", err)
+        self.assertIn("Traceback (most recent call last)", err)
+        self.assertIn("ValueError: boom", err)
+        self.assertIn("workloadctl bug", err)
 
     def test_keyboard_interrupt_returns_130(self):
         code, err = self._run_with_main(KeyboardInterrupt())

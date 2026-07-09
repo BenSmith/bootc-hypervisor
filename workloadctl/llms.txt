@@ -220,6 +220,7 @@ docs/workload-run-files.md         # Authoritative per-workload run-file topolog
 docs/cli.md                        # Complete CLI reference
 docs/secrets.md                    # Secrets management guide
 docs/schema-reference.toml         # Annotated TOML schema with all options
+docs/testing.md                    # Test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
 systemd/                           # systemd units (workloads.slice, metrics timer)
 completions/                       # Bash completions
 seccomp-workload-baseline.json     # Default seccomp profile
@@ -247,6 +248,7 @@ Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`)
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
+- [Testing](docs/testing.md) — test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
 - [Example configs](workloads/) — each workloads/<bundle>/workload.toml — real-world workload definitions
 
 ## Deliberate non-adoptions

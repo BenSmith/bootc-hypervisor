@@ -11,8 +11,11 @@ check has to be repeated there or a crafted name like "../../etc/cron.d/x"
 escapes the workloads tree.
 """
 import argparse
+import io
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -522,8 +525,12 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
 
     def test_data_tree_with_escaping_symlink_rejected_before_copy(self):
         # Build the archive by hand so we can smuggle a symlink escaping the
-        # data/ tree in — this must be rejected (security boundary) and must
-        # not have copied anything into dest_data.
+        # data/ tree in. tarfile's `data` filter now rejects an
+        # absolute-target symlink at extraction time (before staging is even
+        # fully populated); `_assert_no_escaping_symlinks` remains as the
+        # defense-in-depth check for anything the filter doesn't catch (e.g.
+        # a self-consistent relative symlink pointing elsewhere in the tree).
+        # Either way nothing must land in dest_data.
         stage = Path(tempfile.mkdtemp(dir=self.tmp))
         (stage / "workload.toml").write_text('[workload]\nname = "goodapp"\n')
         ddir = stage / "data"
@@ -541,7 +548,7 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 cmd_backup.cmd_restore(self._args(archive), manager=None)
         self.assertEqual(cm.exception.code, 1)
-        self.assertIn("escapes the data tree", err.getvalue())
+        self.assertIn("Error: failed to extract archive", err.getvalue())
         dest_data = self.var / "goodapp" / "data"
         self.assertFalse(dest_data.exists())
 
@@ -567,6 +574,105 @@ class TestRestoreCredentialsAndDataFlow(unittest.TestCase):
         enable_calls = [c for c in self.launched
                         if c[:2] == ["workloadctl", "enable"]]
         self.assertEqual(enable_calls, [])
+
+
+def make_raw_tar_zst(dest: Path, member_name: str, content: bytes = b"pwn") -> Path:
+    """Build a .tar.zst by hand (bypassing the `tar` CLI's own path
+    sanitization) so a malicious member name reaches tarfile untouched.
+    """
+    raw_tar = dest / "raw.tar"
+    with tarfile.open(raw_tar, mode="w") as tf:
+        info = tarfile.TarInfo(name=member_name)
+        info.size = len(content)
+        tf.addfile(info, io.BytesIO(content))
+    archive = dest / "backup.tar.zst"
+    with open(archive, "wb") as out:
+        subprocess.run(["zstd", "-c", str(raw_tar)], stdout=out, check=True)
+    return archive
+
+
+@unittest.skipUnless(shutil.which("zstd"), "zstd binary not available")
+class TestExtractArchiveDataFilter(unittest.TestCase):
+    """`_extract_archive` extracts through tarfile's `filter="data"`, which
+    must reject unsafe member shapes (absolute paths, `..` traversal) at
+    extract time rather than relying on a given tar binary's defaults.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def test_absolute_path_member_is_defanged_not_honored(self):
+        # The `data` filter strips a leading "/" and re-bases the member
+        # under staging rather than raising (PEP 706 behavior) — confirm it
+        # lands inside staging, never at the literal absolute path.
+        import cmd_backup
+        archive = make_raw_tar_zst(self.tmp, "/etc/pwned")
+        staging = self.tmp / "staging"
+        staging.mkdir()
+        cmd_backup._extract_archive(archive, staging)
+        self.assertTrue((staging / "etc" / "pwned").exists())
+        self.assertFalse(Path("/etc/pwned").exists())
+
+    def test_parent_traversal_member_rejected(self):
+        import cmd_backup
+        archive = make_raw_tar_zst(self.tmp, "../../etc/pwned")
+        staging = self.tmp / "staging"
+        staging.mkdir()
+        with self.assertRaises(tarfile.TarError):
+            cmd_backup._extract_archive(archive, staging)
+        self.assertEqual(list(staging.iterdir()), [])
+
+    def test_plain_member_extracted(self):
+        import cmd_backup
+        archive = make_raw_tar_zst(self.tmp, "workload.toml", b"[workload]\nname = \"ok\"\n")
+        staging = self.tmp / "staging"
+        staging.mkdir()
+        cmd_backup._extract_archive(archive, staging)
+        self.assertEqual((staging / "workload.toml").read_bytes(),
+                          b"[workload]\nname = \"ok\"\n")
+
+
+@unittest.skipUnless(shutil.which("zstd"), "zstd binary not available")
+class TestRestoreRejectsMaliciousArchive(unittest.TestCase):
+    """End-to-end: `cmd_restore` refuses a malicious archive via the tarfile
+    `data` filter and reports a clean error, not a traceback.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.etc = self.tmp / "etc"
+        self.etc.mkdir()
+        self.var = self.tmp / "var"
+        self.var.mkdir()
+        import workload_lib
+        import cmd_backup
+        self.cmd_backup = cmd_backup
+        self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
+        self.enterContext(mock.patch.object(
+            cmd_backup, "workload_data_dir", lambda n: self.var / n / "data"))
+
+    def _args(self, archive, **kw):
+        base = dict(archive=str(archive), force=False, enable=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_malicious_archive_refused_with_clean_error(self):
+        # A member whose name still resolves outside the staging dir after
+        # normalization (`..` traversal) is a case the `data` filter cannot
+        # defang by re-basing — it must raise, and cmd_restore must turn
+        # that into a clean "Error: ..." exit, not a raw traceback.
+        archive = make_raw_tar_zst(self.tmp, "../../etc/cron.d/pwn")
+
+        from contextlib import redirect_stderr, redirect_stdout
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            with self.assertRaises(SystemExit) as cm:
+                self.cmd_backup.cmd_restore(self._args(archive), manager=None)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: failed to extract archive", err_buf.getvalue())
+        # Nothing escaped the sandbox.
+        self.assertFalse((self.etc.parent / "cron.d").exists())
 
 
 if __name__ == "__main__":

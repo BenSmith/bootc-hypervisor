@@ -198,6 +198,70 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         self.assertNotIn("(vm)", joined)
 
 
+class ValidateSingleVmMemoryPrecisionTest(unittest.TestCase):
+    """vm.memory in 'K' notation truncates via integer division to MiB
+    (parse_memory_mib rounds down) — validate_single should surface that
+    precision loss as a warning instead of leaving it silent."""
+
+    def _write_vm_config(self, name, memory):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / name).mkdir()
+        checksum = "0" * 64
+        (self.tmp / name / "workload.toml").write_text(f"""
+[workload]
+name = "{name}"
+
+[vm]
+cloud_image_url = "https://example.invalid/f.qcow2"
+cloud_image_checksum = "sha256:{checksum}"
+vcpus = 1
+memory = "{memory}"
+system_disk_size = "10G"
+user = "workload"
+""")
+        fake_pw = types.SimpleNamespace(
+            pw_uid=10001, pw_gid=10001, pw_dir=str(self.tmp / "home"))
+        self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
+        fake_proc = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        self.enterContext(mock.patch.object(cmd_admin.subprocess, "run",
+                                            lambda *a, **k: fake_proc))
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = True
+        manager.get_all_configs.return_value = []
+        pod = mock.Mock()
+        pod.container_status.return_value = ""
+        pod.image_id.return_value = ""
+        manager.podman.return_value = pod
+        return cmd_admin.validate_single(config, manager, json_mode=True)
+
+    def test_lossy_k_value_warns(self):
+        # 500000K // 1024 = 488M with a 288K remainder — lossy, and still
+        # above the 256 MiB schema minimum so the check is isolated.
+        result = self._write_vm_config("clitest-vmmem-lossy", "500000K")
+
+        precision = [c for c in result["checks"] if c["check"] == "vm_memory_precision"]
+        self.assertTrue(precision, "expected a vm_memory_precision check")
+        self.assertEqual(precision[0]["severity"], "warning")
+        self.assertIn("500000K", precision[0]["message"])
+        self.assertIn("488M", precision[0]["message"])
+        self.assertEqual(result["warnings"], 1)
+        self.assertTrue(result["passed"])  # a warning must not fail validation
+
+    def test_exact_k_value_does_not_warn(self):
+        result = self._write_vm_config("clitest-vmmem-exact", "262144K")
+
+        precision = [c for c in result["checks"] if c["check"] == "vm_memory_precision"]
+        self.assertFalse(precision)
+
+    def test_m_suffix_does_not_warn(self):
+        result = self._write_vm_config("clitest-vmmem-mib", "1024M")
+
+        precision = [c for c in result["checks"] if c["check"] == "vm_memory_precision"]
+        self.assertFalse(precision)
+
+
 class ValidateSingleSchemaTest(unittest.TestCase):
     """validate_single runs the same schema checks as the boot generator, so a
     mode/shape mismatch is caught by `validate`/`install` before a boot."""

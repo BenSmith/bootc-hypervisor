@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 
@@ -163,6 +164,49 @@ def _assert_no_escaping_symlinks(root: Path) -> None:
                 )
 
 
+def _extract_archive(archive: Path, staging: Path) -> None:
+    """Extract a `.tar.zst` backup archive into `staging`.
+
+    The archive is an untrusted, portable input (see the module docstring on
+    `_assert_no_escaping_symlinks`), so extraction goes through tarfile's
+    `data` filter rather than shelling out to `tar`: the filter rejects
+    absolute/parent-escaping member paths, device/character-special/FIFO
+    members, and other unsafe member shapes itself, instead of relying on a
+    given tar binary's version-dependent defaults.
+
+    Stdlib `tarfile` can't read zstd streams before Python 3.14, so the
+    archive is decompressed by piping it through the `zstd` binary and
+    handing tarfile the resulting stream in streaming mode.
+    """
+    proc = subprocess.Popen(
+        ["zstd", "-dc", str(archive)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+            tf.extractall(staging, filter="data")
+        # tarfile stops reading at the end-of-archive marker, leaving any
+        # trailing tar padding in the pipe. Drain it so zstd can finish
+        # writing and exit 0 — otherwise padding larger than the pipe buffer
+        # gets zstd killed by EPIPE and a fully successful extraction is
+        # reported as a failure.
+        while proc.stdout.read(65536):
+            pass
+    finally:
+        proc.stdout.close()
+        # zstd's own diagnostic (corrupt frame, premature end, ...) is the
+        # actionable part of a decompression failure; fold it into the error
+        # instead of letting it land wherever the parent's stderr points.
+        stderr_tail = proc.stderr.read().decode(errors="replace").strip()
+        proc.stderr.close()
+        returncode = proc.wait()
+    if returncode != 0:
+        detail = f": {stderr_tail}" if stderr_tail else ""
+        raise RuntimeError(f"zstd exited {returncode} decompressing {archive}{detail}")
+
+
 def cmd_restore(args, manager: WorkloadManager):
     """Restore a workload from a backup archive"""
     require_root()
@@ -175,10 +219,11 @@ def cmd_restore(args, manager: WorkloadManager):
     # Extract to temp dir to inspect contents
     with tempfile.TemporaryDirectory() as staging_name:
         staging = Path(staging_name)
-        subprocess.run(
-            ["tar", "-C", str(staging), "-xf", str(archive), "--zstd"],
-            check=True,
-        )
+        try:
+            _extract_archive(archive, staging)
+        except (tarfile.TarError, RuntimeError, OSError) as e:
+            print(f"Error: failed to extract archive {archive}: {e}", file=sys.stderr)
+            sys.exit(1)
 
         # Read the config to get the workload name
         config_path = staging / "workload.toml"

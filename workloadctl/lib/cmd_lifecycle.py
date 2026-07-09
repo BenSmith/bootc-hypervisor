@@ -4,7 +4,6 @@ enable, disable, start, stop, recreate, reboot, cleanup.
 """
 
 import difflib
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -31,9 +30,10 @@ from workload_lib import (
     workload_username,
     workload_root_dir,
     RUN_SYSTEMD_SYSTEM,
+    RUN_SYSUSERS_D,
     workload_run_files,
     render_sysusers_config,
-    SUBID_LOCK,
+    subid_lock,
 )
 import imagebuild
 from podman import Podman
@@ -45,7 +45,7 @@ from workloadctl_core import (
     VM_BRIDGE_NAME,
 )
 from cmd_backup import BACKUP_DIR
-from substrate import get_substrate, service_active
+from substrate import get_substrate, service_active, LifecycleError
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -288,20 +288,27 @@ def _provision_user(config: WorkloadConfig):
     extra_groups = config.config.get("security", {}).get("extra_groups", [])
 
     # Look up existing UID or allocate the next free one in the workload range.
-    # Flock matches /run/lock/workload-subid.lock in workload-ensure-user so
-    # concurrent enables don't race on the same UID slot. The lock MUST span
-    # allocation *through* systemd-sysusers: get_next_uid() dedupes against
-    # /etc/passwd (plus a per-process set), so the picked UID isn't visible to a
-    # concurrent enable until sysusers has created the user. Releasing after
-    # allocation (as before) let two enables pick the same free UID.
-    _subid_lock = SUBID_LOCK
-    _subid_lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(_subid_lock, "w") as _lock_fd:
-        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX)
+    # subid_lock() is the shared SUBID_LOCK flock (also held by
+    # workload-ensure-user and the boot generator's get_next_uid) so concurrent
+    # allocators don't race on the same UID slot. The lock MUST span allocation
+    # *through* systemd-sysusers: get_next_uid() dedupes against /etc/passwd
+    # (plus a per-process set), so the picked UID isn't visible to a concurrent
+    # enable until sysusers has created the user. It's reentrant, so the inner
+    # get_next_uid() (which now takes the lock too) is a no-op re-acquire.
+    with subid_lock():
         try:
             uid = pwd.getpwnam(user_name).pw_uid
         except KeyError:
-            uid = get_next_uid()
+            try:
+                uid = get_next_uid()
+            except RuntimeError as e:
+                # UID-range exhaustion is an operator-fixable environment
+                # condition, not a bug — surface it as the CLI's clean
+                # one-line error rather than a traceback. LifecycleError
+                # carries an int returncode and its CLI handler prints
+                # nothing, so emit the message here and hand it exit 1.
+                print(f"Error: {e}", file=sys.stderr)
+                raise LifecycleError(1) from e
 
         # Write a temporary sysusers config (the generator creates the
         # persistent copy at boot in /run/systemd/system/, but enable runs
@@ -316,7 +323,7 @@ def _provision_user(config: WorkloadConfig):
             is_vm=config.is_vm,
         )
 
-        sysusers_dir = Path("/run/sysusers.d")
+        sysusers_dir = RUN_SYSUSERS_D
         sysusers_dir.mkdir(parents=True, exist_ok=True)
         sysusers_file = sysusers_dir / f"workload-{config.name}.conf"
         sysusers_file.write_text(sysusers_content)
@@ -891,10 +898,7 @@ def cmd_disable(args, manager: WorkloadManager):
         else:
             try:
                 print("  Removing subuid/subgid entries...")
-                subid_lock = SUBID_LOCK
-                subid_lock.parent.mkdir(parents=True, exist_ok=True)
-                with open(subid_lock, "w") as lock_fd:
-                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                with subid_lock():
                     for file in ["/etc/subuid", "/etc/subgid"]:
                         p = Path(file)
                         if p.exists():

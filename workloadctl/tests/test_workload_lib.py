@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the shared workload library."""
 
+import contextlib
 import os
 import socket
 import sys
@@ -1237,6 +1238,23 @@ class TestGetNextUid(unittest.TestCase):
     exhaustion logic (never exercised elsewhere; callers always mock this
     function outright) needs direct coverage."""
 
+    def setUp(self):
+        # get_next_uid() now flocks SUBID_LOCK (/run/lock, root-only); stub the
+        # lock so these tests exercise only the UID-scan math. Real reentrant
+        # locking is covered by TestSubidLock.
+        self.enterContext(
+            patch.object(workload_lib, "subid_lock", contextlib.nullcontext)
+        )
+        # It also unions in UIDs pinned in /run sysusers configs; stub that to
+        # empty so the passwd/allocated math is tested in isolation (the scan
+        # itself is covered by TestReservedUidsInPendingSysusers).
+        self.enterContext(
+            patch.object(
+                workload_lib, "_reserved_uids_in_pending_sysusers",
+                return_value=set(),
+            )
+        )
+
     def _pw(self, uid):
         import types
         return types.SimpleNamespace(pw_uid=uid)
@@ -1277,6 +1295,146 @@ class TestGetNextUid(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 workload_lib.get_next_uid()
         self.assertIn("No free UIDs", str(ctx.exception))
+
+
+class TestReservedUidsInPendingSysusers(unittest.TestCase):
+    """Pending sysusers configs are the only record of a UID that's been handed
+    out but not yet written to /etc/passwd (generator defers user creation to
+    the workload's setup service). get_next_uid() must treat those as taken, or
+    a concurrent allocator re-hands-out the slot — collapsing per-workload
+    isolation onto a shared UID."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.run_systemd = self.tmp / "systemd-system"
+        self.sysusers_d = self.tmp / "sysusers.d"
+        self.run_systemd.mkdir()
+        self.sysusers_d.mkdir()
+        self.enterContext(
+            patch.object(workload_lib, "RUN_SYSTEMD_SYSTEM", self.run_systemd)
+        )
+        self.enterContext(
+            patch.object(workload_lib, "RUN_SYSUSERS_D", self.sysusers_d)
+        )
+
+    def _write(self, d, name, body):
+        (d / name).write_text(body)
+
+    def test_parses_uid_from_both_dirs(self):
+        self._write(
+            self.run_systemd, "workload-alpha.conf",
+            'u _wl-alpha 10005 "alpha workload" /var/lib/x\n',
+        )
+        self._write(
+            self.sysusers_d, "workload-beta.conf",
+            'u _wl-beta 10007 "beta workload" /var/lib/y\nm _wl-beta kvm\n',
+        )
+        self.assertEqual(
+            workload_lib._reserved_uids_in_pending_sysusers(), {10005, 10007}
+        )
+
+    def test_ignores_non_user_lines_and_junk(self):
+        self._write(
+            self.run_systemd, "workload-gamma.conf",
+            "# comment\nm _wl-gamma render\nu _wl-gamma notanint /home\n",
+        )
+        self.assertEqual(
+            workload_lib._reserved_uids_in_pending_sysusers(), set()
+        )
+
+    def test_missing_dir_is_tolerated(self):
+        import shutil
+        shutil.rmtree(self.sysusers_d)
+        self._write(
+            self.run_systemd, "workload-delta.conf",
+            'u _wl-delta 10009 "d" /home\n',
+        )
+        self.assertEqual(
+            workload_lib._reserved_uids_in_pending_sysusers(), {10009}
+        )
+
+    def test_get_next_uid_skips_pinned_but_uncreated_uid(self):
+        # UID_MIN is pinned in a pending conf but absent from passwd — the exact
+        # allocate-then-create window. get_next_uid must skip it.
+        self._write(
+            self.run_systemd, "workload-eps.conf",
+            f'u _wl-eps {workload_lib.UID_MIN} "e" /home\n',
+        )
+        with patch.object(workload_lib, "subid_lock", contextlib.nullcontext), \
+             patch.object(workload_lib, "_allocated_uids", set()), \
+             patch.object(workload_lib.pwd, "getpwall", return_value=[]):
+            uid = workload_lib.get_next_uid()
+        self.assertEqual(uid, workload_lib.UID_MIN + 1)
+
+
+class TestSubidLock(unittest.TestCase):
+    """subid_lock() serializes UID/subid allocation across processes and is
+    reentrant within one so the enable path (which holds it across the sysusers
+    write) can call get_next_uid() — itself now locked — without deadlocking."""
+
+    def setUp(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        # Point the flock at a writable path so the test runs unprivileged.
+        self.enterContext(
+            patch.object(workload_lib, "SUBID_LOCK", tmp / "subid.lock")
+        )
+        # Reset reentrancy globals in case a prior test left them dirty.
+        self.enterContext(patch.object(workload_lib, "_subid_lock_fd", None))
+        self.enterContext(patch.object(workload_lib, "_subid_lock_depth", 0))
+
+    def test_reentrant_acquire_does_not_deadlock(self):
+        with workload_lib.subid_lock():
+            self.assertEqual(workload_lib._subid_lock_depth, 1)
+            with workload_lib.subid_lock():  # nested acquire, same process
+                self.assertEqual(workload_lib._subid_lock_depth, 2)
+            # inner release must NOT drop the underlying flock yet
+            self.assertEqual(workload_lib._subid_lock_depth, 1)
+            self.assertIsNotNone(workload_lib._subid_lock_fd)
+        self.assertEqual(workload_lib._subid_lock_depth, 0)
+        self.assertIsNone(workload_lib._subid_lock_fd)
+
+    def test_held_lock_blocks_a_separate_fd(self):
+        # A distinct open file description competes with the held lock (the
+        # exact same-process collision that forces reentrancy on one cached
+        # fd): a non-blocking grab on a second fd must fail while it's held,
+        # and succeed once released — proving the flock actually mutexes.
+        import fcntl
+
+        with workload_lib.subid_lock():
+            other = open(workload_lib.SUBID_LOCK, "w")
+            try:
+                with self.assertRaises(OSError):
+                    fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                other.close()
+
+        released = open(workload_lib.SUBID_LOCK, "w")
+        try:
+            fcntl.flock(released.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(released.fileno(), fcntl.LOCK_UN)
+        finally:
+            released.close()
+
+    def test_permission_error_degrades_to_unlocked(self):
+        # An unprivileged caller can't open the root-owned lock; the body must
+        # still run (fd stays None = unlocked) with reentrancy state balanced.
+        with patch("builtins.open", side_effect=PermissionError("denied")):
+            with workload_lib.subid_lock():
+                self.assertEqual(workload_lib._subid_lock_depth, 1)
+                self.assertIsNone(workload_lib._subid_lock_fd)
+        self.assertEqual(workload_lib._subid_lock_depth, 0)
+        self.assertIsNone(workload_lib._subid_lock_fd)
+
+    def test_non_permission_oserror_propagates_and_cleans_up(self):
+        # A real fault (not a permission denial) must NOT silently degrade to an
+        # unlocked allocation — it propagates, and leaves no leaked fd or dirty
+        # reentrancy depth behind.
+        with patch("builtins.open", side_effect=OSError("I/O error")):
+            with self.assertRaises(OSError):
+                with workload_lib.subid_lock():
+                    self.fail("body must not run when acquire raises")
+        self.assertEqual(workload_lib._subid_lock_depth, 0)
+        self.assertIsNone(workload_lib._subid_lock_fd)
 
 
 class TestUnitsOutdated(unittest.TestCase):
