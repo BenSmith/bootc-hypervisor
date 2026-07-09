@@ -1069,6 +1069,23 @@ class TestProvisionUser(unittest.TestCase):
                                         cmd_lifecycle._provision_user(cfg)
                     get_next.assert_not_called()
 
+    def test_uid_exhaustion_prints_and_raises_lifecycle_exit_1(self):
+        # get_next_uid() raising RuntimeError (range exhausted) must surface as
+        # a printed one-line error + LifecycleError carrying an int returncode
+        # of 1 — not a bare traceback, and not a string smuggled into returncode.
+        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            with patch('pwd.getpwnam', side_effect=KeyError):
+                with patch.object(cmd_lifecycle, 'get_next_uid',
+                                  side_effect=RuntimeError("No free UIDs in range 10000-10099")):
+                    with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
+                        buf = io.StringIO()
+                        with redirect_stderr(buf):
+                            with self.assertRaises(cmd_lifecycle.LifecycleError) as ctx:
+                                cmd_lifecycle._provision_user(cfg)
+            self.assertEqual(ctx.exception.returncode, 1)
+            self.assertIsInstance(ctx.exception.returncode, int)
+            self.assertIn("No free UIDs in range", buf.getvalue())
+
 
 # ── _transfer_image / _transfer_one_image ───────────────────────────────────
 

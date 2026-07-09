@@ -304,8 +304,11 @@ def _provision_user(config: WorkloadConfig):
             except RuntimeError as e:
                 # UID-range exhaustion is an operator-fixable environment
                 # condition, not a bug — surface it as the CLI's clean
-                # one-line error rather than a traceback.
-                raise LifecycleError(str(e)) from e
+                # one-line error rather than a traceback. LifecycleError
+                # carries an int returncode and its CLI handler prints
+                # nothing, so emit the message here and hand it exit 1.
+                print(f"Error: {e}", file=sys.stderr)
+                raise LifecycleError(1) from e
 
         # Write a temporary sysusers config (the generator creates the
         # persistent copy at boot in /run/systemd/system/, but enable runs
