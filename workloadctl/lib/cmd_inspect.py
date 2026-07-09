@@ -42,6 +42,29 @@ from cmd_lifecycle import _effective_state
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _publish_host_port(port_spec: str) -> str | None:
+    """Return the host-side port from a podman `--publish` spec, or None when
+    there is no single fixed host port to probe.
+
+    Publish specs are `[[ip:]hostPort:]containerPort[/proto]`. The host port is
+    the field before the container port; a bare `containerPort` (podman picks a
+    random host port), an empty host field (`ip::containerPort`), and port
+    *ranges* all have no single deterministic host port and return None.
+    """
+    spec = port_spec.split('/', 1)[0]  # drop /proto
+    # Strip a bracketed IPv6 bind address so its inner colons don't confuse the split.
+    if spec.startswith('['):
+        _, _, spec = spec.partition(']')
+        spec = spec.lstrip(':')
+    parts = spec.split(':')
+    if len(parts) < 2:
+        return None  # only a container port — host port is ephemeral
+    host = parts[-2]
+    if not host or '-' in host:
+        return None  # random host port, or a range we can't probe as one port
+    return host
+
+
 def _systemctl_show(unit: str, properties: list[str], extra_args: list[str] | None = None) -> dict[str, str]:
     """Run `systemctl show` and return a {key: value} dict."""
     r = subprocess.run(
@@ -1158,8 +1181,10 @@ def cmd_health(args, manager: WorkloadManager):
     network_mode = config.get_network_mode()
     if ports and container_running and network_mode in ("pasta", "host"):
         for port_spec in ports:
-            # Extract port number
-            port = port_spec.split(':')[-1].split('/')[0]
+            # Probe the host-side published port, not the container port.
+            port = _publish_host_port(port_spec)
+            if port is None:
+                continue  # no single fixed host port to probe
             try:
                 port_num = int(port)
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

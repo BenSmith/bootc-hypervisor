@@ -1637,5 +1637,76 @@ class TestMain(unittest.TestCase):
         mocks["generate_ssh_keypair"].assert_called_once()
 
 
+class TestEnsureManagerSlice(unittest.TestCase):
+    """ensure_manager_slice migrates user@<uid>.service into its target slice
+    (ADR 001 1b) by restarting the manager only when it is mis-placed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_script()
+
+    def _drive(self, cgroups, config=None):
+        """Run ensure_manager_slice with a scripted sequence of ControlGroup
+        values returned by successive `systemctl show` calls. Returns the list
+        of issued commands and the ensure_runtime_dir mock."""
+        pending = list(cgroups)
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if "show" in cmd and "ControlGroup" in cmd:
+                val = pending.pop(0) if pending else ""
+                return types.SimpleNamespace(returncode=0, stdout=val + "\n", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        pw = _fake_pw(Path("/nonexistent"), uid=10000)
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(self.mod.service_runtime, "ensure_runtime_dir",
+                               return_value=True) as erd:
+            self.mod.ensure_manager_slice(pw, config or {})
+        return calls, erd
+
+    def _restarted(self, calls):
+        return [c for c in calls
+                if c[:2] == ["systemctl", "restart"] and "user@10000.service" in c]
+
+    def test_noop_when_already_in_target_slice(self):
+        calls, erd = self._drive(["/workloads.slice/user@10000.service"])
+        self.assertEqual(self._restarted(calls), [])
+        erd.assert_not_called()
+
+    def test_restarts_when_misplaced_then_settles(self):
+        calls, erd = self._drive([
+            "/user.slice/user-10000.slice/user@10000.service",  # logind placement
+            "/workloads.slice/user@10000.service",              # after restart
+        ])
+        self.assertEqual(len(self._restarted(calls)), 1)
+        erd.assert_called_once()
+
+    def test_noop_when_manager_cgroup_unknown(self):
+        # Empty ControlGroup (manager not resolvable) → don't touch it.
+        calls, erd = self._drive([""])
+        self.assertEqual(self._restarted(calls), [])
+        erd.assert_not_called()
+
+    def test_warns_but_survives_when_restart_does_not_migrate(self):
+        # Still mis-placed after the restart: no exception, still exactly one
+        # restart attempt (non-fatal — the workload runs regardless).
+        calls, erd = self._drive([
+            "/user.slice/user-10000.slice/user@10000.service",
+            "/user.slice/user-10000.slice/user@10000.service",
+        ])
+        self.assertEqual(len(self._restarted(calls)), 1)
+
+    def test_custom_slice_respected(self):
+        # A [resources].slice override changes the target; a manager already in
+        # that (name-nested) slice is a no-op.
+        calls, _ = self._drive(
+            ["/gpu.slice/gpu-workloads.slice/user@10000.service"],
+            config={"resources": {"slice": "gpu-workloads.slice"}},
+        )
+        self.assertEqual(self._restarted(calls), [])
+
+
 if __name__ == "__main__":
     unittest.main()

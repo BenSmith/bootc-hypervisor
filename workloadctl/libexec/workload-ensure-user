@@ -471,6 +471,54 @@ def enable_linger(pw):
     )
 
 
+def ensure_manager_slice(pw, config):
+    """Migrate the workload's user manager into its target slice (ADR 001 1b).
+
+    The `Slice=<target>` drop-in on `user@<uid>.service` only takes effect when
+    PID1 (re)starts the unit: logind's own start path — which `enable_linger`
+    goes through — parks a lingered manager under `user-<uid>.slice` and ignores
+    the drop-in, so `user@<uid>.service` (and the migrated container payload it
+    hosts) never reaches `workloads.slice`. logind re-starts the lingered manager
+    into `user-<uid>.slice` on every boot, so this check runs each start.
+
+    Runs at ExecStartPre, before the payload starts, so the mandatory manager
+    restart costs nothing (no containers under the manager yet to kill). It is
+    idempotent: once the manager is in the right slice this boot, later starts
+    are a no-op. Non-fatal — a mis-placed manager still runs the workload; only
+    the aggregate-slice grouping is lost, so we warn rather than block start.
+    """
+    uid = pw.pw_uid
+    slice_name = config.get("resources", {}).get("slice", "workloads.slice")
+    target = f"/{slice_name}/user@{uid}.service"
+
+    def manager_cgroup():
+        r = subprocess.run(
+            ["systemctl", "show", f"user@{uid}.service", "-p", "ControlGroup", "--value"],
+            capture_output=True, text=True,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    cgroup = manager_cgroup()
+    if not cgroup or target in cgroup:
+        return  # unknown state, or already correctly placed — nothing to do
+
+    log(f"  Migrating user@{uid}.service into {slice_name} "
+        f"(logind started it at {cgroup!r})")
+    subprocess.run(
+        ["systemctl", "restart", f"user@{uid}.service"],
+        capture_output=True, text=True, timeout=30,
+    )
+    # Re-pin linger / wait for the manager (and /run/user/<uid>) to come back.
+    service_runtime.ensure_runtime_dir(uid, timeout=15)
+
+    cgroup = manager_cgroup()
+    if target in cgroup:
+        log(f"  user@{uid}.service now in {slice_name}")
+    else:
+        log(f"  WARNING: user@{uid}.service still not in {slice_name} after restart "
+            f"(cgroup={cgroup!r}); workload runs but aggregate-slice grouping is lost")
+
+
 def setup_vm_bridge(name: str, bridge: str):
     """Idempotent: configure qemu-bridge-helper to allow the workload's bridge.
 
@@ -1046,6 +1094,12 @@ def main():
         except Exception as e:
             log(f"  ERROR: Failed to enable linger for {username}: {e}")
             return 1
+
+        try:
+            ensure_manager_slice(pw, config)
+        except Exception as e:
+            log(f"  WARNING: Failed to migrate user@{pw.pw_uid}.service into its "
+                f"slice for {username}: {e}")
 
     log(f"User setup complete for {name} ({kind})")
     return 0
