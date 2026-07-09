@@ -61,6 +61,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "interactive: tests that exercise interactive/pty verbs (smoke-grade)")
     config.addinivalue_line("markers", "mutating: tests that modify workload state")
     config.addinivalue_line("markers", "destructive: tests that permanently remove state")
+    config.addinivalue_line("markers", "runtime: runtime-rung checks that boot a VM (--target=vm:<mode>)")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +70,11 @@ def pytest_configure(config):
 
 @pytest.fixture(scope="session")
 def target(request) -> Target:
-    """Construct and yield the Target; handle optional --deploy."""
+    """Construct and yield the Target; handle optional --deploy.
+
+    `--target=vm:<mode>` (dev|gate) boots a harness-owned VM via the runtime
+    launcher and yields a VMTarget; every other dest is the existing
+    hand-provisioned `user@host`/`local` path, unchanged."""
     dest = request.config.getoption("--target")
     if not dest:
         pytest.exit(
@@ -77,6 +82,29 @@ def target(request) -> Target:
             "(e.g. --target=user@host or --target=local).",
             returncode=3,
         )
+
+    if dest.startswith("vm:"):
+        mode = dest.split(":", 1)[1]
+        # Import the launcher lazily so normal (user@host/local) runs never
+        # touch the runtime layer.
+        import sys
+        from pathlib import Path
+        runtime_dir = Path(__file__).parent.parent / "runtime"
+        if str(runtime_dir) not in sys.path:
+            sys.path.insert(0, str(runtime_dir))
+        import vmlaunch
+
+        missing = vmlaunch.missing_prereqs(mode)
+        if missing:
+            pytest.skip(
+                f"runtime harness ({dest}) needs: {', '.join(missing)} "
+                "— skipping (default-safe on a box without KVM/QEMU)"
+            )
+        t = vmlaunch.launch(mode)
+        request.addfinalizer(t.poweroff)
+        yield t
+        return
+
     t = Target.from_dest(dest)
 
     # Validate connectivity
@@ -94,6 +122,18 @@ def target(request) -> Target:
 
     yield t
     t.close()
+
+
+@pytest.fixture
+def reset_vm(target):
+    """Revert a VMTarget to its clean `base` snapshot before the test.
+
+    A no-op for a plain Target (hand-provisioned host has no free reset), so the
+    same runtime check module can run against either without change."""
+    revert = getattr(target, "revert", None)
+    if callable(revert):
+        target.revert("base")
+    yield
 
 
 def _deploy_workloadctl(t: Target):

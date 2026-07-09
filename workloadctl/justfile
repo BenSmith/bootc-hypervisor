@@ -16,6 +16,12 @@ test-cli-vm target:
 test-cli-deploy target:
   pytest tests/cli_surface/ --target={{target}} --deploy -v
 
+# Runtime rung — boot a harness-owned VM and run the `runtime`-marked checks.
+# WLRT_MODE=dev (default): cached Fedora Cloud image + local RPM. WLRT_MODE=gate:
+# the real bootc image + swtpm (B1b). Skips cleanly without /dev/kvm + QEMU.
+test-runtime:
+  pytest tests/cli_surface/ -m runtime --target=vm:${WLRT_MODE:-dev} -v
+
 # Run all unit tests
 test:
   PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v
