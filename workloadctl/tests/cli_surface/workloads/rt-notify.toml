@@ -1,0 +1,24 @@
+# rt-notify — runtime rung's negative-invariant workload (C1 GAP: notify).
+# Deliberately sets service_type = "notify", which is structurally incompatible
+# with the rootless+linger architecture: the sd_notify READY=1 is always emitted
+# from a process in user@<uid>.service's cgroup, so systemd credits the wrong unit
+# and workload-rt-notify.service never reaches active. This workload exists to
+# prove that failure still happens as designed. A short timeout_start_sec bounds
+# how long the doomed start attempt hangs so the check stays cheap.
+# Do NOT enable this manually; it is managed by the runtime harness.
+
+[workload]
+name = "rt-notify"
+enabled = false
+
+[container]
+image = "docker.io/library/caddy:2-alpine"
+command = ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":8080"]
+
+[container.resources]
+service_type = "notify"    # -> Type=notify + --sdnotify=conmon (never goes active)
+timeout_start_sec = "20s"  # bound the doomed start attempt
+
+[network]
+mode = "pasta"
+ports = ["19086:8080"]
