@@ -1,0 +1,95 @@
+# Weekly runtime rung (B1) for workloadctl on the Forgejo runner: boots a
+# harness-owned VM and runs the `runtime`-marked checks (`just test-runtime`
+# -> pytest -m runtime, WLRT_MODE=dev). Mirror of
+# .github/workflows/workloadctl-runtime.yml for the self-hosted forge. This is
+# a CADENCE gate, not a PR gate: schedule + manual dispatch only.
+#
+# No server-URL gate is needed here: GitHub never reads .forgejo/workflows/,
+# so this file can only ever run on the Forgejo runner. (The .github/ twins
+# carry a gate because Forgejo *does* fall back to reading .github/workflows.)
+#
+# The native runner lives inside the virtual-forgejo VM, which exposes nested
+# KVM (workloadctl launches it with `-cpu host`; verified live 2026-07-10).
+# The /dev/kvm probe below is a capability check, not a host list: any runner
+# without KVM records a warning and exits green rather than failing.
+#
+# The dev-mode harness builds the workloadctl RPM *inside* its guest VM, so
+# the runner only needs the QEMU/boot toolchain + pytest + just (see the
+# dependency step). swtpm is NOT needed for dev mode.
+#
+# No secrets are used. See workloadctl/docs/wip/test-suite-remaining.md (D1)
+# and docs/wip/forgejo-runtime-rung.md for the design notes / future options.
+name: workloadctl runtime
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Tuesday 03:00 UTC — offset from the GitHub-hosted runtime rung
+    # (Monday) and the Sat/Sun image builds, so failures are attributable.
+    - cron: '0 3 * * 2'
+
+jobs:
+  runtime:
+    runs-on: native
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for /dev/kvm
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "KVM present:"; ls -l /dev/kvm
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm absent on this runner; skipping runtime rung."
+          fi
+
+      - name: Install runtime dependencies
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          # Probe-then-install, matching workloadctl.yml. The harness's
+          # host-side binary needs (vmlaunch.py _DEV_BINARIES + rsync/pytest):
+          #   qemu-system-x86_64  <- qemu-system-x86-core
+          #   qemu-img            <- qemu-img
+          #   cloud-localds       <- cloud-utils
+          #   ssh-keygen          <- openssh (always present)
+          declare -A need=(
+            [qemu-system-x86_64]=qemu-system-x86-core
+            [qemu-img]=qemu-img
+            [cloud-localds]=cloud-utils
+            [rsync]=rsync
+            [pytest]=python3-pytest
+            [just]=just
+          )
+          missing=()
+          for bin in "${!need[@]}"; do
+            command -v "$bin" >/dev/null || missing+=("${need[$bin]}")
+          done
+          # OVMF has no binary to probe; the harness falls back to SeaBIOS
+          # without it, but UEFI matches the VM-workload launch path.
+          rpm -q edk2-ovmf >/dev/null || missing+=(edk2-ovmf)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo dnf install -y "${missing[@]}"
+          fi
+          just --version
+
+      - name: Persistent image cache
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          # The launcher caches the Fedora Cloud qcow2 under
+          # tests/runtime/.cache/. Point that at a per-runner persistent dir
+          # (the tp-host wlrt-cache pattern) so the weekly run doesn't
+          # re-download ~500MB when the workspace is fresh.
+          mkdir -p "$HOME/wlrt-cache"
+          rm -rf workloadctl/tests/runtime/.cache
+          ln -s "$HOME/wlrt-cache" workloadctl/tests/runtime/.cache
+
+      - name: Runtime rung (VM)
+        if: steps.kvm.outputs.available == 'true'
+        working-directory: workloadctl
+        env:
+          WLRT_MODE: dev
+        run: just test-runtime
