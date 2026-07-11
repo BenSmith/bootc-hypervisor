@@ -70,6 +70,11 @@ def missing_prereqs(mode: str) -> list[str]:
         for binary in ("podman", "swtpm"):
             if shutil.which(binary) is None:
                 missing.append(binary)
+        # bootc images are UEFI-only — there is no SeaBIOS fallback in gate (a
+        # UEFI disk simply won't boot on SeaBIOS). Missing OVMF is a hard prereq
+        # → clean skip, same tier as swtpm-absent.
+        if not (workload_lib.find_ovmf_code() and workload_lib.find_ovmf_vars()):
+            missing.append("OVMF (edk2-ovmf)")
     return missing
 
 
@@ -190,15 +195,18 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name):
+def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name,
+               no_reboot=True, require_ovmf=False):
     argv = [
         "qemu-system-x86_64",
         "-machine", "q35,accel=kvm", "-cpu", "host",
         "-m", str(mem_mib), "-smp", str(vcpus),
     ]
-    # UEFI/OVMF when available (matches the VM-workload launch path); a fresh
-    # writable VARS copy per run. Cloud images also boot on SeaBIOS, so fall
-    # back rather than fail if OVMF is not installed.
+    # UEFI/OVMF (matches the VM-workload launch path); a fresh writable VARS copy
+    # per run. Dev cloud images also boot on SeaBIOS, so dev falls back rather
+    # than fail if OVMF is absent — but gate images are UEFI-only, so gate passes
+    # require_ovmf=True and never takes the SeaBIOS branch (missing_prereqs("gate")
+    # already clean-skips before we get here; the raise is defence in depth).
     #
     # The VARS store is a *qcow2* pflash, not raw: `savevm` (the snapshot
     # primitive) requires every writable block device to support internal
@@ -216,6 +224,11 @@ def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name):
             "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
             "-drive", f"if=pflash,format=qcow2,file={nvram}",
         ]
+    elif require_ovmf:
+        raise RuntimeError(
+            "gate mode requires OVMF (bootc images are UEFI-only), but "
+            "find_ovmf_code()/find_ovmf_vars() returned nothing"
+        )
     argv += ["-drive", f"file={disk},if=virtio,format=qcow2"]
     # dev mode carries a cloud-init seed (read-only data cloud-init only reads;
     # readonly=on keeps it out of savevm's writable-device set). gate mode bakes
@@ -238,7 +251,14 @@ def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name):
         # -display none (not -nographic): serial+monitor are already routed to
         # the file/qmp sockets above, and QEMU 10.x rejects -nographic together
         # with -daemonize (they both want stdio).
-        "-display", "none", "-no-reboot", "-name", name,
+        "-display", "none",
+    ]
+    # -no-reboot is dev-only: a bootc first boot may reboot to finalize the
+    # deployment, and -no-reboot would halt the VM on that legitimate reboot.
+    if no_reboot:
+        argv += ["-no-reboot"]
+    argv += [
+        "-name", name,
         "-pidfile", str(run_dir / "vm.pid"), "-daemonize",
     ]
     return argv
@@ -479,7 +499,9 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
         port = _free_port()
         argv = _qemu_argv(disk=disk, seed=seed, tpm_sock=tpm_sock, port=port,
                           run_dir=run_dir, mem_mib=mem_mib, vcpus=vcpus,
-                          name=f"wlrt-{mode}")
+                          name=f"wlrt-{mode}",
+                          no_reboot=(mode == "dev"),
+                          require_ovmf=(mode == "gate"))
         qemu = subprocess.run(argv, capture_output=True, text=True)
         if qemu.returncode != 0:
             # Surface QEMU's own diagnostic (e.g. an incompatible flag combo)
@@ -511,6 +533,15 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
             target.run(["cloud-init", "status", "--wait"],
                        sudo=True, check=False, timeout=300)
             _deploy(target, key_path, port)
+        elif mode == "gate":
+            # The baked bootc image has no cloud-init; sshd still answers before
+            # the full stack has settled. Block on the systemd transition so the
+            # snapshotted baseline is a fully-started system. `is-system-running
+            # --wait` exits non-zero on `degraded` — expected here (nvidia /
+            # seatd-without-a-seat / some libvirtd bits fail in a plain VM), so
+            # check=False accepts it.
+            target.run(["systemctl", "is-system-running", "--wait"],
+                       sudo=False, check=False, timeout=300)
 
         target.snapshot("base")
         return target
