@@ -130,7 +130,11 @@ def target(request) -> Target:
                 f"runtime harness ({dest}) needs: {', '.join(missing)} "
                 "— skipping (default-safe on a box without KVM/QEMU)"
             )
-        t = vmlaunch.launch(mode)
+        # 4 GiB by default (override WLRT_MEM_MIB): the B6 VM-workload smoke runs
+        # a *nested* guest inside this one, which needs headroom beyond the bootc
+        # host + podman. Harmless surplus for the other runtime checks.
+        mem_mib = int(os.environ.get("WLRT_MEM_MIB", "4096"))
+        t = vmlaunch.launch(mode, mem_mib=mem_mib)
         if os.environ.get("WLRT_KEEP_VM"):
             # Leave the guest (and swtpm) running so a failed run can be
             # inspected live instead of being reaped in teardown.
