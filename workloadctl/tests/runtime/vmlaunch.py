@@ -16,6 +16,7 @@ ships in the image). Checks never branch on mode.
 Stdlib only. See docs/wip/test-suite-improvement-plan.md Part 1.
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -133,6 +134,18 @@ def _download(url: str, dest: Path) -> None:
     with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as f:
         shutil.copyfileobj(resp, f)
     tmp.rename(dest)
+
+
+def _overlay(base: Path, dest: Path) -> None:
+    """Create a copy-on-write qcow2 `dest` backed by read-only `base`.
+
+    Boot writes and internal snapshots land in the thin overlay; the shared
+    backing image (a cached base) stays pristine and reusable across runs."""
+    subprocess.run(
+        ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
+         "-b", str(base), str(dest)],
+        check=True, capture_output=True, text=True,
+    )
 
 
 def _ensure_base_image(ver: int) -> Path:
@@ -299,12 +312,24 @@ def _ensure_bootc_image() -> str:
     return ref
 
 
+# Gate root fs size. The default BIB disk is sized to the image content with
+# little slack; the full `-m runtime` set pulls a container image into each
+# `_wl-*` rootless store, which the default leaves no room for. BIB lays the
+# partition + xfs down at this size at *build* time (osbuild grows the
+# filesystem before first boot), so there is no in-guest grow step to depend on
+# — the size is baked, then the qcow2 cache reuses it. qcow2 is sparse, so the
+# unused headroom costs no real disk.
+_GATE_ROOT_MINSIZE = "20 GiB"
+
+
 def _render_bib_config(pubkey: str) -> str:
     """A bootc-image-builder blueprint that bakes the `wlrt` test user.
 
     No workload TOMLs are baked — the harness installs workloads at runtime via
     `workloadctl install`/`enable`. The NOPASSWD drop-in is required because
-    VMTarget drives sudo non-interactively (`sudo -n`)."""
+    VMTarget drives sudo non-interactively (`sudo -n`). The filesystem block
+    sizes the root fs at build time for the workload-image pulls (see
+    _GATE_ROOT_MINSIZE)."""
     return (
         "[[customizations.user]]\n"
         'name = "wlrt"\n'
@@ -315,6 +340,10 @@ def _render_bib_config(pubkey: str) -> str:
         'path = "/etc/sudoers.d/wlrt-nopasswd"\n'
         'mode = "0440"\n'
         'data = "%wheel ALL=(ALL) NOPASSWD:ALL\\n"\n'
+        "\n"
+        "[[customizations.filesystem]]\n"
+        'mountpoint = "/"\n'
+        f'minsize = "{_GATE_ROOT_MINSIZE}"\n'
     )
 
 
@@ -367,6 +396,73 @@ def _build_gate_qcow2(run_dir: Path, image_ref: str, pubkey: str) -> Path:
     disk = output / "qcow2" / "disk.qcow2"
     if not disk.exists():
         raise RuntimeError(f"BIB reported success but {disk} is missing")
+    return disk
+
+
+def _gate_ssh_key() -> Path:
+    """A stable ssh keypair for gate mode, cached under CACHE_DIR.
+
+    gate bakes the pubkey into the image via bootc-image-builder, so a cached
+    build is only reusable when the baked key is stable across runs — a per-run
+    ephemeral key (as dev mode uses) would make every cached disk
+    unauthenticable. The guest is a throwaway local QEMU behind a loopback
+    port-forward, so a persistent test key is not a trust concern."""
+    key = CACHE_DIR / "gate_id_ed25519"
+    if not key.exists():
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key),
+             "-C", "wlrt-gate"],
+            check=True, capture_output=True, text=True,
+        )
+    return key
+
+
+def _resolve_image_digest(image_ref: str) -> str | None:
+    """The manifest digest of `image_ref` from root's container store, or None.
+
+    Keys the gate qcow2 cache so a genuinely-new image build invalidates it.
+    Resolvable whenever the image is in root's store (always for a `localhost/…`
+    override; typically so on a gate host that already pulled the registry
+    image). An unresolvable digest just disables caching for the run."""
+    r = subprocess.run(
+        ["sudo", "podman", "image", "inspect", "--format", "{{.Digest}}",
+         image_ref],
+        capture_output=True, text=True,
+    )
+    digest = r.stdout.strip()
+    return digest if r.returncode == 0 and digest.startswith("sha256:") else None
+
+
+def _gate_qcow2(run_dir: Path, image_ref: str, pubkey: str) -> Path:
+    """Return a bootable gate qcow2, reusing a cached BIB build when possible.
+
+    A BIB build is multi-minute; its output is fully determined by the source
+    image digest and the blueprint, so cache on both. A hit skips BIB
+    entirely; a miss builds once and moves the result into the cache. Either way
+    the run boots a thin copy-on-write overlay so the cached disk stays pristine
+    (the heavy BIB output/store/rpmmd intermediates stay under run_dir and are
+    reaped with it). If the source digest can't be resolved (registry image
+    absent from root's store), caching is skipped and BIB builds fresh —
+    correct, just slower."""
+    disk = run_dir / "disk.qcow2"
+    digest = _resolve_image_digest(image_ref)
+    if digest is None:
+        return _build_gate_qcow2(run_dir, image_ref, pubkey)
+
+    # Key on the source digest + the full rendered blueprint, so any blueprint
+    # change (a new customization, a different root size, the baked pubkey) busts
+    # the cache automatically rather than serving a stale disk.
+    config = _render_bib_config(pubkey)
+    tag = hashlib.sha256(f"{digest}\n{config}".encode()).hexdigest()[:16]
+    cached = CACHE_DIR / f"gate-{tag}.qcow2"
+    if not cached.exists():
+        built = _build_gate_qcow2(run_dir, image_ref, pubkey)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = cached.with_suffix(".qcow2.part")
+        shutil.move(str(built), str(tmp))
+        tmp.rename(cached)
+    _overlay(cached, disk)
     return disk
 
 
@@ -470,28 +566,28 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
                        capture_output=True, text=True, check=True).stdout.strip()
     )
     try:
-        key_path = run_dir / "id_ed25519"
-        subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path),
-             "-C", "wlrt"],
-            check=True, capture_output=True, text=True,
-        )
-        pubkey = (run_dir / "id_ed25519.pub").read_text().strip()
-
-        # Mode-specific disk / seed / TPM; the rest of the boot is identical.
+        # Mode-specific ssh key + disk / seed / TPM; the rest of the boot is
+        # identical. dev uses a per-run ephemeral key; gate uses a stable cached
+        # key so its baked-in bootc qcow2 can be reused across runs (see
+        # _gate_ssh_key / _gate_qcow2).
         if mode == "dev":
-            base = _ensure_base_image(resolve_fedora_version())
-            disk = run_dir / "overlay.qcow2"
+            key_path = run_dir / "id_ed25519"
             subprocess.run(
-                ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
-                 "-b", str(base), str(disk)],
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f",
+                 str(key_path), "-C", "wlrt"],
                 check=True, capture_output=True, text=True,
             )
+            pubkey = (run_dir / "id_ed25519.pub").read_text().strip()
+            base = _ensure_base_image(resolve_fedora_version())
+            disk = run_dir / "overlay.qcow2"
+            _overlay(base, disk)
             seed = _build_seed(run_dir, pubkey)
             tpm_sock = None
             do_deploy = deploy
         else:  # gate
-            disk = _build_gate_qcow2(run_dir, _ensure_bootc_image(), pubkey)
+            key_path = _gate_ssh_key()
+            pubkey = Path(str(key_path) + ".pub").read_text().strip()
+            disk = _gate_qcow2(run_dir, _ensure_bootc_image(), pubkey)
             seed = None
             tpm_sock = _start_swtpm(run_dir)
             do_deploy = False  # workloadctl is baked into the bootc image
