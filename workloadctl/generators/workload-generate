@@ -471,7 +471,27 @@ def generate_pod_service(workload, user_name, uid):
 
     network_config = workload.get("network", {})
     network_mode = network_config.get("mode", "pasta")
-    pod_args = [f"--name=workload-{name}", f"--network={network_mode}"]
+    # --share-parent=false: do NOT give the pod its own libpod_pod_<id>.slice.
+    # Rootless + systemd cgroup manager, every container start (infra included)
+    # unconditionally StartTransientUnit's that shared slice (podman
+    # container_internal.go -> platformMakePod -> util_linux.go, guarded only by a
+    # cgroupfs-dir check that an empty-but-loaded slice defeats); crun then sends
+    # it in "fail" mode with only a scope-scoped one-shot retry
+    # (cgroup-systemd.c enter_scope), so there is no recovery path. systemd lets
+    # the first caller win; every later member dies with exit 126 ("slice already
+    # loaded or has a fragment file"). Giving each container its own cgroup under
+    # the user manager removes the contended slice entirely, and it costs nothing:
+    # workload resource limits live on the user@<uid>.service subtree
+    # (generate_user_dropin), not the pod cgroup, and namespaces (net/ipc/uts/pid)
+    # are still shared -- --share-parent is cgroup-layout only, orthogonal to
+    # --share (the namespace knob).
+    #
+    # This is a workaround at our layer for an upstream podman+crun race we can't
+    # patch in the image; we arrange never to trigger it rather than fixing it.
+    # Revisit only if a workload ever needs genuine pod-level cgroup accounting or
+    # a pod-scoped limit -- that real fix belongs upstream.
+    pod_args = [f"--name=workload-{name}", f"--network={network_mode}",
+                "--share-parent=false"]
     if network_mode not in ("host", "none"):
         for port in network_config.get("ports", []):
             pod_args.append(f"--publish {port}")
