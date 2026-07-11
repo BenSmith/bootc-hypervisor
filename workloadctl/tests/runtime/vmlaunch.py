@@ -7,8 +7,11 @@ overlay under raw QEMU with a user-mode ssh port-forward, deploys the local
 workloadctl RPM into the guest, snapshots a clean baseline, and hands back a
 `VMTarget` the pytest checks drive unchanged.
 
-gate mode (the real bootc image + swtpm) is B1b — `launch("gate")` raises
-NotImplementedError for now.
+gate mode boots the REAL bootc image instead: bootc-image-builder turns
+`localhost/hypervisor-bootc:latest` (override via WLRT_GATE_IMAGE) into a
+bootable qcow2 with the `wlrt` test user baked in, boots it under an emulated
+TPM2 (swtpm), and hands back the same `VMTarget` with no rpm deploy (workloadctl
+ships in the image). Checks never branch on mode.
 
 Stdlib only. See docs/wip/test-suite-improvement-plan.md Part 1.
 """
@@ -39,6 +42,15 @@ FEDORA_VERSIONS = _REPO_ROOT / "fedora-versions.yml"
 
 # Binaries the dev-mode boot needs beyond /dev/kvm.
 _DEV_BINARIES = ("qemu-system-x86_64", "qemu-img", "cloud-localds", "ssh-keygen")
+
+# gate mode source image (the real hypervisor bootc image) and the
+# bootc-image-builder tool image that turns it into a bootable qcow2. The
+# default is the CI push target — BIB pulls the freshest genuinely-shipped
+# artifact straight off `registry.local`. Override with WLRT_GATE_IMAGE to point
+# at a `localhost/…` local build instead (which reads root's container store).
+_GATE_IMAGE = os.environ.get("WLRT_GATE_IMAGE",
+                             "registry.local/hypervisor-bootc:latest")
+_BIB_IMAGE = "quay.io/centos-bootc/bootc-image-builder:latest"
 
 
 def missing_prereqs(mode: str) -> list[str]:
@@ -178,7 +190,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _qemu_argv(*, overlay, seed, port, run_dir, mem_mib, vcpus, name):
+def _qemu_argv(*, disk, seed, tpm_sock, port, run_dir, mem_mib, vcpus, name):
     argv = [
         "qemu-system-x86_64",
         "-machine", "q35,accel=kvm", "-cpu", "host",
@@ -204,11 +216,21 @@ def _qemu_argv(*, overlay, seed, port, run_dir, mem_mib, vcpus, name):
             "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
             "-drive", f"if=pflash,format=qcow2,file={nvram}",
         ]
+    argv += ["-drive", f"file={disk},if=virtio,format=qcow2"]
+    # dev mode carries a cloud-init seed (read-only data cloud-init only reads;
+    # readonly=on keeps it out of savevm's writable-device set). gate mode bakes
+    # the user in via bootc-image-builder and passes seed=None.
+    if seed is not None:
+        argv += ["-drive", f"file={seed},if=virtio,format=raw,readonly=on"]
+    # gate mode attaches an emulated TPM2 (swtpm) so the bootc host image's
+    # TPM-backed secret path is exercised; dev mode passes tpm_sock=None.
+    if tpm_sock is not None:
+        argv += [
+            "-chardev", f"socket,id=chrtpm,path={tpm_sock}",
+            "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+            "-device", "tpm-tis,tpmdev=tpm0",
+        ]
     argv += [
-        "-drive", f"file={overlay},if=virtio,format=qcow2",
-        # The cloud-init seed is read-only data (cloud-init only reads it);
-        # readonly=on keeps it out of savevm's writable-device set.
-        "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
         "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{port}-:22",
         "-device", "virtio-net-pci,netdev=net0",
         "-serial", f"file:{run_dir / 'console.log'}",
@@ -228,6 +250,123 @@ def _console_tail(run_dir: Path, n: int = 40) -> str:
         return "(no console output)"
     lines = console.read_text(errors="replace").splitlines()
     return "\n".join(lines[-n:])
+
+
+# ---------------------------------------------------------------------------
+# gate mode: real bootc image via bootc-image-builder + swtpm
+# ---------------------------------------------------------------------------
+
+def _is_local_store_ref(ref: str) -> bool:
+    """A `localhost/…` ref reads root's container store (storage bind); any other
+    ref (the `registry.local` default) is pulled by BIB over the network."""
+    return ref.startswith("localhost/")
+
+
+def _ensure_bootc_image() -> str:
+    """Resolve the gate source bootc image ref.
+
+    A `localhost/…` override must already be in root's podman store (BIB reads it
+    via the bound store) — a missing one is a hard error. The default
+    `registry.local` ref is pulled by BIB itself, so there is nothing to
+    pre-stage; return it as-is."""
+    ref = _GATE_IMAGE
+    if _is_local_store_ref(ref):
+        if subprocess.run(["sudo", "podman", "image", "exists", ref]).returncode != 0:
+            raise RuntimeError(
+                f"gate image {ref!r} (WLRT_GATE_IMAGE) not found in the root "
+                f"podman store; pull/build+tag it, or use the registry default"
+            )
+    return ref
+
+
+def _render_bib_config(pubkey: str) -> str:
+    """A bootc-image-builder blueprint that bakes the `wlrt` test user.
+
+    No workload TOMLs are baked — the harness installs workloads at runtime via
+    `workloadctl install`/`enable`. The NOPASSWD drop-in is required because
+    VMTarget drives sudo non-interactively (`sudo -n`)."""
+    return (
+        "[[customizations.user]]\n"
+        'name = "wlrt"\n'
+        'groups = ["wheel"]\n'
+        f'key = "{pubkey}"\n'
+        "\n"
+        "[[customizations.files]]\n"
+        'path = "/etc/sudoers.d/wlrt-nopasswd"\n'
+        'mode = "0440"\n'
+        'data = "%wheel ALL=(ALL) NOPASSWD:ALL\\n"\n'
+    )
+
+
+def _build_gate_qcow2(run_dir: Path, image_ref: str, pubkey: str) -> Path:
+    """Build a bootable qcow2 from the real bootc image; return disk.qcow2.
+
+    Mirrors the root justfile `_build-qcow2` invocation shape (privileged podman,
+    unconfined label, /store /rpmmd /output mounts, xfs rootfs). BIB reads the
+    source image from root's container storage, so that bind is required for both
+    modes (the pre-pulled `registry.local` image lives there). The registry
+    default additionally gets `--network=host` (resolve the mDNS `.local` name so
+    BIB can pull it if absent) and `--tls-verify=false` (Caddy-fronted https)."""
+    bib = run_dir / "bib"
+    output, store, rpmmd = bib / "output", bib / "store", bib / "rpmmd"
+    for d in (output, store, rpmmd):
+        d.mkdir(parents=True, exist_ok=True)
+    config = bib / "config.toml"
+    config.write_text(_render_bib_config(pubkey))
+
+    registry_pull = not _is_local_store_ref(image_ref)
+    podman_args = [
+        "sudo", "podman", "run", "--privileged", "--pull=newer", "--rm",
+        "--security-opt", "label=type:unconfined_t",
+        "-v", f"{config}:/config.toml:ro",
+        "-v", f"{output}:/output",
+        "-v", f"{rpmmd}:/rpmmd",
+        "-v", f"{store}:/store",
+        "-v", "/var/lib/containers/storage:/var/lib/containers/storage",
+    ]
+    if registry_pull:
+        podman_args += ["--network=host"]
+    build_args = [
+        "build",
+        "--chown", f"{os.getuid()}:{os.getgid()}",
+        "--output", "/output",
+        "--rootfs", "xfs",
+        "--rpmmd", "/rpmmd",
+        "--store", "/store",
+        "--type", "qcow2",
+    ]
+    if registry_pull:
+        build_args += ["--tls-verify=false"]  # Caddy-fronted registry.local
+    argv = podman_args + [_BIB_IMAGE] + build_args + [image_ref]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=1800)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"bootc-image-builder failed (rc={r.returncode}):\n"
+            f"{r.stdout[-2000:]}\n{r.stderr[-2000:]}"
+        )
+    disk = output / "qcow2" / "disk.qcow2"
+    if not disk.exists():
+        raise RuntimeError(f"BIB reported success but {disk} is missing")
+    return disk
+
+
+def _start_swtpm(run_dir: Path) -> Path:
+    """Start a swtpm socket daemon; return its control socket path.
+
+    The daemon writes its pid to swtpm.pid in run_dir so poweroff/cleanup can
+    reap it after QEMU exits."""
+    tpm_state = run_dir / "tpm"
+    tpm_state.mkdir(parents=True, exist_ok=True)
+    sock = run_dir / "swtpm.sock"
+    r = subprocess.run(
+        ["swtpm", "socket", "--tpmstate", f"dir={tpm_state}",
+         "--ctrl", f"type=unixio,path={sock}",
+         "--tpm2", "--daemon", "--pid", f"file={run_dir / 'swtpm.pid'}"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"swtpm failed to start:\n{r.stderr or r.stdout}")
+    return sock
 
 
 # ---------------------------------------------------------------------------
@@ -295,21 +434,16 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
     """Boot a runtime-harness VM in `mode` and return a live VMTarget.
 
     dev mode: cached Fedora Cloud overlay + cloud-init seed, then rpm-install.
-    gate mode: NotImplementedError (B1b).
+    gate mode: real bootc image via bootc-image-builder + swtpm, no deploy.
 
     Raises RuntimeError (with the guest console tail) on boot/timeout failure.
     """
-    if mode == "gate":
-        raise NotImplementedError("gate mode is B1b; use dev mode")
-    if mode != "dev":
+    if mode not in ("dev", "gate"):
         raise ValueError(f"unknown mode {mode!r} (expected 'dev' or 'gate')")
 
     missing = missing_prereqs(mode)
     if missing:
         raise RuntimeError(f"missing runtime prerequisites: {', '.join(missing)}")
-
-    ver = resolve_fedora_version()
-    base = _ensure_base_image(ver)
 
     run_dir = Path(
         subprocess.run(["mktemp", "-d", "-t", "wlrt-run.XXXXXX"],
@@ -323,18 +457,29 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
             check=True, capture_output=True, text=True,
         )
         pubkey = (run_dir / "id_ed25519.pub").read_text().strip()
-        seed = _build_seed(run_dir, pubkey)
 
-        overlay = run_dir / "overlay.qcow2"
-        subprocess.run(
-            ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
-             "-b", str(base), str(overlay)],
-            check=True, capture_output=True, text=True,
-        )
+        # Mode-specific disk / seed / TPM; the rest of the boot is identical.
+        if mode == "dev":
+            base = _ensure_base_image(resolve_fedora_version())
+            disk = run_dir / "overlay.qcow2"
+            subprocess.run(
+                ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
+                 "-b", str(base), str(disk)],
+                check=True, capture_output=True, text=True,
+            )
+            seed = _build_seed(run_dir, pubkey)
+            tpm_sock = None
+            do_deploy = deploy
+        else:  # gate
+            disk = _build_gate_qcow2(run_dir, _ensure_bootc_image(), pubkey)
+            seed = None
+            tpm_sock = _start_swtpm(run_dir)
+            do_deploy = False  # workloadctl is baked into the bootc image
 
         port = _free_port()
-        argv = _qemu_argv(overlay=overlay, seed=seed, port=port, run_dir=run_dir,
-                          mem_mib=mem_mib, vcpus=vcpus, name=f"wlrt-{mode}")
+        argv = _qemu_argv(disk=disk, seed=seed, tpm_sock=tpm_sock, port=port,
+                          run_dir=run_dir, mem_mib=mem_mib, vcpus=vcpus,
+                          name=f"wlrt-{mode}")
         qemu = subprocess.run(argv, capture_output=True, text=True)
         if qemu.returncode != 0:
             # Surface QEMU's own diagnostic (e.g. an incompatible flag combo)
@@ -348,6 +493,7 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
             port=port, key_path=key_path,
             qmp_sock=run_dir / "qmp.sock", pid_path=run_dir / "vm.pid",
             run_dir=run_dir,
+            swtpm_pid_path=(run_dir / "swtpm.pid") if tpm_sock else None,
         )
         try:
             target.wait_ready(timeout=240.0)
@@ -356,7 +502,7 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
                 f"{e}\n--- guest console tail ---\n{_console_tail(run_dir)}"
             ) from e
 
-        if deploy:
+        if do_deploy:
             # sshd answers before cloud-init finishes; its packages: module is
             # still installing the in-guest build deps (just, rpm-build, ...).
             # Block on cloud-init before deploying, or `just rpm-install` races
@@ -376,10 +522,9 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
 
 
 def _cleanup_run_dir(run_dir: Path) -> None:
-    pid_file = run_dir / "vm.pid"
-    try:
-        pid = int(pid_file.read_text().strip())
-        os.kill(pid, 15)
-    except (OSError, ValueError):
-        pass
+    for pid_file in (run_dir / "vm.pid", run_dir / "swtpm.pid"):
+        try:
+            os.kill(int(pid_file.read_text().strip()), 15)
+        except (OSError, ValueError):
+            pass
     shutil.rmtree(run_dir, ignore_errors=True)

@@ -43,7 +43,7 @@ class VMTarget(Target):
     """
 
     def __init__(self, *, port, key_path, qmp_sock, pid_path, run_dir,
-                 user="wlrt", host="127.0.0.1"):
+                 user="wlrt", host="127.0.0.1", swtpm_pid_path=None):
         super().__init__(dest=f"{user}@{host}")
         self._setup_mux()
         # SSH options injected into every master + session ssh invocation.
@@ -57,6 +57,9 @@ class VMTarget(Target):
         self._qmp_sock = str(qmp_sock)
         self._pid_path = str(pid_path)
         self._run_dir = str(run_dir)
+        # gate mode only: the swtpm daemon backing the emulated TPM2, reaped
+        # after QEMU exits.
+        self._swtpm_pid_path = str(swtpm_pid_path) if swtpm_pid_path else None
 
     # ------------------------------------------------------------------
     # SSH plumbing (override to inject port/key; reconnect-tolerant master)
@@ -209,6 +212,13 @@ class VMTarget(Target):
             try:
                 pid = int(Path(self._pid_path).read_text().strip())
                 os.kill(pid, signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        # Reap the swtpm daemon (gate mode) — it does not exit with QEMU.
+        if self._swtpm_pid_path:
+            try:
+                os.kill(int(Path(self._swtpm_pid_path).read_text().strip()),
+                        signal.SIGTERM)
             except (OSError, ValueError):
                 pass
         self.close()
