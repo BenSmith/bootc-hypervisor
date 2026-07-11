@@ -8,6 +8,7 @@ Options:
 """
 
 import json
+import os
 import subprocess
 import time
 
@@ -68,6 +69,35 @@ def pytest_configure(config):
 # Session-scoped Target fixture
 # ---------------------------------------------------------------------------
 
+def _keep_vm_notice(t) -> None:
+    """Print (and persist) reconnect details for a WLRT_KEEP_VM guest.
+
+    The VM and its swtpm are deliberately NOT reaped, so their run dir (holding
+    the ephemeral ssh key) survives for manual inspection. pytest may capture
+    stdout at teardown, so the same notice is written to ~/wlrt-keep-vm.txt."""
+    swtpm_pid = getattr(t, "_swtpm_pid_path", None)
+    poweroff = f"kill $(cat {t._pid_path})"
+    if swtpm_pid:
+        poweroff += f" $(cat {swtpm_pid})"
+    poweroff += f" 2>/dev/null; rm -rf {t._run_dir}"
+    msg = "\n".join([
+        "",
+        "=" * 72,
+        "WLRT_KEEP_VM set — guest left RUNNING for inspection (not powered off).",
+        f"  connect:  {t.connect_hint()}",
+        f"  run dir:  {t._run_dir}",
+        f"  teardown: {poweroff}",
+        "=" * 72,
+        "",
+    ])
+    print(msg)
+    try:
+        with open(os.path.expanduser("~/wlrt-keep-vm.txt"), "w") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+
+
 @pytest.fixture(scope="session")
 def target(request) -> Target:
     """Construct and yield the Target; handle optional --deploy.
@@ -101,7 +131,12 @@ def target(request) -> Target:
                 "— skipping (default-safe on a box without KVM/QEMU)"
             )
         t = vmlaunch.launch(mode)
-        request.addfinalizer(t.poweroff)
+        if os.environ.get("WLRT_KEEP_VM"):
+            # Leave the guest (and swtpm) running so a failed run can be
+            # inspected live instead of being reaped in teardown.
+            request.addfinalizer(lambda: _keep_vm_notice(t))
+        else:
+            request.addfinalizer(t.poweroff)
         yield t
         return
 

@@ -30,6 +30,7 @@ and the TOML files in workloads/.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -204,6 +205,12 @@ def _purge_workload(target: Target, name: str):
     The VM may have just restarted (e.g. after rollback), so a generous timeout
     avoids a spurious teardown ERROR when the stop is simply slow.
     """
+    # WLRT_KEEP_VM: leave the workload in place so a failed run can be inspected
+    # live. Safe because reset_vm reverts the guest to `base` at the next test's
+    # setup anyway, so skipping this cleanup never leaks state into another test.
+    if os.environ.get("WLRT_KEEP_VM"):
+        print(f"[WLRT_KEEP_VM] skipping purge of {name} — left in place for inspection")
+        return
     target.wl(f"disable --purge {name}", check=False, timeout=120)
     time.sleep(1)
     target.run(

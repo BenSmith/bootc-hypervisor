@@ -52,13 +52,17 @@ def _cgroup_chain(cgroup_path):
     wherever it landed, without ever reading a slice-level cap.
     """
     parts = cgroup_path.strip("/").split("/")
-    # Trim everything up to and including the user@<uid>.service manager, so the
-    # chain we scan is strictly the container's subtree.
+    # Cap the *upward* walk at the child of the user@<uid>.service manager so we
+    # never read a slice-level cap — but keep the FULL absolute path (including any
+    # prefix above the manager, e.g. /workloads.slice/user@<uid>.service/… or
+    # /user.slice/user-<uid>.slice/user@<uid>.service/…). Reconstructing from the
+    # manager down would drop that prefix and scan a non-existent tree.
+    stop = 0
     for i, seg in enumerate(parts):
         if seg.startswith("user@") and seg.endswith(".service"):
-            parts = parts[i + 1:]
+            stop = i + 1
             break
-    while parts:
+    while len(parts) > stop:
         yield "/" + "/".join(parts)
         parts = parts[:-1]
 

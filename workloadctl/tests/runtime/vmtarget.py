@@ -57,6 +57,10 @@ class VMTarget(Target):
         self._qmp_sock = str(qmp_sock)
         self._pid_path = str(pid_path)
         self._run_dir = str(run_dir)
+        # Retained so a kept-alive VM (WLRT_KEEP_VM) can print a working
+        # reconnect command for manual inspection.
+        self.ssh_port = int(port)
+        self.key_path = str(key_path)
         # gate mode only: the swtpm daemon backing the emulated TPM2, reaped
         # after QEMU exits.
         self._swtpm_pid_path = str(swtpm_pid_path) if swtpm_pid_path else None
@@ -145,6 +149,14 @@ class VMTarget(Target):
     # ------------------------------------------------------------------
     # Readiness
     # ------------------------------------------------------------------
+
+    def connect_hint(self) -> str:
+        """A standalone ssh command that reaches this guest (for WLRT_KEEP_VM)."""
+        return (
+            f"ssh -p {self.ssh_port} -i {self.key_path} "
+            f"-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no "
+            f"{self.dest}"
+        )
 
     def wait_ready(self, timeout: float = 240.0):
         """Block until the guest answers ssh, retrying the master as needed."""

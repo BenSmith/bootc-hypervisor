@@ -1,7 +1,9 @@
 # rt-caps — runtime rung's per-container resource-cap workload (C1 GAP: caps).
-# Unlike the other fixtures, the limits live under [container.resources] (NOT the
-# workload-level [resources] slice drop-in): those map to podman --memory /
-# --pids-limit flags, which crun writes onto the container's own cgroup. This
+# memory_max / tasks_max map to podman --memory / --pids-limit flags, which crun
+# writes onto the container's own cgroup. For a single-container workload these
+# live in a TOP-LEVEL [resources] block: normalize_containers reads
+# config["resources"], so a nested [container.resources] is silently ignored
+# (buried under container["container"]) and the caps never reach podman. This
 # workload exists to prove those caps land as real cgroup limit *values* on a live
 # kernel. caddy is a trivially always-running image; the health cmd settles fast so
 # the harness's readiness wait resolves.
@@ -15,7 +17,7 @@ enabled = false
 image = "docker.io/library/caddy:2-alpine"
 command = ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":8080"]
 
-[container.resources]
+[resources]
 memory_max = "128M"    # -> podman --memory=128M   -> cgroup memory.max = 134217728
 tasks_max = 100        # -> podman --pids-limit=100 -> cgroup pids.max   = 100
 

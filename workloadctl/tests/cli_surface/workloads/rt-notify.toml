@@ -15,7 +15,10 @@ enabled = false
 image = "docker.io/library/caddy:2-alpine"
 command = ["caddy", "file-server", "--root", "/usr/share/caddy", "--listen", ":8080"]
 
-[container.resources]
+# Single-container workloads carry per-container caps/service_type in a TOP-LEVEL
+# [resources] block (normalize_containers reads config["resources"]); a nested
+# [container.resources] is silently ignored (buried under container["container"]).
+[resources]
 service_type = "notify"    # -> Type=notify + --sdnotify=conmon (never goes active)
 timeout_start_sec = "20s"  # bound the doomed start attempt
 
