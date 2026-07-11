@@ -1291,36 +1291,43 @@ def validate_env_key(key: str) -> bool:
 # Pattern matching ${SECRET:name} references in env var values
 SECRET_PATTERN = re.compile(r'\$\{SECRET:([a-zA-Z0-9_-]+)}')
 
-# Pattern matching ${SECRET?name} — optional variant used by cloud-init
-# templates. Unlike SECRET_PATTERN, an unresolved name substitutes to the
-# empty string (mirrors shell ${VAR?default} semantics) so user-data can
-# include a credential reference that callers opt into without forcing
-# every operator to pre-seed a placeholder credstore entry.
-OPTIONAL_SECRET_PATTERN = re.compile(r'\$\{SECRET\?([a-zA-Z0-9_-]+)}')
-
-# Pattern matching ${VAR} substitutions in cloud-init user-data templates.
-# Deliberately distinct from SECRET_PATTERN so secret refs aren't swept up
-# by the plain template-var pass; the resolver below handles both.
-_TEMPLATE_VAR_PATTERN = re.compile(r'(?<!\$)\$\{([a-zA-Z_][a-zA-Z0-9_]*)}')
-
-# Single combined pattern for substitute_template. Folding the three forms into
-# one left-to-right pass (rather than three sequential .sub() calls) is a
-# security property, not just an optimization: re.sub never re-scans the text it
-# inserts, so a resolved value — e.g. a decrypted secret whose plaintext happens
-# to contain "${PATH}" or "${SECRET:other}" — is emitted verbatim instead of
-# being re-expanded by a later pass (which would leak host env/other secrets
-# into the rendered guest user-data). The SECRET? / SECRET: alternatives precede
-# VAR so a secret ref is never captured as a plain var. All three branches carry
-# the (?<!\$) lookbehind so `$$` escaping is uniform: `$${VAR}`, `$${SECRET:name}`
-# and `$${SECRET?name}` all survive the pass untouched and collapse to a literal
-# `${...}` in the final $$→$ step. (A missing lookbehind on the SECRET branches
-# silently broke that escape: `$${SECRET:name}` still matched and tried to resolve
-# a secret named "name", aborting substitution — see tests/test_substitution.)
+# Single combined pattern for substitute_template. Folding every form — the three
+# placeholders AND the `$$` literal-dollar escape — into one left-to-right pass is
+# a security property, not just an optimization: re.sub never re-scans the text it
+# inserts, so a resolved value — e.g. a decrypted secret whose plaintext happens to
+# contain "${PATH}", "${SECRET:other}", or "$$" — is emitted verbatim instead of
+# being re-expanded or collapsed by a later pass (which would leak host env/other
+# secrets, or corrupt a secret containing `$$`, in the rendered guest user-data).
+# The SECRET? / SECRET: alternatives precede VAR so a secret ref is never captured
+# as a plain var. The placeholder branches carry the (?<!\$) lookbehind and the
+# `esc` branch (`\$\$` -> `$`) comes last, so `$$` escaping is uniform: `$${VAR}`,
+# `$${SECRET:name}` and `$${SECRET?name}` each have their leading `$$` consumed as
+# the escape token and leave a literal `${...}` — the placeholder never resolves.
+# Because the collapse rides in this same pass, `$$` in an inserted value survives.
+# (A missing lookbehind on the SECRET branches silently broke the escape:
+# `$${SECRET:name}` still matched and tried to resolve a secret named "name",
+# aborting substitution — see the substitute_template tests in test_workload_lib.)
 _SUBSTITUTION_PATTERN = re.compile(
     r'(?<!\$)\$\{SECRET\?(?P<optsecret>[a-zA-Z0-9_-]+)}'
     r'|(?<!\$)\$\{SECRET:(?P<secret>[a-zA-Z0-9_-]+)}'
     r'|(?<!\$)\$\{(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}'
+    r'|(?P<esc>\$\$)'
 )
+
+# Container-env secret reference, escape-aware. The escape is meaningful ONLY
+# immediately before `{SECRET:`: `(\$)?` captures an optional leading `$`, so
+# `$${SECRET:name}` (group 1 set) is a literal that collapses to `${SECRET:name}`
+# — the credential is neither read nor demanded — while a bare `${SECRET:name}`
+# (group 1 empty) resolves. group 2 is the credential name. Deliberately narrow:
+# unlike the cloud-init template path we do NOT globally collapse `$$` in env
+# values (they are opaque — a password may legitimately contain `$$`); only the
+# exact `$${SECRET:...}` sequence is neutralized. This still matches
+# substitute_template's resolve-vs-literal decision for any run of `$` (both
+# resolve iff exactly one `$` precedes `{SECRET:`), so a ref the cloud-init path
+# treats as inert is never resolved here. re.sub never re-scans inserted text, so
+# decrypted secret plaintext is emitted verbatim. Shared by resolve_secret_env_vars
+# (resolve) and auto_detect_credentials (demand) so the two agree exactly.
+_ENV_SECRET_REF = re.compile(r'(\$)?\$\{SECRET:([a-zA-Z0-9_-]+)}')
 
 
 def substitute_template(
@@ -1345,13 +1352,17 @@ def substitute_template(
     operator may or may not pre-seed — the rendered shell can check whether
     the resulting value is non-empty before using it.
 
-    ``$$`` collapses to a literal ``$`` after substitution, matching the
-    convention used by Python's string.Template and shell here-docs.
+    ``$$`` collapses to a literal ``$`` in the same pass, matching the
+    convention used by Python's string.Template and shell here-docs. Because the
+    collapse is part of the single substitution pass (not a later step), a ``$$``
+    inside a resolved secret/var value is emitted verbatim, never re-collapsed.
     """
     template_vars = template_vars or {}
     env = env or {}
 
     def _resolve(match):
+        if match.group("esc") is not None:  # `$$` literal-dollar escape
+            return "$"
         opt = match.group("optsecret")
         if opt is not None:
             if secret_resolver is None:
@@ -1373,10 +1384,10 @@ def substitute_template(
         raise KeyError(f"unresolved ${{{name}}} in cloud-init template")
 
     # One left-to-right pass: replacements are not re-scanned, so a resolved
-    # secret/var value can't be re-expanded by a "later" pass (see the pattern's
-    # comment). The $$→$ collapse stays a final step so `$${VAR}` escapes.
-    out = _SUBSTITUTION_PATTERN.sub(_resolve, text)
-    return out.replace("$$", "$")
+    # secret/var value can't be re-expanded — or have its own `$$` collapsed — by
+    # a "later" pass. The `$$`→`$` escape is folded in as the pattern's `esc`
+    # branch (see the pattern's comment), so `$${VAR}` still escapes.
+    return _SUBSTITUTION_PATTERN.sub(_resolve, text)
 
 
 def auto_detect_credentials(config: dict) -> set[str]:
@@ -1396,8 +1407,9 @@ def auto_detect_credentials(config: dict) -> set[str]:
 
     def _scan_env(env: dict):
         for value in env.values():
-            for match in SECRET_PATTERN.finditer(str(value)):
-                needed.add(match.group(1))
+            for match in _ENV_SECRET_REF.finditer(str(value)):
+                if not match.group(1):  # group 1 set == escaped `$$`, not demanded
+                    needed.add(match.group(2))
 
     _scan_env(config.get("container", {}).get("environment", {}))
 
@@ -1423,7 +1435,8 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
     """Resolve environment variables that contain ${SECRET:name} references.
 
     Reads credential files from creds_dir and substitutes their contents
-    into the env var values.
+    into the env var values. `$${SECRET:name}` is the literal escape: it
+    collapses to a literal `${SECRET:name}` and the credential is never read.
 
     Args:
         config: Parsed TOML workload config.
@@ -1443,8 +1456,10 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
         if not SECRET_PATTERN.search(value_str):
             continue
 
-        def _read_credential(match):
-            cred_name = match.group(1)
+        def _sub(match):
+            cred_name = match.group(2)
+            if match.group(1):  # `$${SECRET:name}` -> literal, no read, no demand
+                return "${SECRET:" + cred_name + "}"
             cred_path = Path(creds_dir) / cred_name
             if not cred_path.exists():
                 raise FileNotFoundError(
@@ -1452,7 +1467,7 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
                 )
             return cred_path.read_text()
 
-        resolved[key] = SECRET_PATTERN.sub(_read_credential, value_str)
+        resolved[key] = _ENV_SECRET_REF.sub(_sub, value_str)
 
     return resolved
 

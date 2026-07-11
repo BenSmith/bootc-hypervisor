@@ -442,6 +442,19 @@ class TestConfigImagesHelpers(CatalogTestBase):
         cfg = WorkloadConfig("secf")
         self.assertEqual(cmd_catalog._referenced_secrets(cfg), ["db-pass"])
 
+    def test_referenced_secrets_ignores_escaped_ref(self):
+        # An escaped `$${SECRET:x}` env value is a literal, not a reference: the
+        # copy lint must not claim the workload references credential x (it is
+        # never loaded at boot). A real ref alongside it is still reported.
+        from workloadctl_core import WorkloadConfig
+        (self.tmp / "escsec").mkdir()
+        (self.tmp / "escsec" / "workload.toml").write_text(
+            '[workload]\nname = "escsec"\n[container]\nimage = "x"\n'
+            '[container.environment]\n'
+            'LIT = "$${SECRET:phantom}"\nREAL = "${SECRET:used}"\n')
+        cfg = WorkloadConfig("escsec")
+        self.assertEqual(cmd_catalog._referenced_secrets(cfg), ["used"])
+
 
 class TestSetFieldNoSection(unittest.TestCase):
     def test_appends_workload_section_when_absent(self):

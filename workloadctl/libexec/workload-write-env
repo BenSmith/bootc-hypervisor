@@ -28,7 +28,7 @@ from pathlib import Path
 
 from workload_lib import (
     workload_config_path, workload_username, resolve_secret_env_vars,
-    SECRET_PATTERN, validate_env_key, normalize_containers,
+    SECRET_PATTERN, auto_detect_credentials, validate_env_key, normalize_containers,
 )
 
 
@@ -80,15 +80,29 @@ def main():
     if not has_secret_env_vars:
         return 0  # Nothing to do
 
+    # A purely-escaped value (`$${SECRET:name}`) is delivered as a literal and
+    # reads no credential; only an *unescaped* ref actually needs the decrypted
+    # credstore. auto_detect_credentials is escape-aware and is the exact scan
+    # the generator used to decide whether to emit LoadCredentialEncrypted — so
+    # `demanded` is non-empty iff the unit has a CREDENTIALS_DIRECTORY. Require
+    # it only then, so an escaped-only workload (no LoadCredentialEncrypted,
+    # hence no CREDENTIALS_DIRECTORY) still writes its literal env-file and boots
+    # instead of failing this ExecStartPre.
+    demanded = auto_detect_credentials({
+        "container": entry.get("container", {}),
+        "secrets":   entry.get("secrets", {}),
+    })
     creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
-    if not creds_dir:
+    if demanded and not creds_dir:
         print("ERROR: CREDENTIALS_DIRECTORY not set", file=sys.stderr)
         return 1
 
     # resolve_secret_env_vars expects config["container"]["environment"];
-    # entry["container"] already has that shape after normalization.
+    # entry["container"] already has that shape after normalization. With no
+    # real ref, creds_dir is never dereferenced (escaped refs resolve to
+    # literals), so an empty string is a safe placeholder.
     try:
-        resolved = resolve_secret_env_vars({"container": entry["container"]}, creds_dir)
+        resolved = resolve_secret_env_vars({"container": entry["container"]}, creds_dir or "")
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

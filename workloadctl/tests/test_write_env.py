@@ -451,5 +451,105 @@ class TestWriteEnvKeyValidation(unittest.TestCase):
         )
 
 
+class TestWriteEnvDollarEscape(unittest.TestCase):
+    """`$${SECRET:name}` is a literal, not a reference: it must be delivered
+    verbatim and must NOT demand a credential — so an escaped-only workload has
+    no LoadCredentialEncrypted (hence no CREDENTIALS_DIRECTORY) yet still boots.
+
+    These exercise the full script (generator-equivalent credential decision +
+    resolver + file write), not resolve_secret_env_vars in isolation, which is
+    where the escape-aware and bare gates previously disagreed."""
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.creds_dir = tempfile.mkdtemp()
+        self.env_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.creds_dir, self.env_dir):
+            shutil.rmtree(d)
+
+    def _run_without_creds_dir(self, name):
+        """Run the helper with CREDENTIALS_DIRECTORY unset — mirrors a unit that
+        emitted no LoadCredentialEncrypted (nothing to decrypt)."""
+        env = os.environ.copy()
+        env["WORKLOAD_CONFIG_DIR"] = self.config_dir
+        env["WORKLOAD_ENV_DIR"] = self.env_dir
+        env["PYTHONPATH"] = LIB_DIR
+        env.pop("CREDENTIALS_DIRECTORY", None)
+        return subprocess.run(
+            [sys.executable, WRITE_ENV, name],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_escaped_only_boots_without_credentials_directory(self):
+        # An env value whose ONLY secret syntax is escaped demands no credential.
+        # Regression: the bare has_secret gate used to force this ExecStartPre to
+        # fail with "CREDENTIALS_DIRECTORY not set", boot-blocking the workload.
+        write_config(self.config_dir, "esconly", """\
+            [workload]
+            name = "esconly"
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            LIT = "$${SECRET:phantom}"
+        """)
+
+        result = self._run_without_creds_dir("esconly")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        content = (Path(self.env_dir) / "workload-esconly.secrets").read_text()
+        # Collapses to the literal ${SECRET:phantom}; credential never read.
+        self.assertEqual(content.strip(), "LIT=${SECRET:phantom}")
+
+    def test_escaped_alongside_real_ref(self):
+        # Escaped literal + a real ref on the same container: the real ref still
+        # needs (and gets) the credstore; the escaped one stays literal.
+        write_config(self.config_dir, "mixesc", """\
+            [workload]
+            name = "mixesc"
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            LIT = "$${SECRET:phantom}"
+            REAL = "${SECRET:used}"
+        """)
+        write_credential(self.creds_dir, "used", "realval")
+
+        result = run_write_env("mixesc", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        content = (Path(self.env_dir) / "workload-mixesc.secrets").read_text()
+        lines = sorted(content.strip().split('\n'))
+        self.assertEqual(lines, ["LIT=${SECRET:phantom}", "REAL=realval"])
+
+    def test_escaped_only_never_reads_credstore(self):
+        # Even with the credstore reachable, an escaped ref must not read a
+        # same-named credential — the escape means "literal", full stop.
+        write_config(self.config_dir, "escread", """\
+            [workload]
+            name = "escread"
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            LIT = "$${SECRET:decoy}"
+        """)
+        write_credential(self.creds_dir, "decoy", "SHOULD-NOT-APPEAR")
+
+        result = run_write_env("escread", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        content = (Path(self.env_dir) / "workload-escread.secrets").read_text()
+        self.assertEqual(content.strip(), "LIT=${SECRET:decoy}")
+        self.assertNotIn("SHOULD-NOT-APPEAR", content)
+
+
 if __name__ == "__main__":
     unittest.main()
