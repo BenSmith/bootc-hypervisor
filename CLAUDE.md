@@ -47,11 +47,10 @@ just build-all-local
 just build-iso-base                    # installer ISO
 just aio-local                         # build + qcow2 + deploy to a libvirt VM
 
-# --- full VM integration tests (root; needs sudo, QEMU, swtpm) ---
-just test-vm-build && just test-vm     # boots the bootc image, runs tests/vm/run-vm-tests.sh inside it
-
-# --- throwaway manual test VM (workloadctl/, Fedora cloud image) ---
-cd workloadctl && just vm-up && just vm-deploy && just vm-ssh 'workloadctl list'
+# --- runtime rung (workloadctl/; boots a harness-owned VM, runs runtime checks) ---
+cd workloadctl && just test-runtime    # WLRT_MODE=dev (default): cached Fedora Cloud image + local RPM
+WLRT_MODE=gate just test-runtime       # gate: real bootc image via bootc-image-builder + swtpm (B1b)
+                                       # both skip cleanly without /dev/kvm + QEMU
 ```
 
 There is no Python package manager / venv — scripts run against the system `python3` (3.11+) with `PYTHONPATH=lib`. `lib/` has no third-party deps; everything is stdlib + `tomllib`.
