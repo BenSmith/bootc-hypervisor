@@ -9,16 +9,21 @@ look like. Cite this doc when adding or reviewing tests.
 |---|---|---|---|
 | 1 Logic | parsing/UID/tag/volume/secret/quoting/run-file math | a real logic bug | `just test-unit`, in-process |
 | 2 Generation | the generator emits the right unit *text* | intent change **or** bug | `just test`, in-process |
-| 3 Runtime | the unit boots & the workload runs correctly | the world moved under you (podman/systemd/pasta) | `just test-runtime`, VM harness (local + CI) |
+| 3 Runtime | the unit boots & the workload runs correctly | the world moved under you (podman/systemd/pasta) | `just test-runtime`, harness-owned VM (`--target=vm:dev\|gate`) |
 
 Rung 2 is the cheapest to write and the easiest to over-populate — it's where
 test *count* is highest and value per test is lowest, because most rung-2
 assertions only prove "the string didn't change," not "the string is right."
 Rung 3 is the one that catches drift underneath the tool (a Fedora bump to
 systemd/podman/pasta silently breaking a load-bearing invariant like cgroup
-placement or the pasta stale-pause fix) and is the rung most likely to be
-missing entirely. When adding a test, know which rung it's proving and don't
-let rung 2 stand in for rung 3.
+placement or the pasta stale-pause fix). It lives in `tests/cli_surface/`
+as the `runtime`-marked checks (`test_runtime_*.py`), which boot a fresh,
+harness-owned VM — **dev** mode (cached Fedora Cloud + local RPM) or **gate**
+mode (the real bootc image under swtpm). A throwaway per-run guest is what
+keeps these honest: they exercise tight enable/purge sequences that would trip
+host-persistence races (UID recycling, stale runtime dirs) on a long-lived
+host. When adding a test, know which rung it's proving and don't let rung 2
+stand in for rung 3.
 
 ## The deletion heuristic
 

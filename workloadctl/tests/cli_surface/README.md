@@ -8,6 +8,15 @@ Runs on a controller (your dev host). Executes everything over SSH against a
 target Fedora system (specified with `--target=user@host`). Nothing is
 installed on the target beyond what `workloadctl` already ships.
 
+The same harness also hosts the **runtime rung** (`test_runtime_*.py`,
+`runtime`-marked): checks that boot a fresh, harness-owned VM
+(`--target=vm:<mode>`, see below) and assert live runtime invariants
+(effective linger, cgroup placement, secret secrecy, the pasta stale-pause
+fix, …). Those tests are meaningful *only* against a throwaway VM, so
+`conftest.py` deselects every `runtime`-marked test unless the target starts
+with `vm:` — running the suite against a plain `user@host`/`local` target
+skips them automatically.
+
 ## Prerequisites
 
 ### Controller (where you run pytest)
@@ -74,6 +83,31 @@ pytest workloadctl/tests/cli_surface/ --target=user@host -m "not slow"
 pytest workloadctl/tests/cli_surface/ --target=user@host --html=report.html --self-contained-html
 ```
 
+### Runtime rung
+
+The `runtime`-marked checks boot a VM the harness owns and tears down per run,
+so they never touch a long-lived host (and can't trip host-persistence races
+like UID recycling). Two fidelity modes, selected by `--target=vm:<mode>`:
+
+- **dev** (`vm:dev`) — a cached Fedora Cloud image + the local workloadctl RPM,
+  rsynced in and `just rpm-install`ed. Fast; the default.
+- **gate** (`vm:gate`) — the *real* hypervisor bootc image, built via
+  bootc-image-builder and booted under swtpm (emulated TPM2). Highest fidelity;
+  exercises the shipped image and the TPM-backed secret path.
+
+```sh
+just test-runtime                 # WLRT_MODE=dev (default)
+WLRT_MODE=gate just test-runtime  # gate
+just test-all-runtime [target]    # CLI surface + runtime rung (dev + gate), on a KVM host
+just test-all-runtime-remote HOST # same, driven from your laptop against a prepared host (e.g. tp)
+```
+
+Both skip cleanly on a box without `/dev/kvm` + QEMU (and gate additionally
+needs OVMF + swtpm + the source images). The harness lives in
+`../runtime/` (`vmlaunch.py` boots/snapshots the guest, `vmtarget.py` is the
+`VMTarget`). Set `WLRT_KEEP_VM=1` to leave a failed run's guest running for
+inspection.
+
 ## Layout
 
 ```
@@ -94,6 +128,11 @@ workloadctl/tests/cli_surface/
   test_update_rollback.py update(+--all/--force), rollback
   test_network.py         network create
   test_cleanup.py         cleanup (dry-run + --apply + --json)
+  test_runtime_*.py       runtime rung — boot a VM, assert live invariants:
+                          smoke, hardening, caps, cgroup, config_drift,
+                          health, linger_runtime_dir, notify_misattribution,
+                          pasta, pod_reenable, secret, secret_tmpfs, vm_smoke
+  workloads/rt-*.toml     runtime-rung fixtures (rt-basic/caps/notify/pod/vm)
   README.md               this file
 ```
 
@@ -107,12 +146,13 @@ workloadctl/tests/cli_surface/
 | `interactive` | Pty/shell smoke tests (lower assurance)        |
 | `mutating`    | Modifies workload state                        |
 | `destructive` | Permanently removes state (purge, delete)      |
+| `runtime`     | Boots a harness-owned VM; auto-deselected unless `--target=vm:<mode>` |
 
 ## Options
 
 | Option       | Default  | Description                              |
 |--------------|----------|------------------------------------------|
-| `--target`   | required | SSH destination (e.g. `user@host`) or `local` |
+| `--target`   | required | SSH destination (`user@host`), `local`, or `vm:<dev\|gate>` (runtime rung) |
 | `--deploy`   | off      | rsync + rpm-install before testing       |
 | `--key-type` | `auto`   | Secret encryption: auto/tpm2/host        |
 
@@ -175,6 +215,16 @@ removed at teardown. The user's `alloy.toml` is never touched.
 | `clitest-broken.toml` | invalid schema (negative)   | —      |
 | `clitest-vm.toml`     | VM, NAT bridge              | —      |
 | `clitest-vm-bridged`  | VM, br0 LAN bridge          | —      |
+
+Runtime-rung fixtures (`rt-*.toml`, used only by `test_runtime_*.py` in a VM):
+
+| Fixture         | Purpose                                      |
+|-----------------|----------------------------------------------|
+| `rt-basic.toml` | baseline single container (most runtime checks) |
+| `rt-caps.toml`  | capability/hardening assertions              |
+| `rt-notify.toml`| `Type=notify` misattribution regression      |
+| `rt-pod.toml`   | pod-mode re-enable                           |
+| `rt-vm.toml`    | nested `[vm]` workload smoke                  |
 
 ## Notes on interactive verbs
 

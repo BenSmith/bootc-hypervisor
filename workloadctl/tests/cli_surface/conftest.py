@@ -65,6 +65,28 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "runtime: runtime-rung checks that boot a VM (--target=vm:<mode>)")
 
 
+def pytest_collection_modifyitems(config, items):
+    """Deselect `runtime`-marked tests unless the target is a harness VM.
+
+    These checks are only meaningful against a fresh, harness-owned guest booted
+    via `--target=vm:<mode>` (the `just test-runtime` path): they enable/purge
+    workloads in tight sequence, which trips the UID-recycle / runtime-dir race
+    on a persistent, long-lived host and reports spurious failures. Keying on the
+    target — not on a particular justfile recipe — makes the marker load-bearing
+    for every plain-host invocation (`test-cli-deploy user@host`, `test-cli`,
+    ad-hoc runs), so runtime checks can never run outside their intended
+    substrate."""
+    dest = config.getoption("--target") or ""
+    if dest.startswith("vm:"):
+        return
+    selected, deselected = [], []
+    for item in items:
+        (deselected if item.get_closest_marker("runtime") else selected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+
 # ---------------------------------------------------------------------------
 # Session-scoped Target fixture
 # ---------------------------------------------------------------------------

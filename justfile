@@ -551,6 +551,16 @@ test-cli-vm target:
 test-cli-deploy target:
   cd workloadctl && just test-cli-deploy {{target}}
 
+# Full KVM-host verification sweep — CLI surface + runtime rung (dev + gate).
+# Run ON a KVM host (boots QEMU locally); target defaults to `local`.
+test-all-runtime target="local":
+  cd workloadctl && just test-all-runtime {{target}}
+
+# As above, driven from your laptop against a REMOTE prepared KVM host (e.g. tp):
+# rsync the tree over, run the sweep there, stream output back.
+test-all-runtime-remote host target="local":
+  cd workloadctl && just test-all-runtime-remote {{host}} {{target}}
+
 # Build workloadctl RPM
 workload-rpm:
   cd workloadctl && just rpm-build

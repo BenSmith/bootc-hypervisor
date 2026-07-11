@@ -89,3 +89,8 @@ systemd credentials (`systemd-creds`), AES256-GCM with TPM2 (or host key fallbac
 ## CI
 
 GitHub Actions (`.github/workflows/`) and a mirrored Forgejo runner (`.forgejo/workflows/`) build images on a weekly cadence (minimal Sat, variants Sun). Note (from project memory): Forgejo itself runs in a container, so container-in-container CI builds don't work there — VM workloads exist partly to provide a native build host for that.
+
+workloadctl has its own test workflows separate from the image builds:
+
+- `workloadctl-test.yml` (GitHub) — **PR gate**: lint + `just test` (unit + integration) on every PR/push touching `workloadctl/`. No VM, no secrets.
+- `workloadctl-runtime.yml` (GitHub + mirrored Forgejo) — **cadence gate, not a PR gate**: `just test-runtime` (`WLRT_MODE=dev`, boots a harness-owned VM), scheduled weekly (GitHub Mon, Forgejo Tue) and on `workflow_dispatch`. Both skip cleanly without `/dev/kvm`; the Forgejo mirror runs on a `native` runner (the git VM, per the container-in-container note above) with a persistent image cache.
