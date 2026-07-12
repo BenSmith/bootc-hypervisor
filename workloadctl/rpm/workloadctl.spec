@@ -18,7 +18,7 @@ BuildRequires:  systemd-rpm-macros
 # python3-rpm-macros, which rpm-build does not pull in on its own.
 BuildRequires:  python3-rpm-macros
 
-Requires:       python3 >= 3.11
+Requires:       python3 >= 3.14
 Requires:       podman >= 5.3
 Requires:       systemd
 Requires:       shadow-utils

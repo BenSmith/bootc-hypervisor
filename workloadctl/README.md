@@ -31,7 +31,7 @@ handled automatically."
 ## Requirements
 
 - Fedora 43+ (or any systemd + podman 5.3+ Linux)
-- Python 3.11+
+- Python 3.14+
 - No bootc or immutable OS required (works on standard Fedora too)
 
 ## Install

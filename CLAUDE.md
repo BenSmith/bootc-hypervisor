@@ -53,7 +53,7 @@ WLRT_MODE=gate just test-runtime       # gate: real bootc image via bootc-image-
                                        # both skip cleanly without /dev/kvm + QEMU
 ```
 
-There is no Python package manager / venv — scripts run against the system `python3` (3.11+) with `PYTHONPATH=lib`. `lib/` has no third-party deps; everything is stdlib + `tomllib`.
+There is no Python package manager / venv — scripts run against the system `python3` (3.14; Fedora 43 and 44 both ship it) with `PYTHONPATH=lib`. `lib/` has no third-party deps; everything is stdlib + `tomllib`.
 
 ## workloadctl architecture
 
