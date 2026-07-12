@@ -11,6 +11,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -516,6 +517,8 @@ class TestVmHostKeyGeneration(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp)
 
+    @unittest.skipUnless(shutil.which("ssh-keygen"),
+                         "ssh-keygen not installed (minimal CI container)")
     def test_generates_host_keypair_idempotently(self):
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None):
             self.mod.generate_vm_host_keypair(self.pw, "myvm")
