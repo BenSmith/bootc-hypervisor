@@ -1034,57 +1034,21 @@ class TestPreflightChecks(unittest.TestCase):
 # ── _provision_user ──────────────────────────────────────────────────────────
 
 class TestProvisionUser(unittest.TestCase):
-    def test_new_user_allocates_uid_and_runs_sysusers(self):
+    def test_runs_sysusers_then_ensure_user(self):
+        # _provision_user is now pure application of the generator's output: it
+        # runs systemd-sysusers against the generator-written .conf, then
+        # workload-ensure-user. No UID allocation or .conf rendering here
+        # anymore (the generator is the single producer — see _generate_units).
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with tempfile.TemporaryDirectory():
-                with patch.object(cmd_lifecycle, 'Path', wraps=Path) as _:
-                    pass
-                with patch('pwd.getpwnam', side_effect=KeyError):
-                    with patch.object(cmd_lifecycle, 'get_next_uid', return_value=15000):
-                        with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
-                            run_mock.return_value = MagicMock(returncode=0)
-                            with patch('builtins.open', unittest.mock.mock_open()):
-                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
-                                    with patch.object(Path, 'mkdir'):
-                                        with patch.object(Path, 'write_text'):
-                                            cmd_lifecycle._provision_user(cfg)
-                sysusers_call = run_mock.call_args_list[0]
-                self.assertEqual(sysusers_call.args[0][0], "systemd-sysusers")
-                ensure_user_call = run_mock.call_args_list[1]
-                self.assertIn("workload-ensure-user", ensure_user_call.args[0][0])
-                self.assertEqual(ensure_user_call.args[0][1], "test-wl")
-
-    def test_existing_user_reuses_uid(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            fake_pw = MagicMock()
-            fake_pw.pw_uid = 12345
-            with patch('pwd.getpwnam', return_value=fake_pw):
-                with patch.object(cmd_lifecycle, 'get_next_uid') as get_next:
-                    with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
-                        run_mock.return_value = MagicMock(returncode=0)
-                        with patch('builtins.open', unittest.mock.mock_open()):
-                            with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
-                                with patch.object(Path, 'mkdir'):
-                                    with patch.object(Path, 'write_text'):
-                                        cmd_lifecycle._provision_user(cfg)
-                    get_next.assert_not_called()
-
-    def test_uid_exhaustion_prints_and_raises_lifecycle_exit_1(self):
-        # get_next_uid() raising RuntimeError (range exhausted) must surface as
-        # a printed one-line error + LifecycleError carrying an int returncode
-        # of 1 — not a bare traceback, and not a string smuggled into returncode.
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch('pwd.getpwnam', side_effect=KeyError):
-                with patch.object(cmd_lifecycle, 'get_next_uid',
-                                  side_effect=RuntimeError("No free UIDs in range 10000-10099")):
-                    with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
-                        buf = io.StringIO()
-                        with redirect_stderr(buf):
-                            with self.assertRaises(cmd_lifecycle.LifecycleError) as ctx:
-                                cmd_lifecycle._provision_user(cfg)
-            self.assertEqual(ctx.exception.returncode, 1)
-            self.assertIsInstance(ctx.exception.returncode, int)
-            self.assertIn("No free UIDs in range", buf.getvalue())
+            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                run_mock.return_value = MagicMock(returncode=0)
+                cmd_lifecycle._provision_user(cfg)
+            sysusers_call = run_mock.call_args_list[0]
+            self.assertEqual(sysusers_call.args[0][0], "systemd-sysusers")
+            self.assertTrue(sysusers_call.args[0][1].endswith("workload-test-wl.conf"))
+            ensure_user_call = run_mock.call_args_list[1]
+            self.assertIn("workload-ensure-user", ensure_user_call.args[0][0])
+            self.assertEqual(ensure_user_call.args[0][1], "test-wl")
 
 
 # ── _transfer_image / _transfer_one_image ───────────────────────────────────
@@ -1152,17 +1116,54 @@ class TestTransferImage(unittest.TestCase):
                     cmd_lifecycle._transfer_one_image(cfg, manager, "example.com/test:latest")
 
 
-# ── _activate_service ────────────────────────────────────────────────────────
+# ── _generate_units / _start_service ─────────────────────────────────────────
 
-class TestActivateService(unittest.TestCase):
-    def test_generates_reloads_and_starts(self):
+class TestGenerateUnits(unittest.TestCase):
+    def test_generates_reloads_and_verifies(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
-                run_mock.return_value = MagicMock(returncode=0)
-                cmd_lifecycle._activate_service(cfg)
+            with tempfile.TemporaryDirectory() as run_d:
+                run = Path(run_d)
+                # The produced-artifact check passes when the generator's
+                # sysusers .conf is present.
+                (run / "workload-test-wl.conf").touch()
+                with patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run):
+                    with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        run_mock.return_value = MagicMock(returncode=0)
+                        cmd_lifecycle._generate_units(cfg)
             cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertTrue(any("workload-generate" in c[0] for c in cmds))
             self.assertIn(["systemctl", "daemon-reload"], cmds)
+            # The generator is invoked with stderr-logging on so an operator
+            # sees per-workload diagnostics inline.
+            gen_call = next(c for c in run_mock.call_args_list
+                            if "workload-generate" in c.args[0][0])
+            self.assertEqual(gen_call.kwargs["env"]["WORKLOAD_GENERATE_LOG_STDERR"], "1")
+
+    def test_missing_sysusers_conf_raises_lifecycle_exit_1(self):
+        # The generator exits 0 and skips a workload it can't provision (e.g.
+        # UID-range exhaustion), leaving no .conf. enable must detect that and
+        # surface a printed error + LifecycleError(1), not proceed to sysusers.
+        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            with tempfile.TemporaryDirectory() as run_d:
+                with patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', Path(run_d)):
+                    with patch.object(cmd_lifecycle.subprocess, 'run',
+                                      return_value=MagicMock(returncode=0)):
+                        buf = io.StringIO()
+                        with redirect_stderr(buf):
+                            with self.assertRaises(cmd_lifecycle.LifecycleError) as ctx:
+                                cmd_lifecycle._generate_units(cfg)
+            self.assertEqual(ctx.exception.returncode, 1)
+            self.assertIsInstance(ctx.exception.returncode, int)
+            self.assertIn("produced no units", buf.getvalue())
+
+
+class TestStartService(unittest.TestCase):
+    def test_resets_failed_and_starts(self):
+        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                run_mock.return_value = MagicMock(returncode=0)
+                cmd_lifecycle._start_service(cfg)
+            cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertIn(["systemctl", "reset-failed", cfg.service_name], cmds)
             self.assertIn(["systemctl", "start", "--no-block", cfg.service_name], cmds)
 
@@ -1413,17 +1414,19 @@ class TestCmdEnable(unittest.TestCase):
                             with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
                                 with patch.object(cmd_lifecycle, '_run_host_setup') as host_setup:
                                     with patch.object(cmd_lifecycle, '_apply_selinux_policy') as selinux:
-                                        with patch.object(cmd_lifecycle, '_provision_user') as provision:
-                                            with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
-                                                with patch.object(cmd_lifecycle, '_activate_service') as activate:
-                                                    buf = io.StringIO()
-                                                    with redirect_stdout(buf):
-                                                        cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                        with patch.object(cmd_lifecycle, '_generate_units') as generate:
+                                            with patch.object(cmd_lifecycle, '_provision_user') as provision:
+                                                with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                                                    with patch.object(cmd_lifecycle, '_start_service') as start:
+                                                        buf = io.StringIO()
+                                                        with redirect_stdout(buf):
+                                                            cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
                         host_setup.assert_called_once()
                         selinux.assert_called_once()
+                        generate.assert_called_once()
                         provision.assert_called_once()
                         transfer.assert_called_once()
-                        activate.assert_called_once()
+                        start.assert_called_once()
                         marker = workload_lib.workload_enabled_marker("test-wl")
                         self.assertTrue(marker.exists())
                         self.assertIn("enabled and starting", buf.getvalue())
@@ -1467,10 +1470,11 @@ class TestCmdEnable(unittest.TestCase):
                             with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
                                 with patch.object(cmd_lifecycle, '_run_host_setup'):
                                     with patch.object(cmd_lifecycle, '_apply_selinux_policy'):
-                                        with patch.object(cmd_lifecycle, '_provision_user'):
-                                            with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
-                                                with patch.object(cmd_lifecycle, '_activate_service'):
-                                                    cmd_lifecycle.cmd_enable(_ns(workload="test-vm"), manager)
+                                        with patch.object(cmd_lifecycle, '_generate_units'):
+                                            with patch.object(cmd_lifecycle, '_provision_user'):
+                                                with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                                                    with patch.object(cmd_lifecycle, '_start_service'):
+                                                        cmd_lifecycle.cmd_enable(_ns(workload="test-vm"), manager)
                         transfer.assert_not_called()
 
 

@@ -526,9 +526,10 @@ class TestRunFilesParityOracle(unittest.TestCase):
 
 
 class TestSysusersRender(unittest.TestCase):
-    """render_sysusers_config is the single source of truth the generator and
-    enable-time _provision_user now share. These pin the content contract so the
-    two producers can never drift again (the reason B15/B6 exist).
+    """render_sysusers_config renders the workload user's sysusers .conf. The
+    generator is its sole caller and the single producer of the .conf; enable
+    consumes that output rather than re-rendering. These pin the content
+    contract (the reason B15/B6 exist).
     """
 
     def _render(self, **kw):

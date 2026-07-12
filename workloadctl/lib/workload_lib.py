@@ -568,12 +568,12 @@ def render_sysusers_config(
 ) -> str:
     """Render the systemd-sysusers config for a workload's dedicated user.
 
-    Single source of truth shared by enable-time provisioning
-    (cmd_lifecycle._provision_user) and the boot generator, so the .conf a
-    workload is enabled with is byte-identical to the one regenerated at boot.
-    UID must be pre-allocated by the caller — this is a pure render and never
-    allocates. A VM gets implicit `kvm` membership, de-duplicated against
-    extra_groups so it is never emitted twice.
+    The generator is the sole producer of this .conf: both boot and enable-time
+    provisioning go through it (enable consumes the generator's output rather
+    than re-rendering — see cmd_lifecycle._generate_units / _provision_user), so
+    there is one producer and nothing to drift. UID must be pre-allocated by the
+    caller — this is a pure render and never allocates. A VM gets implicit `kvm`
+    membership, de-duplicated against extra_groups so it is never emitted twice.
     """
     lines = [
         f"# Workload user for {name}" + (" (VM)" if is_vm else ""),
