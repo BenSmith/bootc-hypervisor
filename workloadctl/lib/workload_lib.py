@@ -58,6 +58,11 @@ WORKLOAD_BUNDLES_DIR = Path(
 # Username prefix for workload system users
 USERNAME_PREFIX = "_wl-"
 
+# [security] key that opts a workload in to `userns = "host"`. Host userns
+# dissolves the per-workload isolation boundary, so it is refused unless this is
+# set true — an explicit acknowledgement rather than a silently-honoured default.
+HOST_USERNS_OPT_IN = "unsafe_host_userns"
+
 # UID range reserved for workload users.
 UID_MIN = 10000
 UID_MAX = 52948
@@ -1195,7 +1200,51 @@ def validate_workload_config(config: dict) -> list[str]:
                 except ValueError as e:
                     errors.append(f"[workload].{key}: {e}")
 
+    # Host userns is gated: it dissolves the per-workload escape boundary, so
+    # refuse to generate units for it unless the operator explicitly
+    # acknowledges the elevated trust. The generator runs this same check (and
+    # skips workloads with errors), so an un-acknowledged host-userns workload
+    # is hard-blocked at boot, not merely warned in kmsg.
+    if uses_host_userns(config) and not host_userns_acknowledged(config):
+        errors.append(
+            f'security.userns = "host" dissolves the per-workload isolation '
+            f'boundary (container root maps to the workload user in the host '
+            f'user namespace). Set [security] {HOST_USERNS_OPT_IN} = true to '
+            f'acknowledge the elevated trust, or use '
+            f'userns = "keep-id:uid=0,gid=0" for container root in a private '
+            f'namespace.'
+        )
+
     return errors
+
+
+def uses_host_userns(config: dict) -> bool:
+    """True if the workload requests ``userns = "host"`` anywhere.
+
+    Host userns dissolves the per-workload isolation boundary (container root
+    maps to the workload user *in the host's* user namespace), so it is gated
+    behind an explicit opt-in (see validate_workload_config / HOST_USERNS_OPT_IN).
+    Reads userns where build_userns_args does: per-container
+    [containers.security] for bridge mode, workload-level [security] otherwise.
+    VMs never use userns.
+    """
+    if infer_workload_kind(config) == "vm":
+        return False
+    try:
+        mode = infer_workload_mode(config)
+    except ValueError:
+        return False
+    if mode == "bridge":
+        values = [c.get("security", {}).get("userns")
+                  for c in normalize_containers(config)]
+    else:  # single, pod
+        values = [config.get("security", {}).get("userns")]
+    return any(v == "host" for v in values)
+
+
+def host_userns_acknowledged(config: dict) -> bool:
+    """True if the workload opted in to host userns via [security]."""
+    return bool(config.get("security", {}).get(HOST_USERNS_OPT_IN))
 
 
 def valid_userns_mode(mode: str) -> bool:

@@ -536,6 +536,7 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
 
             [security]
             userns = "host"
+            unsafe_host_userns = true
         """)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -562,6 +563,7 @@ class TestSystemdAnalyzeVerify(unittest.TestCase):
 
             [security]
             userns = "host"
+            unsafe_host_userns = true
             capabilities = ["NET_ADMIN", "NET_RAW"]
         """)
         self.assertEqual(result.returncode, 0, result.stderr)

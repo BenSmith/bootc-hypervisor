@@ -76,7 +76,10 @@ volumes = [
 ]
 
 [security]
-userns = "host"
+# keep-id:uid=0,gid=0: Pi-hole's entrypoint requires root inside the container.
+# Container UID 0 maps to the workload user in a PRIVATE user namespace — root to
+# the container, not to the host, so no host userns and no host root.
+userns = "keep-id:uid=0,gid=0"
 
 [network]
 mode = "host"

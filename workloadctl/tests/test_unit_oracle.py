@@ -102,6 +102,7 @@ CASES = [
         image = "docker.io/nginx:latest"
         [security]
         userns = "host"
+        unsafe_host_userns = true
     """, requested=("--userns=host",)),
     Case("nethost", """\
         [workload]

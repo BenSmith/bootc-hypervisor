@@ -653,8 +653,11 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
                     self.assertIn("NET_ADMIN", caps,
                                   f"{name} mounts wireguard config but lacks NET_ADMIN")
 
-    def test_vpn_workloads_use_userns_host(self):
-        """Workloads with WireGuard volumes need userns=host for wg-quick."""
+    def test_vpn_workloads_use_container_root_userns(self):
+        """wg-quick needs to run as root inside the container, but that only
+        requires container root — NOT the host user namespace. These workloads
+        use keep-id:uid=0,gid=0 (container root in a private userns); userns=host
+        is reserved for workloads that must observe host-side UIDs (S5)."""
         for filename, config in ALL_WORKLOADS:
             name = config["workload"]["name"]
             volumes = config.get("storage", {}).get("volumes", [])
@@ -662,8 +665,22 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
             if has_wg:
                 with self.subTest(workload=name):
                     userns = config.get("security", {}).get("userns")
-                    self.assertEqual(userns, "host",
-                                     f"{name} mounts wireguard config but userns != host")
+                    self.assertEqual(userns, "keep-id:uid=0,gid=0",
+                                     f"{name} mounts wireguard config but userns "
+                                     f"!= keep-id:uid=0,gid=0")
+
+    def test_host_userns_configs_carry_optin(self):
+        """Any shipped workload using userns=host must acknowledge it via
+        unsafe_host_userns (S5) — otherwise it fails validation and won't
+        generate. Guards against a new host-userns config slipping in unacked."""
+        from workload_lib import uses_host_userns, host_userns_acknowledged
+        for filename, config in ALL_WORKLOADS:
+            name = config["workload"]["name"]
+            if uses_host_userns(config):
+                with self.subTest(workload=name):
+                    self.assertTrue(
+                        host_userns_acknowledged(config),
+                        f"{name} uses userns=host without unsafe_host_userns=true")
 
     def test_local_images_have_pull_policy(self):
         """Images from localhost/ should explicitly set a pull policy."""

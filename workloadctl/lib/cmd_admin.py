@@ -17,10 +17,12 @@ from workload_lib import (
     collect_config_warnings,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
+    HOST_USERNS_OPT_IN,
     parse_memory_mib,
     selinux_module_name,
     selinux_type_name,
     units_outdated,
+    uses_host_userns,
     vm_mac_address,
     vm_mac_collisions,
     validate_workload_config,
@@ -907,6 +909,17 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                            fix="Check /etc/subuid configuration")
         except Exception as e:
             _check("uid_mapping", False, f"Error reading subuid: {e}")
+
+    # Trust posture: host userns dissolves the per-workload isolation boundary.
+    # When it's in effect (only reachable if opted in — an un-acknowledged
+    # host-userns workload fails validation and never generates/enables),
+    # surface the elevated trust so it isn't invisible. Passes: it's an
+    # acknowledged, intended state, not a fault.
+    if uses_host_userns(config.config):
+        _check("host_userns", True,
+               'Elevated trust: security.userns="host" in effect '
+               f'(acknowledged via {HOST_USERNS_OPT_IN}=true) — the '
+               'per-workload isolation boundary is dissolved.')
 
     return checks, all(c["passed"] for c in checks)
 

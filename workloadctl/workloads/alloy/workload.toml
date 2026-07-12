@@ -69,10 +69,14 @@ volumes = [
 ]
 
 [security]
-# Map container UID 0 → host workload user so alloy (running as root in the
-# image) can read /var/lib/workloads/alloy/data/alloy-config.alloy that's owned by
-# the workload user on the host.
+# alloy genuinely needs host userns (unlike the VPN/pihole workloads, which use
+# keep-id:uid=0,gid=0): it reads the host's /proc, /sys, and journal through the
+# /:/host mount to produce node metrics, and a private userns would remap the
+# UIDs it reports. Container UID 0 → host workload user also lets alloy read its
+# workload-user-owned config. host userns dissolves the per-workload isolation
+# boundary, so it's opted in explicitly below.
 userns = "host"
+unsafe_host_userns = true
 extra_groups = ["systemd-journal"]
 selinux_policy = true
 

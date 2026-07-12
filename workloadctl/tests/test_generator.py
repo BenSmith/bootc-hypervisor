@@ -1266,6 +1266,8 @@ class TestGeneratorUserns(unittest.TestCase):
         self.assertIn("--userns=keep-id", service)
 
     def test_host_userns(self):
+        # userns=host is gated: it must carry the unsafe_host_userns opt-in or the
+        # generator (via validate_workload_config) skips the workload (S5).
         write_config(self.config_dir, "hostns", """\
             [workload]
             name = "hostns"
@@ -1275,11 +1277,30 @@ class TestGeneratorUserns(unittest.TestCase):
 
             [security]
             userns = "host"
+            unsafe_host_userns = true
         """)
 
         run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         service = (Path(self.services_dir) / "workload-hostns.service").read_text()
         self.assertIn("--userns=host", service)
+
+    def test_host_userns_without_optin_is_skipped(self):
+        # Without the opt-in, the workload fails validation and the generator
+        # emits no unit for it (hard-block, not a warning).
+        write_config(self.config_dir, "hostns-bare", """\
+            [workload]
+            name = "hostns-bare"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            userns = "host"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-hostns-bare.service").exists())
 
     def test_keep_id_with_uid_gid(self):
         write_config(self.config_dir, "uidgid", """\

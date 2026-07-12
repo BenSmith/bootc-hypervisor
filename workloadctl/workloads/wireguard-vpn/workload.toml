@@ -41,10 +41,12 @@ volumes = [
 ]
 
 [security]
-# userns=host: wg-quick requires root inside the container (it uses sudo internally
-# when run as non-root). With rootless podman, userns=host maps container UID 0 to
-# the workload user on the host — no actual host root access.
-userns = "host"
+# keep-id:uid=0,gid=0: wg-quick requires root inside the container (it uses sudo
+# internally when run as non-root). This maps container UID 0 to the workload
+# user in a PRIVATE user namespace — the container sees itself as root, the host
+# does not, so no host userns and no host root. NET_ADMIN (below) grants the
+# tunnel capability separately.
+userns = "keep-id:uid=0,gid=0"
 
 # NET_ADMIN required for creating WireGuard interface and managing routes
 capabilities = ["NET_ADMIN"]

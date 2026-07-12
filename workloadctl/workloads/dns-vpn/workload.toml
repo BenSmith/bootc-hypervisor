@@ -56,9 +56,11 @@ mode = "pasta"
 ports = ["53:53/udp", "53:53/tcp"]
 
 [security]
-# userns=host: wg-quick requires root inside the container.
-# Container UID 0 maps to the workload user on the host — no actual host root access.
-userns = "host"
+# keep-id:uid=0,gid=0: wg-quick requires root inside the container. Container
+# UID 0 maps to the workload user in a PRIVATE user namespace — root to the
+# container, not to the host, so no host userns and no host root. NET_ADMIN
+# grants the tunnel capability separately.
+userns = "keep-id:uid=0,gid=0"
 capabilities = ["NET_ADMIN"]
 
 [resources]

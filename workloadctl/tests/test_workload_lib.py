@@ -1493,6 +1493,49 @@ class TestUnitsOutdated(unittest.TestCase):
         self.assertFalse(workload_lib.units_outdated("foo"))
 
 
+class TestHostUsernsGate(unittest.TestCase):
+    """S5: userns=host is refused unless explicitly acknowledged."""
+
+    def _cfg(self, security):
+        return {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+                "security": security}
+
+    def test_uses_host_userns_detection(self):
+        from workload_lib import uses_host_userns
+        self.assertTrue(uses_host_userns(self._cfg({"userns": "host"})))
+        self.assertFalse(uses_host_userns(self._cfg({"userns": "keep-id"})))
+        self.assertFalse(uses_host_userns(
+            self._cfg({"userns": "keep-id:uid=0,gid=0"})))
+        # VMs never use userns.
+        self.assertFalse(uses_host_userns(
+            {"workload": {"name": "v"}, "vm": {"cloud_image_url": "x"},
+             "security": {"userns": "host"}}))
+
+    def test_bridge_reads_per_container_userns(self):
+        from workload_lib import uses_host_userns
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "vpn", "container": {"image": "y:latest"},
+                    "security": {"userns": "host"}},
+               ]}
+        self.assertTrue(uses_host_userns(cfg))
+
+    def test_validate_rejects_unacked_host_userns(self):
+        errors = validate_workload_config(self._cfg({"userns": "host"}))
+        self.assertTrue(any("unsafe_host_userns" in e for e in errors))
+
+    def test_validate_accepts_acked_host_userns(self):
+        errors = validate_workload_config(
+            self._cfg({"userns": "host", "unsafe_host_userns": True}))
+        self.assertFalse(any("unsafe_host_userns" in e for e in errors))
+
+    def test_validate_accepts_container_root_keep_id(self):
+        errors = validate_workload_config(
+            self._cfg({"userns": "keep-id:uid=0,gid=0"}))
+        self.assertEqual(errors, [])
+
+
 class TestVmMacCollisions(unittest.TestCase):
     def test_no_collision_for_distinct_names(self):
         # Real derived MACs differ for these names.
