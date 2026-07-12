@@ -11,14 +11,10 @@ These cover three robustness fixes made after a cli_surface run on tp surfaced:
   - `edit` crashing with EOFError on a non-interactive apply prompt.
 """
 
-import os
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
 
 import cmd_admin
 import cmd_inspect

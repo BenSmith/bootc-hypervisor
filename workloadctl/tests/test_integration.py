@@ -17,13 +17,12 @@ from unittest import mock
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from tests import REPO_ROOT as ROOT, script_env
+
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
 WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-write-env')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 WORKLOADS_DIR = ROOT / "workloads"
 
-sys.path.insert(0, LIB_DIR)
 import workload_lib  # noqa: E402
 from workload_lib import workload_service_units  # noqa: E402
 from workloadctl_core import WorkloadConfig  # noqa: E402
@@ -44,10 +43,7 @@ def expected_service_filenames(name, config_dir):
 
 def run_generator(config_dir, services_dir, sysusers_dir):
     """Run the generator and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(WORKLOAD_CONFIG_DIR=config_dir, SYSUSERS_DIR=sysusers_dir)
     return subprocess.run(
         [sys.executable, GENERATOR, str(services_dir)],
         capture_output=True, text=True, env=env,
@@ -56,11 +52,11 @@ def run_generator(config_dir, services_dir, sysusers_dir):
 
 def run_write_env(name, config_dir, creds_dir, env_dir):
     """Run workload-write-env and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["CREDENTIALS_DIRECTORY"] = str(creds_dir)
-    env["WORKLOAD_ENV_DIR"] = str(env_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        CREDENTIALS_DIRECTORY=creds_dir,
+        WORKLOAD_ENV_DIR=env_dir,
+    )
     return subprocess.run(
         [sys.executable, WRITE_ENV, name],
         capture_output=True, text=True, env=env,

@@ -4,9 +4,7 @@
 import io
 from contextlib import redirect_stderr
 import json
-import os
 import shutil
-import sys
 import tempfile
 import types
 import unittest
@@ -16,8 +14,6 @@ from unittest.mock import MagicMock, patch
 
 # ── imports from lib ──────────────────────────────────────────────────────────
 
-_LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, _LIB)
 
 import workload_lib
 import cmd_admin

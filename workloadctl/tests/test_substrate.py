@@ -3,9 +3,7 @@
 
 import io
 import json
-import os
 import shutil
-import sys
 import tempfile
 import types
 import unittest
@@ -13,10 +11,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
-# ── imports from lib ──────────────────────────────────────────────────────────
 
-_LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, _LIB)
+# ── imports from lib ──────────────────────────────────────────────────────────
 
 import workload_lib
 import workloadctl_core
@@ -56,6 +52,8 @@ name = "test-wl"
 image = "example.com/test:latest"
 """
 
+
+from tests import REPO_ROOT, script_env
 VM_TOML = """\
 [workload]
 name = "test-vm"
@@ -1810,11 +1808,10 @@ class TestRemovedVerbs(unittest.TestCase):
     def _invoke(self, argv):
         """Run bin/workloadctl with the given argv list; return (stdout, stderr, exitcode)."""
         import subprocess
-        wctl = str(Path(__file__).parent.parent / 'bin' / 'workloadctl')
+        wctl = str(REPO_ROOT / 'bin' / 'workloadctl')
         result = subprocess.run(
             ['python3', wctl, *argv],
-            capture_output=True, text=True,
-            env={**__import__('os').environ, 'PYTHONPATH': str(Path(__file__).parent.parent / 'lib')},
+            capture_output=True, text=True, env=script_env(),
         )
         return result.stdout, result.stderr, result.returncode
 

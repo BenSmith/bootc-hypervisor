@@ -2,12 +2,9 @@
 """Unit tests for workloadctl update/rollback functionality."""
 
 import os
-import sys
 import unittest
 from pathlib import Path
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
 
 import cmd_update
 from substrate import rollback_tag

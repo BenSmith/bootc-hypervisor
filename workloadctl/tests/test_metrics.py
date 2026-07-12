@@ -14,8 +14,6 @@ return empty/defaults, so we test:
 - Atomic write (temp + rename, world-readable, no partial file left behind)
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -26,9 +24,10 @@ import time
 import unittest
 from pathlib import Path
 
-EXPORTER_SCRIPT = os.path.join(
-    os.path.dirname(__file__), '..', 'libexec', 'workload-exporter')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+from tests import REPO_ROOT, load_script, script_env
+
+
+EXPORTER_SCRIPT = str(REPO_ROOT / "libexec" / "workload-exporter")
 
 
 def run_writer(config_dir, output_path, disk=False):
@@ -36,9 +35,7 @@ def run_writer(config_dir, output_path, disk=False):
 
     With disk=True the slow --disk producer runs instead of the fast one.
     """
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(WORKLOAD_CONFIG_DIR=config_dir)
     argv = [sys.executable, EXPORTER_SCRIPT]
     if disk:
         argv.append("--disk")
@@ -94,19 +91,12 @@ def parse_metric_value(prom_text, metric_name, labels=None):
 
 def _exporter_get_enabled_workloads(config_dir):
     """Load workload-exporter and call get_enabled_workloads against config_dir."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader(
-        "workload_exporter", EXPORTER_SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_exporter", loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
     orig_env = os.environ.get("WORKLOAD_CONFIG_DIR")
     orig_argv = sys.argv[:]
     os.environ["WORKLOAD_CONFIG_DIR"] = str(config_dir)
     sys.argv = [EXPORTER_SCRIPT]  # prevent PORT = int(sys.argv[1]) from failing
     try:
-        loader.exec_module(mod)
+        mod = load_script("libexec/workload-exporter")
         return mod.get_enabled_workloads()
     finally:
         sys.argv = orig_argv
@@ -506,18 +496,10 @@ class TestMetricsLiveCollection(unittest.TestCase):
 
 def _load_exporter():
     """Load the workload-exporter module object (for direct function calls)."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader(
-        "workload_exporter", EXPORTER_SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_exporter", loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
     orig_argv = sys.argv[:]
     sys.argv = [EXPORTER_SCRIPT]  # PORT = int(sys.argv[1]) guard
     try:
-        loader.exec_module(mod)
-        return mod
+        return load_script("libexec/workload-exporter")
     finally:
         sys.argv = orig_argv
 

@@ -7,7 +7,6 @@ Two jobs:
 2. Generator-level scan: run the generator over all workload TOMLs and assert
    that no --volume or --drive host path still carries a relative anchor prefix.
 """
-import os
 import re
 import subprocess
 import sys
@@ -16,12 +15,11 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from tests import REPO_ROOT as ROOT, script_env
+
 GENERATOR = ROOT / "generators" / "workload-generate"
-LIB_DIR = ROOT / "lib"
 WORKLOADS_DIR = ROOT / "workloads"
 
-sys.path.insert(0, str(LIB_DIR))
 from workload_lib import expand_volume_path, workload_state_dir  # noqa: E402
 
 
@@ -124,11 +122,11 @@ class TestNoRawAnchorsInGeneratedUnits(unittest.TestCase):
                 (cfg / name).mkdir(exist_ok=True)
                 _enable_toml(src, cfg / name / "workload.toml")
 
-            env = os.environ.copy()
-            env["WORKLOAD_CONFIG_DIR"] = str(cfg)
-            env["SYSUSERS_DIR"] = str(sys_d)
-            env["PYTHONPATH"] = str(LIB_DIR)
-            env["WORKLOAD_GPU_OVERRIDE"] = "nvidia"
+            env = script_env(
+                WORKLOAD_CONFIG_DIR=cfg,
+                SYSUSERS_DIR=sys_d,
+                WORKLOAD_GPU_OVERRIDE="nvidia",
+            )
 
             r = subprocess.run(
                 [sys.executable, str(GENERATOR), str(svc)],
@@ -221,7 +219,6 @@ class TestPreflightDataAnchoring(unittest.TestCase):
     def _run_preflight(self, base, toml_text):
         import workload_lib
         import workloadctl_core as core
-        sys.path.insert(0, str(LIB_DIR))
         import cmd_lifecycle
         toml_dir = base / "tomls"
         toml_dir.mkdir(exist_ok=True)

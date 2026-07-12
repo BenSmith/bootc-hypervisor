@@ -25,17 +25,17 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
 from covhelper import python_cmd
 
+from tests import script_env
+
+
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
 # Messages systemd-analyze verify emits purely because THIS host is missing
 # pieces the real hypervisor image ships elsewhere — not because the
@@ -58,11 +58,11 @@ def _is_benign_verify_line(line):
 
 def run_generator(config_dir, services_dir, sysusers_dir):
     """Run the generator and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
-    env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        SYSUSERS_DIR=sysusers_dir,
+        WORKLOAD_GENERATE_LOG_STDERR="1",
+    )
     # Pin hash seed so the before/after snapshot diff (this module's whole
     # purpose) is stable: the generator iterates a few sets when emitting
     # directives, and set order otherwise varies per process, producing

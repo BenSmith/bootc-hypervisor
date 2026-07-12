@@ -21,8 +21,10 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from tests import script_env
+
+
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 # Shipped bundles live one-per-dir as workloads/<bundle>/workload.toml. The
 # bundle dir name is the workload identity; we present it as "<bundle>.toml" so
 # the filename-based assertions and skip set below read unchanged.
@@ -43,10 +45,7 @@ SKIP_FILES = {"example-multi-container.toml", "webproxy-demo.toml"}
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(WORKLOAD_CONFIG_DIR=config_dir, SYSUSERS_DIR=sysusers_dir)
     return subprocess.run(
         [sys.executable, GENERATOR, str(services_dir)],
         capture_output=True, text=True, env=env,

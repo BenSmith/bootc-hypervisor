@@ -3,13 +3,11 @@
 workload-vm-qmp, workload-vm-shutdown.
 
 These three gate VM readiness (sd_notify), the QMP escape hatch, and graceful
-power-off — and had no tests at all. They're argv scripts (no .py), so we load
-each via SourceFileLoader and drive its pure functions with a fake QMPClient;
-the real socket/QEMU/systemd I/O is out of scope for a unit test.
+power-off — and had no tests at all. They're argv scripts (no .py), so load_script()
+imports each and we drive its pure functions with a fake QMPClient; the real
+socket/QEMU/systemd I/O is out of scope for a unit test.
 """
 
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -20,24 +18,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-LIBEXEC = Path(__file__).resolve().parent.parent / "libexec"
-LIB = str(Path(__file__).resolve().parent.parent / "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
+from tests import load_script
 
 
-def _load(script: str, modname: str):
-    loader = importlib.machinery.SourceFileLoader(modname, str(LIBEXEC / script))
-    spec = importlib.util.spec_from_loader(modname, loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
-notify = _load("workload-vm-notify", "wl_vm_notify")
-qmp = _load("workload-vm-qmp", "wl_vm_qmp")
-shutdown = _load("workload-vm-shutdown", "wl_vm_shutdown")
+notify = load_script("libexec/workload-vm-notify", "wl_vm_notify")
+qmp = load_script("libexec/workload-vm-qmp", "wl_vm_qmp")
+shutdown = load_script("libexec/workload-vm-shutdown", "wl_vm_shutdown")
 
 
 class FakeQMP:

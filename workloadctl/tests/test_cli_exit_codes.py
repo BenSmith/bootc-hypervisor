@@ -8,27 +8,16 @@ rather than only through end-to-end subprocess runs that can't easily provoke
 every exception type.
 """
 
-import importlib.machinery
-import importlib.util
 import io
-import os
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
 from unittest import mock
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
+from tests import load_script
 
-# Load the extensionless bin/workloadctl script as a module. The __main__ guard
-# does not fire (module name != "__main__"), so importing it is side-effect free
-# beyond its top-level imports.
-_WCTL = Path(__file__).parent.parent / 'bin' / 'workloadctl'
-_loader = importlib.machinery.SourceFileLoader('workloadctl_bin', str(_WCTL))
-_spec = importlib.util.spec_from_loader('workloadctl_bin', _loader)
-cli = importlib.util.module_from_spec(_spec)
-_loader.exec_module(cli)
+
+cli = load_script("bin/workloadctl", "workloadctl_bin")
 
 
 class RunCliExitCodeTest(unittest.TestCase):
@@ -130,8 +119,7 @@ class VersionFlagTest(unittest.TestCase):
         # that an in-place build or a system-installed package left importable on
         # sys.path (as on a host with the RPM installed).
         with mock.patch.dict(sys.modules, {'_version': None}):
-            reloaded = importlib.util.module_from_spec(_spec)
-            _loader.exec_module(reloaded)
+            reloaded = load_script("bin/workloadctl", "workloadctl_bin")
             self.assertEqual(reloaded.__version__, "0-dev")
 
 

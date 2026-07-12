@@ -4,7 +4,6 @@
 import contextlib
 import os
 import socket
-import sys
 import tempfile
 import threading
 import unittest
@@ -13,11 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Add lib to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
 import workload_lib
 import vm
-import validation
 from workload_lib import (
     WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
     workload_username, workload_service_name, workload_container_name,

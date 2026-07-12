@@ -6,16 +6,12 @@ the `dev <iface>` tokens it prints in the unfiltered form, so the MAC is not at
 a fixed column. The lookup must find it via the `lladdr` marker, not parts[4].
 """
 
-import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
 
 import substrate
 from vm import vm_mac_address

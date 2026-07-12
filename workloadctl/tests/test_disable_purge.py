@@ -7,15 +7,12 @@ linger root-readable until the next reboot.
 """
 
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
 
 import workload_lib
 import cmd_lifecycle

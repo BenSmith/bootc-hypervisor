@@ -10,14 +10,11 @@ a duplicate overrides independently of its source. Absolute paths bypass both.
 This is the single chokepoint every control-file lookup (enable/recreate/validate
 build.sh, [host].setup, SELinux policy.cil) now goes through.
 """
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "lib"))
 
 import workload_lib               # noqa: E402
 import workloadctl_core as core  # noqa: E402

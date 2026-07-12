@@ -5,12 +5,9 @@ Runs the generator with temp directories and validates the output files.
 No root required — all paths are overridden via env vars and argv.
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
@@ -18,32 +15,25 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(__file__))
 from covhelper import python_cmd
 
-GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+from tests import REPO_ROOT, load_script, script_env
+
+GENERATOR = str(REPO_ROOT / "generators" / "workload-generate")
 
 
 def _load_generator_module():
     """Import workload-generate as a module (it has a __main__ guard)."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader("workload_generate", GENERATOR)
-    spec = importlib.util.spec_from_loader("workload_generate", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return load_script("generators/workload-generate")
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
     """Run the generator and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
-    env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        SYSUSERS_DIR=sysusers_dir,
+        WORKLOAD_GENERATE_LOG_STDERR="1",
+    )
     return subprocess.run(
         python_cmd(GENERATOR, str(services_dir)),
         capture_output=True, text=True, env=env,

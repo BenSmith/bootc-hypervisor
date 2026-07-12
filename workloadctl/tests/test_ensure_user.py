@@ -2,36 +2,25 @@
 """Unit tests for workload-ensure-user helpers.
 
 The script lives in libexec/ and has no __main__ guard around its imports;
-load it via SourceFileLoader so we can exercise the user-data rendering
-and cloud-init template substitution paths without running the rest of
-the (root-only) user-provisioning flow.
+load_script() imports it so we can exercise the user-data rendering and
+cloud-init template substitution paths without running the rest of the
+(root-only) user-provisioning flow.
 """
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import os
 import shutil
-import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-ensure-user')
+from tests import load_script
 
 
 def _load_script():
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader("workload_ensure_user", SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_ensure_user", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return load_script("libexec/workload-ensure-user")
 
 
 # Stand-in VM host keypair (S1). The private half is a multi-line PEM so tests

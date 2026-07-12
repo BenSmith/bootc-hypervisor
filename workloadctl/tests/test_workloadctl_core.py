@@ -9,15 +9,12 @@ functions with no filesystem involvement.
 
 import io
 import shutil
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "lib"))
 
 import workload_lib               # noqa: E402
 import vm                          # noqa: E402

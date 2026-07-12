@@ -13,16 +13,11 @@ interact dispatchers that carry real logic rather than a single passthrough:
 
 import argparse
 import io
-import os
-import sys
 import types
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
 
-LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
 
 import cmd_interact  # noqa: E402
 

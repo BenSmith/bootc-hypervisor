@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for lib/unit_file.py — the typed systemd unit-file builder."""
 
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 from unit_file import Unit, Section
 
 

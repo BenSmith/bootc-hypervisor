@@ -20,18 +20,14 @@ re-implementation:
 These are unit-rung tests (plain `just test`); no runtime marker, no host state.
 """
 import io
-import os
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "lib"))
 
 import cmd_backup                      # noqa: E402
 import workload_lib                    # noqa: E402

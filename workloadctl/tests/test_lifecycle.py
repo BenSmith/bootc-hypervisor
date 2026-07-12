@@ -29,15 +29,13 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
-# ── lib path ──────────────────────────────────────────────────────────────────
-
-_LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, _LIB)
-
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
 from substrate import ContainerSubstrate, VMSubstrate
+
+from tests import script_env
+
 
 # ── generator helpers (shared with test_generator.py) ─────────────────────────
 
@@ -45,11 +43,11 @@ _GEN = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-gen
 
 
 def _run_generator(config_dir, services_dir, sysusers_dir):
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = _LIB
-    env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        SYSUSERS_DIR=sysusers_dir,
+        WORKLOAD_GENERATE_LOG_STDERR="1",
+    )
     return subprocess.run(
         [sys.executable, _GEN, str(services_dir)],
         capture_output=True, text=True, env=env,

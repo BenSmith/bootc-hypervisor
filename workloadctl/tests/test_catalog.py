@@ -8,16 +8,12 @@ shipped bundles under ../workloads/, writing instances into a tmp /etc dir.
 import argparse
 import io
 import json
-import sys
 import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-LIB = str(Path(__file__).resolve().parent.parent / "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
 
 import workload_lib            # noqa: E402
 import cmd_catalog            # noqa: E402

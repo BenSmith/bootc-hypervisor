@@ -36,9 +36,9 @@ just lint                 # py_compile syntax check of all scripts
 just rpm-build            # build the RPM from local checkout
 just rpm-install          # build + dnf install/upgrade locally
 
-# run a single test module / case (PYTHONPATH=lib is required)
-PYTHONPATH=lib python3 -m unittest tests.test_workloads -v
-PYTHONPATH=lib python3 -m unittest tests.test_workloads.SomeClass.test_method
+# run a single test module / case (from workloadctl/; no PYTHONPATH needed)
+python3 -m unittest tests.test_workloads -v
+python3 -m unittest tests.test_workloads.SomeClass.test_method
 
 # --- image builds (root, requires podman; *-local skip the registry push) ---
 just build-base-local                 # hypervisor-bootc from local minimal
@@ -53,7 +53,9 @@ WLRT_MODE=gate just test-runtime       # gate: real bootc image via bootc-image-
                                        # both skip cleanly without /dev/kvm + QEMU
 ```
 
-There is no Python package manager / venv — scripts run against the system `python3` (3.14; Fedora 43 and 44 both ship it) with `PYTHONPATH=lib`. `lib/` has no third-party deps; everything is stdlib + `tomllib`.
+There is no Python package manager / venv — scripts run against the system `python3` (3.14; Fedora 43 and 44 both ship it). `lib/` has no third-party deps; everything is stdlib + `tomllib`.
+
+`lib/` is a flat set of top-level modules, not a package. Exactly one thing puts it on `sys.path`: on a host, the RPM's `%{python3_sitelib}/workloadctl.pth`; in the test suite, `tests/__init__.py` (which also provides `load_script()` for the extension-less entrypoints and `script_env()` for subprocess launches). Test modules import as `tests.<name>` — hence `just test` runs `unittest discover -t .` — and no test module does its own `sys.path` surgery.
 
 ## workloadctl architecture
 
