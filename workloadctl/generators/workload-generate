@@ -942,6 +942,245 @@ def _env_args(container, container_name, has_secret_env_vars):
     return args
 
 
+def _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
+                net_service, umbrella_service, gpu_vendor):
+    """[Unit] Description/Requires/After/Wants/BindsTo/PartOf + nvidia deps."""
+    u.set("Description", unit_description)
+    if mode == "single":
+        u.add("Requires", setup_service)
+        u.add("After", f"network.target {setup_service}")
+    else:
+        # pod mode binds to the pod-create service; bridge mode to the
+        # network-create service.
+        dep_service = pod_service if mode == "pod" else net_service
+        u.add("Requires", dep_service)
+        u.add("After", dep_service)
+        u.add("BindsTo", dep_service)
+        u.add("PartOf", umbrella_service)
+    u.set("StartLimitIntervalSec", 300)
+    u.set("StartLimitBurst", 5)
+
+    # [workload].requires → Wants= (start them if possible, but don't fail us)
+    # [workload].after    → After= (ordering only, no dependency)
+    wl_requires = workload.get("workload", {}).get("requires", [])
+    wl_after = workload.get("workload", {}).get("after", [])
+    if wl_requires:
+        wants = " ".join(f"workload-{n}.service" for n in wl_requires)
+        u.add("Wants", wants)
+    if wl_after:
+        after_deps = " ".join(f"workload-{n}.service" for n in wl_after)
+        u.add("After", after_deps)
+
+    if gpu_vendor == "nvidia":
+        u.add("Requires", "nvidia-cdi-generator.service")
+        u.add("After", "nvidia-cdi-generator.service")
+
+
+def _service_identity(svc, service_type, slice_name, systemd_mode, user_name, home_dir, name):
+    """[Service] Type/Slice/NotifyAccess/KillSignal/User/Group/Environment/
+    EnvironmentFile. No possible earlier same-key line for any of these
+    (they run before the custom_directives splice) -- .set() is safe here."""
+    svc.set("Type", service_type)
+    svc.set("Slice", slice_name)
+
+    # NotifyAccess only needed for Type=notify
+    if service_type == "notify":
+        svc.set("NotifyAccess", "all")
+
+    # systemd containers need SIGRTMIN+3 for clean shutdown
+    if systemd_mode in ("always", "true"):
+        svc.set("KillSignal", "SIGRTMIN+3")
+
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    svc.set("Environment", f'"HOME={home_dir}"')
+    svc.set("EnvironmentFile", f"-/run/workload-env/workload-{name}.env")
+    svc.blank()
+
+
+def _resource_overrides(svc, resources, name):
+    """Service-level resource overrides (TimeoutStart/StopSec + custom_directives).
+    This is the custom_directives splice point: every directive emitted from here
+    on down must use .add(), never .set(), or a user's shadowing custom_directive
+    line would collapse into the generator's own later line instead of both
+    surviving for systemd's last-wins to pick between (see the .set()/.add()
+    invariant in docs/wip/a1-generator-refactor.md)."""
+    service_directives = []
+    if "timeout_start_sec" in resources:
+        service_directives.append(("TimeoutStartSec", resources['timeout_start_sec']))
+    if "timeout_stop_sec" in resources:
+        service_directives.append(("TimeoutStopSec", resources['timeout_stop_sec']))
+    for directive, value in resources.get("custom_directives", {}).items():
+        if directive in GENERATOR_OWNED_DIRECTIVES:
+            log_msg(
+                f"WARNING: custom_directives contains '{directive}' which is managed "
+                f"by the generator — this may have no effect or cause unexpected behaviour",
+                level="warning"
+            )
+        service_directives.append((directive, value))
+    if service_directives:
+        svc.comment("Service-level overrides")
+        for directive, value in service_directives:
+            svc.add(directive, value)
+        svc.blank()
+
+
+def _credential_loads(svc, credentials):
+    """LoadCredentialEncrypted= for each auto-detected credential."""
+    if credentials:
+        svc.comment("Load encrypted credentials (auto-decrypted to /run/credentials/{service}/)")
+        # sorted() so unit output is reproducible: auto_detect_credentials
+        # returns a set, whose iteration order otherwise varies per process.
+        for cred_name in sorted(credentials):
+            cred_file = f"/etc/credstore.encrypted/{cred_name}"
+            svc.add("LoadCredentialEncrypted", f"{cred_name}:{cred_file}")
+        svc.blank()
+
+
+def _exec_start_pre(svc, mode, name, container, has_secret_env_vars, gpu_vendor, uid):
+    """ExecStartPre chain: write-env, nvidia CDI-spec check, and (single mode
+    only) the fresh-pause cleanup that works around the pasta stale-pause bug."""
+    if has_secret_env_vars:
+        # Multi-container: pass the local container name so workload-write-env
+        # resolves *that* container's env vars only and writes the matching
+        # per-container secrets file. Single-mode keeps the legacy one-arg form.
+        if mode == "single":
+            svc.add("ExecStartPre", f"+/usr/libexec/workloadctl/workload-write-env {name}")
+        else:
+            svc.add(
+                "ExecStartPre",
+                f"+/usr/libexec/workloadctl/workload-write-env "
+                f"{name} {container['name']}",
+            )
+
+    if gpu_vendor == "nvidia":
+        svc.add(
+            "ExecStartPre",
+            "/bin/bash -c "
+            "'test -s /run/cdi/nvidia.yaml"
+            " || { echo \"NVIDIA CDI spec missing: check nvidia-cdi-generator.service\" >&2; exit 1; }'",
+        )
+
+    if mode == "single":
+        # Force a *fresh* libpod pause process before the first podman touch of
+        # this invocation. Trigger: any pasta-networked workload. pasta's
+        # prefork isolation does mount("","/tmp","tmpfs")+pivot_root (passt
+        # isolation.c, TMPDIR==/tmp, compile-time) — if /tmp doesn't resolve in
+        # pasta's mount ns it dies with "Failed to mount empty tmpfs for
+        # pivot_root(): ENOENT" and the unit restart-loops to StartLimitBurst.
+        # How /tmp goes missing: a pause that outlives the previous activation
+        # (podman moves it into podman-pause-*.scope under user@<uid>, where it
+        # survives the unit stop) still pins that activation's PrivateTmp /tmp,
+        # which systemd already deleted. The next `podman run` takes the rootless
+        # join shortcut (rootless_linux.c can_use_shortcut → join_namespace_or_die
+        # "mnt") and *inherits that dead mount ns*. NB the join is userns-agnostic
+        # — keep-id vs userns=host is irrelevant; only pasta (vs --network=host,
+        # which spawns no pasta) is the trigger.
+        #   `podman system migrate` is necessary but not sufficient: it stops all
+        # running containers first and returns *before* killing the pause if any
+        # stop errors (runtime_migrate.go), and it's tolerant ("-"). So we also
+        # rm pause.pid + ns_handles unconditionally — that makes the shortcut
+        # fall through so `podman run` builds a fresh pause in the live (valid)
+        # mount ns. migrate runs first so it can still SIGKILL the tracked pause;
+        # the rm cleans up when migrate couldn't. Both tolerant so first boot
+        # (no rundir/handles yet) never blocks startup. Pod/bridge members must
+        # NOT do this (it would kill the pause out from under the live pod infra
+        # / sibling containers) — their head units handle it.
+        svc.add("ExecStartPre", "-/usr/bin/podman system migrate")
+        svc.add(
+            "ExecStartPre",
+            f"-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
+            f" /run/user/{uid}/libpod/tmp/ns_handles",
+        )
+
+    svc.blank()
+
+
+def _lifecycle_exec(svc, wl_lifecycle, podman_cmd, container_name_quoted, pull_policy,
+                     mode, uid, resources):
+    """run-vs-pet ExecStart + ExecStop/ExecStopPost."""
+    if wl_lifecycle == "pet":
+        # Pet lifecycle: create the container once; subsequent starts reuse the
+        # writable overlay.  The "-" prefix on create ignores "name already in
+        # use" so the unit starts cleanly after a plain reboot.
+        # --pull is honoured on the initial create; later starts use whatever
+        # image the overlay was originally built from.
+        svc.comment("Pet lifecycle: create-once + start (overlay survives stop/reboot)")
+        svc.add("ExecStartPre", f"-{podman_cmd}")
+        svc.blank()
+        svc.add("ExecStart", f"/usr/bin/podman start -a {container_name_quoted}")
+    else:
+        svc.comment(f"Image pulling handled by podman run --pull={pull_policy}")
+        svc.blank()
+        svc.add("ExecStart", podman_cmd)
+
+    svc.blank()
+
+    # podman's own container-stop grace (-t): how long the container gets to
+    # exit on the stop signal before podman SIGKILLs it. Keep it a few seconds
+    # under the unit's TimeoutStopSec so systemd doesn't kill `podman stop`
+    # before podman can do its own SIGKILL + reap. Tracks timeout_stop_sec when
+    # set (so a write-heavy workload's longer drain actually reaches podman);
+    # otherwise stays the historical 10s (systemd default TimeoutStopSec=30).
+    # (resources dict is already set above from container.get("resources", {}))
+    stop_grace = resources.get("timeout_stop_sec")
+    try:
+        podman_stop_timeout = (
+            max(1, int(stop_grace) - 5) if stop_grace is not None else 10
+        )
+    except (TypeError, ValueError):
+        # timeout_stop_sec given as a systemd timespan (e.g. "2min"); fall back
+        # to the safe default rather than guessing a seconds value.
+        podman_stop_timeout = 10
+
+    svc.add("ExecStop", f"/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}")
+    # Under option 1b payloads live in the user manager's cgroup, not the unit's
+    # cgroup, so KillMode=control-group can't reach them. ExecStopPost force-removes
+    # any container that survived ExecStop (e.g. a SIGKILLed podman client).
+    # Pod mode is excluded: the pod-create service already has ExecStop=podman pod rm
+    # which tears down all member containers; per-container services don't need it.
+    # Pet mode is excluded: the overlay must survive stop — never rm a pet container.
+    if mode != "pod" and wl_lifecycle != "pet":
+        svc.add("ExecStopPost", f"-/usr/bin/podman rm -f -t0 {container_name_quoted}")
+    svc.blank()
+
+
+def _logging(svc, container_name, resources):
+    """StandardOutput/Error/SyslogIdentifier + LogRateLimit* defaults."""
+    custom_d = resources.get("custom_directives", {})
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+    # Name the journal stream after the container so passthrough log lines
+    # read `workload-<name>[pid]: ...` (members: workload-<wl>-<ctr>).
+    # Podman's own messages (pull errors etc.) share the identifier.
+    svc.add("SyslogIdentifier", container_name)
+    if "LogRateLimitIntervalSec" not in custom_d:
+        svc.add("LogRateLimitIntervalSec", 30)
+    if "LogRateLimitBurst" not in custom_d:
+        svc.add("LogRateLimitBurst", 250)
+    svc.blank()
+
+
+def _hardening(svc, name, uid, resources):
+    """Restart/RestartSec + filesystem/socket-family hardening + default timeouts."""
+    svc.add("Restart", "on-failure")
+    svc.add("RestartSec", "5s")
+    svc.blank()
+    svc.comment("Filesystem hardening: restrict writes to workload home + podman runtime")
+    svc.add("ProtectSystem", "strict")
+    svc.add("ReadWritePaths", f'"{str(workload_root_dir(name))}" /run/user/{uid}')
+    svc.add("PrivateTmp", "yes")
+    svc.comment("Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and")
+    svc.comment("AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list")
+    svc.comment("(~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.")
+    svc.add("RestrictAddressFamilies", "~AF_ALG AF_PACKET")
+
+    if "timeout_start_sec" not in resources:
+        svc.add("TimeoutStartSec", 300)
+    if "timeout_stop_sec" not in resources:
+        svc.add("TimeoutStopSec", 30)
+
+
 def generate_system_service(workload, container, user_name, uid, mode="single"):
     """Generate systemd system service for rootless podman execution.
 
@@ -996,35 +1235,8 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     unit.comment("Generated by workload-generate")
 
     u = unit.section("Unit")
-    u.set("Description", unit_description)
-    if mode == "single":
-        u.add("Requires", setup_service)
-        u.add("After", f"network.target {setup_service}")
-    else:
-        # pod mode binds to the pod-create service; bridge mode to the
-        # network-create service.
-        dep_service = pod_service if mode == "pod" else net_service
-        u.add("Requires", dep_service)
-        u.add("After", dep_service)
-        u.add("BindsTo", dep_service)
-        u.add("PartOf", umbrella_service)
-    u.set("StartLimitIntervalSec", 300)
-    u.set("StartLimitBurst", 5)
-
-    # [workload].requires → Wants= (start them if possible, but don't fail us)
-    # [workload].after    → After= (ordering only, no dependency)
-    wl_requires = workload.get("workload", {}).get("requires", [])
-    wl_after = workload.get("workload", {}).get("after", [])
-    if wl_requires:
-        wants = " ".join(f"workload-{n}.service" for n in wl_requires)
-        u.add("Wants", wants)
-    if wl_after:
-        after_deps = " ".join(f"workload-{n}.service" for n in wl_after)
-        u.add("After", after_deps)
-
-    if gpu_vendor == "nvidia":
-        u.add("Requires", "nvidia-cdi-generator.service")
-        u.add("After", "nvidia-cdi-generator.service")
+    _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
+               net_service, umbrella_service, gpu_vendor)
 
     # container.systemd: "always", "true", "false", or unset
     systemd_mode = container.get("container", {}).get("systemd", None)
@@ -1143,181 +1355,22 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     podman_cmd = " ".join(podman_args)
 
     svc = unit.section("Service")
-    svc.set("Type", service_type)
-    svc.set("Slice", slice_name)
-
-    # NotifyAccess only needed for Type=notify
-    if service_type == "notify":
-        svc.set("NotifyAccess", "all")
-
-    # systemd containers need SIGRTMIN+3 for clean shutdown
-    if systemd_mode in ("always", "true"):
-        svc.set("KillSignal", "SIGRTMIN+3")
-
-    svc.set("User", user_name)
-    svc.set("Group", user_name)
-    svc.set("Environment", f'"HOME={home_dir}"')
-    svc.set("EnvironmentFile", f"-/run/workload-env/workload-{name}.env")
-    svc.blank()
+    _service_identity(svc, service_type, slice_name, systemd_mode, user_name, home_dir, name)
 
     # Service-level resource overrides only (cgroup limits live in the user@<uid> drop-in).
     resources = container.get("resources", {})
-    service_directives = []
-    if "timeout_start_sec" in resources:
-        service_directives.append(("TimeoutStartSec", resources['timeout_start_sec']))
-    if "timeout_stop_sec" in resources:
-        service_directives.append(("TimeoutStopSec", resources['timeout_stop_sec']))
-    for directive, value in resources.get("custom_directives", {}).items():
-        if directive in GENERATOR_OWNED_DIRECTIVES:
-            log_msg(
-                f"WARNING: custom_directives contains '{directive}' which is managed "
-                f"by the generator — this may have no effect or cause unexpected behaviour",
-                level="warning"
-            )
-        service_directives.append((directive, value))
-    if service_directives:
-        svc.comment("Service-level overrides")
-        for directive, value in service_directives:
-            svc.add(directive, value)
-        svc.blank()
+    _resource_overrides(svc, resources, name)
 
-    if credentials:
-        svc.comment("Load encrypted credentials (auto-decrypted to /run/credentials/{service}/)")
-        # sorted() so unit output is reproducible: auto_detect_credentials
-        # returns a set, whose iteration order otherwise varies per process.
-        for cred_name in sorted(credentials):
-            cred_file = f"/etc/credstore.encrypted/{cred_name}"
-            svc.add("LoadCredentialEncrypted", f"{cred_name}:{cred_file}")
-        svc.blank()
+    _credential_loads(svc, credentials)
 
-    if has_secret_env_vars:
-        # Multi-container: pass the local container name so workload-write-env
-        # resolves *that* container's env vars only and writes the matching
-        # per-container secrets file. Single-mode keeps the legacy one-arg form.
-        if mode == "single":
-            svc.add("ExecStartPre", f"+/usr/libexec/workloadctl/workload-write-env {name}")
-        else:
-            svc.add(
-                "ExecStartPre",
-                f"+/usr/libexec/workloadctl/workload-write-env "
-                f"{name} {container['name']}",
-            )
+    _exec_start_pre(svc, mode, name, container, has_secret_env_vars, gpu_vendor, uid)
 
-    if gpu_vendor == "nvidia":
-        svc.add(
-            "ExecStartPre",
-            "/bin/bash -c "
-            "'test -s /run/cdi/nvidia.yaml"
-            " || { echo \"NVIDIA CDI spec missing: check nvidia-cdi-generator.service\" >&2; exit 1; }'",
-        )
+    _lifecycle_exec(svc, wl_lifecycle, podman_cmd, container_name_quoted, pull_policy,
+                     mode, uid, resources)
 
-    if mode == "single":
-        # Force a *fresh* libpod pause process before the first podman touch of
-        # this invocation. Trigger: any pasta-networked workload. pasta's
-        # prefork isolation does mount("","/tmp","tmpfs")+pivot_root (passt
-        # isolation.c, TMPDIR==/tmp, compile-time) — if /tmp doesn't resolve in
-        # pasta's mount ns it dies with "Failed to mount empty tmpfs for
-        # pivot_root(): ENOENT" and the unit restart-loops to StartLimitBurst.
-        # How /tmp goes missing: a pause that outlives the previous activation
-        # (podman moves it into podman-pause-*.scope under user@<uid>, where it
-        # survives the unit stop) still pins that activation's PrivateTmp /tmp,
-        # which systemd already deleted. The next `podman run` takes the rootless
-        # join shortcut (rootless_linux.c can_use_shortcut → join_namespace_or_die
-        # "mnt") and *inherits that dead mount ns*. NB the join is userns-agnostic
-        # — keep-id vs userns=host is irrelevant; only pasta (vs --network=host,
-        # which spawns no pasta) is the trigger.
-        #   `podman system migrate` is necessary but not sufficient: it stops all
-        # running containers first and returns *before* killing the pause if any
-        # stop errors (runtime_migrate.go), and it's tolerant ("-"). So we also
-        # rm pause.pid + ns_handles unconditionally — that makes the shortcut
-        # fall through so `podman run` builds a fresh pause in the live (valid)
-        # mount ns. migrate runs first so it can still SIGKILL the tracked pause;
-        # the rm cleans up when migrate couldn't. Both tolerant so first boot
-        # (no rundir/handles yet) never blocks startup. Pod/bridge members must
-        # NOT do this (it would kill the pause out from under the live pod infra
-        # / sibling containers) — their head units handle it.
-        svc.add("ExecStartPre", "-/usr/bin/podman system migrate")
-        svc.add(
-            "ExecStartPre",
-            f"-/usr/bin/rm -f /run/user/{uid}/libpod/tmp/pause.pid"
-            f" /run/user/{uid}/libpod/tmp/ns_handles",
-        )
+    _logging(svc, container_name, resources)
 
-    svc.blank()
-
-    if wl_lifecycle == "pet":
-        # Pet lifecycle: create the container once; subsequent starts reuse the
-        # writable overlay.  The "-" prefix on create ignores "name already in
-        # use" so the unit starts cleanly after a plain reboot.
-        # --pull is honoured on the initial create; later starts use whatever
-        # image the overlay was originally built from.
-        svc.comment("Pet lifecycle: create-once + start (overlay survives stop/reboot)")
-        svc.add("ExecStartPre", f"-{podman_cmd}")
-        svc.blank()
-        svc.add("ExecStart", f"/usr/bin/podman start -a {container_name_quoted}")
-    else:
-        svc.comment(f"Image pulling handled by podman run --pull={pull_policy}")
-        svc.blank()
-        svc.add("ExecStart", podman_cmd)
-
-    svc.blank()
-
-    # podman's own container-stop grace (-t): how long the container gets to
-    # exit on the stop signal before podman SIGKILLs it. Keep it a few seconds
-    # under the unit's TimeoutStopSec so systemd doesn't kill `podman stop`
-    # before podman can do its own SIGKILL + reap. Tracks timeout_stop_sec when
-    # set (so a write-heavy workload's longer drain actually reaches podman);
-    # otherwise stays the historical 10s (systemd default TimeoutStopSec=30).
-    # (resources dict is already set above from container.get("resources", {}))
-    stop_grace = resources.get("timeout_stop_sec")
-    try:
-        podman_stop_timeout = (
-            max(1, int(stop_grace) - 5) if stop_grace is not None else 10
-        )
-    except (TypeError, ValueError):
-        # timeout_stop_sec given as a systemd timespan (e.g. "2min"); fall back
-        # to the safe default rather than guessing a seconds value.
-        podman_stop_timeout = 10
-
-    svc.add("ExecStop", f"/usr/bin/podman stop -t {podman_stop_timeout} {container_name_quoted}")
-    # Under option 1b payloads live in the user manager's cgroup, not the unit's
-    # cgroup, so KillMode=control-group can't reach them. ExecStopPost force-removes
-    # any container that survived ExecStop (e.g. a SIGKILLed podman client).
-    # Pod mode is excluded: the pod-create service already has ExecStop=podman pod rm
-    # which tears down all member containers; per-container services don't need it.
-    # Pet mode is excluded: the overlay must survive stop — never rm a pet container.
-    if mode != "pod" and wl_lifecycle != "pet":
-        svc.add("ExecStopPost", f"-/usr/bin/podman rm -f -t0 {container_name_quoted}")
-    svc.blank()
-
-    custom_d = resources.get("custom_directives", {})
-    svc.add("StandardOutput", "journal")
-    svc.add("StandardError", "journal")
-    # Name the journal stream after the container so passthrough log lines
-    # read `workload-<name>[pid]: ...` (members: workload-<wl>-<ctr>).
-    # Podman's own messages (pull errors etc.) share the identifier.
-    svc.add("SyslogIdentifier", container_name)
-    if "LogRateLimitIntervalSec" not in custom_d:
-        svc.add("LogRateLimitIntervalSec", 30)
-    if "LogRateLimitBurst" not in custom_d:
-        svc.add("LogRateLimitBurst", 250)
-    svc.blank()
-    svc.add("Restart", "on-failure")
-    svc.add("RestartSec", "5s")
-    svc.blank()
-    svc.comment("Filesystem hardening: restrict writes to workload home + podman runtime")
-    svc.add("ProtectSystem", "strict")
-    svc.add("ReadWritePaths", f'"{str(workload_root_dir(name))}" /run/user/{uid}')
-    svc.add("PrivateTmp", "yes")
-    svc.comment("Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and")
-    svc.comment("AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list")
-    svc.comment("(~) keeps AF_INET/AF_UNIX/AF_NETLINK for pasta networking + getaddrinfo.")
-    svc.add("RestrictAddressFamilies", "~AF_ALG AF_PACKET")
-
-    if "timeout_start_sec" not in resources:
-        svc.add("TimeoutStartSec", 300)
-    if "timeout_stop_sec" not in resources:
-        svc.add("TimeoutStopSec", 30)
+    _hardening(svc, name, uid, resources)
 
     # [Install] only on the workload-level service: in single mode that's
     # *this* unit (it gets the multi-user.target.wants symlink); in
