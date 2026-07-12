@@ -1250,18 +1250,21 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     # service_type is read here (before podman_args) so --sdnotify can match.
     # Default is "exec": activates once podman starts, no READY handshake needed.
-    # "notify" is structurally incompatible with this rootless+linger architecture
-    # and stays unsupported in practice (settled, not a pending question; verified
-    # tp Fedora 44/systemd 259 2026-06-21). systemd attributes an sd_notify datagram
-    # to the unit owning the *sender's* cgroup, but the process that emits READY=1
-    # always lives in user@<uid>.service's cgroup, never workload-<name>.service's:
-    # with --sdnotify=conmon the sender is conmon; with --sdnotify=healthy podman
-    # does send READY once healthy, but from the re-exec'd libpod podman that has
-    # migrated into the same user-manager scope as conmon. Either way systemd
-    # credits user@<uid>.service (wrong unit, which rejects it) and the workload
-    # unit never goes active. No NotifyAccess tweak on the workload unit can fix
-    # this — the sender is not in its cgroup at all. Use --health-cmd + the CLI's
-    # health-verified flow for readiness instead. See ADR 001 and llms.txt.
+    # "notify" does not work under the SHIPPED cgroup topology (ADR 001 option 1b:
+    # no --cgroups=split, so conmon+payload migrate into user@<uid>.service).
+    # systemd attributes an sd_notify datagram to the unit owning the *sender's*
+    # cgroup, and under 1b the READY=1 emitter always lives in user@<uid>.service's
+    # cgroup, never workload-<name>.service's: with --sdnotify=conmon the sender is
+    # conmon; with --sdnotify=healthy it is the re-exec'd libpod podman migrated
+    # into the same user-manager scope. Either way systemd credits the wrong unit
+    # and the workload never goes active; no NotifyAccess tweak helps (the sender
+    # is not in the unit's cgroup at all). This is a property of the non-split
+    # topology, NOT a fundamental rootless+linger limit: under --cgroups=split +
+    # Delegate=yes (ADR 001 option 1) conmon lands in workload-<name>.service's own
+    # cgroup and Type=notify reaches active in 0s — proven on tp 2026-07-12 (ADR
+    # 001 addendum). Adopting it would revert the split tax 1b was chosen to shed,
+    # so exec stays the default. Readiness gating uses --health-cmd + the CLI's
+    # health-verified flow. See ADR 001 (item 8 + 2026-07-12 addendum) and llms.txt.
     service_type = container.get("resources", {}).get("service_type", "exec")
     valid_types = ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
     if service_type not in valid_types:

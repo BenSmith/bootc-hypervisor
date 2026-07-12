@@ -64,9 +64,11 @@ bind it directly.
 - ❌ Pays a permanent tax: `lib/cgroup_exec.py` (uid-owned-leaf placement) for
   `exec`/`shell`, the system-manager healthcheck timer + `workload-healthcheck`
   + `DISABLE_HC_SYSTEMD`, and recurring debugging cost (e.g. the non-interactive
-  exec fix, commit `3b1e668`). (`Type=notify` is unsupported, but that is *not*
-  specific to this option — it is structural to the rootless+linger design and
-  unchanged by 1b; see spike item 8.)
+  exec fix, commit `3b1e668`). (Note: this split topology is in fact the *only*
+  one where `Type=notify` works — conmon lands in the unit's own cgroup, so
+  `READY=1` is attributed correctly; under 1b's non-split placement notify fails.
+  See spike item 8 + the 2026-07-12 addendum. Since 1b is shipped, notify is
+  unavailable in practice.)
 - ❌ Pod mode can't use split, so pods get **no** per-unit enforcement —
   mitigated by `user-<uid>.slice` drop-ins (C11 in
   `docs/architecture-and-followup-review-2026-06-10.md`). The rejection is
@@ -375,9 +377,14 @@ Still open (subsequent stages):
    `MemorySwapMax` unset, zram absorbs overflow and no OOM fires — see the
    swap caveat in the 1b spike results.
 8. ~~Re-test `Type=notify` under 1b (the topology changed, result was unknown)~~
-   **Resolved 2026-06-21 on tp (Fedora 44 / systemd 259):** `Type=notify` is
-   **structurally incompatible** with the rootless+linger design — 1b does not
-   fix it, and there is no conmon-independent workaround. systemd attributes an
+   **Resolved 2026-06-21 on tp (Fedora 44 / systemd 259)** — *framing refined
+   2026-07-12, see the addendum below: this result holds for 1b's non-split
+   placement; `Type=notify` **does** work under `--cgroups=split` (option 1). The
+   "structurally incompatible with rootless+linger" wording overstates it — the
+   incompatibility is with the non-split topology specifically. The decision
+   (exec stays default) is unchanged.* Original finding: under 1b, `Type=notify`
+   does not work — 1b does not fix it, and there is no conmon-independent
+   workaround within the non-split topology. systemd attributes an
    sd_notify datagram to the unit owning the *sender's* cgroup, and the process
    that emits `READY=1` always lives in `user@<uid>.service`'s cgroup, never in
    `workload-<name>.service`'s. Tested both policies with the container reaching
@@ -397,3 +404,44 @@ Still open (subsequent stages):
    `--health-cmd` (works under 1b, item 4) + `workloadctl health`/`update`'s
    health-verified flow. The VM substrate's `Type=notify` is unaffected:
    `workload-vm-notify` sends `READY=1` from inside the system unit's own cgroup.
+
+## Addendum (2026-07-12): `Type=notify` works under split — item 8 refined
+
+Item 8's "structurally incompatible with the rootless+linger design" is
+imprecise. A controlled spike on tp (Fedora 44, systemd 259, podman 5.8.3)
+shows the failure is a property of 1b's **non-split** placement, not of
+rootless+linger per se: restoring `--cgroups=split` + `Delegate=yes` — i.e.
+option 1's topology — makes `Type=notify` + `--sdnotify=conmon` reach `active`.
+
+Three faithful units, each run as the same lingering workload user (pasta net,
+`--userns=keep-id`, `TimeoutStartSec=20`; `systemctl start` on a `Type=notify`
+unit blocks until `READY=1` or timeout, so its exit code is the verdict):
+
+| unit | cgroups mode | `--sdnotify` | result | conmon cgroup |
+|------|--------------|--------------|--------|---------------|
+| control | enabled | `ignore` (never READY) | failed / timeout 20s | — |
+| 1b (shipped) | enabled | `conmon` | failed / timeout 20s | `…/user@<uid>.service/…/podman-*.scope` |
+| option 1 | **split** + `Delegate=yes` | `conmon` | **active in 0s** | `/workloads.slice/<unit>.service/runtime` |
+
+The negative control failing — and the 1b unit failing *identically* to it —
+validates the harness and reproduces item 8; the split unit passing is the new
+result. Mechanism re-confirmed against systemd v261 source (`src/core/manager.c`
+`manager_get_units_for_pidref` + `src/core/service.c`
+`service_notify_message_authorized`): a notify datagram is only delivered to a
+unit that owns the sender's cgroup **or** watches the sender's PID, and
+`NotifyAccess` gates *authorization*, never *candidacy* — so 1b's out-of-cgroup
+sender is unreachable regardless of `NotifyAccess=all`, while split's in-cgroup
+conmon is delivered. This is the same reason Quadlet's notify path works: Quadlet
+defaults to `--cgroups=split` (`.reference/podman` `options/cgroups.md`).
+
+**Decision unchanged.** Adopting split to gain notify would reintroduce exactly
+the tax 1b was chosen to shed — `cgroup_exec.py`, the healthcheck-timer shim
+stack, and the pod-mode parity gap (pods can't use split; see option 1's ❌
+list). So `Type=exec` + `--health-cmd` + the CLI health-verified flow remains
+the shipped design. What changes is only the *rationale*: notify is a capability
+traded away with the split topology, not a fundamental impossibility — and if
+per-workload readiness gating ever justifies the split tax for single-mode
+workloads, the mechanism is proven. Not covered by this spike (prerequisites
+before any such change): `--sdnotify=healthy` under split (the re-exec'd libpod
+podman's placement), and where `[resources]` caps land under split's
+two-sub-cgroup (`conmon` vs payload) layout.
