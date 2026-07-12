@@ -5,3 +5,4 @@
 # drives the metrics-textfile oneshot (workload-exporter.service); without it
 # enabled the exporter never runs and no workload metrics are produced.
 enable workload-exporter.timer
+enable workload-exporter-disk.timer

@@ -1,0 +1,23 @@
+[Unit]
+Description=Write the workload disk-usage metrics textfile for node_exporter
+Documentation=man:workload-exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/workloadctl/workload-exporter --disk
+
+# Hardening. Same profile as the fast exporter: no network role, reads
+# durable state under /var/lib/workloads (kept readable by ProtectSystem=strict)
+# and drops a textfile under /run/workload-exporter.
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/workload-exporter
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+
+# The `du` walk over a large durable-state dir can run for a while; keep the
+# generous in-script timeout from being pre-empted by a unit-level one.
+TimeoutStartSec=180

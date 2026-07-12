@@ -53,6 +53,7 @@
 - Workloads get LVM provisioned to cap or flex storage
 - make missing host setup script an error not a warning
 - put all control surfaces in wireguard/vpn
+- zsh/fish shell completions (`completions/` ships bash only; review item O7). Not a quick win — ~366 lines of bash to mirror across two more completion systems for 41 subcommands + `secret` sub-verbs + packaging, kept in sync as commands change.
 
 ### Freshness alert for the workload metrics textfile
 **Why:** The metrics exporter is now a root oneshot+timer that writes an atomic

@@ -22,9 +22,10 @@ from workload_lib import (
     workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
     auto_detect_credentials, resolve_secret_env_vars,
     validate_workload_config, infer_workload_mode, normalize_containers,
-    parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address,
+    parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address, vm_mac_collisions,
     substitute_template, QMPClient,
     selinux_module_name, selinux_type_name,
+    valid_userns_mode, collect_config_warnings,
 )
 
 
@@ -1490,6 +1491,112 @@ class TestUnitsOutdated(unittest.TestCase):
         self.cfg.write_text("x")
         os.utime(self.cfg, (1000.4, 1000.4))
         self.assertFalse(workload_lib.units_outdated("foo"))
+
+
+class TestVmMacCollisions(unittest.TestCase):
+    def test_no_collision_for_distinct_names(self):
+        # Real derived MACs differ for these names.
+        self.assertEqual(vm_mac_collisions("git", ["forge", "build"]), [])
+
+    def test_excludes_self(self):
+        self.assertEqual(vm_mac_collisions("git", ["git"]), [])
+
+    def test_detects_collision(self):
+        # Force two names onto one MAC to exercise the detection path without
+        # having to construct a real md5 collision.
+        fixed = "02:00:00:00:00:01"
+        collide = {"git", "forge"}
+        with patch("workload_lib.vm_mac_address",
+                   side_effect=lambda n: fixed if n in collide else f"02:00:00:00:00:{ord(n[0]):02x}"):
+            self.assertEqual(vm_mac_collisions("git", ["forge", "other"]), ["forge"])
+
+
+class TestValidUsernsMode(unittest.TestCase):
+    def test_accepts_plain_forms(self):
+        self.assertTrue(valid_userns_mode("keep-id"))
+        self.assertTrue(valid_userns_mode("host"))
+
+    def test_accepts_keep_id_params(self):
+        self.assertTrue(valid_userns_mode("keep-id:uid=1000"))
+        self.assertTrue(valid_userns_mode("keep-id:uid=0,gid=0"))
+
+    def test_rejects_bad_forms(self):
+        for bad in ("private", "keep-id:", "keep-id:uid=x", "keep-id:foo=1",
+                    "keep-id:uid=1,uid=2", "keep-id:uid"):
+            self.assertFalse(valid_userns_mode(bad), bad)
+
+
+class TestCollectConfigWarnings(unittest.TestCase):
+    """collect_config_warnings mirrors the boot generator's kmsg-only warnings
+    so `validate` can surface them at edit/deploy time."""
+
+    def test_clean_single_config_has_no_warnings(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"}}
+        self.assertEqual(collect_config_warnings(cfg), [])
+
+    def test_invalid_userns_flagged(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+               "security": {"userns": "private"}}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("invalid userns" in w and "private" in w for w in warnings))
+
+    def test_valid_userns_not_flagged(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+               "security": {"userns": "keep-id:uid=0,gid=0"}}
+        self.assertEqual(collect_config_warnings(cfg), [])
+
+    def test_bridge_userns_read_per_container(self):
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"},
+                    "security": {"userns": "bogus"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("invalid userns" in w and "'web'" in w for w in warnings))
+
+    def test_pet_in_multi_flagged(self):
+        cfg = {"workload": {"name": "app", "mode": "pod", "lifecycle": "pet"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("lifecycle=pet" in w for w in warnings))
+
+    def test_pet_in_single_not_flagged(self):
+        cfg = {"workload": {"name": "app", "lifecycle": "pet"},
+               "container": {"image": "x:latest"}}
+        self.assertFalse(any("lifecycle=pet" in w
+                             for w in collect_config_warnings(cfg)))
+
+    def test_bridge_ports_ignored_flagged(self):
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "network": {"ports": ["8080:80"]},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("[network].ports is ignored in bridge mode" in w
+                            for w in warnings))
+
+    def test_requires_after_cross_reference(self):
+        cfg = {"workload": {"name": "app", "requires": ["db"], "after": ["cache"]},
+               "container": {"image": "x:latest"}}
+        # Without the fleet view, the cross-reference is skipped.
+        self.assertEqual(collect_config_warnings(cfg), [])
+        # db exists, cache does not.
+        warnings = collect_config_warnings(cfg, known_workload_names={"app", "db"})
+        self.assertTrue(any("after" in w and "cache" in w for w in warnings))
+        self.assertFalse(any("db" in w for w in warnings))
+
+    def test_vm_config_skips_container_checks(self):
+        cfg = {"workload": {"name": "gitvm", "lifecycle": "pet"},
+               "vm": {"cloud_image_url": "https://x/y.qcow2"},
+               "security": {"userns": "private"}}
+        # VMs don't use userns/lifecycle-in-mode; those must not fire.
+        self.assertEqual(collect_config_warnings(cfg), [])
 
 
 if __name__ == "__main__":

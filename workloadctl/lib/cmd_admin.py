@@ -14,12 +14,15 @@ import sys
 import tempfile
 
 from workload_lib import (
+    collect_config_warnings,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
     parse_memory_mib,
     selinux_module_name,
     selinux_type_name,
     units_outdated,
+    vm_mac_address,
+    vm_mac_collisions,
     validate_workload_config,
     validate_workload_name,
     workload_config_path,
@@ -338,6 +341,38 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                 "passed": True,
                 "severity": "warning",
                 "message": f"custom_directives overrides '{directive}' which is managed by the generator — may have no effect or cause unexpected behaviour",
+            })
+            warnings += 1
+
+    # Non-fatal generator warnings (invalid userns, bridge-mode ports ignored,
+    # pet-in-multi fallback, unknown requires/after). The boot generator only
+    # logs these to kmsg, where nobody sees them; surface them here so a config
+    # mistake shows at edit/deploy time. all_configs (fetched above for the
+    # uniqueness check) is the fleet view the requires/after check needs.
+    known_workload_names = {c.name for c in all_configs}
+    for msg in collect_config_warnings(config.config, known_workload_names):
+        checks.append({
+            "check": "generator_warning",
+            "passed": True,
+            "severity": "warning",
+            "message": msg,
+        })
+        warnings += 1
+
+    # VM MACs are hash-derived with no allocation registry, so distinct names
+    # can rarely collide on the shared bridge — two guests fighting one address.
+    # Flag it against the current VM fleet so a rename fixes it before deploy.
+    if config.config.get("vm"):
+        vm_names = [c.name for c in all_configs if c.config.get("vm")]
+        collisions = vm_mac_collisions(config.name, vm_names)
+        if collisions:
+            checks.append({
+                "check": "vm_mac_collision",
+                "passed": False,
+                "severity": "warning",
+                "message": f"VM MAC {vm_mac_address(config.name)} collides with "
+                           f"workload(s): {', '.join(collisions)}",
+                "fix": "Rename one of the colliding VM workloads.",
             })
             warnings += 1
 

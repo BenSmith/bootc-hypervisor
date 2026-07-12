@@ -183,8 +183,12 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def _iso_path(self, name: str = "myvm") -> Path:
         return self.runtime / name / "cloud-init.iso"
 
-    def _read_user_data(self) -> str:
-        return (self.home / ".cloud-init-seed" / "user-data").read_text()
+    def _seed_dir(self, name: str = "myvm") -> Path:
+        # The seed is staged on the tmpfs runtime dir (S6), never the home.
+        return self.runtime / name / ".cloud-init-seed"
+
+    def _read_user_data(self, name: str = "myvm") -> str:
+        return (self._seed_dir(name) / "user-data").read_text()
 
     def test_template_substitutes_template_vars(self):
         ud = self.config_dir / "user-data"
@@ -214,7 +218,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         ud.write_text("#cloud-config\nname: ${WORKLOADCTL_WORKLOAD_NAME}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         self._run_build(cfg, name="myforge")
-        text = self._read_user_data()
+        text = self._read_user_data("myforge")
         self.assertIn("name: myforge", text)
 
     def test_template_resolves_secrets(self):
@@ -333,7 +337,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 self.pw, cfg, "myvm",
                 config_path=self.config_dir / "myvm.toml",
             )
-        ud_path = self.home / ".cloud-init-seed" / "user-data"
+        ud_path = self._seed_dir() / "user-data"
         mode = oct(ud_path.stat().st_mode & 0o777)
         self.assertEqual(mode, "0o600")
 
@@ -357,9 +361,23 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 self.pw, cfg, "myvm",
                 config_path=self.config_dir / "myvm.toml",
             )
-        seed_dir = self.home / ".cloud-init-seed"
+        seed_dir = self._seed_dir()
         self.assertTrue(any(str(seed_dir) in str(p) for p in rmtree_calls),
                         f"seed_dir not removed; rmtree calls: {rmtree_calls}")
+
+    def test_seed_dir_staged_on_tmpfs_not_home(self):
+        """S6: the plaintext-secret seed is staged on the tmpfs runtime dir, so
+        it never lands at rest in the persistent home even if the rmtree is
+        cut short by a crash (rmtree is mocked here to simulate that)."""
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nhostname: test\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        # _run_build mocks shutil.rmtree, so the seed dir survives the build —
+        # standing in for a crash before the post-build cleanup runs.
+        self._run_build(cfg)
+        self.assertTrue((self._seed_dir() / "user-data").exists())
+        self.assertFalse((self.home / ".cloud-init-seed").exists(),
+                         "plaintext seed leaked into the persistent home")
 
     def test_default_mode_used_when_no_user_data_file(self):
         # No [vm.cloud_init].user_data_file → built-in cloud-config (no
@@ -367,7 +385,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # rendered user-data contains the default scaffolding.
         cfg = {"vm": {"user": "fedora"}}
         self._run_build(cfg, name="defvm")
-        text = self._read_user_data()
+        text = self._read_user_data("defvm")
         self.assertTrue(text.startswith("#cloud-config\n"))
         self.assertIn("hostname: defvm", text)
         self.assertIn("- name: fedora", text)

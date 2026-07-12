@@ -222,6 +222,18 @@ def vm_mac_address(name: str) -> str:
     return ":".join(f"{b:02x}" for b in [first, h[1], h[2], h[3], h[4], h[5]])
 
 
+def vm_mac_collisions(name: str, other_names) -> list[str]:
+    """Return the subset of other_names whose derived VM MAC equals name's.
+
+    vm_mac_address hashes the name into a MAC with no allocation registry, so
+    two distinct names can (rarely) collide on the shared VM bridge — two guests
+    would then fight over one address. This lets `validate` flag it up front.
+    """
+    mine = vm_mac_address(name)
+    return sorted(other for other in set(other_names)
+                  if other != name and vm_mac_address(other) == mine)
+
+
 def vm_socket_dir(name: str) -> Path:
     """Return the runtime socket directory for a VM workload."""
     return VM_SOCKET_DIR / name
@@ -1184,6 +1196,104 @@ def validate_workload_config(config: dict) -> list[str]:
                     errors.append(f"[workload].{key}: {e}")
 
     return errors
+
+
+def valid_userns_mode(mode: str) -> bool:
+    """True if `mode` is a userns value the generator accepts.
+
+    Accepts "host", "keep-id", or "keep-id" with uid/gid parameters
+    (e.g. "keep-id:uid=1000,gid=1000"). Single source shared by the boot
+    generator (build_userns_args) and `validate` (collect_config_warnings).
+    """
+    if mode in ("keep-id", "host"):
+        return True
+    if not mode.startswith("keep-id:"):
+        return False
+    params = mode[len("keep-id:"):].split(",")
+    valid_keys = {"uid", "gid"}
+    seen = set()
+    for param in params:
+        if "=" not in param:
+            return False
+        key, value = param.split("=", 1)
+        if key not in valid_keys or key in seen or not value.isdigit():
+            return False
+        seen.add(key)
+    return len(seen) > 0
+
+
+def collect_config_warnings(config: dict, known_workload_names=None) -> list[str]:
+    """Non-fatal config warnings, as message strings (empty list = none).
+
+    The boot generator emits these to /dev/kmsg, where they're effectively
+    invisible. This reproduces them read-only so `validate` can surface the
+    same mistakes at edit/deploy time. The generator stays authoritative at
+    boot (it also applies each safe fallback); this is only the early heads-up,
+    mirroring how validate_workload_config mirrors the generator's schema checks.
+
+    `known_workload_names`, when provided, enables the requires/after
+    cross-reference check; it is skipped when None (the caller lacks the fleet
+    view — e.g. validating a config in isolation).
+    """
+    warnings: list[str] = []
+    wl = config.get("workload", {})
+
+    # requires/after must name workloads that actually exist. (Shape/name
+    # validity is a hard error handled by validate_workload_config; here we only
+    # flag well-formed names that don't resolve.)
+    if known_workload_names is not None:
+        known = set(known_workload_names)
+        for key in ("requires", "after"):
+            val = wl.get(key)
+            if not isinstance(val, list):
+                continue
+            for dep in val:
+                if isinstance(dep, str) and dep not in known:
+                    warnings.append(
+                        f"[workload].{key} references unknown workload {dep!r}")
+
+    # The remaining checks are container-topology specific; VMs don't use them.
+    if infer_workload_kind(config) == "vm":
+        return warnings
+    try:
+        mode = infer_workload_mode(config)
+    except ValueError:
+        # A mode contradiction is a hard schema error (reported by
+        # validate_workload_config); don't also flag it as a warning.
+        return warnings
+
+    # userns must be an accepted form or the generator falls back to keep-id.
+    # Read it where build_userns_args does: the workload-level [security] block
+    # for single/pod, per-container [containers.security] for bridge.
+    if mode == "bridge":
+        userns_sites = [
+            (c.get("name"), c.get("security", {}).get("userns"))
+            for c in normalize_containers(config)
+        ]
+    else:  # single, pod
+        userns_sites = [(None, config.get("security", {}).get("userns"))]
+    for cname, userns in userns_sites:
+        if userns is None:
+            continue
+        if not isinstance(userns, str) or not valid_userns_mode(userns):
+            where = f" for container {cname!r}" if cname else ""
+            warnings.append(
+                f"invalid userns mode {userns!r}{where}; the generator "
+                f"falls back to 'keep-id'")
+
+    # lifecycle=pet is single-mode only; pod/bridge fall back to cattle.
+    if wl.get("lifecycle") == "pet" and mode != "single":
+        warnings.append(
+            f"lifecycle=pet is only supported in single mode (mode={mode!r}); "
+            f"the generator falls back to cattle")
+
+    # bridge mode ignores workload-level [network].ports.
+    if mode == "bridge" and config.get("network", {}).get("ports"):
+        warnings.append(
+            "workload-level [network].ports is ignored in bridge mode; publish "
+            "ports per container under [containers.network]")
+
+    return warnings
 
 
 def validate_workload_name(name: str):

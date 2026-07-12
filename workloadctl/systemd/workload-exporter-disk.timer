@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the workload disk-usage metrics textfile periodically
+
+[Timer]
+# Disk usage changes slowly and the `du` walk is expensive on large durable
+# state, so this runs far less often than the fast metrics timer (30s). A
+# larger OnBootSec staggers the first walk past boot-time settling.
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

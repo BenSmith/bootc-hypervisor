@@ -13,8 +13,16 @@ pasta netns and can do neither. So the producer drops an atomic file and Alloy
 ingests it over a read-only bind mount rather than scraping a socket. There is
 no network listener.
 
-Usage: workload-exporter [output_path]
-  output_path: file to write (default: /run/workload-exporter/workloads.prom)
+Disk usage is a second, slow producer. `du -sb` over a workload's durable
+state can take seconds on a large home (tens of GB), and running it on the
+fast timer stalls every other metric behind it. So `--disk` splits that walk
+onto its own infrequent timer (workload-exporter-disk.timer), writing a
+separate textfile in the same drop dir; node_exporter's textfile collector
+globs the directory and picks up both. The fast path never touches the disk.
+
+Usage: workload-exporter [--disk] [output_path]
+  --disk:      collect only disk usage (slow walk), for the disk timer
+  output_path: file to write (defaults per mode, under /run/workload-exporter)
 """
 
 import os
@@ -35,10 +43,40 @@ VM_SOCKET_DIR = Path("/run/workload-vm")
 # Unified cgroup v2 mount. A module constant so tests can redirect it.
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
+DROP_DIR = Path("/run/workload-exporter")
+# Default drop names, one per producer; both land in DROP_DIR so Alloy's
+# directory-globbing textfile collector ingests both.
+DEFAULT_OUTPUT = DROP_DIR / "workloads.prom"
+DEFAULT_DISK_OUTPUT = DROP_DIR / "workloads-disk.prom"
+
+# The `du` walk runs on the slow disk timer, well off the fast scrape, so it
+# can afford a generous cap — a large durable-state dir (tens of GB) is worth
+# waiting for rather than timing out to a missing series.
+DISK_DU_TIMEOUT = 120
+
+
+def parse_args(argv):
+    """Parse argv into (disk_mode, output_override).
+
+    Accepts an optional `--disk` flag and an optional positional output path
+    (the latter kept so tests can redirect writes to a scratch file).
+    """
+    disk_mode = False
+    output_override = None
+    for arg in argv[1:]:
+        if arg == "--disk":
+            disk_mode = True
+        else:
+            output_override = arg
+    return disk_mode, output_override
+
+
+DISK_MODE, _OUTPUT_OVERRIDE = parse_args(sys.argv)
 # Where the rendered exposition is dropped for node_exporter's textfile
-# collector. Overridable via argv[1] so tests can write to a scratch path.
-OUTPUT_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-    "/run/workload-exporter/workloads.prom"
+# collector. Overridable via the positional arg so tests can write to a scratch
+# path; otherwise defaults per mode.
+OUTPUT_PATH = Path(_OUTPUT_OVERRIDE) if _OUTPUT_OVERRIDE else (
+    DEFAULT_DISK_OUTPUT if DISK_MODE else DEFAULT_OUTPUT
 )
 
 
@@ -47,7 +85,7 @@ def get_workload_disk_bytes(home_dir):
     try:
         result = subprocess.run(
             ["du", "-sb", str(home_dir)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=DISK_DU_TIMEOUT,
         )
         if result.returncode == 0:
             return int(result.stdout.split()[0])
@@ -372,7 +410,7 @@ def format_metrics(all_metrics):
             # 0/1}, one entry per container that has a health check (pod/bridge
             # workloads can have several; single-container workloads have one,
             # keyed by the workload name).
-            for workload_name, svc_metrics, _cgroup, _vm, _disk in all_metrics:
+            for workload_name, svc_metrics, _cgroup, _vm in all_metrics:
                 for container, value in svc_metrics.get("health", {}).items():
                     if container == workload_name:
                         # Single-container workloads key health by the workload
@@ -388,7 +426,7 @@ def format_metrics(all_metrics):
             lines.append("")
             continue
 
-        for workload_name, svc_metrics, cgroup_metrics, _vm_metrics, _disk in all_metrics:
+        for workload_name, svc_metrics, cgroup_metrics, _vm_metrics in all_metrics:
             key = metric_name.replace("workload_", "")
             if key in svc_metrics:
                 value = svc_metrics[key]
@@ -408,25 +446,18 @@ def format_metrics(all_metrics):
     # VM-specific metrics (only emitted for workloads with a [vm] section)
     lines.append("# HELP workload_vm_balloon_actual_bytes Guest physical memory in use after balloon inflation")
     lines.append("# TYPE workload_vm_balloon_actual_bytes gauge")
-    for workload_name, _svc, _cgroup, vm_metrics, _disk in all_metrics:
+    for workload_name, _svc, _cgroup, vm_metrics in all_metrics:
         if "balloon_actual_bytes" in vm_metrics:
             lines.append(f'workload_vm_balloon_actual_bytes{{workload="{workload_name}"}} {vm_metrics["balloon_actual_bytes"]}')
     lines.append("")
 
     lines.append("# HELP workload_vm_vcpu_cpu_seconds_total Total CPU time consumed by a vCPU thread in seconds")
     lines.append("# TYPE workload_vm_vcpu_cpu_seconds_total counter")
-    for workload_name, _svc, _cgroup, vm_metrics, _disk in all_metrics:
+    for workload_name, _svc, _cgroup, vm_metrics in all_metrics:
         for key, value in vm_metrics.items():
             if key.startswith("vcpu_") and key.endswith("_cpu_seconds_total"):
                 vcpu_idx = key.split("_")[1]
                 lines.append(f'workload_vm_vcpu_cpu_seconds_total{{workload="{workload_name}",vcpu="{vcpu_idx}"}} {value:.6f}')
-    lines.append("")
-
-    lines.append("# HELP workload_disk_bytes Total disk usage of the workload home directory in bytes")
-    lines.append("# TYPE workload_disk_bytes gauge")
-    for workload_name, _svc, _cgroup, _vm, disk_bytes in all_metrics:
-        if disk_bytes is not None:
-            lines.append(f'workload_disk_bytes{{workload="{workload_name}"}} {disk_bytes}')
     lines.append("")
 
     lines.append("# HELP workload_enabled_total Total number of enabled workloads")
@@ -448,10 +479,11 @@ def format_metrics(all_metrics):
 # timer interval. If it becomes a bottleneck, collecting workloads concurrently
 # (one thread per rootless-podman round-trip) is the natural next step.
 def collect_all():
-    """Collect metrics for every enabled workload.
+    """Collect fast metrics for every enabled workload.
 
-    Returns the list of (name, svc, cgroup, vm, disk) tuples that
-    format_metrics() renders.
+    Returns the list of (name, svc, cgroup, vm) tuples that format_metrics()
+    renders. Disk usage is deliberately not collected here — it is a slow walk
+    handled by the separate --disk producer (collect_disk).
     """
     all_metrics = []
     for name, health_targets, is_vm in get_enabled_workloads():
@@ -468,13 +500,44 @@ def collect_all():
             if health_by_container:
                 svc["health"] = health_by_container
         vm = get_vm_qmp_metrics(name) if is_vm else {}
-        disk = get_workload_disk_bytes(workload_root_dir(name))
-        all_metrics.append((name, svc, cgroup, vm, disk))
+        all_metrics.append((name, svc, cgroup, vm))
     return all_metrics
 
 
-def write_metrics(output_path):
-    """Render the exposition and write it atomically to output_path.
+def collect_disk():
+    """Collect disk usage for every enabled workload (the slow --disk pass).
+
+    Returns a list of (name, disk_bytes) tuples; disk_bytes is None when the
+    `du` walk fails or times out.
+    """
+    return [
+        (name, get_workload_disk_bytes(workload_root_dir(name)))
+        for name, _health_targets, _is_vm in get_enabled_workloads()
+    ]
+
+
+def format_disk_metrics(disk_metrics):
+    """Format the disk-usage textfile (its own producer, own drop file)."""
+    lines = [
+        "# Workload disk metrics collected by workload-exporter --disk",
+        f"# Generated at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        "",
+        "# HELP workload_disk_bytes Total disk usage of the workload durable-state directory in bytes",
+        "# TYPE workload_disk_bytes gauge",
+    ]
+    for name, disk_bytes in disk_metrics:
+        if disk_bytes is not None:
+            lines.append(f'workload_disk_bytes{{workload="{name}"}} {disk_bytes}')
+    lines.append("")
+    lines.append("# HELP workload_disk_last_collect_timestamp_seconds Unix timestamp of last disk-usage collection")
+    lines.append("# TYPE workload_disk_last_collect_timestamp_seconds gauge")
+    lines.append(f"workload_disk_last_collect_timestamp_seconds {time.time():.0f}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_atomic(output_path, body):
+    """Write body to output_path atomically, world-readable.
 
     Writes a sibling temp file and renames it onto the final name so a
     concurrently-reading textfile collector never sees a partial file. The
@@ -490,15 +553,27 @@ def write_metrics(output_path):
         # create it ourselves, so we never loosen an existing dir's perms.
         parent.mkdir(parents=True, exist_ok=True)
         os.chmod(parent, 0o755)
-    body = format_metrics(collect_all())
     tmp = output_path.with_name("." + output_path.name + ".tmp")
     tmp.write_text(body)
     os.chmod(tmp, 0o644)
     os.replace(tmp, output_path)
 
 
+def write_metrics(output_path):
+    """Render the fast exposition and write it atomically to output_path."""
+    _write_atomic(output_path, format_metrics(collect_all()))
+
+
+def write_disk_metrics(output_path):
+    """Render the disk-usage exposition and write it atomically."""
+    _write_atomic(output_path, format_disk_metrics(collect_disk()))
+
+
 def main():
-    write_metrics(OUTPUT_PATH)
+    if DISK_MODE:
+        write_disk_metrics(OUTPUT_PATH)
+    else:
+        write_metrics(OUTPUT_PATH)
 
 
 if __name__ == "__main__":

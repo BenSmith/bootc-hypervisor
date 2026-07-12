@@ -776,11 +776,16 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     os.chown(runtime_dir, pw.pw_uid, pw.pw_gid)
     os.chmod(runtime_dir, 0o750)
     iso_path = runtime_dir / "cloud-init.iso"
-    seed_dir = home_path / ".cloud-init-seed"
+    # The seed staging dir holds the rendered user-data, which in template mode
+    # is plaintext secrets (0600). It lives on the tmpfs runtime dir alongside
+    # the ISO, never the persistent home: it's rmtree'd once the ISO is built,
+    # but if that step is cut short by a crash the leftover must not survive a
+    # reboot at rest (the offline-disk-read threat the ISO placement guards).
+    seed_dir = runtime_dir / ".cloud-init-seed"
 
-    # Migration: older builds wrote the ISO into the persistent home. It can
-    # embed plaintext secrets, so remove any stale copy left there — the live
-    # ISO is now the tmpfs one above.
+    # Migration: older builds wrote the ISO — and staged the seed dir — in the
+    # persistent home. Both can embed plaintext secrets, so remove any stale
+    # copies left there; the live ISO and seed dir are now the tmpfs ones above.
     legacy_iso = home_path / "cloud-init.iso"
     try:
         legacy_iso.unlink()
@@ -789,6 +794,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         pass
     except OSError as e:
         log(f"  WARNING: could not remove legacy ISO {legacy_iso}: {e}")
+    legacy_seed_dir = home_path / ".cloud-init-seed"
+    if legacy_seed_dir.exists():
+        shutil.rmtree(legacy_seed_dir, ignore_errors=True)
+        log(f"  Removed legacy on-disk cloud-init seed dir: {legacy_seed_dir}")
 
     vm_cfg = config.get("vm", {})
     guest_user = vm_cfg.get("user", "workload")

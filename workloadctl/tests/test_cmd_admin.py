@@ -288,6 +288,49 @@ class ValidateSingleSchemaTest(unittest.TestCase):
         self.assertIn("requires [[containers]]", schema[0]["message"])
 
 
+class ValidateSingleGeneratorWarningsTest(unittest.TestCase):
+    """validate_single surfaces the generator's otherwise-kmsg-only warnings
+    (invalid userns, bridge-mode ports ignored, pet-in-multi, unknown
+    requires/after) as non-fatal warning checks (U4)."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+
+    def _validate(self, name, toml, known=()):
+        (self.tmp / name).mkdir()
+        (self.tmp / name / "workload.toml").write_text(toml)
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = [
+            types.SimpleNamespace(name=n, path=None) for n in known
+        ]
+        return cmd_admin.validate_single(config, manager, json_mode=True)
+
+    def test_invalid_userns_surfaced_as_warning(self):
+        result = self._validate(
+            "clitest-userns",
+            '[workload]\nname = "clitest-userns"\n\n'
+            '[container]\nimage = "x:latest"\n\n'
+            '[security]\nuserns = "private"\n',
+        )
+        warns = [c for c in result["checks"] if c["check"] == "generator_warning"]
+        self.assertTrue(any("invalid userns" in c["message"] for c in warns))
+        self.assertTrue(result["passed"], "a warning must not fail validation")
+        self.assertGreaterEqual(result["warnings"], 1)
+
+    def test_unknown_requires_surfaced(self):
+        result = self._validate(
+            "clitest-req",
+            '[workload]\nname = "clitest-req"\nrequires = ["ghost"]\n\n'
+            '[container]\nimage = "x:latest"\n',
+            known=("clitest-req",),
+        )
+        warns = [c for c in result["checks"] if c["check"] == "generator_warning"]
+        self.assertTrue(any("ghost" in c["message"] for c in warns))
+
+
 class CleanupOverrideDirTest(unittest.TestCase):
     """_cleanup_override_dir must not delete the instance dir when workload.toml
     lives inside it (post-subdir flip).  A naive rmdir-to-base would evict the

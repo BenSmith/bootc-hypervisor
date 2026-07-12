@@ -68,7 +68,7 @@ try:
         workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
-        infer_workload_kind,
+        infer_workload_kind, valid_userns_mode,
         get_next_uid, subid_lock,
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
         VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
@@ -219,29 +219,6 @@ def get_group_gid(group_name):
         return None
 
 
-def _valid_userns(mode):
-    """Validate a userns mode string.
-
-    Accepts "host", "keep-id", or "keep-id" with uid/gid parameters
-    (e.g. "keep-id:uid=1000,gid=1000").
-    """
-    if mode in ("keep-id", "host"):
-        return True
-    if not mode.startswith("keep-id:"):
-        return False
-    params = mode[len("keep-id:"):].split(",")
-    valid_keys = {"uid", "gid"}
-    seen = set()
-    for param in params:
-        if "=" not in param:
-            return False
-        key, value = param.split("=", 1)
-        if key not in valid_keys or key in seen or not value.isdigit():
-            return False
-        seen.add(key)
-    return len(seen) > 0
-
-
 def build_userns_args(security, uid, extra_groups, name):
     """Return podman --userns / --uidmap / --gidmap args for a security dict.
 
@@ -252,7 +229,7 @@ def build_userns_args(security, uid, extra_groups, name):
     """
     args = []
     userns_mode = security.get("userns", "keep-id")
-    if not _valid_userns(userns_mode):
+    if not valid_userns_mode(userns_mode):
         log_msg(f"WARNING: Invalid userns mode '{userns_mode}' for {name}. "
                 f"Defaulting to 'keep-id'.",
                 level="warning")

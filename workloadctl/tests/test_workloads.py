@@ -163,28 +163,12 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 
     def test_userns_valid(self):
         """security.userns is one of the valid values."""
-        def _valid_userns(mode):
-            if mode in ("keep-id", "host"):
-                return True
-            if not mode.startswith("keep-id:"):
-                return False
-            params = mode[len("keep-id:"):].split(",")
-            valid_keys = {"uid", "gid"}
-            seen = set()
-            for param in params:
-                if "=" not in param:
-                    return False
-                key, value = param.split("=", 1)
-                if key not in valid_keys or key in seen or not value.isdigit():
-                    return False
-                seen.add(key)
-            return len(seen) > 0
-
+        from workload_lib import valid_userns_mode
         for filename, config in ALL_WORKLOADS:
             userns = config.get("security", {}).get("userns")
             if userns is not None:
                 with self.subTest(config=filename):
-                    self.assertTrue(_valid_userns(userns),
+                    self.assertTrue(valid_userns_mode(userns),
                                     f"{filename}: invalid userns={userns}")
 
     def test_capabilities_are_uppercase(self):

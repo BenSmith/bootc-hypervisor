@@ -97,6 +97,10 @@ install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.service \
     %{buildroot}%{_unitdir}/workload-exporter.service
 install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter.timer \
     %{buildroot}%{_unitdir}/workload-exporter.timer
+install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter-disk.service \
+    %{buildroot}%{_unitdir}/workload-exporter-disk.service
+install -Dpm 0644 %{_sourcedir}/systemd/workload-exporter-disk.timer \
+    %{buildroot}%{_unitdir}/workload-exporter-disk.timer
 install -Dpm 0644 %{_sourcedir}/systemd/workloads.slice \
     %{buildroot}%{_unitdir}/workloads.slice
 
@@ -134,17 +138,17 @@ install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloa
 
 install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 
-# The timer is the enabled unit; its oneshot service is pulled in by the timer,
-# not enabled on its own.
+# The timers are the enabled units; each oneshot service is pulled in by its
+# timer, not enabled on its own.
 %post
-%systemd_post workload-exporter.timer
+%systemd_post workload-exporter.timer workload-exporter-disk.timer
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 
 %preun
-%systemd_preun workload-exporter.timer
+%systemd_preun workload-exporter.timer workload-exporter-disk.timer
 
 %postun
-%systemd_postun_with_restart workload-exporter.timer
+%systemd_postun_with_restart workload-exporter.timer workload-exporter-disk.timer
 # On full uninstall ($1 == 0, not upgrade) reverse the host-global state that
 # workload-ensure-user accretes but never per-workload teardown can safely
 # remove (it's shared across workloads while the package is installed):
@@ -176,6 +180,8 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_unitdir}/workload-exporter.service
 %{_unitdir}/workload-exporter.timer
+%{_unitdir}/workload-exporter-disk.service
+%{_unitdir}/workload-exporter-disk.timer
 %{_unitdir}/workloads.slice
 %{_presetdir}/80-workloadctl.preset
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
