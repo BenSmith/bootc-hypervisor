@@ -386,6 +386,49 @@ FIXTURES = {
             volumes = ["./data:/app/data:rw"]
         """),
     ],
+
+    # VM path — managed bridge, virtiofs volumes, data disk, on-reboot restart,
+    # resource caps. Exercises generate_vm_service (memfd/virtiofs branch, data
+    # disk, qmp-notify socket, resource lines), the two virtiofsd sidecars, the
+    # shared workload-bridge.service, and the build service.
+    "vm-full": [
+        ("vmfull", """\
+            [workload]
+            name = "vmfull"
+
+            [vm]
+            cloud_image_url = "https://example.test/img.qcow2"
+            cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            vcpus = 2
+            memory = "2G"
+            system_disk_size = "20G"
+            data_disk_size = "10G"
+            restart = "on-reboot"
+            volumes = ["./shared:/mnt/shared", "./cache:/var/cache"]
+
+            [resources]
+            memory_max = "4G"
+            cpu_quota = "150%"
+            cpu_weight = 200
+        """),
+    ],
+
+    # VM path — user-provided bridge, no volumes/data disk. Exercises the
+    # opposite branches: no workload-bridge.service, plain -m (no memfd), no
+    # virtiofs sidecars, default restart=always.
+    "vm-bridged": [
+        ("vmbridged", """\
+            [workload]
+            name = "vmbridged"
+
+            [vm]
+            cloud_image_url = "https://example.test/img.qcow2"
+            cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+            [vm.network]
+            bridge = "br0"
+        """),
+    ],
 }
 
 
