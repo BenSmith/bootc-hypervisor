@@ -242,6 +242,16 @@ name = "schema-reference"
 #                                   Drop this into users[].ssh_authorized_keys
 #                                   so `workloadctl exec` keeps working.
 #   ${WORKLOADCTL_WORKLOAD_NAME}  - The workload name (e.g. for hostname).
+#   ${WORKLOADCTL_VM_HOST_KEY_B64} - The workload's SSH *host* private key,
+#                                   base64-encoded (single line). REQUIRED for a
+#                                   custom seed: the CLI pins the host key
+#                                   (StrictHostKeyChecking=yes), so a custom
+#                                   user_data_file must install it via a
+#                                   write_files entry for
+#                                   /etc/ssh/ssh_host_ed25519_key (encoding: b64)
+#                                   or provisioning fails. The default seed does
+#                                   this automatically.
+#   ${WORKLOADCTL_VM_HOST_PUBKEY} - The matching SSH host public key.
 #
 # Notes:
 #   - The seed ISO lives in the workload's home dir, mode 0640, owned by

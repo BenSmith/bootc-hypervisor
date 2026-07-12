@@ -28,6 +28,7 @@ from substrate import (
     BackupError,
     LifecycleError,
     service_active,
+    _vm_ssh_command,
 )
 import cmd_drift
 import cmd_inspect
@@ -84,6 +85,23 @@ class _WorkloadDir:
         assert self._patcher is not None and self._tmp is not None
         self._patcher.stop()
         shutil.rmtree(self._tmp, ignore_errors=True)
+
+
+# ── _vm_ssh_command host-key pinning (S1) ────────────────────────────────────
+
+class TestVmSshCommandPinning(unittest.TestCase):
+    def test_pins_host_key_no_permissive_options(self):
+        config = _make_vm_config()
+        cmd = _vm_ssh_command(config, "192.168.200.5", exec_args=["true"])
+        joined = " ".join(cmd)
+        # Verifies against a per-workload known_hosts keyed by the stable name.
+        self.assertIn("StrictHostKeyChecking=yes", cmd)
+        self.assertIn(f"HostKeyAlias={config.name}", cmd)
+        self.assertIn(
+            f"UserKnownHostsFile={config.home_dir}/.ssh/vm_known_hosts", cmd)
+        # No trust-on-first-use / throwaway known_hosts remain.
+        self.assertNotIn("StrictHostKeyChecking=no", joined)
+        self.assertNotIn("/dev/null", joined)
 
 
 # ── VMSubstrate.liveness() ───────────────────────────────────────────────────

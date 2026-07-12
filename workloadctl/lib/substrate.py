@@ -154,12 +154,19 @@ def _vm_ssh_command(
     """Build the ssh argv used to reach a VM workload's guest user."""
     key_path = _vm_ssh_key(config)
     guest_user = _vm_guest_user(config)
+    known_hosts = config.home_dir / ".ssh" / "vm_known_hosts"
     cmd = [
         "ssh",
         *(["-t"] if sys.stdout.isatty() else []),
         "-i", str(key_path),
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
+        # Host-key pinning (S1): verify the guest against the per-workload
+        # known_hosts written at provisioning time, keyed by the stable
+        # workload name via HostKeyAlias so DHCP/ARP/mDNS address churn never
+        # invalidates the pin. No trust-on-first-use, no MITM on the shared
+        # bridge.
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        "-o", f"HostKeyAlias={config.name}",
         "-o", "LogLevel=ERROR",
     ]
     if connect_timeout is not None:
