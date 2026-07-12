@@ -30,7 +30,7 @@ for _p in (str(_CLI_SURFACE), str(_LIB)):
         sys.path.insert(0, _p)
 
 from target import RunResult, Target  # noqa: E402
-from workload_lib import QMPClient  # noqa: E402
+from qmp import QMPClient  # noqa: E402
 
 
 class VMTarget(Target):

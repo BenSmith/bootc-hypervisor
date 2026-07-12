@@ -15,7 +15,6 @@ from typing import Any
 
 from workload_lib import (
     HOST_USERNS_OPT_IN,
-    QMPClient,
     USERNAME_PREFIX,
     VM_SOCKET_DIR,
     units_outdated,
@@ -23,6 +22,7 @@ from workload_lib import (
     workload_config_dir,
     workload_service_units,
 )
+from qmp import QMPClient
 from podman import Podman
 from service_runtime import manager_active
 from substrate import NotApplicable, get_substrate, service_active

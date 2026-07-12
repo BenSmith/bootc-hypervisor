@@ -33,7 +33,8 @@ import tomllib
 from pathlib import Path
 
 from podman import Podman
-from workload_lib import QMPClient, ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
+from workload_lib import ENABLED_MARKER_NAME, iter_workloads, normalize_containers, workload_container_name, workload_podman_container_name, workload_root_dir, workload_service_name, workload_username
+from qmp import QMPClient
 
 
 WORKLOAD_CONFIG_DIR = Path(

@@ -16,10 +16,10 @@ import tempfile
 import tomllib
 
 from workload_lib import (
-    auto_detect_credentials,
     CREDSTORE_DIR,
     iter_workloads,
 )
+from secrets_template import auto_detect_credentials
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,

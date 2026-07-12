@@ -41,7 +41,7 @@ shutdown = _load("workload-vm-shutdown", "wl_vm_shutdown")
 
 
 class FakeQMP:
-    """Configurable stand-in for workload_lib.QMPClient."""
+    """Configurable stand-in for qmp.QMPClient."""
 
     def __init__(self, *, connect_raises=None, handler=None, messages=None):
         self.connect_raises = connect_raises

@@ -48,9 +48,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from workload_lib import (
-    auto_detect_credentials,
     CREDSTORE_DIR,
-    QMPClient,
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
@@ -58,6 +56,8 @@ from workload_lib import (
     workload_config_path,
     workload_service_units,
 )
+from qmp import QMPClient
+from secrets_template import auto_detect_credentials
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from podman import PodmanError
 from workloadctl_core import resolve_container_target

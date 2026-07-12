@@ -64,7 +64,6 @@ try:
     from workload_lib import (
         WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
         ENABLED_MARKER_NAME, iter_workloads,
-        SECRET_PATTERN, auto_detect_credentials, validate_env_key,
         workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
         normalize_containers, validate_workload_config, infer_workload_mode,
@@ -77,6 +76,9 @@ try:
         parse_memory_mib, virtiofs_tags, parse_volume_spec,
         selinux_type_name, render_sysusers_config,
         RUN_SYSTEMD_SYSTEM, workload_run_files,
+    )
+    from secrets_template import (
+        SECRET_PATTERN, auto_detect_credentials, validate_env_key,
     )
     _early_log("Python imports complete")
 except Exception as e:

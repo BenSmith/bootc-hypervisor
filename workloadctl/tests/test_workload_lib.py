@@ -17,15 +17,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
 import workload_lib
 from workload_lib import (
-    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
+    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
     workload_username, workload_service_name, workload_container_name,
     workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
-    auto_detect_credentials, resolve_secret_env_vars,
     validate_workload_config, infer_workload_mode, normalize_containers,
     parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address, vm_mac_collisions,
-    substitute_template, QMPClient,
     selinux_module_name, selinux_type_name,
     valid_userns_mode, collect_config_warnings,
+)
+from qmp import QMPClient
+from secrets_template import (
+    SECRET_PATTERN, auto_detect_credentials, resolve_secret_env_vars,
+    substitute_template,
 )
 
 
