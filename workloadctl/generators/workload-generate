@@ -1130,7 +1130,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     if credentials:
         lines.append("# Load encrypted credentials (auto-decrypted to /run/credentials/{service}/)")
-        for cred_name in credentials:
+        # sorted() so unit output is reproducible: auto_detect_credentials
+        # returns a set, whose iteration order otherwise varies per process.
+        for cred_name in sorted(credentials):
             cred_file = f"/etc/credstore.encrypted/{cred_name}"
             lines.append(f"LoadCredentialEncrypted={cred_name}:{cred_file}")
         lines.append("")
