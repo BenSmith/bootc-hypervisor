@@ -175,9 +175,11 @@ name = "schema-reference"
 #                  ExecStop) is never auto-restarted regardless.
 #   "on-failure" - leave the VM down on a clean exit (incl. a guest reboot);
 #                  relaunch only on a non-zero QEMU exit (a crash).
-#   "on-reboot"  - reserved: restart only on a guest reboot while honoring an
-#                  in-guest poweroff. Not implemented yet — currently falls
-#                  back to "always" with a warning.
+#   "on-reboot"  - relaunch on a guest reboot, but leave the VM down on an
+#                  in-guest poweroff (so `poweroff` inside the guest actually
+#                  stops it). A crash still relaunches. QEMU can't express this
+#                  via exit code, so the notify wrapper watches the QMP SHUTDOWN
+#                  event to tell a reboot from a poweroff.
 # Type: string ("always" | "on-failure" | "on-reboot")
 # Default: "always"
 # restart = "always"

@@ -143,8 +143,21 @@ def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
 
 VM_BRIDGE_IP, VM_BRIDGE_CIDR, VM_BRIDGE_SUBNET, VM_DHCP_RANGE = managed_bridge_params(
     os.environ.get("WORKLOADCTL_VM_BRIDGE_SUBNET", "192.168.200.0/24"))
+
+# Exit code workload-vm-notify uses to report a guest *reboot* (as opposed to a
+# poweroff, which exits 0). QEMU runs with -no-reboot, so both a guest reboot and
+# a guest poweroff make QEMU exit 0 — only the QMP SHUTDOWN event's reason tells
+# them apart. For [vm].restart = "on-reboot" the wrapper translates a reboot into
+# this nonzero code so systemd's Restart=on-failure cycles the VM, while a
+# poweroff (exit 0) leaves it down. Nonzero and outside QEMU's own 0/1 range.
+VM_REBOOT_EXIT_CODE = 133
+# Upstream DNS the bridge dnsmasq forwards guest queries to. Empty by default:
+# the bridge service then lets dnsmasq inherit the host's own /etc/resolv.conf,
+# so guests resolve exactly what the host does — including `.local` names via the
+# host's mDNS resolver — instead of leaking to a hardcoded public resolver. Set
+# WORKLOADCTL_VM_BRIDGE_DNS (comma-separated) to force specific upstreams.
 VM_BRIDGE_DNS = [s.strip() for s in os.environ.get(
-    "WORKLOADCTL_VM_BRIDGE_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
+    "WORKLOADCTL_VM_BRIDGE_DNS", "").split(",") if s.strip()]
 # dnsmasq for the bridge runs confined in the SELinux dnsmasq_t domain, which
 # may only write its lease/pid files in dnsmasq-owned, dnsmasq_lease_t-labeled
 # locations. /var/lib/workloads is labeled container_file_t (rootless podman),
@@ -378,6 +391,17 @@ class QMPClient:
         raise ConnectionError(
             f"no QMP reply for {command!r} after {max_events} messages"
         )
+
+    def next_message(self) -> dict | None:
+        """Read one QMP message (async event or reply), or None on a read
+        timeout while the monitor is still open. Raises ConnectionError when the
+        monitor closes (e.g. QEMU exited). Lets a caller watch for async events
+        like SHUTDOWN without conflating a quiet monitor with a closed one.
+        """
+        try:
+            return self._readline()
+        except socket.timeout:
+            return None
 
     def close(self):
         if self._sock is not None:

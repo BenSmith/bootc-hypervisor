@@ -1766,13 +1766,27 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("Restart=on-failure", svc)
         self.assertNotIn("Restart=always", svc)
 
-    def test_vm_restart_on_reboot_falls_back_to_always(self):
-        # "on-reboot" is reserved for reason-aware restart that isn't
-        # implemented yet; it must degrade to the safe always-on behavior.
+    def test_vm_restart_on_reboot(self):
+        # "on-reboot" restarts a guest reboot but honors a guest poweroff. It's
+        # implemented via Restart=on-failure + a reason-aware exit code from the
+        # notify wrapper (armed by the env var), watching a dedicated
+        # qmp-notify.sock monitor.
         self._write_vm_config(extra='restart = "on-reboot"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
-        self.assertIn("Restart=always", svc)
+        self.assertIn("Restart=on-failure", svc)
+        self.assertNotIn("Restart=always", svc)
+        self.assertIn("Environment=WORKLOADCTL_VM_REBOOT_EXIT=133", svc)
+        self.assertIn("qmp-notify.sock", svc)
+
+    def test_vm_restart_default_has_no_reboot_env_or_socket(self):
+        # The reason-aware machinery is on-reboot-only: default (always) units
+        # keep their shape — no reboot env, no extra QMP socket.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertNotIn("WORKLOADCTL_VM_REBOOT_EXIT", svc)
+        self.assertNotIn("qmp-notify.sock", svc)
 
     def test_main_service_owns_runtime_dir_with_preserve(self):
         # The per-VM socket dir must be owned by the *main* VM service (so
