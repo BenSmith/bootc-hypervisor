@@ -689,6 +689,259 @@ def _secret_mount_args(container, container_name):
     return args
 
 
+def _base_run_args(wl_lifecycle, container_name_quoted, mode, name, systemd_mode, service_type, pull_policy):
+    """Base podman run/create invocation: name/hostname/rm/replace/init/
+    systemd/sdnotify/pull/log-driver."""
+    args = [
+        "/usr/bin/podman run" if wl_lifecycle == "cattle" else "/usr/bin/podman create",
+        f"--name {container_name_quoted}",
+    ]
+    # In pod mode the container joins the pod's UTS namespace, so it cannot
+    # set its own hostname (podman rejects it). Single and bridge mode each
+    # own their UTS namespace and take a hostname normally.
+    if mode != "pod":
+        args.append(f"--hostname {dq(name)}")
+    if wl_lifecycle == "cattle":
+        args.append("--rm")
+        # --replace removes a same-named container leftover from an unclean shutdown
+        # (OOM kill, SIGKILL) before starting, breaking the "name already in use" loop.
+        args.append("--replace")
+
+    # --init provides a minimal init process (tini) for signal handling.
+    # Skip when container.systemd is set — the container either runs systemd
+    # as PID 1 or has its own init/entrypoint.
+    if systemd_mode is None:
+        args.append("--init")
+    else:
+        args.append(f"--systemd={systemd_mode}")
+
+    # Use sdnotify=conmon only when the unit type is notify; otherwise ignore.
+    sdnotify = "conmon" if service_type == "notify" else "ignore"
+    args.extend([
+        f"--sdnotify={sdnotify}",
+        f"--pull={pull_policy}",
+        # passthrough: conmon hands the container's stdout/stderr fds straight
+        # to the unit's journal stream (single copy, named via the unit's
+        # SyslogIdentifier=). The journald driver would double-log every line:
+        # once tagged by conmon, once as untagged podman[pid] via the attached
+        # foreground `podman run` relaying container output to unit stdout.
+        # `workloadctl logs` reads the journal by unit, so it is unaffected.
+        "--log-driver=passthrough",
+    ])
+    return args
+
+
+def _security_args(container, config, mode, name, privileged, extra_groups):
+    """--user/--cap-add/--security-opt (selinux label, seccomp baseline,
+    privileged)/--group-add=keep-groups flags from [security]."""
+    args = []
+
+    # Override the container image's USER directive if specified
+    container_user = container.get("container", {}).get("user", "")
+    if container_user:
+        args.append(f"--user={container_user}")
+
+    capabilities = container.get("security", {}).get("capabilities", [])
+    for cap in capabilities:
+        args.append(f"--cap-add={cap}")
+
+    security_opts = container.get("security", {}).get("security_opt", [])
+    for opt in security_opts:
+        args.append(f"--security-opt={opt}")
+
+    # Per-workload SELinux type: launch the container under wl_<name>.process
+    # instead of widening the shared container_t/container_init_t domains (a
+    # global semodule load). The matching CIL policy module is loaded by the CLI
+    # on enable; here we only apply the label, which is a pure string function of
+    # the workload name — no I/O, boot-path safe.
+    # selinux_policy is a workload-level decision (one module per workload, keyed
+    # on the workload name). Read it from the top-level [security] block so the
+    # label matches what cmd_enable loads in all modes including multi-container.
+    workload_selinux = config.get("security", {}).get("selinux_policy")
+    if mode != "single" and container.get("security", {}).get("selinux_policy"):
+        log_msg(f"WARNING: {name}/{container.get('name', '?')} sets selinux_policy "
+                f"under [containers.security]; this is ignored. Set selinux_policy "
+                f"in the top-level [security] block to apply it to all containers "
+                f"in this workload.", level="warning")
+    if workload_selinux:
+        args.append(f"--security-opt=label=type:{selinux_type_name(name)}")
+
+    # Apply baseline seccomp profile unless the workload overrides it or uses --privileged
+    # (--privileged disables seccomp anyway; adding it would just be noise)
+    if not privileged and not any(opt.startswith("seccomp=") for opt in security_opts):
+        args.append(f"--security-opt=seccomp={SECCOMP_BASELINE}")
+
+    if privileged:
+        log_msg(f"WARNING: {name} uses privileged=true. "
+                f"Consider using specific capabilities for better security.", level="warning")
+        args.append("--privileged")
+
+    # Pass host supplementary groups into the container.
+    # keep-groups preserves all supplementary groups from the host process and
+    # is required for @GID userns delegation in --gidmap +GID:@GID:1.
+    # The workload user is added to extra_groups via sysusers 'm' directive.
+    if extra_groups:
+        args.append("--group-add=keep-groups")
+
+    return args
+
+
+def _device_args(container, uid):
+    """--device flags: generic passthrough + input/audio/virtualization
+    convenience flags from [devices]."""
+    args = []
+    devices_config = container.get("devices", {})
+    generic_devices = devices_config.get("devices", [])
+    for device in generic_devices:
+        args.append(f"--device {device}")
+
+    # CONVENIENCE FLAGS (multi-device shortcuts)
+
+    # Input devices (2 devices)
+    if devices_config.get("input", False):
+        args.extend([
+            "--device /dev/input",
+            "--device /dev/uinput",
+        ])
+
+    # Audio devices (device + socket auto-detection)
+    if devices_config.get("audio", False):
+        args.append("--device /dev/snd")
+        # Mount PulseAudio/PipeWire sockets. XDG_RUNTIME_DIR is deterministically
+        # /run/user/<uid> (set by workload-ensure-user's EnvironmentFile), and uid
+        # is already known at generation time -- embed it directly rather than
+        # relying on ${XDG_RUNTIME_DIR} runtime expansion, which resolves to an
+        # empty string (mounting host "/pulse") if the EnvironmentFile is missing.
+        for suffix in ["pulse", "pipewire-0"]:
+            args.append(f"--volume /run/user/{uid}/{suffix}:/run/user/{uid}/{suffix}:ro")
+
+    # Virtualization devices (3 devices)
+    if devices_config.get("virtualization", False):
+        args.extend([
+            "--device /dev/kvm",
+            "--device /dev/vhost-net",
+            "--device /dev/vhost-vsock",
+        ])
+
+    return args
+
+
+def _cgroup_args(container, name):
+    """--shm-size/--pids-limit/--memory/--cpus/--cpu-shares/--device-read-bps/
+    --device-write-bps flags from [resources], plus their warnings."""
+    args = []
+
+    # Shared memory size
+    shm_size = container.get("resources", {}).get("shm_size", "")
+    if shm_size:
+        args.append(f"--shm-size={shm_size}")
+
+    # Container PID limit (podman default is 2048, independent of systemd TasksMax)
+    tasks_max = container.get("resources", {}).get("tasks_max", 0)
+    if tasks_max:
+        args.append(f"--pids-limit={tasks_max}")
+
+    # Per-container cgroup limits via podman flags. Under option 1b (non-split
+    # topology) payloads live in a transient libpod scope under the user manager;
+    # podman flags write directly to the scope's cgroup files via OCI/crun, so they
+    # bind in all modes (single/bridge/pod) — spike-verified on tp 2026-06-11.
+    # Workload-level limits (aggregate cap for the whole user manager) are in the
+    # user@<uid>.service.d drop-in; these per-container flags add finer-grained OOM
+    # scoping on top.
+    c_res = container.get("resources", {})
+    if "memory_max" in c_res:
+        args.append(f"--memory={c_res['memory_max']}")
+    if "cpu_quota" in c_res:
+        # CPUQuota is a percentage string ("50%"); --cpus takes a float (0.5 = ½ core)
+        try:
+            cpus_val = str(float(c_res["cpu_quota"].rstrip("%")) / 100)
+            args.append(f"--cpus={cpus_val}")
+        except (ValueError, AttributeError):
+            log_msg(f"WARNING: {name}: cannot convert cpu_quota "
+                    f"'{c_res['cpu_quota']}' to --cpus; skipping", level="warning")
+    if "cpu_weight" in c_res:
+        args.append(f"--cpu-shares={c_res['cpu_weight']}")
+    if "memory_high" in c_res:
+        # ADR 001 source-verified: no podman flag writes memory.high.
+        # --memory-reservation maps to memory.low, not memory.high.
+        # Use workload-level memory_high (in the drop-in) for soft limits.
+        log_msg(f"WARNING: {name}: per-container memory_high is not settable via "
+                f"podman flags (ADR 001); use workload-level memory_high instead",
+                level="warning")
+    for spec in c_res.get("io_read_bandwidth_max", []):
+        parts = spec.split(None, 1)
+        if len(parts) == 2:
+            args.append(f"--device-read-bps={parts[0]}:{parts[1]}")
+    for spec in c_res.get("io_write_bandwidth_max", []):
+        parts = spec.split(None, 1)
+        if len(parts) == 2:
+            args.append(f"--device-write-bps={parts[0]}:{parts[1]}")
+
+    return args
+
+
+def _network_args(mode, workload, name, container):
+    """--network/--publish/--network-alias flags: single/pod/bridge mode."""
+    args = []
+    if mode == "single":
+        network_config = workload.get("network", {})
+        network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
+
+        args.append(f"--network={dq(network_mode)}")
+        if network_mode not in ("host", "none"):
+            for port in network_config.get("ports", []):
+                args.append(f"--publish {port}")
+    elif mode == "pod":
+        args.append(f"--pod={dq(f'workload-{name}')}")
+    else:  # bridge
+        args.append(f"--network={dq(f'workload-{name}-net')}")
+        # Publish the short container name as a DNS alias so siblings resolve
+        # each other by name (e.g. "db"); the --name is workload-{name}-{ctr}.
+        args.append(f"--network-alias={dq(container['name'])}")
+        for port in container.get("network", {}).get("ports", []):
+            args.append(f"--publish {port}")
+    return args
+
+
+def _volume_args(container, home_dir, name):
+    """--volume flags: [storage].volumes expansion, escape-warn, quoting."""
+    args = []
+    for volume in container.get("storage", {}).get("volumes", []):
+        expanded = expand_volume_path(volume, home_dir)
+        if ':' in expanded:
+            parts = expanded.split(':', 2)
+            # Warn if host path escapes the workload home directory
+            try:
+                resolved = str(Path(parts[0]).resolve())
+                root = str(workload_root_dir(name))
+                if not resolved.startswith(root + '/') and resolved != root:
+                    log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
+                            f"'{resolved}' outside workload dir '{root}'", level="warning")
+            except Exception:
+                pass
+            expanded = ':'.join(dq(p) for p in parts)
+        else:
+            expanded = dq(expanded)
+        args.append(f"--volume {expanded}")
+    return args
+
+
+def _env_args(container, container_name, has_secret_env_vars):
+    """--env flags: HOST_IP, plain container env vars, and (if any env var
+    references a secret) the per-container --env-file written by
+    workload-write-env."""
+    args = ["--env HOST_IP=${HOST_IP}"]
+    # Plain env vars go as --env args; secret env vars go via --env-file
+    args.extend(build_plain_env_args(container))
+    if has_secret_env_vars:
+        # Per-container secrets file: each container has its own
+        # LoadCredentialEncrypted/CREDENTIALS_DIRECTORY, so a shared file
+        # would race when multiple containers in the same workload start.
+        secrets_env_file = f"/run/workload-env/{container_name}.secrets"
+        args.append(f"--env-file {dq(secrets_env_file)}")
+    return args
+
+
 def generate_system_service(workload, container, user_name, uid, mode="single"):
     """Generate systemd system service for rootless podman execution.
 
@@ -820,42 +1073,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
         )
         wl_lifecycle = "cattle"
 
-    podman_args = [
-        "/usr/bin/podman run" if wl_lifecycle == "cattle" else "/usr/bin/podman create",
-        f"--name {container_name_quoted}",
-    ]
-    # In pod mode the container joins the pod's UTS namespace, so it cannot
-    # set its own hostname (podman rejects it). Single and bridge mode each
-    # own their UTS namespace and take a hostname normally.
-    if mode != "pod":
-        podman_args.append(f"--hostname {dq(name)}")
-    if wl_lifecycle == "cattle":
-        podman_args.append("--rm")
-        # --replace removes a same-named container leftover from an unclean shutdown
-        # (OOM kill, SIGKILL) before starting, breaking the "name already in use" loop.
-        podman_args.append("--replace")
-
-    # --init provides a minimal init process (tini) for signal handling.
-    # Skip when container.systemd is set — the container either runs systemd
-    # as PID 1 or has its own init/entrypoint.
-    if systemd_mode is None:
-        podman_args.append("--init")
-    else:
-        podman_args.append(f"--systemd={systemd_mode}")
-
-    # Use sdnotify=conmon only when the unit type is notify; otherwise ignore.
-    sdnotify = "conmon" if service_type == "notify" else "ignore"
-    podman_args.extend([
-        f"--sdnotify={sdnotify}",
-        f"--pull={pull_policy}",
-        # passthrough: conmon hands the container's stdout/stderr fds straight
-        # to the unit's journal stream (single copy, named via the unit's
-        # SyslogIdentifier=). The journald driver would double-log every line:
-        # once tagged by conmon, once as untagged podman[pid] via the attached
-        # foreground `podman run` relaying container output to unit stdout.
-        # `workloadctl logs` reads the journal by unit, so it is unaffected.
-        "--log-driver=passthrough",
-    ])
+    podman_args = _base_run_args(
+        wl_lifecycle, container_name_quoted, mode, name, systemd_mode, service_type, pull_policy
+    )
 
     # User namespace / UID-GID maps.
     # In pod mode the user namespace is owned by the pod's infra container and
@@ -872,135 +1092,14 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
             build_userns_args(container.get("security", {}), uid, extra_groups, name)
         )
 
-    # Override the container image's USER directive if specified
-    container_user = container.get("container", {}).get("user", "")
-    if container_user:
-        podman_args.append(f"--user={container_user}")
-
-    capabilities = container.get("security", {}).get("capabilities", [])
-    for cap in capabilities:
-        podman_args.append(f"--cap-add={cap}")
-
-    security_opts = container.get("security", {}).get("security_opt", [])
-    for opt in security_opts:
-        podman_args.append(f"--security-opt={opt}")
-
-    # Per-workload SELinux type: launch the container under wl_<name>.process
-    # instead of widening the shared container_t/container_init_t domains (a
-    # global semodule load). The matching CIL policy module is loaded by the CLI
-    # on enable; here we only apply the label, which is a pure string function of
-    # the workload name — no I/O, boot-path safe.
-    # selinux_policy is a workload-level decision (one module per workload, keyed
-    # on the workload name). Read it from the top-level [security] block so the
-    # label matches what cmd_enable loads in all modes including multi-container.
-    workload_selinux = config.get("security", {}).get("selinux_policy")
-    if mode != "single" and container.get("security", {}).get("selinux_policy"):
-        log_msg(f"WARNING: {name}/{container.get('name', '?')} sets selinux_policy "
-                f"under [containers.security]; this is ignored. Set selinux_policy "
-                f"in the top-level [security] block to apply it to all containers "
-                f"in this workload.", level="warning")
-    if workload_selinux:
-        podman_args.append(f"--security-opt=label=type:{selinux_type_name(name)}")
-
-    # Apply baseline seccomp profile unless the workload overrides it or uses --privileged
-    # (--privileged disables seccomp anyway; adding it would just be noise)
-    if not privileged and not any(opt.startswith("seccomp=") for opt in security_opts):
-        podman_args.append(f"--security-opt=seccomp={SECCOMP_BASELINE}")
-
-    if privileged:
-        log_msg(f"WARNING: {name} uses privileged=true. "
-                f"Consider using specific capabilities for better security.", level="warning")
-        podman_args.append("--privileged")
-
-    # Pass host supplementary groups into the container.
-    # keep-groups preserves all supplementary groups from the host process and
-    # is required for @GID userns delegation in --gidmap +GID:@GID:1.
-    # The workload user is added to extra_groups via sysusers 'm' directive.
-    if extra_groups:
-        podman_args.append("--group-add=keep-groups")
+    podman_args.extend(_security_args(container, config, mode, name, privileged, extra_groups))
 
     # GPU devices (convenience flag)
     podman_args.extend(_gpu_device_args(gpu_vendor, gpu_spec))
 
-    # Generic device passthrough
-    devices_config = container.get("devices", {})
-    generic_devices = devices_config.get("devices", [])
-    for device in generic_devices:
-        podman_args.append(f"--device {device}")
+    podman_args.extend(_device_args(container, uid))
 
-    # CONVENIENCE FLAGS (multi-device shortcuts)
-
-    # Input devices (2 devices)
-    if devices_config.get("input", False):
-        podman_args.extend([
-            "--device /dev/input",
-            "--device /dev/uinput",
-        ])
-
-    # Audio devices (device + socket auto-detection)
-    if devices_config.get("audio", False):
-        podman_args.append("--device /dev/snd")
-        # Mount PulseAudio/PipeWire sockets. XDG_RUNTIME_DIR is deterministically
-        # /run/user/<uid> (set by workload-ensure-user's EnvironmentFile), and uid
-        # is already known at generation time -- embed it directly rather than
-        # relying on ${XDG_RUNTIME_DIR} runtime expansion, which resolves to an
-        # empty string (mounting host "/pulse") if the EnvironmentFile is missing.
-        for suffix in ["pulse", "pipewire-0"]:
-            podman_args.append(f"--volume /run/user/{uid}/{suffix}:/run/user/{uid}/{suffix}:ro")
-
-    # Virtualization devices (3 devices)
-    if devices_config.get("virtualization", False):
-        podman_args.extend([
-            "--device /dev/kvm",
-            "--device /dev/vhost-net",
-            "--device /dev/vhost-vsock",
-        ])
-
-    # Shared memory size
-    shm_size = container.get("resources", {}).get("shm_size", "")
-    if shm_size:
-        podman_args.append(f"--shm-size={shm_size}")
-
-    # Container PID limit (podman default is 2048, independent of systemd TasksMax)
-    tasks_max = container.get("resources", {}).get("tasks_max", 0)
-    if tasks_max:
-        podman_args.append(f"--pids-limit={tasks_max}")
-
-    # Per-container cgroup limits via podman flags. Under option 1b (non-split
-    # topology) payloads live in a transient libpod scope under the user manager;
-    # podman flags write directly to the scope's cgroup files via OCI/crun, so they
-    # bind in all modes (single/bridge/pod) — spike-verified on tp 2026-06-11.
-    # Workload-level limits (aggregate cap for the whole user manager) are in the
-    # user@<uid>.service.d drop-in; these per-container flags add finer-grained OOM
-    # scoping on top.
-    c_res = container.get("resources", {})
-    if "memory_max" in c_res:
-        podman_args.append(f"--memory={c_res['memory_max']}")
-    if "cpu_quota" in c_res:
-        # CPUQuota is a percentage string ("50%"); --cpus takes a float (0.5 = ½ core)
-        try:
-            cpus_val = str(float(c_res["cpu_quota"].rstrip("%")) / 100)
-            podman_args.append(f"--cpus={cpus_val}")
-        except (ValueError, AttributeError):
-            log_msg(f"WARNING: {name}: cannot convert cpu_quota "
-                    f"'{c_res['cpu_quota']}' to --cpus; skipping", level="warning")
-    if "cpu_weight" in c_res:
-        podman_args.append(f"--cpu-shares={c_res['cpu_weight']}")
-    if "memory_high" in c_res:
-        # ADR 001 source-verified: no podman flag writes memory.high.
-        # --memory-reservation maps to memory.low, not memory.high.
-        # Use workload-level memory_high (in the drop-in) for soft limits.
-        log_msg(f"WARNING: {name}: per-container memory_high is not settable via "
-                f"podman flags (ADR 001); use workload-level memory_high instead",
-                level="warning")
-    for spec in c_res.get("io_read_bandwidth_max", []):
-        parts = spec.split(None, 1)
-        if len(parts) == 2:
-            podman_args.append(f"--device-read-bps={parts[0]}:{parts[1]}")
-    for spec in c_res.get("io_write_bandwidth_max", []):
-        parts = spec.split(None, 1)
-        if len(parts) == 2:
-            podman_args.append(f"--device-write-bps={parts[0]}:{parts[1]}")
+    podman_args.extend(_cgroup_args(container, name))
 
     # Network configuration.
     #  - single: workload-level [network] mode + ports.
@@ -1008,41 +1107,9 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     #    --network/--publish — podman rejects them on a pod member).
     #  - bridge: the container joins the per-workload bridge network and
     #    publishes its own [containers.network].ports.
-    if mode == "single":
-        network_config = workload.get("network", {})
-        network_mode = network_config.get("mode", "pasta")  # Default to pasta (works in Podman 5.3+)
+    podman_args.extend(_network_args(mode, workload, name, container))
 
-        podman_args.append(f"--network={dq(network_mode)}")
-        if network_mode not in ("host", "none"):
-            for port in network_config.get("ports", []):
-                podman_args.append(f"--publish {port}")
-    elif mode == "pod":
-        podman_args.append(f"--pod={dq(f'workload-{name}')}")
-    else:  # bridge
-        podman_args.append(f"--network={dq(f'workload-{name}-net')}")
-        # Publish the short container name as a DNS alias so siblings resolve
-        # each other by name (e.g. "db"); the --name is workload-{name}-{ctr}.
-        podman_args.append(f"--network-alias={dq(container['name'])}")
-        for port in container.get("network", {}).get("ports", []):
-            podman_args.append(f"--publish {port}")
-
-    for volume in container.get("storage", {}).get("volumes", []):
-        expanded = expand_volume_path(volume, home_dir)
-        if ':' in expanded:
-            parts = expanded.split(':', 2)
-            # Warn if host path escapes the workload home directory
-            try:
-                resolved = str(Path(parts[0]).resolve())
-                root = str(workload_root_dir(name))
-                if not resolved.startswith(root + '/') and resolved != root:
-                    log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
-                            f"'{resolved}' outside workload dir '{root}'", level="warning")
-            except Exception:
-                pass
-            expanded = ':'.join(dq(p) for p in parts)
-        else:
-            expanded = dq(expanded)
-        podman_args.append(f"--volume {expanded}")
+    podman_args.extend(_volume_args(container, home_dir, name))
 
     credentials = auto_detect_credentials({
         "container": container.get("container", {}),
@@ -1055,23 +1122,12 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     # HOST_IP is auto-detected by workload-ensure-user and written to the
     # EnvironmentFile; pass it into the container so configs can use it.
-    podman_args.append("--env HOST_IP=${HOST_IP}")
-
-    # Plain env vars go as --env args; secret env vars go via --env-file
-    env_args = build_plain_env_args(container)
-    podman_args.extend(env_args)
-
     # Check if any env vars reference secrets (need --env-file from workload-write-env)
     has_secret_env_vars = any(
         SECRET_PATTERN.search(str(v))
         for v in container.get("container", {}).get("environment", {}).values()
     )
-    if has_secret_env_vars:
-        # Per-container secrets file: each container has its own
-        # LoadCredentialEncrypted/CREDENTIALS_DIRECTORY, so a shared file
-        # would race when multiple containers in the same workload start.
-        secrets_env_file = f"/run/workload-env/{container_name}.secrets"
-        podman_args.append(f"--env-file {dq(secrets_env_file)}")
+    podman_args.extend(_env_args(container, container_name, has_secret_env_vars))
 
     # Health checks — podman's native user-manager timer works under 1b (non-split)
     podman_args.extend(_health_check_args(container))
