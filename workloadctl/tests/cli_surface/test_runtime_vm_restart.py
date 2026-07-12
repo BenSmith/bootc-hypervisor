@@ -77,6 +77,25 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
             _dump_journal(target, WORKLOAD)
             raise
 
+        # Deploy-time guard: before exercising the runtime behavior, confirm the
+        # *deployed* unit actually carries on-reboot's shape. This localizes a
+        # failure — if the generator or the enable path didn't apply
+        # restart=on-reboot, the live unit is the default Restart=always and the
+        # reboot/poweroff dance below would be meaningless. Read the unit off the
+        # guest and assert on-failure + the reboot-exit env are present.
+        unit_path = f"/run/systemd/system/{SERVICE}"
+        deployed_unit = target.read(unit_path)
+        assert "Restart=on-failure" in deployed_unit and "Restart=always" not in deployed_unit, (
+            f"deployed {SERVICE} has the wrong Restart directive — restart=on-reboot "
+            f"was not applied at enable time (this is the O6 generation/enable path, "
+            f"not the wrapper). Unit:\n{deployed_unit}"
+        )
+        assert "WORKLOADCTL_VM_REBOOT_EXIT=133" in deployed_unit, (
+            f"deployed {SERVICE} is missing the reboot-exit env that arms the "
+            f"wrapper's reason detection — restart=on-reboot not fully applied. "
+            f"Unit:\n{deployed_unit}"
+        )
+
         # Reachable + capture the pre-reboot boot_id.
         first = poll_vm_reachable(target, WORKLOAD, token="rt-reboot-up", timeout=300)
         if not (first and first.rc == 0 and "rt-reboot-up" in first.stdout):

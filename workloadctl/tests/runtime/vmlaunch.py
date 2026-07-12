@@ -296,12 +296,18 @@ def _is_local_store_ref(ref: str) -> bool:
 
 
 def _ensure_bootc_image() -> str:
-    """Resolve the gate source bootc image ref.
+    """Resolve the gate source bootc image ref, refreshing it for registry refs.
 
     A `localhost/…` override must already be in root's podman store (BIB reads it
-    via the bound store) — a missing one is a hard error. The default
-    `registry.local` ref is pulled by BIB itself, so there is nothing to
-    pre-stage; return it as-is."""
+    via the bound store) — a missing one is a hard error; it is whatever the
+    operator staged, so it is not re-pulled.
+
+    A registry ref (the `registry.local` default) is **pulled fresh into root's
+    store here**. BIB reads the source image from that store and only pulls when
+    it is *absent*, so a present-but-stale copy would otherwise be built (and the
+    qcow2 cache keyed on its stale digest) — silently testing an old image. The
+    pull is best-effort: if it fails but a copy already exists, warn and proceed;
+    if it fails and none exists, hard error."""
     ref = _GATE_IMAGE
     if _is_local_store_ref(ref):
         if subprocess.run(["sudo", "podman", "image", "exists", ref]).returncode != 0:
@@ -309,6 +315,26 @@ def _ensure_bootc_image() -> str:
                 f"gate image {ref!r} (WLRT_GATE_IMAGE) not found in the root "
                 f"podman store; pull/build+tag it, or use the registry default"
             )
+        return ref
+
+    # Registry ref: refresh root's store to the registry's current image so the
+    # gate builds+tests the tip, not a stale local copy. --tls-verify=false for
+    # the Caddy-fronted registry.local https.
+    pull = subprocess.run(
+        ["sudo", "podman", "pull", "--tls-verify=false", ref],
+        capture_output=True, text=True,
+    )
+    if pull.returncode != 0:
+        exists = subprocess.run(
+            ["sudo", "podman", "image", "exists", ref]
+        ).returncode == 0
+        if not exists:
+            raise RuntimeError(
+                f"gate image {ref!r} could not be pulled and is not in root's "
+                f"podman store:\n{pull.stderr.strip()}"
+            )
+        print(f"vmlaunch: warning: could not refresh {ref!r} "
+              f"({pull.stderr.strip()}); using the copy already in root's store")
     return ref
 
 

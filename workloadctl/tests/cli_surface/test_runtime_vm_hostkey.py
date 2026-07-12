@@ -71,19 +71,31 @@ def test_vm_ssh_hostkey_swap_is_refused(target):
             f"{'' if good is None else good.stdout}\n{'' if good is None else good.stderr}"
         )
 
-        # Re-key the guest's ed25519 host key (the pinned type) and bounce sshd.
-        # Run it detached via systemd-run so restarting sshd — which drops this
-        # very SSH session — doesn't make the exec itself report failure and
-        # mask the result we're actually testing.
-        rekey = (
-            "rm -f /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub && "
-            "ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key && "
-            "systemctl restart sshd"
+        # Re-key the guest's ed25519 host key (the pinned type), then bounce sshd.
+        # Issue each step as its own simple-argv exec: a compound `sh -c "… && …"`
+        # string does not survive the double SSH hop (harness→host→guest) intact,
+        # so the pieces are run separately. Removing the old key first means
+        # ssh-keygen won't stop on an interactive overwrite prompt.
+        target.wl_exec(
+            WORKLOAD,
+            ["sudo", "rm", "-f",
+             "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_ed25519_key.pub"],
+            sudo=True, check=True, timeout=60,
         )
+        # `ssh-keygen -A` regenerates just the now-missing ed25519 host key with
+        # an empty passphrase — no `-N ""` empty-string argv element, which
+        # `workloadctl exec`'s SSH hop to the guest silently drops (ssh joins argv
+        # with spaces, so an empty arg vanishes and mangles the flags).
+        target.wl_exec(
+            WORKLOAD, ["sudo", "ssh-keygen", "-A"],
+            sudo=True, check=True, timeout=60,
+        )
+        # Restart sshd detached (it drops this very SSH session, which would
+        # otherwise make the exec itself report failure and mask the result).
         target.wl_exec(
             WORKLOAD,
             ["sudo", "systemd-run", "--collect", "--unit=rt-vm-rekey",
-             "/bin/sh", "-c", rekey],
+             "systemctl", "restart", "sshd"],
             sudo=True, check=True, timeout=60,
         )
 
