@@ -238,6 +238,71 @@ class TestBadBundleNames(unittest.TestCase):
                 validate_workload_name(name)  # no raise
 
 
+class TestControlCharInjection(unittest.TestCase):
+    """Boundary: a container-config string with an embedded newline must not
+    reach the generator, or it could inject a following systemd directive.
+
+    validate_workload_config walks the whole container config and rejects any
+    string carrying a C0 control char (except tab) or DEL — covering every
+    ExecStart token and the raw-spliced [resources.custom_directives] values,
+    regardless of whether that particular site is dq()'d.
+    """
+
+    def _base(self):
+        return {
+            "workload": {"name": "app"},
+            "container": {"image": "localhost/x:latest"},
+        }
+
+    def test_newline_in_env_value_rejected(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["container"]["environment"] = {"K": "foo\nExecStartPost=/bin/evil"}
+        errors = validate_workload_config(cfg)
+        self.assertTrue(
+            any("control character" in e for e in errors),
+            f"newline env value not rejected: {errors}",
+        )
+
+    def test_newline_in_custom_directive_rejected(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["resources"] = {"custom_directives": {"Environment": "a\nExecStop=x"}}
+        errors = validate_workload_config(cfg)
+        self.assertTrue(any("control character" in e for e in errors))
+
+    def test_control_chars_in_various_sites_rejected(self):
+        from validation import validate_workload_config
+        for mutate in (
+            lambda c: c["container"].__setitem__("image", "img\nx"),
+            lambda c: c["container"].__setitem__("command", "run\r0"),
+            lambda c: c["container"].__setitem__(
+                "storage", {"volumes": ["/a:/b\n:ro"]}),
+            lambda c: c.__setitem__(
+                "security", {"capabilities": ["NET_ADMIN\nfoo"]}),
+            lambda c: c.__setitem__("devices", {"devices": ["/dev/x\x00"]}),
+        ):
+            cfg = self._base()
+            mutate(cfg)
+            with self.subTest(cfg=cfg):
+                errors = validate_workload_config(cfg)
+                self.assertTrue(
+                    any("control character" in e for e in errors),
+                    f"control char not rejected: {errors}",
+                )
+
+    def test_tab_and_clean_values_accepted(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        # tab is allowed; ordinary values must not trip the check
+        cfg["container"]["environment"] = {"ARGS": "a\tb", "URL": "https://x/y"}
+        errors = validate_workload_config(cfg)
+        self.assertFalse(
+            any("control character" in e for e in errors),
+            f"clean/tab values wrongly rejected: {errors}",
+        )
+
+
 class TestSecretDollarEscape(unittest.TestCase):
     """Boundary 4: the $${SECRET:x} literal-dollar escape must NOT resolve.
 

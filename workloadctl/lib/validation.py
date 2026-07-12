@@ -34,6 +34,52 @@ def validate_container_name(name: str):
         raise ValueError(f"Invalid container name: {name!r}")
 
 
+def _control_char_in(value: str) -> str | None:
+    """Return the first disallowed control character in `value`, or None.
+
+    Tab is allowed (systemd keeps it through quote handling and it's a
+    legitimate separator); every other C0 control plus DEL is rejected. The one
+    that matters is the raw newline: a single directive value is one line, so an
+    embedded newline in any string that gets spliced into the generated unit —
+    an ExecStart token (image, command, --user/--cap-add/--device/env value,
+    volume spec) or a [resources.custom_directives] value emitted verbatim —
+    would terminate the directive and let the tail parse as a *following*
+    directive. NUL terminates C strings similarly.
+    """
+    for ch in value:
+        o = ord(ch)
+        if (o < 32 and ch != "\t") or o == 127:
+            return ch
+    return None
+
+
+def _reject_control_chars(node, path: str, errors: list[str]):
+    """Recursively flag control characters in any string within `node`.
+
+    Walks the whole container config so every string that can reach the unit is
+    covered (and stays covered as fields are added), rather than escaping each
+    injection site by hand. Container-config values are never legitimately
+    multi-line, so this is a hard error: fail the config loudly at validate/boot
+    instead of emitting a malformed or directive-injected unit. Not applied to
+    VM configs, whose cloud-init template_vars may legitimately be multi-line.
+    """
+    if isinstance(node, str):
+        bad = _control_char_in(node)
+        if bad is not None:
+            where = path or "value"
+            errors.append(
+                f"{where} contains a disallowed control character {bad!r}; "
+                f"control characters corrupt the generated systemd unit"
+            )
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            child = f"{path}.{k}" if path else str(k)
+            _reject_control_chars(v, child, errors)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _reject_control_chars(v, f"{path}[{i}]", errors)
+
+
 def validate_workload_config(config: dict) -> list[str]:
     """Run schema-level checks. Returns a list of error strings (empty = OK)."""
     errors = []
@@ -45,6 +91,8 @@ def validate_workload_config(config: dict) -> list[str]:
         return errors
 
     # --- container validation ---
+    _reject_control_chars(config, "", errors)
+
     has_container = "container" in config
     has_containers = "containers" in config
 
