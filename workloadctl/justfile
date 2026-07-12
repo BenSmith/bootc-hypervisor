@@ -16,6 +16,39 @@ test-cli-vm target:
 test-cli-deploy target:
   pytest tests/cli_surface/ --target={{target}} --deploy -v
 
+# Runtime rung — boot a harness-owned VM and run the `runtime`-marked checks.
+# WLRT_MODE=dev (default): cached Fedora Cloud image + local RPM. WLRT_MODE=gate:
+# the real bootc image + swtpm (B1b). Skips cleanly without /dev/kvm + QEMU.
+test-runtime:
+  pytest tests/cli_surface/ -m runtime --target=vm:${WLRT_MODE:-dev} -v
+
+# Full KVM-host verification sweep: CLI surface (container+VM) + runtime rung in
+# both dev and gate fidelity. Run this ON a KVM host — the runtime rung boots
+# QEMU locally, so it can't be driven over SSH. {{target}} is the CLI-surface
+# substrate (default `local` = this host); pair with `just test` for rungs 1-2.
+# Each step skips cleanly if its prerequisite (KVM/OVMF/swtpm) is absent.
+test-all-runtime target="local":
+  just test-cli-deploy {{target}}
+  just test-runtime
+  WLRT_MODE=gate just test-runtime
+
+# Path to the workloadctl checkout on a prepared remote KVM host ($HOME-relative).
+wlrt_remote_path := "projects/miniverse/hypervisor/workloadctl"
+
+# Drive the full sweep on a REMOTE prepared host from your laptop: rsync this
+# tree over, then run `test-all-runtime` there and stream the output back. The
+# host must already be set up for the runtime rung — a checkout at
+# {{wlrt_remote_path}} and the wlrt image cache (~/wlrt-cache, preserved via the
+# tests/runtime/.cache exclude below); e.g. tp. Override the path by editing
+# `wlrt_remote_path`.
+test-all-runtime-remote host target="local":
+  rsync -a --delete \
+    --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' \
+    --exclude='rpmbuild/' --exclude='.pytest_cache/' \
+    --exclude='tests/runtime/.cache' \
+    ./ {{host}}:{{wlrt_remote_path}}/
+  ssh {{host}} 'cd {{wlrt_remote_path}} && just test-all-runtime {{target}}'
+
 # Run all unit tests
 test:
   PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -117,25 +150,3 @@ rpm-install: rpm-build
 # Remove old build artifacts
 rpm-clean:
   rm -rf rpmbuild
-
-# --- Manual test VM (throwaway Fedora VM for multi-container validation) ---
-
-# Boot the test VM (downloads the Fedora cloud image on first run)
-vm-up:
-  tests/vm/vm.sh up
-
-# Build the RPM and install it + test workloads into the running VM
-vm-deploy:
-  tests/vm/vm.sh deploy
-
-# SSH into the test VM (optionally run a command: just vm-ssh 'workloadctl list')
-vm-ssh *cmd:
-  tests/vm/vm.sh ssh {{cmd}}
-
-# Power off the test VM and drop the per-boot overlay
-vm-down:
-  tests/vm/vm.sh down
-
-# Show whether the test VM is running
-vm-status:
-  tests/vm/vm.sh status

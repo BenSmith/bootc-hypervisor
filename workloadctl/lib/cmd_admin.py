@@ -554,6 +554,26 @@ def cmd_create(args, manager: WorkloadManager):
 # cmd_validate
 # ---------------------------------------------------------------------------
 
+def _load_config_or_exit(name: str, json_mode: bool = False) -> WorkloadConfig:
+    """Load a single WorkloadConfig for a report verb (validate/diagnose).
+
+    These verbs exist to *report* on a config, so a broken or absent one (bad
+    name/dir, malformed TOML, missing file, masked) is a normal negative result
+    — not a workloadctl bug. Construction failures are surfaced as a clean
+    nonzero exit rather than escaping to the top-level "this looks like a bug"
+    traceback handler. Mirrors the load-failure tolerance in
+    WorkloadManager.get_all_configs.
+    """
+    try:
+        return WorkloadConfig(name)
+    except Exception as e:
+        if json_mode:
+            print(json.dumps({"workload": name, "passed": False, "error": str(e)}, indent=2))
+        else:
+            print(f"Error: cannot load workload '{name}': {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_validate(args, manager: WorkloadManager):
     """Validate workload configuration"""
     if args.all:
@@ -575,7 +595,7 @@ def cmd_validate(args, manager: WorkloadManager):
         if not args.workload:
             print("Error: Workload name required (or use --all)", file=sys.stderr)
             sys.exit(1)
-        config = WorkloadConfig(args.workload)
+        config = _load_config_or_exit(args.workload, json_mode=args.json)
         result = validate_single(config, manager, json_mode=args.json)
 
         if args.json:
@@ -859,7 +879,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
 def cmd_diagnose(args, manager: WorkloadManager):
     """Diagnose workload runtime setup (user, subids, linger, SELinux)"""
     require_root()
-    config = WorkloadConfig(args.workload)
+    config = _load_config_or_exit(args.workload, json_mode=args.json)
 
     checks, passed = collect_diagnose_checks(config, manager)
     checks_passed = sum(1 for c in checks if c["passed"])

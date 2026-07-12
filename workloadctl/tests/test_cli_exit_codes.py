@@ -123,9 +123,16 @@ class VersionFlagTest(unittest.TestCase):
         self.assertEqual(lines[0], f"workloadctl {cli.__version__}")
 
     def test_source_checkout_reports_dev_fallback(self):
-        # No _version.py is generated in a source checkout, so the CLI falls
-        # back to the sentinel rather than crashing on the missing import.
-        self.assertEqual(cli.__version__, "0-dev")
+        # A real source checkout has no _version.py, so the CLI falls back to
+        # the sentinel rather than crashing on the missing import. Block the
+        # _version module and reload the CLI so this asserts the fallback branch
+        # itself — not the module-level import, which would pick up a _version.py
+        # that an in-place build or a system-installed package left importable on
+        # sys.path (as on a host with the RPM installed).
+        with mock.patch.dict(sys.modules, {'_version': None}):
+            reloaded = importlib.util.module_from_spec(_spec)
+            _loader.exec_module(reloaded)
+            self.assertEqual(reloaded.__version__, "0-dev")
 
 
 if __name__ == '__main__':

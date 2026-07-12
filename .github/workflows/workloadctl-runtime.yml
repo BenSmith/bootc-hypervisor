@@ -1,0 +1,69 @@
+# Weekly runtime rung (B1) for workloadctl: boots a harness-owned VM and runs
+# the `runtime`-marked checks (`just test-runtime` -> pytest -m runtime,
+# WLRT_MODE=dev by default). This is a CADENCE gate, not a PR gate: it runs on
+# a schedule (and manual dispatch) only, so it never blocks a pull request.
+#
+# It requires nested KVM. Two gates apply:
+#   1. `github.server_url == 'https://github.com'` keeps the mirrored *Forgejo*
+#      runner from picking this up. The Forgejo runner CANNOT run the runtime
+#      job at all: Forgejo itself runs inside a container (the Forgejo workload
+#      is containerised), so it can't nest a KVM VM (container-in-container).
+#      That is the whole reason the runtime rung lives on a separate cadence.
+#   2. A `/dev/kvm` presence check: subsequent steps run only where KVM exists.
+#      GitHub-hosted ubuntu-24.04 runners expose /dev/kvm; if a future runner
+#      does not, the job records that and exits green rather than failing.
+#
+# No secrets are used. See docs/wip/test-suite-improvement-plan.md task D1.
+#
+# HUMAN REVIEW: runner choice and the runtime dependency set below are a
+# best-effort starting point. The dev-mode harness builds the RPM and boots a
+# Fedora Cloud VM; validate that ubuntu-24.04 (or a self-hosted KVM runner)
+# provides everything `just test-runtime` needs before relying on this gate.
+name: workloadctl runtime
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 03:00 UTC (after the Sat/Sun image builds).
+    - cron: '0 3 * * 1'
+
+concurrency:
+  group: workloadctl-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for /dev/kvm
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "KVM present:"; ls -l /dev/kvm
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm absent on this runner; skipping runtime rung."
+          fi
+
+      - name: Install runtime dependencies
+        if: ${{ steps.kvm.outputs.available == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86 qemu-utils swtpm cloud-image-utils rpm python3-pytest
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+          just --version
+
+      - name: Runtime rung (VM)
+        if: ${{ steps.kvm.outputs.available == 'true' }}
+        working-directory: workloadctl
+        env:
+          WLRT_MODE: dev
+        run: just test-runtime

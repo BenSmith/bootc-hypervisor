@@ -1271,6 +1271,90 @@ class TestCmdHealthMore(unittest.TestCase):
             self.assertEqual(data['overall'], 'UNHEALTHY')
             self.assertEqual(cm.exception.code, 1)
 
+    def test_health_probes_host_side_of_publish_spec(self):
+        """port_accessibility must probe the host-published port, not the
+        container port. `18080:80` publishes host 18080 -> container 80, so the
+        probe (and its details) must reference 18080."""
+        toml = PORTS_HEALTH_TOML.replace('ports = ["8080:80"]', 'ports = ["18080:80"]')
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return _ok(stdout='active\n', returncode=0)
+            return _ok()
+
+        with _WorkloadDir(toml):
+            manager = MagicMock()
+            manager.user_exists.return_value = True
+            manager.podman.return_value.container_status.return_value = 'running'
+            manager.podman.return_value.container_health.return_value = 'healthy'
+            buf = io.StringIO()
+            with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
+                               return_value=10043):
+                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                    with patch('socket.socket') as sock_cls:
+                        sock_cls.return_value.connect_ex.return_value = 0  # open
+                        with patch('subprocess.run', side_effect=fake_run):
+                            with patch('sys.stdout', buf):
+                                with self.assertRaises(SystemExit) as cm:
+                                    cmd_inspect.cmd_health(
+                                        _args(json=True, workload='test-wl'), manager)
+            # It must have connected to the host port 18080, never 80.
+            connected_ports = [c.args[0][1]
+                               for c in sock_cls.return_value.connect_ex.call_args_list]
+            self.assertIn(18080, connected_ports)
+            self.assertNotIn(80, connected_ports)
+            data = json.loads(buf.getvalue())
+            checks = {c['check']: c for c in data['checks']}
+            self.assertTrue(checks['port_accessibility']['healthy'])
+            self.assertEqual(checks['port_accessibility']['details']['port'], '18080')
+            self.assertEqual(cm.exception.code, 0)
+
+    def test_health_random_host_port_publish_not_probed(self):
+        """A bare container port (`80`) has podman pick a random host port, so
+        there is no deterministic port to probe — the check is skipped, not run
+        against the container port."""
+        toml = PORTS_HEALTH_TOML.replace('ports = ["8080:80"]', 'ports = ["80"]')
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return _ok(stdout='active\n', returncode=0)
+            return _ok()
+
+        with _WorkloadDir(toml):
+            manager = MagicMock()
+            manager.user_exists.return_value = True
+            manager.podman.return_value.container_status.return_value = 'running'
+            manager.podman.return_value.container_health.return_value = 'healthy'
+            buf = io.StringIO()
+            with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
+                               return_value=10044):
+                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                    with patch('subprocess.run', side_effect=fake_run):
+                        with patch('sys.stdout', buf):
+                            with self.assertRaises(SystemExit) as cm:
+                                cmd_inspect.cmd_health(
+                                    _args(json=True, workload='test-wl'), manager)
+            data = json.loads(buf.getvalue())
+            checks = [c['check'] for c in data['checks']]
+            self.assertNotIn('port_accessibility', checks)
+            self.assertEqual(data['overall'], 'HEALTHY')
+            self.assertEqual(cm.exception.code, 0)
+
+    def test_publish_host_port_parsing(self):
+        cases = {
+            "8080:80": "8080",
+            "80": None,
+            "127.0.0.1:8080:80": "8080",
+            "0.0.0.0:8080:80/tcp": "8080",
+            "8080:80/udp": "8080",
+            "::80": None,          # ip::containerPort -> random host port
+            "8080-8090:80-90": None,  # range, no single port
+            "[::1]:8080:80": "8080",  # IPv6 bind address
+        }
+        for spec, expected in cases.items():
+            with self.subTest(spec=spec):
+                self.assertEqual(cmd_inspect._publish_host_port(spec), expected)
+
     def test_health_single_invalid_port_number_skipped(self):
         toml = PORTS_HEALTH_TOML.replace('ports = ["8080:80"]', 'ports = ["notaport"]')
 

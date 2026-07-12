@@ -8,6 +8,7 @@ Options:
 """
 
 import json
+import os
 import subprocess
 import time
 
@@ -61,15 +62,71 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "interactive: tests that exercise interactive/pty verbs (smoke-grade)")
     config.addinivalue_line("markers", "mutating: tests that modify workload state")
     config.addinivalue_line("markers", "destructive: tests that permanently remove state")
+    config.addinivalue_line("markers", "runtime: runtime-rung checks that boot a VM (--target=vm:<mode>)")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Deselect `runtime`-marked tests unless the target is a harness VM.
+
+    These checks are only meaningful against a fresh, harness-owned guest booted
+    via `--target=vm:<mode>` (the `just test-runtime` path): they enable/purge
+    workloads in tight sequence, which trips the UID-recycle / runtime-dir race
+    on a persistent, long-lived host and reports spurious failures. Keying on the
+    target — not on a particular justfile recipe — makes the marker load-bearing
+    for every plain-host invocation (`test-cli-deploy user@host`, `test-cli`,
+    ad-hoc runs), so runtime checks can never run outside their intended
+    substrate."""
+    dest = config.getoption("--target") or ""
+    if dest.startswith("vm:"):
+        return
+    selected, deselected = [], []
+    for item in items:
+        (deselected if item.get_closest_marker("runtime") else selected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
 
 
 # ---------------------------------------------------------------------------
 # Session-scoped Target fixture
 # ---------------------------------------------------------------------------
 
+def _keep_vm_notice(t) -> None:
+    """Print (and persist) reconnect details for a WLRT_KEEP_VM guest.
+
+    The VM and its swtpm are deliberately NOT reaped, so their run dir (holding
+    the ephemeral ssh key) survives for manual inspection. pytest may capture
+    stdout at teardown, so the same notice is written to ~/wlrt-keep-vm.txt."""
+    swtpm_pid = getattr(t, "_swtpm_pid_path", None)
+    poweroff = f"kill $(cat {t._pid_path})"
+    if swtpm_pid:
+        poweroff += f" $(cat {swtpm_pid})"
+    poweroff += f" 2>/dev/null; rm -rf {t._run_dir}"
+    msg = "\n".join([
+        "",
+        "=" * 72,
+        "WLRT_KEEP_VM set — guest left RUNNING for inspection (not powered off).",
+        f"  connect:  {t.connect_hint()}",
+        f"  run dir:  {t._run_dir}",
+        f"  teardown: {poweroff}",
+        "=" * 72,
+        "",
+    ])
+    print(msg)
+    try:
+        with open(os.path.expanduser("~/wlrt-keep-vm.txt"), "w") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+
+
 @pytest.fixture(scope="session")
 def target(request) -> Target:
-    """Construct and yield the Target; handle optional --deploy."""
+    """Construct and yield the Target; handle optional --deploy.
+
+    `--target=vm:<mode>` (dev|gate) boots a harness-owned VM via the runtime
+    launcher and yields a VMTarget; every other dest is the existing
+    hand-provisioned `user@host`/`local` path, unchanged."""
     dest = request.config.getoption("--target")
     if not dest:
         pytest.exit(
@@ -77,6 +134,38 @@ def target(request) -> Target:
             "(e.g. --target=user@host or --target=local).",
             returncode=3,
         )
+
+    if dest.startswith("vm:"):
+        mode = dest.split(":", 1)[1]
+        # Import the launcher lazily so normal (user@host/local) runs never
+        # touch the runtime layer.
+        import sys
+        from pathlib import Path
+        runtime_dir = Path(__file__).parent.parent / "runtime"
+        if str(runtime_dir) not in sys.path:
+            sys.path.insert(0, str(runtime_dir))
+        import vmlaunch
+
+        missing = vmlaunch.missing_prereqs(mode)
+        if missing:
+            pytest.skip(
+                f"runtime harness ({dest}) needs: {', '.join(missing)} "
+                "— skipping (default-safe on a box without KVM/QEMU)"
+            )
+        # 4 GiB by default (override WLRT_MEM_MIB): the B6 VM-workload smoke runs
+        # a *nested* guest inside this one, which needs headroom beyond the bootc
+        # host + podman. Harmless surplus for the other runtime checks.
+        mem_mib = int(os.environ.get("WLRT_MEM_MIB", "4096"))
+        t = vmlaunch.launch(mode, mem_mib=mem_mib)
+        if os.environ.get("WLRT_KEEP_VM"):
+            # Leave the guest (and swtpm) running so a failed run can be
+            # inspected live instead of being reaped in teardown.
+            request.addfinalizer(lambda: _keep_vm_notice(t))
+        else:
+            request.addfinalizer(t.poweroff)
+        yield t
+        return
+
     t = Target.from_dest(dest)
 
     # Validate connectivity
@@ -94,6 +183,18 @@ def target(request) -> Target:
 
     yield t
     t.close()
+
+
+@pytest.fixture
+def reset_vm(target):
+    """Revert a VMTarget to its clean `base` snapshot before the test.
+
+    A no-op for a plain Target (hand-provisioned host has no free reset), so the
+    same runtime check module can run against either without change."""
+    revert = getattr(target, "revert", None)
+    if callable(revert):
+        target.revert("base")
+    yield
 
 
 def _deploy_workloadctl(t: Target):

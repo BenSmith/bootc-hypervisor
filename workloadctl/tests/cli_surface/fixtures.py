@@ -30,6 +30,7 @@ and the TOML files in workloads/.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -57,6 +58,34 @@ def skip_if_no_kvm(target: Target):
 def skip_if_no_br0(target: Target):
     if not target.capabilities["has_br0"]:
         pytest.skip("requires br0 bridge interface")
+
+
+# OVMF firmware search order, mirroring workload_lib.OVMF_CODE_CANDIDATES — the
+# VM path's own pre-flight (lib/cmd_lifecycle.py) requires one of these plus the
+# qemu binaries + socat. The bootc hypervisor image bakes the whole toolchain;
+# the bare dev cloud image has none of it.
+_OVMF_CODE_CANDIDATES = (
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+    "/usr/share/OVMF/OVMF_CODE.fd",
+    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+    "/usr/share/ovmf/OVMF.fd",
+)
+
+
+def skip_if_no_vm_toolchain(target: Target):
+    """Skip unless the VM enable pre-flight would pass: qemu-system-x86_64,
+    qemu-img, socat, and OVMF firmware present. This lives on the hypervisor
+    image, not in the workloadctl RPM — so a `[vm]` runtime check runs under
+    gate mode and skips cleanly under the bare dev cloud image."""
+    for tool in ("qemu-system-x86_64", "qemu-img", "socat"):
+        if target.run(["command", "-v", tool], sudo=False, check=False).rc != 0:
+            pytest.skip(f"requires VM toolchain ({tool} missing) — present on the "
+                        "bootc hypervisor image; run in gate mode")
+    ovmf = " ".join(_OVMF_CODE_CANDIDATES)
+    if target.run(["sh", "-c", f"for f in {ovmf}; do [ -e \"$f\" ] && exit 0; done; exit 1"],
+                  sudo=False, check=False).rc != 0:
+        pytest.skip("requires OVMF firmware (edk2-ovmf) — present on the bootc "
+                    "hypervisor image; run in gate mode")
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +233,12 @@ def _purge_workload(target: Target, name: str):
     The VM may have just restarted (e.g. after rollback), so a generous timeout
     avoids a spurious teardown ERROR when the stop is simply slow.
     """
+    # WLRT_KEEP_VM: leave the workload in place so a failed run can be inspected
+    # live. Safe because reset_vm reverts the guest to `base` at the next test's
+    # setup anyway, so skipping this cleanup never leaks state into another test.
+    if os.environ.get("WLRT_KEEP_VM"):
+        print(f"[WLRT_KEEP_VM] skipping purge of {name} — left in place for inspection")
+        return
     target.wl(f"disable --purge {name}", check=False, timeout=120)
     time.sleep(1)
     target.run(

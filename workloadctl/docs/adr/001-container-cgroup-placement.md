@@ -4,6 +4,21 @@
 2026-06-11). Options 1 and 2 are superseded. Decided against options 3 and 4
 (recorded here so they aren't re-litigated).
 
+> **Implementation note (2026-07-09, branch `test-suite-runtime`).** The
+> `Slice=workloads.slice` drop-in alone is *not* sufficient: when linger starts
+> `user@<uid>.service` it goes through logind's start path, which parks the
+> manager under `user-<uid>.slice` and ignores the drop-in — `systemctl show`
+> then reports the configured `Slice=workloads.slice` while the real
+> `ControlGroup` stays under `user-<uid>.slice`. Only a PID1 restart
+> (`systemctl restart user@<uid>.service`) honors the drop-in and migrates the
+> manager, and logind re-parks it every boot. So `workload-ensure-user`
+> (`ensure_manager_slice`) restarts the manager at enable-time `ExecStartPre` —
+> before the payload starts, gated on "only if mis-placed" so it's idempotent —
+> to make the migration actually happen. The runtime rung's
+> `tests/cli_surface/test_runtime_cgroup.py` (B3) is the regression proof; the
+> spike originally only checked `systemctl show`, which is why the gap went
+> unnoticed until B3 read `/proc/<pid>/cgroup` directly.
+
 **Date:** 2026-06-10 (capturing a decision originally made on branch
 `resource-caps-split`; see `docs/resource-caps-and-split-review.md`).
 Updated 2026-06-11 with option 1b spike results.

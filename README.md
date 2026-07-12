@@ -225,7 +225,8 @@ just aio-local
 
 # Tests
 just test                                # workloadctl unit tests
-just test-vm-build && just test-vm       # Full VM integration tests (libvirt + SWTPM)
+cd workloadctl && just test-runtime      # Runtime rung: boot a VM and run the runtime checks
+                                         #   (WLRT_MODE=gate → real bootc image + swtpm; skips without /dev/kvm)
 
 # Push to local registry
 just push-all

@@ -1,8 +1,0 @@
-# Test workload: should NOT be running (disabled)
-[workload]
-name = "disabled"
-enabled = false
-
-[container]
-image = "docker.io/library/busybox:latest"
-command = ["sleep", "infinity"]

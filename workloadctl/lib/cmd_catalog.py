@@ -18,7 +18,7 @@ import shutil
 import sys
 import tomllib
 
-from workload_lib import iter_workloads, SECRET_PATTERN, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
+from workload_lib import iter_workloads, auto_detect_credentials, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -64,24 +64,12 @@ def _config_images(cfg: WorkloadConfig) -> set[str]:
 
 
 def _referenced_secrets(cfg: WorkloadConfig) -> list[str]:
-    """Secret names a config pulls in — via [secrets].files credentials and
-    ${SECRET:name} refs in any container's environment (single/pod/bridge)."""
-    found: set[str] = set()
-    for spec in cfg.config.get("secrets", {}).get("files", []):
-        cred = spec.get("credential")
-        if cred:
-            found.add(cred)
-    container_envs = []
-    single = cfg.config.get("container", {})
-    if single:
-        container_envs.append(single.get("environment", {}))
-    for c in cfg.config.get("containers", []):
-        container_envs.append(c.get("environment", {}))
-    for env in container_envs:
-        for val in env.values():
-            for m in SECRET_PATTERN.finditer(str(val)):
-                found.add(m.group(1))
-    return sorted(found)
+    """Secret names a config pulls in — [secrets].files credentials (top-level and
+    per-container) and unescaped ${SECRET:name} refs across every container's
+    environment (single/pod/bridge). Delegates to auto_detect_credentials so this
+    report matches exactly what the boot path loads: an escaped `$${SECRET:name}`
+    is a literal, not a reference, and nested/per-container secrets are included."""
+    return sorted(auto_detect_credentials(cfg.config))
 
 
 def _set_workload_field(content: str, field: str, value: str) -> str:

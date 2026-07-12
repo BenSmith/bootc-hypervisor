@@ -1,0 +1,50 @@
+# Per-PR fast test gate for workloadctl (rungs 1-2: unit + integration + the
+# A1 systemd-analyze verify and A2 oracle modules). No VM, no /dev/kvm, no
+# secrets. `just test` is `unittest discover -s tests -p 'test_*.py'`, so it
+# picks up tests/test_integration.py and tests/test_unit_oracle.py with no
+# recipe change.
+#
+# The `github.server_url == 'https://github.com'` guard keeps the mirrored
+# Forgejo runner from also executing this job; Forgejo has its own
+# .forgejo/workflows/workloadctl.yml for the same fast suite.
+name: workloadctl test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'workloadctl/**'
+      - '.github/workflows/workloadctl-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'workloadctl/**'
+      - '.github/workflows/workloadctl-test.yml'
+
+concurrency:
+  group: workloadctl-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | sudo bash -s -- --to /usr/local/bin
+          just --version
+          python3 --version
+
+      - name: Lint (py_compile)
+        working-directory: workloadctl
+        run: just lint
+
+      - name: Unit + integration tests
+        working-directory: workloadctl
+        run: just test

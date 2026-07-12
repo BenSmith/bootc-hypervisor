@@ -166,10 +166,14 @@ write_files:
 
       # 1. Packages. dnf5 fails the whole transaction on any unknown OR
       # already-installed package; --skip-* tolerates both.
+      # qemu-kvm/qemu-img/swtpm/edk2-ovmf back the runtime-test gate (B1b):
+      # the native CI runner boots a real bootc image under nested KVM with a
+      # swtpm-backed vTPM and OVMF firmware. Harmless on a non-gate runner.
       dnf install -y --skip-broken --skip-unavailable \
         podman skopeo curl jq yq just git rpm-build \
         python3 policycoreutils-python-utils checkpolicy \
         qemu-guest-agent nodejs fuse3 \
+        qemu-kvm qemu-img swtpm swtpm-tools edk2-ovmf \
         dnf-utils
 
       # 1a. Pull in any updates published since the cloud image was cut —
