@@ -125,7 +125,8 @@ class NotifyTest(unittest.TestCase):
     # --- on-reboot shutdown-reason monitoring (O6) -----------------------
 
     def test_monitor_returns_shutdown_reason(self):
-        proc = mock.Mock(); proc.poll.return_value = None
+        proc = mock.Mock()
+        proc.poll.return_value = None
         fake = FakeQMP(messages=[
             {"event": "NIC_RX"},  # unrelated event, skipped
             {"event": "SHUTDOWN", "data": {"reason": "guest-reset"}},
@@ -136,21 +137,24 @@ class NotifyTest(unittest.TestCase):
         self.assertTrue(fake.closed)
 
     def test_monitor_none_when_monitor_closes_first(self):
-        proc = mock.Mock(); proc.poll.return_value = None
+        proc = mock.Mock()
+        proc.poll.return_value = None
         fake = FakeQMP(messages=[])  # next_message raises ConnectionError
         with mock.patch.object(notify, "QMPClient", return_value=fake):
             self.assertIsNone(notify.monitor_shutdown_reason("vm1", proc))
 
     def test_monitor_none_on_timeout_after_qemu_exit(self):
         # A read timeout (None) with QEMU already gone ends the wait.
-        proc = mock.Mock(); proc.poll.return_value = 0
+        proc = mock.Mock()
+        proc.poll.return_value = 0
         fake = FakeQMP(messages=[None])
         with mock.patch.object(notify, "QMPClient", return_value=fake):
             self.assertIsNone(notify.monitor_shutdown_reason("vm1", proc))
 
     def _run_main_reboot_mode(self, reason, wait_rc=0):
         fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
-        proc = mock.Mock(); proc.wait.return_value = wait_rc
+        proc = mock.Mock()
+        proc.wait.return_value = wait_rc
         with mock.patch.dict(os.environ, {"WORKLOADCTL_VM_REBOOT_EXIT": "133"}), \
              mock.patch.object(notify.sys, "argv",
                                ["notify", "vm1", "qemu", "-nographic"]), \

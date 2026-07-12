@@ -161,8 +161,10 @@ class TestHostSetupTraversal(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.usr, ignore_errors=True))
         p1 = mock.patch.object(core, "WORKLOAD_BUNDLES_DIR", self.usr)
         p2 = mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc)
-        p1.start(); p2.start()
-        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+        p1.start()
+        p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
 
     def _config(self, name="app", setup=None):
         body = f'[workload]\nname = "{name}"\n\n[container]\nimage = "localhost/x:latest"\n'

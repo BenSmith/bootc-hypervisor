@@ -23,7 +23,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -35,7 +34,6 @@ for _p in (str(_HERE), str(_LIB)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import workload_lib  # noqa: E402
 import vm  # noqa: E402
 from vmtarget import VMTarget  # noqa: E402
 
