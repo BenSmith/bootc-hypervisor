@@ -88,6 +88,32 @@ def skip_if_no_vm_toolchain(target: Target):
                     "hypervisor image; run in gate mode")
 
 
+def poll_vm_reachable(target: Target, name: str, *, token: str = "vm-reachable",
+                      timeout: int = 300, interval: int = 10):
+    """Poll `workloadctl exec <name> echo <token>` until it succeeds, or timeout.
+
+    `workloadctl exec` reaches a VM workload over SSH with the pinned host key
+    (StrictHostKeyChecking=yes), so a success here is also positive proof that
+    the guest presented the host key the harness injected. Returns the last
+    RunResult (rc 0 + token on stdout on success); the caller asserts on it.
+    """
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = target.wl_exec(name, f"echo {token}", sudo=True, check=False, timeout=60)
+        if last.rc == 0 and token in last.stdout:
+            return last
+        time.sleep(interval)
+    return last
+
+
+def guest_boot_id(target: Target, name: str) -> str:
+    """Read the guest's current boot_id over `workloadctl exec` (changes on reboot)."""
+    r = target.wl_exec(name, "cat /proc/sys/kernel/random/boot_id",
+                       sudo=True, check=True, timeout=60)
+    return r.stdout.strip()
+
+
 # ---------------------------------------------------------------------------
 # Low-level provision/teardown helpers
 # ---------------------------------------------------------------------------

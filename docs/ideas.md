@@ -54,6 +54,7 @@
 - make missing host setup script an error not a warning
 - put all control surfaces in wireguard/vpn
 - zsh/fish shell completions (`completions/` ships bash only; review item O7). Not a quick win — ~366 lines of bash to mirror across two more completion systems for 41 subcommands + `secret` sub-verbs + packaging, kept in sync as commands change.
+- `--help` verb grouping (review item U1). The CLI has 41 subcommands with a non-obvious mental model (`init`/`install`/`create`/`duplicate`/`catalog`; `update`/`recreate`/`reboot`/`rollback`; `enable`/`start`) and help strings that don't disambiguate overlapping verbs (e.g. `reboot` keeps the overlay vs `recreate` destroys it). Fix = group verbs in `--help` and add "when to use vs the neighbour" one-liners. Not a quick win — argparse has no native subcommand grouping, so it needs a custom `HelpFormatter` + restructuring how all 41 parsers register.
 
 ### Freshness alert for the workload metrics textfile
 **Why:** The metrics exporter is now a root oneshot+timer that writes an atomic
