@@ -16,12 +16,12 @@ from typing import Any
 from workload_lib import (
     HOST_USERNS_OPT_IN,
     USERNAME_PREFIX,
-    VM_SOCKET_DIR,
     units_outdated,
-    uses_host_userns,
     workload_config_dir,
     workload_service_units,
 )
+from vm import VM_SOCKET_DIR
+from validation import uses_host_userns
 from qmp import QMPClient
 from podman import Podman
 from service_runtime import manager_active

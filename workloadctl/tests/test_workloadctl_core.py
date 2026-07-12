@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import workload_lib               # noqa: E402
+import vm                          # noqa: E402
 import workloadctl_core as core  # noqa: E402
 
 
@@ -578,7 +579,7 @@ class WorkloadConfigPodmanTargetsTest(WorkloadConfigTestBase):
 class WorkloadConfigMiscPropsTest(WorkloadConfigTestBase):
     def test_vm_bridge_default(self):
         cfg = self._config("vmb1", '[workload]\nname = "vmb1"\n\n[vm]\n')
-        self.assertEqual(cfg.vm_bridge, workload_lib.VM_BRIDGE_NAME)
+        self.assertEqual(cfg.vm_bridge, vm.VM_BRIDGE_NAME)
 
     def test_vm_bridge_custom(self):
         cfg = self._config(

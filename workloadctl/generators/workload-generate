@@ -66,17 +66,20 @@ try:
         ENABLED_MARKER_NAME, iter_workloads,
         workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
         expand_volume_path, dq,
-        normalize_containers, validate_workload_config, infer_workload_mode,
-        infer_workload_kind, valid_userns_mode,
+        normalize_containers, infer_workload_mode,
+        infer_workload_kind,
         get_next_uid, subid_lock,
-        VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
-        VM_REBOOT_EXIT_CODE,
-        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
-        vm_mac_address, find_ovmf_code,
-        parse_memory_mib, virtiofs_tags, parse_volume_spec,
+        virtiofs_tags, parse_volume_spec,
         selinux_type_name, render_sysusers_config,
         RUN_SYSTEMD_SYSTEM, workload_run_files,
     )
+    from vm import (
+        VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
+        VM_REBOOT_EXIT_CODE,
+        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
+        vm_mac_address, find_ovmf_code, parse_memory_mib,
+    )
+    from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
         SECRET_PATTERN, auto_detect_credentials, validate_env_key,
     )

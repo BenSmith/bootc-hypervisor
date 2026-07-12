@@ -15,12 +15,12 @@ import tomllib
 
 from workload_lib import (
     CREDSTORE_DIR,
-    validate_workload_name,
     workload_config_path,
     WORKLOADS_BASE,
     workload_data_dir,
     workload_service_name,
 )
+from validation import validate_workload_name
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,

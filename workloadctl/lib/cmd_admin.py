@@ -14,21 +14,21 @@ import sys
 import tempfile
 
 from workload_lib import (
-    collect_config_warnings,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
     HOST_USERNS_OPT_IN,
-    parse_memory_mib,
     selinux_module_name,
     selinux_type_name,
     units_outdated,
-    uses_host_userns,
-    vm_mac_address,
-    vm_mac_collisions,
-    validate_workload_config,
-    validate_workload_name,
     workload_config_path,
     workload_service_units,
+)
+from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from validation import (
+    collect_config_warnings,
+    uses_host_userns,
+    validate_workload_config,
+    validate_workload_name,
 )
 from workloadctl_core import (
     WorkloadConfig,

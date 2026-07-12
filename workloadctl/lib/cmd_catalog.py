@@ -18,7 +18,8 @@ import shutil
 import sys
 import tomllib
 
-from workload_lib import iter_workloads, validate_workload_name, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
+from workload_lib import iter_workloads, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
+from validation import validate_workload_name
 from secrets_template import auto_detect_credentials
 from workloadctl_core import (
     WorkloadConfig,

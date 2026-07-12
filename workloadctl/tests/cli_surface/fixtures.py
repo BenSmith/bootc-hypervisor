@@ -60,7 +60,7 @@ def skip_if_no_br0(target: Target):
         pytest.skip("requires br0 bridge interface")
 
 
-# OVMF firmware search order, mirroring workload_lib.OVMF_CODE_CANDIDATES — the
+# OVMF firmware search order, mirroring vm.OVMF_CODE_CANDIDATES — the
 # VM path's own pre-flight (lib/cmd_lifecycle.py) requires one of these plus the
 # qemu binaries + socat. The bootc hypervisor image bakes the whole toolchain;
 # the bare dev cloud image has none of it.

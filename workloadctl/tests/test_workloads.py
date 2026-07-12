@@ -163,7 +163,7 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 
     def test_userns_valid(self):
         """security.userns is one of the valid values."""
-        from workload_lib import valid_userns_mode
+        from validation import valid_userns_mode
         for filename, config in ALL_WORKLOADS:
             userns = config.get("security", {}).get("userns")
             if userns is not None:
@@ -673,7 +673,7 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
         """Any shipped workload using userns=host must acknowledge it via
         unsafe_host_userns (S5) — otherwise it fails validation and won't
         generate. Guards against a new host-userns config slipping in unacked."""
-        from workload_lib import uses_host_userns, host_userns_acknowledged
+        from validation import uses_host_userns, host_userns_acknowledged
         for filename, config in ALL_WORKLOADS:
             name = config["workload"]["name"]
             if uses_host_userns(config):

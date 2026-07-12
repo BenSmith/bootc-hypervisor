@@ -22,7 +22,6 @@ from workload_lib import (
     USERNAME_PREFIX,
     WORKLOADS_BASE,
     WORKLOAD_BUNDLES_DIR,
-    VM_SOCKET_DIR,
     get_next_uid,
     NAME_PATTERN,
     workload_config_path,
@@ -35,6 +34,7 @@ from workload_lib import (
     render_sysusers_config,
     subid_lock,
 )
+from vm import VM_SOCKET_DIR
 import imagebuild
 from podman import Podman
 from workloadctl_core import (
@@ -127,7 +127,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             print("    Enable nested KVM or run on bare metal")
             failed = True
 
-        from workload_lib import find_ovmf_code
+        from vm import find_ovmf_code
         if not find_ovmf_code():
             print("  ✗ OVMF firmware (edk2-ovmf) not found")
             print("    Install: dnf install edk2-ovmf")

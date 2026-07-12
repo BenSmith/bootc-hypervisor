@@ -49,12 +49,14 @@ from pathlib import Path
 
 from workload_lib import (
     CREDSTORE_DIR,
+    workload_config_path,
+    workload_service_units,
+)
+from vm import (
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
     vm_mac_address,
-    workload_config_path,
-    workload_service_units,
 )
 from qmp import QMPClient
 from secrets_template import auto_detect_credentials

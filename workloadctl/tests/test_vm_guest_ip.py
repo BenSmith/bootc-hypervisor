@@ -18,7 +18,7 @@ LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 sys.path.insert(0, LIB_DIR)
 
 import substrate
-from workload_lib import vm_mac_address
+from vm import vm_mac_address
 
 
 def _completed(stdout="", returncode=0):

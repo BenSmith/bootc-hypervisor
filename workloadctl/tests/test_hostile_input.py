@@ -10,7 +10,7 @@ re-implementation:
    on the archive's self-declared name.
 2. [host].setup with ".."    -> WorkloadConfig.resolve_control_file_with_source
    (the single control-file chokepoint; rejects "..", takes absolute verbatim).
-3. Bad bundle/workload names -> workload_lib.validate_workload_name (NAME_PATTERN).
+3. Bad bundle/workload names -> validation.validate_workload_name (NAME_PATTERN).
 4. $${SECRET:x} escaping     -> secrets_template.substitute_template AND
    resolve_secret_env_vars (both honor the $$-escape via a single-pass resolver);
    auto_detect_credentials skips the escape so it can't demand a phantom credential.
@@ -37,11 +37,11 @@ import cmd_backup                      # noqa: E402
 import workload_lib                    # noqa: E402
 import workloadctl_core as core        # noqa: E402
 from workload_lib import (             # noqa: E402
-    validate_workload_name,
     expand_volume_path,
     workload_state_dir,
     _safe_anchor_subpath,
 )
+from validation import validate_workload_name  # noqa: E402
 from secrets_template import (          # noqa: E402
     substitute_template,
     resolve_secret_env_vars,
