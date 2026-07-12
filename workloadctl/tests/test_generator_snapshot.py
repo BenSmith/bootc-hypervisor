@@ -63,6 +63,11 @@ def run_generator(config_dir, services_dir, sysusers_dir):
     env["SYSUSERS_DIR"] = str(sysusers_dir)
     env["PYTHONPATH"] = LIB_DIR
     env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
+    # Pin hash seed so the before/after snapshot diff (this module's whole
+    # purpose) is stable: the generator iterates a few sets when emitting
+    # directives, and set order otherwise varies per process, producing
+    # spurious "reordered directive" deltas unrelated to the change under test.
+    env["PYTHONHASHSEED"] = "0"
     return subprocess.run(
         python_cmd(GENERATOR, str(services_dir)),
         capture_output=True, text=True, env=env,
