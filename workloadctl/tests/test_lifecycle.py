@@ -32,7 +32,7 @@ from unittest.mock import MagicMock, patch
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
-from substrate import ContainerSubstrate, VMSubstrate
+from substrate import ContainerSubstrate, LifecycleError, VMSubstrate
 
 from tests import script_env
 
@@ -661,9 +661,9 @@ class TestVMLifecycle(unittest.TestCase):
         with _CfgDir(_PET_VM_TOML, 'test-vm') as cfg:
             manager = MagicMock()
             sub = VMSubstrate(cfg, manager)
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 sub.rollback()
-            self.assertNotEqual(cm.exception.code, 0)
+            self.assertNotEqual(cm.exception.returncode, 0)
 
     def test_pet_vm_rollback_does_not_touch_disk(self):
         """Pet VM rollback must not call subprocess.run (no disk rotation)."""
@@ -671,7 +671,7 @@ class TestVMLifecycle(unittest.TestCase):
             manager = MagicMock()
             sub = VMSubstrate(cfg, manager)
             with patch('subprocess.run') as mock_run:
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(LifecycleError):
                     sub.rollback()
                 mock_run.assert_not_called()
 
@@ -1633,9 +1633,55 @@ class TestCmdStartStop(unittest.TestCase):
             with _RootBypass():
                 manager = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=3)):
-                    with self.assertRaises(SystemExit) as cm:
+                    with self.assertRaises(LifecycleError) as cm:
                         cmd_lifecycle.cmd_stop(_ns(workload="test-wl"), manager)
-                    self.assertEqual(cm.exception.code, 3)
+                    self.assertEqual(cm.exception.returncode, 3)
+
+
+# ── cmd_restart ──────────────────────────────────────────────────────────────
+
+class TestCmdRestart(unittest.TestCase):
+    def test_restart_config_not_found_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', Path(d)):
+                with _RootBypass():
+                    with self.assertRaises(SystemExit):
+                        cmd_lifecycle.cmd_restart(_ns(workload="ghost"), MagicMock())
+
+    def test_restart_calls_substrate_lifecycle(self):
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), manager)
+                sub.lifecycle.assert_called_once_with("restart")
+                self.assertIn("restarted", buf.getvalue())
+
+    def test_restart_does_not_regenerate_units(self):
+        """restart is a bounce: unlike recreate it must not re-run the generator."""
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        with redirect_stdout(io.StringIO()):
+                            cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), MagicMock())
+                run_mock.assert_not_called()
+                sub.reprovision.assert_not_called()
+
+    def test_restart_failure_propagates_exit_code(self):
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                sub = MagicMock()
+                sub.lifecycle.side_effect = LifecycleError(3)
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(LifecycleError) as cm:
+                            cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), MagicMock())
+                self.assertEqual(cm.exception.returncode, 3)
 
 
 # ── cmd_recreate ─────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@
 | [`logs`](#logs) | View workload logs via `journalctl` |
 | [`reboot`](#reboot) | Soft-reboot a workload (systemd re-exec inside container or VM) |
 | [`recreate`](#recreate) | Regenerate units and restart (apply TOML edits or post-build) |
+| [`restart`](#restart) | Bounce a workload service, keeping its overlay/disk (does not apply TOML edits) |
 | [`restore`](#restore) | Restore a workload from a `backup` archive (optionally `--force`, `--enable`) |
 | [`rollback`](#rollback) | Revert to the previous container image or VM disk generation |
 | [`secret`](#secret-management) | Manage encrypted systemd credentials (subcommands: `create list show rotate delete export import`) |
@@ -64,7 +65,7 @@ workloadctl health myapp           # per-container health table
 
 For multi-container workloads, `exec` and `shell` **require** the `<workload>/<container>` form — a bare `<workload>` errors and lists the available containers. `logs` and `health` accept both forms.
 
-Lifecycle commands (`enable`, `disable`, `start`, `stop`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `stats`, `cp` likewise take a bare workload name.
+Lifecycle commands (`enable`, `disable`, `start`, `stop`, `restart`, `recreate`, `reboot`, `update`, `rollback`) always operate on the whole workload. For **container** workloads, `update` pulls every container's image and `rollback` reverts them all. For **VM** workloads, `update` rebuilds the system disk from its image source and `rollback` restores the previous disk generation. `status`, `info`, `stats`, `cp` likewise take a bare workload name.
 
 ---
 
@@ -275,6 +276,22 @@ Stop a workload service without changing its `enabled` state.
 ```
 sudo workloadctl stop <workload>
 ```
+
+[↑ top](#workloadctl-command-reference)
+
+---
+
+### `restart`
+
+Bounce a workload service without changing its `enabled` state.
+
+```
+sudo workloadctl restart <workload>
+```
+
+This restarts the workload's main unit and nothing else. **Container workloads:** the container overlay is preserved. **VM workloads:** the system and data disks and the existing cloud-init seed are preserved — QEMU is power-cycled onto them.
+
+`restart` does **not** apply TOML edits: the unit files are not regenerated and the VM's cloud-init seed is not re-rendered. Use [`recreate`](#recreate) for that.
 
 [↑ top](#workloadctl-command-reference)
 

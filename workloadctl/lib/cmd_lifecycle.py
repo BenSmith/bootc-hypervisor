@@ -31,7 +31,7 @@ from workload_lib import (
     workload_run_files,
     subid_lock,
 )
-from vm import VM_SOCKET_DIR
+from vm import VM_BRIDGE_NAME, VM_SOCKET_DIR
 import imagebuild
 from podman import Podman
 from workloadctl_core import (
@@ -39,7 +39,6 @@ from workloadctl_core import (
     WorkloadManager,
     WorkloadUserNotFound,
     require_root,
-    VM_BRIDGE_NAME,
 )
 from cmd_backup import BACKUP_DIR
 from substrate import get_substrate, service_active, LifecycleError
@@ -994,10 +993,25 @@ def cmd_stop(args, manager: WorkloadManager):
 
     config = WorkloadConfig(args.workload)
     print(f"Stopping {config.service_name}...")
-    result = subprocess.run(["systemctl", "stop", config.service_name])
-    if result.returncode != 0:
-        sys.exit(result.returncode)
+    substrate = get_substrate(config, manager)
+    substrate.lifecycle("stop")
     print(f"✓ Workload '{args.workload}' stopped")
+
+
+def cmd_restart(args, manager: WorkloadManager):
+    """Restart a workload service (does not change enabled state)"""
+    require_root()
+
+    config_path = workload_config_path(args.workload)
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(args.workload)
+    print(f"Restarting {config.service_name}...")
+    substrate = get_substrate(config, manager)
+    substrate.lifecycle("restart")
+    print(f"✓ Workload '{args.workload}' restarted")
 
 
 def cmd_recreate(args, manager: WorkloadManager):
