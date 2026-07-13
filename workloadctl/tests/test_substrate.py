@@ -2145,9 +2145,9 @@ class TestVMExecShell(unittest.TestCase):
         substrate = self._substrate()
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.exec(["ls"])
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
     def test_exec_runs_ssh_and_returns_code(self):
         substrate = self._substrate()
@@ -2162,9 +2162,9 @@ class TestVMExecShell(unittest.TestCase):
         substrate = self._substrate()
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=0)):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
-        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(cm.exception.returncode, 0)
 
     def test_open_shell_ssh_failure_falls_back_to_console(self):
         substrate = self._substrate()
@@ -2172,18 +2172,18 @@ class TestVMExecShell(unittest.TestCase):
              patch('subprocess.run', return_value=_ok(returncode=255)), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
     def test_open_shell_no_ip_falls_to_console_missing_socket(self):
         substrate = self._substrate()
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
     def test_open_shell_console_connects_via_socat(self):
         substrate = self._substrate()
@@ -2338,9 +2338,9 @@ image = "example.com/guest:latest"
         substrate = VMSubstrate(config, None)
         buf = io.StringIO()
         with patch('sys.stderr', buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.rollback()
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
         self.assertIn('pet', buf.getvalue())
 
     def test_no_targets_exits_1(self):
@@ -2348,9 +2348,9 @@ image = "example.com/guest:latest"
         substrate = VMSubstrate(config, None)
         with patch.object(substrate, 'rollback_targets', return_value=[]), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.rollback()
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
     def test_rollback_applies_latest_generation(self):
         config = _make_vm_config()
