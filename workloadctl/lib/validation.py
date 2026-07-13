@@ -56,12 +56,12 @@ def _control_char_in(value: str) -> str | None:
 def _reject_control_chars(node, path: str, errors: list[str]):
     """Recursively flag control characters in any string within `node`.
 
-    Walks the whole container config so every string that can reach the unit is
-    covered (and stays covered as fields are added), rather than escaping each
-    injection site by hand. Container-config values are never legitimately
-    multi-line, so this is a hard error: fail the config loudly at validate/boot
-    instead of emitting a malformed or directive-injected unit. Not applied to
-    VM configs, whose cloud-init template_vars may legitimately be multi-line.
+    Walks the whole config so every string that can reach the unit is covered
+    (and stays covered as fields are added), rather than escaping each injection
+    site by hand. Config values are never legitimately multi-line — with the one
+    exception `_vm_scannable` prunes away — so this is a hard error: fail the
+    config loudly at validate/boot instead of emitting a malformed or
+    directive-injected unit.
     """
     if isinstance(node, str):
         bad = _control_char_in(node)
@@ -80,6 +80,25 @@ def _reject_control_chars(node, path: str, errors: list[str]):
             _reject_control_chars(v, f"{path}[{i}]", errors)
 
 
+def _vm_scannable(config: dict) -> dict:
+    """A copy of a VM config with [vm.cloud_init].template_vars pruned.
+
+    template_vars are substituted into the cloud-init user-data YAML, never into
+    a unit directive, and a multi-line value there is legitimate (a script, a
+    key). Everything else in a VM config gets the control-char guard, because it
+    can reach a generated unit: [resources].slice is spliced into the VM
+    service's Slice=, and a [vm].volumes host path into the virtiofsd ExecStart
+    (dq() is no defense — systemd ends a directive at a newline no matter how
+    it's quoted).
+    """
+    ci = config.get("vm", {}).get("cloud_init")
+    if not isinstance(ci, dict) or "template_vars" not in ci:
+        return config
+    vm = dict(config["vm"])
+    vm["cloud_init"] = {k: v for k, v in ci.items() if k != "template_vars"}
+    return {**config, "vm": vm}
+
+
 def validate_workload_config(config: dict) -> list[str]:
     """Run schema-level checks. Returns a list of error strings (empty = OK)."""
     errors = []
@@ -87,6 +106,7 @@ def validate_workload_config(config: dict) -> list[str]:
     kind = infer_workload_kind(config)
 
     if kind == "vm":
+        _reject_control_chars(_vm_scannable(config), "", errors)
         errors.extend(validate_vm_config(config))
         return errors
 
