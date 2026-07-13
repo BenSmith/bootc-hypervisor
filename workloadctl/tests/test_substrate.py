@@ -3,9 +3,7 @@
 
 import io
 import json
-import os
 import shutil
-import sys
 import tempfile
 import types
 import unittest
@@ -13,10 +11,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
-# ── imports from lib ──────────────────────────────────────────────────────────
 
-_LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, _LIB)
+# ── imports from lib ──────────────────────────────────────────────────────────
 
 import workload_lib
 import workloadctl_core
@@ -28,6 +24,7 @@ from substrate import (
     BackupError,
     LifecycleError,
     service_active,
+    _vm_ssh_command,
 )
 import cmd_drift
 import cmd_inspect
@@ -55,6 +52,8 @@ name = "test-wl"
 image = "example.com/test:latest"
 """
 
+
+from tests import REPO_ROOT, script_env
 VM_TOML = """\
 [workload]
 name = "test-vm"
@@ -84,6 +83,23 @@ class _WorkloadDir:
         assert self._patcher is not None and self._tmp is not None
         self._patcher.stop()
         shutil.rmtree(self._tmp, ignore_errors=True)
+
+
+# ── _vm_ssh_command host-key pinning (S1) ────────────────────────────────────
+
+class TestVmSshCommandPinning(unittest.TestCase):
+    def test_pins_host_key_no_permissive_options(self):
+        config = _make_vm_config()
+        cmd = _vm_ssh_command(config, "192.168.200.5", exec_args=["true"])
+        joined = " ".join(cmd)
+        # Verifies against a per-workload known_hosts keyed by the stable name.
+        self.assertIn("StrictHostKeyChecking=yes", cmd)
+        self.assertIn(f"HostKeyAlias={config.name}", cmd)
+        self.assertIn(
+            f"UserKnownHostsFile={config.home_dir}/.ssh/vm_known_hosts", cmd)
+        # No trust-on-first-use / throwaway known_hosts remain.
+        self.assertNotIn("StrictHostKeyChecking=no", joined)
+        self.assertNotIn("/dev/null", joined)
 
 
 # ── VMSubstrate.liveness() ───────────────────────────────────────────────────
@@ -1792,11 +1808,10 @@ class TestRemovedVerbs(unittest.TestCase):
     def _invoke(self, argv):
         """Run bin/workloadctl with the given argv list; return (stdout, stderr, exitcode)."""
         import subprocess
-        wctl = str(Path(__file__).parent.parent / 'bin' / 'workloadctl')
+        wctl = str(REPO_ROOT / 'bin' / 'workloadctl')
         result = subprocess.run(
             ['python3', wctl, *argv],
-            capture_output=True, text=True,
-            env={**__import__('os').environ, 'PYTHONPATH': str(Path(__file__).parent.parent / 'lib')},
+            capture_output=True, text=True, env=script_env(),
         )
         return result.stdout, result.stderr, result.returncode
 

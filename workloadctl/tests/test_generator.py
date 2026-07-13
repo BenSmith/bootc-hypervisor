@@ -5,12 +5,9 @@ Runs the generator with temp directories and validates the output files.
 No root required — all paths are overridden via env vars and argv.
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
@@ -18,32 +15,25 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(__file__))
 from covhelper import python_cmd
 
-GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+from tests import REPO_ROOT, load_script, script_env
+
+GENERATOR = str(REPO_ROOT / "generators" / "workload-generate")
 
 
 def _load_generator_module():
     """Import workload-generate as a module (it has a __main__ guard)."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader("workload_generate", GENERATOR)
-    spec = importlib.util.spec_from_loader("workload_generate", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return load_script("generators/workload-generate")
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
     """Run the generator and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
-    env["WORKLOAD_GENERATE_LOG_STDERR"] = "1"
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        SYSUSERS_DIR=sysusers_dir,
+        WORKLOAD_GENERATE_LOG_STDERR="1",
+    )
     return subprocess.run(
         python_cmd(GENERATOR, str(services_dir)),
         capture_output=True, text=True, env=env,
@@ -1266,6 +1256,8 @@ class TestGeneratorUserns(unittest.TestCase):
         self.assertIn("--userns=keep-id", service)
 
     def test_host_userns(self):
+        # userns=host is gated: it must carry the unsafe_host_userns opt-in or the
+        # generator (via validate_workload_config) skips the workload (S5).
         write_config(self.config_dir, "hostns", """\
             [workload]
             name = "hostns"
@@ -1275,11 +1267,30 @@ class TestGeneratorUserns(unittest.TestCase):
 
             [security]
             userns = "host"
+            unsafe_host_userns = true
         """)
 
         run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         service = (Path(self.services_dir) / "workload-hostns.service").read_text()
         self.assertIn("--userns=host", service)
+
+    def test_host_userns_without_optin_is_skipped(self):
+        # Without the opt-in, the workload fails validation and the generator
+        # emits no unit for it (hard-block, not a warning).
+        write_config(self.config_dir, "hostns-bare", """\
+            [workload]
+            name = "hostns-bare"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            userns = "host"
+        """)
+
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-hostns-bare.service").exists())
 
     def test_keep_id_with_uid_gid(self):
         write_config(self.config_dir, "uidgid", """\
@@ -1745,13 +1756,27 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("Restart=on-failure", svc)
         self.assertNotIn("Restart=always", svc)
 
-    def test_vm_restart_on_reboot_falls_back_to_always(self):
-        # "on-reboot" is reserved for reason-aware restart that isn't
-        # implemented yet; it must degrade to the safe always-on behavior.
+    def test_vm_restart_on_reboot(self):
+        # "on-reboot" restarts a guest reboot but honors a guest poweroff. It's
+        # implemented via Restart=on-failure + a reason-aware exit code from the
+        # notify wrapper (armed by the env var), watching a dedicated
+        # qmp-notify.sock monitor.
         self._write_vm_config(extra='restart = "on-reboot"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
-        self.assertIn("Restart=always", svc)
+        self.assertIn("Restart=on-failure", svc)
+        self.assertNotIn("Restart=always", svc)
+        self.assertIn("Environment=WORKLOADCTL_VM_REBOOT_EXIT=133", svc)
+        self.assertIn("qmp-notify.sock", svc)
+
+    def test_vm_restart_default_has_no_reboot_env_or_socket(self):
+        # The reason-aware machinery is on-reboot-only: default (always) units
+        # keep their shape — no reboot env, no extra QMP socket.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertNotIn("WORKLOADCTL_VM_REBOOT_EXIT", svc)
+        self.assertNotIn("qmp-notify.sock", svc)
 
     def test_main_service_owns_runtime_dir_with_preserve(self):
         # The per-VM socket dir must be owned by the *main* VM service (so

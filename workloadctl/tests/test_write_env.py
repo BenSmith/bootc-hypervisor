@@ -13,17 +13,19 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from tests import script_env
+
+
 WRITE_ENV = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-write-env')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 
 
 def run_write_env(name, config_dir, creds_dir, env_dir, container=None):
     """Run workload-write-env and return the CompletedProcess."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["CREDENTIALS_DIRECTORY"] = str(creds_dir)
-    env["WORKLOAD_ENV_DIR"] = str(env_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(
+        WORKLOAD_CONFIG_DIR=config_dir,
+        CREDENTIALS_DIRECTORY=creds_dir,
+        WORKLOAD_ENV_DIR=env_dir,
+    )
     argv = [sys.executable, WRITE_ENV, name]
     if container is not None:
         argv.append(container)
@@ -244,10 +246,10 @@ class TestWriteEnvErrors(unittest.TestCase):
         """)
 
         # Run without CREDENTIALS_DIRECTORY set
-        env = os.environ.copy()
-        env["WORKLOAD_CONFIG_DIR"] = self.config_dir
-        env["WORKLOAD_ENV_DIR"] = self.env_dir
-        env["PYTHONPATH"] = LIB_DIR
+        env = script_env(
+            WORKLOAD_CONFIG_DIR=self.config_dir,
+            WORKLOAD_ENV_DIR=self.env_dir,
+        )
         env.pop("CREDENTIALS_DIRECTORY", None)
 
         result = subprocess.run(
@@ -258,8 +260,7 @@ class TestWriteEnvErrors(unittest.TestCase):
         self.assertIn("CREDENTIALS_DIRECTORY", result.stderr)
 
     def test_no_args(self):
-        env = os.environ.copy()
-        env["PYTHONPATH"] = LIB_DIR
+        env = script_env()
         result = subprocess.run(
             [sys.executable, WRITE_ENV],
             capture_output=True, text=True, env=env,
@@ -473,10 +474,10 @@ class TestWriteEnvDollarEscape(unittest.TestCase):
     def _run_without_creds_dir(self, name):
         """Run the helper with CREDENTIALS_DIRECTORY unset — mirrors a unit that
         emitted no LoadCredentialEncrypted (nothing to decrypt)."""
-        env = os.environ.copy()
-        env["WORKLOAD_CONFIG_DIR"] = self.config_dir
-        env["WORKLOAD_ENV_DIR"] = self.env_dir
-        env["PYTHONPATH"] = LIB_DIR
+        env = script_env(
+            WORKLOAD_CONFIG_DIR=self.config_dir,
+            WORKLOAD_ENV_DIR=self.env_dir,
+        )
         env.pop("CREDENTIALS_DIRECTORY", None)
         return subprocess.run(
             [sys.executable, WRITE_ENV, name],

@@ -22,13 +22,11 @@ docs/wip/test-suite-improvement-plan.md phase A2.
 import configparser
 import os
 import shutil
-import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
 from test_generator import run_generator, write_config
 
 # Opt-in tokens the generator must never emit unless the config requested them.
@@ -102,6 +100,7 @@ CASES = [
         image = "docker.io/nginx:latest"
         [security]
         userns = "host"
+        unsafe_host_userns = true
     """, requested=("--userns=host",)),
     Case("nethost", """\
         [workload]

@@ -13,10 +13,7 @@ test_cmd_drift, substrate liveness via test_substrate). Pinned here:
 """
 
 import argparse
-import importlib.machinery
-import importlib.util
 import io
-import os
 import sys
 import tempfile
 import unittest
@@ -25,22 +22,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
+import cmd_doctor
 
-import cmd_doctor  # noqa: E402
+from tests import load_script
 
 
 def _load_cli():
-    """Load the extensionless bin/workloadctl as a module (no __main__ side
-    effects; same technique as test_cli_exit_codes)."""
-    path = Path(__file__).parent.parent / "bin" / "workloadctl"
-    loader = importlib.machinery.SourceFileLoader("workloadctl_bin", str(path))
-    spec = importlib.util.spec_from_loader("workloadctl_bin", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+    """Load the extensionless bin/workloadctl as a module (no __main__ side effects)."""
+    return load_script("bin/workloadctl", "workloadctl_bin")
 
 
 class WiringTest(unittest.TestCase):

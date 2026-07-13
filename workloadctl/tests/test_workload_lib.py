@@ -4,7 +4,6 @@
 import contextlib
 import os
 import socket
-import sys
 import tempfile
 import threading
 import unittest
@@ -13,18 +12,26 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Add lib to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 
 import workload_lib
+import vm
 from workload_lib import (
-    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES, SECRET_PATTERN,
+    WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
     workload_username, workload_service_name, workload_container_name,
-    workload_home_dir, workload_state_dir, validate_workload_name, expand_volume_path, dq,
-    auto_detect_credentials, resolve_secret_env_vars,
-    validate_workload_config, infer_workload_mode, normalize_containers,
-    parse_memory_mib, virtiofs_tag, parse_volume_spec, vm_mac_address,
-    substitute_template, QMPClient,
+    workload_home_dir, workload_state_dir, expand_volume_path, dq,
+    infer_workload_mode, normalize_containers,
+    virtiofs_tag, parse_volume_spec,
     selinux_module_name, selinux_type_name,
+)
+from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from validation import (
+    validate_workload_name, validate_workload_config,
+    valid_userns_mode, collect_config_warnings,
+)
+from qmp import QMPClient
+from secrets_template import (
+    SECRET_PATTERN, auto_detect_credentials, resolve_secret_env_vars,
+    substitute_template,
 )
 
 
@@ -319,7 +326,7 @@ class TestVmNetworkValidation(unittest.TestCase):
                 "vm": {"image": "example/x:latest", "network": network}}
 
     def _net_errors(self, **network):
-        return [e for e in workload_lib.validate_vm_config(self._cfg(**network))
+        return [e for e in vm.validate_vm_config(self._cfg(**network))
                 if "network" in e]
 
     def test_absent_network_ok(self):
@@ -700,22 +707,22 @@ class TestManagedBridgeConstants(unittest.TestCase):
     def test_default_subnet_matches_historical_values(self):
         # The /24 default must reproduce the pre-ADR hardcoded constants so the
         # generated bridge unit stays byte-identical.
-        self.assertEqual(workload_lib.VM_BRIDGE_SUBNET, "192.168.200.0/24")
-        self.assertEqual(workload_lib.VM_BRIDGE_IP, "192.168.200.1")
-        self.assertEqual(workload_lib.VM_BRIDGE_CIDR, "192.168.200.1/24")
-        self.assertEqual(workload_lib.VM_DHCP_RANGE,
+        self.assertEqual(vm.VM_BRIDGE_SUBNET, "192.168.200.0/24")
+        self.assertEqual(vm.VM_BRIDGE_IP, "192.168.200.1")
+        self.assertEqual(vm.VM_BRIDGE_CIDR, "192.168.200.1/24")
+        self.assertEqual(vm.VM_DHCP_RANGE,
                          "192.168.200.100,192.168.200.199,12h")
 
     def test_default_derivation_matches_module_constants(self):
-        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("192.168.200.0/24")
+        ip, cidr, subnet, dhcp = vm.managed_bridge_params("192.168.200.0/24")
         self.assertEqual((ip, cidr, subnet, dhcp),
-                         (workload_lib.VM_BRIDGE_IP, workload_lib.VM_BRIDGE_CIDR,
-                          workload_lib.VM_BRIDGE_SUBNET, workload_lib.VM_DHCP_RANGE))
+                         (vm.VM_BRIDGE_IP, vm.VM_BRIDGE_CIDR,
+                          vm.VM_BRIDGE_SUBNET, vm.VM_DHCP_RANGE))
 
     def test_dhcp_range_is_on_the_configured_subnet(self):
         # The range must follow the subnet (the latent bug ADR 002 fixes:
         # dhcp-range was hardcoded 192.168.200.x regardless of subnet).
-        ip, cidr, subnet, dhcp = workload_lib.managed_bridge_params("10.100.0.0/24")
+        ip, cidr, subnet, dhcp = vm.managed_bridge_params("10.100.0.0/24")
         self.assertEqual(ip, "10.100.0.1")
         self.assertEqual(cidr, "10.100.0.1/24")
         self.assertEqual(dhcp, "10.100.0.100,10.100.0.199,12h")
@@ -723,17 +730,17 @@ class TestManagedBridgeConstants(unittest.TestCase):
     def test_small_subnet_dhcp_range_falls_back_to_full_span(self):
         # A /26 (.0–.63) can't fit the .100–.199 window; instead of collapsing
         # to a single clamped address it must span first-usable..last-usable.
-        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/26")
+        _ip, _cidr, _subnet, dhcp = vm.managed_bridge_params("10.0.0.0/26")
         self.assertEqual(dhcp, "10.0.0.2,10.0.0.62,12h")
 
     def test_tiny_subnet_dhcp_range_still_spans_usable_hosts(self):
-        _ip, _cidr, _subnet, dhcp = workload_lib.managed_bridge_params("10.0.0.0/28")
+        _ip, _cidr, _subnet, dhcp = vm.managed_bridge_params("10.0.0.0/28")
         self.assertEqual(dhcp, "10.0.0.2,10.0.0.14,12h")
 
     def test_subnet_with_no_leasable_address_is_rejected(self):
         for cidr in ("10.0.0.0/31", "10.0.0.0/32"):
             with self.assertRaises(ValueError):
-                workload_lib.managed_bridge_params(cidr)
+                vm.managed_bridge_params(cidr)
 
 
 class TestParseVolumeSpec(unittest.TestCase):
@@ -1490,6 +1497,155 @@ class TestUnitsOutdated(unittest.TestCase):
         self.cfg.write_text("x")
         os.utime(self.cfg, (1000.4, 1000.4))
         self.assertFalse(workload_lib.units_outdated("foo"))
+
+
+class TestHostUsernsGate(unittest.TestCase):
+    """S5: userns=host is refused unless explicitly acknowledged."""
+
+    def _cfg(self, security):
+        return {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+                "security": security}
+
+    def test_uses_host_userns_detection(self):
+        from validation import uses_host_userns
+        self.assertTrue(uses_host_userns(self._cfg({"userns": "host"})))
+        self.assertFalse(uses_host_userns(self._cfg({"userns": "keep-id"})))
+        self.assertFalse(uses_host_userns(
+            self._cfg({"userns": "keep-id:uid=0,gid=0"})))
+        # VMs never use userns.
+        self.assertFalse(uses_host_userns(
+            {"workload": {"name": "v"}, "vm": {"cloud_image_url": "x"},
+             "security": {"userns": "host"}}))
+
+    def test_bridge_reads_per_container_userns(self):
+        from validation import uses_host_userns
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "vpn", "container": {"image": "y:latest"},
+                    "security": {"userns": "host"}},
+               ]}
+        self.assertTrue(uses_host_userns(cfg))
+
+    def test_validate_rejects_unacked_host_userns(self):
+        errors = validate_workload_config(self._cfg({"userns": "host"}))
+        self.assertTrue(any("unsafe_host_userns" in e for e in errors))
+
+    def test_validate_accepts_acked_host_userns(self):
+        errors = validate_workload_config(
+            self._cfg({"userns": "host", "unsafe_host_userns": True}))
+        self.assertFalse(any("unsafe_host_userns" in e for e in errors))
+
+    def test_validate_accepts_container_root_keep_id(self):
+        errors = validate_workload_config(
+            self._cfg({"userns": "keep-id:uid=0,gid=0"}))
+        self.assertEqual(errors, [])
+
+
+class TestVmMacCollisions(unittest.TestCase):
+    def test_no_collision_for_distinct_names(self):
+        # Real derived MACs differ for these names.
+        self.assertEqual(vm_mac_collisions("git", ["forge", "build"]), [])
+
+    def test_excludes_self(self):
+        self.assertEqual(vm_mac_collisions("git", ["git"]), [])
+
+    def test_detects_collision(self):
+        # Force two names onto one MAC to exercise the detection path without
+        # having to construct a real md5 collision.
+        fixed = "02:00:00:00:00:01"
+        collide = {"git", "forge"}
+        with patch("vm.vm_mac_address",
+                   side_effect=lambda n: fixed if n in collide else f"02:00:00:00:00:{ord(n[0]):02x}"):
+            self.assertEqual(vm_mac_collisions("git", ["forge", "other"]), ["forge"])
+
+
+class TestValidUsernsMode(unittest.TestCase):
+    def test_accepts_plain_forms(self):
+        self.assertTrue(valid_userns_mode("keep-id"))
+        self.assertTrue(valid_userns_mode("host"))
+
+    def test_accepts_keep_id_params(self):
+        self.assertTrue(valid_userns_mode("keep-id:uid=1000"))
+        self.assertTrue(valid_userns_mode("keep-id:uid=0,gid=0"))
+
+    def test_rejects_bad_forms(self):
+        for bad in ("private", "keep-id:", "keep-id:uid=x", "keep-id:foo=1",
+                    "keep-id:uid=1,uid=2", "keep-id:uid"):
+            self.assertFalse(valid_userns_mode(bad), bad)
+
+
+class TestCollectConfigWarnings(unittest.TestCase):
+    """collect_config_warnings mirrors the boot generator's kmsg-only warnings
+    so `validate` can surface them at edit/deploy time."""
+
+    def test_clean_single_config_has_no_warnings(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"}}
+        self.assertEqual(collect_config_warnings(cfg), [])
+
+    def test_invalid_userns_flagged(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+               "security": {"userns": "private"}}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("invalid userns" in w and "private" in w for w in warnings))
+
+    def test_valid_userns_not_flagged(self):
+        cfg = {"workload": {"name": "app"}, "container": {"image": "x:latest"},
+               "security": {"userns": "keep-id:uid=0,gid=0"}}
+        self.assertEqual(collect_config_warnings(cfg), [])
+
+    def test_bridge_userns_read_per_container(self):
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"},
+                    "security": {"userns": "bogus"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("invalid userns" in w and "'web'" in w for w in warnings))
+
+    def test_pet_in_multi_flagged(self):
+        cfg = {"workload": {"name": "app", "mode": "pod", "lifecycle": "pet"},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("lifecycle=pet" in w for w in warnings))
+
+    def test_pet_in_single_not_flagged(self):
+        cfg = {"workload": {"name": "app", "lifecycle": "pet"},
+               "container": {"image": "x:latest"}}
+        self.assertFalse(any("lifecycle=pet" in w
+                             for w in collect_config_warnings(cfg)))
+
+    def test_bridge_ports_ignored_flagged(self):
+        cfg = {"workload": {"name": "app", "mode": "bridge"},
+               "network": {"ports": ["8080:80"]},
+               "containers": [
+                   {"name": "web", "container": {"image": "x:latest"}},
+                   {"name": "db", "container": {"image": "y:latest"}},
+               ]}
+        warnings = collect_config_warnings(cfg)
+        self.assertTrue(any("[network].ports is ignored in bridge mode" in w
+                            for w in warnings))
+
+    def test_requires_after_cross_reference(self):
+        cfg = {"workload": {"name": "app", "requires": ["db"], "after": ["cache"]},
+               "container": {"image": "x:latest"}}
+        # Without the fleet view, the cross-reference is skipped.
+        self.assertEqual(collect_config_warnings(cfg), [])
+        # db exists, cache does not.
+        warnings = collect_config_warnings(cfg, known_workload_names={"app", "db"})
+        self.assertTrue(any("after" in w and "cache" in w for w in warnings))
+        self.assertFalse(any("db" in w for w in warnings))
+
+    def test_vm_config_skips_container_checks(self):
+        cfg = {"workload": {"name": "gitvm", "lifecycle": "pet"},
+               "vm": {"cloud_image_url": "https://x/y.qcow2"},
+               "security": {"userns": "private"}}
+        # VMs don't use userns/lifecycle-in-mode; those must not fire.
+        self.assertEqual(collect_config_warnings(cfg), [])
 
 
 if __name__ == "__main__":

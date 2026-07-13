@@ -4,7 +4,8 @@
 # Substitutions are performed by workloadctl (workload-ensure-user) at ISO
 # build time — see docs/workloads.md "Bootstrapping a VM with cloud-init"
 # for the full list of placeholder forms. Magic vars injected here:
-# WORKLOADCTL_SSH_KEY (workload's pubkey) and WORKLOADCTL_WORKLOAD_NAME.
+# WORKLOADCTL_SSH_KEY (workload's pubkey), WORKLOADCTL_WORKLOAD_NAME, and the
+# SSH host key (WORKLOADCTL_VM_HOST_KEY_B64 / WORKLOADCTL_VM_HOST_PUBKEY).
 #
 # No idle-poweroff: Forgejo lives here too, so this VM is always-on.
 
@@ -29,6 +30,20 @@ users:
       - ${WORKLOADCTL_SSH_KEY}
 
 write_files:
+  # SSH host key (S1). The CLI pins the guest host key
+  # (StrictHostKeyChecking=yes), so this custom seed MUST install it or
+  # provisioning fails. base64 keeps the multi-line PEM on one line (same reason
+  # as the homelab CA material below); sshd picks it up on first boot.
+  - path: /etc/ssh/ssh_host_ed25519_key
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: ${WORKLOADCTL_VM_HOST_KEY_B64}
+  - path: /etc/ssh/ssh_host_ed25519_key.pub
+    permissions: '0644'
+    owner: root:root
+    content: ${WORKLOADCTL_VM_HOST_PUBKEY}
+
   # Resolve the forge hostname to this VM itself: Caddy listens on :443/80,
   # and the runner inside the VM talks to https://${FORGEJO_HOSTNAME} during register.
   - path: /etc/hosts

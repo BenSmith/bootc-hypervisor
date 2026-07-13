@@ -14,13 +14,15 @@ import sys
 from typing import Any
 
 from workload_lib import (
-    QMPClient,
+    HOST_USERNS_OPT_IN,
     USERNAME_PREFIX,
-    VM_SOCKET_DIR,
     units_outdated,
     workload_config_dir,
     workload_service_units,
 )
+from vm import VM_SOCKET_DIR
+from validation import uses_host_userns
+from qmp import QMPClient
 from podman import Podman
 from service_runtime import manager_active
 from substrate import NotApplicable, get_substrate, service_active
@@ -287,6 +289,7 @@ def cmd_status(args, manager: WorkloadManager):
             "tasks_current": _int_or_null(props.get("TasksCurrent", "")),
             "result": props.get("Result") or None,
             "config_stale": units_outdated(config.name),
+            "host_userns": uses_host_userns(config.config),
         }
         if config.is_multi:
             out["mode"] = config.mode
@@ -306,6 +309,13 @@ def cmd_status(args, manager: WorkloadManager):
         print(f"⚠  config edited since last enable — units are stale. Run "
               f"'sudo workloadctl enable {config.name}' to apply "
               f"(daemon-reload does not regenerate units).\n", flush=True)
+
+    if uses_host_userns(config.config):
+        # Surface the elevated trust: host userns dissolves the per-workload
+        # isolation boundary. flush for the same buffering reason as above.
+        print(f'⚠  elevated trust: security.userns="host" in effect '
+              f'({HOST_USERNS_OPT_IN}=true) — per-workload isolation boundary '
+              f'dissolved.\n', flush=True)
 
     if config.is_multi:
         units = workload_service_units(config)

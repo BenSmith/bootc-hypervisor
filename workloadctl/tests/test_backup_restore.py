@@ -14,15 +14,12 @@ import argparse
 import io
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "lib"))
 
 import workload_lib  # noqa: E402
 import cmd_backup  # noqa: E402

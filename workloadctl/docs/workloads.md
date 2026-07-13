@@ -1108,10 +1108,28 @@ Inside the user-data file, three substitution forms are recognised:
 | `${SECRET?name}` | Same as `${SECRET:name}` but missing credential substitutes to `""` instead of erroring. Useful for runtime opt-ins gated by a shell check on the rendered value. |
 | `$$` | Collapses to a literal `$` — use `$${shellvar}` to keep `${shellvar}` literal in the rendered file. |
 
-Two magic variables are always injected:
+These magic variables are always injected:
 
 - `${WORKLOADCTL_SSH_KEY}` — the workload's generated SSH pubkey. Drop into `users[].ssh_authorized_keys` to keep `workloadctl exec` working.
 - `${WORKLOADCTL_WORKLOAD_NAME}` — the workload name (useful for `hostname:`).
+- `${WORKLOADCTL_VM_HOST_KEY_B64}` — the workload's SSH **host** private key, base64-encoded (single line). `${WORKLOADCTL_VM_HOST_PUBKEY}` is the matching public key.
+
+**Host-key pinning (required for custom seeds).** The CLI verifies the guest with `StrictHostKeyChecking=yes` against a pinned host key, so a custom `user_data_file` **must install that host key or provisioning fails** (no trust-on-first-use). Drop this into the seed — base64 keeps the multi-line PEM on one line, which a YAML `write_files` block scalar can't otherwise carry:
+
+```yaml
+write_files:
+  - path: /etc/ssh/ssh_host_ed25519_key
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: ${WORKLOADCTL_VM_HOST_KEY_B64}
+  - path: /etc/ssh/ssh_host_ed25519_key.pub
+    permissions: '0644'
+    owner: root:root
+    content: ${WORKLOADCTL_VM_HOST_PUBKEY}
+```
+
+The default seed (no `user_data_file`) installs and pins the host key automatically.
 
 **Encrypting a runtime secret** for `${SECRET:name}`:
 

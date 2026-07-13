@@ -21,8 +21,10 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from tests import script_env
+
+
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
 # Shipped bundles live one-per-dir as workloads/<bundle>/workload.toml. The
 # bundle dir name is the workload identity; we present it as "<bundle>.toml" so
 # the filename-based assertions and skip set below read unchanged.
@@ -43,10 +45,7 @@ SKIP_FILES = {"example-multi-container.toml", "webproxy-demo.toml"}
 
 
 def run_generator(config_dir, services_dir, sysusers_dir):
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["SYSUSERS_DIR"] = str(sysusers_dir)
-    env["PYTHONPATH"] = LIB_DIR
+    env = script_env(WORKLOAD_CONFIG_DIR=config_dir, SYSUSERS_DIR=sysusers_dir)
     return subprocess.run(
         [sys.executable, GENERATOR, str(services_dir)],
         capture_output=True, text=True, env=env,
@@ -163,28 +162,12 @@ class TestWorkloadConfigParsing(unittest.TestCase):
 
     def test_userns_valid(self):
         """security.userns is one of the valid values."""
-        def _valid_userns(mode):
-            if mode in ("keep-id", "host"):
-                return True
-            if not mode.startswith("keep-id:"):
-                return False
-            params = mode[len("keep-id:"):].split(",")
-            valid_keys = {"uid", "gid"}
-            seen = set()
-            for param in params:
-                if "=" not in param:
-                    return False
-                key, value = param.split("=", 1)
-                if key not in valid_keys or key in seen or not value.isdigit():
-                    return False
-                seen.add(key)
-            return len(seen) > 0
-
+        from validation import valid_userns_mode
         for filename, config in ALL_WORKLOADS:
             userns = config.get("security", {}).get("userns")
             if userns is not None:
                 with self.subTest(config=filename):
-                    self.assertTrue(_valid_userns(userns),
+                    self.assertTrue(valid_userns_mode(userns),
                                     f"{filename}: invalid userns={userns}")
 
     def test_capabilities_are_uppercase(self):
@@ -669,8 +652,11 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
                     self.assertIn("NET_ADMIN", caps,
                                   f"{name} mounts wireguard config but lacks NET_ADMIN")
 
-    def test_vpn_workloads_use_userns_host(self):
-        """Workloads with WireGuard volumes need userns=host for wg-quick."""
+    def test_vpn_workloads_use_container_root_userns(self):
+        """wg-quick needs to run as root inside the container, but that only
+        requires container root — NOT the host user namespace. These workloads
+        use keep-id:uid=0,gid=0 (container root in a private userns); userns=host
+        is reserved for workloads that must observe host-side UIDs (S5)."""
         for filename, config in ALL_WORKLOADS:
             name = config["workload"]["name"]
             volumes = config.get("storage", {}).get("volumes", [])
@@ -678,8 +664,22 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
             if has_wg:
                 with self.subTest(workload=name):
                     userns = config.get("security", {}).get("userns")
-                    self.assertEqual(userns, "host",
-                                     f"{name} mounts wireguard config but userns != host")
+                    self.assertEqual(userns, "keep-id:uid=0,gid=0",
+                                     f"{name} mounts wireguard config but userns "
+                                     f"!= keep-id:uid=0,gid=0")
+
+    def test_host_userns_configs_carry_optin(self):
+        """Any shipped workload using userns=host must acknowledge it via
+        unsafe_host_userns (S5) — otherwise it fails validation and won't
+        generate. Guards against a new host-userns config slipping in unacked."""
+        from validation import uses_host_userns, host_userns_acknowledged
+        for filename, config in ALL_WORKLOADS:
+            name = config["workload"]["name"]
+            if uses_host_userns(config):
+                with self.subTest(workload=name):
+                    self.assertTrue(
+                        host_userns_acknowledged(config),
+                        f"{name} uses userns=host without unsafe_host_userns=true")
 
     def test_local_images_have_pull_policy(self):
         """Images from localhost/ should explicitly set a pull policy."""

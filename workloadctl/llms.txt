@@ -255,7 +255,7 @@ Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`)
 
 These patterns were considered and explicitly rejected:
 
-- **Stdlib-only constraint.** `lib/` has no third-party dependencies; all imports are stdlib + `tomllib`. The rationale: the tool ships inside a bootc image RPM. Adding pip/venv machinery to a system Python package creates unresolvable version-conflict surface; keeping everything stdlib means `PYTHONPATH=lib python3 -m unittest` "just works" and the RPM only needs `python3`.
+- **Stdlib-only constraint.** `lib/` has no third-party dependencies; all imports are stdlib + `tomllib`. The rationale: the tool ships inside a bootc image RPM. Adding pip/venv machinery to a system Python package creates unresolvable version-conflict surface; keeping everything stdlib means `python3 -m unittest` "just works" and the RPM only needs `python3`.
 
 - **`podman secret` for runtime secrets.** Rejected: podman secrets are stored as plaintext JSON on disk under the user's homedir (`$HOME/.local/share/containers/storage/secrets/`). workloadctl uses systemd credentials (`systemd-creds`, AES256-GCM, TPM2-bound) instead — encrypted blobs that only decrypt in-process to a tmpfs mount at runtime. See `docs/secrets.md`.
 

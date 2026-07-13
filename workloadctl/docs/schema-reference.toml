@@ -175,9 +175,11 @@ name = "schema-reference"
 #                  ExecStop) is never auto-restarted regardless.
 #   "on-failure" - leave the VM down on a clean exit (incl. a guest reboot);
 #                  relaunch only on a non-zero QEMU exit (a crash).
-#   "on-reboot"  - reserved: restart only on a guest reboot while honoring an
-#                  in-guest poweroff. Not implemented yet — currently falls
-#                  back to "always" with a warning.
+#   "on-reboot"  - relaunch on a guest reboot, but leave the VM down on an
+#                  in-guest poweroff (so `poweroff` inside the guest actually
+#                  stops it). A crash still relaunches. QEMU can't express this
+#                  via exit code, so the notify wrapper watches the QMP SHUTDOWN
+#                  event to tell a reboot from a poweroff.
 # Type: string ("always" | "on-failure" | "on-reboot")
 # Default: "always"
 # restart = "always"
@@ -242,6 +244,16 @@ name = "schema-reference"
 #                                   Drop this into users[].ssh_authorized_keys
 #                                   so `workloadctl exec` keeps working.
 #   ${WORKLOADCTL_WORKLOAD_NAME}  - The workload name (e.g. for hostname).
+#   ${WORKLOADCTL_VM_HOST_KEY_B64} - The workload's SSH *host* private key,
+#                                   base64-encoded (single line). REQUIRED for a
+#                                   custom seed: the CLI pins the host key
+#                                   (StrictHostKeyChecking=yes), so a custom
+#                                   user_data_file must install it via a
+#                                   write_files entry for
+#                                   /etc/ssh/ssh_host_ed25519_key (encoding: b64)
+#                                   or provisioning fails. The default seed does
+#                                   this automatically.
+#   ${WORKLOADCTL_VM_HOST_PUBKEY} - The matching SSH host public key.
 #
 # Notes:
 #   - The seed ISO lives in the workload's home dir, mode 0640, owned by
@@ -432,7 +444,9 @@ image = "ghcr.io/example/workload:latest"
 # Default: (uses the image's USER — typically root or nobody)
 # Use this when the image runs as an unprivileged user (e.g., nobody) but the
 # workload's volume directories are owned by the workload user. Common pattern:
-#   user = "0" with userns = "host" — container root maps to the workload user.
+#   user = "0" with userns = "keep-id:uid=0,gid=0" — container root maps to the
+#   workload user in a private userns (prefer this over userns = "host", which
+#   is gated behind unsafe_host_userns; see [security].userns).
 # user = "0"
 
 # Optional: Pull policy for container images
@@ -708,20 +722,35 @@ virtualization = true
 #               Use when the container image runs as a fixed non-root UID
 #               (e.g. nobody=65534, git=1000) and volumes need to be writable
 #               Same security as keep-id — no container root access
-#   "host"    - Container root maps to workload user on host
-#               Container root (UID 0) → workload user (UID 10009) on host
-#               Required for: systemd-based containers (pihole, etc.)
-#               Security trade-off: Container escape = workload user access
+#   "host"    - Share the HOST user namespace (container root → workload user,
+#               but in the host's userns, not a private one)
+#               GATED: dissolves the per-workload isolation boundary, so it is
+#               REFUSED unless unsafe_host_userns = true is also set (see below).
+#               Only genuinely needed when the container must see host-side UIDs
+#               through a host mount (e.g. a metrics agent reading /host/proc).
+#               If the container merely needs to *be* root (systemd, wg-quick,
+#               pihole entrypoints), use "keep-id:uid=0,gid=0" instead: that
+#               gives container root in a PRIVATE userns — same in-container
+#               root, no host userns.
 #
-# IMPORTANT: Use "host" only for trusted containers that need systemd
-# Prefer "keep-id:uid=N,gid=N" over "host" + user="0" when the container
-# just needs a different UID (not actual root privileges).
+# IMPORTANT: Prefer "keep-id:uid=N,gid=N" (incl. uid=0) over "host". Reach for
+# "host" only when the container must observe host-side UIDs, and then set
+# unsafe_host_userns = true to acknowledge the elevated trust.
 # Examples:
 #   userns = "keep-id"                        # Default - maximum security
 #   userns = "keep-id:uid=65534,gid=65534"   # Remap to nobody (e.g. Prometheus)
 #   userns = "keep-id:uid=1000,gid=1000"     # Remap to UID 1000 (e.g. Forgejo)
-#   userns = "host"                           # Required for systemd containers
+#   userns = "keep-id:uid=0,gid=0"           # Container root, private userns
+#   userns = "host"                           # host userns (needs opt-in below)
 # userns = "keep-id"
+
+# GATE: opt in to userns = "host". Host userns dissolves the per-workload
+# isolation boundary, so a workload that sets userns = "host" WITHOUT this key
+# fails validation (enable/install/validate refuse) and is skipped by the boot
+# generator — it never starts. Set this true to acknowledge the elevated trust.
+# It is surfaced in `status` and `diagnose` so the posture stays visible.
+# Type: bool   Default: false
+# unsafe_host_userns = false
 
 # Optional: Linux capabilities to add to the container
 # Type: array of strings

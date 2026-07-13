@@ -131,8 +131,10 @@ workloadctl/tests/cli_surface/
   test_runtime_*.py       runtime rung — boot a VM, assert live invariants:
                           smoke, hardening, caps, cgroup, config_drift,
                           health, linger_runtime_dir, notify_misattribution,
-                          pasta, pod_reenable, secret, secret_tmpfs, vm_smoke
-  workloads/rt-*.toml     runtime-rung fixtures (rt-basic/caps/notify/pod/vm)
+                          pasta, pod_reenable, secret, secret_tmpfs, vm_smoke,
+                          vm_hostkey (S1 pin), vm_restart (O6 on-reboot)
+  workloads/rt-*.toml     runtime-rung fixtures (rt-basic/caps/notify/pod/vm/
+                          vm-reboot)
   README.md               this file
 ```
 
@@ -224,7 +226,8 @@ Runtime-rung fixtures (`rt-*.toml`, used only by `test_runtime_*.py` in a VM):
 | `rt-caps.toml`  | capability/hardening assertions              |
 | `rt-notify.toml`| `Type=notify` misattribution regression      |
 | `rt-pod.toml`   | pod-mode re-enable                           |
-| `rt-vm.toml`    | nested `[vm]` workload smoke                  |
+| `rt-vm.toml`    | nested `[vm]` workload smoke; SSH host-key pin (S1) |
+| `rt-vm-reboot.toml` | `[vm].restart="on-reboot"` reboot-vs-poweroff (O6) |
 
 ## Notes on interactive verbs
 

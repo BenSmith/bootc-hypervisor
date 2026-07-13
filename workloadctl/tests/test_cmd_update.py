@@ -10,15 +10,10 @@ faking the substrate.
 
 import argparse
 import io
-import os
-import sys
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
 
-LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
 
 import cmd_update  # noqa: E402
 from substrate import NotApplicable, ProvisionFailed  # noqa: E402

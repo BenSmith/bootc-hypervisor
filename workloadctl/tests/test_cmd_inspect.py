@@ -9,9 +9,7 @@ be proven behaviour-preserving. See docs/wip/refactor-service-runtime-and-naming
 
 import io
 import json
-import os
 import shutil
-import sys
 import tempfile
 import types
 import unittest
@@ -19,8 +17,6 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, PropertyMock, patch
 
-_LIB = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, _LIB)
 
 import workload_lib
 import cmd_inspect

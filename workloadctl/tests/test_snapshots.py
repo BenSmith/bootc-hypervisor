@@ -39,14 +39,14 @@ import unittest
 import warnings
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from tests import REPO_ROOT as ROOT, script_env
+
 GENERATOR = ROOT / "generators" / "workload-generate"
-LIB_DIR = ROOT / "lib"
 WORKLOADS_DIR = ROOT / "workloads"
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
-sys.path.insert(0, str(LIB_DIR))
 from workload_lib import infer_workload_mode, normalize_containers  # noqa: E402
+
 
 # sysusers 'u' line: `u <name> <uid> "<gecos>" <home>`
 _SYSUSERS_UID_RE = re.compile(r'^u\s+\S+\s+(\d+)\s', re.M)
@@ -132,10 +132,7 @@ class TestWorkloadSnapshots(unittest.TestCase):
                 (cfg / name).mkdir(exist_ok=True)
                 _enable_toml(src, cfg / name / "workload.toml")
 
-            env = os.environ.copy()
-            env["WORKLOAD_CONFIG_DIR"] = str(cfg)
-            env["SYSUSERS_DIR"] = str(sys_d)
-            env["PYTHONPATH"] = str(LIB_DIR)
+            env = script_env(WORKLOAD_CONFIG_DIR=cfg, SYSUSERS_DIR=sys_d)
             # Pin GPU auto-resolution so snapshots are host-independent: the
             # generator otherwise reads the build host's PCI vendor IDs, so
             # `gpu = "auto"` workloads would differ between an NVIDIA dev box and

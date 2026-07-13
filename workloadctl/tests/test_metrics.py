@@ -14,8 +14,6 @@ return empty/defaults, so we test:
 - Atomic write (temp + rename, world-readable, no partial file left behind)
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -26,27 +24,32 @@ import time
 import unittest
 from pathlib import Path
 
-EXPORTER_SCRIPT = os.path.join(
-    os.path.dirname(__file__), '..', 'libexec', 'workload-exporter')
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
+from tests import REPO_ROOT, load_script, script_env
 
 
-def run_writer(config_dir, output_path):
-    """Run workload-exporter as a subprocess, writing to output_path."""
-    env = os.environ.copy()
-    env["WORKLOAD_CONFIG_DIR"] = str(config_dir)
-    env["PYTHONPATH"] = LIB_DIR
+EXPORTER_SCRIPT = str(REPO_ROOT / "libexec" / "workload-exporter")
+
+
+def run_writer(config_dir, output_path, disk=False):
+    """Run workload-exporter as a subprocess, writing to output_path.
+
+    With disk=True the slow --disk producer runs instead of the fast one.
+    """
+    env = script_env(WORKLOAD_CONFIG_DIR=config_dir)
+    argv = [sys.executable, EXPORTER_SCRIPT]
+    if disk:
+        argv.append("--disk")
+    argv.append(str(output_path))
     subprocess.run(
-        [sys.executable, EXPORTER_SCRIPT, str(output_path)],
-        env=env, check=True, capture_output=True, text=True, timeout=30,
+        argv, env=env, check=True, capture_output=True, text=True, timeout=30,
     )
 
 
-def scrape(config_dir):
+def scrape(config_dir, disk=False):
     """Run the exporter against config_dir once, return the written exposition."""
     with tempfile.TemporaryDirectory() as d:
-        out = Path(d) / "workloads.prom"
-        run_writer(config_dir, out)
+        out = Path(d) / ("workloads-disk.prom" if disk else "workloads.prom")
+        run_writer(config_dir, out, disk=disk)
         return out.read_text()
 
 
@@ -88,19 +91,12 @@ def parse_metric_value(prom_text, metric_name, labels=None):
 
 def _exporter_get_enabled_workloads(config_dir):
     """Load workload-exporter and call get_enabled_workloads against config_dir."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader(
-        "workload_exporter", EXPORTER_SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_exporter", loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
     orig_env = os.environ.get("WORKLOAD_CONFIG_DIR")
     orig_argv = sys.argv[:]
     os.environ["WORKLOAD_CONFIG_DIR"] = str(config_dir)
     sys.argv = [EXPORTER_SCRIPT]  # prevent PORT = int(sys.argv[1]) from failing
     try:
-        loader.exec_module(mod)
+        mod = load_script("libexec/workload-exporter")
         return mod.get_enabled_workloads()
     finally:
         sys.argv = orig_argv
@@ -349,7 +345,6 @@ class TestMetricsFormat(unittest.TestCase):
             "workload_memory_max_bytes": "gauge",
             "workload_pids_current": "gauge",
             "workload_health": "gauge",
-            "workload_disk_bytes": "gauge",
             "workload_enabled_total": "gauge",
             "workload_metrics_last_collect_timestamp_seconds": "gauge",
         }
@@ -403,12 +398,15 @@ class TestMetricsFormat(unittest.TestCase):
         if active is not None:
             self.assertIn(active, ("0", "1"))
 
-    def test_disk_bytes_gauge_declared(self):
-        """workload_disk_bytes gauge TYPE and HELP are always emitted."""
-        types = parse_type_declarations(self.prom)
+    def test_disk_bytes_in_separate_producer_not_fast_path(self):
+        """workload_disk_bytes is emitted by the slow --disk producer, and is
+        absent from the fast textfile (kept off the hot scrape path)."""
+        self.assertNotIn("workload_disk_bytes", self.prom)
+        disk_prom = scrape(self.config_dir, disk=True)
+        types = parse_type_declarations(disk_prom)
         self.assertIn("workload_disk_bytes", types)
         self.assertEqual(types["workload_disk_bytes"], "gauge")
-        self.assertIn("# HELP workload_disk_bytes ", self.prom)
+        self.assertIn("# HELP workload_disk_bytes ", disk_prom)
 
 
 class TestMetricsRobustness(unittest.TestCase):
@@ -498,18 +496,10 @@ class TestMetricsLiveCollection(unittest.TestCase):
 
 def _load_exporter():
     """Load the workload-exporter module object (for direct function calls)."""
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader(
-        "workload_exporter", EXPORTER_SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_exporter", loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
     orig_argv = sys.argv[:]
     sys.argv = [EXPORTER_SCRIPT]  # PORT = int(sys.argv[1]) guard
     try:
-        loader.exec_module(mod)
-        return mod
+        return load_script("libexec/workload-exporter")
     finally:
         sys.argv = orig_argv
 
@@ -969,9 +959,8 @@ class TestFormatMetrics(unittest.TestCase):
                       "uptime_seconds": 12.5, "health": {"app": 1}},
              {"cpu_usage_seconds_total": 3.5, "memory_current_bytes": 1024,
               "memory_max_bytes": 2048, "pids_current": 4},
-             {"balloon_actual_bytes": 999, "vcpu_0_cpu_seconds_total": 1.25},
-             4096),
-            ("nodisk", {}, {}, {}, None),
+             {"balloon_actual_bytes": 999, "vcpu_0_cpu_seconds_total": 1.25}),
+            ("nodisk", {}, {}, {}),
         ]
         text = self.mod.format_metrics(all_metrics)
         self.assertIn('workload_active{workload="app"} 1', text)
@@ -982,15 +971,15 @@ class TestFormatMetrics(unittest.TestCase):
         self.assertNotIn('workload_health{workload="app",container=', text)
         self.assertIn('workload_vm_balloon_actual_bytes{workload="app"} 999', text)
         self.assertIn('workload_vm_vcpu_cpu_seconds_total{workload="app",vcpu="0"} 1.250000', text)
-        self.assertIn('workload_disk_bytes{workload="app"} 4096', text)
-        self.assertNotIn('workload_disk_bytes{workload="nodisk"}', text)
+        # Disk usage is emitted by the separate --disk producer, not here.
+        self.assertNotIn('workload_disk_bytes', text)
         self.assertIn("workload_enabled_total 2", text)
 
     def test_pod_health_rendered_per_container(self):
         """Multi-container workloads emit one workload_health line per
         container, distinguished by the container label (the A6 fix)."""
         all_metrics = [
-            ("multi", {"health": {"web": 1, "db": 0}}, {}, {}, None),
+            ("multi", {"health": {"web": 1, "db": 0}}, {}, {}),
         ]
         text = self.mod.format_metrics(all_metrics)
         self.assertIn('workload_health{workload="multi",container="web"} 1', text)
@@ -1017,14 +1006,12 @@ class TestCollectAll(unittest.TestCase):
              self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
              self.mock.patch.object(self.mod, "get_container_healths",
-                                    return_value={"workload-app": "healthy"}), \
-             self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=1000):
+                                    return_value={"workload-app": "healthy"}):
             all_metrics = self.mod.collect_all()
         self.assertEqual(len(all_metrics), 1)
-        name, svc, _cgroup, _vm, disk = all_metrics[0]
+        name, svc, _cgroup, _vm = all_metrics[0]
         self.assertEqual(name, "app")
         self.assertEqual(svc["health"], {"app": 1})
-        self.assertEqual(disk, 1000)
         body = self.mod.format_metrics(all_metrics)
         self.assertIn('workload_health{workload="app"} 1', body)
 
@@ -1049,8 +1036,7 @@ class TestCollectAll(unittest.TestCase):
                 ], False)]), \
              self.mock.patch.object(self.mod, "get_service_metrics", return_value={"active": 1}), \
              self.mock.patch.object(self.mod, "get_cgroup_metrics", return_value={}), \
-             self.mock.patch.object(self.mod, "get_container_healths", side_effect=fake_healths), \
-             self.mock.patch.object(self.mod, "get_workload_disk_bytes", return_value=None):
+             self.mock.patch.object(self.mod, "get_container_healths", side_effect=fake_healths):
             all_metrics = self.mod.collect_all()
 
         self.assertEqual(sorted(queried_names), ["workload-multi-db", "workload-multi-web"])
@@ -1081,7 +1067,7 @@ class TestWriteMetrics(unittest.TestCase):
     def test_body_matches_format_metrics(self):
         """The file holds exactly what format_metrics() renders — the writer
         swapped the transport (was HTTP), not the metrics."""
-        sample = [("app", {"active": 1}, {}, {}, None)]
+        sample = [("app", {"active": 1}, {}, {})]
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "workloads.prom"
             with self.mock.patch.object(self.mod, "collect_all", return_value=sample):
@@ -1108,6 +1094,53 @@ class TestWriteMetrics(unittest.TestCase):
             self.assertTrue(mode & stat.S_IROTH, f"not world-readable: {oct(mode)}")
 
 
+class TestDiskProducer(unittest.TestCase):
+    """The separate --disk producer: slow du walk, own textfile."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.mod = _load_exporter()
+
+    def test_parse_args_disk_flag_and_path(self):
+        self.assertEqual(self.mod.parse_args(["prog"]), (False, None))
+        self.assertEqual(self.mod.parse_args(["prog", "--disk"]), (True, None))
+        self.assertEqual(self.mod.parse_args(["prog", "/out"]), (False, "/out"))
+        self.assertEqual(
+            self.mod.parse_args(["prog", "--disk", "/out"]), (True, "/out"))
+
+    def test_collect_disk_walks_each_enabled_workload(self):
+        with self.mock.patch.object(
+                self.mod, "get_enabled_workloads",
+                return_value=[("app", [], False), ("big", [], True)]), \
+             self.mock.patch.object(self.mod, "workload_root_dir",
+                                    side_effect=lambda n: Path(f"/var/lib/workloads/{n}")), \
+             self.mock.patch.object(self.mod, "get_workload_disk_bytes",
+                                    side_effect=[4096, None]):
+            disk_metrics = self.mod.collect_disk()
+        self.assertEqual(disk_metrics, [("app", 4096), ("big", None)])
+
+    def test_format_disk_metrics_skips_none(self):
+        text = self.mod.format_disk_metrics([("app", 4096), ("big", None)])
+        self.assertIn('workload_disk_bytes{workload="app"} 4096', text)
+        self.assertNotIn('workload_disk_bytes{workload="big"}', text)
+        self.assertIn("workload_disk_last_collect_timestamp_seconds", text)
+
+    def test_write_disk_metrics_atomic_and_world_readable(self):
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads-disk.prom"
+            with self.mock.patch.object(self.mod, "collect_disk",
+                                        return_value=[("app", 4096)]):
+                self.mod.write_disk_metrics(out)
+            self.assertEqual([p.name for p in Path(d).iterdir()],
+                             ["workloads-disk.prom"])
+            self.assertIn('workload_disk_bytes{workload="app"} 4096',
+                          out.read_text())
+            mode = stat.S_IMODE(os.stat(out).st_mode)
+            self.assertTrue(mode & stat.S_IROTH)
+
+
 class TestMain(unittest.TestCase):
     def setUp(self):
         from unittest import mock
@@ -1122,6 +1155,18 @@ class TestMain(unittest.TestCase):
                 self.mod.main()
             self.assertTrue(out.exists())
             self.assertIn("workload_enabled_total 0", out.read_text())
+
+    def test_main_disk_mode_writes_disk_textfile(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "workloads-disk.prom"
+            with self.mock.patch.object(self.mod, "DISK_MODE", True), \
+                 self.mock.patch.object(self.mod, "OUTPUT_PATH", out), \
+                 self.mock.patch.object(self.mod, "collect_disk",
+                                        return_value=[("app", 4096)]):
+                self.mod.main()
+            self.assertTrue(out.exists())
+            self.assertIn('workload_disk_bytes{workload="app"} 4096',
+                          out.read_text())
 
 
 if __name__ == "__main__":

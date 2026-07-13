@@ -11,8 +11,6 @@ the host-side path logic that previously only ran behind a live SSH target.
 import argparse
 import contextlib
 import io
-import os
-import sys
 import tempfile
 import types
 import unittest
@@ -20,9 +18,6 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
 
 import cmd_interact  # noqa: E402
 

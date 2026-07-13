@@ -49,17 +49,19 @@ test-all-runtime-remote host target="local":
     ./ {{host}}:{{wlrt_remote_path}}/
   ssh {{host}} 'cd {{wlrt_remote_path}} && just test-all-runtime {{target}}'
 
-# Run all unit tests
+# Run all unit tests.
+# -t . makes the repo root the top-level dir, so modules import as `tests.<name>`
+# and tests/__init__.py runs first -- that is what puts lib/ on sys.path.
 test:
-  PYTHONPATH=lib python3 -m unittest discover -s tests -p 'test_*.py' -v
+  python3 -m unittest discover -t . -s tests -p 'test_*.py' -v
 
 # Run unit tests only (no integration)
 test-unit:
-  PYTHONPATH=lib python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics -v
+  python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics -v
 
 # Run integration tests
 test-integration:
-  PYTHONPATH=lib python3 -m unittest tests.test_integration -v
+  python3 -m unittest tests.test_integration -v
 
 # Run the unit suite under coverage.py (dev-only), print a per-file report.
 # COVERAGE_PROCESS_START makes tests that shell out to our scripts route the
@@ -67,8 +69,8 @@ test-integration:
 # merges those per-process data files into the parent's.
 coverage:
   rm -f .coverage .coverage.*
-  PYTHONPATH=lib COVERAGE_PROCESS_START={{justfile_directory()}}/.coveragerc \
-    python3 -m coverage run --rcfile=.coveragerc -m unittest discover -s tests
+  COVERAGE_PROCESS_START={{justfile_directory()}}/.coveragerc \
+    python3 -m coverage run --rcfile=.coveragerc -m unittest discover -t . -s tests
   python3 -m coverage combine --rcfile=.coveragerc
   python3 -m coverage report --rcfile=.coveragerc --sort=cover
 

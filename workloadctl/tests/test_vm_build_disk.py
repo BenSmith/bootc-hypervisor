@@ -1,35 +1,23 @@
 #!/usr/bin/env python3
 """Unit tests for workload-vm-build-disk helpers.
 
-The script lives in libexec/ and has a __main__ guard; load it as a module
-with importlib so we can exercise the disk-rotation logic without running
-the full build (which downloads/copies real qcow2 files).
+The script lives in libexec/ and has a __main__ guard; load_script() imports it
+as a module so we can exercise the disk-rotation logic without running the full
+build (which downloads/copies real qcow2 files).
 """
 
 import hashlib
-import importlib.machinery
-import importlib.util
-import os
-import sys
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
 from unittest import mock
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-vm-build-disk')
+from tests import load_script
 
 
 def _load_script():
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader("workload_vm_build_disk", SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_vm_build_disk", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return load_script("libexec/workload-vm-build-disk")
 
 
 class TestRotateGenerations(unittest.TestCase):

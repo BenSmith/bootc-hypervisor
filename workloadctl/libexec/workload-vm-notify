@@ -13,17 +13,11 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-_here = Path(__file__).resolve().parent
-for _libdir in (_here, _here.parent / "lib", Path("/usr/libexec/workloadctl")):
-    if (_libdir / "workload_lib.py").is_file():
-        sys.path.insert(0, str(_libdir))
-        break
-
-from workload_lib import VM_SOCKET_DIR, QMPClient
+from vm import VM_SOCKET_DIR
+from qmp import QMPClient
 
 
 def sd_notify(msg: str):
@@ -49,6 +43,48 @@ def wait_running(qmp: QMPClient, timeout: float = 120.0):
             return
         time.sleep(0.5)
     raise TimeoutError(f"Guest did not enter running state within {timeout:.0f}s")
+
+
+def monitor_shutdown_reason(name: str, proc) -> str | None:
+    """Watch the guest's QMP SHUTDOWN event and return its `reason`.
+
+    Used only in [vm].restart = "on-reboot" mode to tell a guest reboot from a
+    poweroff. QEMU runs with -no-reboot, so both exit QEMU with status 0; only
+    the SHUTDOWN event distinguishes them:
+      "guest-reset"    → the guest rebooted (should relaunch)
+      "guest-shutdown" → the guest powered off (should stay down)
+    Watches a DEDICATED monitor (qmp-notify.sock) so it never contends with the
+    control socket (ExecStop's system_powerdown) or the metrics socket. Reads
+    until the event arrives or the monitor closes (QEMU gone). Best-effort:
+    returns None on any error, so a monitoring hiccup falls back to QEMU's own
+    exit code rather than breaking the VM lifecycle.
+    """
+    sock_path = str(VM_SOCKET_DIR / name / "qmp-notify.sock")
+    qmp = QMPClient()
+    try:
+        qmp.connect(sock_path, timeout=60.0, recv_timeout=2.0)
+        qmp.negotiate()
+        while True:
+            try:
+                msg = qmp.next_message()
+            except ConnectionError:
+                return None  # monitor closed before a SHUTDOWN was seen
+            if msg is None:
+                # Read timeout: keep waiting only while QEMU is alive. (Buffered
+                # messages are still drained first — recv returns queued bytes
+                # before it ever signals close — so a SHUTDOWN emitted right
+                # before exit isn't lost to this liveness check.)
+                if proc.poll() is not None:
+                    return None
+                continue
+            if msg.get("event") == "SHUTDOWN":
+                return msg.get("data", {}).get("reason")
+    except Exception as e:
+        print(f"workload-vm-notify: shutdown-reason monitor error: {e}",
+              file=sys.stderr)
+        return None
+    finally:
+        qmp.close()
 
 
 def main():
@@ -102,6 +138,20 @@ def main():
         sd_notify("READY=1")
     finally:
         qmp.close()
+
+    # on-reboot mode: the generator arms this env var and adds qmp-notify.sock.
+    # Translate the guest's shutdown reason into an exit code the unit's
+    # Restart=on-failure acts on — nonzero for a reboot (relaunch), 0 for a
+    # poweroff (stay down). Anything else falls through to QEMU's own code.
+    reboot_exit = os.environ.get("WORKLOADCTL_VM_REBOOT_EXIT")
+    if reboot_exit:
+        reason = monitor_shutdown_reason(name, proc)
+        rc = proc.wait()
+        if reason == "guest-reset":
+            sys.exit(int(reboot_exit))
+        if reason == "guest-shutdown":
+            sys.exit(0)
+        sys.exit(rc)
 
     # Wait for QEMU to exit and propagate its exit code
     rc = proc.wait()

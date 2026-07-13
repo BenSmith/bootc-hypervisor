@@ -2,35 +2,37 @@
 """Unit tests for workload-ensure-user helpers.
 
 The script lives in libexec/ and has no __main__ guard around its imports;
-load it via SourceFileLoader so we can exercise the user-data rendering
-and cloud-init template substitution paths without running the rest of
-the (root-only) user-provisioning flow.
+load_script() imports it so we can exercise the user-data rendering and
+cloud-init template substitution paths without running the rest of the
+(root-only) user-provisioning flow.
 """
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import os
-import sys
+import shutil
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'libexec', 'workload-ensure-user')
+from tests import load_script
 
 
 def _load_script():
-    if LIB_DIR not in sys.path:
-        sys.path.insert(0, LIB_DIR)
-    loader = importlib.machinery.SourceFileLoader("workload_ensure_user", SCRIPT)
-    spec = importlib.util.spec_from_loader("workload_ensure_user", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return load_script("libexec/workload-ensure-user")
+
+
+# Stand-in VM host keypair (S1). The private half is a multi-line PEM so tests
+# exercise the block-scalar indentation path; the (c) contract check keys off
+# this exact text appearing in the rendered user-data.
+FAKE_HOST_PRIV = (
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAFAKEFAKEFAKEFAKE\n"
+    "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLLMMMMNNNNOOOO\n"
+    "-----END OPENSSH PRIVATE KEY-----\n"
+)
+FAKE_HOST_PUB = "ssh-ed25519 AAAAFAKEHOSTKEY host@myvm"
 
 
 def _fake_pw(home: Path, uid: int = 9999, gid: int = 9999):
@@ -141,6 +143,9 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         (self.home / ".ssh" / "id_ed25519.pub").write_text(
             "ssh-ed25519 AAAAFAKEKEY user@host\n"
         )
+        # VM host keypair (S1) — build_cloud_init_iso reads + pins these.
+        (self.home / ".ssh" / "vm_host_ed25519_key").write_text(FAKE_HOST_PRIV)
+        (self.home / ".ssh" / "vm_host_ed25519_key.pub").write_text(FAKE_HOST_PUB + "\n")
         self.config_dir = Path(self.tmp) / "cfg"
         self.config_dir.mkdir()
         # The ISO is built into VM_SOCKET_DIR/{name} (tmpfs in production);
@@ -164,7 +169,23 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 break
         return types.SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    def _run_build(self, config: dict, name: str = "myvm"):
+    def _run_build(self, config: dict, name: str = "myvm",
+                   inject_host_key: bool = True):
+        # A custom seed must install the workload's SSH host key or
+        # build_cloud_init_iso fails the S1 (c) contract. Unless a test is
+        # exercising that failure (inject_host_key=False), append a reference to
+        # the magic var so the rendered user-data carries the host key. The
+        # value is a multi-line PEM; the tests never parse the YAML, so a
+        # trailing block is harmless — it only has to satisfy the substring pin.
+        udf = config.get("vm", {}).get("cloud_init", {}).get("user_data_file")
+        if udf and inject_host_key:
+            path = Path(udf)
+            if not path.is_absolute():
+                path = self.config_dir / udf
+            if path.exists():
+                body = path.read_text()
+                if "WORKLOADCTL_VM_HOST_KEY" not in body:
+                    path.write_text(body + "\nhost_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
@@ -183,8 +204,12 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def _iso_path(self, name: str = "myvm") -> Path:
         return self.runtime / name / "cloud-init.iso"
 
-    def _read_user_data(self) -> str:
-        return (self.home / ".cloud-init-seed" / "user-data").read_text()
+    def _seed_dir(self, name: str = "myvm") -> Path:
+        # The seed is staged on the tmpfs runtime dir (S6), never the home.
+        return self.runtime / name / ".cloud-init-seed"
+
+    def _read_user_data(self, name: str = "myvm") -> str:
+        return (self._seed_dir(name) / "user-data").read_text()
 
     def test_template_substitutes_template_vars(self):
         ud = self.config_dir / "user-data"
@@ -214,7 +239,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         ud.write_text("#cloud-config\nname: ${WORKLOADCTL_WORKLOAD_NAME}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         self._run_build(cfg, name="myforge")
-        text = self._read_user_data()
+        text = self._read_user_data("myforge")
         self.assertIn("name: myforge", text)
 
     def test_template_resolves_secrets(self):
@@ -317,7 +342,8 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
 
     def test_user_data_written_0600(self):
         ud = self.config_dir / "user-data"
-        ud.write_text("#cloud-config\nhostname: test\n")
+        ud.write_text("#cloud-config\nhostname: test\n"
+                      "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
@@ -333,13 +359,14 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 self.pw, cfg, "myvm",
                 config_path=self.config_dir / "myvm.toml",
             )
-        ud_path = self.home / ".cloud-init-seed" / "user-data"
+        ud_path = self._seed_dir() / "user-data"
         mode = oct(ud_path.stat().st_mode & 0o777)
         self.assertEqual(mode, "0o600")
 
     def test_seed_dir_removed_after_iso_build(self):
         ud = self.config_dir / "user-data"
-        ud.write_text("#cloud-config\nhostname: test\n")
+        ud.write_text("#cloud-config\nhostname: test\n"
+                      "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
         rmtree_calls = []
@@ -357,9 +384,24 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
                 self.pw, cfg, "myvm",
                 config_path=self.config_dir / "myvm.toml",
             )
-        seed_dir = self.home / ".cloud-init-seed"
+        seed_dir = self._seed_dir()
         self.assertTrue(any(str(seed_dir) in str(p) for p in rmtree_calls),
                         f"seed_dir not removed; rmtree calls: {rmtree_calls}")
+
+    def test_seed_dir_staged_on_tmpfs_not_home(self):
+        """S6: the plaintext-secret seed is staged on the tmpfs runtime dir, so
+        it never lands at rest in the persistent home even if the rmtree is
+        cut short by a crash (rmtree is mocked here to simulate that)."""
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nhostname: test\n"
+                      "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        # _run_build mocks shutil.rmtree, so the seed dir survives the build —
+        # standing in for a crash before the post-build cleanup runs.
+        self._run_build(cfg)
+        self.assertTrue((self._seed_dir() / "user-data").exists())
+        self.assertFalse((self.home / ".cloud-init-seed").exists(),
+                         "plaintext seed leaked into the persistent home")
 
     def test_default_mode_used_when_no_user_data_file(self):
         # No [vm.cloud_init].user_data_file → built-in cloud-config (no
@@ -367,11 +409,122 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # rendered user-data contains the default scaffolding.
         cfg = {"vm": {"user": "fedora"}}
         self._run_build(cfg, name="defvm")
-        text = self._read_user_data()
+        text = self._read_user_data("defvm")
         self.assertTrue(text.startswith("#cloud-config\n"))
         self.assertIn("hostname: defvm", text)
         self.assertIn("- name: fedora", text)
         self.assertIn("ssh-ed25519 AAAAFAKEKEY", text)
+
+    # --- S1 host-key pinning ---------------------------------------------
+
+    def test_default_mode_injects_host_key_block(self):
+        """Default seed installs the generated host key via ssh_keys:, with the
+        private PEM as an indented block scalar and the public key inline."""
+        cfg = {"vm": {"user": "fedora"}}
+        self._run_build(cfg, name="defvm")
+        text = self._read_user_data("defvm")
+        self.assertIn("ssh_keys:", text)
+        self.assertIn("  ed25519_private: |", text)
+        self.assertIn(f"  ed25519_public: {FAKE_HOST_PUB}", text)
+        # Private PEM lines are indented 4 spaces under the block scalar.
+        self.assertIn("    -----BEGIN OPENSSH PRIVATE KEY-----", text)
+
+    def test_build_pins_host_key_in_known_hosts(self):
+        """build_cloud_init_iso writes vm_known_hosts keyed by the workload
+        name (the HostKeyAlias the CLI verifies against)."""
+        cfg = {"vm": {"user": "fedora"}}
+        self._run_build(cfg, name="defvm")
+        known = (self.home / ".ssh" / "vm_known_hosts").read_text()
+        self.assertEqual(known, f"defvm {FAKE_HOST_PUB}\n")
+
+    def test_custom_seed_missing_host_key_fails(self):
+        """(c) contract: a custom seed that doesn't install the host key fails
+        provisioning rather than shipping an unverifiable VM (no TOFU)."""
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nhostname: test\n")  # deliberately no host key
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg, inject_host_key=False)
+        self.assertIn("host key", str(ctx.exception).lower())
+        # No pin is written when provisioning is refused.
+        self.assertFalse((self.home / ".ssh" / "vm_known_hosts").exists())
+
+    def test_custom_seed_with_host_key_pins(self):
+        """A custom seed that wires ${WORKLOADCTL_VM_HOST_KEY} passes the
+        contract and gets pinned."""
+        ud = self.config_dir / "user-data"
+        ud.write_text(
+            "#cloud-config\nssh_keys:\n  ed25519_private: |\n"
+            "    ${WORKLOADCTL_VM_HOST_KEY}\n"
+            "  ed25519_public: ${WORKLOADCTL_VM_HOST_PUBKEY}\n"
+        )
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg, inject_host_key=False)  # seed already carries it
+        known = (self.home / ".ssh" / "vm_known_hosts").read_text()
+        self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
+
+    def test_custom_seed_with_host_key_b64_pins(self):
+        """The write_files + base64 form (what the shipped seeds use) also
+        satisfies the (c) contract."""
+        ud = self.config_dir / "user-data"
+        ud.write_text(
+            "#cloud-config\nwrite_files:\n"
+            "  - path: /etc/ssh/ssh_host_ed25519_key\n"
+            "    encoding: b64\n"
+            "    content: ${WORKLOADCTL_VM_HOST_KEY_B64}\n"
+        )
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg, inject_host_key=False)
+        # The rendered seed carries the base64 of the host key, and the pin is
+        # written.
+        import base64 as _b64
+        want_b64 = _b64.b64encode(FAKE_HOST_PRIV.encode()).decode()
+        self.assertIn(want_b64, self._read_user_data())
+        known = (self.home / ".ssh" / "vm_known_hosts").read_text()
+        self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
+
+    def test_missing_host_keypair_raises(self):
+        """A missing host keypair (setup step skipped) fails the ISO build."""
+        (self.home / ".ssh" / "vm_host_ed25519_key").unlink()
+        cfg = {"vm": {"user": "fedora"}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg, name="defvm")
+        self.assertIn("host keypair missing", str(ctx.exception).lower())
+
+
+class TestVmHostKeyGeneration(unittest.TestCase):
+    """generate_vm_host_keypair + write_vm_known_hosts (S1)."""
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        self.pw = _fake_pw(self.home)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"),
+                         "ssh-keygen not installed (minimal CI container)")
+    def test_generates_host_keypair_idempotently(self):
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None):
+            self.mod.generate_vm_host_keypair(self.pw, "myvm")
+            priv = self.home / ".ssh" / "vm_host_ed25519_key"
+            pub = priv.with_suffix(".pub")
+            self.assertTrue(priv.exists() and pub.exists())
+            first = priv.read_bytes()
+            # Re-run must not regenerate (stable pin).
+            self.mod.generate_vm_host_keypair(self.pw, "myvm")
+            self.assertEqual(priv.read_bytes(), first)
+
+    def test_write_vm_known_hosts_line_format(self):
+        (self.home / ".ssh").mkdir()
+        with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None):
+            self.mod.write_vm_known_hosts(self.pw, "myvm", "ssh-ed25519 AAAAHOST")
+        known = (self.home / ".ssh" / "vm_known_hosts").read_text()
+        self.assertEqual(known, "myvm ssh-ed25519 AAAAHOST\n")
 
 
 class TestSetupVmVolumeDirectories(unittest.TestCase):
@@ -1398,6 +1551,8 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
         self.home.mkdir()
         (self.home / ".ssh").mkdir()
         (self.home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA user@host\n")
+        (self.home / ".ssh" / "vm_host_ed25519_key").write_text(FAKE_HOST_PRIV)
+        (self.home / ".ssh" / "vm_host_ed25519_key.pub").write_text(FAKE_HOST_PUB + "\n")
         self.runtime = Path(self.tmp) / "run"
         self.runtime.mkdir()
         self.pw = _fake_pw(self.home)
@@ -1495,6 +1650,7 @@ class TestMain(unittest.TestCase):
             "setup_vm_socket_dir": mock.patch.object(self.mod, "setup_vm_socket_dir"),
             "setup_vm_volume_directories": mock.patch.object(self.mod, "setup_vm_volume_directories"),
             "generate_ssh_keypair": mock.patch.object(self.mod, "generate_ssh_keypair"),
+            "generate_vm_host_keypair": mock.patch.object(self.mod, "generate_vm_host_keypair"),
             "build_cloud_init_iso": mock.patch.object(self.mod, "build_cloud_init_iso"),
         }
         mocks = {name: p.start() for name, p in patches.items()}
@@ -1593,6 +1749,7 @@ class TestMain(unittest.TestCase):
         mocks["setup_vm_socket_dir"].assert_called_once()
         mocks["setup_vm_volume_directories"].assert_called_once()
         mocks["generate_ssh_keypair"].assert_called_once()
+        mocks["generate_vm_host_keypair"].assert_called_once()
         mocks["build_cloud_init_iso"].assert_called_once()
         mocks["write_environment_file"].assert_called_once()
         mocks["restore_selinux_labels"].assert_called_once()

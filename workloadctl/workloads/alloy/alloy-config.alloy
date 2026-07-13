@@ -42,10 +42,11 @@ prometheus.exporter.unix "host" {
     "thermal_zone",
     "time",
     "uname",
-    // "textfile" reads *.prom files dropped by the workload-exporter oneshot
-    // (workload-exporter.timer). The exporter is a root-only local producer
-    // (reads every workload's cgroups + rootless-podman), so it writes a file
-    // rather than listening on a socket; node_exporter surfaces it inline here.
+    // "textfile" reads *.prom files dropped by the workload-exporter oneshots
+    // (fast metrics on workload-exporter.timer + slow disk usage on
+    // workload-exporter-disk.timer). The exporter is a root-only local producer
+    // (reads every workload's cgroups + rootless-podman), so it writes files
+    // rather than listening on a socket; node_exporter surfaces them inline here.
     "textfile",
   ]
   // Collectors intentionally not enabled:

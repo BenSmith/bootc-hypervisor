@@ -1,14 +1,20 @@
 # Weekly runtime rung (B1) for workloadctl: boots a harness-owned VM and runs
 # the `runtime`-marked checks (`just test-runtime` -> pytest -m runtime,
-# WLRT_MODE=dev by default). This is a CADENCE gate, not a PR gate: it runs on
-# a schedule (and manual dispatch) only, so it never blocks a pull request.
+# WLRT_MODE=dev). This is a CADENCE gate, not a PR gate: it runs on a schedule
+# (and manual dispatch) only, so it never blocks a pull request.
+#
+# dev mode ONLY here. The higher-fidelity gate mode (B1b — the real bootc image
+# via bootc-image-builder + swtpm) needs registry.local (homelab-internal) and
+# privileged BIB, so it runs exclusively on the self-hosted Forgejo native
+# runner — see .forgejo/workflows/workloadctl-runtime.yml (matrix: [dev, gate]).
 #
 # It requires nested KVM. Two gates apply:
 #   1. `github.server_url == 'https://github.com'` keeps the mirrored *Forgejo*
-#      runner from picking this up. The Forgejo runner CANNOT run the runtime
-#      job at all: Forgejo itself runs inside a container (the Forgejo workload
-#      is containerised), so it can't nest a KVM VM (container-in-container).
-#      That is the whole reason the runtime rung lives on a separate cadence.
+#      runner from also picking this file up. Forgejo falls back to reading
+#      .github/workflows/ when a repo has no .forgejo twin; this repo does, so
+#      the Forgejo runtime rung runs from .forgejo/ (on the native runner inside
+#      the virtual-forgejo VM, which nests KVM directly — not container-in-
+#      container) instead of from here.
 #   2. A `/dev/kvm` presence check: subsequent steps run only where KVM exists.
 #      GitHub-hosted ubuntu-24.04 runners expose /dev/kvm; if a future runner
 #      does not, the job records that and exits green rather than failing.

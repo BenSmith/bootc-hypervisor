@@ -17,7 +17,6 @@ test_cmd_interact_dispatch.py (cmd_exec/cmd_logs dispatch) and test_cmd_cp.py
 import argparse
 import io
 import os
-import sys
 import tempfile
 import types
 import unittest
@@ -25,9 +24,6 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
 
 import cmd_interact  # noqa: E402
 

@@ -22,19 +22,16 @@ from workload_lib import (
     USERNAME_PREFIX,
     WORKLOADS_BASE,
     WORKLOAD_BUNDLES_DIR,
-    VM_SOCKET_DIR,
-    get_next_uid,
     NAME_PATTERN,
     workload_config_path,
     workload_enabled_marker,
     workload_username,
     workload_root_dir,
     RUN_SYSTEMD_SYSTEM,
-    RUN_SYSUSERS_D,
     workload_run_files,
-    render_sysusers_config,
     subid_lock,
 )
+from vm import VM_SOCKET_DIR
 import imagebuild
 from podman import Podman
 from workloadctl_core import (
@@ -127,7 +124,7 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
             print("    Enable nested KVM or run on bare metal")
             failed = True
 
-        from workload_lib import find_ovmf_code
+        from vm import find_ovmf_code
         if not find_ovmf_code():
             print("  ✗ OVMF firmware (edk2-ovmf) not found")
             print("    Install: dnf install edk2-ovmf")
@@ -280,55 +277,18 @@ def _preflight_checks(config: WorkloadConfig) -> bool:
 
 
 def _provision_user(config: WorkloadConfig):
-    """Create workload user and configure subuid/subgid, home dir, linger."""
+    """Create the workload user and configure subuid/subgid, home dir, linger.
+
+    Applies the sysusers config the generator already wrote (single producer —
+    see _generate_units): enable no longer allocates the UID or renders the
+    .conf, it just runs the same two steps the boot path defers to the setup
+    service's ExecStartPre. The generator ran under subid_lock() and is the sole
+    UID allocator; systemd-sysusers here creates the user from its output.
+    """
+    sysusers_file = RUN_SYSTEMD_SYSTEM / f"workload-{config.name}.conf"
+
     print("  Running systemd-sysusers...")
-
-    user_name = config.username
-    home_dir = str(config.home_dir)
-    extra_groups = config.config.get("security", {}).get("extra_groups", [])
-
-    # Look up existing UID or allocate the next free one in the workload range.
-    # subid_lock() is the shared SUBID_LOCK flock (also held by
-    # workload-ensure-user and the boot generator's get_next_uid) so concurrent
-    # allocators don't race on the same UID slot. The lock MUST span allocation
-    # *through* systemd-sysusers: get_next_uid() dedupes against /etc/passwd
-    # (plus a per-process set), so the picked UID isn't visible to a concurrent
-    # enable until sysusers has created the user. It's reentrant, so the inner
-    # get_next_uid() (which now takes the lock too) is a no-op re-acquire.
-    with subid_lock():
-        try:
-            uid = pwd.getpwnam(user_name).pw_uid
-        except KeyError:
-            try:
-                uid = get_next_uid()
-            except RuntimeError as e:
-                # UID-range exhaustion is an operator-fixable environment
-                # condition, not a bug — surface it as the CLI's clean
-                # one-line error rather than a traceback. LifecycleError
-                # carries an int returncode and its CLI handler prints
-                # nothing, so emit the message here and hand it exit 1.
-                print(f"Error: {e}", file=sys.stderr)
-                raise LifecycleError(1) from e
-
-        # Write a temporary sysusers config (the generator creates the
-        # persistent copy at boot in /run/systemd/system/, but enable runs
-        # before boot). Rendered by the shared helper so the enable-time .conf
-        # is byte-identical to the generator's boot-time output.
-        sysusers_content = render_sysusers_config(
-            name=config.name,
-            user_name=user_name,
-            uid=uid,
-            home_dir=home_dir,
-            extra_groups=extra_groups,
-            is_vm=config.is_vm,
-        )
-
-        sysusers_dir = RUN_SYSUSERS_D
-        sysusers_dir.mkdir(parents=True, exist_ok=True)
-        sysusers_file = sysusers_dir / f"workload-{config.name}.conf"
-        sysusers_file.write_text(sysusers_content)
-
-        subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
+    subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
 
     print("  Configuring workload user...")
     subprocess.run(["/usr/libexec/workloadctl/workload-ensure-user", config.name], check=True)
@@ -436,22 +396,53 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
         sys.exit(1)
 
 
-def _activate_service(config: WorkloadConfig):
-    """Re-run the workload-generate script and refresh systemd unit state."""
-    # Architecture: the real systemd generator (`workload-generator`, shell)
-    # only emits a single oneshot service (`workload-generate.service`) that
-    # runs the Python `workload-generate` script at early boot. daemon-reload
-    # re-runs generators, so it re-emits workload-generate.service — but it
-    # does not re-run that service, so the per-workload unit files aren't
-    # regenerated. For post-boot config changes we invoke the Python script
-    # directly here, then daemon-reload so systemd picks up the new units.
+def _generate_units(config: WorkloadConfig):
+    """Run the boot generator against the live /run dir — the single producer.
+
+    The generator emits every per-workload artifact: the sysusers .conf + UID
+    allocation, the unit files, the user@<uid> drop-in, and the wants symlink.
+    enable runs the same script the boot path runs (rather than re-deriving any
+    of it) and then applies the result, so there is exactly one producer.
+
+    Architecture: the real systemd generator (`workload-generator`, shell) only
+    emits a single oneshot service (`workload-generate.service`) that runs the
+    Python `workload-generate` script at early boot. daemon-reload re-runs
+    generators, so it re-emits workload-generate.service — but it does not
+    re-run that service, so the per-workload unit files aren't regenerated. For
+    post-boot config changes we invoke the Python script directly here, then
+    daemon-reload so systemd picks up the new units.
+
+    WORKLOAD_GENERATE_LOG_STDERR routes the generator's per-workload diagnostics
+    (which normally go to /dev/kmsg) to this command's stderr, so an operator
+    sees the reason inline when a workload can't be generated.
+    """
     print("  Generating service files...")
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
         check=True,
+        env={**os.environ, "WORKLOAD_GENERATE_LOG_STDERR": "1"},
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
 
+    # The generator always exits 0 and *skips* any workload it can't process
+    # (logging the reason above), so a produced-artifact check is how enable
+    # learns whether provisioning can proceed. The sysusers .conf is the first
+    # thing the generator writes per workload and the artifact _provision_user
+    # consumes next; its absence means UID allocation failed — almost always
+    # UID-range exhaustion (the one per-workload failure preflight can't catch).
+    sysusers_file = RUN_SYSTEMD_SYSTEM / f"workload-{config.name}.conf"
+    if not sysusers_file.exists():
+        print(
+            f"Error: workload-generate produced no units for '{config.name}' "
+            f"(see the messages above; the usual cause is UID-range "
+            f"exhaustion). Workload left disabled.",
+            file=sys.stderr,
+        )
+        raise LifecycleError(1)
+
+
+def _start_service(config: WorkloadConfig):
+    """Start the workload's umbrella service (units already generated)."""
     print(f"  Starting {config.service_name}...")
     print("  (Image pull may take a few minutes on first start)")
     # A re-enabled unit name can still carry a `start-limit-hit` lockout from a
@@ -708,10 +699,20 @@ def cmd_enable(args, manager: WorkloadManager):
         sys.exit(1)
 
     print()
+    # Generate first: the generator is the single producer of the sysusers
+    # .conf + UID + units, and _provision_user consumes what it writes. If it
+    # can't produce this workload's units (UID exhaustion), revert to disabled
+    # so the "left disabled" message is true and the next boot doesn't retry.
+    try:
+        _generate_units(config)
+    except LifecycleError:
+        workload_enabled_marker(args.workload).unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        raise
     _provision_user(config)
     if not config.is_vm:
         _transfer_image(config, manager)
-    _activate_service(config)
+    _start_service(config)
 
     already_running = subprocess.run(
         ["systemctl", "is-active", "--quiet", config.service_name], check=False

@@ -42,19 +42,18 @@ Two properties the helper's API is shaped around:
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
-sys.path.insert(0, os.path.dirname(__file__))
 
 import workload_lib
 from workloadctl_core import WorkloadConfig
 from covhelper import python_cmd
+
+from tests import script_env
+
 
 # The helper under test does not exist yet (Stage 0). Guard the import so this
 # module is collectable today; the contract classes skip until it lands.
@@ -471,11 +470,11 @@ class TestRunFilesParityOracle(unittest.TestCase):
             wl.mkdir()
             (wl / 'workload.toml').write_text(toml.format(name=name))
             (wl / '.enabled').touch()
-            env = os.environ.copy()
-            env['WORKLOAD_CONFIG_DIR'] = config_dir
-            env['SYSUSERS_DIR'] = services_dir
-            env['PYTHONPATH'] = LIB_DIR
-            env['WORKLOAD_GENERATE_LOG_STDERR'] = '1'
+            env = script_env(
+                WORKLOAD_CONFIG_DIR=config_dir,
+                SYSUSERS_DIR=services_dir,
+                WORKLOAD_GENERATE_LOG_STDERR='1',
+            )
             subprocess.run(python_cmd(GENERATOR, services_dir),
                            capture_output=True, text=True, env=env, check=False)
             emitted = {p.relative_to(services_dir).as_posix()
@@ -526,9 +525,10 @@ class TestRunFilesParityOracle(unittest.TestCase):
 
 
 class TestSysusersRender(unittest.TestCase):
-    """render_sysusers_config is the single source of truth the generator and
-    enable-time _provision_user now share. These pin the content contract so the
-    two producers can never drift again (the reason B15/B6 exist).
+    """render_sysusers_config renders the workload user's sysusers .conf. The
+    generator is its sole caller and the single producer of the .conf; enable
+    consumes that output rather than re-rendering. These pin the content
+    contract (the reason B15/B6 exist).
     """
 
     def _render(self, **kw):

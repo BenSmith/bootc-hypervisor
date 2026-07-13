@@ -6,15 +6,11 @@ workload-bridge.service when the disabled workload was the final
 managed-bridge VM workload.
 """
 
-import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
-LIB_DIR = os.path.join(os.path.dirname(__file__), '..', 'lib')
-sys.path.insert(0, LIB_DIR)
 
 import workload_lib
 import cmd_lifecycle

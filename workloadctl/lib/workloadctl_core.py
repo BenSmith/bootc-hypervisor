@@ -18,18 +18,18 @@ import pwd
 import sys
 import tomllib
 
+from vm import VM_BRIDGE_NAME
+from validation import validate_workload_name
 from workload_lib import (
     expand_volume_path,
     infer_workload_kind,
     infer_workload_mode,
     iter_workloads,
     normalize_containers,
-    validate_workload_name,
     WORKLOAD_BUNDLES_DIR,
     workload_config_dir,
     workload_config_path,
     workload_is_enabled,
-    VM_BRIDGE_NAME,
     workload_container_name,
     workload_data_dir,
     workload_home_dir,

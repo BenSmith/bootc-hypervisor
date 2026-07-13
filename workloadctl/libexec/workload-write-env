@@ -27,8 +27,11 @@ import tomllib
 from pathlib import Path
 
 from workload_lib import (
-    workload_config_path, workload_username, resolve_secret_env_vars,
-    SECRET_PATTERN, auto_detect_credentials, validate_env_key, normalize_containers,
+    workload_config_path, workload_username, normalize_containers,
+)
+from secrets_template import (
+    resolve_secret_env_vars, SECRET_PATTERN, auto_detect_credentials,
+    validate_env_key,
 )
 
 

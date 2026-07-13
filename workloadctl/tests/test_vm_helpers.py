@@ -3,13 +3,11 @@
 workload-vm-qmp, workload-vm-shutdown.
 
 These three gate VM readiness (sd_notify), the QMP escape hatch, and graceful
-power-off — and had no tests at all. They're argv scripts (no .py), so we load
-each via SourceFileLoader and drive its pure functions with a fake QMPClient;
-the real socket/QEMU/systemd I/O is out of scope for a unit test.
+power-off — and had no tests at all. They're argv scripts (no .py), so load_script()
+imports each and we drive its pure functions with a fake QMPClient; the real
+socket/QEMU/systemd I/O is out of scope for a unit test.
 """
 
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -20,34 +18,26 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-LIBEXEC = Path(__file__).resolve().parent.parent / "libexec"
-LIB = str(Path(__file__).resolve().parent.parent / "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
+from tests import load_script
 
 
-def _load(script: str, modname: str):
-    loader = importlib.machinery.SourceFileLoader(modname, str(LIBEXEC / script))
-    spec = importlib.util.spec_from_loader(modname, loader)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
-notify = _load("workload-vm-notify", "wl_vm_notify")
-qmp = _load("workload-vm-qmp", "wl_vm_qmp")
-shutdown = _load("workload-vm-shutdown", "wl_vm_shutdown")
+notify = load_script("libexec/workload-vm-notify", "wl_vm_notify")
+qmp = load_script("libexec/workload-vm-qmp", "wl_vm_qmp")
+shutdown = load_script("libexec/workload-vm-shutdown", "wl_vm_shutdown")
 
 
 class FakeQMP:
-    """Configurable stand-in for workload_lib.QMPClient."""
+    """Configurable stand-in for qmp.QMPClient."""
 
-    def __init__(self, *, connect_raises=None, handler=None):
+    def __init__(self, *, connect_raises=None, handler=None, messages=None):
         self.connect_raises = connect_raises
         self.handler: Any = handler or (lambda cmd, args=None: {"return": {}})
         self.sent = []
         self.closed = False
+        # Queue for next_message(): dicts are returned in order; a None entry
+        # simulates a read timeout; exhausting the queue raises ConnectionError
+        # (the monitor closed / QEMU exited).
+        self.messages = list(messages) if messages else []
 
     def connect(self, path, timeout=10.0, recv_timeout=5.0):
         if self.connect_raises is not None:
@@ -59,6 +49,11 @@ class FakeQMP:
     def execute(self, command, arguments=None, **kw):
         self.sent.append((command, arguments))
         return self.handler(command, arguments)
+
+    def next_message(self):
+        if not self.messages:
+            raise ConnectionError("monitor closed")
+        return self.messages.pop(0)
 
     def close(self):
         self.closed = True
@@ -126,6 +121,64 @@ class NotifyTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 notify.main()
         self.assertEqual(cm.exception.code, 1)
+
+    # --- on-reboot shutdown-reason monitoring (O6) -----------------------
+
+    def test_monitor_returns_shutdown_reason(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        fake = FakeQMP(messages=[
+            {"event": "NIC_RX"},  # unrelated event, skipped
+            {"event": "SHUTDOWN", "data": {"reason": "guest-reset"}},
+        ])
+        with mock.patch.object(notify, "QMPClient", return_value=fake):
+            self.assertEqual(
+                notify.monitor_shutdown_reason("vm1", proc), "guest-reset")
+        self.assertTrue(fake.closed)
+
+    def test_monitor_none_when_monitor_closes_first(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        fake = FakeQMP(messages=[])  # next_message raises ConnectionError
+        with mock.patch.object(notify, "QMPClient", return_value=fake):
+            self.assertIsNone(notify.monitor_shutdown_reason("vm1", proc))
+
+    def test_monitor_none_on_timeout_after_qemu_exit(self):
+        # A read timeout (None) with QEMU already gone ends the wait.
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        fake = FakeQMP(messages=[None])
+        with mock.patch.object(notify, "QMPClient", return_value=fake):
+            self.assertIsNone(notify.monitor_shutdown_reason("vm1", proc))
+
+    def _run_main_reboot_mode(self, reason, wait_rc=0):
+        fake = FakeQMP(handler=lambda c, a=None: {"return": {"running": True}})
+        proc = mock.Mock()
+        proc.wait.return_value = wait_rc
+        with mock.patch.dict(os.environ, {"WORKLOADCTL_VM_REBOOT_EXIT": "133"}), \
+             mock.patch.object(notify.sys, "argv",
+                               ["notify", "vm1", "qemu", "-nographic"]), \
+             mock.patch.object(notify.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(notify, "QMPClient", return_value=fake), \
+             mock.patch.object(notify.signal, "signal"), \
+             mock.patch.object(notify, "monitor_shutdown_reason",
+                               return_value=reason), \
+             mock.patch.object(notify, "sd_notify"), \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                notify.main()
+        return cm.exception.code
+
+    def test_main_on_reboot_reboot_exits_reboot_code(self):
+        self.assertEqual(self._run_main_reboot_mode("guest-reset"), 133)
+
+    def test_main_on_reboot_poweroff_exits_zero(self):
+        self.assertEqual(
+            self._run_main_reboot_mode("guest-shutdown", wait_rc=0), 0)
+
+    def test_main_on_reboot_other_reason_propagates_qemu_rc(self):
+        # host-signal / crash / unknown → fall through to QEMU's own exit code.
+        self.assertEqual(self._run_main_reboot_mode(None, wait_rc=5), 5)
 
     def _run_main(self, fake_qmp, wait_rc=0):
         proc = mock.Mock()
