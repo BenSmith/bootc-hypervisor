@@ -135,15 +135,6 @@ def vm_mac_collisions(name: str, other_names) -> list[str]:
                   if other != name and vm_mac_address(other) == mine)
 
 
-def vm_socket_dir(name: str) -> Path:
-    """Return the runtime socket directory for a VM workload."""
-    return VM_SOCKET_DIR / name
-
-
-def vm_home_dir(name: str) -> Path:
-    return WORKLOADS_BASE / name
-
-
 def find_ovmf_code() -> str | None:
     """Return the first existing OVMF_CODE path, or None."""
     for p in OVMF_CODE_CANDIDATES:

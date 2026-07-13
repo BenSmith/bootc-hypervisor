@@ -1605,7 +1605,7 @@ class TestCmdRollbackList(unittest.TestCase):
 
             manager = MagicMock()
             manager.user_exists.return_value = True
-            # No rollback images — will sys.exit(1) via rollback()
+            # No rollback images — rollback() raises LifecycleError
             manager.podman.return_value.image_id.return_value = None
 
             args = types.SimpleNamespace(workload='test-wl', list=False)
@@ -1613,10 +1613,10 @@ class TestCmdRollbackList(unittest.TestCase):
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch.object(cmd_update, 'require_root'), \
                  patch('sys.stderr', buf_err):
-                with self.assertRaises(SystemExit) as cm:
+                with self.assertRaises(LifecycleError) as cm:
                     cmd_update.cmd_rollback(args, manager)
         # Should exit non-zero (no rollback image found)
-        self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotEqual(cm.exception.returncode, 0)
 
 
 # ── control() primitive — incant ──────────────────────────────────────────────
@@ -2091,9 +2091,9 @@ class TestContainerRollback(unittest.TestCase):
         substrate, manager = self._substrate({})
         buf = io.StringIO()
         with patch('sys.stderr', buf):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.rollback()
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
         self.assertIn('No rollback image', buf.getvalue())
 
     def test_already_at_rollback_image_no_restart(self):
@@ -2158,13 +2158,23 @@ class TestVMExecShell(unittest.TestCase):
         ssh_argv = mock_run.call_args[0][0]
         self.assertIn('ssh', ssh_argv)
 
-    def test_open_shell_ssh_success_exits_with_code(self):
+    def test_open_shell_ssh_success_returns_normally(self):
+        """A clean SSH session is success: return, don't raise, don't fall back."""
         substrate = self._substrate()
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
-             patch('subprocess.run', return_value=_ok(returncode=0)):
+             patch('subprocess.run', return_value=_ok(returncode=0)), \
+             patch.object(_substrate_mod.os, 'execvp') as mock_execvp:
+            substrate.open_shell()
+        mock_execvp.assert_not_called()
+
+    def test_open_shell_ssh_remote_failure_propagates_code(self):
+        """A nonzero exit from the remote shell surfaces as that exact code."""
+        substrate = self._substrate()
+        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+             patch('subprocess.run', return_value=_ok(returncode=17)):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
-        self.assertEqual(cm.exception.returncode, 0)
+        self.assertEqual(cm.exception.returncode, 17)
 
     def test_open_shell_ssh_failure_falls_back_to_console(self):
         substrate = self._substrate()

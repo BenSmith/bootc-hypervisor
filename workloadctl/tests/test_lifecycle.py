@@ -32,7 +32,7 @@ from unittest.mock import MagicMock, patch
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
-from substrate import ContainerSubstrate, VMSubstrate
+from substrate import ContainerSubstrate, LifecycleError, VMSubstrate
 
 from tests import script_env
 
@@ -661,9 +661,9 @@ class TestVMLifecycle(unittest.TestCase):
         with _CfgDir(_PET_VM_TOML, 'test-vm') as cfg:
             manager = MagicMock()
             sub = VMSubstrate(cfg, manager)
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 sub.rollback()
-            self.assertNotEqual(cm.exception.code, 0)
+            self.assertNotEqual(cm.exception.returncode, 0)
 
     def test_pet_vm_rollback_does_not_touch_disk(self):
         """Pet VM rollback must not call subprocess.run (no disk rotation)."""
@@ -671,7 +671,7 @@ class TestVMLifecycle(unittest.TestCase):
             manager = MagicMock()
             sub = VMSubstrate(cfg, manager)
             with patch('subprocess.run') as mock_run:
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(LifecycleError):
                     sub.rollback()
                 mock_run.assert_not_called()
 
@@ -1633,9 +1633,9 @@ class TestCmdStartStop(unittest.TestCase):
             with _RootBypass():
                 manager = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=3)):
-                    with self.assertRaises(SystemExit) as cm:
+                    with self.assertRaises(LifecycleError) as cm:
                         cmd_lifecycle.cmd_stop(_ns(workload="test-wl"), manager)
-                    self.assertEqual(cm.exception.code, 3)
+                    self.assertEqual(cm.exception.returncode, 3)
 
 
 # ── cmd_recreate ─────────────────────────────────────────────────────────────

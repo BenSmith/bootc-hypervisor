@@ -822,12 +822,7 @@ class ContainerSubstrate(Substrate):
                 # next start re-creates it from the image.
                 pod = self.manager.podman(self.config)
                 self._pet_snapshot_and_remove(pod, self.config.container_name)
-            if self.manager.user_exists(self.config):
-                restart_workload_service(self.config.uid, self.config.service_name)
-            else:
-                subprocess.run(
-                    ["systemctl", "restart", self.config.service_name], check=True
-                )
+            self._restart_or_fail()
             return None
 
         specs = self.config.container_specs()
@@ -894,10 +889,29 @@ class ContainerSubstrate(Substrate):
             # Single-mode only, matching the generator's pet fallback.
             self._pet_snapshot_and_remove(pod, self.config.container_name)
 
-        restart_workload_service(self.config.uid, self.config.service_name)
+        self._restart_or_fail()
         print(f"  ✓ {self.config.name}: restarted")
 
         return (self.config, old_ids)
+
+    def _restart_or_fail(self) -> None:
+        """Restart the workload service, mapping a hard failure to ProvisionFailed.
+
+        restart_workload_service() raises CalledProcessError once its retries are
+        exhausted; a unit that won't come back up is an operator condition, so it
+        has to reach the caller as ProvisionFailed rather than an unmapped
+        exception that the CLI would report as a workloadctl bug.
+        """
+        try:
+            if self.manager.user_exists(self.config):
+                restart_workload_service(self.config.uid, self.config.service_name)
+            else:
+                subprocess.run(
+                    ["systemctl", "restart", self.config.service_name], check=True
+                )
+        except subprocess.CalledProcessError:
+            print(f"  ✗ Restart failed for {self.config.name}", file=sys.stderr)
+            raise ProvisionFailed(f"restart failed for {self.config.name}")
 
     def rollback_targets(self) -> list:
         """Return available container rollback targets (saved image tags)."""
@@ -956,7 +970,7 @@ class ContainerSubstrate(Substrate):
                 "  (rollback images are created automatically by 'workloadctl update')",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            raise LifecycleError(1)
 
         if not targets:
             print(f"Already running the rollback image(s) for {self.config.name}")
@@ -1062,8 +1076,11 @@ class VMSubstrate(Substrate):
             if guest_ip:
                 ssh_cmd = _vm_ssh_command(self.config, guest_ip, connect_timeout=5)
                 result = subprocess.run(ssh_cmd)
-                # 255 = ssh transport failure (host unreachable, auth, etc.);
-                # anything else came from the remote shell and should propagate.
+                if result.returncode == 0:
+                    return
+                # 255 = ssh transport failure (host unreachable, auth, etc.), so
+                # fall through to the console. Anything else came from the remote
+                # shell and is the exit code the operator should see.
                 if result.returncode != 255:
                     raise LifecycleError(result.returncode)
                 print(
@@ -1158,12 +1175,16 @@ class VMSubstrate(Substrate):
             # recreate path: re-render cloud-init seed and restart QEMU.
             # For pet VMs this is safe — it does not touch system.qcow2.
             print(f"Recreating VM workload {self.config.name}...")
-            subprocess.run(
-                ["systemctl", "restart",
-                 workload_service_units(self.config, roles={"setup"})[0]],
-                check=True,
-            )
-            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+            for unit in (
+                workload_service_units(self.config, roles={"setup"})[0],
+                self.config.service_name,
+            ):
+                restart = subprocess.run(
+                    ["systemctl", "restart", unit], check=False
+                )
+                if restart.returncode != 0:
+                    print(f"  ✗ Restart failed for {unit}", file=sys.stderr)
+                    raise ProvisionFailed(f"restart failed for {self.config.name}")
             return None
 
         if self.config.lifecycle == "pet":
