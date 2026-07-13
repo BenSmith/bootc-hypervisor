@@ -34,6 +34,7 @@ from cmd_secret import cmd_secret
 from cmd_update import cmd_rollback, cmd_update
 from substrate import LifecycleError, ProvisionFailed
 from workloadctl_core import (
+    NotRoot,
     UsageError,
     WorkloadManager,
     WorkloadMasked,
@@ -399,6 +400,9 @@ def _run_cli() -> int:
         # Raiser prints the "✗ ..." diagnostic. Commands that need to keep going
         # (update --all tallies per-workload failures) catch it themselves; this
         # is the backstop for the ones that just need a clean nonzero exit.
+        return 1
+    except NotRoot as e:
+        print(f"Error: {e}", file=sys.stderr)
         return 1
     except WorkloadMasked as e:
         print(str(e), file=sys.stderr)

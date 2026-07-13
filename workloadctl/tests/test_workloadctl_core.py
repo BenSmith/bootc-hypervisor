@@ -152,14 +152,12 @@ class RequireRootTest(unittest.TestCase):
         with mock.patch("os.geteuid", return_value=0):
             core.require_root()  # should not raise/exit
 
-    def test_non_root_exits_1(self):
+    def test_non_root_raises_not_root(self):
+        """Library code raises; the exit is bin/workloadctl's to make."""
         with mock.patch("os.geteuid", return_value=1000):
-            buf = io.StringIO()
-            with redirect_stderr(buf):
-                with self.assertRaises(SystemExit) as cm:
-                    core.require_root()
-            self.assertEqual(cm.exception.code, 1)
-            self.assertIn("must be run as root", buf.getvalue())
+            with self.assertRaises(core.NotRoot) as cm:
+                core.require_root()
+        self.assertIn("must be run as root", str(cm.exception))
 
 
 class ExceptionsTest(unittest.TestCase):

@@ -184,6 +184,12 @@ class WorkloadUserNotFound(Exception):
         )
 
 
+class NotRoot(Exception):
+    """Raised by require_root() when a mutating command is run unprivileged."""
+    def __init__(self):
+        super().__init__("This command must be run as root (use sudo)")
+
+
 def toml_string(value: str) -> str:
     """Return a TOML-safe double-quoted string literal."""
     result = value.replace('\\', '\\\\').replace('"', '\\"')
@@ -193,10 +199,13 @@ def toml_string(value: str) -> str:
 
 
 def require_root():
-    """Ensure running as root"""
+    """Ensure running as root.
+
+    Raises NotRoot rather than exiting: this is library code, and the exit is the
+    CLI's to make (bin/workloadctl prints the message and returns 1).
+    """
     if os.geteuid() != 0:
-        print("Error: This command must be run as root (use sudo)", file=sys.stderr)
-        sys.exit(1)
+        raise NotRoot()
 
 
 # ---------------------------------------------------------------------------
