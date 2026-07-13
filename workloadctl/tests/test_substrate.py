@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 import workload_lib
 import workloadctl_core
 import backup as _backup_mod
-import substrate as _substrate_mod
 import substrate_container as _container_mod
 import substrate_vm as _vm_mod
 from substrate import (

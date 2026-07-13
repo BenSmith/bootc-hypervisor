@@ -12,7 +12,6 @@ import argparse
 import io
 import json
 import os
-import sys
 import tempfile
 import tomllib
 import types
