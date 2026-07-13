@@ -1095,11 +1095,11 @@ class VMSubstrate(Substrate):
         if action == "start":
             result = subprocess.run(["systemctl", "start", self.config.service_name])
             if result.returncode != 0:
-                sys.exit(result.returncode)
+                raise LifecycleError(result.returncode)
         elif action == "stop":
             result = subprocess.run(["systemctl", "stop", self.config.service_name])
             if result.returncode != 0:
-                sys.exit(result.returncode)
+                raise LifecycleError(result.returncode)
         elif action == "restart":
             # recreate: re-render cloud-init seed then restart QEMU.
             # The cloud-init ISO and nvram are built by the setup oneshot
@@ -1124,7 +1124,7 @@ class VMSubstrate(Substrate):
                     f"'workloadctl shell {self.config.name}' (console).",
                     file=sys.stderr,
                 )
-                sys.exit(1)
+                raise LifecycleError(1)
             # Fire the soft-reboot detached via systemd-run --no-block: a direct
             # `systemctl soft-reboot` tears down sshd mid-command, so the SSH
             # connection drops and ssh exits nonzero *even on success*. Running it
@@ -1148,7 +1148,7 @@ class VMSubstrate(Substrate):
                     file=sys.stderr,
                 )
                 print(f"    sudo systemctl restart {self.config.service_name}", file=sys.stderr)
-                sys.exit(1)
+                raise LifecycleError(1)
             print(f"✓ VM '{self.config.name}' soft-reboot initiated (disk preserved)")
         else:
             raise ValueError(f"Unknown lifecycle action: {action!r}")

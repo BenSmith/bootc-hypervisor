@@ -2209,9 +2209,9 @@ class TestVMLifecycleReboot(unittest.TestCase):
         substrate = self._substrate()
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
     def test_reboot_ssh_success_prints_confirmation(self):
         substrate = self._substrate()
@@ -2227,9 +2227,9 @@ class TestVMLifecycleReboot(unittest.TestCase):
         with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=1)), \
              patch('sys.stderr', io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.returncode, 1)
 
 
 # ── VMSubstrate.reprovision() (non-recreate) ──────────────────────────────────
