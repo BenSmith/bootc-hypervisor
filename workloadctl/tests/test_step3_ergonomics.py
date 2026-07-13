@@ -2,9 +2,9 @@
 """Step 3 management ergonomics: info --files, edit <name> <file>, build <name>.
 
 These exercise the lazy-override surface that makes control files livable:
-- `info --files` (cmd_inspect._collect_control_files) — the merged view reporting
+- `info --files` (cmd_info._collect_control_files) — the merged view reporting
   whether each control file wins from /etc (override) or /usr (shipped).
-- `edit <name> <file>` (cmd_admin._edit_control_file) — copy-on-write seed of an
+- `edit <name> <file>` (cmd_edit._edit_control_file) — copy-on-write seed of an
   /etc override, with systemctl-edit-style discard when the result matches the
   shipped default (or is an untouched empty new file).
 - `build <name>` (cmd_lifecycle.cmd_build) — resolve+run the bundle's build.sh,
@@ -26,8 +26,8 @@ from unittest import mock
 
 import workload_lib               # noqa: E402
 import workloadctl_core as core   # noqa: E402
-import cmd_admin                  # noqa: E402
-import cmd_inspect                # noqa: E402
+import cmd_edit                  # noqa: E402
+import cmd_info                   # noqa: E402
 import cmd_lifecycle              # noqa: E402
 from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
 
@@ -55,7 +55,7 @@ class Step3Base(unittest.TestCase):
         for p in (
             mock.patch.object(core, "WORKLOAD_BUNDLES_DIR", self.usr),
             mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc),
-            mock.patch.object(cmd_admin, "require_root", lambda: None),
+            mock.patch.object(cmd_edit, "require_root", lambda: None),
             mock.patch.object(cmd_lifecycle, "require_root", lambda: None),
         ):
             p.start()
@@ -109,7 +109,7 @@ class TestControlFilesView(Step3Base):
         self._ship("solo", "policy.cil")
         self._override_file("solo", "policy.cil")  # override wins for this one
         cfg = self._config("solo")
-        files = {f["file"]: f for f in cmd_inspect._collect_control_files(cfg)}
+        files = {f["file"]: f for f in cmd_info._collect_control_files(cfg)}
         self.assertEqual(set(files), {"build.sh", "Containerfile", "policy.cil"})
         self.assertEqual(files["build.sh"]["source"], "usr")
         self.assertTrue(files["build.sh"]["exists"])
@@ -120,25 +120,25 @@ class TestControlFilesView(Step3Base):
         self._ship("solo", "workload.toml", 'name="solo"')
         self._ship("solo", "build.sh")
         cfg = self._config("solo")
-        names = {f["file"] for f in cmd_inspect._collect_control_files(cfg)}
+        names = {f["file"] for f in cmd_info._collect_control_files(cfg)}
         self.assertEqual(names, {"build.sh"})
 
     def test_declared_but_missing_setup_surfaced(self):
         cfg = self._config("solo", extra='\n[host]\nsetup = "setup.sh"\n')
-        files = {f["file"]: f for f in cmd_inspect._collect_control_files(cfg)}
+        files = {f["file"]: f for f in cmd_info._collect_control_files(cfg)}
         self.assertIn("setup.sh", files)
         self.assertEqual(files["setup.sh"]["source"], "usr")
         self.assertFalse(files["setup.sh"]["exists"])
 
     def test_absolute_setup_not_listed(self):
         cfg = self._config("solo", extra='\n[host]\nsetup = "/opt/x/setup.sh"\n')
-        names = {f["file"] for f in cmd_inspect._collect_control_files(cfg)}
+        names = {f["file"] for f in cmd_info._collect_control_files(cfg)}
         self.assertEqual(names, set())
 
     def test_copy_resolves_against_source_bundle(self):
         self._ship("src-bundle", "build.sh")
         cfg = self._config("copy", bundle="src-bundle")
-        files = {f["file"]: f for f in cmd_inspect._collect_control_files(cfg)}
+        files = {f["file"]: f for f in cmd_info._collect_control_files(cfg)}
         self.assertEqual(files["build.sh"]["source"], "usr")
         self.assertTrue(files["build.sh"]["path"].startswith(str(self.usr / "src-bundle")))
 
@@ -149,7 +149,7 @@ class TestControlFilesView(Step3Base):
         d.mkdir(parents=True)
         (d / "extra.conf").write_text("x\n")
         cfg = self._config("solo")
-        files = {f["file"]: f for f in cmd_inspect._collect_control_files(cfg)}
+        files = {f["file"]: f for f in cmd_info._collect_control_files(cfg)}
         self.assertIn("rootfs/extra.conf", files)
         self.assertEqual(files["rootfs/extra.conf"]["source"], "usr")
         self.assertTrue(files["rootfs/extra.conf"]["exists"])
@@ -158,7 +158,7 @@ class TestControlFilesView(Step3Base):
         cfg = self._config("solo")
         buf = io.StringIO()
         with redirect_stdout(buf):
-            cmd_inspect._print_control_files(cfg, json_mode=False)
+            cmd_info._print_control_files(cfg, json_mode=False)
         self.assertIn("No control files", buf.getvalue())
 
     def test_json_shape(self):
@@ -166,7 +166,7 @@ class TestControlFilesView(Step3Base):
         cfg = self._config("solo")
         buf = io.StringIO()
         with redirect_stdout(buf):
-            cmd_inspect._print_control_files(cfg, json_mode=True)
+            cmd_info._print_control_files(cfg, json_mode=True)
         import json
         data = json.loads(buf.getvalue())
         self.assertEqual(data["workload"], "solo")
@@ -183,7 +183,7 @@ class TestEditControlFile(Step3Base):
         with mock.patch.dict(os.environ, {"EDITOR": self._editor(editor_body)}):
             buf = io.StringIO()
             with redirect_stdout(buf):
-                cmd_admin.cmd_edit(_ns(workload=name, file=fname, yes=False),
+                cmd_edit.cmd_edit(_ns(workload=name, file=fname, yes=False),
                                    self.manager)
             return buf.getvalue()
 
@@ -239,7 +239,7 @@ class TestEditControlFile(Step3Base):
         with mock.patch.dict(os.environ, {"EDITOR": self._editor("true")}):
             with self.assertRaises(SystemExit):
                 with redirect_stdout(io.StringIO()):
-                    cmd_admin.cmd_edit(_ns(workload="solo", file="../evil", yes=False),
+                    cmd_edit.cmd_edit(_ns(workload="solo", file="../evil", yes=False),
                                        self.manager)
 
     def test_symlink_escape_rejected(self):
@@ -255,7 +255,7 @@ class TestEditControlFile(Step3Base):
         with mock.patch.dict(os.environ, {"EDITOR": self._editor('printf x > "$1"')}):
             with self.assertRaises(SystemExit):
                 with redirect_stdout(io.StringIO()):
-                    cmd_admin.cmd_edit(_ns(workload="solo", file="sub/evil", yes=False),
+                    cmd_edit.cmd_edit(_ns(workload="solo", file="sub/evil", yes=False),
                                        self.manager)
         self.assertFalse((outside / "evil").exists())  # nothing written through link
 
@@ -278,7 +278,7 @@ class TestEditControlFile(Step3Base):
         with mock.patch.dict(os.environ, {"EDITOR": self._editor("true")}):
             with self.assertRaises(SystemExit):
                 with redirect_stdout(io.StringIO()):
-                    cmd_admin.cmd_edit(_ns(workload="ghost", file="build.sh", yes=False),
+                    cmd_edit.cmd_edit(_ns(workload="ghost", file="build.sh", yes=False),
                                        self.manager)
 
     def test_no_file_arg_takes_toml_path(self):
@@ -288,7 +288,7 @@ class TestEditControlFile(Step3Base):
         # errors out on a missing config rather than seeding an override.)
         with self.assertRaises(SystemExit):
             with redirect_stdout(io.StringIO()):
-                cmd_admin.cmd_edit(_ns(workload="ghost", file=None, yes=False),
+                cmd_edit.cmd_edit(_ns(workload="ghost", file=None, yes=False),
                                    self.manager)
         self.assertFalse((self.etc / "ghost").exists())
 

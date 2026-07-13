@@ -16,8 +16,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
-import cmd_admin
-import cmd_inspect
+import cmd_edit
+import cmd_images
 import service_runtime
 
 
@@ -139,7 +139,7 @@ class TestImagesSkipsVM(unittest.TestCase):
         manager.podman.return_value = pod
         args = SimpleNamespace(subcommand="list", json=True)
         with patch('sys.stdout'):
-            cmd_inspect.cmd_images(args, manager)
+            cmd_images.cmd_images(args, manager)
         return manager, pod
 
     def test_vm_workload_is_skipped(self):
@@ -156,19 +156,19 @@ class TestImagesSkipsVM(unittest.TestCase):
 
 
 class TestAskYesNo(unittest.TestCase):
-    """cmd_admin._ask_yes_no tolerates EOF (non-interactive stdin)."""
+    """cmd_edit._ask_yes_no tolerates EOF (non-interactive stdin)."""
 
     def test_eof_is_no(self):
         with patch('builtins.input', side_effect=EOFError), patch('sys.stdout'):
-            self.assertFalse(cmd_admin._ask_yes_no("Apply? [y/N] "))
+            self.assertFalse(cmd_edit._ask_yes_no("Apply? [y/N] "))
 
     def test_yes(self):
         with patch('builtins.input', return_value="y"):
-            self.assertTrue(cmd_admin._ask_yes_no("Apply? [y/N] "))
+            self.assertTrue(cmd_edit._ask_yes_no("Apply? [y/N] "))
 
     def test_blank_is_no(self):
         with patch('builtins.input', return_value=""):
-            self.assertFalse(cmd_admin._ask_yes_no("Apply? [y/N] "))
+            self.assertFalse(cmd_edit._ask_yes_no("Apply? [y/N] "))
 
 
 if __name__ == '__main__':

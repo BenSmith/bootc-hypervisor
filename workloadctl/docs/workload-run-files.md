@@ -121,7 +121,7 @@ env files) are currently spelled by hand at each call site.
 ## Maintenance note
 
 Because the derived set is hand-enumerated in several places (`_workload_run_files`
-and `helper_services` in `lib/cmd_lifecycle.py`, plus `cmd_interact`, `cmd_admin`,
+and `helper_services` in `lib/cmd_disable.py`, plus `cmd_interact`, `cmd_diagnose`,
 `cmd_drift`, `cmd_inspect`, `substrate.py`) **and** re-derived in the generator, the
 mode→run-files membership can drift between copies. Two past bugs (the exporter
 `workload_health` miss and disable/purge-completeness) came from exactly that drift.

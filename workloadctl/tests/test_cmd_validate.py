@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 
-import cmd_admin  # noqa: E402
+import cmd_validate  # noqa: E402
 import workload_lib  # noqa: E402
 from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
 
@@ -40,9 +40,9 @@ class ValidateDispatchTest(unittest.TestCase):
             passed = self.verdicts.get(name, True)
             return {"workload": name, "passed": passed, "checks": []}
 
-        self.enterContext(mock.patch.object(cmd_admin, "validate_single", fake_validate))
+        self.enterContext(mock.patch.object(cmd_validate, "validate_single", fake_validate))
         self.enterContext(mock.patch.object(
-            cmd_admin, "WorkloadConfig",
+            cmd_validate, "WorkloadConfig",
             lambda n: argparse.Namespace(name=n)))
 
     def _run(self, **kw):
@@ -50,7 +50,7 @@ class ValidateDispatchTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_validate(_ns(**kw), self.manager)
+                cmd_validate.cmd_validate(_ns(**kw), self.manager)
         except SystemExit as e:
             code = e.code
         self._out, self._err = out.getvalue(), err.getvalue()
@@ -117,7 +117,7 @@ class ValidateSingleCredentialsTest(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
         self.credstore = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(cmd_admin, "CREDSTORE_DIR", self.credstore))
+        self.enterContext(mock.patch.object(cmd_validate, "CREDSTORE_DIR", self.credstore))
 
     def _validate(self, name, toml):
         (self.tmp / name).mkdir()
@@ -126,7 +126,7 @@ class ValidateSingleCredentialsTest(unittest.TestCase):
         manager = mock.Mock(spec=WorkloadManager)
         manager.user_exists.return_value = False
         manager.get_all_configs.return_value = []
-        return cmd_admin.validate_single(config, manager, json_mode=True)
+        return cmd_validate.validate_single(config, manager, json_mode=True)
 
     def test_no_secret_refs_ok(self):
         result = self._validate(
@@ -173,7 +173,7 @@ class ValidateSingleCredentialsTest(unittest.TestCase):
             def __truediv__(self, other):
                 raise PermissionError(13, "Permission denied")
 
-        with mock.patch.object(cmd_admin, "CREDSTORE_DIR", _NoPermDir()):
+        with mock.patch.object(cmd_validate, "CREDSTORE_DIR", _NoPermDir()):
             result = self._validate(
                 "clitest-noperm",
                 '[workload]\nname = "clitest-noperm"\n\n'

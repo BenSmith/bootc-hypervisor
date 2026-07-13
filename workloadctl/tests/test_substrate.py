@@ -30,7 +30,8 @@ from substrate import (
 from substrate_container import ContainerSubstrate
 from substrate_vm import VMSubstrate, _vm_ssh_command
 import cmd_drift
-import cmd_inspect
+import cmd_health
+import cmd_stats
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -185,7 +186,7 @@ class TestVMStats(unittest.TestCase):
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
-                    cmd_inspect.cmd_stats(args, manager)
+                    cmd_stats.cmd_stats(args, manager)
             self.assertEqual(cm.exception.code, 0)
             output = buf_out.getvalue() + buf_err.getvalue()
             self.assertIn('not applicable', output.lower())
@@ -1096,7 +1097,7 @@ class TestCmdHealthPlacement(unittest.TestCase):
                  patch('subprocess.run', side_effect=fake_run), \
                  patch('sys.stdout', buf_out), patch('sys.stderr', buf_err):
                 with self.assertRaises(SystemExit) as cm:
-                    cmd_inspect.cmd_health(args, manager)
+                    cmd_health.cmd_health(args, manager)
             output = buf_out.getvalue()
             data = json.loads(output) if output.strip() else {}
             return cm.exception.code, data

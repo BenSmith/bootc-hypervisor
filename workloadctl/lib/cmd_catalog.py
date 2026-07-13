@@ -27,7 +27,7 @@ from workloadctl_core import (
     require_root,
     toml_string,
 )
-from cmd_admin import validate_single
+from cmd_validate import validate_single
 
 BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 

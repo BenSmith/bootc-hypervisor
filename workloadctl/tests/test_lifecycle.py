@@ -202,11 +202,11 @@ class TestLifecycleAccessor(unittest.TestCase):
 class TestLifecycleValidation(unittest.TestCase):
 
     def _validate(self, toml, name):
-        import cmd_admin
+        import cmd_validate
         cfg = _make_config(toml, name)
         manager = MagicMock()
         manager.get_all_configs.return_value = [cfg]
-        return cmd_admin.validate_single(cfg, manager)
+        return cmd_validate.validate_single(cfg, manager)
 
     def test_valid_cattle_passes(self):
         result = self._validate(_CONTAINER_TOML, 'test-wl')
@@ -703,17 +703,21 @@ import io
 import json
 from contextlib import redirect_stdout, redirect_stderr
 
+import cmd_cleanup
+import cmd_disable
+import cmd_enable
 import cmd_lifecycle
+import cmd_provision
 
 
 class TestSubidLockSharedConstant(unittest.TestCase):
     """A11/A5: the subuid/subgid flock only mutexes if every participant uses
-    the identical primitive — cmd_lifecycle must go through workload_lib's
+    the identical primitive — cmd_disable must go through workload_lib's
     shared subid_lock() context manager (which names the one SUBID_LOCK path)
     rather than re-spelling its own flock."""
 
     def test_cmd_lifecycle_uses_shared_lock(self):
-        self.assertIs(cmd_lifecycle.subid_lock, workload_lib.subid_lock)
+        self.assertIs(cmd_disable.subid_lock, workload_lib.subid_lock)
         self.assertEqual(
             workload_lib.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
         )
@@ -786,15 +790,24 @@ image = "example.com/db:latest"
 
 
 class _RootBypass:
-    """Context manager patching cmd_lifecycle.require_root to a no-op."""
+    """Context manager making require_root a no-op in every verb module.
+
+    Each command module imports require_root by name, so the patch has to land
+    on the module under test — bypassing it in one doesn't bypass it in the next.
+    """
+
+    _MODULES = (cmd_cleanup, cmd_disable, cmd_enable, cmd_lifecycle)
 
     def __enter__(self):
-        self._p = patch.object(cmd_lifecycle, "require_root", lambda: None)
-        self._p.start()
+        self._patches = [patch.object(m, "require_root", lambda: None)
+                         for m in self._MODULES]
+        for p in self._patches:
+            p.start()
         return self
 
     def __exit__(self, *_):
-        self._p.stop()
+        for p in self._patches:
+            p.stop()
 
 
 def _cfg(toml, name, **fmt):
@@ -861,7 +874,7 @@ class TestEffectiveState(unittest.TestCase):
             self.assertIsNone(failed)
 
 
-# ── _preflight_checks ───────────────────────────────────────────────────────
+# ── preflight_checks ───────────────────────────────────────────────────────
 
 class TestPreflightChecks(unittest.TestCase):
     def _patched_which(self, missing=()):
@@ -873,45 +886,45 @@ class TestPreflightChecks(unittest.TestCase):
 
     def test_missing_required_executable_fails(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which(missing={"podman"})):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"podman"})):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("podman", buf.getvalue())
 
     def test_missing_recommended_executable_warns_but_passes(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which(missing={"semanage"})):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"semanage"})):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             self.assertTrue(ok)
             self.assertIn("semanage", buf.getvalue())
 
     def test_pull_never_missing_image_fails(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = ""
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("not found locally", buf.getvalue())
 
     def test_pull_never_present_image_passes(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             self.assertTrue(ok)
 
     def test_required_files_auto_copy_from_hint(self):
@@ -928,12 +941,12 @@ class TestPreflightChecks(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                     with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                         cfg = WorkloadConfig('test-wl')
-                        with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                            with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+                        with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                                 for_root.return_value.image_id.return_value = "sha256:abc"
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    ok = cmd_lifecycle._preflight_checks(cfg)
+                                    ok = cmd_provision.preflight_checks(cfg)
                         self.assertTrue(ok)
                         self.assertIn("Copied config template", buf.getvalue())
 
@@ -947,34 +960,34 @@ class TestPreflightChecks(unittest.TestCase):
             )
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                 cfg = WorkloadConfig('test-wl')
-                with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                    with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+                with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "sha256:abc"
                         buf = io.StringIO()
                         with redirect_stdout(buf):
-                            ok = cmd_lifecycle._preflight_checks(cfg)
+                            ok = cmd_provision.preflight_checks(cfg)
                 self.assertFalse(ok)
                 self.assertIn("Missing required files", buf.getvalue())
 
     def test_missing_extra_group_fails(self):
         with _cfg(_GROUPS_TOML, 'test-wl', group="definitely-not-a-real-group-xyz") as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("Missing groups", buf.getvalue())
 
     def test_host_mode_unprivileged_port_warns(self):
         with _cfg(_HOSTNET_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     fake_path = MagicMock()
                     fake_path.read_text.return_value = "1024\n"
-                    with patch.object(cmd_lifecycle.Path, '__new__', side_effect=lambda cls, *a, **k: Path.__new__(cls) if a and a[0] != "/proc/sys/net/ipv4/ip_unprivileged_port_start" else fake_path):
+                    with patch.object(cmd_provision.Path, '__new__', side_effect=lambda cls, *a, **k: Path.__new__(cls) if a and a[0] != "/proc/sys/net/ipv4/ip_unprivileged_port_start" else fake_path):
                         # simplest: just patch the specific sysctl path via read_text monkeypatch
                         pass
                     # Directly patch Path.read_text won't be reliable cross-cutting; instead
@@ -982,67 +995,67 @@ class TestPreflightChecks(unittest.TestCase):
                     # verify function tolerates missing /proc file (Exception branch).
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_lifecycle._preflight_checks(cfg)
+                        ok = cmd_provision.preflight_checks(cfg)
             # Real hosts normally have unpriv_start=0 or the file may not parse;
             # either way preflight must not crash and volumes/groups still pass.
             self.assertTrue(ok)
 
     def test_vm_missing_qemu_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which(missing={"qemu-system-x86_64"})):
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"qemu-system-x86_64"})):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    ok = cmd_lifecycle._preflight_checks(cfg)
+                    ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("Missing required VM executables", buf.getvalue())
 
     def test_vm_missing_kvm_device_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Path, 'exists', return_value=False):
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Path, 'exists', return_value=False):
                     with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                         buf = io.StringIO()
                         with redirect_stdout(buf):
-                            ok = cmd_lifecycle._preflight_checks(cfg)
+                            ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("/dev/kvm not found", buf.getvalue())
 
     def test_vm_missing_ovmf_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Path, 'exists', return_value=True):
-                    with patch.object(cmd_lifecycle.Path, 'read_text', return_value="allow _workload-br\n"):
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                    with patch.object(cmd_provision.Path, 'read_text', return_value="allow _workload-br\n"):
                         with patch('vm.find_ovmf_code', return_value=None):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                ok = cmd_lifecycle._preflight_checks(cfg)
+                                ok = cmd_provision.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("OVMF firmware", buf.getvalue())
 
     def test_vm_all_checks_pass(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_lifecycle.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_lifecycle.Path, 'exists', return_value=True):
-                    with patch.object(cmd_lifecycle.Path, 'read_text', return_value="allow _workload-br\n"):
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                    with patch.object(cmd_provision.Path, 'read_text', return_value="allow _workload-br\n"):
                         with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                ok = cmd_lifecycle._preflight_checks(cfg)
+                                ok = cmd_provision.preflight_checks(cfg)
             self.assertTrue(ok)
 
 
-# ── _provision_user ──────────────────────────────────────────────────────────
+# ── provision_user ──────────────────────────────────────────────────────────
 
 class TestProvisionUser(unittest.TestCase):
     def test_runs_sysusers_then_ensure_user(self):
-        # _provision_user is now pure application of the generator's output: it
+        # provision_user is now pure application of the generator's output: it
         # runs systemd-sysusers against the generator-written .conf, then
         # workload-ensure-user. No UID allocation or .conf rendering here
-        # anymore (the generator is the single producer — see _generate_units).
+        # anymore (the generator is the single producer — see generate_units).
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                 run_mock.return_value = MagicMock(returncode=0)
-                cmd_lifecycle._provision_user(cfg)
+                cmd_provision.provision_user(cfg)
             sysusers_call = run_mock.call_args_list[0]
             self.assertEqual(sysusers_call.args[0][0], "systemd-sysusers")
             self.assertTrue(sysusers_call.args[0][1].endswith("workload-test-wl.conf"))
@@ -1051,21 +1064,21 @@ class TestProvisionUser(unittest.TestCase):
             self.assertEqual(ensure_user_call.args[0][1], "test-wl")
 
 
-# ── _transfer_image / _transfer_one_image ───────────────────────────────────
+# ── transfer_image / _transfer_one_image ───────────────────────────────────
 
 class TestTransferImage(unittest.TestCase):
     def test_skips_non_pull_never_images(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_lifecycle, '_transfer_one_image') as one:
-                cmd_lifecycle._transfer_image(cfg, manager)
+            with patch.object(cmd_provision, '_transfer_one_image') as one:
+                cmd_provision.transfer_image(cfg, manager)
             one.assert_not_called()
 
     def test_transfers_pull_never_image(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_lifecycle, '_transfer_one_image') as one:
-                cmd_lifecycle._transfer_image(cfg, manager)
+            with patch.object(cmd_provision, '_transfer_one_image') as one:
+                cmd_provision.transfer_image(cfg, manager)
             one.assert_called_once_with(cfg, manager, "example.com/test:latest")
 
     def test_transfer_one_image_needs_transfer_when_stale(self):
@@ -1074,18 +1087,18 @@ class TestTransferImage(unittest.TestCase):
             manager.podman.return_value.image_id.return_value = "old-id"
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
                 with patch.object(type(cfg), 'gid', new_callable=lambda: property(lambda _: 12345)):
-                    with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "new-id"
-                        with patch.object(cmd_lifecycle.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
-                            with patch.object(cmd_lifecycle.os, 'close'):
-                                with patch.object(cmd_lifecycle.os, 'chown'):
-                                    with patch.object(cmd_lifecycle.os, 'unlink'):
-                                        with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        with patch.object(cmd_provision.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
+                            with patch.object(cmd_provision.os, 'close'):
+                                with patch.object(cmd_provision.os, 'chown'):
+                                    with patch.object(cmd_provision.os, 'unlink'):
+                                        with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                                             save_res = MagicMock(returncode=0)
                                             load_res = MagicMock(returncode=0)
                                             active_res = MagicMock(returncode=1)
                                             run_mock.side_effect = [save_res, load_res, active_res]
-                                            cmd_lifecycle._transfer_one_image(cfg, manager, "example.com/test:latest")
+                                            cmd_provision._transfer_one_image(cfg, manager, "example.com/test:latest")
             self.assertEqual(run_mock.call_count, 3)
 
     def test_transfer_one_image_save_failure_exits(self):
@@ -1094,29 +1107,29 @@ class TestTransferImage(unittest.TestCase):
             manager.podman.return_value.image_id.return_value = ""
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
                 with patch.object(type(cfg), 'gid', new_callable=lambda: property(lambda _: 12345)):
-                    with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "new-id"
-                        with patch.object(cmd_lifecycle.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
-                            with patch.object(cmd_lifecycle.os, 'close'):
-                                with patch.object(cmd_lifecycle.os, 'chown'):
-                                    with patch.object(cmd_lifecycle.os, 'unlink'):
-                                        with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        with patch.object(cmd_provision.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
+                            with patch.object(cmd_provision.os, 'close'):
+                                with patch.object(cmd_provision.os, 'chown'):
+                                    with patch.object(cmd_provision.os, 'unlink'):
+                                        with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                                             save_res = MagicMock(returncode=1, stderr=b"boom")
                                             run_mock.return_value = save_res
                                             with self.assertRaises(SystemExit):
-                                                cmd_lifecycle._transfer_one_image(cfg, manager, "example.com/test:latest")
+                                                cmd_provision._transfer_one_image(cfg, manager, "example.com/test:latest")
 
     def test_transfer_one_image_missing_locally_no_root_copy_exits(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = ""
-            with patch.object(cmd_lifecycle.Podman, 'for_root') as for_root:
+            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
                 with self.assertRaises(SystemExit):
-                    cmd_lifecycle._transfer_one_image(cfg, manager, "example.com/test:latest")
+                    cmd_provision._transfer_one_image(cfg, manager, "example.com/test:latest")
 
 
-# ── _generate_units / _start_service ─────────────────────────────────────────
+# ── generate_units / start_service ─────────────────────────────────────────
 
 class TestGenerateUnits(unittest.TestCase):
     def test_generates_reloads_and_verifies(self):
@@ -1126,10 +1139,10 @@ class TestGenerateUnits(unittest.TestCase):
                 # The produced-artifact check passes when the generator's
                 # sysusers .conf is present.
                 (run / "workload-test-wl.conf").touch()
-                with patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run):
-                    with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                with patch.object(cmd_provision, 'RUN_SYSTEMD_SYSTEM', run):
+                    with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                         run_mock.return_value = MagicMock(returncode=0)
-                        cmd_lifecycle._generate_units(cfg)
+                        cmd_provision.generate_units(cfg)
             cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertTrue(any("workload-generate" in c[0] for c in cmds))
             self.assertIn(["systemctl", "daemon-reload"], cmds)
@@ -1145,13 +1158,13 @@ class TestGenerateUnits(unittest.TestCase):
         # surface a printed error + LifecycleError(1), not proceed to sysusers.
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             with tempfile.TemporaryDirectory() as run_d:
-                with patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', Path(run_d)):
-                    with patch.object(cmd_lifecycle.subprocess, 'run',
+                with patch.object(cmd_provision, 'RUN_SYSTEMD_SYSTEM', Path(run_d)):
+                    with patch.object(cmd_provision.subprocess, 'run',
                                       return_value=MagicMock(returncode=0)):
                         buf = io.StringIO()
                         with redirect_stderr(buf):
-                            with self.assertRaises(cmd_lifecycle.LifecycleError) as ctx:
-                                cmd_lifecycle._generate_units(cfg)
+                            with self.assertRaises(cmd_provision.LifecycleError) as ctx:
+                                cmd_provision.generate_units(cfg)
             self.assertEqual(ctx.exception.returncode, 1)
             self.assertIsInstance(ctx.exception.returncode, int)
             self.assertIn("produced no units", buf.getvalue())
@@ -1160,48 +1173,48 @@ class TestGenerateUnits(unittest.TestCase):
 class TestStartService(unittest.TestCase):
     def test_resets_failed_and_starts(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                 run_mock.return_value = MagicMock(returncode=0)
-                cmd_lifecycle._start_service(cfg)
+                cmd_provision.start_service(cfg)
             cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertIn(["systemctl", "reset-failed", cfg.service_name], cmds)
             self.assertIn(["systemctl", "start", "--no-block", cfg.service_name], cmds)
 
 
-# ── _run_host_setup ──────────────────────────────────────────────────────────
+# ── run_host_setup ──────────────────────────────────────────────────────────
 
 class TestRunHostSetup(unittest.TestCase):
     def test_no_setup_configured_is_noop(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
-                cmd_lifecycle._run_host_setup(cfg, "enable")
+            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                cmd_provision.run_host_setup(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_missing_script_warns_no_exit(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_lifecycle._run_host_setup(cfg, "enable")
+                cmd_provision.run_host_setup(cfg, "enable")
             self.assertIn("not found", buf.getvalue())
 
     def test_script_failure_on_enable_exits(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.Path, 'exists', return_value=True):
-                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=1)):
+            with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=1)):
                     with self.assertRaises(SystemExit):
-                        cmd_lifecycle._run_host_setup(cfg, "enable")
+                        cmd_provision.run_host_setup(cfg, "enable")
 
     def test_script_failure_on_disable_does_not_exit(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.Path, 'exists', return_value=True):
-                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=1)):
-                    cmd_lifecycle._run_host_setup(cfg, "disable")  # must not raise
+            with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=1)):
+                    cmd_provision.run_host_setup(cfg, "disable")  # must not raise
 
     def test_script_success_runs(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.Path, 'exists', return_value=True):
-                with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
-                    cmd_lifecycle._run_host_setup(cfg, "enable")
+            with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
+                    cmd_provision.run_host_setup(cfg, "enable")
             self.assertEqual(run_mock.call_args.args[0][1], "enable")
 
 
@@ -1211,33 +1224,33 @@ class TestSelinuxHelpers(unittest.TestCase):
     def test_selinux_available_true(self):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = True
-        with patch.object(cmd_lifecycle.shutil, 'which', return_value="/usr/sbin/semodule"):
-            with patch.object(cmd_lifecycle, 'UDICA_TEMPLATE_DIR', fake_dir):
-                self.assertTrue(cmd_lifecycle._selinux_available())
+        with patch.object(cmd_provision.shutil, 'which', return_value="/usr/sbin/semodule"):
+            with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', fake_dir):
+                self.assertTrue(cmd_provision._selinux_available())
 
     def test_selinux_available_false_no_semodule(self):
-        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
-            self.assertFalse(cmd_lifecycle._selinux_available())
+        with patch.object(cmd_provision.shutil, 'which', return_value=None):
+            self.assertFalse(cmd_provision._selinux_available())
 
     def test_selinux_enforcing_true(self):
-        with patch.object(cmd_lifecycle.subprocess, 'run',
+        with patch.object(cmd_provision.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Enforcing\n")):
-            self.assertTrue(cmd_lifecycle._selinux_enforcing())
+            self.assertTrue(cmd_provision._selinux_enforcing())
 
     def test_selinux_enforcing_false_permissive(self):
-        with patch.object(cmd_lifecycle.subprocess, 'run',
+        with patch.object(cmd_provision.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Permissive\n")):
-            self.assertFalse(cmd_lifecycle._selinux_enforcing())
+            self.assertFalse(cmd_provision._selinux_enforcing())
 
     def test_selinux_enforcing_getenforce_missing(self):
-        with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=FileNotFoundError):
-            self.assertFalse(cmd_lifecycle._selinux_enforcing())
+        with patch.object(cmd_provision.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertFalse(cmd_provision._selinux_enforcing())
 
     def test_available_bundles_empty_when_dir_missing(self):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = False
-        with patch.object(cmd_lifecycle, '_BUNDLES_DIR', fake_dir):
-            self.assertEqual(cmd_lifecycle._available_bundles(), [])
+        with patch.object(cmd_provision, '_BUNDLES_DIR', fake_dir):
+            self.assertEqual(cmd_provision._available_bundles(), [])
 
     def test_available_bundles_lists_dirs_with_policy(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1245,72 +1258,72 @@ class TestSelinuxHelpers(unittest.TestCase):
             (p / "foo").mkdir()
             (p / "foo" / "policy.cil").write_text("")
             (p / "bar").mkdir()  # no policy.cil -> excluded
-            with patch.object(cmd_lifecycle, '_BUNDLES_DIR', p):
-                self.assertEqual(cmd_lifecycle._available_bundles(), ["foo"])
+            with patch.object(cmd_provision, '_BUNDLES_DIR', p):
+                self.assertEqual(cmd_provision._available_bundles(), ["foo"])
 
     def test_print_available_bundles_suggests_close_match(self):
-        with patch.object(cmd_lifecycle, '_available_bundles', return_value=["forgejo"]):
+        with patch.object(cmd_provision, '_available_bundles', return_value=["forgejo"]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_lifecycle._print_available_bundles("forgeejo")
+                cmd_provision._print_available_bundles("forgeejo")
             self.assertIn("did you mean 'forgejo'", buf.getvalue())
 
     def test_print_available_bundles_noop_when_none_available(self):
-        with patch.object(cmd_lifecycle, '_available_bundles', return_value=[]):
+        with patch.object(cmd_provision, '_available_bundles', return_value=[]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_lifecycle._print_available_bundles("anything")
+                cmd_provision._print_available_bundles("anything")
             self.assertEqual(buf.getvalue(), "")
 
 
-# ── _apply_selinux_policy ────────────────────────────────────────────────────
+# ── apply_selinux_policy ────────────────────────────────────────────────────
 
 class TestApplySelinuxPolicy(unittest.TestCase):
     def test_noop_when_not_selinux_policy(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
-                cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                cmd_provision.apply_selinux_policy(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_enable_hard_fails_when_tooling_missing_and_enforcing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=False):
-                with patch.object(cmd_lifecycle, '_selinux_enforcing', return_value=True):
-                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                        cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+            with patch.object(cmd_provision, '_selinux_available', return_value=False):
+                with patch.object(cmd_provision, '_selinux_enforcing', return_value=True):
+                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                        cmd_provision.apply_selinux_policy(cfg, "enable")
 
     def test_enable_warns_when_tooling_missing_and_permissive(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=False):
-                with patch.object(cmd_lifecycle, '_selinux_enforcing', return_value=False):
+            with patch.object(cmd_provision, '_selinux_available', return_value=False):
+                with patch.object(cmd_provision, '_selinux_enforcing', return_value=False):
                     buf = io.StringIO()
                     with redirect_stderr(buf):
-                        cmd_lifecycle._apply_selinux_policy(cfg, "enable")  # no raise
+                        cmd_provision.apply_selinux_policy(cfg, "enable")  # no raise
                     self.assertIn("WARNING", buf.getvalue())
 
     def test_disable_never_hard_fails_when_tooling_missing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=False):
-                with patch.object(cmd_lifecycle, '_selinux_enforcing', return_value=True):
-                    cmd_lifecycle._apply_selinux_policy(cfg, "disable")  # must not raise
+            with patch.object(cmd_provision, '_selinux_available', return_value=False):
+                with patch.object(cmd_provision, '_selinux_enforcing', return_value=True):
+                    cmd_provision.apply_selinux_policy(cfg, "disable")  # must not raise
 
     def test_disable_removes_loaded_module(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            module = cmd_lifecycle.selinux_module_name(cfg.name)
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
-                with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+            module = cmd_provision.selinux_module_name(cfg.name)
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout=f"{module}\nother_mod\n")
-                    cmd_lifecycle._apply_selinux_policy(cfg, "disable")
+                    cmd_provision.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(len(remove_calls), 1)
             self.assertEqual(remove_calls[0].args[0][2], module)
 
     def test_disable_skips_removal_when_not_loaded(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
-                with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout="other_mod\n")
-                    cmd_lifecycle._apply_selinux_policy(cfg, "disable")
+                    cmd_provision.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(remove_calls, [])
 
@@ -1319,50 +1332,50 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             'name = "test-wl"', 'name = "test-wl"\nbundle = "bad_name"'
         )
         with _CfgDir(toml, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                        cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                        cmd_provision.apply_selinux_policy(cfg, "enable")
                 self.assertIn("invalid", buf.getvalue())
 
     def test_enable_missing_template_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                        cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                        cmd_provision.apply_selinux_policy(cfg, "enable")
                 self.assertIn("template not found", buf.getvalue())
 
     def test_enable_installs_module_success(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
-                with patch.object(cmd_lifecycle.WorkloadConfig, 'resolve_control_file') as resolve:
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+                with patch.object(cmd_provision.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(cmd_lifecycle, 'UDICA_TEMPLATE_DIR', Path(td)):
-                            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', Path(td)):
+                            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
                                 run_mock.return_value = MagicMock(returncode=0)
-                                cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+                                cmd_provision.apply_selinux_policy(cfg, "enable")
                     install_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-i"]]
                     self.assertEqual(len(install_calls), 1)
 
     def test_enable_install_failure_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
-                with patch.object(cmd_lifecycle.WorkloadConfig, 'resolve_control_file') as resolve:
+            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+                with patch.object(cmd_provision.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(cmd_lifecycle, 'UDICA_TEMPLATE_DIR', Path(td)):
-                            with patch.object(cmd_lifecycle.subprocess, 'run',
-                                              side_effect=cmd_lifecycle.subprocess.CalledProcessError(1, ["semodule"])):
-                                with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                                    cmd_lifecycle._apply_selinux_policy(cfg, "enable")
+                        with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', Path(td)):
+                            with patch.object(cmd_provision.subprocess, 'run',
+                                              side_effect=cmd_provision.subprocess.CalledProcessError(1, ["semodule"])):
+                                with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                                    cmd_provision.apply_selinux_policy(cfg, "enable")
 
 
 # ── cmd_enable ────────────────────────────────────────────────────────────────
@@ -1376,7 +1389,7 @@ class TestCmdEnable(unittest.TestCase):
                     buf = io.StringIO()
                     with redirect_stderr(buf):
                         with self.assertRaises(SystemExit):
-                            cmd_lifecycle.cmd_enable(_ns(workload="ghost"), manager)
+                            cmd_enable.cmd_enable(_ns(workload="ghost"), manager)
                     self.assertIn("not found", buf.getvalue())
 
     def test_preflight_failure_reverts_marker(self):
@@ -1388,12 +1401,12 @@ class TestCmdEnable(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
-                        with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
-                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=False):
+                        with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                            with patch.object(cmd_enable, 'preflight_checks', return_value=False):
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
                                     with self.assertRaises(SystemExit):
-                                        cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                        cmd_enable.cmd_enable(_ns(workload="test-wl"), manager)
                         marker = workload_lib.workload_enabled_marker("test-wl")
                         self.assertFalse(marker.exists())
 
@@ -1410,17 +1423,17 @@ class TestCmdEnable(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
-                        with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run):
-                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
-                                with patch.object(cmd_lifecycle, '_run_host_setup') as host_setup:
-                                    with patch.object(cmd_lifecycle, '_apply_selinux_policy') as selinux:
-                                        with patch.object(cmd_lifecycle, '_generate_units') as generate:
-                                            with patch.object(cmd_lifecycle, '_provision_user') as provision:
-                                                with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
-                                                    with patch.object(cmd_lifecycle, '_start_service') as start:
+                        with patch.object(cmd_enable.subprocess, 'run', side_effect=fake_run):
+                            with patch.object(cmd_enable, 'preflight_checks', return_value=True):
+                                with patch.object(cmd_enable, 'run_host_setup') as host_setup:
+                                    with patch.object(cmd_enable, 'apply_selinux_policy') as selinux:
+                                        with patch.object(cmd_enable, 'generate_units') as generate:
+                                            with patch.object(cmd_enable, 'provision_user') as provision:
+                                                with patch.object(cmd_enable, 'transfer_image') as transfer:
+                                                    with patch.object(cmd_enable, 'start_service') as start:
                                                         buf = io.StringIO()
                                                         with redirect_stdout(buf):
-                                                            cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                                            cmd_enable.cmd_enable(_ns(workload="test-wl"), manager)
                         host_setup.assert_called_once()
                         selinux.assert_called_once()
                         generate.assert_called_once()
@@ -1432,7 +1445,7 @@ class TestCmdEnable(unittest.TestCase):
                         self.assertIn("enabled and starting", buf.getvalue())
 
     def test_selinux_policy_failure_exits_1_without_reprinting(self):
-        # _apply_selinux_policy() prints its own diagnostic and raises
+        # apply_selinux_policy() prints its own diagnostic and raises
         # SelinuxPolicyError; cmd_enable must exit 1 without printing a
         # second "Error: ..." line (the message is already on stderr).
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as wl_base:
@@ -1443,17 +1456,17 @@ class TestCmdEnable(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
-                        with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
-                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
-                                with patch.object(cmd_lifecycle, '_run_host_setup'):
+                        with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                            with patch.object(cmd_enable, 'preflight_checks', return_value=True):
+                                with patch.object(cmd_enable, 'run_host_setup'):
                                     with patch.object(
-                                        cmd_lifecycle, '_apply_selinux_policy',
-                                        side_effect=cmd_lifecycle.SelinuxPolicyError("boom"),
+                                        cmd_enable, 'apply_selinux_policy',
+                                        side_effect=cmd_enable.SelinuxPolicyError("boom"),
                                     ):
                                         buf = io.StringIO()
                                         with redirect_stderr(buf):
                                             with self.assertRaises(SystemExit) as cm:
-                                                cmd_lifecycle.cmd_enable(_ns(workload="test-wl"), manager)
+                                                cmd_enable.cmd_enable(_ns(workload="test-wl"), manager)
                                         self.assertEqual(cm.exception.code, 1)
                                         self.assertEqual(buf.getvalue(), "")
 
@@ -1466,15 +1479,15 @@ class TestCmdEnable(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                     with _RootBypass():
                         manager = MagicMock()
-                        with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
-                            with patch.object(cmd_lifecycle, '_preflight_checks', return_value=True):
-                                with patch.object(cmd_lifecycle, '_run_host_setup'):
-                                    with patch.object(cmd_lifecycle, '_apply_selinux_policy'):
-                                        with patch.object(cmd_lifecycle, '_generate_units'):
-                                            with patch.object(cmd_lifecycle, '_provision_user'):
-                                                with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
-                                                    with patch.object(cmd_lifecycle, '_start_service'):
-                                                        cmd_lifecycle.cmd_enable(_ns(workload="test-vm"), manager)
+                        with patch.object(cmd_enable.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                            with patch.object(cmd_enable, 'preflight_checks', return_value=True):
+                                with patch.object(cmd_enable, 'run_host_setup'):
+                                    with patch.object(cmd_enable, 'apply_selinux_policy'):
+                                        with patch.object(cmd_enable, 'generate_units'):
+                                            with patch.object(cmd_enable, 'provision_user'):
+                                                with patch.object(cmd_enable, 'transfer_image') as transfer:
+                                                    with patch.object(cmd_enable, 'start_service'):
+                                                        cmd_enable.cmd_enable(_ns(workload="test-vm"), manager)
                         transfer.assert_not_called()
 
 
@@ -1491,15 +1504,15 @@ class TestCmdDisableAdditional(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
-                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=Path(d) / "nope"):
-                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
-                                    with patch.object(cmd_lifecycle, 'open', unittest.mock.mock_open(), create=True):
+                            with patch.object(cmd_disable, 'workload_root_dir', return_value=Path(d) / "nope"):
+                                with patch.object(cmd_disable, 'subid_lock', contextlib.nullcontext):
+                                    with patch.object(cmd_disable, 'open', unittest.mock.mock_open(), create=True):
                                         with _no_subid_files():
                                             buf = io.StringIO()
                                             with redirect_stdout(buf):
-                                                cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=True), manager)
+                                                cmd_disable.cmd_disable(_ns(workload="test-wl", purge=True), manager)
                     self.assertIn("was not provisioned", buf.getvalue())
 
     def test_purge_user_present_userdel_fails_reports_failure(self):
@@ -1514,15 +1527,15 @@ class TestCmdDisableAdditional(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', return_value=fake_pw):
-                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=Path(d) / "nope"):
-                                with patch.object(cmd_lifecycle.time, 'sleep'):
+                            with patch.object(cmd_disable, 'workload_root_dir', return_value=Path(d) / "nope"):
+                                with patch.object(cmd_disable.time, 'sleep'):
                                     buf_out = io.StringIO()
                                     buf_err = io.StringIO()
                                     with redirect_stdout(buf_out), redirect_stderr(buf_err):
                                         with self.assertRaises(SystemExit):
-                                            cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=True), manager)
+                                            cmd_disable.cmd_disable(_ns(workload="test-wl", purge=True), manager)
                     self.assertIn("still exists", buf_err.getvalue())
 
     def test_purge_removes_workload_dir(self):
@@ -1538,13 +1551,13 @@ class TestCmdDisableAdditional(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
-                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
-                                with patch.object(cmd_lifecycle, 'subid_lock', contextlib.nullcontext):
-                                    with patch.object(cmd_lifecycle, 'open', unittest.mock.mock_open(), create=True):
+                            with patch.object(cmd_disable, 'workload_root_dir', return_value=wl_dir):
+                                with patch.object(cmd_disable, 'subid_lock', contextlib.nullcontext):
+                                    with patch.object(cmd_disable, 'open', unittest.mock.mock_open(), create=True):
                                         with _no_subid_files():
-                                            cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=True), manager)
+                                            cmd_disable.cmd_disable(_ns(workload="test-wl", purge=True), manager)
             self.assertFalse(wl_dir.exists())
 
     def test_non_purge_keeps_user_stops_lingering_manager(self):
@@ -1557,11 +1570,11 @@ class TestCmdDisableAdditional(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
-                        with patch.object(cmd_lifecycle, '_stop_user_manager', return_value=True) as stop_mgr:
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                        with patch.object(cmd_disable, '_stop_user_manager', return_value=True) as stop_mgr:
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=False), manager)
+                                cmd_disable.cmd_disable(_ns(workload="test-wl", purge=False), manager)
                     stop_mgr.assert_called_once()
                     self.assertIn("disabled and stopped", buf.getvalue())
                     marker = workload_lib.workload_enabled_marker("test-wl")
@@ -1579,12 +1592,12 @@ class TestCmdDisableAdditional(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
-                        with patch.object(cmd_lifecycle, '_run_host_setup', side_effect=RuntimeError("boom")):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                        with patch.object(cmd_disable, 'run_host_setup', side_effect=RuntimeError("boom")):
                             buf_err = io.StringIO()
                             with redirect_stderr(buf_err):
                                 with self.assertRaises(SystemExit):
-                                    cmd_lifecycle.cmd_disable(_ns(workload="test-wl", purge=False), manager)
+                                    cmd_disable.cmd_disable(_ns(workload="test-wl", purge=False), manager)
                     self.assertIn("boom", buf_err.getvalue())
                     # Marker was still removed despite the earlier failure.
                     marker = workload_lib.workload_enabled_marker("test-wl")
@@ -1611,12 +1624,12 @@ class TestCmdDisableDryRun(unittest.TestCase):
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
                     mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="2048\t/x\n"))
-                    with patch.object(cmd_lifecycle.subprocess, 'run', mock_run):
+                    with patch.object(cmd_disable.subprocess, 'run', mock_run):
                         with patch('pwd.getpwnam', side_effect=KeyError):
-                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
+                            with patch.object(cmd_disable, 'workload_root_dir', return_value=wl_dir):
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    cmd_lifecycle.cmd_disable(
+                                    cmd_disable.cmd_disable(
                                         _ns(workload="test-wl", purge=True, dry_run=True), manager)
                     for call in mock_run.call_args_list:
                         argv = call.args[0]
@@ -1636,11 +1649,11 @@ class TestCmdDisableDryRun(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                cmd_lifecycle.cmd_disable(
+                                cmd_disable.cmd_disable(
                                     _ns(workload="test-wl", purge=False, dry_run=True), manager)
             self.assertIn(workload_lib.workload_service_name("test-wl"), buf.getvalue())
 
@@ -1657,13 +1670,13 @@ class TestCmdDisableDryRun(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run',
+                    with patch.object(cmd_disable.subprocess, 'run',
                                        return_value=MagicMock(returncode=0, stdout="2048\t/x\n")):
                         with patch('pwd.getpwnam', side_effect=KeyError):
-                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
+                            with patch.object(cmd_disable, 'workload_root_dir', return_value=wl_dir):
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    cmd_lifecycle.cmd_disable(
+                                    cmd_disable.cmd_disable(
                                         _ns(workload="test-wl", purge=True, dry_run=True), manager)
             out = buf.getvalue()
             self.assertIn("DESTROY data directory", out)
@@ -1681,11 +1694,11 @@ class TestCmdDisableDryRun(unittest.TestCase):
                 with _RootBypass():
                     manager = MagicMock()
                     manager.get_all_configs.return_value = []
-                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                    with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                cmd_lifecycle.cmd_disable(
+                                cmd_disable.cmd_disable(
                                     _ns(workload="test-wl", purge=False, dry_run=True), manager)
             self.assertIn("keep user, home and subuid ranges", buf.getvalue())
 
@@ -1795,7 +1808,7 @@ class TestCmdRecreate(unittest.TestCase):
                 sub = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
                     with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
-                        with patch.object(cmd_lifecycle, '_transfer_image'):
+                        with patch.object(cmd_lifecycle, 'transfer_image'):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
                                 cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
@@ -1815,7 +1828,7 @@ class TestCmdRecreate(unittest.TestCase):
                 sub = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
                     with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
-                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                        with patch.object(cmd_lifecycle, 'transfer_image') as transfer:
                             cmd_lifecycle.cmd_recreate(_ns(workload="test-wl"), manager)
                 transfer.assert_called_once()
                 self.assertEqual(transfer.call_args.args[1], manager)
@@ -1827,7 +1840,7 @@ class TestCmdRecreate(unittest.TestCase):
                 sub = MagicMock()
                 with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
                     with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
-                        with patch.object(cmd_lifecycle, '_transfer_image') as transfer:
+                        with patch.object(cmd_lifecycle, 'transfer_image') as transfer:
                             cmd_lifecycle.cmd_recreate(_ns(workload="test-vm"), manager)
                 transfer.assert_not_called()
 
@@ -1864,25 +1877,25 @@ class TestCmdCleanup(unittest.TestCase):
 
     def test_nothing_to_clean_text(self):
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                cmd_lifecycle.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
+                                cmd_cleanup.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
                             self.assertIn("Nothing to clean up", buf.getvalue())
 
     def test_dry_run_json_lists_orphans_without_removing(self):
         orphan = self._fake_pwent("_wl-orphan", 15001)
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[orphan]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                cmd_lifecycle.cmd_cleanup(_ns(apply=False, json=True), MagicMock())
+                                cmd_cleanup.cmd_cleanup(_ns(apply=False, json=True), MagicMock())
             data = json.loads(buf.getvalue())
             self.assertTrue(data["dry_run"])
             self.assertEqual(data["orphan_users"], ["_wl-orphan"])
@@ -1891,15 +1904,15 @@ class TestCmdCleanup(unittest.TestCase):
     def test_orphaned_user_not_removed_without_apply(self):
         orphan = self._fake_pwent("_wl-orphan", 15001)
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[orphan]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
-                            with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
+                            with patch.object(cmd_cleanup.subprocess, 'run') as run_mock:
                                 with patch.object(Path, 'exists', return_value=False):
                                     buf = io.StringIO()
                                     with redirect_stdout(buf):
-                                        cmd_lifecycle.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
+                                        cmd_cleanup.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
                             run_mock.assert_not_called()
                             self.assertIn("Run with --apply", buf.getvalue())
                             self.assertIn("_wl-orphan", buf.getvalue())
@@ -1907,15 +1920,15 @@ class TestCmdCleanup(unittest.TestCase):
     def test_apply_removes_orphaned_user(self):
         orphan = self._fake_pwent("_wl-orphan", 15001)
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[orphan]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
-                            with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
+                            with patch.object(cmd_cleanup.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
                                 with patch.object(Path, 'exists', return_value=False):
                                     buf = io.StringIO()
                                     with redirect_stdout(buf):
-                                        cmd_lifecycle.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
+                                        cmd_cleanup.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
             userdel_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "userdel"]
             self.assertEqual(len(userdel_calls), 1)
             self.assertIn("_wl-orphan", userdel_calls[0].args[0])
@@ -1945,18 +1958,18 @@ class TestCmdCleanup(unittest.TestCase):
             written[str(self)] = content
 
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[orphan]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
-                            with patch.object(cmd_lifecycle.subprocess, 'run',
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
+                            with patch.object(cmd_cleanup.subprocess, 'run',
                                                return_value=MagicMock(returncode=0)):
                                 with patch.object(Path, 'exists', new=fake_exists), \
                                      patch.object(Path, 'read_text', new=fake_read_text), \
                                      patch.object(Path, 'write_text', new=fake_write_text):
                                     buf = io.StringIO()
                                     with redirect_stdout(buf):
-                                        cmd_lifecycle.cmd_cleanup(_ns(apply=True, json=True), MagicMock())
+                                        cmd_cleanup.cmd_cleanup(_ns(apply=True, json=True), MagicMock())
 
         self.assertIn("/etc/subuid", written)
         self.assertIn("/etc/subgid", written)
@@ -1971,13 +1984,13 @@ class TestCmdCleanup(unittest.TestCase):
             orphan_dir = base / "orphan-wl"
             orphan_dir.mkdir()
             with _RootBypass():
-                with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+                with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                     with patch('pwd.getpwall', return_value=[]):
-                        with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
-                            with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
+                        with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                            with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    cmd_lifecycle.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
+                                    cmd_cleanup.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
             self.assertFalse(orphan_dir.exists())
             self.assertIn("Cleanup complete", buf.getvalue())
 
@@ -1989,14 +2002,14 @@ class TestCmdCleanup(unittest.TestCase):
             wl_dir.mkdir()
             keeper = self._fake_pwent("_wl-keepme", 15002)
             with _RootBypass():
-                with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+                with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                     with patch('pwd.getpwall', return_value=[keeper]):
-                        with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
-                            with patch.object(cmd_lifecycle.shutil, 'which', return_value=None):
+                        with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                            with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
                                 with patch.object(Path, 'exists', return_value=False):
                                     buf = io.StringIO()
                                     with redirect_stdout(buf):
-                                        cmd_lifecycle.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
+                                        cmd_cleanup.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
             # keepme user is configured? No — configured_names comes from iter_workloads
             # (empty here), so 'keepme' user IS orphaned by name-matching, but its dir
             # should not be double-reported as an orphan dir separately from the user.
@@ -2004,18 +2017,18 @@ class TestCmdCleanup(unittest.TestCase):
 
     def test_orphaned_selinux_module_removed_on_apply(self):
         with _RootBypass():
-            with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[]):
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_lifecycle.shutil, 'which', return_value="/usr/sbin/semodule"):
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value="/usr/sbin/semodule"):
                             def fake_run(cmd, **kw):
                                 if cmd[:2] == ["semodule", "-l"]:
                                     return MagicMock(returncode=0, stdout="wl_orphan\nudica_base\n")
                                 return MagicMock(returncode=0, stdout="", stderr="")
-                            with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run) as run_mock:
+                            with patch.object(cmd_cleanup.subprocess, 'run', side_effect=fake_run) as run_mock:
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    cmd_lifecycle.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
+                                    cmd_cleanup.cmd_cleanup(_ns(apply=True, json=False), MagicMock())
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(len(remove_calls), 1)
             self.assertEqual(remove_calls[0].args[0][2], "wl_orphan")
@@ -2025,18 +2038,18 @@ class TestCmdCleanup(unittest.TestCase):
             cfg_file = Path(d) / "workload.toml"
             cfg_file.write_text(_SELINUX_TOML.format(name="kept"))
             with _RootBypass():
-                with patch.object(cmd_lifecycle, 'iter_workloads', return_value=[("kept", cfg_file)]):
+                with patch.object(cmd_cleanup, 'iter_workloads', return_value=[("kept", cfg_file)]):
                     with patch('pwd.getpwall', return_value=[]):
-                        with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                            with patch.object(cmd_lifecycle.shutil, 'which', return_value="/usr/sbin/semodule"):
+                        with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
+                            with patch.object(cmd_cleanup.shutil, 'which', return_value="/usr/sbin/semodule"):
                                 def fake_run(cmd, **kw):
                                     if cmd[:2] == ["semodule", "-l"]:
                                         return MagicMock(returncode=0, stdout="wl_kept\n")
                                     return MagicMock(returncode=0, stdout="", stderr="")
-                                with patch.object(cmd_lifecycle.subprocess, 'run', side_effect=fake_run):
+                                with patch.object(cmd_cleanup.subprocess, 'run', side_effect=fake_run):
                                     buf = io.StringIO()
                                     with redirect_stdout(buf):
-                                        cmd_lifecycle.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
+                                        cmd_cleanup.cmd_cleanup(_ns(apply=False, json=False), MagicMock())
                 self.assertIn("Nothing to clean up", buf.getvalue())
 
 

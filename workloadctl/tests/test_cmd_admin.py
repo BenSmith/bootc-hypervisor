@@ -23,7 +23,10 @@ from unittest import mock
 
 
 import workload_lib          # noqa: E402
-import cmd_admin            # noqa: E402
+import cmd_create           # noqa: E402
+import cmd_diagnose         # noqa: E402
+import cmd_edit             # noqa: E402
+import cmd_validate         # noqa: E402
 import workloadctl_core      # noqa: E402
 from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
 
@@ -46,10 +49,10 @@ class CreateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_create, "require_root", lambda: None))
         # Isolate flag->TOML from the validation pass (covered separately).
         self.enterContext(mock.patch.object(
-            cmd_admin, "validate_single", lambda c, m, json_mode=False: {"passed": True}))
+            cmd_create, "validate_single", lambda c, m, json_mode=False: {"passed": True}))
         self.manager = mock.Mock()
 
     def _create(self, **kw):
@@ -57,7 +60,7 @@ class CreateTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_create(_create_ns(**kw), self.manager)
+                cmd_create.cmd_create(_create_ns(**kw), self.manager)
         except SystemExit as e:
             code = e.code
         self._err = err.getvalue()
@@ -169,7 +172,7 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
         # Stub the host probes validate_single fires under user_exists.
         fake_proc = types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        self.enterContext(mock.patch.object(cmd_admin.subprocess, "run",
+        self.enterContext(mock.patch("subprocess.run",
                                             lambda *a, **k: fake_proc))
 
     def test_validate_single_vm_skips_image_check(self):
@@ -187,7 +190,7 @@ class ValidateSingleVMGuardTest(unittest.TestCase):
         pod.image_id.return_value = ""
         manager.podman.return_value = pod
 
-        result = cmd_admin.validate_single(config, manager, json_mode=True)
+        result = cmd_validate.validate_single(config, manager, json_mode=True)
 
         manager.get_image_id.assert_not_called()
         # No check should reference the "(vm)" image sentinel.
@@ -221,7 +224,7 @@ user = "workload"
             pw_uid=10001, pw_gid=10001, pw_dir=str(self.tmp / "home"))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
         fake_proc = types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        self.enterContext(mock.patch.object(cmd_admin.subprocess, "run",
+        self.enterContext(mock.patch("subprocess.run",
                                             lambda *a, **k: fake_proc))
         config = WorkloadConfig(name)
         manager = mock.Mock(spec=WorkloadManager)
@@ -231,7 +234,7 @@ user = "workload"
         pod.container_status.return_value = ""
         pod.image_id.return_value = ""
         manager.podman.return_value = pod
-        return cmd_admin.validate_single(config, manager, json_mode=True)
+        return cmd_validate.validate_single(config, manager, json_mode=True)
 
     def test_lossy_k_value_warns(self):
         # 500000K // 1024 = 488M with a 288K remainder — lossy, and still
@@ -278,7 +281,7 @@ class ValidateSingleSchemaTest(unittest.TestCase):
         manager.user_exists.return_value = False
         manager.get_all_configs.return_value = []
 
-        result = cmd_admin.validate_single(config, manager, json_mode=True)
+        result = cmd_validate.validate_single(config, manager, json_mode=True)
 
         schema = [c for c in result["checks"] if c["check"] == "schema"]
         self.assertTrue(schema and not schema[0]["passed"])
@@ -303,7 +306,7 @@ class ValidateSingleGeneratorWarningsTest(unittest.TestCase):
         manager.get_all_configs.return_value = [
             types.SimpleNamespace(name=n, path=None) for n in known
         ]
-        return cmd_admin.validate_single(config, manager, json_mode=True)
+        return cmd_validate.validate_single(config, manager, json_mode=True)
 
     def test_invalid_userns_surfaced_as_warning(self):
         result = self._validate(
@@ -352,12 +355,12 @@ class CleanupOverrideDirTest(unittest.TestCase):
         config = WorkloadConfig("myapp")
 
         # Plant a control-file override directly in override_dir, then remove
-        # it (simulating what cmd_admin does before calling _cleanup_override_dir).
+        # it (simulating what cmd_edit does before calling _cleanup_override_dir).
         override_file = self.instance_dir / "Containerfile"
         override_file.write_text("FROM scratch\n")
         override_file.unlink()
 
-        cmd_admin._cleanup_override_dir(config, override_file)
+        cmd_edit._cleanup_override_dir(config, override_file)
 
         # workload.toml must survive — rmdir hit OSError and stopped correctly.
         self.assertTrue((self.instance_dir / "workload.toml").exists(),
@@ -373,7 +376,7 @@ class CleanupOverrideDirTest(unittest.TestCase):
         sub.mkdir()
         override_file = sub / "extra.conf"
         # File already removed; only the now-empty sub/ remains to be reaped.
-        cmd_admin._cleanup_override_dir(config, override_file)
+        cmd_edit._cleanup_override_dir(config, override_file)
         self.assertFalse(sub.exists(), "empty nested override dir not removed")
         self.assertTrue((self.instance_dir / "workload.toml").exists())
         self.assertTrue(self.instance_dir.exists())
@@ -387,7 +390,7 @@ class DiagnoseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_diagnose, "require_root", lambda: None))
         (self.tmp / "app").mkdir()
         (self.tmp / "app" / "workload.toml").write_text(
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
@@ -396,7 +399,7 @@ class DiagnoseTest(unittest.TestCase):
         self.manager.user_exists.return_value = False
         # All systemctl/loginctl probes report "not enabled / not active".
         self.enterContext(mock.patch.object(
-            cmd_admin.subprocess, "run",
+            cmd_diagnose.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
 
     def _run(self, json_mode):
@@ -405,7 +408,7 @@ class DiagnoseTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_diagnose(ns, self.manager)
+                cmd_diagnose.cmd_diagnose(ns, self.manager)
         except SystemExit as e:
             code = e.code
         return code, out.getvalue()
@@ -414,8 +417,8 @@ class DiagnoseTest(unittest.TestCase):
         # The seam doctor consumes: (checks, passed), no root gate, no output.
         out = io.StringIO()
         with redirect_stdout(out):
-            checks, passed = cmd_admin.collect_diagnose_checks(
-                cmd_admin.WorkloadConfig("app"), self.manager)
+            checks, passed = cmd_diagnose.collect_diagnose_checks(
+                WorkloadConfig("app"), self.manager)
         self.assertEqual(out.getvalue(), "")
         self.assertFalse(passed)
         self.assertIn("user_exists", {c["check"] for c in checks})
@@ -444,35 +447,35 @@ class AskYesNoTest(unittest.TestCase):
     def test_yes_variants_true(self):
         for ans in ("y", "Y", "yes", "YES", " yes "):
             with mock.patch("builtins.input", return_value=ans):
-                self.assertTrue(cmd_admin._ask_yes_no("? "))
+                self.assertTrue(cmd_edit._ask_yes_no("? "))
 
     def test_no_and_empty_false(self):
         for ans in ("n", "no", "", "maybe"):
             with mock.patch("builtins.input", return_value=ans):
-                self.assertFalse(cmd_admin._ask_yes_no("? "))
+                self.assertFalse(cmd_edit._ask_yes_no("? "))
 
     def test_eof_is_no(self):
         with mock.patch("builtins.input", side_effect=EOFError), \
              redirect_stdout(io.StringIO()):
-            self.assertFalse(cmd_admin._ask_yes_no("? "))
+            self.assertFalse(cmd_edit._ask_yes_no("? "))
 
 
 class ValidateControlFileNameTest(unittest.TestCase):
     def test_nested_relative_ok(self):
-        cmd_admin._validate_control_file_name("rootfs/app.conf")  # no raise
+        cmd_edit._validate_control_file_name("rootfs/app.conf")  # no raise
 
     def test_empty_rejected(self):
         for bad in ("", "   "):
             with self.assertRaises(ValueError):
-                cmd_admin._validate_control_file_name(bad)
+                cmd_edit._validate_control_file_name(bad)
 
     def test_absolute_rejected(self):
         with self.assertRaises(ValueError):
-            cmd_admin._validate_control_file_name("/etc/passwd")
+            cmd_edit._validate_control_file_name("/etc/passwd")
 
     def test_traversal_rejected(self):
         with self.assertRaises(ValueError):
-            cmd_admin._validate_control_file_name("../../etc/passwd")
+            cmd_edit._validate_control_file_name("../../etc/passwd")
 
 
 class AssertNoSymlinkEscapeTest(unittest.TestCase):
@@ -482,20 +485,20 @@ class AssertNoSymlinkEscapeTest(unittest.TestCase):
     def test_clean_path_ok(self):
         target = self.base / "sub" / "file"
         (self.base / "sub").mkdir()
-        cmd_admin._assert_no_symlink_escape(self.base, target)  # no raise
+        cmd_edit._assert_no_symlink_escape(self.base, target)  # no raise
 
     def test_symlinked_component_rejected(self):
         (self.base / "sub").symlink_to("/tmp")
         target = self.base / "sub" / "file"
         with self.assertRaises(ValueError):
-            cmd_admin._assert_no_symlink_escape(self.base, target)
+            cmd_edit._assert_no_symlink_escape(self.base, target)
 
     def test_symlinked_base_rejected(self):
         real = Path(self.enterContext(tempfile.TemporaryDirectory()))
         link = real / "link"
         link.symlink_to("/tmp")
         with self.assertRaises(ValueError):
-            cmd_admin._assert_no_symlink_escape(link, link / "file")
+            cmd_edit._assert_no_symlink_escape(link, link / "file")
 
 
 class PrintControlFileNextStepsTest(unittest.TestCase):
@@ -511,7 +514,7 @@ class PrintControlFileNextStepsTest(unittest.TestCase):
     def _steps(self, rel, setup=""):
         out = io.StringIO()
         with redirect_stdout(out):
-            cmd_admin._print_control_file_next_steps(self._cfg(setup), rel)
+            cmd_edit._print_control_file_next_steps(self._cfg(setup), rel)
         return out.getvalue()
 
     def test_policy_cil_hints_enable(self):
@@ -553,7 +556,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_diagnose, "require_root", lambda: None))
         (self.tmp / "app").mkdir()
         (self.tmp / "app" / "workload.toml").write_text(
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
@@ -562,7 +565,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self.home = self.tmp / "home-app"
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.home))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
-        self.enterContext(mock.patch.object(cmd_admin, "units_outdated", lambda name: False))
+        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
 
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
@@ -606,7 +609,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             return mock.Mock(returncode=1, stdout="", stderr="")
 
         self.enterContext(mock.patch("builtins.open", side_effect=opener))
-        self.enterContext(mock.patch.object(cmd_admin.subprocess, "run", side_effect=_run_side_effect))
+        self.enterContext(mock.patch.object(cmd_diagnose.subprocess, "run", side_effect=_run_side_effect))
         self.enterContext(mock.patch.object(Path, "exists", self._exists_patch(false_substrings)))
 
         out, err = io.StringIO(), io.StringIO()
@@ -614,7 +617,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_diagnose(ns, self.manager)
+                cmd_diagnose.cmd_diagnose(ns, self.manager)
         except SystemExit as e:
             code = e.code
         return code, out.getvalue()
@@ -626,9 +629,9 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self._set_proc(["loginctl", "show-user", "10005", "--property=Linger", "--value"],
                         returncode=0, stdout="yes")
         self._set_proc(["systemctl", "is-active", "user@10005.service"], returncode=0)
-        self._set_proc(["systemctl", "is-enabled", cmd_admin.WorkloadConfig("app").service_name],
+        self._set_proc(["systemctl", "is-enabled", WorkloadConfig("app").service_name],
                         returncode=0)
-        self._set_proc(["systemctl", "is-active", cmd_admin.WorkloadConfig("app").service_name],
+        self._set_proc(["systemctl", "is-active", WorkloadConfig("app").service_name],
                         returncode=0, stdout="active")
         self.pod.container_status.return_value = "running"
 
@@ -710,7 +713,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self.assertIn("Build or provide", check["fix"])
 
     def test_config_current_outdated(self):
-        self.enterContext(mock.patch.object(cmd_admin, "units_outdated", lambda name: True))
+        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: True))
         code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "config_current")
@@ -777,7 +780,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
             '\n[security]\nselinux_policy = true\n'
         )
-        with mock.patch.object(cmd_admin.shutil, "which", return_value=None):
+        with mock.patch.object(cmd_diagnose.shutil, "which", return_value=None):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")
@@ -790,7 +793,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '\n[security]\nselinux_policy = true\n'
         )
         self._set_proc(["semodule", "-l"], returncode=0, stdout="some_other_module\n")
-        with mock.patch.object(cmd_admin.shutil, "which", return_value="/usr/sbin/semodule"):
+        with mock.patch.object(cmd_diagnose.shutil, "which", return_value="/usr/sbin/semodule"):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")
@@ -834,14 +837,14 @@ class CmdValidateTest(unittest.TestCase):
         self.manager.get_all_configs.return_value = [WorkloadConfig("app")]
         self.enterContext(mock.patch("pwd.getpwnam", side_effect=KeyError))
         self.enterContext(mock.patch.object(
-            cmd_admin.grp, "getgrnam", side_effect=KeyError))
+            cmd_validate.grp, "getgrnam", side_effect=KeyError))
 
     def _run(self, ns):
         out, err = io.StringIO(), io.StringIO()
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_validate(ns, self.manager)
+                cmd_validate.cmd_validate(ns, self.manager)
         except SystemExit as e:
             code = e.code
         return code, out.getvalue()
@@ -902,10 +905,10 @@ class EditControlFileTest(unittest.TestCase):
         ns = argparse.Namespace(workload="app", file=filename)
         out, err = io.StringIO(), io.StringIO()
         code = None
-        with mock.patch.object(cmd_admin.subprocess, "run", side_effect=editor_side_effect):
+        with mock.patch.object(cmd_edit.subprocess, "run", side_effect=editor_side_effect):
             try:
                 with redirect_stdout(out), redirect_stderr(err):
-                    cmd_admin._edit_control_file(ns, self.manager)
+                    cmd_edit._edit_control_file(ns, self.manager)
             except SystemExit as e:
                 code = e.code
         return code, out.getvalue(), err.getvalue()
@@ -915,7 +918,7 @@ class EditControlFileTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             with self.assertRaises(SystemExit) as cm:
-                cmd_admin._edit_control_file(ns, self.manager)
+                cmd_edit._edit_control_file(ns, self.manager)
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("not found", err.getvalue())
 
@@ -981,7 +984,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
     def _validate(self, config, json_mode=True):
         out = io.StringIO()
         with redirect_stdout(out):
-            res = cmd_admin.validate_single(config, self.manager, json_mode=json_mode)
+            res = cmd_validate.validate_single(config, self.manager, json_mode=json_mode)
         self._out = out.getvalue()
         return res
 
@@ -1143,7 +1146,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
     def test_missing_group_is_error(self):
         cfg = self._cfg('[workload]\nname = "app"\n\n[container]\nimage = "x"\n'
                         '\n[security]\nextra_groups = ["no-such-group-xyz"]\n')
-        with mock.patch.object(cmd_admin.grp, "getgrnam", side_effect=KeyError):
+        with mock.patch.object(cmd_validate.grp, "getgrnam", side_effect=KeyError):
             res = self._validate(cfg)
         c = next(c for c in res["checks"] if c["check"] == "group_exists")
         self.assertFalse(c["passed"])
@@ -1152,7 +1155,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
     def test_existing_group_ok(self):
         cfg = self._cfg('[workload]\nname = "app"\n\n[container]\nimage = "x"\n'
                         '\n[security]\nextra_groups = ["render"]\n')
-        with mock.patch.object(cmd_admin.grp, "getgrnam", lambda g: object()):
+        with mock.patch.object(cmd_validate.grp, "getgrnam", lambda g: object()):
             res = self._validate(cfg)
         self.assertTrue(
             next(c for c in res["checks"] if c["check"] == "group_exists")["passed"])
@@ -1171,7 +1174,7 @@ class ValidateSingleErrorsTest(unittest.TestCase):
         # the "Validation failed" summary.
         cfg = self._cfg('[workload]\nname = "app"\n\n[container]\nimage = "x"\n'
                         '\n[security]\nselinux_policy = "d"\nextra_groups = ["nope"]\n')
-        with mock.patch.object(cmd_admin.grp, "getgrnam", side_effect=KeyError):
+        with mock.patch.object(cmd_validate.grp, "getgrnam", side_effect=KeyError):
             res = self._validate(cfg, json_mode=False)
         self.assertFalse(res["passed"])
         self.assertIn("✗", self._out)
@@ -1217,7 +1220,7 @@ class CreateValidationEnableTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_create, "require_root", lambda: None))
         self.manager = mock.Mock()
 
     def _create(self, **kw):
@@ -1225,7 +1228,7 @@ class CreateValidationEnableTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                cmd_admin.cmd_create(_create_ns(**kw), self.manager)
+                cmd_create.cmd_create(_create_ns(**kw), self.manager)
         except SystemExit as e:
             code = e.code
         self._out, self._err = out.getvalue(), err.getvalue()
@@ -1235,7 +1238,7 @@ class CreateValidationEnableTest(unittest.TestCase):
         # Real validation runs; a bad volume path makes it fail, cmd_create
         # exits 1 but leaves the written config in place for the user to fix.
         with mock.patch.object(
-                cmd_admin, "validate_single",
+                cmd_create, "validate_single",
                 lambda c, m, json_mode=False: {"passed": False}):
             code = self._create(name="web", image="nginx")
         self.assertEqual(code, 1)
@@ -1244,7 +1247,7 @@ class CreateValidationEnableTest(unittest.TestCase):
 
     def test_validate_raises_unlinks_config(self):
         with mock.patch.object(
-                cmd_admin, "validate_single",
+                cmd_create, "validate_single",
                 side_effect=RuntimeError("boom")):
             code = self._create(name="web", image="nginx")
         self.assertEqual(code, 1)
@@ -1258,9 +1261,9 @@ class CreateValidationEnableTest(unittest.TestCase):
             called["workload"] = args.workload
 
         with mock.patch.object(
-                cmd_admin, "validate_single",
+                cmd_create, "validate_single",
                 lambda c, m, json_mode=False: {"passed": True}), \
-             mock.patch.dict(sys.modules, {"cmd_lifecycle": types.SimpleNamespace(cmd_enable=fake_enable)}):
+             mock.patch.object(cmd_create, "cmd_enable", fake_enable):
             code = self._create(name="web", image="nginx", enable=True)
         self.assertIsNone(code)
         self.assertEqual(called["workload"], "web")
@@ -1273,7 +1276,7 @@ class DiagnoseMultiContainerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_diagnose, "require_root", lambda: None))
         (self.tmp / "app").mkdir()
         (self.tmp / "app" / "workload.toml").write_text(
             '[workload]\nname = "app"\nmode = "pod"\n'
@@ -1282,13 +1285,13 @@ class DiagnoseMultiContainerTest(unittest.TestCase):
         )
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.tmp / "h"))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
-        self.enterContext(mock.patch.object(cmd_admin, "units_outdated", lambda name: False))
+        self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
         self.pod = mock.Mock()
         self.manager.podman.return_value = self.pod
         self.enterContext(mock.patch.object(
-            cmd_admin.subprocess, "run",
+            cmd_diagnose.subprocess, "run",
             return_value=mock.Mock(returncode=1, stdout="", stderr="")))
 
     def _run(self):
@@ -1297,7 +1300,7 @@ class DiagnoseMultiContainerTest(unittest.TestCase):
         code = None
         try:
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                cmd_admin.cmd_diagnose(ns, self.manager)
+                cmd_diagnose.cmd_diagnose(ns, self.manager)
         except SystemExit as e:
             code = e.code
         return code, json.loads(out.getvalue())
@@ -1349,7 +1352,7 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
             '\n[security]\nselinux_policy = true\n')
         module = workload_lib.selinux_module_name("app")
         self._set_proc(["semodule", "-l"], returncode=0, stdout=f"foo\n{module}\nbar\n")
-        with mock.patch.object(cmd_admin.shutil, "which", return_value="/usr/sbin/semodule"):
+        with mock.patch.object(cmd_diagnose.shutil, "which", return_value="/usr/sbin/semodule"):
             code, out = self._run(json_mode=True)
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "selinux_module")
@@ -1357,7 +1360,7 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
         self.assertIn("module loaded", check["message"])
 
     def test_home_dir_missing(self):
-        cfg = cmd_admin.WorkloadConfig("app")
+        cfg = WorkloadConfig("app")
         code, out = self._run(json_mode=True, false_substrings=(str(cfg.home_dir),))
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "home_dir")
@@ -1424,7 +1427,7 @@ class CmdEditTomlTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
-        self.enterContext(mock.patch.object(cmd_admin, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(cmd_edit, "require_root", lambda: None))
         (self.tmp / "app").mkdir()
         self.cfg_path = self.tmp / "app" / "workload.toml"
         self.orig = '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
@@ -1450,10 +1453,10 @@ class CmdEditTomlTest(unittest.TestCase):
                     return r
             return mock.Mock(returncode=0)
 
-        patches = [mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect)]
+        patches = [mock.patch.object(cmd_edit.subprocess, "run", side_effect=run_side_effect)]
         if validate_result is not None:
             patches.append(mock.patch.object(
-                cmd_admin, "validate_single",
+                cmd_edit, "validate_single",
                 lambda c, m, json_mode=False: validate_result))
         out, err = io.StringIO(), io.StringIO()
         code = None
@@ -1461,7 +1464,7 @@ class CmdEditTomlTest(unittest.TestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 for p in patches:
                     self.enterContext(p)
-                cmd_admin.cmd_edit(ns, self.manager)
+                cmd_edit.cmd_edit(ns, self.manager)
         except SystemExit as e:
             code = e.code
         return code, out.getvalue(), err.getvalue()
@@ -1483,10 +1486,10 @@ class CmdEditTomlTest(unittest.TestCase):
             return mock.Mock(returncode=0)
 
         with mock.patch.dict(os.environ, {"EDITOR": "code --wait"}):
-            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+            with mock.patch.object(cmd_edit.subprocess, "run", side_effect=run_side_effect):
                 out, err = io.StringIO(), io.StringIO()
                 with redirect_stdout(out), redirect_stderr(err):
-                    cmd_admin.cmd_edit(ns, self.manager)
+                    cmd_edit.cmd_edit(ns, self.manager)
 
         self.assertEqual(captured[0][:-1], ["code", "--wait"])
         self.assertEqual(Path(captured[0][-1]), self.cfg_path)
@@ -1502,10 +1505,10 @@ class CmdEditTomlTest(unittest.TestCase):
             return mock.Mock(returncode=0)
 
         with mock.patch.dict(os.environ, {"EDITOR": '"vim'}):
-            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+            with mock.patch.object(cmd_edit.subprocess, "run", side_effect=run_side_effect):
                 out, err = io.StringIO(), io.StringIO()
                 with redirect_stdout(out), redirect_stderr(err):
-                    cmd_admin.cmd_edit(ns, self.manager)
+                    cmd_edit.cmd_edit(ns, self.manager)
 
         self.assertEqual(captured[0][0], "nano")
         self.assertEqual(Path(captured[0][-1]), self.cfg_path)
@@ -1533,7 +1536,7 @@ class CmdEditTomlTest(unittest.TestCase):
         # Valid TOML that loads fine, but validate_single (mocked) fails —
         # exercises the validation-failed restore branch (not the load-error one).
         new = self.orig + '\n[network]\nmode = "host"\n'
-        with mock.patch.object(cmd_admin, "_ask_yes_no", return_value=True):
+        with mock.patch.object(cmd_edit, "_ask_yes_no", return_value=True):
             code, out, err = self._run(edited_content=new,
                                        validate_result={"passed": False})
         self.assertEqual(code, 1)
@@ -1543,7 +1546,7 @@ class CmdEditTomlTest(unittest.TestCase):
 
     def test_changed_invalid_keep_edited(self):
         new = self.orig + "\nkeepme = true\n"
-        with mock.patch.object(cmd_admin, "_ask_yes_no", return_value=False):
+        with mock.patch.object(cmd_edit, "_ask_yes_no", return_value=False):
             code, out, err = self._run(edited_content=new,
                                        validate_result={"passed": False})
         self.assertEqual(code, 1)
@@ -1552,9 +1555,9 @@ class CmdEditTomlTest(unittest.TestCase):
 
     def test_validate_raises_restores_backup(self):
         new = self.orig + "\nx = 1\n"
-        with mock.patch.object(cmd_admin, "validate_single",
+        with mock.patch.object(cmd_edit, "validate_single",
                                side_effect=RuntimeError("bad toml")), \
-             mock.patch.object(cmd_admin, "_ask_yes_no", return_value=True):
+             mock.patch.object(cmd_edit, "_ask_yes_no", return_value=True):
             ns = argparse.Namespace(workload="app", file=None, yes=False)
 
             def run_side_effect(argv, **kw):
@@ -1563,10 +1566,10 @@ class CmdEditTomlTest(unittest.TestCase):
                 return mock.Mock(returncode=0)
             out, err = io.StringIO(), io.StringIO()
             code = None
-            with mock.patch.object(cmd_admin.subprocess, "run", side_effect=run_side_effect):
+            with mock.patch.object(cmd_edit.subprocess, "run", side_effect=run_side_effect):
                 try:
                     with redirect_stdout(out), redirect_stderr(err):
-                        cmd_admin.cmd_edit(ns, self.manager)
+                        cmd_edit.cmd_edit(ns, self.manager)
                 except SystemExit as e:
                     code = e.code
         self.assertEqual(code, 1)
@@ -1580,7 +1583,7 @@ class CmdEditTomlTest(unittest.TestCase):
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir="/x")
         restarted = {}
         with mock.patch("pwd.getpwnam", lambda n: fake_pw), \
-             mock.patch.object(cmd_admin, "restart_workload_service",
+             mock.patch.object(cmd_edit, "restart_workload_service",
                                side_effect=lambda uid, svc: restarted.update(uid=uid, svc=svc)):
             code, out, err = self._run(edited_content=new, yes=True,
                                        validate_result={"passed": True})
@@ -1591,7 +1594,7 @@ class CmdEditTomlTest(unittest.TestCase):
     def test_changed_valid_enabled_no_apply(self):
         (self.tmp / "app" / ".enabled").touch()
         new = self.orig + '\n[network]\nmode = "host"\n'
-        with mock.patch.object(cmd_admin, "_ask_yes_no", return_value=False):
+        with mock.patch.object(cmd_edit, "_ask_yes_no", return_value=False):
             code, out, err = self._run(edited_content=new, yes=False,
                                        validate_result={"passed": True})
         self.assertIsNone(code)
@@ -1608,8 +1611,8 @@ class CmdEditTomlTest(unittest.TestCase):
 
     def test_file_arg_dispatches_to_control_file_edit(self):
         ns = argparse.Namespace(workload="app", file="Containerfile", yes=False)
-        with mock.patch.object(cmd_admin, "_edit_control_file") as ecf:
-            cmd_admin.cmd_edit(ns, self.manager)
+        with mock.patch.object(cmd_edit, "_edit_control_file") as ecf:
+            cmd_edit.cmd_edit(ns, self.manager)
         ecf.assert_called_once()
 
     def test_changed_valid_enabled_apply_vm(self):

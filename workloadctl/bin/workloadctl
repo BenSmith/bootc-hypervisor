@@ -16,19 +16,25 @@ try:
 except ImportError:
     __version__ = "0-dev"
 
-from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
+from cmd_create import cmd_create
+from cmd_diagnose import cmd_diagnose
+from cmd_edit import cmd_edit
+from cmd_validate import cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_doctor import cmd_doctor
 from cmd_drift import cmd_drift
-from cmd_inspect import (
-    cmd_health, cmd_images, cmd_info, cmd_list,
-    cmd_stats, cmd_status,
-)
+from cmd_health import cmd_health
+from cmd_images import cmd_images
+from cmd_info import cmd_info
+from cmd_inspect import cmd_list, cmd_status
+from cmd_stats import cmd_stats
+from cmd_cleanup import cmd_cleanup
+from cmd_disable import cmd_disable
+from cmd_enable import cmd_enable
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
-    cmd_build, cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
-    cmd_recreate, cmd_restart, cmd_start, cmd_stop,
+    cmd_build, cmd_reboot, cmd_recreate, cmd_restart, cmd_start, cmd_stop,
 )
 from cmd_secret import cmd_secret
 from cmd_update import cmd_rollback, cmd_update

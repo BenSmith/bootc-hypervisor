@@ -16,10 +16,15 @@ from unittest.mock import MagicMock, patch
 
 
 import workload_lib
-import cmd_admin
+import cmd_diagnose
+import cmd_validate
 import cmd_backup
+import cmd_cleanup
+import cmd_images
+import cmd_info
 import cmd_inspect
-import cmd_lifecycle
+import cmd_stats
+import cmd_provision
 import cmd_secret
 import substrate
 import substrate_container
@@ -285,7 +290,7 @@ class TestInfoJson(unittest.TestCase):
                 return _ok()
 
             with patch('subprocess.run', side_effect=fake_run):
-                return _capture_json(lambda: cmd_inspect.cmd_info(args, self._manager(user_exists)))
+                return _capture_json(lambda: cmd_info.cmd_info(args, self._manager(user_exists)))
 
     def test_all_top_level_sections_present(self):
         data = self._run()
@@ -407,7 +412,7 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 129499136, 'Created': None})
-            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_images.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['size_bytes'], int)
         self.assertEqual(data['images'][0]['size_bytes'], 129499136)
 
@@ -415,21 +420,21 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': '2024-11-15T10:30:00Z'})
-            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_images.cmd_images(args, manager))
         self.assertIsInstance(data['images'][0]['created'], int)
 
     def test_created_null_when_none(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
-            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_images.cmd_images(args, manager))
         self.assertIsNone(data['images'][0]['created'])
 
     def test_no_human_strings_in_size(self):
         with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 99000000, 'Created': None})
-            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_images.cmd_images(args, manager))
         size = data['images'][0]['size_bytes']
         self.assertNotIn('MB', str(size))
         self.assertNotIn('GB', str(size))
@@ -438,7 +443,7 @@ class TestImagesListJson(unittest.TestCase):
         with _WorkloadDir(ENABLED_TOML, 'test-wl', enabled=True):
             args = _args(subcommand='list', json=True)
             manager = self._manager_with_image({'Size': 1000, 'Created': None})
-            data = _capture_json(lambda: cmd_inspect.cmd_images(args, manager))
+            data = _capture_json(lambda: cmd_images.cmd_images(args, manager))
         img = data['images'][0]
         for key in ('workload', 'image', 'size_bytes', 'created'):
             self.assertIn(key, img, f'missing key: {key}')
@@ -453,7 +458,7 @@ class TestValidateSingleSeverity(unittest.TestCase):
             config = WorkloadConfig('test-wl')
             manager = WorkloadManager()
             manager.get_image_id = MagicMock(return_value='')  # type: ignore[method-assign]
-            return cmd_admin.validate_single(config, manager)
+            return cmd_validate.validate_single(config, manager)
 
     def test_every_check_has_severity(self):
         result = self._run_validate()
@@ -495,7 +500,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(json=True, follow=True, workload='test-wl')
             with self.assertRaises(SystemExit):
-                cmd_inspect.cmd_stats(args, WorkloadManager())
+                cmd_stats.cmd_stats(args, WorkloadManager())
 
     def _make_stats_manager(self, podman_stdout):
         """Return a WorkloadManager mock whose podman().run() returns podman_stdout."""
@@ -510,7 +515,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_stats.cmd_stats(args, m))
 
         self.assertIn('stats', data)
         self.assertEqual(len(data['stats']), 1)
@@ -523,7 +528,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_stats.cmd_stats(args, m))
 
         row = data['stats'][0]
         self.assertIsInstance(row['mem_usage'], int)
@@ -539,7 +544,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager(json.dumps([_STATS_ROW]))
-            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_stats.cmd_stats(args, m))
 
         row = data['stats'][0]
         for key in ('workload', 'username', 'container', 'cpu_percent', 'mem_usage',
@@ -551,7 +556,7 @@ class TestStatsJson(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl'):
             args = _args(workload='test-wl', json=True, follow=False)
             m = self._make_stats_manager('')
-            data = _capture_json(lambda: cmd_inspect.cmd_stats(args, m))
+            data = _capture_json(lambda: cmd_stats.cmd_stats(args, m))
         self.assertEqual(data['stats'], [])
 
 
@@ -636,7 +641,7 @@ class TestReadSubid(unittest.TestCase):
 
     def test_returns_start_and_count(self):
         with patch('builtins.open', side_effect=self._fake_open('_wl-test-wl', 100000, 65536)):
-            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+            start, count = cmd_info._read_subid('_wl-test-wl', '/etc/subuid')
         self.assertEqual(start, 100000)
         self.assertEqual(count, 65536)
 
@@ -650,13 +655,13 @@ class TestReadSubid(unittest.TestCase):
             return real_open(path, *args, **kwargs)
 
         with patch('builtins.open', side_effect=no_entry):
-            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+            start, count = cmd_info._read_subid('_wl-test-wl', '/etc/subuid')
         self.assertIsNone(start)
         self.assertIsNone(count)
 
     def test_returns_none_none_when_file_missing(self):
         with patch('builtins.open', side_effect=FileNotFoundError):
-            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+            start, count = cmd_info._read_subid('_wl-test-wl', '/etc/subuid')
         self.assertIsNone(start)
         self.assertIsNone(count)
 
@@ -670,7 +675,7 @@ class TestReadSubid(unittest.TestCase):
             return real_open(path, *args, **kwargs)
 
         with patch('builtins.open', side_effect=other_user):
-            start, count = cmd_inspect._read_subid('_wl-test-wl', '/etc/subuid')
+            start, count = cmd_info._read_subid('_wl-test-wl', '/etc/subuid')
         self.assertIsNone(start)
 
 
@@ -692,9 +697,9 @@ class TestDiagnoseJson(unittest.TestCase):
                     return _ok(stdout='inactive\n', returncode=3)
                 return _ok()
 
-            with patch.object(cmd_admin, 'require_root'):
+            with patch.object(cmd_diagnose, 'require_root'):
                 with patch('subprocess.run', side_effect=fake_run):
-                    return _capture_json_exitok(lambda: cmd_admin.cmd_diagnose(args, m))
+                    return _capture_json_exitok(lambda: cmd_diagnose.cmd_diagnose(args, m))
 
     def test_top_level_shape(self):
         data = self._run_no_user()
@@ -753,10 +758,10 @@ class TestCleanupJson(unittest.TestCase):
     def test_schema_keys_always_present(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'orphan_modules',
                     'removed_users', 'removed_dirs', 'removed_modules'):
             self.assertIn(key, data, f'missing key: {key}')
@@ -764,38 +769,38 @@ class TestCleanupJson(unittest.TestCase):
     def test_dry_run_flag_is_true(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertTrue(data['dry_run'])
 
     def test_configured_user_not_reported_as_orphan(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[self._configured_pw()]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_users'], [])
 
     def test_orphan_user_reported(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall',
                            return_value=[self._configured_pw(), self._orphan_pw()]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertIn('_wl-orphan', data['orphan_users'])
 
     def test_dry_run_removed_lists_are_empty(self):
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[self._orphan_pw()]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['removed_users'], [])
         self.assertEqual(data['removed_dirs'], [])
 
@@ -809,10 +814,10 @@ class TestCleanupJson(unittest.TestCase):
             (backups / 'test-wl-20260610.tar.zst').write_text('x')
             (base / 'orphan').mkdir()
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
 
     def test_configured_dir_without_user_not_orphan(self):
@@ -828,10 +833,10 @@ class TestCleanupJson(unittest.TestCase):
             (base / 'test-wl').mkdir()          # configured, user-less
             (base / 'orphan').mkdir()           # genuinely orphaned
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'):
+            with patch.object(cmd_cleanup, 'require_root'):
                 with patch('pwd.getpwall', return_value=[]):
-                    with patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base):
-                        data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                        data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_dirs'], [str(base / 'orphan')])
 
     @staticmethod
@@ -849,13 +854,13 @@ class TestCleanupJson(unittest.TestCase):
         # ignored (no wl_ prefix).
         with _WorkloadDir(MINIMAL_TOML, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'), \
+            with patch.object(cmd_cleanup, 'require_root'), \
                  patch('pwd.getpwall', return_value=[]), \
                  patch('shutil.which', return_value='/usr/sbin/semodule'), \
                  patch('subprocess.run',
                        side_effect=self._semodule_l(['wl_orphan', 'container', 'seatd_container'])), \
-                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                 patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertIn('wl_orphan', data['orphan_modules'])
         self.assertNotIn('container', data['orphan_modules'])
         self.assertNotIn('seatd_container', data['orphan_modules'])
@@ -864,13 +869,13 @@ class TestCleanupJson(unittest.TestCase):
         toml = MINIMAL_TOML + '\n[security]\nselinux_policy = true\n'
         with _WorkloadDir(toml, 'test-wl') as tmp:
             args = _args(json=True, apply=False)
-            with patch.object(cmd_lifecycle, 'require_root'), \
+            with patch.object(cmd_cleanup, 'require_root'), \
                  patch('pwd.getpwall', return_value=[]), \
                  patch('shutil.which', return_value='/usr/sbin/semodule'), \
                  patch('subprocess.run',
                        side_effect=self._semodule_l(['wl_test_wl', 'container'])), \
-                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', Path(tmp) / 'none'):
-                data = _capture_json(lambda: cmd_lifecycle.cmd_cleanup(args, WorkloadManager()))
+                 patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
+                data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         self.assertEqual(data['orphan_modules'], [])
 
 
@@ -916,9 +921,9 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # plain workload-style name must be rejected before lookup.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='../etc/evil')
         self.assertEqual(cfg.selinux_bundle, '../etc/evil')
-        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
-            with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
+        with patch.object(cmd_provision, '_selinux_available', return_value=True):
+            with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                cmd_provision.apply_selinux_policy(cfg, 'enable')
 
     def test_underscore_bundle_suggests_hyphenated_form(self):
         # Footgun: users copy the SELinux *type* name (underscores) into
@@ -926,10 +931,10 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # invalid-bundle error should suggest the hyphenated form.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop_wayfire')
         err = io.StringIO()
-        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True):
+        with patch.object(cmd_provision, '_selinux_available', return_value=True):
             with redirect_stderr(err):
-                with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                    cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
+                with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                    cmd_provision.apply_selinux_policy(cfg, 'enable')
         self.assertIn('vncdesktop-wayfire', err.getvalue())
 
     def test_missing_bundle_lists_available(self):
@@ -937,12 +942,12 @@ class TestSelinuxBundleResolution(unittest.TestCase):
         # ship a CIL, plus a close-match suggestion.
         cfg = self._config('\n[security]\nselinux_policy = true\n', bundle='vncdesktop-wayfir')
         err = io.StringIO()
-        with patch.object(cmd_lifecycle, '_selinux_available', return_value=True), \
-                patch.object(cmd_lifecycle, '_available_bundles',
+        with patch.object(cmd_provision, '_selinux_available', return_value=True), \
+                patch.object(cmd_provision, '_available_bundles',
                              return_value=['vncdesktop-sway', 'vncdesktop-wayfire']):
             with redirect_stderr(err):
-                with self.assertRaises(cmd_lifecycle.SelinuxPolicyError):
-                    cmd_lifecycle._apply_selinux_policy(cfg, 'enable')
+                with self.assertRaises(cmd_provision.SelinuxPolicyError):
+                    cmd_provision.apply_selinux_policy(cfg, 'enable')
         out = err.getvalue()
         self.assertIn('available bundles', out)
         self.assertIn('vncdesktop-wayfire', out)

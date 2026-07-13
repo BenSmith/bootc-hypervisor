@@ -4,15 +4,15 @@ cmd_doctor — one-shot aggregate diagnosis for a workload.
 Collapses the manual failure-diagnosis loop (generator journal → unit states
 → setup checks → drift → health) into a single skimmable report. Read-only:
 doctor never mutates state. Leaf module: it imports collectors and substrate
-primitives only, never other cmd_* entry points, which keeps it out of the
-cmd_lifecycle → cmd_admin import cycle.
+primitives only, never other cmd_* entry points, so it never becomes a node in
+a cycle between the verb modules.
 """
 
 import json
 import subprocess
 import sys
 
-from cmd_admin import collect_diagnose_checks
+from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift
 from substrate import get_substrate
 from workload_lib import units_outdated, workload_config_path, workload_run_files
