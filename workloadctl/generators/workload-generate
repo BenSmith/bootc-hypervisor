@@ -344,12 +344,46 @@ def build_plain_env_args(container):
     return env_args
 
 
+# [resources] key -> cgroup directive. The [resources] block is substrate-neutral
+# (one schema, documented once), so both substrates read it from here: containers
+# apply it to the user manager's subtree via the user@{uid} drop-in, VMs to the
+# QEMU service unit itself. Anything added here reaches both.
+#
+# CPUWeight/IOWeight have no default: workloads.slice already carries
+# CPUWeight=80 / IOWeight=80 for host-vs-workload contention, and an
+# unconditional default here would add intra-workload weight noise.
+CGROUP_SCALAR_KEYS = (
+    ("cpu_quota",       "CPUQuota"),
+    ("cpu_weight",      "CPUWeight"),
+    ("memory_max",      "MemoryMax"),
+    ("memory_high",     "MemoryHigh"),
+    ("memory_swap_max", "MemorySwapMax"),
+    ("io_weight",       "IOWeight"),
+    ("tasks_max",       "TasksMax"),
+)
+# Repeatable directives: one line per entry, so these take a list.
+CGROUP_LIST_KEYS = (
+    ("io_read_bandwidth_max",  "IOReadBandwidthMax"),
+    ("io_write_bandwidth_max", "IOWriteBandwidthMax"),
+)
+
+
+def cgroup_directives(resources) -> list[tuple[str, str]]:
+    """[resources] -> ordered (directive, value) pairs for a [Service] section."""
+    out = [(directive, resources[key])
+           for key, directive in CGROUP_SCALAR_KEYS if key in resources]
+    for key, directive in CGROUP_LIST_KEYS:
+        out += [(directive, limit) for limit in resources.get(key, [])]
+    return out
+
+
 def generate_user_dropin(config, uid):
     """Emit user@{uid}.service.d/50-workload.conf for 1b cgroup placement.
 
     Redirects the workload's user manager into workloads.slice and applies
     workload-level cgroup resource limits to the whole user manager subtree
     (which is the payload's cgroup scope under the non-split topology).
+    Per-container limits bind via podman flags on each container run command.
     """
     resources = config.get("resources", {})
     slice_name = resources.get("slice", "workloads.slice")
@@ -362,28 +396,8 @@ def generate_user_dropin(config, uid):
         "[Service]",
         f"Slice={slice_name}",
     ]
-
-    # Workload-level cgroup limits (apply to the whole user manager subtree).
-    # Per-container limits bind via podman flags on each container run command.
-    # CPUWeight/IOWeight defaults are intentionally omitted: workloads.slice already
-    # carries CPUWeight=80 / IOWeight=80 for host-vs-workload contention; adding
-    # unconditional defaults here would introduce intra-workload weight noise.
-    cgroup_keys = [
-        ("cpu_quota",    "CPUQuota"),
-        ("cpu_weight",   "CPUWeight"),
-        ("memory_max",   "MemoryMax"),
-        ("memory_high",  "MemoryHigh"),
-        ("memory_swap_max", "MemorySwapMax"),
-        ("io_weight",    "IOWeight"),
-        ("tasks_max",    "TasksMax"),
-    ]
-    for key, directive in cgroup_keys:
-        if key in resources:
-            lines.append(f"{directive}={resources[key]}")
-    for limit in resources.get("io_read_bandwidth_max", []):
-        lines.append(f"IOReadBandwidthMax={limit}")
-    for limit in resources.get("io_write_bandwidth_max", []):
-        lines.append(f"IOWriteBandwidthMax={limit}")
+    lines += [f"{directive}={value}"
+              for directive, value in cgroup_directives(resources)]
 
     lines.append("")
     return "\n".join(lines)
@@ -1778,15 +1792,7 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         f"-name {name}",
     ]
 
-    # Resource directives
     resources = config.get("resources", {})
-    resource_lines = []
-    if "memory_max" in resources:
-        resource_lines.append(f"MemoryMax={resources['memory_max']}")
-    if "cpu_quota" in resources:
-        resource_lines.append(f"CPUQuota={resources['cpu_quota']}")
-    if "cpu_weight" in resources:
-        resource_lines.append(f"CPUWeight={resources['cpu_weight']}")
 
     # Build ExecStart: workload-vm-notify wraps QEMU
     qemu_cmd = " \\\n        ".join(qemu_args)
@@ -1818,13 +1824,20 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     svc.set("RuntimeDirectoryMode", "0750")
     svc.set("RuntimeDirectoryPreserve", "yes")
 
-    if resource_lines:
+    # The VM service unit IS the payload's cgroup (QEMU runs directly under it,
+    # with no user manager in between), so [resources] binds here rather than in
+    # a user@{uid} drop-in — same keys, same meaning as a container workload.
+    directives = cgroup_directives(resources)
+    if directives:
         svc.blank()
-        for line in resource_lines:
-            key, _, value = line.partition("=")
+        for key, value in directives:
             svc.add(key, value)
 
     svc.blank()
+    # custom_directives splice point: every directive from here down uses .add(),
+    # never .set(), so a user's shadowing line and the generator's own both
+    # survive for systemd's last-wins to pick between (see _resource_overrides).
+    _resource_overrides(svc, resources, name)
 
     # Restart policy. QEMU runs with -no-reboot, so a guest reboot AND a guest
     # poweroff both make QEMU exit 0 — indistinguishable by exit code alone.
@@ -1843,19 +1856,14 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     #                added above). Restart=on-failure then relaunches the reboot
     #                (and any real crash) while leaving a poweroff down.
     restart_mode = vm_cfg.get("restart", "always")
-    reboot_exit_env = None
-    if restart_mode == "on-failure":
+    if restart_mode in ("on-failure", "on-reboot"):
         restart_directive = "on-failure"
-    elif restart_mode == "on-reboot":
-        restart_directive = "on-failure"
-        reboot_exit_env = (
-            f"Environment=WORKLOADCTL_VM_REBOOT_EXIT={VM_REBOOT_EXIT_CODE}")
     else:
         restart_directive = "always"
 
-    if reboot_exit_env:
-        key, _, value = reboot_exit_env.partition("=")
-        svc.add(key, value)
+    if restart_mode == "on-reboot":
+        svc.add("Environment",
+                f"WORKLOADCTL_VM_REBOOT_EXIT={VM_REBOOT_EXIT_CODE}")
 
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
@@ -1869,14 +1877,18 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # below (90s) is the backstop if the guest ignores ACPI.
     svc.add("ExecStop", f"/usr/libexec/workloadctl/workload-vm-shutdown {dq(name)}")
     svc.blank()
-    svc.set("StandardOutput", "journal")
-    svc.set("StandardError", "journal")
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
     svc.blank()
-    svc.set("Restart", restart_directive)
-    svc.set("RestartSec", "10s")
-    # Generous start timeout: guest may be slow on first boot
-    svc.set("TimeoutStartSec", "300")
-    svc.set("TimeoutStopSec", "90")
+    svc.add("Restart", restart_directive)
+    svc.add("RestartSec", "10s")
+    # Generous start timeout: guest may be slow on first boot. Both defaults
+    # yield to an explicit [resources] value, which _resource_overrides already
+    # emitted above.
+    if "timeout_start_sec" not in resources:
+        svc.add("TimeoutStartSec", "300")
+    if "timeout_stop_sec" not in resources:
+        svc.add("TimeoutStopSec", "90")
 
     install = unit.section("Install")
     install.set("WantedBy", "multi-user.target")
