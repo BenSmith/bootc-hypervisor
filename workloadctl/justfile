@@ -63,6 +63,12 @@ test-unit:
 test-integration:
   python3 -m unittest tests.test_integration -v
 
+# Regenerate snapshot test fixtures after intentional generator changes.
+# Re-runs the generator over every TOML in workloads.d/ and writes the
+# normalized output to tests/snapshots/. Review with `git diff tests/snapshots/`.
+test-snapshot-update:
+  UPDATE_SNAPSHOTS=1 python3 -m unittest tests.test_snapshots -v
+
 # Run the unit suite under coverage.py (dev-only), print a per-file report.
 # COVERAGE_PROCESS_START makes tests that shell out to our scripts route the
 # subprocess through `coverage run` too (see tests/covhelper.py); combine then
