@@ -130,6 +130,67 @@ $ sudo workloadctl update --all --json
 
 ---
 
+## The Operations Log
+
+Every mutating command appends one JSON object per touched workload to
+`/var/lib/workloads/<name>/operations.log`, whether or not you passed `--json`.
+It answers the question the journal can't: not *that* someone ran
+`workloadctl update web` — `sudo` already logs that — but what the update
+actually did.
+
+```console
+$ sudo tail -1 /var/lib/workloads/web/operations.log | jq
+{
+  "ts": "2026-07-13T18:04:22Z",
+  "command": "update",
+  "ok": true,
+  "user": "ben",
+  "user_source": "login",
+  "workload": "web",
+  "kind": "container",
+  "result": "rolled-back",
+  "verify": "crashed",
+  "images": {
+    "web": {
+      "image": "docker.io/library/nginx:alpine",
+      "old": "sha256:1f2e3d4c5b6a",
+      "new": "sha256:9a8b7c6d5e4f"
+    }
+  }
+}
+```
+
+Each line is the `--json` result row plus `ts`, `command`, `ok`, `user` and
+`user_source` — the same dict, so the log and `--json` cannot drift apart.
+
+`user_source` says how much to trust `user`:
+
+| Source | Means | Notes |
+|--------|-------|-------|
+| `login` | The kernel's audit loginuid (`/proc/self/loginuid`) | The human who logged in, even several privilege hops later. Survives `su -`, which `SUDO_USER` does not, and is the one field here that userspace cannot forge. |
+| `sudo` | `$SUDO_USER` | Fallback when the kernel has no audit support. Just an environment variable, so spoofable — which costs nothing, since root can rewrite this file anyway. |
+| `system` | No login session at all | A systemd unit, a timer, cron. Distinguishing this from a person at a root console is why `loginuid` is consulted first. |
+
+- **It is a record, not an audit trail.** Only root can run these verbs, and
+  root can equally edit or delete the file. It is not tamper-evident and is not
+  offered as a security control.
+- **It lives beside the workload**, not in a host-global file. Lines lead with a
+  UTC timestamp, so `cat /var/lib/workloads/*/operations.log | sort` still gives
+  a host-wide timeline.
+- **Backup skips it.** Only `data/` is captured, so a restore doesn't import
+  another host's history into a fresh workload.
+- **`disable --purge` deletes it** along with the rest of the workload
+  directory. The workload is gone; its history goes with it.
+- **Dry-runs and reports record nothing** (`--dry-run`, `rollback --list`).
+- **Writing is best-effort.** If the workload directory doesn't exist — an
+  `enable` that never got as far as provisioning `/var` — the command warns on
+  stderr and carries on. A log line that didn't land is never why an operation
+  fails.
+
+There is no rotation: one line per mutating operation is a few kilobytes a year.
+
+---
+
 ## Targeting a Container in a Multi-Container Workload
 
 A workload may run more than one container (see [Multi-Container Workloads](workloads.md#multi-container-workloads)). Commands that operate on a container — `exec`, `shell`, `logs`, `health` — accept either the workload alone or a `<workload>/<container>` reference:

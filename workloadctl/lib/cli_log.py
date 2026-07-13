@@ -31,6 +31,8 @@ import json
 import logging
 import sys
 
+import oplog
+
 
 LOGGER_NAME = "workloadctl"
 
@@ -142,14 +144,20 @@ def partial(message: str) -> None:
 
 
 def emit_result(workloads: list[dict], *, ok: bool = True, **extra) -> None:
-    """Emit a mutating verb's JSON result object. No-op unless --json.
+    """Report a mutating verb's outcome to both sinks.
 
     The shape is fixed so a script can treat every mutating verb the same:
     the command that ran, whether it succeeded overall, and one row per
     workload it touched (`{"workload": …, "result": …}`, plus whatever the
     verb can say about it — old/new image, failure reason). Verb-specific
     top-level keys (a `summary`, a dry-run `plan`) ride in **extra.
+
+    The same rows go to the workload's operations log — always, not only under
+    --json. Fanning both sinks out from the one call a verb already makes is
+    what keeps them from drifting: a verb that learns to report something new
+    records it too, with nothing to remember.
     """
+    oplog.record(_state["command"], workloads, ok=ok)
     if not _state["json"]:
         return
     payload = {

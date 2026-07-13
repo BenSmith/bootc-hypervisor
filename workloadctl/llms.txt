@@ -87,6 +87,37 @@ disable, start, stop, restart, reboot, recreate, build, update, rollback) — th
 ones whose narration goes through cli_log. Offering the flag where it wasn't
 honored would be a lie.
 
+### Operations log
+
+`lib/oplog.py` appends one JSON object per mutated workload to
+`/var/lib/workloads/<name>/operations.log` — the `--json` result row plus `ts`,
+`command`, `ok`, `user` and `user_source`. It hangs off `cli_log.emit_result()`,
+the one call each mutating verb already makes, so the log and `--json` are the
+same dict and can't drift; a verb that learns to report something new records it
+with no second call site.
+
+It is a **record, not an audit trail** — only root can run these verbs and root
+can equally delete the file, so it is worthless as a tamper-evident control and
+isn't offered as one. Its value is the half `sudo`'s own journal entry misses:
+not *that* someone ran `update web`, but that the update moved nginx from
+1f2e3d4c to 9a8b7c6d and rolled back on a failed health check.
+
+`user` comes from the kernel's audit **loginuid** first (`/proc/self/loginuid`),
+falling back to `SUDO_USER` and then the real uid — recorded as `user_source`
+`login` / `sudo` / `system`. loginuid is the only unforgeable source and the only
+one that survives `su -`; and its absence positively identifies automation, so a
+timer-driven `update --all` reads as `system` rather than as an indistinguishable
+bare `root`.
+
+Placement is load-bearing: at the workload *root*, beside `state/` and `data/`
+rather than inside either — so backup (which captures only `data/`) doesn't
+import one host's history into a restored workload, and the rootless
+`_wl-<name>` user (who owns `state/`) can't touch its own record. `--purge`
+rmtree's the root and takes the log with it, which is coherent: the workload is
+gone. Dry-runs and reports record nothing. Writes are best-effort — a missing
+directory warns once on stderr and the command carries on. No rotation (a few KB
+a year).
+
 ### Multi-Container Workloads
 
 A workload may run more than one container under the same `_wl-<name>` user, sharing home directory and lifecycle. `workload.mode` selects the topology:
@@ -239,6 +270,7 @@ VM workloads use a separate, mutually-exclusive set of sections:
 bin/workloadctl                    # CLI dispatcher (argparse → lib/cmd_*.py)
 lib/cmd_*.py                       # One module per verb (enable, disable, info, health, …); cmd_provision holds the machinery enable/disable/recreate share
 lib/cli_log.py                     # CLI prose channel (info/warn/error, --quiet) + the mutating verbs' --json result object
+lib/oplog.py                       # Per-workload operations log (/var/lib/workloads/<name>/operations.log, JSON Lines)
 lib/substrate.py                   # Substrate port (ABC + exceptions + get_substrate router, computed capability matrix)
 lib/substrate_container.py         # ContainerSubstrate (rootless podman)
 lib/substrate_vm.py                # VMSubstrate (QEMU/KVM, SSH + QMP)

@@ -58,6 +58,8 @@ def cmd_enable(args, manager: WorkloadManager):
         # Nothing was started, so revert to disabled by removing the marker.
         workload_enabled_marker(args.workload).unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], check=False)
+        emit_result([{"workload": args.workload, "result": "failed",
+                      "reason": "pre-flight checks failed"}], ok=False)
         sys.exit(1)
 
     # Run host setup script if configured
@@ -68,7 +70,9 @@ def cmd_enable(args, manager: WorkloadManager):
     # apply_selinux_policy(); exit without printing again.
     try:
         apply_selinux_policy(config, "enable")
-    except SelinuxPolicyError:
+    except SelinuxPolicyError as e:
+        emit_result([{"workload": args.workload, "result": "failed",
+                      "reason": str(e)}], ok=False)
         sys.exit(1)
 
     info()
