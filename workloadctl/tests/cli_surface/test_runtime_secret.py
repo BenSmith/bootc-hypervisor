@@ -37,20 +37,13 @@ Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`
 
 import pytest
 
+from fixtures import dump_journal
+
 pytestmark = pytest.mark.runtime
 
 # Must match the clitest_secret fixture + clitest-secret.toml.
 SECRET_VALUE = "clitest-secret-value-12345"
 ENV_VAR = "CLITEST_TOKEN"          # [container.environment] CLITEST_TOKEN = "${SECRET:clitest_token}"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "80", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def test_secret_reaches_container_env(target, clitest_secret):
@@ -59,7 +52,7 @@ def test_secret_reaches_container_env(target, clitest_secret):
     name = clitest_secret
     r = target.wl_exec(name, ["printenv", ENV_VAR], sudo=True, check=False)
     if r.rc != 0:
-        _dump_journal(target, name)
+        dump_journal(target, name)
     assert r.rc == 0, f"`printenv {ENV_VAR}` failed in {name}: {r.stderr!r}"
     # Compare without echoing: assert equality, don't print the value on failure.
     got = r.stdout.strip()

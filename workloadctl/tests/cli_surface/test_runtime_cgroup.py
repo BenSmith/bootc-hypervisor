@@ -14,23 +14,13 @@ Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`
 
 import pytest
 
-from fixtures import _enable_workload, _install_toml, _purge_workload
+from fixtures import _enable_workload, _install_toml, _purge_workload, dump_journal
 
 pytestmark = pytest.mark.runtime
 
 WORKLOAD = "rt-basic"
 USER = "_wl-rt-basic"
 CONTAINER = "workload-rt-basic"  # single-mode container name (generator convention)
-
-
-def _dump_journal(target, name):
-    """Print the workload unit's journal tail — the diagnosis on any failure."""
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "80", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def test_cgroup_placement(target):
@@ -41,7 +31,7 @@ def test_cgroup_placement(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         # Resolve the workload uid at runtime — never hardcode 10000 (get_next_uid

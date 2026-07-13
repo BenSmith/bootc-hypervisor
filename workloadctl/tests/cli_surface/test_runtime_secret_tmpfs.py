@@ -27,6 +27,8 @@ Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`
 
 import pytest
 
+from fixtures import dump_journal
+
 pytestmark = pytest.mark.runtime
 
 # Must match the clitest_secret fixture + clitest-secret.toml.
@@ -36,15 +38,6 @@ SERVICE = "workload-clitest-secret.service"
 USER = "_wl-clitest-secret"
 # systemd credential store for the unit; the decrypted cred is <dir>/<CRED_NAME>.
 CRED_DIR = f"/run/credentials/{SERVICE}"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "80", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def _mount_fstype(mountinfo_text, mountpoint):
@@ -77,7 +70,7 @@ def test_secret_credential_ram_backed_and_locked_down(target, clitest_secret):
         sudo=True, check=True,
     ).stdout.strip()
     if not (main_pid.isdigit() and int(main_pid) > 0):
-        _dump_journal(target, name)
+        dump_journal(target, name)
         pytest.fail(f"no MainPID for {SERVICE} (got {main_pid!r})")
 
     # --- mount type: the credential store is memory-backed (RAM-only) ---
@@ -106,7 +99,7 @@ def test_secret_credential_ram_backed_and_locked_down(target, clitest_secret):
     cred_path = f"/proc/{main_pid}/root{CRED_DIR}/{CRED_NAME}"
     st = target.run(["stat", "-c", "%a %U", cred_path], sudo=True, check=False)
     if st.rc != 0:
-        _dump_journal(target, name)
+        dump_journal(target, name)
     assert st.rc == 0, f"decrypted credential {CRED_DIR}/{CRED_NAME} missing: {st.stderr!r}"
     mode, owner = st.stdout.split()
     print(f"----- credential {CRED_NAME}: mode={mode} owner={owner} -----")

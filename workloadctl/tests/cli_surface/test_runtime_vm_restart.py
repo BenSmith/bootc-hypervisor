@@ -27,6 +27,7 @@ import time
 import pytest
 
 from fixtures import (
+    dump_journal, unit_state,
     _install_toml, _purge_workload, _enable_workload,
     guest_boot_id, poll_vm_reachable, skip_if_no_kvm, skip_if_no_vm_toolchain,
 )
@@ -35,20 +36,6 @@ pytestmark = [pytest.mark.runtime, pytest.mark.slow]
 
 WORKLOAD = "rt-vm-reboot"
 SERVICE = f"workload-{WORKLOAD}.service"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "120", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
-
-
-def _is_active(target, service) -> str:
-    return target.run(["systemctl", "is-active", service],
-                      sudo=False, check=False).stdout.strip()
 
 
 def _trigger_guest(target, name, verb):
@@ -74,7 +61,7 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=900, expect_container=False)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         # Deploy-time guard: before exercising the runtime behavior, confirm the
@@ -99,7 +86,7 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
         # Reachable + capture the pre-reboot boot_id.
         first = poll_vm_reachable(target, WORKLOAD, token="rt-reboot-up", timeout=300)
         if not (first and first.rc == 0 and "rt-reboot-up" in first.stdout):
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert first is not None and first.rc == 0 and "rt-reboot-up" in first.stdout, (
             f"VM never became reachable before reboot (last rc="
             f"{None if first is None else first.rc})"
@@ -114,21 +101,22 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
         deadline = time.monotonic() + 420
         boot_id_after = None
         while time.monotonic() < deadline:
-            r = target.wl_exec(WORKLOAD, "cat /proc/sys/kernel/random/boot_id",
-                               sudo=True, check=False, timeout=60)
-            if r.rc == 0 and r.stdout.strip() and r.stdout.strip() != boot_id_before:
-                boot_id_after = r.stdout.strip()
+            # check=False: the guest is unreachable while it cycles, which is
+            # the expected state here, not a failure.
+            current = guest_boot_id(target, WORKLOAD, check=False)
+            if current and current != boot_id_before:
+                boot_id_after = current
                 break
             time.sleep(10)
 
         if boot_id_after is None:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert boot_id_after is not None, (
             "VM never came back with a new boot_id after a guest reboot — "
             "on-reboot did not relaunch the VM (boot_id stayed "
             f"{boot_id_before!r})"
         )
-        assert _is_active(target, SERVICE) == "active", (
+        assert unit_state(target, SERVICE) == "active", (
             f"{SERVICE} is not active after the guest reboot cycle"
         )
 
@@ -140,13 +128,13 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
         deadline = time.monotonic() + 180
         went_down = False
         while time.monotonic() < deadline:
-            if _is_active(target, SERVICE) != "active":
+            if unit_state(target, SERVICE) != "active":
                 went_down = True
                 break
             time.sleep(5)
 
         if not went_down:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert went_down, (
             f"{SERVICE} stayed active after a guest poweroff — on-reboot wrongly "
             "relaunched a powered-off VM"
@@ -154,9 +142,9 @@ def test_vm_restart_on_reboot_cycles_but_poweroff_stays_down(target):
 
         # And it must *stay* down (no delayed relaunch).
         time.sleep(30)
-        state = _is_active(target, SERVICE)
+        state = unit_state(target, SERVICE)
         if state == "active":
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert state != "active", (
             f"{SERVICE} relaunched after a guest poweroff (state={state!r}) — "
             "poweroff must stay down under restart=on-reboot"

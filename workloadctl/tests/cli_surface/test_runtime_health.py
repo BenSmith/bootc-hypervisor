@@ -14,23 +14,13 @@ import time
 
 import pytest
 
-from fixtures import _enable_workload, _install_toml, _purge_workload
+from fixtures import _enable_workload, _install_toml, _purge_workload, dump_journal
 
 pytestmark = pytest.mark.runtime
 
 WORKLOAD = "rt-basic"
 USER = "_wl-rt-basic"
 RUN_UNIT = "/run/systemd/system/workload-rt-basic.service"
-
-
-def _dump_journal(target, name):
-    """Print the workload unit's journal tail — the diagnosis on any failure."""
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "80", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def test_health_lifecycle(target):
@@ -42,7 +32,7 @@ def test_health_lifecycle(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         # Step 3: unit is active.

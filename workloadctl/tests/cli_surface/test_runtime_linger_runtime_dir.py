@@ -34,22 +34,13 @@ import time
 
 import pytest
 
-from fixtures import _enable_workload, _install_toml, _purge_workload
+from fixtures import _enable_workload, _install_toml, _purge_workload, dump_journal
 
 pytestmark = pytest.mark.runtime
 
 WORKLOAD = "rt-basic"
 USER = "_wl-rt-basic"
 LINGER_MARKER = f"/var/lib/systemd/linger/{USER}"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "80", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def _uid(target, user=USER):
@@ -81,7 +72,7 @@ def test_linger_manager_is_active_and_runtime_dir_is_stable(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         uid = _uid(target)
@@ -89,7 +80,7 @@ def test_linger_manager_is_active_and_runtime_dir_is_stable(target):
         # The invariant that dir-existence can't prove: the manager is live.
         state = _manager_active(target, uid)
         if state != "active":
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert state == "active", (
             f"user@{uid}.service is {state!r}, expected active — linger is not "
             f"effective even if /run/user/{uid} momentarily exists"
@@ -127,7 +118,7 @@ def test_linger_survives_stale_marker_recycle(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
         uid = _uid(target)
         _purge_workload(target, WORKLOAD)
@@ -153,13 +144,13 @@ def test_linger_survives_stale_marker_recycle(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
         uid2 = _uid(target)
 
         state = _manager_active(target, uid2)
         if state != "active":
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert state == "active", (
             f"after re-enable over a stale linger marker, user@{uid2}.service is "
             f"{state!r}, expected active — the enable path trusted the stale "
