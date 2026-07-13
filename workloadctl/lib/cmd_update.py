@@ -14,11 +14,11 @@ from workloadctl_core import (
 from service_runtime import restart_workload_service
 from substrate import (
     get_substrate,
-    VMSubstrate,
     ProvisionFailed,
     NotApplicable,
     rollback_tag,
 )
+from substrate_vm import VMSubstrate
 
 
 # ---------------------------------------------------------------------------

@@ -534,7 +534,7 @@ def _print_control_files(config, json_mode=False):
 
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
-    from substrate import _vm_guest_ip
+    from substrate_vm import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
 

@@ -17,16 +17,18 @@ from unittest.mock import MagicMock, patch
 
 import workload_lib
 import workloadctl_core
+import backup as _backup_mod
 import substrate as _substrate_mod
+import substrate_container as _container_mod
+import substrate_vm as _vm_mod
 from substrate import (
-    ContainerSubstrate,
-    VMSubstrate,
     NotApplicable,
     BackupError,
     LifecycleError,
     service_active,
-    _vm_ssh_command,
 )
+from substrate_container import ContainerSubstrate
+from substrate_vm import VMSubstrate, _vm_ssh_command
 import cmd_drift
 import cmd_inspect
 
@@ -207,8 +209,8 @@ class TestVMResourceUsage(unittest.TestCase):
         second = {"vcpu_0_cpu_seconds_total": 1.2, "vcpu_1_cpu_seconds_total": 1.3,
                   "balloon_actual_bytes": 123456}
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
-             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+             patch.object(_vm_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
+             patch.object(_vm_mod.time, 'sleep') as mock_sleep:
             rows = substrate.resource_usage([], json_out=True)
         mock_sleep.assert_called_once_with(VMSubstrate.CPU_SAMPLE_SECONDS)
         self.assertEqual(len(rows), 1)
@@ -222,8 +224,8 @@ class TestVMResourceUsage(unittest.TestCase):
         first = {"vcpu_0_cpu_seconds_total": 1.0, "balloon_actual_bytes": 555555}
         second = {"vcpu_0_cpu_seconds_total": 1.0, "balloon_actual_bytes": 555555}
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
-             patch.object(_substrate_mod.time, 'sleep'):
+             patch.object(_vm_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
+             patch.object(_vm_mod.time, 'sleep'):
             rows = substrate.resource_usage([], json_out=True)
         row = rows[0]
         self.assertEqual(row['mem_usage'], 555555)
@@ -239,8 +241,8 @@ class TestVMResourceUsage(unittest.TestCase):
         config = self._make_config()
         substrate = VMSubstrate(config, None)
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'get_vm_qmp_metrics', return_value={}) as mock_qmp, \
-             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+             patch.object(_vm_mod, 'get_vm_qmp_metrics', return_value={}) as mock_qmp, \
+             patch.object(_vm_mod.time, 'sleep') as mock_sleep:
             with self.assertRaises(NotApplicable):
                 substrate.resource_usage([], json_out=True)
         mock_qmp.assert_called_once()
@@ -250,7 +252,7 @@ class TestVMResourceUsage(unittest.TestCase):
         config = self._make_config()
         substrate = VMSubstrate(config, None)
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'get_vm_qmp_metrics') as mock_qmp:
+             patch.object(_vm_mod, 'get_vm_qmp_metrics') as mock_qmp:
             with self.assertRaises(NotApplicable):
                 substrate.resource_usage([], follow=True)
         mock_qmp.assert_not_called()
@@ -270,8 +272,8 @@ class TestVMBackupConsistency(unittest.TestCase):
         substrate = VMSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_vm', return_value=42) as mock_bvm, \
-                 patch.object(_substrate_mod, '_backup_vm_crash') as mock_crash:
+            with patch.object(_vm_mod, 'backup_vm', return_value=42) as mock_bvm, \
+                 patch.object(_vm_mod, 'backup_vm_crash') as mock_crash:
                 result = substrate.capture(output, consistency='cold')
         mock_bvm.assert_called_once_with(config, output, quiet=False)
         mock_crash.assert_not_called()
@@ -283,8 +285,8 @@ class TestVMBackupConsistency(unittest.TestCase):
         substrate = VMSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_vm', return_value=99) as mock_bvm, \
-                 patch.object(_substrate_mod, '_backup_vm_crash') as mock_crash:
+            with patch.object(_vm_mod, 'backup_vm', return_value=99) as mock_bvm, \
+                 patch.object(_vm_mod, 'backup_vm_crash') as mock_crash:
                 result = substrate.capture(output)
         mock_bvm.assert_called_once()
         mock_crash.assert_not_called()
@@ -296,8 +298,8 @@ class TestVMBackupConsistency(unittest.TestCase):
         substrate = VMSubstrate(config, None)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch.object(_substrate_mod, '_backup_vm_crash', return_value=7) as mock_crash, \
-                 patch.object(_substrate_mod, '_backup_vm') as mock_bvm:
+            with patch.object(_vm_mod, 'backup_vm_crash', return_value=7) as mock_crash, \
+                 patch.object(_vm_mod, 'backup_vm') as mock_bvm:
                 result = substrate.capture(output, consistency='crash')
         mock_crash.assert_called_once_with(config, output, quiet=False)
         mock_bvm.assert_not_called()
@@ -324,7 +326,7 @@ class TestContainerBackupConsistency(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             output.write_bytes(b'x' * 10)
-            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+            with patch.object(_container_mod, 'backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='cold')
         mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 10)
@@ -336,7 +338,7 @@ class TestContainerBackupConsistency(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             output.write_bytes(b'x' * 20)
-            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+            with patch.object(_container_mod, 'backup_impl') as mock_impl:
                 result = substrate.capture(output, consistency='crash')
         mock_impl.assert_called_once_with(config, output, no_stop=True, quiet=False, vm=False)
         self.assertEqual(result, 20)
@@ -348,7 +350,7 @@ class TestContainerBackupConsistency(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             output.write_bytes(b'x' * 5)
-            with patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+            with patch.object(_container_mod, 'backup_impl') as mock_impl:
                 result = substrate.capture(output)
         mock_impl.assert_called_once_with(config, output, no_stop=False, quiet=False, vm=False)
         self.assertEqual(result, 5)
@@ -379,9 +381,9 @@ class TestBackupVMCrash(unittest.TestCase):
         inactive = MagicMock(return_value=MagicMock(returncode=1))
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
-            with patch('substrate.subprocess.run', inactive), \
-                 patch.object(_substrate_mod, '_backup_vm', return_value=55) as mock_cold:
-                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+            with patch('backup.subprocess.run', inactive), \
+                 patch.object(_backup_mod, 'backup_vm', return_value=55) as mock_cold:
+                result = _backup_mod.backup_vm_crash(config, output, quiet=True)
         mock_cold.assert_called_once_with(config, output, quiet=True)
         self.assertEqual(result, 55)
 
@@ -392,10 +394,10 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             buf = io.StringIO()
-            with patch('substrate.subprocess.run', inactive), \
-                 patch.object(_substrate_mod, '_backup_vm', return_value=55) as mock_cold, \
+            with patch('backup.subprocess.run', inactive), \
+                 patch.object(_backup_mod, 'backup_vm', return_value=55) as mock_cold, \
                  patch('sys.stdout', buf):
-                result = _substrate_mod._backup_vm_crash(config, output, quiet=False)
+                result = _backup_mod.backup_vm_crash(config, output, quiet=False)
         mock_cold.assert_called_once_with(config, output, quiet=False)
         self.assertEqual(result, 55)
         self.assertIn('not active', buf.getvalue())
@@ -407,7 +409,7 @@ class TestBackupVMCrash(unittest.TestCase):
         sock_dir = Path(d) / config_name
         sock_dir.mkdir(parents=True, exist_ok=True)
         (sock_dir / "qmp.sock").touch()
-        return patch.object(_substrate_mod, 'VM_SOCKET_DIR', Path(d))
+        return patch.object(_backup_mod, 'VM_SOCKET_DIR', Path(d))
 
     def test_crash_calls_qmp_stop_then_cont(self):
         """Active VM: QMP 'stop' is issued before copy, 'cont' after."""
@@ -418,12 +420,12 @@ class TestBackupVMCrash(unittest.TestCase):
             output = MagicMock()
             output.stat.return_value.st_size = 123
             vm_sock_patch = self._patch_active_vm(config.name, d)
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl'):
-                _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl'):
+                _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
         self.assertIn('stop', calls)
@@ -451,14 +453,14 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             vm_sock_patch = self._patch_active_vm(config.name, d)
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', FakeQMP), \
-                 patch.object(_substrate_mod, '_backup_impl',
+                 patch.object(_backup_mod, 'QMPClient', FakeQMP), \
+                 patch.object(_backup_mod, 'backup_impl',
                                side_effect=RuntimeError("copy failed")):
                 with self.assertRaises(RuntimeError):
-                    _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                    _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         self.assertTrue(stop_called, "QMP 'stop' was not called")
         self.assertTrue(cont_called, "QMP 'cont' was NOT called after copy failure — vCPUs left paused")
@@ -474,12 +476,12 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             # VM_SOCKET_DIR points to d but qmp.sock doesn't exist there
-            with patch('substrate.subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'VM_SOCKET_DIR', Path(d)):
+            with patch('backup.subprocess.run', side_effect=fake_run), \
+                 patch.object(_backup_mod, 'VM_SOCKET_DIR', Path(d)):
                 buf = io.StringIO()
                 with patch('sys.stderr', buf):
                     with self.assertRaises(BackupError):
-                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                        _backup_mod.backup_vm_crash(config, output, quiet=True)
         self.assertIn('cold', buf.getvalue())  # mentions --consistency cold fallback
 
     def test_stop_error_raises_backup_error_without_resuming(self):
@@ -491,14 +493,14 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             vm_sock_patch = self._patch_active_vm(config.name, d)
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl') as mock_impl:
                 with patch('sys.stderr', io.StringIO()):
                     with self.assertRaises(BackupError):
-                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                        _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
         self.assertIn('stop', calls)
@@ -516,13 +518,13 @@ class TestBackupVMCrash(unittest.TestCase):
             output.stat.return_value.st_size = 123
             vm_sock_patch = self._patch_active_vm(config.name, d)
             buf = io.StringIO()
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl'), \
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl'), \
                  patch('sys.stderr', buf):
-                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                result = _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         self.assertEqual(result, 123)
         self.assertIn('may remain paused', buf.getvalue())
@@ -544,13 +546,13 @@ class TestBackupVMCrash(unittest.TestCase):
             output.stat.return_value.st_size = 77
             vm_sock_patch = self._patch_active_vm(config.name, d)
             buf = io.StringIO()
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl'), \
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl'), \
                  patch('sys.stderr', buf):
-                result = _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                result = _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         self.assertEqual(result, 77)
         self.assertIn('may remain paused', buf.getvalue())
@@ -571,14 +573,14 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             vm_sock_patch = self._patch_active_vm(config.name, d)
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl') as mock_impl, \
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl') as mock_impl, \
                  patch('sys.stderr', io.StringIO()):
                 with self.assertRaises(BackupError):
-                    _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                    _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         calls = [c[0][0] for c in qmp_mock.execute.call_args_list]
         self.assertIn('stop', calls)
@@ -596,14 +598,14 @@ class TestBackupVMCrash(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             vm_sock_patch = self._patch_active_vm(config.name, d)
-            with patch('substrate.subprocess.run',
+            with patch('backup.subprocess.run',
                        return_value=MagicMock(returncode=0)), \
                  vm_sock_patch, \
-                 patch.object(_substrate_mod, 'QMPClient', return_value=qmp_mock), \
-                 patch.object(_substrate_mod, '_backup_impl') as mock_impl:
+                 patch.object(_backup_mod, 'QMPClient', return_value=qmp_mock), \
+                 patch.object(_backup_mod, 'backup_impl') as mock_impl:
                 with patch('sys.stderr', io.StringIO()):
                     with self.assertRaises(BackupError):
-                        _substrate_mod._backup_vm_crash(config, output, quiet=True)
+                        _backup_mod.backup_vm_crash(config, output, quiet=True)
 
         qmp_mock.close.assert_called_once()  # fd released despite the failure
         # never paused, so nothing to copy or resume
@@ -1575,7 +1577,7 @@ class TestContainerLifecycle(unittest.TestCase):
         substrate = ContainerSubstrate(config, manager)
         err = subprocess.CalledProcessError(3, ['systemctl', 'restart'])
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service', side_effect=err):
+             patch.object(_container_mod, 'restart_workload_service', side_effect=err):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("restart")
         self.assertEqual(cm.exception.returncode, 3)
@@ -1784,12 +1786,12 @@ class TestVMControl(unittest.TestCase):
         return VMSubstrate(config, None)
 
     def test_control_sends_qmp_command(self):
-        from substrate import VM_SOCKET_DIR as _VM_SOCKET_DIR
+        from vm import VM_SOCKET_DIR as _VM_SOCKET_DIR
         substrate = self._substrate()
         mock_qmp = MagicMock()
         mock_qmp.execute.return_value = {"return": {}}
         sock_path = _VM_SOCKET_DIR / substrate.config.name / "qmp.sock"
-        with patch('substrate.QMPClient', return_value=mock_qmp), \
+        with patch('substrate_vm.QMPClient', return_value=mock_qmp), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('builtins.print'):
             rc = substrate.control(["query-status"])
@@ -1802,7 +1804,7 @@ class TestVMControl(unittest.TestCase):
         substrate = self._substrate()
         mock_qmp = MagicMock()
         mock_qmp.execute.return_value = {"return": {}}
-        with patch('substrate.QMPClient', return_value=mock_qmp), \
+        with patch('substrate_vm.QMPClient', return_value=mock_qmp), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('builtins.print'):
             substrate.control(["migrate", "uri=tcp:0:4444"])
@@ -1812,7 +1814,7 @@ class TestVMControl(unittest.TestCase):
         substrate = self._substrate()
         mock_qmp = MagicMock()
         mock_qmp.execute.return_value = {"error": {"class": "CommandNotFound", "desc": "no such"}}
-        with patch('substrate.QMPClient', return_value=mock_qmp), \
+        with patch('substrate_vm.QMPClient', return_value=mock_qmp), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('builtins.print'):
             rc = substrate.control(["badcmd"])
@@ -2039,7 +2041,7 @@ class TestContainerLifecycleMore(unittest.TestCase):
     def test_start_with_user_calls_restart_workload_service(self):
         substrate, manager = self._substrate(user_exists=True)
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+             patch.object(_container_mod, 'restart_workload_service') as mock_r:
             substrate.lifecycle("start")
         mock_r.assert_called_once_with(
             10001, substrate.config.service_name, action="start"
@@ -2049,7 +2051,7 @@ class TestContainerLifecycleMore(unittest.TestCase):
         import subprocess as sp
         substrate, manager = self._substrate(user_exists=True)
         with _patch_uid(10001), patch.object(
-            _substrate_mod, 'restart_workload_service',
+            _container_mod, 'restart_workload_service',
             side_effect=sp.CalledProcessError(returncode=5, cmd=['x']),
         ):
             with self.assertRaises(LifecycleError) as cm:
@@ -2058,7 +2060,7 @@ class TestContainerLifecycleMore(unittest.TestCase):
 
     def test_restart_with_user_calls_restart_workload_service(self):
         substrate, manager = self._substrate(user_exists=True)
-        with _patch_uid(10001), patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+        with _patch_uid(10001), patch.object(_container_mod, 'restart_workload_service') as mock_r:
             substrate.lifecycle("restart")
         mock_r.assert_called_once_with(10001, substrate.config.service_name)
 
@@ -2130,7 +2132,7 @@ pull = "never"
         pod = manager.podman.return_value
         pod.image_id.side_effect = ['old-id', 'new-id']
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+             patch.object(_container_mod, 'restart_workload_service') as mock_r:
             result = substrate.reprovision()
         self.assertIsNotNone(result)
         cfg, old_ids = result
@@ -2148,9 +2150,9 @@ pull = "never"
         # then new_id call for change detection.
         pod.image_id.side_effect = ['', '', '', 'old-id', 'new-id']
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service'), \
-             patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
-             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+             patch.object(_container_mod, 'restart_workload_service'), \
+             patch.object(_container_mod, 'ensure_runtime_dir') as mock_ensure, \
+             patch.object(_container_mod.time, 'sleep') as mock_sleep:
             result = substrate.reprovision()
         mock_ensure.assert_called_once_with(10001)
         cfg, old_ids = result
@@ -2168,9 +2170,9 @@ pull = "never"
         # returns empty/None so nothing ever resolves.
         pod.image_id.return_value = None
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service'), \
-             patch.object(_substrate_mod, 'ensure_runtime_dir') as mock_ensure, \
-             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+             patch.object(_container_mod, 'restart_workload_service'), \
+             patch.object(_container_mod, 'ensure_runtime_dir') as mock_ensure, \
+             patch.object(_container_mod.time, 'sleep') as mock_sleep:
             result = substrate.reprovision(force=True)
         mock_ensure.assert_called_once_with(10001)
         self.assertEqual(mock_sleep.call_count, 10)
@@ -2194,7 +2196,7 @@ pull = "never"
         pod = manager.podman.return_value
         pod.image_id.return_value = 'same-id'
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+             patch.object(_container_mod, 'restart_workload_service') as mock_r:
             result = substrate.reprovision(force=True)
         self.assertIsNotNone(result)
         mock_r.assert_called_once()
@@ -2248,7 +2250,7 @@ class TestContainerRollback(unittest.TestCase):
             tag: 'abc123', 'example.com/test:latest': 'def456',
         })
         with _patch_uid(10001), \
-             patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
+             patch.object(_container_mod, 'restart_workload_service') as mock_r:
             buf = io.StringIO()
             with patch('sys.stdout', buf):
                 substrate.rollback()
@@ -2266,7 +2268,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.exec(["ls"])
@@ -2274,7 +2276,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_runs_ssh_and_returns_code(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=7)) as mock_run:
             rc = substrate.exec(["ls"])
         self.assertEqual(rc, 7)
@@ -2284,16 +2286,16 @@ class TestVMExecShell(unittest.TestCase):
     def test_open_shell_ssh_success_returns_normally(self):
         """A clean SSH session is success: return, don't raise, don't fall back."""
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=0)), \
-             patch.object(_substrate_mod.os, 'execvp') as mock_execvp:
+             patch.object(_vm_mod.os, 'execvp') as mock_execvp:
             substrate.open_shell()
         mock_execvp.assert_not_called()
 
     def test_open_shell_ssh_remote_failure_propagates_code(self):
         """A nonzero exit from the remote shell surfaces as that exact code."""
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=17)):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
@@ -2301,7 +2303,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_ssh_failure_falls_back_to_console(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=255)), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
@@ -2311,7 +2313,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_no_ip_falls_to_console_missing_socket(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -2320,7 +2322,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_console_connects_via_socat(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('os.execvp') as mock_exec, \
              patch('sys.stderr', io.StringIO()), \
@@ -2340,7 +2342,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
@@ -2348,7 +2350,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_success_prints_confirmation(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=0)):
             buf = io.StringIO()
             with patch('sys.stdout', buf):
@@ -2357,7 +2359,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_failure_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_substrate_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
              patch('subprocess.run', return_value=_ok(returncode=1)), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -2535,7 +2537,7 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             buf = io.StringIO()
             with _patch_uid(10001), \
                  patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value=set()), \
                  patch('sys.stdout', buf):
                 size = ContainerSubstrate(config, None).capture(output, consistency='cold', quiet=False)
         self.assertEqual(size, 42)
@@ -2561,9 +2563,9 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             output = Path(d) / 'out.tar.zst'
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value=set()), \
                  patch('sys.stdout', buf):
-                size = _substrate_mod._backup_vm(config, output, quiet=False)
+                size = _backup_mod.backup_vm(config, output, quiet=False)
         self.assertEqual(size, 99)
         self.assertIn('Backup:', buf.getvalue())
 
@@ -2584,9 +2586,9 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             output = Path(d) / 'out.tar.zst'
             with _patch_uid(10001), \
                  patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()), \
-                 patch.object(_substrate_mod, 'restart_workload_service') as mock_r:
-                _substrate_mod._backup_impl(config, output, no_stop=False, quiet=True, vm=False)
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value=set()), \
+                 patch.object(_backup_mod, 'restart_workload_service') as mock_r:
+                _backup_mod.backup_impl(config, output, no_stop=False, quiet=True, vm=False)
         stop_calls = [c for c in calls if 'stop' in c]
         self.assertTrue(stop_calls, "service should be stopped when active and no_stop=False")
         mock_r.assert_called_once_with(10001, config.service_name, action="start")
@@ -2610,8 +2612,8 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()):
-                _substrate_mod._backup_impl(config, output, no_stop=False, quiet=True, vm=True)
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value=set()):
+                _backup_mod.backup_impl(config, output, no_stop=False, quiet=True, vm=True)
         start_calls = [c for c in calls if 'start' in c]
         self.assertTrue(start_calls, "VM should be restarted via plain systemctl start")
 
@@ -2629,8 +2631,8 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'out.tar.zst'
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value=set()):
-                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=True, vm=False)
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value=set()):
+                _backup_mod.backup_impl(config, output, no_stop=True, quiet=True, vm=False)
         self.assertFalse(any('stop' in c for c in calls))
 
     def test_backup_impl_copies_credentials(self):
@@ -2648,9 +2650,9 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             (credstore / 'mycred').write_text('secret')
             output = Path(out_d) / 'out.tar.zst'
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value={'mycred'}), \
-                 patch.object(_substrate_mod, 'CREDSTORE_DIR', credstore):
-                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=True, vm=False)
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value={'mycred'}), \
+                 patch.object(_backup_mod, 'CREDSTORE_DIR', credstore):
+                _backup_mod.backup_impl(config, output, no_stop=True, quiet=True, vm=False)
         # No assertion failure means the credential copy path executed without error.
 
     def test_backup_impl_missing_credential_warns(self):
@@ -2666,10 +2668,10 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             output = Path(out_d) / 'out.tar.zst'
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(_substrate_mod, 'auto_detect_credentials', return_value={'missing-cred'}), \
-                 patch.object(_substrate_mod, 'CREDSTORE_DIR', Path('/nonexistent-credstore')), \
+                 patch.object(_backup_mod, 'auto_detect_credentials', return_value={'missing-cred'}), \
+                 patch.object(_backup_mod, 'CREDSTORE_DIR', Path('/nonexistent-credstore')), \
                  patch('sys.stdout', buf):
-                _substrate_mod._backup_impl(config, output, no_stop=True, quiet=False, vm=False)
+                _backup_mod.backup_impl(config, output, no_stop=True, quiet=False, vm=False)
         self.assertIn('not found', buf.getvalue())
 
     def test_credstore_dir_is_shared_and_encrypted(self):
@@ -2682,32 +2684,32 @@ class TestBackupImplAndHelpers(unittest.TestCase):
         import cmd_secret
         self.assertEqual(workload_lib.CREDSTORE_DIR,
                          Path('/etc/credstore.encrypted'))
-        self.assertIs(_substrate_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
+        self.assertIs(_backup_mod.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
         self.assertIs(cmd_backup.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
         self.assertIs(cmd_secret.CREDSTORE_DIR, workload_lib.CREDSTORE_DIR)
 
     def test_print_backup_size_formats_bytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):
-            _substrate_mod._print_backup_size(Path('/x'), 500)
+            _backup_mod.print_backup_size(Path('/x'), 500)
         self.assertIn('500B', buf.getvalue())
 
     def test_print_backup_size_formats_kilobytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):
-            _substrate_mod._print_backup_size(Path('/x'), 5_000)
+            _backup_mod.print_backup_size(Path('/x'), 5_000)
         self.assertIn('5.0K', buf.getvalue())
 
     def test_print_backup_size_formats_megabytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):
-            _substrate_mod._print_backup_size(Path('/x'), 5_000_000)
+            _backup_mod.print_backup_size(Path('/x'), 5_000_000)
         self.assertIn('5.0M', buf.getvalue())
 
     def test_print_backup_size_formats_gigabytes(self):
         buf = io.StringIO()
         with patch('sys.stdout', buf):
-            _substrate_mod._print_backup_size(Path('/x'), 5_000_000_000)
+            _backup_mod.print_backup_size(Path('/x'), 5_000_000_000)
         self.assertIn('5.0G', buf.getvalue())
 
 
@@ -2722,12 +2724,12 @@ class TestVmGuestIp(unittest.TestCase):
             (run_dir / 'bridge-managed').touch()
             lease_file = Path(d) / 'leases'
             lease_file.write_text("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
-            with patch('substrate.Path'):
+            with patch('substrate_vm.Path'):
                 # Only patch the bridge-managed marker check and lease file path;
                 # simplest is to patch the two module-level Path constants directly.
                 pass
         # Simpler: patch the two constants used inside the function.
-        with patch.object(_substrate_mod, 'VM_DHCP_LEASE_FILE') as mock_lease:
+        with patch.object(_vm_mod, 'VM_DHCP_LEASE_FILE') as mock_lease:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.leases', delete=False) as f:
                 f.write("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
                 lease_path = Path(f.name)
@@ -2735,41 +2737,41 @@ class TestVmGuestIp(unittest.TestCase):
                 mock_lease.exists.return_value = True
                 mock_lease.read_text.return_value = lease_path.read_text()
                 with patch('pathlib.Path.exists', return_value=True):
-                    ip = _substrate_mod._vm_guest_ip('myvm')
+                    ip = _vm_mod._vm_guest_ip('myvm')
             finally:
                 lease_path.unlink()
         self.assertEqual(ip, '192.168.1.5')
 
     def test_no_bridge_managed_falls_to_arp(self):
         with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout="192.168.1.9 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"),  # ip neigh
             ]
-            ip = _substrate_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm')
         self.assertEqual(ip, '192.168.1.9')
 
     def test_arp_no_match_falls_to_mdns(self):
         with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout="192.168.1.9 lladdr 11:22:33:44:55:66 REACHABLE\n"),  # no match
                 _ok(returncode=0, stdout="192.168.1.20 myvm.local\n"),  # getent
             ]
-            ip = _substrate_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm')
         self.assertEqual(ip, '192.168.1.20')
 
     def test_all_lookups_fail_returns_none(self):
         with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_substrate_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout=""),
                 _ok(returncode=2, stdout=""),
             ]
-            ip = _substrate_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm')
         self.assertIsNone(ip)
 
 
@@ -2790,7 +2792,7 @@ mode = "host"
 ports = ["8080/tcp"]
 """
         config = _make_config(toml, 'test-ep')
-        result = _substrate_mod._accessible_at_config(config)
+        result = _container_mod._accessible_at_config(config)
         self.assertEqual(result, [{"host": "localhost:8080", "container": None}])
 
     def test_ip_host_container_triple(self):
@@ -2805,7 +2807,7 @@ image = "example.com/test:latest"
 ports = ["127.0.0.1:8080:80"]
 """
         config = _make_config(toml, 'test-ep')
-        result = _substrate_mod._accessible_at_config(config)
+        result = _container_mod._accessible_at_config(config)
         self.assertEqual(result, [{"host": "127.0.0.1:8080", "container": "80"}])
 
     def test_dynamic_host_port(self):
@@ -2820,12 +2822,12 @@ image = "example.com/test:latest"
 ports = [":80"]
 """
         config = _make_config(toml, 'test-ep')
-        result = _substrate_mod._accessible_at_config(config)
+        result = _container_mod._accessible_at_config(config)
         self.assertEqual(result, [{"host": "localhost:(dynamic)", "container": "80"}])
 
     def test_no_ports_returns_empty(self):
         config = _make_config(SINGLE_TOML, 'test-wl')
-        self.assertEqual(_substrate_mod._accessible_at_config(config), [])
+        self.assertEqual(_container_mod._accessible_at_config(config), [])
 
 
 if __name__ == '__main__':
