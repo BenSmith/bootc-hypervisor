@@ -998,6 +998,22 @@ def cmd_stop(args, manager: WorkloadManager):
     print(f"✓ Workload '{args.workload}' stopped")
 
 
+def cmd_restart(args, manager: WorkloadManager):
+    """Restart a workload service (does not change enabled state)"""
+    require_root()
+
+    config_path = workload_config_path(args.workload)
+    if not config_path.exists():
+        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config = WorkloadConfig(args.workload)
+    print(f"Restarting {config.service_name}...")
+    substrate = get_substrate(config, manager)
+    substrate.lifecycle("restart")
+    print(f"✓ Workload '{args.workload}' restarted")
+
+
 def cmd_recreate(args, manager: WorkloadManager):
     """Recreate a workload from its image/config (containers: destroy overlay;
     VMs: rebuild the cloud-init seed and reboot QEMU onto it)."""

@@ -28,7 +28,7 @@ from cmd_inspect import (
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
     cmd_build, cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
-    cmd_recreate, cmd_start, cmd_stop,
+    cmd_recreate, cmd_restart, cmd_start, cmd_stop,
 )
 from cmd_secret import cmd_secret
 from cmd_update import cmd_rollback, cmd_update
@@ -250,6 +250,10 @@ def main():
     recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
     recreate_parser.set_defaults(func=cmd_recreate)
     recreate_parser.add_argument("workload", help="Workload name")
+
+    restart_parser = subparsers.add_parser("restart", help="Restart a workload service (keeps overlay/disk; does not apply TOML edits)")
+    restart_parser.set_defaults(func=cmd_restart)
+    restart_parser.add_argument("workload", help="Workload name")
 
     restore_parser = subparsers.add_parser("restore", help="Restore a workload from backup")
     restore_parser.set_defaults(func=cmd_restore)

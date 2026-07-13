@@ -394,8 +394,16 @@ class Substrate(ABC):
     def lifecycle(self, action: str) -> None:
         """Unified lifecycle primitive: start / stop / restart / reboot.
 
-        action must be one of: ``"start"``, ``"stop"``, ``"restart"``,
-        ``"reboot"`` (soft-reboot the workload's init system).
+        action must be one of: ``"start"``, ``"stop"``, ``"restart"`` (bounce the
+        workload's main unit only), ``"reboot"`` (soft-reboot the workload's init
+        system).
+
+        ``"restart"`` is a *bounce*, not a re-provision: the container overlay,
+        the VM's disks and its cloud-init seed all survive it, and nothing is
+        re-rendered from the TOML.  Applying a config edit — dropping the overlay,
+        rebuilding the seed — is ``reprovision(recreate=True)``.
+
+        Raises LifecycleError carrying the returncode of the call that failed.
         """
         ...
 
@@ -731,12 +739,18 @@ class ContainerSubstrate(Substrate):
             if result.returncode != 0:
                 raise LifecycleError(result.returncode)
         elif action == "restart":
+            # A bounce: the container is re-created from its existing overlay by
+            # the unit's own ExecStartPre. Snapshotting a pet's overlay and
+            # dropping the container is reprovision(recreate=True), not this.
             if self.manager.user_exists(self.config):
-                restart_workload_service(self.config.uid, self.config.service_name)
+                try:
+                    restart_workload_service(self.config.uid, self.config.service_name)
+                except subprocess.CalledProcessError as e:
+                    raise LifecycleError(e.returncode or 1)
             else:
-                subprocess.run(
-                    ["systemctl", "restart", self.config.service_name], check=True
-                )
+                result = subprocess.run(["systemctl", "restart", self.config.service_name])
+                if result.returncode != 0:
+                    raise LifecycleError(result.returncode)
         elif action == "reboot":
             result = self.manager.run_podman_exec(
                 self.config,
@@ -1118,17 +1132,13 @@ class VMSubstrate(Substrate):
             if result.returncode != 0:
                 raise LifecycleError(result.returncode)
         elif action == "restart":
-            # recreate: re-render cloud-init seed then restart QEMU.
-            # The cloud-init ISO and nvram are built by the setup oneshot
-            # (RemainAfterExit=yes), which a plain main-service restart does NOT
-            # re-run. Restart it first so config edits (template_vars, volumes, …)
-            # are re-rendered into a fresh seed before QEMU boots onto it.
-            subprocess.run(
-                ["systemctl", "restart",
-                 workload_service_units(self.config, roles={"setup"})[0]],
-                check=True,
-            )
-            subprocess.run(["systemctl", "restart", self.config.service_name], check=True)
+            # A power-cycle onto the existing disks and cloud-init seed. The setup
+            # oneshot (RemainAfterExit=yes) is deliberately left alone: re-rendering
+            # the seed from a changed TOML is reprovision(recreate=True)'s job, and
+            # a bounce shouldn't silently re-seed the guest.
+            result = subprocess.run(["systemctl", "restart", self.config.service_name])
+            if result.returncode != 0:
+                raise LifecycleError(result.returncode)
         elif action == "reboot":
             guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
             if not guest_ip:

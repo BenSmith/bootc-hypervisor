@@ -1638,6 +1638,52 @@ class TestCmdStartStop(unittest.TestCase):
                     self.assertEqual(cm.exception.returncode, 3)
 
 
+# ── cmd_restart ──────────────────────────────────────────────────────────────
+
+class TestCmdRestart(unittest.TestCase):
+    def test_restart_config_not_found_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', Path(d)):
+                with _RootBypass():
+                    with self.assertRaises(SystemExit):
+                        cmd_lifecycle.cmd_restart(_ns(workload="ghost"), MagicMock())
+
+    def test_restart_calls_substrate_lifecycle(self):
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                manager = MagicMock()
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), manager)
+                sub.lifecycle.assert_called_once_with("restart")
+                self.assertIn("restarted", buf.getvalue())
+
+    def test_restart_does_not_regenerate_units(self):
+        """restart is a bounce: unlike recreate it must not re-run the generator."""
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                sub = MagicMock()
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    with patch.object(cmd_lifecycle.subprocess, 'run') as run_mock:
+                        with redirect_stdout(io.StringIO()):
+                            cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), MagicMock())
+                run_mock.assert_not_called()
+                sub.reprovision.assert_not_called()
+
+    def test_restart_failure_propagates_exit_code(self):
+        with _cfg(_CONTAINER_TOML, 'test-wl'):
+            with _RootBypass():
+                sub = MagicMock()
+                sub.lifecycle.side_effect = LifecycleError(3)
+                with patch.object(cmd_lifecycle, 'get_substrate', return_value=sub):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(LifecycleError) as cm:
+                            cmd_lifecycle.cmd_restart(_ns(workload="test-wl"), MagicMock())
+                self.assertEqual(cm.exception.returncode, 3)
+
+
 # ── cmd_recreate ─────────────────────────────────────────────────────────────
 
 class TestCmdRecreate(unittest.TestCase):
