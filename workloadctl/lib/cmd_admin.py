@@ -1281,9 +1281,12 @@ def cmd_edit(args, manager: WorkloadManager):
             # only the systemd shell-generator re-runs, and it just emits a
             # oneshot that doesn't fire until next boot. Run workload-generate
             # explicitly so [container.environment] and other inlined values
-            # actually take effect.
+            # actually take effect. --workload keeps the run to the workload
+            # being edited: an unfiltered run rewrites every enabled workload's
+            # units and starts each one.
             subprocess.run(
-                ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+                ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
+                 "--workload", config.name],
                 check=True,
             )
             subprocess.run(["systemctl", "daemon-reload"], check=True)

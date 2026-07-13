@@ -94,7 +94,31 @@ except Exception as e:
 # Output directory for generated service files and sysusers configs.
 # Called by workload-generate.service with /run/systemd/system as argv[1],
 # or by tests with a temp directory.
-NORMAL_DIR = sys.argv[1] if len(sys.argv) > 1 else None
+#
+# `--workload NAME` narrows the run to one workload: only its files are written,
+# and only it gets a start job. The CLI passes it whenever it acts on a single
+# workload (enable / edit / recreate), because an unfiltered run writes units for
+# the *whole* enabled set — which would silently update a bystander's unit file
+# (hiding its drift, since `drift` compares against the files in /run) and
+# enqueue a start for a workload the operator had deliberately stopped. Boot
+# passes no filter and emits everything.
+ONLY_WORKLOAD = None
+_args = sys.argv[1:]
+_positional = []
+_i = 0
+while _i < len(_args):
+    _a = _args[_i]
+    if _a == "--workload" and _i + 1 < len(_args):
+        ONLY_WORKLOAD = _args[_i + 1]
+        _i += 2
+    elif _a.startswith("--workload="):
+        ONLY_WORKLOAD = _a.split("=", 1)[1]
+        _i += 1
+    else:
+        _positional.append(_a)
+        _i += 1
+
+NORMAL_DIR = _positional[0] if _positional else None
 SERVICES_DIR = Path(NORMAL_DIR) if NORMAL_DIR else Path("/run/systemd/system")
 # Allow override for testing
 SYSUSERS_DIR = Path(os.environ.get("SYSUSERS_DIR", str(SERVICES_DIR)))
@@ -1969,6 +1993,13 @@ def main():
                 all_workload_names.add(_n)
         except Exception:
             pass
+
+    # The cross-reference scan above deliberately runs over every workload even
+    # when the emit is filtered: a narrowed run still has to know the full name
+    # set to validate this workload's requires/after against it.
+    if ONLY_WORKLOAD:
+        config_files = [cf for cf in config_files if cf.parent.name == ONLY_WORKLOAD]
+        log_msg(f"Filtered to workload {ONLY_WORKLOAD!r}: {len(config_files)} config file(s)")
 
     for config_file in config_files:
         try:

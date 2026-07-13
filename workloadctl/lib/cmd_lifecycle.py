@@ -415,10 +415,16 @@ def _generate_units(config: WorkloadConfig):
     WORKLOAD_GENERATE_LOG_STDERR routes the generator's per-workload diagnostics
     (which normally go to /dev/kmsg) to this command's stderr, so an operator
     sees the reason inline when a workload can't be generated.
+
+    `--workload` scopes the run to this workload alone. Without it the generator
+    emits the whole enabled set, so acting on one workload would rewrite every
+    other workload's units and enqueue a start job for each — disturbing
+    bystanders and hiding their drift.
     """
     print("  Generating service files...")
     subprocess.run(
-        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
+         "--workload", config.name],
         check=True,
         env={**os.environ, "WORKLOAD_GENERATE_LOG_STDERR": "1"},
     )
@@ -1125,7 +1131,8 @@ def cmd_recreate(args, manager: WorkloadManager):
     print(f"Recreating workload: {args.workload}")
     print("  Regenerating service files...")
     subprocess.run(
-        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system"],
+        ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
+         "--workload", config.name],
         check=True,
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)
