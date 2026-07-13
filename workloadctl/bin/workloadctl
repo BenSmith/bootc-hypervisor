@@ -68,6 +68,10 @@ def main():
     # that printed anyway would be a lie), so the read/report verbs — which
     # emit output, not prose — don't take it.
     mutating = argparse.ArgumentParser(add_help=False)
+    # Marks these verbs as the ones whose result object cli_log writes. The read
+    # verbs carry a --json of their own that means something different (see
+    # configure() below), and this is what tells the two apart.
+    mutating.set_defaults(emits_result=True)
     mutating.add_argument("-q", "--quiet", action="store_true",
                           help="Suppress progress output; warnings and errors still print")
     mutating.add_argument("--json", action="store_true",
@@ -396,12 +400,19 @@ def main():
     args = parser.parse_args()
 
     # One configure() for the whole process, before any handler can speak.
-    # The read verbs carry --json too, and pointing cli_log at it costs nothing:
-    # they print their reports directly, and any prose they reach through a
-    # shared helper is correctly silenced.
+    #
+    # Two different flags spell themselves --json. On a read verb it means "my
+    # stdout is a report I print myself"; on a mutating verb it means "cli_log
+    # writes the result object to stdout". Both need prose off stdout, so both
+    # set quiet — but only the second may set json_mode, because json_mode is
+    # what licenses cli_log to *write* a document there. Granting it to a read
+    # verb puts a second JSON object on a stream that already holds a report
+    # (emit_failure fires from the exit ladder on any non-zero exit), and no
+    # parser downstream survives that.
+    json_flag = getattr(args, "json", False)
     cli_log.configure(
-        quiet=getattr(args, "quiet", False),
-        json_mode=getattr(args, "json", False),
+        quiet=getattr(args, "quiet", False) or json_flag,
+        json_mode=json_flag and getattr(args, "emits_result", False),
         command=args.command,
     )
 

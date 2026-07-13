@@ -93,7 +93,14 @@ _install_handlers()
 
 def configure(*, quiet: bool = False, json_mode: bool = False,
               command: str | None = None) -> None:
-    """Set the output mode for this process. Called once, from the entrypoint."""
+    """Set the output mode for this process. Called once, from the entrypoint.
+
+    `json_mode` says cli_log *owns the document on stdout* — not merely that the
+    caller passed --json. A verb that prints its own JSON report (every read verb
+    has a --json of its own) must leave this false and pass `quiet`, or the
+    result/failure object emitted here lands as a second document beside the
+    report.
+    """
     _state["quiet"] = quiet
     _state["json"] = json_mode
     _state["command"] = command
