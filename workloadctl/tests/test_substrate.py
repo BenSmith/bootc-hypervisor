@@ -2671,8 +2671,10 @@ class TestBackupImplAndHelpers(unittest.TestCase):
             with patch('subprocess.run', side_effect=fake_run), \
                  patch.object(_backup_mod, 'auto_detect_credentials', return_value={'missing-cred'}), \
                  patch.object(_backup_mod, 'CREDSTORE_DIR', Path('/nonexistent-credstore')), \
-                 patch('sys.stdout', buf):
+                 patch('sys.stderr', buf):
                 _backup_mod.backup_impl(config, output, no_stop=True, quiet=False, vm=False)
+        # A skipped credential is a warning: stderr, so it survives --quiet and
+        # stays out of a piped stdout.
         self.assertIn('not found', buf.getvalue())
 
     def test_credstore_dir_is_shared_and_encrypted(self):

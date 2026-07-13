@@ -63,6 +63,30 @@ untagged copy via the unit's stdout relay. Filter container output with
 `journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl by unit.
 `podman logs` does not work with passthrough (podman keeps no copy).
 
+### CLI output: prose vs. output
+
+`lib/cli_log.py` owns the CLI's **prose** — what a command says *about* what it
+is doing (progress, status, diagnostics). `info()` goes to stdout,
+`warn()`/`error()` to stderr, so severity survives a redirect. Everything a
+command was *asked* to produce — reports, `--dry-run` plans, JSON documents,
+`incant`/`logs`/`stats` passthrough — stays on plain `print()`.
+
+That split is the whole reason `--quiet` is safe: it raises the level to
+WARNING, so it can silence narration but never a failure, and never the answer.
+`--json` suppresses prose the same way *and* reserves stdout for the result
+object the mutating verbs emit via `emit_result()` (shape in `docs/cli.md`), so
+`update --all --json | jq` can't choke on a progress line. `bin/workloadctl`
+calls `cli_log.configure()` once from the parsed args, and the exit-code ladder
+in `_run_cli()` calls `emit_failure()` so a command that dies still leaves a
+result document behind. Handlers resolve `sys.stdout`/`sys.stderr` per record
+rather than binding at import, so a redirected caller (the test suite) still
+captures what we write.
+
+`--quiet`/`--json` are offered only on the verbs that mutate a workload (enable,
+disable, start, stop, restart, reboot, recreate, build, update, rollback) — the
+ones whose narration goes through cli_log. Offering the flag where it wasn't
+honored would be a lie.
+
 ### Multi-Container Workloads
 
 A workload may run more than one container under the same `_wl-<name>` user, sharing home directory and lifecycle. `workload.mode` selects the topology:
@@ -214,6 +238,7 @@ VM workloads use a separate, mutually-exclusive set of sections:
 ```
 bin/workloadctl                    # CLI dispatcher (argparse → lib/cmd_*.py)
 lib/cmd_*.py                       # One module per verb (enable, disable, info, health, …); cmd_provision holds the machinery enable/disable/recreate share
+lib/cli_log.py                     # CLI prose channel (info/warn/error, --quiet) + the mutating verbs' --json result object
 lib/substrate.py                   # Substrate port (ABC + exceptions + get_substrate router, computed capability matrix)
 lib/substrate_container.py         # ContainerSubstrate (rootless podman)
 lib/substrate_vm.py                # VMSubstrate (QEMU/KVM, SSH + QMP)

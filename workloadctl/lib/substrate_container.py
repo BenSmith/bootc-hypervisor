@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from backup import backup_impl, print_backup_size
+from cli_log import error, info, warn
 from podman import PodmanError
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from substrate import (
@@ -255,8 +256,8 @@ class ContainerSubstrate(Substrate):
                 "--env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{container_uid}/bus",
             ])
 
-        print(f"Opening shell in {target}...")
-        print()
+        info(f"Opening shell in {target}...")
+        info()
         # Try bash first, fall back to sh only if bash isn't available in the image.
         # 127 = command not found; any other non-zero is propagated from the user's
         # last command (e.g. 130 after ^C), not a reason to relaunch.
@@ -305,9 +306,9 @@ class ContainerSubstrate(Substrate):
                 [self.config.container_name, "systemctl", "soft-reboot"],
             )
             if result.returncode != 0:
-                print("Error: soft-reboot failed. Is this a systemd container?", file=sys.stderr)
+                error("Error: soft-reboot failed. Is this a systemd container?")
                 raise LifecycleError(1)
-            print(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
+            info(f"✓ Workload '{self.config.name}' soft-rebooted (overlay preserved)")
         else:
             raise ValueError(f"Unknown lifecycle action: {action!r}")
 
@@ -331,12 +332,9 @@ class ContainerSubstrate(Substrate):
         try:
             pod.commit(container_name, snapshot_ref)
             committed = True
-            print(f"  ✓ Pet snapshot saved: {snapshot_ref}")
+            info(f"  ✓ Pet snapshot saved: {snapshot_ref}")
         except Exception as exc:
-            print(
-                f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}",
-                file=sys.stderr,
-            )
+            warn(f"  ⚠ Pet snapshot failed (overlay may not exist yet): {exc}")
         # Bound the snapshot repository so deliberate rebuilds don't leak disk
         # forever (the VM path has rollback_keep; pets had no analog). Only
         # prune after a fresh commit succeeded — nothing new was added otherwise.
@@ -367,14 +365,14 @@ class ContainerSubstrate(Substrate):
                 ref = f"{repo}:{tag}"
                 removed = pod.run("rmi", ref, capture_output=True)
                 if removed.returncode == 0:
-                    print(f"  ✓ Pruned old pet snapshot: {ref}")
+                    info(f"  ✓ Pruned old pet snapshot: {ref}")
         except Exception as exc:
-            print(f"  ⚠ Pet snapshot prune skipped: {exc}", file=sys.stderr)
+            warn(f"  ⚠ Pet snapshot prune skipped: {exc}")
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):
         if recreate:
             # recreate path: skip pull, just restart to recreate the overlay.
-            print(f"Recreating {self.config.name}...")
+            info(f"Recreating {self.config.name}...")
             # pet honoring is single-mode only — the generator falls back to
             # cattle units for pod/bridge, so the substrate must too (otherwise
             # we'd commit/rm a container name that doesn't exist for multi).
@@ -393,10 +391,10 @@ class ContainerSubstrate(Substrate):
                 f"{self.config.name} uses pull=never (local image) — build it manually"
             )
 
-        print(f"Updating {self.config.name}...")
+        info(f"Updating {self.config.name}...")
 
         if not self.manager.user_exists(self.config):
-            print(f"  Skipping: user {self.config.username} does not exist (workload not enabled?)")
+            info(f"  Skipping: user {self.config.username} does not exist (workload not enabled?)")
             return None
 
         pod = self.manager.podman(self.config)
@@ -421,7 +419,7 @@ class ContainerSubstrate(Substrate):
             try:
                 pod.pull(image)
             except PodmanError as e:
-                print(f"  ✗ Failed to pull {image}: {e.stderr}", file=sys.stderr)
+                error(f"  ✗ Failed to pull {image}: {e.stderr}")
                 raise ProvisionFailed(f"pull failed for {image}")
             new_id = pod.image_id(image)
             if old_id != new_id:
@@ -430,10 +428,10 @@ class ContainerSubstrate(Substrate):
                     f"{self.config.name}/{cname}" if self.config.is_multi
                     else self.config.name
                 )
-                print(f"  {label}: {(old_id or 'none')[:12]} → {(new_id or 'unknown')[:12]}")
+                info(f"  {label}: {(old_id or 'none')[:12]} → {(new_id or 'unknown')[:12]}")
 
         if not changed and not force:
-            print("  ✓ Already up to date")
+            info("  ✓ Already up to date")
             return None
 
         # Tag old images for rollback before restarting
@@ -452,7 +450,7 @@ class ContainerSubstrate(Substrate):
             self._pet_snapshot_and_remove(pod, self.config.container_name)
 
         self._restart_or_fail()
-        print(f"  ✓ {self.config.name}: restarted")
+        info(f"  ✓ {self.config.name}: restarted")
 
         return (self.config, old_ids)
 
@@ -472,7 +470,7 @@ class ContainerSubstrate(Substrate):
                     ["systemctl", "restart", self.config.service_name], check=True
                 )
         except subprocess.CalledProcessError:
-            print(f"  ✗ Restart failed for {self.config.name}", file=sys.stderr)
+            error(f"  ✗ Restart failed for {self.config.name}")
             raise ProvisionFailed(f"restart failed for {self.config.name}")
 
     def rollback_targets(self) -> list:
@@ -506,14 +504,13 @@ class ContainerSubstrate(Substrate):
         try:
             pod.tag(target["tag"], target["image"])
         except PodmanError as e:
-            print(
+            error(
                 f"Error: Failed to retag rollback image for {target['label']}: {e.stderr}",
-                file=sys.stderr,
             )
             raise LifecycleError(1)
         current_id = target.get("current_id")
         rollback_id = target["rollback_id"]
-        print(
+        info(
             f"  {target['label']}: {current_id[:12] if current_id else 'unknown'} → {rollback_id[:12]}"
         )
 
@@ -524,25 +521,23 @@ class ContainerSubstrate(Substrate):
         have_any_tag = bool(targets) or self._has_any_rollback_tag()
 
         if not have_any_tag:
-            print(
+            error(
                 f"Error: No rollback image found for {self.config.name}",
-                file=sys.stderr,
             )
-            print(
+            error(
                 "  (rollback images are created automatically by 'workloadctl update')",
-                file=sys.stderr,
             )
             raise LifecycleError(1)
 
         if not targets:
-            print(f"Already running the rollback image(s) for {self.config.name}")
+            info(f"Already running the rollback image(s) for {self.config.name}")
             return
 
         for target in targets:
             self.rollback_to(target)
 
         restart_workload_service(self.config.uid, self.config.service_name)
-        print(f"✓ Rolled back {self.config.name}")
+        info(f"✓ Rolled back {self.config.name}")
 
     def control(self, argv: list[str]) -> int:
         """Run ``podman <argv>`` as the workload user via the rootless wrapper."""

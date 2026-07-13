@@ -51,6 +51,85 @@ workloadctl [-h] <command> [options]
 
 ---
 
+## Output Options on Mutating Commands
+
+`build`, `disable`, `enable`, `reboot`, `recreate`, `restart`, `rollback`,
+`start`, `stop` and `update` each take two output flags. They are offered only
+on these verbs because only these verbs *narrate* — the read/report commands
+(`list`, `status`, `drift`, …) print output rather than progress, and have
+carried their own `--json` for a long time.
+
+| Flag | Effect |
+|------|--------|
+| `-q`, `--quiet` | Drop the progress narration. Warnings and errors still print, on stderr — `--quiet` silences the commentary, never a failure. |
+| `--json` | Print a JSON result object on stdout instead of the narration, so `workloadctl update --all --json \| jq` is safe. |
+
+Progress goes to stdout, warnings and errors to stderr, so the two survive a
+redirect (`workloadctl update --all >run.log 2>errors.log`).
+
+A command's *output* — a `--dry-run` plan, `rollback --list`'s targets — is not
+narration and is never suppressed: with `--quiet` it still prints, and with
+`--json` it moves into the result object.
+
+### The result object
+
+Every mutating verb reports the same shape, so a script can treat them alike:
+
+```console
+$ sudo workloadctl update --all --json
+{
+  "command": "update",
+  "ok": true,
+  "workloads": [
+    {
+      "workload": "web",
+      "kind": "container",
+      "result": "updated",
+      "images": {
+        "web": {
+          "image": "docker.io/library/nginx:alpine",
+          "old": "sha256:1f2e3d4c5b6a",
+          "new": "sha256:9a8b7c6d5e4f"
+        }
+      },
+      "verify": "healthy"
+    },
+    {
+      "workload": "cache",
+      "kind": "container",
+      "result": "rolled-back",
+      "verify": "crashed"
+    },
+    {
+      "workload": "builder",
+      "kind": "container",
+      "result": "skipped",
+      "reason": "builder uses pull=never (local image) — build it manually"
+    }
+  ],
+  "summary": {
+    "updated": 1, "rolled-back": 1, "skipped": 1, "failed": 0, "unchanged": 0
+  }
+}
+```
+
+- `ok` is the command's overall verdict, and tracks the exit code. A rollback is
+  a *handled* outcome, not a failure: auto-rollback working as designed leaves
+  `ok: true` and exit 0. A failed pull, or a VM rebuild that didn't come back,
+  gives `ok: false` and exit 1.
+- `result` per workload is one of `enabled`, `already-running`, `disabled`,
+  `purged`, `started`, `stopped`, `restarted`, `rebooted`, `recreated`, `built`,
+  `updated`, `unchanged`, `skipped`, `failed`, `rolled-back`, `listed`, or
+  `dry-run`.
+- `reason` explains a `skipped` or `failed` row; `verify` carries the
+  post-restart health verdict; `images` the per-container old→new image IDs.
+- `summary` (update only) counts the rows by result.
+- A command that dies before it can report — bad arguments, not root, an
+  unexpected crash — still emits the document, with `ok: false` and an `error`
+  string. The human-readable diagnostic is on stderr, as always.
+
+---
+
 ## Targeting a Container in a Multi-Container Workload
 
 A workload may run more than one container (see [Multi-Container Workloads](workloads.md#multi-container-workloads)). Commands that operate on a container — `exec`, `shell`, `logs`, `health` — accept either the workload alone or a `<workload>/<container>` reference:

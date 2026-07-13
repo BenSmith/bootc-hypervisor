@@ -11,6 +11,7 @@ didn't come up is left honestly disabled.
 import subprocess
 import sys
 
+from cli_log import emit_result, error, info
 from workload_lib import workload_config_path, workload_enabled_marker
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
@@ -32,16 +33,16 @@ def cmd_enable(args, manager: WorkloadManager):
 
     config_path = workload_config_path(args.workload)
     if not config_path.exists():
-        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        error(f"Error: Workload config not found: {config_path}")
         sys.exit(1)
 
-    print(f"Enabling workload: {args.workload}")
+    info(f"Enabling workload: {args.workload}")
 
     # Mark enabled before the daemon-reload below: the boot/CLI generator only
     # emits this workload's units when the marker is present.
     workload_enabled_marker(args.workload).touch()
 
-    print("  Reloading systemd...")
+    info("  Reloading systemd...")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
 
     config = WorkloadConfig(args.workload)
@@ -50,10 +51,10 @@ def cmd_enable(args, manager: WorkloadManager):
     config.home_dir.mkdir(parents=True, exist_ok=True)
 
     if not preflight_checks(config):
-        print()
-        print("Pre-flight checks failed. Fix the issues above, then re-run enable.")
-        print(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
-        print(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
+        info()
+        info("Pre-flight checks failed. Fix the issues above, then re-run enable.")
+        info(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
+        info(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
         # Nothing was started, so revert to disabled by removing the marker.
         workload_enabled_marker(args.workload).unlink(missing_ok=True)
         subprocess.run(["systemctl", "daemon-reload"], check=False)
@@ -70,7 +71,7 @@ def cmd_enable(args, manager: WorkloadManager):
     except SelinuxPolicyError:
         sys.exit(1)
 
-    print()
+    info()
     # Generate first: the generator is the single producer of the sysusers
     # .conf + UID + units, and provision_user consumes what it writes. If it
     # can't produce this workload's units (UID exhaustion), revert to disabled
@@ -91,10 +92,16 @@ def cmd_enable(args, manager: WorkloadManager):
     ).returncode == 0
 
     if already_running:
-        print(f"✓ Workload '{args.workload}' setup complete (already running)")
-        print(f"  To apply config changes to the live container: sudo workloadctl recreate {args.workload}")
+        info(f"✓ Workload '{args.workload}' setup complete (already running)")
+        info(f"  To apply config changes to the live container: sudo workloadctl recreate {args.workload}")
     else:
-        print(f"✓ Workload '{args.workload}' enabled and starting")
-        print(f"  Check status: workloadctl status {args.workload}")
-        print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+        info(f"✓ Workload '{args.workload}' enabled and starting")
+        info(f"  Check status: workloadctl status {args.workload}")
+        info(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+
+    emit_result([{
+        "workload": args.workload,
+        "result": "already-running" if already_running else "enabled",
+        "service": config.service_name,
+    }])
 

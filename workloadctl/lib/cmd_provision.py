@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 
+from cli_log import error, info, warn
 from workload_lib import (
     selinux_module_name,
     selinux_type_name,
@@ -50,24 +51,24 @@ _BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
 def preflight_checks(config: WorkloadConfig) -> bool:
     """Run pre-flight checks for a workload. Returns True if all checks pass."""
-    print()
-    print("Running pre-flight checks...")
+    info()
+    info("Running pre-flight checks...")
     failed = False
 
     # Check required executables are available
     missing_required = [exe for exe in REQUIRED_EXECUTABLES if not shutil.which(exe)]
     if missing_required:
-        print("  ✗ Missing required executables:")
+        info("  ✗ Missing required executables:")
         for exe in missing_required:
-            print(f"    - {exe}")
+            info(f"    - {exe}")
         failed = True
 
     missing_recommended = [exe for exe in RECOMMENDED_EXECUTABLES if not shutil.which(exe)]
     if missing_recommended:
-        print("  ! Missing recommended executables (SELinux policy management):")
+        info("  ! Missing recommended executables (SELinux policy management):")
         for exe in missing_recommended:
-            print(f"    - {exe}")
-        print("    Install: dnf install policycoreutils-python-utils checkpolicy")
+            info(f"    - {exe}")
+        info("    Install: dnf install policycoreutils-python-utils checkpolicy")
 
     if config.is_vm:
         # VM-specific preflight: qemu, OVMF firmware, /dev/kvm, socat (for
@@ -77,28 +78,28 @@ def preflight_checks(config: WorkloadConfig) -> bool:
         vm_required = ["qemu-system-x86_64", "qemu-img", "socat"]
         missing_vm = [exe for exe in vm_required if not shutil.which(exe)]
         if missing_vm:
-            print("  ✗ Missing required VM executables:")
+            info("  ✗ Missing required VM executables:")
             for exe in missing_vm:
-                print(f"    - {exe}")
-            print("    Install: dnf install qemu-kvm socat")
+                info(f"    - {exe}")
+            info("    Install: dnf install qemu-kvm socat")
             failed = True
 
         if not Path("/dev/kvm").exists():
-            print("  ✗ /dev/kvm not found — KVM acceleration unavailable")
-            print("    Enable nested KVM or run on bare metal")
+            info("  ✗ /dev/kvm not found — KVM acceleration unavailable")
+            info("    Enable nested KVM or run on bare metal")
             failed = True
 
         from vm import find_ovmf_code
         if not find_ovmf_code():
-            print("  ✗ OVMF firmware (edk2-ovmf) not found")
-            print("    Install: dnf install edk2-ovmf")
+            info("  ✗ OVMF firmware (edk2-ovmf) not found")
+            info("    Install: dnf install edk2-ovmf")
             failed = True
 
         bridge_conf = Path("/etc/qemu/bridge.conf")
         bridge = config.vm_bridge
         if not bridge_conf.exists() or f"allow {bridge}" not in bridge_conf.read_text(errors="replace"):
-            print(f"  ! /etc/qemu/bridge.conf missing 'allow {bridge}'")
-            print("    Will be configured automatically on first enable via workload-ensure-user")
+            info(f"  ! /etc/qemu/bridge.conf missing 'allow {bridge}'")
+            info("    Will be configured automatically on first enable via workload-ensure-user")
 
         return not failed
 
@@ -106,13 +107,13 @@ def preflight_checks(config: WorkloadConfig) -> bool:
     # Check pull=never images exist locally (once per container)
     for _cname, image, pull in config.container_specs():
         if pull == "never" and not Podman.for_root().image_id(image):
-            print(f"  ✗ Image '{image}' not found locally and pull=never")
+            info(f"  ✗ Image '{image}' not found locally and pull=never")
             build_script = config.resolve_control_file("build.sh")
             if build_script.exists():
-                print("    Build the image first:")
-                print(f"      sudo {build_script}")
+                info("    Build the image first:")
+                info(f"      sudo {build_script}")
             else:
-                print("    Build or pull the image first, or change pull policy")
+                info("    Build or pull the image first, or change pull policy")
             failed = True
 
     # Check required files exist (declared in [setup].required_files)
@@ -134,22 +135,22 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             if hint and Path(hint).exists() and dest.resolve().is_relative_to(root_resolved):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(hint, dest)
-                print(f"  ✓ Copied config template: {dest}")
+                info(f"  ✓ Copied config template: {dest}")
             else:
                 still_missing.append(entry)
 
         if still_missing:
-            print("  ✗ Missing required files:")
+            info("  ✗ Missing required files:")
             for entry in still_missing:
-                print(f"    - {entry['path']}")
-            print()
-            print("  Create these files before enabling:")
+                info(f"    - {entry['path']}")
+            info()
+            info("  Create these files before enabling:")
             for entry in still_missing:
                 if entry["hint"]:
-                    print(f"    sudo cp {entry['hint']} \\")
-                    print(f"             {entry['path']}")
+                    info(f"    sudo cp {entry['hint']} \\")
+                    info(f"             {entry['path']}")
                 else:
-                    print(f"    # Create {entry['path']}")
+                    info(f"    # Create {entry['path']}")
             failed = True
 
     # Check volume paths exist
@@ -184,24 +185,24 @@ def preflight_checks(config: WorkloadConfig) -> bool:
 
         for path in auto_create:
             Path(path).mkdir(parents=True, exist_ok=True)
-            print(f"  ✓ Created volume directory: {path}")
+            info(f"  ✓ Created volume directory: {path}")
 
         if must_create:
-            print("  ✗ Missing volume directories (outside workload home):")
+            info("  ✗ Missing volume directories (outside workload home):")
             for path in must_create:
-                print(f"    - {path}")
-            print()
-            print("  Create these directories before enabling:")
+                info(f"    - {path}")
+            info()
+            info("  Create these directories before enabling:")
             for path in must_create:
-                print(f"    sudo mkdir -p {path}")
+                info(f"    sudo mkdir -p {path}")
             failed = True
 
     if missing_files:
-        print("  ✗ Missing volume files:")
+        info("  ✗ Missing volume files:")
         for path in missing_files:
-            print(f"    - {path}")
-        print()
-        print("  Create these files before enabling (see workload documentation).")
+            info(f"    - {path}")
+        info()
+        info("  Create these files before enabling (see workload documentation).")
         failed = True
 
     # Check extra groups exist
@@ -214,11 +215,11 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             missing_groups.append(group)
 
     if missing_groups:
-        print("  ✗ Missing groups:")
+        info("  ✗ Missing groups:")
         for group in missing_groups:
-            print(f"    - {group}")
-        print()
-        print("  These groups must exist on the system.")
+            info(f"    - {group}")
+        info()
+        info("  These groups must exist on the system.")
         failed = True
 
     # Check ip_unprivileged_port_start for host-mode workloads
@@ -227,15 +228,15 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             sysctl_path = Path("/proc/sys/net/ipv4/ip_unprivileged_port_start")
             unpriv_start = int(sysctl_path.read_text().strip())
             if unpriv_start > 0:
-                print(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
-                print(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
-                print("    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
+                info(f"  ! host-mode workload: ip_unprivileged_port_start={unpriv_start}")
+                info(f"    Binding ports below {unpriv_start} will fail with 'permission denied'.")
+                info("    Fix: echo 'net.ipv4.ip_unprivileged_port_start = 0' | "
                       "sudo tee /etc/sysctl.d/50-privileged-ports.conf && sudo sysctl --system")
         except Exception:
             pass
 
     if not failed:
-        print("  ✓ Pre-flight checks passed")
+        info("  ✓ Pre-flight checks passed")
 
     return not failed
 
@@ -251,10 +252,10 @@ def provision_user(config: WorkloadConfig):
     """
     sysusers_file = RUN_SYSTEMD_SYSTEM / f"workload-{config.name}.conf"
 
-    print("  Running systemd-sysusers...")
+    info("  Running systemd-sysusers...")
     subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
 
-    print("  Configuring workload user...")
+    info("  Configuring workload user...")
     subprocess.run(["/usr/libexec/workloadctl/workload-ensure-user", config.name], check=True)
 
 
@@ -290,9 +291,9 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
 
     if need_transfer:
         if user_image_id:
-            print(f"  Root store has an updated '{image}' (rebuild detected), re-transferring...")
+            info(f"  Root store has an updated '{image}' (rebuild detected), re-transferring...")
         else:
-            print(f"  Transferring '{image}' from root store to workload user store...")
+            info(f"  Transferring '{image}' from root store to workload user store...")
 
         # Use a temp file rather than a pipe.  podman save via pipe creates a
         # pipeDir in /var/tmp as root (mode 700); the target user can't access
@@ -308,10 +309,9 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 capture_output=True,
             )
             if save_result.returncode != 0:
-                print(
+                error(
                     f"Error: Failed to save image '{image}': "
                     f"{save_result.stderr.decode(errors='replace')}",
-                    file=sys.stderr,
                 )
                 sys.exit(1)
 
@@ -328,10 +328,9 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 cwd=config.home_dir,
             )
             if load_result.returncode != 0:
-                print(
+                error(
                     f"Error: Failed to transfer image '{image}': "
                     f"{load_result.stderr.decode(errors='replace')}",
-                    file=sys.stderr,
                 )
                 sys.exit(1)
         finally:
@@ -339,24 +338,24 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 os.unlink(tmp_path)
             except FileNotFoundError:
                 pass
-        print(f"  Image '{image}' transferred successfully")
+        info(f"  Image '{image}' transferred successfully")
         if user_image_id:
             active = subprocess.run(
                 ["systemctl", "is-active", "--quiet", config.service_name],
                 check=False
             )
             if active.returncode == 0:
-                print("  Note: container is still running the old image.")
-                print(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
+                info("  Note: container is still running the old image.")
+                info(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
     elif not user_image_id:
-        print()
-        print(f"Error: Image '{image}' not found locally and pull=never", file=sys.stderr)
+        info()
+        error(f"Error: Image '{image}' not found locally and pull=never")
         build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
-            print("Build the image first:", file=sys.stderr)
-            print(f"  sudo {build_script}", file=sys.stderr)
+            error("Build the image first:")
+            error(f"  sudo {build_script}")
         else:
-            print(f"Build or pull the image '{image}' first.", file=sys.stderr)
+            error(f"Build or pull the image '{image}' first.")
         sys.exit(1)
 
 
@@ -385,7 +384,7 @@ def generate_units(config: WorkloadConfig):
     other workload's units and enqueue a start job for each — disturbing
     bystanders and hiding their drift.
     """
-    print("  Generating service files...")
+    info("  Generating service files...")
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
          "--workload", config.name],
@@ -402,19 +401,18 @@ def generate_units(config: WorkloadConfig):
     # UID-range exhaustion (the one per-workload failure preflight can't catch).
     sysusers_file = RUN_SYSTEMD_SYSTEM / f"workload-{config.name}.conf"
     if not sysusers_file.exists():
-        print(
+        error(
             f"Error: workload-generate produced no units for '{config.name}' "
             f"(see the messages above; the usual cause is UID-range "
             f"exhaustion). Workload left disabled.",
-            file=sys.stderr,
         )
         raise LifecycleError(1)
 
 
 def start_service(config: WorkloadConfig):
     """Start the workload's umbrella service (units already generated)."""
-    print(f"  Starting {config.service_name}...")
-    print("  (Image pull may take a few minutes on first start)")
+    info(f"  Starting {config.service_name}...")
+    info("  (Image pull may take a few minutes on first start)")
     # A re-enabled unit name can still carry a `start-limit-hit` lockout from a
     # prior incarnation (StartLimitBurst survives userdel/purge), which would
     # refuse this fresh start. Clear it first; idempotent on a clean unit. The
@@ -439,17 +437,16 @@ def run_host_setup(config: WorkloadConfig, action: str):
     script_path = config.resolve_control_file(setup_script)
 
     if not script_path.exists():
-        print(f"  WARNING: Host setup script not found: {script_path}", file=sys.stderr)
+        warn(f"  WARNING: Host setup script not found: {script_path}")
         return
 
-    print(f"  Running host setup script ({action})...")
+    info(f"  Running host setup script ({action})...")
     result = subprocess.run(
         [str(script_path), action],
         capture_output=False,
     )
     if result.returncode != 0:
-        print(f"  Error: Host setup script exited with code {result.returncode}",
-              file=sys.stderr)
+        error(f"  Error: Host setup script exited with code {result.returncode}")
         if action == "enable":
             sys.exit(1)
 
@@ -489,8 +486,8 @@ def _print_available_bundles(bundle: str):
         return
     match = difflib.get_close_matches(bundle, available, n=1)
     if match:
-        print(f"         did you mean {match[0]!r}?", file=sys.stderr)
-    print("         available bundles: " + ", ".join(available), file=sys.stderr)
+        error(f"         did you mean {match[0]!r}?")
+    error("         available bundles: " + ", ".join(available))
 
 
 def apply_selinux_policy(config: WorkloadConfig, action: str):
@@ -515,21 +512,19 @@ def apply_selinux_policy(config: WorkloadConfig, action: str):
         # teardown — without tooling there's nothing we could remove anyway, so
         # never block it.
         if action != "disable" and _selinux_enforcing():
-            print(f"  ERROR: selinux_policy is set for '{config.name}' but SELinux tooling "
+            error(f"  ERROR: selinux_policy is set for '{config.name}' but SELinux tooling "
                   f"(semodule + container-selinux templates) is missing. The container "
                   f"would fail to start under enforcing mode. Install container-selinux "
-                  f"and policycoreutils, then re-run enable.",
-                  file=sys.stderr)
+                  f"and policycoreutils, then re-run enable.")
             raise SelinuxPolicyError(f"selinux tooling missing for '{config.name}'")
-        print(f"  WARNING: SELinux tooling (semodule + udica templates) not "
-              f"found; skipping policy {action} for '{config.name}'",
-              file=sys.stderr)
+        warn(f"  WARNING: SELinux tooling (semodule + udica templates) not "
+             f"found; skipping policy {action} for '{config.name}'")
         return
 
     if action == "disable":
         loaded = subprocess.run(["semodule", "-l"], capture_output=True, text=True)
         if module in loaded.stdout.split():
-            print(f"  Removing SELinux module {module}...")
+            info(f"  Removing SELinux module {module}...")
             subprocess.run(["semodule", "-r", module], check=False)
         return
 
@@ -541,39 +536,37 @@ def apply_selinux_policy(config: WorkloadConfig, action: str):
     bundle = config.selinux_bundle
     if bundle is None:
         # Reached only if a workload without selinux_policy is routed here.
-        print(f"  ERROR: no SELinux bundle resolved for '{config.name}' "
-              f"(selinux_policy not set)", file=sys.stderr)
+        error(f"  ERROR: no SELinux bundle resolved for '{config.name}' "
+              f"(selinux_policy not set)")
         raise SelinuxPolicyError(f"no SELinux bundle resolved for '{config.name}'")
     if not NAME_PATTERN.match(bundle):
         # bundle goes straight into a filesystem path; reject anything that
         # isn't a plain workload-style name (blocks traversal / odd values).
-        print(f"  ERROR: invalid [workload] bundle {bundle!r} "
-              f"(must match {NAME_PATTERN.pattern})", file=sys.stderr)
+        error(f"  ERROR: invalid [workload] bundle {bundle!r} "
+              f"(must match {NAME_PATTERN.pattern})")
         # Common footgun: users copy the SELinux *type* name (wl_foo_bar,
         # underscores) into `bundle`, but the bundle is a directory name
         # and dirs are hyphenated. Suggest the hyphenated form.
         if "_" in bundle:
-            print(f"         did you mean {bundle.replace('_', '-')!r}? "
+            error(f"         did you mean {bundle.replace('_', '-')!r}? "
                   f"(the bundle is a directory name and uses hyphens, not the "
-                  f"underscores of the SELinux type name)", file=sys.stderr)
+                  f"underscores of the SELinux type name)")
         raise SelinuxPolicyError(f"invalid bundle {bundle!r} for '{config.name}'")
     template = config.resolve_control_file("policy.cil")
     if not template.exists():
-        print(f"  ERROR: SELinux policy template not found: {template}",
-              file=sys.stderr)
+        error(f"  ERROR: SELinux policy template not found: {template}")
         _print_available_bundles(bundle)
         raise SelinuxPolicyError(f"policy template not found for '{config.name}'")
 
     bases = sorted(str(p) for p in UDICA_TEMPLATE_DIR.glob("*.cil"))
     src = template.read_text().replace("__WL_MODULE__", module)
 
-    print(f"  Installing SELinux module {module} (type {selinux_type_name(config.name)})...")
+    info(f"  Installing SELinux module {module} (type {selinux_type_name(config.name)})...")
     with tempfile.TemporaryDirectory() as work:
         cil = Path(work) / f"{module}.cil"
         cil.write_text(src)
         try:
             subprocess.run(["semodule", "-i", str(cil), *bases], check=True)
         except subprocess.CalledProcessError as e:
-            print(f"  Error: SELinux policy install failed (exit {e.returncode})",
-                  file=sys.stderr)
+            error(f"  Error: SELinux policy install failed (exit {e.returncode})")
             raise SelinuxPolicyError(f"semodule -i failed for '{config.name}'")

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 
+from cli_log import emit_result, error, info, json_enabled, partial, warn
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -60,12 +61,23 @@ def _do_rollback(config: WorkloadConfig, manager: WorkloadManager):
         if pod.image_id(tag):
             pod.tag(tag, image)
     restart_workload_service(config.uid, config.service_name)
-    print(f"  ✗ {config.name}: rolled back to previous image(s)")
+    info(f"  ✗ {config.name}: rolled back to previous image(s)")
 
 
 
-def _verify_all(updated: list, manager: WorkloadManager) -> int:
-    """Verify all updated workloads after restart. Returns number of rollbacks."""
+def _verify_all(updated: list, manager: WorkloadManager,
+                results: dict | None = None) -> int:
+    """Verify all updated workloads after restart. Returns number of rollbacks.
+
+    When `results` is given, each workload's verdict is recorded into it as
+    `{name: {"verify": <health|active|…>, "rolled_back": bool}}` — the detail
+    the --json result object reports per workload, which the rollback count
+    alone can't carry.
+    """
+    def verdict(config, state: str, rolled_back: bool = False) -> None:
+        if results is not None:
+            results[config.name] = {"verify": state, "rolled_back": rolled_back}
+
     # Wait time: max health check wait, minimum 5s for crash detection
     max_wait = 5
     for config, _ in updated:
@@ -80,10 +92,10 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
         parts.append(f"health checks: {', '.join(hc_names)}")
     if nhc_names:
         parts.append(f"service liveness: {', '.join(nhc_names)}")
-    print(f"Verifying updates ({'; '.join(parts)})...")
-    print(f"  Waiting {max_wait}s...", end="", flush=True)
+    info(f"Verifying updates ({'; '.join(parts)})...")
+    partial(f"  Waiting {max_wait}s...")
     time.sleep(max_wait)
-    print(" checking")
+    info(" checking")
 
     rolled_back = 0
     for config, old_ids in updated:
@@ -99,7 +111,8 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                         for local, pname, _h in hc_blocks}
 
             if all(s == "healthy" for s in statuses.values()):
-                print(f"  ✓ {config.name}: healthy")
+                info(f"  ✓ {config.name}: healthy")
+                verdict(config, "healthy")
             elif any(s == "starting" for s in statuses.values()) and have_old:
                 # One container is still starting — give it the longest
                 # remaining interval before declaring failure.
@@ -109,29 +122,33 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
                     if statuses[local] == "starting"
                 )
                 still = ", ".join(local for local, s in statuses.items() if s == "starting")
-                print(f"  ⏳ {config.name}: still starting ({still}), waiting {interval}s more...",
-                      end="", flush=True)
+                partial(f"  ⏳ {config.name}: still starting ({still}), "
+                        f"waiting {interval}s more...")
                 time.sleep(interval)
                 statuses = {local: pod.container_health(pname) or ""
                             for local, pname, _h in hc_blocks}
                 if all(s == "healthy" for s in statuses.values()):
-                    print(" healthy")
+                    info(" healthy")
+                    verdict(config, "healthy")
                 else:
                     detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                        if s != "healthy")
-                    print(f" {detail}")
+                    info(f" {detail}")
                     _do_rollback(config, manager)
+                    verdict(config, "unhealthy", rolled_back=True)
                     rolled_back += 1
             elif have_old:
                 detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                    if s != "healthy")
-                print(f"  ✗ {config.name}: {detail}")
+                info(f"  ✗ {config.name}: {detail}")
                 _do_rollback(config, manager)
+                verdict(config, "unhealthy", rolled_back=True)
                 rolled_back += 1
             else:
                 detail = ", ".join(f"{local_name}={s or 'unknown'}" for local_name, s in statuses.items()
                                    if s != "healthy")
-                print(f"  ⚠ {config.name}: {detail} (no previous image to roll back)")
+                warn(f"  ⚠ {config.name}: {detail} (no previous image to roll back)")
+                verdict(config, "unhealthy")
         else:
             # No health check — verify the service(s) survived. For
             # multi-container the umbrella is a oneshot (always "active"), so
@@ -140,13 +157,16 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
             failed = [u for u in units
                       if subprocess.run(["systemctl", "is-active", "--quiet", u]).returncode != 0]
             if not failed:
-                print(f"  ✓ {config.name}: active")
+                info(f"  ✓ {config.name}: active")
+                verdict(config, "active")
             elif have_old:
-                print(f"  ✗ {config.name}: service crashed ({', '.join(failed)})")
+                info(f"  ✗ {config.name}: service crashed ({', '.join(failed)})")
                 _do_rollback(config, manager)
+                verdict(config, "crashed", rolled_back=True)
                 rolled_back += 1
             else:
-                print(f"  ⚠ {config.name}: service crashed (no previous image to roll back)")
+                warn(f"  ⚠ {config.name}: service crashed (no previous image to roll back)")
+                verdict(config, "crashed")
 
     return rolled_back
 
@@ -198,6 +218,84 @@ def _update_plan(config: WorkloadConfig, manager: WorkloadManager) -> list[str]:
     return lines
 
 
+def _image_transitions(config: WorkloadConfig, old_ids: dict,
+                       manager: WorkloadManager) -> dict:
+    """Per-container old→new image IDs, for the --json result row."""
+    pod = manager.podman(config)
+    return {
+        cname: {
+            "image": image,
+            "old": old_ids.get(cname),
+            "new": pod.image_id(image),
+        }
+        for cname, image in config.container_images()
+    }
+
+
+def _reprovision_one(config: WorkloadConfig, manager: WorkloadManager, *,
+                     force: bool) -> tuple[dict, tuple | None]:
+    """Update one workload. Returns its --json result row plus the
+    (config, old_ids) tuple the verification phase consumes — None when there
+    is nothing to verify (a VM, a no-op update, a skip, a failure).
+
+    A failure becomes a row rather than an escaping exception: `update --all`
+    has to keep going and tally it, and the single-workload path wants the same
+    row to report before it exits nonzero.
+    """
+    substrate = get_substrate(config, manager)
+    is_vm = isinstance(substrate, VMSubstrate)
+    row = {
+        "workload": config.name,
+        "kind": "vm" if is_vm else "container",
+        "result": "unchanged",
+    }
+    try:
+        result = substrate.reprovision(force=force)
+    except NotApplicable as e:
+        row["result"] = "skipped"
+        row["reason"] = e.reason
+        return row, None
+    except ProvisionFailed as e:
+        row["result"] = "failed"
+        row["reason"] = str(e)
+        return row, None
+
+    if is_vm:
+        # VMs have no verification phase: reprovision either rebuilt and
+        # restarted the VM, or raised.
+        row["result"] = "updated"
+        return row, None
+    if result is None:
+        return row, None
+
+    row["result"] = "updated"
+    if json_enabled():
+        row["images"] = _image_transitions(config, result[1], manager)
+    return row, result
+
+
+def _apply_verdicts(rows: list[dict], verified: dict) -> None:
+    """Fold the verification phase's verdict into the result rows: a workload
+    that failed its post-restart check and was put back on its previous image
+    is 'rolled-back', not 'updated'."""
+    for row in rows:
+        v = verified.get(row["workload"])
+        if not v:
+            continue
+        row["verify"] = v["verify"]
+        if v["rolled_back"]:
+            row["result"] = "rolled-back"
+
+
+def _tally(rows: list[dict]) -> dict:
+    """Count rows by result — the JSON summary, and the source of the prose
+    counts, so the two can't disagree."""
+    return {
+        outcome: sum(1 for r in rows if r["result"] == outcome)
+        for outcome in ("updated", "rolled-back", "skipped", "failed", "unchanged")
+    }
+
+
 def cmd_update(args, manager: WorkloadManager):
     """Update workload image and restart"""
     require_root()
@@ -208,11 +306,22 @@ def cmd_update(args, manager: WorkloadManager):
         elif args.workload:
             configs = [WorkloadConfig(args.workload)]
         else:
-            print("Error: Workload name required (or use --all)", file=sys.stderr)
+            error("Error: Workload name required (or use --all)")
             sys.exit(1)
 
         if not configs:
-            print("No enabled workloads found")
+            if json_enabled():
+                emit_result([])
+            else:
+                print("No enabled workloads found")
+            return
+
+        if json_enabled():
+            emit_result([
+                {"workload": c.name, "result": "dry-run",
+                 "plan": _update_plan(c, manager)}
+                for c in configs
+            ])
             return
 
         print("Dry run — would update:")
@@ -226,66 +335,71 @@ def cmd_update(args, manager: WorkloadManager):
     if args.all:
         configs = manager.get_all_configs(enabled_only=True)
         if not configs:
-            print("No enabled workloads found")
+            info("No enabled workloads found")
+            emit_result([])
             return
 
-        # Phase 1: Reprovision all workloads
-        updated = []  # (config, old_ids) tuples — containers only, for verification
-        skipped = 0
-        container_failed = 0
-        vm_total = 0
-        vm_failed = 0
+        # Phase 1: reprovision every workload, tallying rather than aborting —
+        # one workload's failed pull must not strand the other seven.
+        rows = []
+        updated = []  # (config, old_ids) — containers only, for verification
         for config in configs:
-            substrate = get_substrate(config, manager)
-            is_vm = isinstance(substrate, VMSubstrate)
-            if is_vm:
-                vm_total += 1
-            try:
-                result = substrate.reprovision(force=args.force)
-                if result is not None:
-                    updated.append(result)
-            except NotApplicable:
-                skipped += 1
-            except ProvisionFailed:
-                if is_vm:
-                    vm_failed += 1
-                else:
-                    container_failed += 1
-            print()
+            row, verify_input = _reprovision_one(config, manager, force=args.force)
+            rows.append(row)
+            if verify_input is not None:
+                updated.append(verify_input)
+            info()
 
-        # Phase 2: Verify + rollback containers only
+        # Phase 2: verify + roll back containers only
+        verified: dict = {}
         rolled_back = 0
         if updated:
-            rolled_back = _verify_all(updated, manager)
+            rolled_back = _verify_all(updated, manager, verified)
+        _apply_verdicts(rows, verified)
 
-        done = f"Done: {len(updated) - rolled_back} updated, {rolled_back} rolled back, {skipped} skipped (pull=never)"
+        counts = _tally(rows)
+        containers = [r for r in rows if r["kind"] == "container"]
+        vms = [r for r in rows if r["kind"] == "vm"]
+        container_failed = sum(1 for r in containers if r["result"] == "failed")
+        vm_failed = sum(1 for r in vms if r["result"] == "failed")
+        container_updated = sum(1 for r in containers if r["result"] == "updated")
+
+        done = (f"Done: {container_updated} updated, {rolled_back} rolled back, "
+                f"{counts['skipped']} skipped (pull=never)")
         if container_failed:
             done += f", {container_failed} failed"
-        print(done)
-        if vm_total:
+        info(done)
+        if vms:
             # "updated" rather than "rebuilt": a pet VM is restarted in place
             # (system.qcow2 is never rotated), so "rebuilt" would misdescribe it.
-            print(f"VMs: {vm_total - vm_failed} updated, {vm_failed} failed")
+            info(f"VMs: {len(vms) - vm_failed} updated, {vm_failed} failed")
+
+        failed = container_failed + vm_failed
+        emit_result(rows, ok=not failed, summary=counts)
         # A failed update (VM rebuild, or a container pull/restart) must not be
         # silently reported as success — exit nonzero for scripted callers. VMs
         # additionally have no auto-rollback safety net.
-        if vm_failed or container_failed:
+        if failed:
             sys.exit(1)
     else:
         if not args.workload:
-            print("Error: Workload name required (or use --all)", file=sys.stderr)
+            error("Error: Workload name required (or use --all)")
             sys.exit(1)
         config = WorkloadConfig(args.workload)
-        substrate = get_substrate(config, manager)
-        try:
-            result = substrate.reprovision(force=args.force)
-        except NotApplicable as e:
-            print(f"Error: {e.reason}", file=sys.stderr)
+        row, verify_input = _reprovision_one(config, manager, force=args.force)
+
+        if row["result"] == "skipped":
+            error(f"Error: {row['reason']}")
+        if row["result"] in ("skipped", "failed"):
+            # The ProvisionFailed diagnostic is already on stderr; don't repeat it.
+            emit_result([row], ok=False)
             sys.exit(1)
-        except ProvisionFailed:
-            sys.exit(1)
-        if result is not None:
-            _verify_all([result], manager)
+
+        if verify_input is not None:
+            verified: dict = {}
+            _verify_all([verify_input], manager, verified)
+            _apply_verdicts([row], verified)
+        emit_result([row])
 
 
 def cmd_rollback(args, manager: WorkloadManager):
@@ -294,13 +408,17 @@ def cmd_rollback(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     if not manager.user_exists(config):
-        print(f"Error: user {config.username} does not exist (workload not enabled?)", file=sys.stderr)
+        error(f"Error: user {config.username} does not exist (workload not enabled?)")
         sys.exit(1)
 
     substrate = get_substrate(config, manager)
 
     if getattr(args, "list", False):
         targets = substrate.rollback_targets()
+        if json_enabled():
+            emit_result([{"workload": config.name, "result": "listed",
+                          "targets": targets}])
+            return
         if not targets:
             print(f"No rollback targets available for '{config.name}'.")
             return
@@ -310,3 +428,4 @@ def cmd_rollback(args, manager: WorkloadManager):
         return
 
     substrate.rollback()
+    emit_result([{"workload": config.name, "result": "rolled-back"}])

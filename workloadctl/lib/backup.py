@@ -13,10 +13,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
+from cli_log import error, info, warn
 from qmp import QMPClient
 from secrets_template import auto_detect_credentials
 from service_runtime import restart_workload_service
@@ -59,17 +59,16 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
         # Nothing running — fall back to cold copy (identical result, no QMP
         # needed).
         if not quiet:
-            print(f"  VM '{config.name}' is not active; using cold backup path.")
+            info(f"  VM '{config.name}' is not active; using cold backup path.")
         return backup_vm(config, output, quiet=quiet)
 
     # VM is running — pause vCPUs, copy durable disk + home, then resume.
     sock_path = VM_SOCKET_DIR / config.name / "qmp.sock"
     if not sock_path.exists():
-        print(
+        error(
             f"Error: QMP socket not found at {sock_path}. "
             f"Cannot safely copy a live qcow2 without pausing vCPUs. "
             f"Use --consistency cold to stop the VM first.",
-            file=sys.stderr,
         )
         raise BackupError(f"QMP socket not found for VM '{config.name}'")
 
@@ -84,32 +83,29 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
         except (OSError, ValueError) as exc:
             # TimeoutError/ConnectionError are OSError subclasses; ValueError
             # covers a malformed JSON greeting from the monitor.
-            print(
+            error(
                 f"Error: Could not connect to QMP for VM '{config.name}': {exc}. "
                 f"Cannot safely copy a live qcow2 without pausing vCPUs. "
                 f"Use --consistency cold to stop the VM first.",
-                file=sys.stderr,
             )
             raise BackupError(f"QMP unreachable for VM '{config.name}': {exc}")
 
         if not quiet:
-            print(f"  Pausing vCPUs for '{config.name}'...")
+            info(f"  Pausing vCPUs for '{config.name}'...")
         try:
             stop_reply = qmp.execute("stop")
         except (OSError, ValueError) as exc:
             # A protocol/socket fault here means the vCPUs were never paused, so
             # there is nothing to resume — fail the backup cleanly.
-            print(
+            error(
                 f"Error: QMP 'stop' failed for VM '{config.name}': {exc}. "
                 f"Use --consistency cold to stop the VM first.",
-                file=sys.stderr,
             )
             raise BackupError(f"QMP 'stop' failed for VM '{config.name}': {exc}")
         if "error" in stop_reply:
-            print(
+            error(
                 f"Error: QMP 'stop' failed for VM '{config.name}': {stop_reply['error']}. "
                 f"Use --consistency cold to stop the VM first.",
-                file=sys.stderr,
             )
             raise BackupError(
                 f"QMP 'stop' failed for VM '{config.name}': {stop_reply['error']}"
@@ -122,23 +118,21 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
         finally:
             # CRITICAL: always resume vCPUs, even if the copy raised.
             if not quiet:
-                print(f"  Resuming vCPUs for '{config.name}'...")
+                info(f"  Resuming vCPUs for '{config.name}'...")
             try:
                 cont_reply = qmp.execute("cont")
                 if "error" in cont_reply:
-                    print(
+                    error(
                         f"Warning: QMP 'cont' failed for '{config.name}': {cont_reply['error']}. "
                         f"The VM may remain paused — check with 'workloadctl status {config.name}'.",
-                        file=sys.stderr,
                     )
             except (OSError, ValueError) as exc:
                 # OSError covers ConnectionError; ValueError covers a malformed
                 # reply. Resume is best-effort — warn, never mask the backup or
                 # escape un-isolated.
-                print(
+                error(
                     f"Warning: Failed to resume vCPUs for '{config.name}': {exc}. "
                     f"The VM may remain paused — check with 'workloadctl status {config.name}'.",
-                    file=sys.stderr,
                 )
     finally:
         qmp.close()
@@ -161,7 +155,7 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
 
     if service_was_active and not no_stop:
         if not quiet:
-            print(f"  Stopping {service_name}...")
+            info(f"  Stopping {service_name}...")
         subprocess.run(["systemctl", "stop", service_name], check=True)
 
     try:
@@ -179,7 +173,7 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
                     if cred_path.exists():
                         shutil.copy2(cred_path, cred_dir / cred_path.name)
                     elif not quiet:
-                        print(f"  Warning: Credential '{cred_name}' not found, skipping")
+                        warn(f"  Warning: Credential '{cred_name}' not found, skipping")
 
             # Capture only the precious data/ subtree — for every substrate.
             # state/ (podman graphroot, VM system.qcow2 + gen snapshots,
@@ -213,7 +207,7 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
     finally:
         if service_was_active and not no_stop:
             if not quiet:
-                print(f"  Starting {service_name}...")
+                info(f"  Starting {service_name}...")
             # Containers: re-pin the runtime dir and tolerate start-limit thrash
             # when bringing the workload back up after the cold-backup stop.
             # VMs have no /run/user/<uid>, so start them plainly.
@@ -235,4 +229,4 @@ def print_backup_size(output: Path, size: int) -> None:
         size_str = f"{size / 1_000:.1f}K"
     else:
         size_str = f"{size}B"
-    print(f"  Backup: {output} ({size_str})")
+    info(f"  Backup: {output} ({size_str})")

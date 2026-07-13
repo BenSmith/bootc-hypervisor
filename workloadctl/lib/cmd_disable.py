@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 
+from cli_log import emit_result, error, info, json_enabled
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
     subid_lock,
@@ -97,7 +98,7 @@ def _stop_bridge_if_last_vm(config: WorkloadConfig, manager: WorkloadManager):
         check=False,
         capture_output=True,
     )
-    print("  Stopped shared VM bridge (no managed-bridge VMs remain)")
+    info("  Stopped shared VM bridge (no managed-bridge VMs remain)")
 
 
 def _dir_size(path: Path) -> str:
@@ -201,17 +202,22 @@ def cmd_disable(args, manager: WorkloadManager):
     purge = args.purge
 
     if getattr(args, "dry_run", False):
+        plan = _disable_plan(config, manager, purge)
+        if json_enabled():
+            emit_result([{"workload": args.workload, "result": "dry-run",
+                          "purge": purge, "plan": plan}])
+            return
         verb = "disable and purge" if purge else "disable"
         print(f"Dry run — would {verb} workload '{args.workload}':")
-        for line in _disable_plan(config, manager, purge):
+        for line in plan:
             print(f"  {line}")
         print("\nNothing was changed. Re-run without --dry-run to apply.")
         return
 
     if purge:
-        print(f"Disabling and purging workload: {args.workload}")
+        info(f"Disabling and purging workload: {args.workload}")
     else:
-        print(f"Disabling workload: {args.workload}")
+        info(f"Disabling workload: {args.workload}")
 
     # Every teardown/removal step below is attempted independently and
     # best-effort: a failure in one never skips the rest, so a half-provisioned
@@ -225,7 +231,7 @@ def cmd_disable(args, manager: WorkloadManager):
         except Exception as e:
             failures.append(f"{label}: {e}")
 
-    print(f"  Stopping {config.service_name}...")
+    info(f"  Stopping {config.service_name}...")
     attempt(f"stop {config.service_name}",
             lambda: subprocess.run(["systemctl", "stop", config.service_name], check=False))
 
@@ -312,11 +318,11 @@ def cmd_disable(args, manager: WorkloadManager):
         try:
             uid = pwd.getpwnam(config.username).pw_uid
         except KeyError:
-            print(f"  User {config.username} not present (nothing to remove)")
+            info(f"  User {config.username} not present (nothing to remove)")
 
         if uid is not None:
             try:
-                print(f"  Terminating user sessions for {config.username}...")
+                info(f"  Terminating user sessions for {config.username}...")
                 _stop_user_manager(config.username)
                 time.sleep(1)
                 # Kill any straggler processes (rootless podman, conmon, etc.)
@@ -345,7 +351,7 @@ def cmd_disable(args, manager: WorkloadManager):
                 failures.append(f"remove VM socket dir: {e}")
         else:
             try:
-                print("  Removing subuid/subgid entries...")
+                info("  Removing subuid/subgid entries...")
                 with subid_lock():
                     for file in ["/etc/subuid", "/etc/subgid"]:
                         p = Path(file)
@@ -358,7 +364,7 @@ def cmd_disable(args, manager: WorkloadManager):
 
         if uid is not None:
             try:
-                print(f"  Removing user {config.username}...")
+                info(f"  Removing user {config.username}...")
                 userdel = subprocess.run(["userdel", "-f", config.username],
                                          check=False, capture_output=True, text=True)
                 # userdel -f exits 0 even when it prints a warning about a
@@ -381,7 +387,7 @@ def cmd_disable(args, manager: WorkloadManager):
         workload_dir = workload_root_dir(config.name)
         if workload_dir.exists():
             try:
-                print(f"  Removing workload directory {workload_dir}...")
+                info(f"  Removing workload directory {workload_dir}...")
                 shutil.rmtree(workload_dir)
             except OSError as e:
                 failures.append(f"remove {workload_dir}: {e} "
@@ -399,16 +405,23 @@ def cmd_disable(args, manager: WorkloadManager):
         # re-establishes linger via workload-ensure-user.
         def _stop_lingering_user_manager():
             if _stop_user_manager(config.username):
-                print(f"  Stopped lingering user manager for {config.username}")
+                info(f"  Stopped lingering user manager for {config.username}")
         attempt("stop lingering user manager", _stop_lingering_user_manager)
         success_msg = f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)"
 
     attempt("stop shared VM bridge", lambda: _stop_bridge_if_last_vm(config, manager))
 
+    result = "purged" if purge else "disabled"
+
     if failures:
-        sys.stderr.write(f"  ! Disable of '{args.workload}' completed with errors:\n")
+        error(f"  ! Disable of '{args.workload}' completed with errors:")
         for f in failures:
-            sys.stderr.write(f"    - {f}\n")
+            error(f"    - {f}")
+        # Teardown is best-effort, so the workload really is (partly) down —
+        # the row says what was attempted and carries what didn't come apart.
+        emit_result([{"workload": args.workload, "result": result,
+                      "errors": failures}], ok=False)
         sys.exit(1)
 
-    print(success_msg)
+    info(success_msg)
+    emit_result([{"workload": args.workload, "result": result}])

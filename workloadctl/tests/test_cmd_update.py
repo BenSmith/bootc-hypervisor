@@ -66,8 +66,21 @@ class UpdateDispatchTest(unittest.TestCase):
         out = io.StringIO()
         err = io.StringIO()
         code = None
+
+        def fake_verify(updated, m, results=None):
+            # Honors the real _verify_all's contract: report the rollback count
+            # *and* record each workload's verdict, which is what the result
+            # rows — and so the printed tally — are built from.
+            if results is not None:
+                for entry in updated[:verify_returns]:
+                    cfg = entry[0]
+                    results[getattr(cfg, "name", cfg)] = {
+                        "verify": "crashed", "rolled_back": True,
+                    }
+            return verify_returns
+
         with mock.patch.object(cmd_update, "get_substrate", lambda c, m: c._sub), \
-             mock.patch.object(cmd_update, "_verify_all", lambda updated, m: verify_returns):
+             mock.patch.object(cmd_update, "_verify_all", fake_verify):
             try:
                 with redirect_stdout(out), redirect_stderr(err):
                     cmd_update.cmd_update(args, self.manager)
@@ -162,7 +175,7 @@ class UpdateDispatchTest(unittest.TestCase):
         with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg), \
              mock.patch.object(cmd_update, "get_substrate", lambda c, m: c._sub), \
              mock.patch.object(cmd_update, "_verify_all",
-                               lambda updated, m: seen.setdefault("updated", updated)):
+                               lambda updated, m, results=None: seen.setdefault("updated", updated)):
             cmd_update.cmd_update(_ns(all=False, workload="x"), self.manager)
         # The single success path feeds exactly its one result into verification.
         self.assertEqual(seen["updated"], [("x", {})])

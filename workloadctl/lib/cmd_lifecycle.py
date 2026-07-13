@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 import imagebuild
+from cli_log import emit_result, error, info
 from workload_lib import workload_config_path
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import get_substrate, service_active
@@ -52,14 +53,16 @@ def cmd_start(args, manager: WorkloadManager):
 
     config_path = workload_config_path(args.workload)
     if not config_path.exists():
-        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        error(f"Error: Workload config not found: {config_path}")
         sys.exit(1)
 
     config = WorkloadConfig(args.workload)
-    print(f"Starting {config.service_name}...")
+    info(f"Starting {config.service_name}...")
     substrate = get_substrate(config, manager)
     substrate.lifecycle("start")
-    print(f"✓ Workload '{args.workload}' started")
+    info(f"✓ Workload '{args.workload}' started")
+    emit_result([{"workload": args.workload, "result": "started",
+                  "service": config.service_name}])
 
 
 def cmd_stop(args, manager: WorkloadManager):
@@ -68,14 +71,16 @@ def cmd_stop(args, manager: WorkloadManager):
 
     config_path = workload_config_path(args.workload)
     if not config_path.exists():
-        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        error(f"Error: Workload config not found: {config_path}")
         sys.exit(1)
 
     config = WorkloadConfig(args.workload)
-    print(f"Stopping {config.service_name}...")
+    info(f"Stopping {config.service_name}...")
     substrate = get_substrate(config, manager)
     substrate.lifecycle("stop")
-    print(f"✓ Workload '{args.workload}' stopped")
+    info(f"✓ Workload '{args.workload}' stopped")
+    emit_result([{"workload": args.workload, "result": "stopped",
+                  "service": config.service_name}])
 
 
 def cmd_restart(args, manager: WorkloadManager):
@@ -84,14 +89,16 @@ def cmd_restart(args, manager: WorkloadManager):
 
     config_path = workload_config_path(args.workload)
     if not config_path.exists():
-        print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
+        error(f"Error: Workload config not found: {config_path}")
         sys.exit(1)
 
     config = WorkloadConfig(args.workload)
-    print(f"Restarting {config.service_name}...")
+    info(f"Restarting {config.service_name}...")
     substrate = get_substrate(config, manager)
     substrate.lifecycle("restart")
-    print(f"✓ Workload '{args.workload}' restarted")
+    info(f"✓ Workload '{args.workload}' restarted")
+    emit_result([{"workload": args.workload, "result": "restarted",
+                  "service": config.service_name}])
 
 
 def cmd_recreate(args, manager: WorkloadManager):
@@ -100,8 +107,8 @@ def cmd_recreate(args, manager: WorkloadManager):
     require_root()
     config = WorkloadConfig(args.workload)
 
-    print(f"Recreating workload: {args.workload}")
-    print("  Regenerating service files...")
+    info(f"Recreating workload: {args.workload}")
+    info("  Regenerating service files...")
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
          "--workload", config.name],
@@ -123,8 +130,10 @@ def cmd_recreate(args, manager: WorkloadManager):
         transfer_image(config, manager)
     substrate = get_substrate(config, manager)
     substrate.reprovision(recreate=True)
-    print(f"✓ Workload '{args.workload}' recreated")
-    print(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+    info(f"✓ Workload '{args.workload}' recreated")
+    info(f"  Watch logs: sudo journalctl -fu {config.service_name}")
+    emit_result([{"workload": args.workload, "result": "recreated",
+                  "service": config.service_name}])
 
 
 def _run_build(config: WorkloadConfig) -> int:
@@ -142,10 +151,9 @@ def _run_build(config: WorkloadConfig) -> int:
         return imagebuild.run_build_script(config)
     if config.has_build_context():
         return imagebuild.build_image(config)
-    print(f"Error: nothing to build for '{config.name}'", file=sys.stderr)
-    print("  No pull=never image with a resolvable Containerfile, and no "
-          "[build].script — this workload pulls a published image.",
-          file=sys.stderr)
+    error(f"Error: nothing to build for '{config.name}'")
+    error("  No pull=never image with a resolvable Containerfile, and no "
+          "[build].script — this workload pulls a published image.")
     return 1
 
 
@@ -154,21 +162,22 @@ def cmd_build(args, manager: WorkloadManager):
     require_root()
     config = WorkloadConfig(args.workload)
     if config.is_vm:
-        print(f"Error: 'build' applies to container workloads; '{config.name}' "
-              f"is a VM (provision via 'update'/'recreate').", file=sys.stderr)
+        error(f"Error: 'build' applies to container workloads; '{config.name}' "
+              f"is a VM (provision via 'update'/'recreate').")
         sys.exit(1)
 
     rc = _run_build(config)
     if rc != 0:
-        print(f"✗ Build failed (exit {rc})", file=sys.stderr)
+        error(f"✗ Build failed (exit {rc})")
         sys.exit(rc)
 
-    print()
-    print(f"✓ Built image for '{config.name}'")
+    info()
+    info(f"✓ Built image for '{config.name}'")
     if config.enabled:
-        print(f"  Apply to the running workload: sudo workloadctl recreate {config.name}")
+        info(f"  Apply to the running workload: sudo workloadctl recreate {config.name}")
     else:
-        print(f"  Enable when ready: sudo workloadctl enable {config.name}")
+        info(f"  Enable when ready: sudo workloadctl enable {config.name}")
+    emit_result([{"workload": config.name, "result": "built"}])
 
 
 def cmd_reboot(args, manager: WorkloadManager):
@@ -180,10 +189,12 @@ def cmd_reboot(args, manager: WorkloadManager):
     config = WorkloadConfig(args.workload)
 
     if not manager.user_exists(config):
-        print(f"Error: Workload user '{config.username}' does not exist", file=sys.stderr)
-        print("Is the workload enabled and running?", file=sys.stderr)
+        error(f"Error: Workload user '{config.username}' does not exist")
+        error("Is the workload enabled and running?")
         sys.exit(1)
 
-    print(f"Soft-rebooting workload: {args.workload}")
+    info(f"Soft-rebooting workload: {args.workload}")
     substrate = get_substrate(config, manager)
     substrate.lifecycle("reboot")
+    emit_result([{"workload": args.workload, "result": "rebooted",
+                  "service": config.service_name}])

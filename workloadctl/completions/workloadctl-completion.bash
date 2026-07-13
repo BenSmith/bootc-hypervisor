@@ -107,8 +107,12 @@ _workload_ctl_completion() {
             return 0
             ;;
         build|reboot|recreate)
-            # Complete with workload names (no extra flags)
-            COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            # Complete with the mutating-verb flags, or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-q --quiet --json" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
             return 0
             ;;
         edit)
@@ -145,7 +149,7 @@ _workload_ctl_completion() {
             ;;
         rollback)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--list" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--list -q --quiet --json" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
@@ -161,8 +165,12 @@ _workload_ctl_completion() {
             return 0
             ;;
         enable|start|stop|restart)
-            # Complete with workload names
-            COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            # Complete with the mutating-verb flags, or workload names
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-q --quiet --json" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
             return 0
             ;;
         exec)
@@ -202,9 +210,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         disable)
-            # Complete with --purge, --dry-run, or workload names
+            # Complete with --purge, --dry-run, the mutating-verb flags, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--purge --dry-run" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--purge --dry-run -q --quiet --json" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
@@ -220,9 +228,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         update)
-            # Complete with --force, --all, --dry-run, or workload names
+            # Complete with --force, --all, --dry-run, the mutating-verb flags, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--force --all --dry-run" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--force --all --dry-run -q --quiet --json" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
