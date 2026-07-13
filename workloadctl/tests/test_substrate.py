@@ -63,6 +63,15 @@ name = "test-vm"
 image = "example.com/guest:latest"
 """
 
+VM_TOML_WITH_MEMORY = """\
+[workload]
+name = "test-vm"
+
+[vm]
+image = "example.com/guest:latest"
+memory = "2048M"
+"""
+
 
 class _WorkloadDir:
     def __init__(self, toml=MINIMAL_TOML, name='test-wl'):
@@ -178,6 +187,73 @@ class TestVMStats(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             output = buf_out.getvalue() + buf_err.getvalue()
             self.assertIn('not applicable', output.lower())
+
+
+# ── VMSubstrate.resource_usage() — QMP-sourced stat row ──────────────────────
+
+class TestVMResourceUsage(unittest.TestCase):
+    """VMSubstrate.resource_usage() derives cpu_percent from two QMP samples
+    CPU_SAMPLE_SECONDS apart; mem_usage comes from the balloon, mem_limit from
+    [vm].memory; net/block/pids are always None (no source)."""
+
+    def _make_config(self):
+        return _make_config(VM_TOML_WITH_MEMORY, 'test-vm')
+
+    def test_cpu_percent_derived_from_vcpu_seconds_delta(self):
+        config = self._make_config()
+        substrate = VMSubstrate(config, None)
+        first = {"vcpu_0_cpu_seconds_total": 1.0, "vcpu_1_cpu_seconds_total": 1.0,
+                 "balloon_actual_bytes": 123456}
+        second = {"vcpu_0_cpu_seconds_total": 1.2, "vcpu_1_cpu_seconds_total": 1.3,
+                  "balloon_actual_bytes": 123456}
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
+             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+            rows = substrate.resource_usage([], json_out=True)
+        mock_sleep.assert_called_once_with(VMSubstrate.CPU_SAMPLE_SECONDS)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        # delta = (1.2+1.3) - (1.0+1.0) = 0.5 over 0.5s → 100%.
+        self.assertAlmostEqual(row['cpu_percent'], 100.0)
+
+    def test_json_row_mem_usage_from_balloon_net_block_pids_none(self):
+        config = self._make_config()
+        substrate = VMSubstrate(config, None)
+        first = {"vcpu_0_cpu_seconds_total": 1.0, "balloon_actual_bytes": 555555}
+        second = {"vcpu_0_cpu_seconds_total": 1.0, "balloon_actual_bytes": 555555}
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'get_vm_qmp_metrics', side_effect=[first, second]), \
+             patch.object(_substrate_mod.time, 'sleep'):
+            rows = substrate.resource_usage([], json_out=True)
+        row = rows[0]
+        self.assertEqual(row['mem_usage'], 555555)
+        self.assertEqual(row['mem_limit'], 2048 * 1024 * 1024)
+        self.assertEqual(row['container'], None)
+        self.assertIsNone(row['net_input'])
+        self.assertIsNone(row['net_output'])
+        self.assertIsNone(row['block_input'])
+        self.assertIsNone(row['block_output'])
+        self.assertIsNone(row['pids'])
+
+    def test_empty_first_sample_raises_not_applicable(self):
+        config = self._make_config()
+        substrate = VMSubstrate(config, None)
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'get_vm_qmp_metrics', return_value={}) as mock_qmp, \
+             patch.object(_substrate_mod.time, 'sleep') as mock_sleep:
+            with self.assertRaises(NotApplicable):
+                substrate.resource_usage([], json_out=True)
+        mock_qmp.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_follow_raises_not_applicable(self):
+        config = self._make_config()
+        substrate = VMSubstrate(config, None)
+        with _patch_uid(10001), \
+             patch.object(_substrate_mod, 'get_vm_qmp_metrics') as mock_qmp:
+            with self.assertRaises(NotApplicable):
+                substrate.resource_usage([], follow=True)
+        mock_qmp.assert_not_called()
 
 
 # ── --consistency seam: VMSubstrate.capture() ────────────────────────────────
@@ -738,11 +814,11 @@ class TestContainerResourceUsage(unittest.TestCase):
         return ContainerSubstrate(config, manager)
 
     def test_json_returns_result(self):
-        """json_out path returns the raw subprocess result to the caller."""
+        """json_out path returns a list of normalized STAT_ROW_KEYS rows."""
         result = _ok(stdout='[]')
         substrate = self._substrate(result)
         returned = substrate.resource_usage(['test-wl'], json_out=True)
-        self.assertIs(returned, result)
+        self.assertEqual(returned, [])
 
     def test_stream_returns_none(self):
         """Non-json (streaming) path returns None."""
@@ -1148,13 +1224,15 @@ class TestCapabilityMatrix(unittest.TestCase):
     def _container_config(self):
         return _make_config(SINGLE_TOML, 'test-wl')
 
-    # VMSubstrate: resource_usage absent → NotApplicable
+    # VMSubstrate.resource_usage is implemented (sourced from QMP), so a VM
+    # that isn't running raises NotApplicable naming the QMP socket, not the
+    # generic "no primitive" reason.
     def test_vm_resource_usage_raises_not_applicable(self):
         substrate = VMSubstrate(self._vm_config(), None)
         with self.assertRaises(NotApplicable) as cm:
             substrate.resource_usage([])
         self.assertIn('resource_usage', cm.exception.reason)
-        self.assertIn('VMs', cm.exception.reason)
+        self.assertIn('QMP', cm.exception.reason)
 
     # VMSubstrate: logs runs the host-journal command directly (a VM's QEMU
     # service journal is on the host journal, same as a container's service).

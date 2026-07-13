@@ -246,12 +246,15 @@ This is idempotent — safe to re-run if a previous enable was interrupted.
 Stop the workload service and remove its `.enabled` marker (`/etc/workloads.d/<name>/.enabled`), so the generator stops emitting its units.
 
 ```
-sudo workloadctl disable [--purge] <workload>
+sudo workloadctl disable [--purge] [--dry-run] <workload>
 ```
 
 | Option | Description |
 |---|---|
 | `--purge` | Also delete the workload user, home directory, and subuid/subgid entries |
+| `--dry-run` | Print the teardown plan and exit without changing anything |
+
+`--dry-run` enumerates exactly what teardown would touch — the units it would stop, the generated unit files it would remove, and (with `--purge`) the subuid/subgid entries, the user, and the data directory with its size. It reports only what is actually present, so anything it doesn't list, `disable` won't touch.
 
 [↑ top](#workloadctl-command-reference)
 
@@ -340,13 +343,16 @@ Values that flow through `EnvironmentFile=` (`XDG_RUNTIME_DIR`, `HOST_IP`, decry
 Pull the latest image and restart the workload.
 
 ```
-sudo workloadctl update [--force] [--all] [<workload>]
+sudo workloadctl update [--force] [--all] [--dry-run] [<workload>]
 ```
 
 | Option | Description |
 |---|---|
 | `--force` | Restart even if the image hasn't changed |
 | `--all` | Update all enabled workloads (skips `pull=never` containers) |
+| `--dry-run` | Print what would be pulled and restarted, without changing anything |
+
+`--dry-run` names the images it would pull (with the image ID each would roll back to), the workloads it would skip as `pull=never`, and the services it would restart. It does not contact the registry, so it reports the plan rather than predicting whether a pull would actually find a new image.
 
 **Container workloads:** Pulls the latest image, restarts, then monitors health checks (or service liveness) and automatically rolls back on failure. With `--all`, all workloads are pulled and restarted first, then verified in a single wait period.
 
@@ -486,8 +492,10 @@ workloadctl stats [--json] [-f] [<workload>]
 
 | Option | Description |
 |---|---|
-| `-f` / `--follow` | Keep updating (live view); incompatible with `--json` |
+| `-f` / `--follow` | Keep updating (live view); incompatible with `--json` and with VM workloads |
 | `--json` | Output raw numeric stats as JSON |
+
+**Container workloads** are measured with `podman stats`. **VM workloads** are measured over QEMU's read-only QMP monitor: CPU percent is derived from the vCPU thread times sampled twice, memory from the guest's balloon against the configured `[vm] memory`. A VM reports `null` for network and block I/O — QEMU is not asked for them, and a zero would read as an idle disk rather than as a gap.
 
 [↑ top](#workloadctl-command-reference)
 

@@ -155,6 +155,8 @@ def main():
     disable_parser.set_defaults(func=cmd_disable)
     disable_parser.add_argument("--purge", action="store_true",
                                help="Also remove user, home, and subuid/subgid")
+    disable_parser.add_argument("--dry-run", action="store_true",
+                               help="Print the teardown plan without changing anything")
     disable_parser.add_argument("workload", help="Workload name")
 
     edit_parser = subparsers.add_parser("edit", help="Edit config, or a named control file (copy-on-write override)")
@@ -343,6 +345,8 @@ def main():
     update_parser.set_defaults(func=cmd_update)
     update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
+    update_parser.add_argument("--dry-run", action="store_true",
+                               help="Print what would be pulled and restarted, without changing anything")
     update_parser.add_argument("workload", nargs="?", help="Workload name")
 
     validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")

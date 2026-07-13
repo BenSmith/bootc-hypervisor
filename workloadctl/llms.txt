@@ -21,6 +21,8 @@ The system has four main components:
 
    **Exit-code boundary (enforced): the library core raises, only the CLI leaf exits.** `sys.exit()` is allowed in `bin/workloadctl` and `lib/cmd_*.py`, and nowhere else in `lib/`. Everything else — `workload_lib`, `workloadctl_core`, `substrate`, `podman`, `qmp`, `unit_file`, `validation`, `vm`, `secrets_template`, `service_runtime`, `imagebuild` — raises a typed exception, and `_run_cli()` in `bin/workloadctl` maps it to a code: `UsageError` → 2, `LifecycleError` → the returncode of the systemctl/podman call that failed, `NotRoot`/`ProvisionFailed`/`WorkloadMasked`/`WorkloadUserNotFound`/`FileNotFoundError` → 1, anything else → traceback + "this looks like a workloadctl bug". `ProvisionFailed`, `BackupError` and `NotApplicable` are also caught at call sites that must keep going (`update --all` tallies per-workload failures rather than dying on the first). The reason is that `SystemExit` inherits `BaseException` so it passes straight through `except Exception:` — harmless at a leaf, a trapdoor in a helper, which takes the process down past a caller that meant to recover. `tests/test_layering.py` walks the AST of every non-`cmd_` module in `lib/` and fails the suite if a `sys.exit`/`os._exit` call appears, so this is a checked invariant, not a convention.
 
+   **`--dry-run` exists only where a truthful plan can be computed** — `disable` (`_disable_plan`) and `update` (`_update_plan`), plus `cleanup`, which defaults to it. Both plans are built read-only *before* any mutation and returned as lines, rather than by walking the real teardown with the writes switched off: a plan that shares the mutating path is only as trustworthy as the last guard someone remembered to add. They enumerate from the same sources the real path acts on (`workload_run_files`, the passwd db, `/etc/subuid`, the data dir) and report only what is actually present, so what a plan doesn't list, the command won't touch. The other mutating verbs deliberately have no `--dry-run`: for most of them "would restart the service" is a restatement of the verb, not a plan, and a dry-run that cannot be wrong teaches operators to trust it. Applying a config edit is `recreate`, and previewing that edit is `drift` (which already generates into a temp dir and diffs) — not a third flag.
+
 ### Boot Flow
 
 ```
@@ -83,7 +85,9 @@ Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workl
 
 The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `control`, `gating_units` — and two implementations, `ContainerSubstrate` and `VMSubstrate`. `get_substrate(config, manager)` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
 
-A substrate declares the primitives it supports in a `PRIMITIVES` frozenset; optional primitives absent from it (`resource_usage`, `endpoints`, `reprovision`) auto-raise `NotApplicable` with a generated reason via one base-class check. This makes the `(verb, substrate)` capability matrix **computed, not maintained**: e.g. `stats` on a VM reports a self-documenting "not applicable" instead of running `podman stats` against a nonexistent container. `VMSubstrate` omits `resource_usage`/`logs`/`endpoints`; `ContainerSubstrate` supports all three.
+Required primitives are `@abstractmethod`s, so a substrate cannot exist without them. Optional ones (`resource_usage`, `logs`, `endpoints`, `reprovision`) have a base-class default that raises `NotApplicable` with a self-documenting reason, and a substrate opts in by overriding. The `(verb, substrate)` capability matrix is therefore **declared by what each class defines**, not maintained as a list: a verb a substrate can't serve reports "not applicable" rather than running a nonsensical command against it. `ContainerSubstrate` overrides `resource_usage`/`endpoints`/`reprovision`; `VMSubstrate` overrides `resource_usage` (sourced from QMP, see below) and `reprovision`, and leaves `logs`/`endpoints` at the default.
+
+`resource_usage(json_out=True)` returns normalized rows keyed by `STAT_ROW_KEYS`, uniform across substrates so `stats --json` has one schema. A substrate with no source for a key reports `None`, not `0` — a VM has no block-I/O figure because nothing asks QEMU for `query-blockstats`, and a zero there would read as an idle disk rather than as a gap. The VM row is read from `qmp-metrics.sock` (the dedicated read-only monitor the Prometheus exporter also scrapes) via `lib/vm_metrics.py`, never from the control socket `qmp.sock`: a QMP monitor serves one client at a time, so a competing reader there could block `ExecStop`'s `system_powerdown` and force an unclean SIGKILL.
 
 `gating_units()` is a diagnostics primitive: it names the systemd units that must succeed *before* the main service starts. Containers return `[]` (setup is an `ExecStartPre` on the main unit, so a failure surfaces there directly); a VM returns its `workload-<name>-setup.service` + `workload-<name>-build.service`, which run as separate `RemainAfterExit=yes` units. `status`/`_effective_state` walk these so a failed setup/build is reported as `failed` and the culprit unit is named, instead of the main service showing a bland `inactive`/`dependency failed` with the real cause buried.
 
@@ -151,12 +155,12 @@ loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
 | `workloadctl duplicate <src> <new>` | Copy a live workload (alias `clone`); resolves `bundle` to the source's, lints host-global settings |
 | `workloadctl create` | Scaffold a from-scratch workload TOML from flags (`--image …`) |
 | `workloadctl enable` | Create user, transfer image, start service |
-| `workloadctl disable` | Stop service, optionally purge user/data |
+| `workloadctl disable` | Stop service, optionally purge user/data (`--dry-run` prints the teardown plan) |
 | `workloadctl start` | Start workload service |
 | `workloadctl stop` | Stop workload service |
 | `workloadctl restart` | Bounce the workload service (keeps the container overlay / VM disks + seed; does **not** apply TOML edits — that's `recreate`) |
 | `workloadctl reboot` | Restart the workload (container: keeps the overlay; VM: guest reboot) |
-| `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure) |
+| `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure; `--dry-run` prints what it would pull and restart) |
 | `workloadctl recreate` | Recreate from current config (destroys a cattle overlay; rotates VM `system.qcow2`) |
 | `workloadctl rollback` | Roll back to the previous image (VM: restore previous disk generation); `--list` shows targets |
 | `workloadctl status` | Show workload status |
@@ -170,7 +174,7 @@ loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
 | `workloadctl validate` | Validate TOML config (static, declaration-level) |
 | `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux), emits fixes |
 | `workloadctl drift` | Show drift between generated and deployed systemd unit files (exits 1 if out of sync) |
-| `workloadctl stats` | Show live resource usage (containers; N/A for VMs) |
+| `workloadctl stats` | Show live resource usage (containers via podman; VMs via QMP, no `--follow`) |
 | `workloadctl health` | Check health status (scriptable exit code) |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |
 | `workloadctl backup` | Backup config, overrides, and durable data; `--consistency {cold,crash}` for VMs |
@@ -215,6 +219,7 @@ libexec/workload-metrics           # Prometheus metrics exporter
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
+lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 workloads/<bundle>/                # Shipped bundles: workload.toml (template declaration)
                                    #   co-located with control files (Containerfile, build.sh,
                                    #   setup.sh, policy.cil, cloud-init user-data — any subset)

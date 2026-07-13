@@ -155,9 +155,73 @@ def _verify_all(updated: list, manager: WorkloadManager) -> int:
 # Commands
 # ---------------------------------------------------------------------------
 
+def _update_plan(config: WorkloadConfig, manager: WorkloadManager) -> list[str]:
+    """The work `update` would do for one workload, as printable lines.
+
+    Reports the plan, not its outcome: whether a pull actually produces a new
+    image is only knowable by doing it, so this names the images it would pull
+    and the image ID each would roll back to, and stops short of predicting the
+    result. Read-only — no pull, no restart.
+    """
+    lines = []
+
+    if config.is_vm:
+        if config.lifecycle == "pet":
+            lines.append("rebuild the system disk in place (pet: no generation rotation)")
+        else:
+            lines.append("rebuild the system disk as a new generation (previous kept for rollback)")
+        lines.append(f"restart {config.service_name} (VM power-cycle; no auto-rollback on failure)")
+        return lines
+
+    specs = config.container_specs()
+    pullable = [(c, image, pull) for c, image, pull in specs if pull != "never"]
+    if not pullable:
+        lines.append("nothing to pull (every image is pull=never) — update would skip this workload")
+        return lines
+
+    user_present = manager.user_exists(config)
+    pod = manager.podman(config) if user_present else None
+    for cname, image, pull in specs:
+        if pull == "never":
+            lines.append(f"skip {image} (pull=never, built locally)")
+            continue
+        current = pod.image_id(image) if pod else None
+        current_str = f"current {current[:19]}" if current else "not present locally"
+        lines.append(f"pull {image} (pull={pull}, {current_str})")
+
+    if config.lifecycle == "pet":
+        lines.append(f"snapshot the container overlay before recreating "
+                     f"(pet, keeping {config.snapshot_keep})")
+    lines.append(f"restart {config.service_name} if any image changed")
+    if user_present:
+        lines.append("verify health after restart, and roll back to the current image on failure")
+    return lines
+
+
 def cmd_update(args, manager: WorkloadManager):
     """Update workload image and restart"""
     require_root()
+
+    if getattr(args, "dry_run", False):
+        if args.all:
+            configs = manager.get_all_configs(enabled_only=True)
+        elif args.workload:
+            configs = [WorkloadConfig(args.workload)]
+        else:
+            print("Error: Workload name required (or use --all)", file=sys.stderr)
+            sys.exit(1)
+
+        if not configs:
+            print("No enabled workloads found")
+            return
+
+        print("Dry run — would update:")
+        for config in configs:
+            print(f"  {config.name}:")
+            for line in _update_plan(config, manager):
+                print(f"    {line}")
+        print("\nNothing was changed. Re-run without --dry-run to apply.")
+        return
 
     if args.all:
         configs = manager.get_all_configs(enabled_only=True)

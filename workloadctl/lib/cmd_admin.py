@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 from workload_lib import (
+    CREDSTORE_DIR,
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
     HOST_USERNS_OPT_IN,
@@ -30,6 +31,7 @@ from validation import (
     validate_workload_config,
     validate_workload_name,
 )
+from secrets_template import auto_detect_credentials
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -77,6 +79,52 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "severity": "ok",
             "message": "Schema valid"
         })
+
+    # Credential validation — `${SECRET:name}` references are resolved by
+    # substituting a file's contents at container-start time, so a typo or a
+    # never-created secret otherwise surfaces as a cryptic namespace/ExecStart
+    # failure well after boot. Cross-check what the config demands against
+    # what's actually in the credstore so it's a named, config-time error
+    # instead. /etc/credstore.encrypted is root-only (0700) and `validate`
+    # doesn't require root, so a permission failure here means "can't tell"
+    # rather than "missing" — report that as a warning, not false errors.
+    demanded = auto_detect_credentials(config.config)
+    if not demanded:
+        checks.append({
+            "check": "credentials",
+            "passed": True,
+            "severity": "ok",
+            "message": "No credential references"
+        })
+    else:
+        try:
+            missing = sorted(name for name in demanded if not (CREDSTORE_DIR / name).exists())
+        except OSError:
+            checks.append({
+                "check": "credentials",
+                "passed": True,
+                "severity": "warning",
+                "message": "Cannot verify credentials as non-root; re-run with sudo"
+            })
+            warnings += 1
+        else:
+            if missing:
+                for name in missing:
+                    checks.append({
+                        "check": "credentials",
+                        "passed": False,
+                        "severity": "error",
+                        "message": f"Missing credential: {name}",
+                        "fix": f"sudo workloadctl secret set {name}"
+                    })
+                    errors += 1
+            else:
+                checks.append({
+                    "check": "credentials",
+                    "passed": True,
+                    "severity": "ok",
+                    "message": f"Credentials present: {', '.join(sorted(demanded))}"
+                })
 
     username_len = len(config.username)
     if username_len >= 32:

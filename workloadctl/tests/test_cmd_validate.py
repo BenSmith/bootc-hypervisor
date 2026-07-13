@@ -11,12 +11,16 @@ itself is stubbed so each test controls pass/fail directly.
 import argparse
 import io
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
 from unittest import mock
 
 
 import cmd_admin  # noqa: E402
+import workload_lib  # noqa: E402
+from workloadctl_core import WorkloadConfig, WorkloadManager  # noqa: E402
 
 
 def _ns(**kw):
@@ -102,6 +106,87 @@ class ValidateDispatchTest(unittest.TestCase):
         doc = json.loads(self._out)
         self.assertEqual(doc["workload"], "web")
         self.assertTrue(doc["passed"])
+
+
+class ValidateSingleCredentialsTest(unittest.TestCase):
+    """validate_single cross-checks ${SECRET:name} references against the
+    credstore so a missing secret is a named, config-time error instead of a
+    cryptic namespace/ExecStart failure at service-start time."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        self.credstore = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(cmd_admin, "CREDSTORE_DIR", self.credstore))
+
+    def _validate(self, name, toml):
+        (self.tmp / name).mkdir()
+        (self.tmp / name / "workload.toml").write_text(toml)
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+        return cmd_admin.validate_single(config, manager, json_mode=True)
+
+    def test_no_secret_refs_ok(self):
+        result = self._validate(
+            "clitest-nosecret",
+            '[workload]\nname = "clitest-nosecret"\n\n'
+            '[container]\nimage = "x:latest"\n',
+        )
+        creds = [c for c in result["checks"] if c["check"] == "credentials"]
+        self.assertEqual(len(creds), 1)
+        self.assertTrue(creds[0]["passed"])
+        self.assertEqual(creds[0]["message"], "No credential references")
+
+    def test_all_refs_present_ok(self):
+        (self.credstore / "dbpass").write_text("secret")
+        result = self._validate(
+            "clitest-present",
+            '[workload]\nname = "clitest-present"\n\n'
+            '[container]\nimage = "x:latest"\n'
+            '[container.environment]\nDB_PASS = "${SECRET:dbpass}"\n',
+        )
+        creds = [c for c in result["checks"] if c["check"] == "credentials"]
+        self.assertEqual(len(creds), 1)
+        self.assertTrue(creds[0]["passed"])
+        self.assertIn("dbpass", creds[0]["message"])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["errors"], 0)
+
+    def test_missing_ref_errors(self):
+        result = self._validate(
+            "clitest-missing",
+            '[workload]\nname = "clitest-missing"\n\n'
+            '[container]\nimage = "x:latest"\n'
+            '[container.environment]\nDB_PASS = "${SECRET:dbpass}"\n',
+        )
+        creds = [c for c in result["checks"] if c["check"] == "credentials"]
+        self.assertTrue(creds and not creds[0]["passed"])
+        self.assertIn("dbpass", creds[0]["message"])
+        self.assertFalse(result["passed"])
+        self.assertGreaterEqual(result["errors"], 1)
+
+    def test_permission_error_warns_not_errors(self):
+        class _NoPermDir:
+            """Stands in for a 0700 credstore this process can't read into."""
+            def __truediv__(self, other):
+                raise PermissionError(13, "Permission denied")
+
+        with mock.patch.object(cmd_admin, "CREDSTORE_DIR", _NoPermDir()):
+            result = self._validate(
+                "clitest-noperm",
+                '[workload]\nname = "clitest-noperm"\n\n'
+                '[container]\nimage = "x:latest"\n'
+                '[container.environment]\nDB_PASS = "${SECRET:dbpass}"\n',
+            )
+        creds = [c for c in result["checks"] if c["check"] == "credentials"]
+        self.assertEqual(len(creds), 1)
+        self.assertEqual(creds[0]["severity"], "warning")
+        self.assertTrue(creds[0]["passed"])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["errors"], 0)
+        self.assertGreaterEqual(result["warnings"], 1)
 
 
 if __name__ == "__main__":

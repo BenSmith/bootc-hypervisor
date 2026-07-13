@@ -168,6 +168,69 @@ class UpdateDispatchTest(unittest.TestCase):
         self.assertEqual(seen["updated"], [("x", {})])
 
 
+def _plan_cfg(name, *, is_vm=False, lifecycle="cattle", specs=None, service_name=None):
+    """A Mock shaped like the WorkloadConfig surface _update_plan reads."""
+    c = mock.Mock()
+    c.name = name
+    c.is_vm = is_vm
+    c.lifecycle = lifecycle
+    c.service_name = service_name or f"workload-{name}.service"
+    if specs is not None:
+        c.container_specs.return_value = specs
+    return c
+
+
+class UpdateDryRunTest(unittest.TestCase):
+    """--dry-run must plan without touching the substrate."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.object(cmd_update, "require_root", lambda: None))
+        self.manager = mock.Mock()
+
+    def _run(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                cmd_update.cmd_update(args, self.manager)
+        except SystemExit as e:
+            code = e.code
+        return out.getvalue(), err.getvalue(), code
+
+    def test_does_not_reprovision(self):
+        cfg = _plan_cfg("x", specs=[("x", "example.com/x:latest", "always")])
+        self.manager.user_exists.return_value = False
+        substrate_mock = mock.Mock()
+        with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg), \
+             mock.patch.object(cmd_update, "get_substrate", lambda c, m: substrate_mock):
+            out, err, code = self._run(_ns(all=False, workload="x", dry_run=True))
+        substrate_mock.reprovision.assert_not_called()
+        self.assertIsNone(code)
+
+    def test_pull_never_only_reports_skip(self):
+        cfg = _plan_cfg("x", specs=[("x", "example.com/x:latest", "never")])
+        with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg):
+            out, err, code = self._run(_ns(all=False, workload="x", dry_run=True))
+        self.assertIn("update would skip this workload", out)
+        self.assertIsNone(code)
+
+    def test_all_covers_every_enabled_workload(self):
+        cfg_a = _plan_cfg("a", specs=[("a", "example.com/a:latest", "never")])
+        cfg_b = _plan_cfg("b", specs=[("b", "example.com/b:latest", "never")])
+        self.manager.get_all_configs.return_value = [cfg_a, cfg_b]
+        out, err, code = self._run(_ns(all=True, dry_run=True))
+        self.assertIn("  a:", out)
+        self.assertIn("  b:", out)
+        self.assertIsNone(code)
+
+    def test_vm_plan_mentions_disk_rebuild_not_pull(self):
+        cfg = _plan_cfg("vmwl", is_vm=True)
+        with mock.patch.object(cmd_update, "WorkloadConfig", lambda n: cfg):
+            out, err, code = self._run(_ns(all=False, workload="vmwl", dry_run=True))
+        self.assertIn("rebuild the system disk", out)
+        self.assertNotIn("pull ", out)
+
+
 class RollbackDispatchTest(unittest.TestCase):
     def setUp(self):
         self.enterContext(mock.patch.object(cmd_update, "require_root", lambda: None))

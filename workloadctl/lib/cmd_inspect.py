@@ -33,7 +33,6 @@ from workloadctl_core import (
     created_unix,
     format_created,
     format_size,
-    parse_size_bytes,
     parse_workload_ref,
     require_root,
 )
@@ -840,70 +839,8 @@ def cmd_info(args, manager: WorkloadManager):
 
 
 # ---------------------------------------------------------------------------
-# stats helpers + cmd_stats
+# cmd_stats
 # ---------------------------------------------------------------------------
-
-def _stats_parse_percent(v) -> float:
-    if isinstance(v, (int, float)):
-        return float(v)
-    try:
-        return float(str(v).strip().rstrip("%"))
-    except (ValueError, AttributeError):
-        return 0.0
-
-
-def _stats_parse_io(s: str) -> tuple[int, int]:
-    parts = str(s).split(" / ")
-    if len(parts) == 2:
-        return parse_size_bytes(parts[0]), parse_size_bytes(parts[1])
-    return 0, 0
-
-
-def _stats_parse_mem(row: dict) -> tuple[int, int]:
-    """Return (mem_usage_bytes, mem_limit_bytes) from a podman stats row.
-
-    Handles both the combined 'X / Y' string format (older podman) and
-    separate numeric fields (newer podman).
-    """
-    raw = row.get("mem_usage") or row.get("MemUsage", "0")
-    if isinstance(raw, str) and " / " in raw:
-        return _stats_parse_io(raw)
-    return (parse_size_bytes(raw),
-            parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
-
-
-def _stats_parse_row(row: dict, config, target_names: list[str]) -> dict:
-    """Build one `workloadctl stats --json` row from a raw podman stats row."""
-    net_in, net_out = _stats_parse_io(row.get("net_io") or row.get("NetIO", "0 / 0"))
-    blk_in, blk_out = _stats_parse_io(row.get("block_io") or row.get("BlockIO", "0 / 0"))
-    mem_u, mem_l = _stats_parse_mem(row)
-    return {
-        "workload": config.name,
-        "username": config.username,
-        "container": row.get("name") or row.get("Name", target_names[0]),
-        "cpu_percent": _stats_parse_percent(row.get("cpu_percent") or row.get("CPU", 0)),
-        "mem_usage": mem_u,
-        "mem_limit": mem_l,
-        "mem_percent": _stats_parse_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
-        "net_input": net_in,
-        "net_output": net_out,
-        "block_input": blk_in,
-        "block_output": blk_out,
-        "pids": int(row.get("pids") or row.get("PIDs", 0)),
-    }
-
-
-def _stats_one(config, manager, target_names, *, json_out, follow):
-    """Run podman stats for one workload's containers via ContainerSubstrate."""
-    substrate = get_substrate(config, manager)
-    try:
-        return substrate.resource_usage(
-            target_names, json_out=json_out, follow=follow,
-        )
-    except NotApplicable as e:
-        print(f"stats: not applicable for {config.name} — {e.reason}", file=sys.stderr)
-        return None
-
 
 def cmd_stats(args, manager: WorkloadManager):
     """Show resource usage statistics"""
@@ -913,26 +850,16 @@ def cmd_stats(args, manager: WorkloadManager):
 
     if args.workload:
         config = WorkloadConfig(args.workload)
-
-        # VM workloads always get NotApplicable — check before user_exists so
-        # an unprovisioned VM doesn't hide the "not applicable" message.
         substrate = get_substrate(config, manager)
-        if config.is_vm:
-            try:
-                substrate.resource_usage([])
-            except NotApplicable as e:
-                print(f"stats: not applicable for {config.name} — {e.reason}")
-                sys.exit(0)
 
         if not manager.user_exists(config):
             print("Error: Workload user not found. Is workload enabled?", file=sys.stderr)
             sys.exit(1)
 
-        # substrate already resolved above
         target_names = config.podman_targets()
 
         try:
-            result = substrate.resource_usage(
+            rows = substrate.resource_usage(
                 target_names, json_out=args.json, follow=args.follow,
             )
         except NotApplicable as e:
@@ -940,40 +867,40 @@ def cmd_stats(args, manager: WorkloadManager):
             sys.exit(0)
 
         if args.json:
-            stats_list = []
-            if result is not None and result.returncode == 0 and result.stdout.strip():
-                raw = json.loads(result.stdout)
-                for row in (raw if isinstance(raw, list) else [raw]):
-                    stats_list.append(_stats_parse_row(row, config, target_names))
-            print(json.dumps({"stats": stats_list}, indent=2))
+            print(json.dumps({"stats": rows or []}, indent=2))
     else:
         configs = manager.get_all_configs(enabled_only=True)
 
-        def _running_targets(c):
-            if c.is_vm or not manager.user_exists(c):
-                return []
-            names = c.podman_targets()
-            return [n for n in names if manager.podman(c).container_exists(n)]
+        def _targets(c):
+            """The stats targets for one workload, or None to skip it.
 
-        running = [(c, names) for c in configs for names in [_running_targets(c)] if names]
+            A VM has no podman targets — its substrate sources the row from QMP
+            and ignores the list — so an enabled VM is included with an empty
+            one. A container is only worth asking about if it actually exists.
+            """
+            if not manager.user_exists(c):
+                return None
+            if c.is_vm:
+                return []
+            names = [n for n in c.podman_targets() if manager.podman(c).container_exists(n)]
+            return names or None
+
+        running = [(c, t) for c in configs for t in [_targets(c)] if t is not None]
 
         if args.json:
             stats_list = []
             for config, target_names in running:
                 substrate = get_substrate(config, manager)
                 try:
-                    result = substrate.resource_usage(target_names, json_out=True)
+                    rows = substrate.resource_usage(target_names, json_out=True)
                 except NotApplicable:
                     continue
-                if result is not None and result.returncode == 0 and result.stdout.strip():
-                    raw = json.loads(result.stdout)
-                    for row in (raw if isinstance(raw, list) else [raw]):
-                        stats_list.append(_stats_parse_row(row, config, target_names))
+                stats_list.extend(rows or [])
             print(json.dumps({"stats": stats_list}, indent=2))
             return
 
         if not running:
-            print("No running workload containers found")
+            print("No running workloads found")
             return
 
         for config, target_names in running:

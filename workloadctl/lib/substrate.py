@@ -56,13 +56,15 @@ from vm import (
     VM_BRIDGE_NAME,
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
+    parse_memory_mib,
     vm_mac_address,
 )
+from vm_metrics import get_vm_qmp_metrics
 from qmp import QMPClient
 from secrets_template import auto_detect_credentials
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from podman import PodmanError
-from workloadctl_core import resolve_container_target
+from workloadctl_core import format_size, parse_size_bytes, resolve_container_target
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,70 @@ def service_active(unit: str) -> tuple[bool, str]:
         ["systemctl", "is-active", unit], capture_output=True, text=True
     )
     return r.returncode == 0, r.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# Resource-usage rows
+# ---------------------------------------------------------------------------
+
+# The normalized shape every substrate's resource_usage(json_out=True) returns.
+# Uniform across containers and VMs so `workloadctl stats --json` has one schema;
+# a substrate with no source for a key reports None rather than 0.
+STAT_ROW_KEYS = (
+    "workload", "username", "container",
+    "cpu_percent", "mem_usage", "mem_limit", "mem_percent",
+    "net_input", "net_output", "block_input", "block_output", "pids",
+)
+
+
+def _stat_percent(v) -> float:
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip().rstrip("%"))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _stat_io_pair(s) -> tuple[int, int]:
+    parts = str(s).split(" / ")
+    if len(parts) == 2:
+        return parse_size_bytes(parts[0]), parse_size_bytes(parts[1])
+    return 0, 0
+
+
+def _stat_mem_pair(row: dict) -> tuple[int, int]:
+    """(mem_usage_bytes, mem_limit_bytes) from a podman stats row.
+
+    Handles both the combined 'X / Y' string format (older podman) and the
+    separate numeric fields (newer podman).
+    """
+    raw = row.get("mem_usage") or row.get("MemUsage", "0")
+    if isinstance(raw, str) and " / " in raw:
+        return _stat_io_pair(raw)
+    return (parse_size_bytes(raw),
+            parse_size_bytes(row.get("mem_limit") or row.get("MemLimit", 0)))
+
+
+def podman_stat_row(row: dict, config, target_names: list[str]) -> dict:
+    """Normalize one raw `podman stats --format json` row into STAT_ROW_KEYS."""
+    net_in, net_out = _stat_io_pair(row.get("net_io") or row.get("NetIO", "0 / 0"))
+    blk_in, blk_out = _stat_io_pair(row.get("block_io") or row.get("BlockIO", "0 / 0"))
+    mem_u, mem_l = _stat_mem_pair(row)
+    return {
+        "workload": config.name,
+        "username": config.username,
+        "container": row.get("name") or row.get("Name", target_names[0]),
+        "cpu_percent": _stat_percent(row.get("cpu_percent") or row.get("CPU", 0)),
+        "mem_usage": mem_u,
+        "mem_limit": mem_l,
+        "mem_percent": _stat_percent(row.get("mem_percent") or row.get("MemPerc", 0)),
+        "net_input": net_in,
+        "net_output": net_out,
+        "block_input": blk_in,
+        "block_output": blk_out,
+        "pids": int(row.get("pids") or row.get("PIDs", 0)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +535,13 @@ class Substrate(ABC):
     ):
         """Display or stream resource usage.
 
-        For json_out, returns the raw subprocess result (CompletedProcess) for
-        the caller to parse; otherwise streams to the terminal and returns None.
+        With ``json_out``, returns a list of normalized stat rows (see
+        STAT_ROW_KEYS) — one per target — so callers never have to know how the
+        substrate got them.  A key the substrate has no source for is None, not
+        0: a VM reports no block I/O because QEMU isn't asked for it, and
+        reporting zero there would be a lie rather than a gap.
+
+        Otherwise writes a human table to the terminal and returns None.
 
         Raises NotApplicable if the substrate does not expose resource metrics
         through this primitive.
@@ -627,11 +698,17 @@ class ContainerSubstrate(Substrate):
     ):
         podman = self.manager.podman(self.config)
         if json_out:
-            # Return the raw result for the caller to parse/print.
-            return podman.run(
+            result = podman.run(
                 "stats", "--no-stream", "--format", "json",
                 *target_names, capture_output=True,
             )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+            raw = json.loads(result.stdout)
+            return [
+                podman_stat_row(row, self.config, target_names)
+                for row in (raw if isinstance(raw, list) else [raw])
+            ]
         elif follow:
             podman.run("stats", *target_names, check=True)
         else:
@@ -1020,10 +1097,14 @@ class ContainerSubstrate(Substrate):
 class VMSubstrate(Substrate):
     """Substrate for VM workloads ([vm] section in TOML).
 
-    Overrides reprovision (see below); resource_usage and endpoints use the
-    base-class NotApplicable defaults (VMs implement neither), and logs uses
-    the base default (the VM's QEMU service journal is on the host journal).
+    Overrides reprovision and resource_usage (see below); endpoints uses the
+    base-class NotApplicable default, and logs uses the base default (the VM's
+    QEMU service journal is on the host journal).
     """
+
+    # Wall-clock gap between the two vCPU-time samples cpu_percent is derived
+    # from. QMP reports cumulative CPU seconds, so a rate needs two reads.
+    CPU_SAMPLE_SECONDS = 0.5
 
     # ── required primitives ───────────────────────────────────────────────────
 
@@ -1037,7 +1118,85 @@ class VMSubstrate(Substrate):
             "healthy": active,
         }
 
-    # resource_usage, logs, endpoints: inherited base auto-raises NotApplicable.
+    # logs, endpoints: inherited base auto-raises NotApplicable.
+
+    def _vm_stat_row(self) -> dict:
+        """One STAT_ROW_KEYS row for this VM, sourced from QMP.
+
+        Reads the dedicated read-only metrics monitor (qmp-metrics.sock), the
+        same socket the Prometheus exporter scrapes — never the control socket,
+        which serves one client at a time and whose ExecStop system_powerdown a
+        competing reader could block.
+
+        net/block I/O are None: QEMU would answer query-blockstats, but nothing
+        collects it yet, and a zero here would read as an idle disk.
+        """
+        first = get_vm_qmp_metrics(self.config.name)
+        if not first:
+            raise NotApplicable(
+                f"resource_usage: no QMP metrics socket for '{self.config.name}' "
+                f"(is the VM running?)"
+            )
+
+        def _cpu_seconds(metrics: dict) -> float:
+            return sum(v for k, v in metrics.items() if k.startswith("vcpu_"))
+
+        time.sleep(self.CPU_SAMPLE_SECONDS)
+        second = get_vm_qmp_metrics(self.config.name)
+
+        cpu_percent = 0.0
+        if second:
+            delta = _cpu_seconds(second) - _cpu_seconds(first)
+            cpu_percent = max(0.0, delta / self.CPU_SAMPLE_SECONDS * 100)
+
+        mem_usage = (second or first).get("balloon_actual_bytes")
+        try:
+            mem_limit = parse_memory_mib(self.config.config["vm"].get("memory")) * 1024 * 1024
+        except (KeyError, ValueError):
+            mem_limit = None
+
+        mem_percent = None
+        if mem_usage is not None and mem_limit:
+            mem_percent = mem_usage / mem_limit * 100
+
+        return {
+            "workload": self.config.name,
+            "username": self.config.username,
+            "container": None,
+            "cpu_percent": cpu_percent,
+            "mem_usage": mem_usage,
+            "mem_limit": mem_limit,
+            "mem_percent": mem_percent,
+            "net_input": None,
+            "net_output": None,
+            "block_input": None,
+            "block_output": None,
+            "pids": None,
+        }
+
+    def resource_usage(
+        self,
+        target_names: list[str],
+        *,
+        no_stream: bool = True,
+        json_out: bool = False,
+        follow: bool = False,
+    ):
+        if follow:
+            raise NotApplicable("resource_usage: --follow is not supported for VMs")
+
+        row = self._vm_stat_row()
+        if json_out:
+            return [row]
+
+        def _mem(v):
+            return format_size(v) if v is not None else "--"
+
+        print(f"{'WORKLOAD':<20} {'CPU %':>7}  {'MEM USAGE / LIMIT':<21} {'MEM %':>6}")
+        mem = f"{_mem(row['mem_usage'])} / {_mem(row['mem_limit'])}"
+        pct = f"{row['mem_percent']:.2f}%" if row["mem_percent"] is not None else "--"
+        print(f"{row['workload']:<20} {row['cpu_percent']:>6.2f}%  {mem:<21} {pct:>6}")
+        return None
 
     def capture(
         self,

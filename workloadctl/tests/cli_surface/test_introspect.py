@@ -426,23 +426,26 @@ class TestStats:
         data = json.loads(r.stdout)
         assert "stats" in data
 
-    def test_stats_vm_is_na(self, target, clitest_vm, record_property):
-        """stats on a VM: designed-N/A, must exit 0 with a clear message.
+    def test_stats_vm(self, target, clitest_vm, record_property):
+        """stats on a VM: exit 0, sourced from QMP.
 
-        VMSubstrate.resource_usage raises NotApplicable; cmd_stats catches it
-        and exits 0.
+        VMSubstrate.resource_usage reads the VM's qmp-metrics.sock, so a running
+        VM gets a usage table. A VM that isn't up has no socket to read, which is
+        a NotApplicable — cmd_stats reports it and still exits 0. Either outcome
+        is correct here; an unhandled exception or a nonzero exit is not.
         """
         record_property("cell", "stats/vm")
         skip_if_no_kvm(target)
         r = target.wl(f"stats {clitest_vm}", check=False)
         assert r.rc == 0, (
-            f"stats on VM should exit 0 (designed-N/A), got rc={r.rc}\n"
-            f"stderr: {r.stderr}"
+            f"stats on VM should exit 0, got rc={r.rc}\nstderr: {r.stderr}"
         )
         assert "Traceback" not in r.stderr, "stats raised unhandled exception on VM"
-        # Should mention "not applicable"
-        combined = r.stdout + r.stderr
-        assert "not applicable" in combined.lower() or "vm" in combined.lower()
+        combined = (r.stdout + r.stderr).lower()
+        assert "mem usage" in combined or "not applicable" in combined, (
+            f"stats on VM printed neither a usage table nor a not-applicable "
+            f"message:\n{combined}"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -672,12 +672,13 @@ class TestCmdStats(unittest.TestCase):
             manager.user_exists.return_value = True
             sub = MagicMock()
             row = {
-                'name': 'workload-test-wl', 'cpu_percent': '1.23%',
-                'mem_usage': '10MB / 100MB', 'mem_percent': '10%',
-                'net_io': '1kB / 2kB', 'block_io': '3kB / 4kB', 'pids': 5,
+                'workload': 'test-wl', 'username': '_wl-test-wl',
+                'container': 'workload-test-wl', 'cpu_percent': 1.23,
+                'mem_usage': 10_000_000, 'mem_limit': 100_000_000, 'mem_percent': 10.0,
+                'net_input': 1000, 'net_output': 2000,
+                'block_input': 3000, 'block_output': 4000, 'pids': 5,
             }
-            sub.resource_usage.return_value = CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps(row), stderr='')
+            sub.resource_usage.return_value = [row]
             buf = io.StringIO()
             with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
@@ -698,7 +699,7 @@ class TestCmdStats(unittest.TestCase):
             buf = io.StringIO()
             with patch('sys.stdout', buf):
                 cmd_inspect.cmd_stats(_args(json=False, follow=False, workload=None), manager)
-            self.assertIn('No running workload containers found', buf.getvalue())
+            self.assertIn('No running workloads found', buf.getvalue())
 
     def test_stats_all_workloads_json_aggregates_running(self):
         with _MultiWorkloadDir({'test-wl': MINIMAL_TOML}) as p:
@@ -710,10 +711,12 @@ class TestCmdStats(unittest.TestCase):
             podman.container_exists.return_value = True
             manager.podman = MagicMock(return_value=podman)
             sub = MagicMock()
-            row = {'name': 'workload-test-wl', 'cpu_percent': 0, 'mem_usage': 0,
-                   'mem_percent': 0, 'net_io': '0 / 0', 'block_io': '0 / 0', 'pids': 1}
-            sub.resource_usage.return_value = CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps(row), stderr='')
+            row = {'workload': 'test-wl', 'username': '_wl-test-wl',
+                   'container': 'workload-test-wl', 'cpu_percent': 0.0,
+                   'mem_usage': 0, 'mem_limit': 0, 'mem_percent': 0.0,
+                   'net_input': 0, 'net_output': 0,
+                   'block_input': 0, 'block_output': 0, 'pids': 1}
+            sub.resource_usage.return_value = [row]
             buf = io.StringIO()
             with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
@@ -1116,34 +1119,13 @@ ports = ["8080:80"]
 
 class TestStatsHelpersMore(unittest.TestCase):
     def test_parse_percent_invalid_string_returns_zero(self):
-        self.assertEqual(cmd_inspect._stats_parse_percent(object()), 0.0)
-        self.assertEqual(cmd_inspect._stats_parse_percent('n/a'), 0.0)
+        import substrate
+        self.assertEqual(substrate._stat_percent(object()), 0.0)
+        self.assertEqual(substrate._stat_percent('n/a'), 0.0)
 
     def test_parse_io_without_separator_returns_zero_zero(self):
-        self.assertEqual(cmd_inspect._stats_parse_io('garbage'), (0, 0))
-
-    def test_stats_one_not_applicable_prints_and_returns_none(self):
-        from substrate import NotApplicable
-        config = MagicMock(name='cfg')
-        config.name = 'wl'
-        manager = MagicMock()
-        sub = MagicMock()
-        sub.resource_usage.side_effect = NotApplicable('nope')
-        with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
-            with patch('sys.stderr', io.StringIO()) as err:
-                result = cmd_inspect._stats_one(config, manager, ['c'], json_out=False, follow=False)
-        self.assertIsNone(result)
-        self.assertIn('not applicable', err.getvalue())
-
-    def test_stats_one_success_returns_result(self):
-        config = MagicMock()
-        manager = MagicMock()
-        sub = MagicMock()
-        expected = CompletedProcess(args=[], returncode=0, stdout='{}', stderr='')
-        sub.resource_usage.return_value = expected
-        with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
-            result = cmd_inspect._stats_one(config, manager, ['c'], json_out=True, follow=False)
-        self.assertIs(result, expected)
+        import substrate
+        self.assertEqual(substrate._stat_io_pair('garbage'), (0, 0))
 
 
 class TestCmdStatsMore(unittest.TestCase):
@@ -1181,15 +1163,19 @@ class TestCmdStatsMore(unittest.TestCase):
             data = json.loads(buf.getvalue())
             self.assertEqual(data['stats'], [])
 
-    def test_all_workloads_vm_excluded_from_running_targets(self):
-        with _MultiWorkloadDir({'test-vm': VM_TOML}):
+    def test_all_workloads_vm_included_in_running_targets(self):
+        with _MultiWorkloadDir({'test-vm': VM_TOML}) as p:
+            (p / 'test-vm' / '.enabled').write_text('')
             from workloadctl_core import WorkloadManager
             manager = WorkloadManager()
             manager.user_exists = MagicMock(return_value=True)
+            sub = MagicMock()
             buf = io.StringIO()
-            with patch('sys.stdout', buf):
-                cmd_inspect.cmd_stats(_args(json=False, follow=False, workload=None), manager)
-            self.assertIn('No running workload containers found', buf.getvalue())
+            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+                with patch('sys.stdout', buf):
+                    cmd_inspect.cmd_stats(_args(json=False, follow=False, workload=None), manager)
+            self.assertNotIn('No running workloads found', buf.getvalue())
+            sub.resource_usage.assert_called_once_with([])
 
     def test_all_workloads_human_prints_each_and_follow_shows_only_first(self):
         with _MultiWorkloadDir({'test-wl': MINIMAL_TOML}) as p:

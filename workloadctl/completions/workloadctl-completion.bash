@@ -202,9 +202,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         disable)
-            # Complete with --purge or workload names
+            # Complete with --purge, --dry-run, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--purge" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--purge --dry-run" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi
@@ -220,9 +220,9 @@ _workload_ctl_completion() {
             return 0
             ;;
         update)
-            # Complete with --force, --all, or workload names
+            # Complete with --force, --all, --dry-run, or workload names
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--force --all" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--force --all --dry-run" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             fi

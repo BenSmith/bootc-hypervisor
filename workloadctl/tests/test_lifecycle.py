@@ -1589,6 +1589,105 @@ class TestCmdDisableAdditional(unittest.TestCase):
                     self.assertFalse(marker.exists())
 
 
+# ── cmd_disable --dry-run ────────────────────────────────────────────────────
+
+class TestCmdDisableDryRun(unittest.TestCase):
+    def test_no_mutating_calls(self):
+        """--dry-run must issue no systemctl/userdel calls, even with a data
+        dir present (_dir_size shells out to `du` for the DESTROY line, so we
+        assert on the commands actually run rather than on call count)."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            (p / 'test-wl' / '.enabled').touch()
+            wl_dir = Path(d) / "wl-data"
+            wl_dir.mkdir()
+            (wl_dir / "marker").write_text("x")
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with _RootBypass():
+                    manager = MagicMock()
+                    manager.get_all_configs.return_value = []
+                    mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="2048\t/x\n"))
+                    with patch.object(cmd_lifecycle.subprocess, 'run', mock_run):
+                        with patch('pwd.getpwnam', side_effect=KeyError):
+                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
+                                buf = io.StringIO()
+                                with redirect_stdout(buf):
+                                    cmd_lifecycle.cmd_disable(
+                                        _ns(workload="test-wl", purge=True, dry_run=True), manager)
+                    for call in mock_run.call_args_list:
+                        argv = call.args[0]
+                        self.assertNotIn("systemctl", argv)
+                        self.assertNotIn("userdel", argv)
+                    marker = workload_lib.workload_enabled_marker("test-wl")
+                    self.assertTrue(marker.exists())
+            self.assertTrue(wl_dir.exists())
+
+    def test_plan_names_service_unit(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            (p / 'test-wl' / '.enabled').touch()
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with _RootBypass():
+                    manager = MagicMock()
+                    manager.get_all_configs.return_value = []
+                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                        with patch('pwd.getpwnam', side_effect=KeyError):
+                            buf = io.StringIO()
+                            with redirect_stdout(buf):
+                                cmd_lifecycle.cmd_disable(
+                                    _ns(workload="test-wl", purge=False, dry_run=True), manager)
+            self.assertIn(workload_lib.workload_service_name("test-wl"), buf.getvalue())
+
+    def test_purge_reports_destroy_data_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            (p / 'test-wl' / '.enabled').touch()
+            wl_dir = Path(d) / "wl-data"
+            wl_dir.mkdir()
+            (wl_dir / "marker").write_text("x")
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with _RootBypass():
+                    manager = MagicMock()
+                    manager.get_all_configs.return_value = []
+                    with patch.object(cmd_lifecycle.subprocess, 'run',
+                                       return_value=MagicMock(returncode=0, stdout="2048\t/x\n")):
+                        with patch('pwd.getpwnam', side_effect=KeyError):
+                            with patch.object(cmd_lifecycle, 'workload_root_dir', return_value=wl_dir):
+                                buf = io.StringIO()
+                                with redirect_stdout(buf):
+                                    cmd_lifecycle.cmd_disable(
+                                        _ns(workload="test-wl", purge=True, dry_run=True), manager)
+            out = buf.getvalue()
+            self.assertIn("DESTROY data directory", out)
+            self.assertIn(str(wl_dir), out)
+            # Nothing actually removed.
+            self.assertTrue(wl_dir.exists())
+
+    def test_no_purge_keeps_user(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'test-wl').mkdir()
+            (p / 'test-wl' / 'workload.toml').write_text(_CONTAINER_TOML)
+            (p / 'test-wl' / '.enabled').touch()
+            with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
+                with _RootBypass():
+                    manager = MagicMock()
+                    manager.get_all_configs.return_value = []
+                    with patch.object(cmd_lifecycle.subprocess, 'run', return_value=MagicMock(returncode=0)):
+                        with patch('pwd.getpwnam', side_effect=KeyError):
+                            buf = io.StringIO()
+                            with redirect_stdout(buf):
+                                cmd_lifecycle.cmd_disable(
+                                    _ns(workload="test-wl", purge=False, dry_run=True), manager)
+            self.assertIn("keep user, home and subuid ranges", buf.getvalue())
+
+
 # ── cmd_start / cmd_stop ─────────────────────────────────────────────────────
 
 class TestCmdStartStop(unittest.TestCase):

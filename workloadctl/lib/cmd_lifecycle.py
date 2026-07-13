@@ -38,6 +38,7 @@ from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
     WorkloadUserNotFound,
+    format_size,
     require_root,
 )
 from cmd_backup import BACKUP_DIR
@@ -753,12 +754,113 @@ def _stop_bridge_if_last_vm(config: WorkloadConfig, manager: WorkloadManager):
     print("  Stopped shared VM bridge (no managed-bridge VMs remain)")
 
 
+def _dir_size(path: Path) -> str:
+    """Human size of a directory tree, or 'unknown' if it can't be measured."""
+    result = subprocess.run(["du", "-sb", str(path)],
+                            check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        return "unknown"
+    try:
+        return format_size(int(result.stdout.split()[0]))
+    except (ValueError, IndexError):
+        return "unknown"
+
+
+def _disable_plan(config: WorkloadConfig, manager: WorkloadManager, purge: bool) -> list[str]:
+    """The teardown cmd_disable would perform, as printable lines.
+
+    Enumerated from the same sources the real path acts on — workload_run_files,
+    the passwd db, /etc/subuid, the data dir — and reports only what is actually
+    there, so an operator can trust that what this doesn't list, disable won't
+    touch. Purely read-only: it is computed before any mutation, not by walking
+    the teardown with the writes switched off, because a plan that shares the
+    mutating path can only be as trustworthy as the last guard someone
+    remembered to add.
+    """
+    lines = []
+
+    units = [config.service_name] + [
+        rf.path.name for rf in workload_run_files(config)
+        if rf.kind == "unit" and rf.path.name != config.service_name
+    ]
+    lines.append(f"stop units: {', '.join(units)}")
+
+    run_files = [rf.path for rf in workload_run_files(config)
+                 if rf.kind != "env-file" and rf.path.exists()]
+    if run_files:
+        lines.append("remove generated unit files:")
+        lines.extend(f"    {p}" for p in run_files)
+
+    setup_script = config.config.get("host", {}).get("setup", "")
+    if setup_script:
+        lines.append(f"run host teardown hook: {setup_script} disable")
+
+    lines.append(f"remove SELinux module: wl_{config.name}")
+    lines.append(f"unlink enabled marker: {workload_enabled_marker(config.name)}")
+
+    try:
+        pwd.getpwnam(config.username)
+        user_present = True
+    except KeyError:
+        user_present = False
+
+    if purge:
+        env_files = [rf.path for rf in workload_run_files(config)
+                     if rf.kind == "env-file" and rf.path.exists()]
+        if env_files:
+            lines.append("remove runtime env/secret files:")
+            lines.extend(f"    {p}" for p in env_files)
+
+        if config.is_vm:
+            sock_dir = VM_SOCKET_DIR / config.name
+            if sock_dir.exists():
+                lines.append(f"remove VM socket dir: {sock_dir}")
+        else:
+            subid = [f for f in ("/etc/subuid", "/etc/subgid")
+                     if Path(f).exists()
+                     and any(line.startswith(f"{config.username}:")
+                             for line in Path(f).read_text().splitlines())]
+            if subid:
+                lines.append(f"remove subuid/subgid entries from: {', '.join(subid)}")
+
+        if user_present:
+            lines.append(f"kill user sessions and delete user: {config.username}")
+        else:
+            lines.append(f"user {config.username} not present (nothing to remove)")
+
+        workload_dir = workload_root_dir(config.name)
+        if workload_dir.exists():
+            lines.append(f"DESTROY data directory: {workload_dir} ({_dir_size(workload_dir)})")
+    else:
+        if user_present:
+            lines.append(f"stop lingering user manager for {config.username}")
+        lines.append(f"keep user, home and subuid ranges for {config.username}")
+
+    if config.is_vm and config.vm_bridge == VM_BRIDGE_NAME:
+        still_needed = any(
+            c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != config.name
+            for c in manager.get_all_configs(enabled_only=True)
+        )
+        if not still_needed:
+            lines.append("stop shared VM bridge (last bridged VM)")
+
+    return lines
+
+
 def cmd_disable(args, manager: WorkloadManager):
     """Disable and stop a workload"""
     require_root()
 
     config = WorkloadConfig(args.workload)
     purge = args.purge
+
+    if getattr(args, "dry_run", False):
+        verb = "disable and purge" if purge else "disable"
+        print(f"Dry run — would {verb} workload '{args.workload}':")
+        for line in _disable_plan(config, manager, purge):
+            print(f"  {line}")
+        print("\nNothing was changed. Re-run without --dry-run to apply.")
+        return
 
     if purge:
         print(f"Disabling and purging workload: {args.workload}")
