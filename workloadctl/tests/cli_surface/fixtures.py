@@ -32,6 +32,7 @@ and the TOML files in workloads/.
 import json
 import os
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -129,14 +130,22 @@ def unit_state(target: Target, service: str) -> str:
                       sudo=False, check=False).stdout.strip()
 
 
-def dump_journal(target: Target, name: str, lines: int = 120) -> None:
-    """Print the workload unit's journal tail — the diagnosis on any failure."""
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", str(lines), "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
+def dump_journal(target: Target, name: str, lines: int = 120,
+                 *, extra_units: Sequence[str] = ()) -> None:
+    """Print the workload unit's journal tail — the diagnosis on any failure.
+
+    `extra_units` are dumped after the umbrella unit, as full unit names. A pod
+    fails in its members (`workload-<name>-<container>.service`), not in the
+    umbrella that merely binds them, so a pod test has to ask for those by name.
+    """
+    for unit in (f"workload-{name}.service", *extra_units):
+        r = target.run(
+            ["journalctl", "--no-pager", "-n", str(lines), "-u", unit],
+            sudo=True, check=False,
+        )
+        print(f"\n----- journalctl -u {unit} (tail) -----\n"
+              f"{r.stdout}\n{r.stderr}\n"
+              f"--------------------------------------------------------")
 
 
 # ---------------------------------------------------------------------------

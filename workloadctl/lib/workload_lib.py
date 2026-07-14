@@ -810,3 +810,22 @@ def dq(s: str) -> str:
            .replace('%', '%%')
         + '"'
     )
+
+
+def uq(s: str) -> str:
+    """Quote a string as a LITERAL value for a NON-Exec systemd unit setting
+    (RequiresMountsFor=, ReadWritePaths=, ...).
+
+    Differs from dq() in exactly one way, and the difference matters: `$` /
+    `${VAR}` expansion runs only on Exec command lines, so a `$` in an ordinary
+    setting is *already* literal and doubling it would corrupt the value. `%`
+    specifiers are expanded at unit load for every setting, so a literal `%`
+    still has to be written `%%`.
+    """
+    return (
+        '"'
+        + s.replace('\\', '\\\\')
+           .replace('"', '\\"')
+           .replace('%', '%%')
+        + '"'
+    )

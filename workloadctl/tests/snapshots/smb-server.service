@@ -7,6 +7,7 @@ Requires=workload-smb-server-setup.service
 After=network.target workload-smb-server-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+RequiresMountsFor="/run/systemd/journal/socket"
 
 [Service]
 Type=exec

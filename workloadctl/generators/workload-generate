@@ -65,7 +65,7 @@ try:
         WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
         ENABLED_MARKER_NAME, iter_workloads,
         workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
-        expand_volume_path, dq,
+        expand_volume_path, dq, uq,
         normalize_containers, infer_workload_mode,
         infer_workload_kind,
         get_next_uid, subid_lock,
@@ -941,27 +941,52 @@ def _network_args(mode, workload, name, container):
     return args
 
 
+def _external_host_path(host_path, name):
+    """The resolved form of `host_path` if it falls outside the workload's own
+    tree, else None.
+
+    Such a path is admin-supplied: workload-ensure-user deliberately does not
+    create it (setup_volume_directories skips anything out of tree), so it may
+    live on a filesystem of its own that is not mounted -- or not mounted yet.
+    Callers guard it with RequiresMountsFor=. Symlinks are resolved because
+    systemd matches RequiresMountsFor= paths against real mount points.
+    """
+    try:
+        resolved = str(Path(host_path).resolve())
+    except Exception:
+        return None
+    root = str(workload_root_dir(name))
+    if resolved == root or resolved.startswith(root + '/'):
+        return None
+    return resolved
+
+
 def _volume_args(container, home_dir, name):
-    """--volume flags: [storage].volumes expansion, escape-warn, quoting."""
+    """--volume flags: [storage].volumes expansion, escape-warn, quoting.
+
+    Returns (args, external_paths). `external_paths` are the host paths that
+    resolve outside the workload tree, deduplicated in declaration order, for
+    the caller to turn into RequiresMountsFor= -- see _unit_deps.
+    """
     args = []
+    external = []
     for volume in container.get("storage", {}).get("volumes", []):
         expanded = expand_volume_path(volume, home_dir)
         if ':' in expanded:
             parts = expanded.split(':', 2)
             # Warn if host path escapes the workload home directory
-            try:
-                resolved = str(Path(parts[0]).resolve())
-                root = str(workload_root_dir(name))
-                if not resolved.startswith(root + '/') and resolved != root:
-                    log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
-                            f"'{resolved}' outside workload dir '{root}'", level="warning")
-            except Exception:
-                pass
+            resolved = _external_host_path(parts[0], name)
+            if resolved is not None:
+                log_msg(f"  WARNING: volume host path '{parts[0]}' resolves to "
+                        f"'{resolved}' outside workload dir "
+                        f"'{workload_root_dir(name)}'", level="warning")
+                if resolved not in external:
+                    external.append(resolved)
             expanded = ':'.join(dq(p) for p in parts)
         else:
             expanded = dq(expanded)
         args.append(f"--volume {expanded}")
-    return args
+    return args, external
 
 
 def _env_args(container, container_name, has_secret_env_vars):
@@ -981,8 +1006,10 @@ def _env_args(container, container_name, has_secret_env_vars):
 
 
 def _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
-                net_service, umbrella_service, gpu_vendor):
-    """[Unit] Description/Requires/After/Wants/BindsTo/PartOf + nvidia deps."""
+                net_service, umbrella_service, gpu_vendor,
+                external_volume_paths=()):
+    """[Unit] Description/Requires/After/Wants/BindsTo/PartOf + nvidia deps
+    + RequiresMountsFor= for volume host paths outside the workload tree."""
     u.set("Description", unit_description)
     if mode == "single":
         u.add("Requires", setup_service)
@@ -1012,6 +1039,15 @@ def _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
     if gpu_vendor == "nvidia":
         u.add("Requires", "nvidia-cdi-generator.service")
         u.add("After", "nvidia-cdi-generator.service")
+
+    # A volume host path outside the workload tree can be its own filesystem.
+    # RequiresMountsFor= pulls in and orders after the mount unit backing each
+    # one, so a filesystem that is absent or fails to mount stops the workload.
+    # Without it the failure is silent and looks healthy: podman creates the
+    # missing bind source, and the container comes up over an empty directory.
+    if external_volume_paths:
+        u.add("RequiresMountsFor",
+              " ".join(uq(p) for p in external_volume_paths))
 
 
 def _service_identity(svc, service_type, slice_name, systemd_mode, user_name, home_dir, name):
@@ -1265,6 +1301,11 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     else:
         unit_description = f"{name}/{container['name']} container"
 
+    # Expanded ahead of the [Unit] section: the host paths that land outside the
+    # workload tree become RequiresMountsFor= there, and the flags themselves go
+    # into podman_args further down.
+    volume_args, external_volume_paths = _volume_args(container, home_dir, name)
+
     unit = Unit()
     if mode == "single":
         unit.comment(f"Rootless workload service for {name}")
@@ -1274,7 +1315,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     u = unit.section("Unit")
     _unit_deps(u, workload, mode, unit_description, setup_service, pod_service,
-               net_service, umbrella_service, gpu_vendor)
+               net_service, umbrella_service, gpu_vendor, external_volume_paths)
 
     # container.systemd: "always", "true", "false", or unset
     systemd_mode = container.get("container", {}).get("systemd", None)
@@ -1362,7 +1403,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     #    publishes its own [containers.network].ports.
     podman_args.extend(_network_args(mode, workload, name, container))
 
-    podman_args.extend(_volume_args(container, home_dir, name))
+    podman_args.extend(volume_args)
 
     credentials = auto_detect_credentials({
         "container": container.get("container", {}),
@@ -1469,6 +1510,13 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     u.set("After", f"workload-{name}-setup.service")
     u.set("Before", f"workload-{name}.service")
     u.set("PartOf", f"workload-{name}.service")
+    # The sidecar is what opens the host path, so the mount guard belongs here
+    # rather than on the VM service. Same reasoning as the container units: an
+    # unmounted filesystem would otherwise be shared into the guest as an empty
+    # directory. PartOf= propagates the resulting failure to the VM.
+    external = _external_host_path(host_path, name)
+    if external is not None:
+        u.add("RequiresMountsFor", uq(external))
 
     svc = unit.section("Service")
     # Type=exec: systemd marks the service active once virtiofsd exec()s,
