@@ -92,9 +92,26 @@ honored would be a lie.
 `lib/oplog.py` appends one JSON object per mutated workload to
 `/var/lib/workloads/<name>/operations.log` — the `--json` result row plus `ts`,
 `command`, `ok`, `user` and `user_source`. It hangs off `cli_log.emit_result()`,
-the one call each mutating verb already makes, so the log and `--json` are the
-same dict and can't drift; a verb that learns to report something new records it
-with no second call site.
+the one call each verb already makes, so the log and `--json` are the same dict
+and can't drift; a verb that learns to report something new records it with no
+second call site. The administrative verbs (`create`/`init`/`duplicate`/
+`install`/`edit`/`backup`/`restore`/`cp`) call `emit_result()` too even though
+they own no `--json` document: with `json_mode` off it feeds the log and nothing
+else. `secret` (host-global credstore) and `cleanup` (reaps orphans that have no
+workload left to own a record) stay out.
+
+`oplog.RECORDED_RESULTS` / `IGNORED_RESULTS` classify every `result` string a verb
+can emit — **a new verb must add its result string to one of them.** It's an
+allowlist because `update --all` reports `"unchanged"` for a fleet that didn't
+move, and a denylist that hadn't heard of that string appended a no-op line per
+workload on every scheduled run, forever (nothing rotates this file). An
+unclassified string is recorded *and* warned about: losing an operation is worse
+than keeping a doubtful one, and the warning is what sends you here.
+
+The config-authoring verbs run before `enable` ever creates `/var/lib/workloads/
+<name>/`, so `record()` makes that root on demand for any workload that has a
+config. A name with no config gets a warning and no directory — otherwise a typo
+would leave something `cleanup` reads as an orphan.
 
 It is a **record, not an audit trail** — only root can run these verbs and root
 can equally delete the file, so it is worthless as a tamper-evident control and

@@ -31,6 +31,15 @@ Placement, and what each choice buys:
   alternative (a host-global tombstone) reintroduces exactly the central file
   this design avoids.
 
+Every verb that changes a *workload* records here: the lifecycle verbs, and the
+administrative ones (`create`, `install`, `duplicate`, `init`, `edit`, `backup`,
+`restore`, `cp`) — a `restore` rewrites the data directory from a portable
+archive, which is the single most consequential thing anyone can do to a
+workload, and it left no trace at all before. Two verbs deliberately stay out:
+`secret`, whose credstore is host-global and belongs to no workload, and
+`cleanup`, which reaps orphans — workloads whose config is already gone, so
+there is nothing left to own the record.
+
 Writing here is best-effort in the strict sense: a failure to record must never
 be the reason an operation reports failure. Every error path below warns and
 returns.
@@ -43,7 +52,7 @@ import os
 import pwd
 from pathlib import Path
 
-from workload_lib import workload_root_dir
+from workload_lib import workload_config_path, workload_root_dir
 
 
 # The same channel cli_log warns on, reached by logger name rather than by
@@ -55,11 +64,40 @@ _logger = logging.getLogger("workloadctl")
 
 OPLOG_NAME = "operations.log"
 
-# Results that record nothing, and why:
-#   dry-run / listed — the verb reported a plan or a report; nothing changed.
-#   purged           — the directory the log lives in was just deleted. Warning
-#                      about the absent dir here would fire on every purge.
-NON_MUTATING_RESULTS = frozenset({"dry-run", "listed", "purged"})
+# A result string is classified, not guessed at. Three-way, because both ways of
+# getting it wrong are real and they fail in opposite directions:
+#
+#   RECORDED — the operation changed the workload. Write the line.
+#   IGNORED  — the verb ran but changed nothing (a plan, a report, a no-op
+#              update), or there is nowhere left to write (a purge just rmtree'd
+#              the directory the log lives in). Write nothing, say nothing.
+#   unknown  — a verb grew a result string nobody classified. Record it *and*
+#              warn: a log that loses an operation is worse than one that keeps
+#              an extra, so the fallback keeps the line and the warning tells the
+#              next developer to come here and pick a side.
+#
+# An allowlist rather than a denylist of no-ops. `update --all` on an unchanged
+# fleet reports "unchanged" for every workload, and a denylist that hadn't heard
+# of that string appended a no-op line, per workload, on every scheduled run —
+# forever, since nothing rotates this file. Under an allowlist that mistake is
+# impossible; the opposite mistake (a mutating result nobody registered) is the
+# one the unknown-result warning above is there to catch.
+RECORDED_RESULTS = frozenset({
+    # lifecycle
+    "enabled", "already-running", "disabled",
+    "started", "stopped", "restarted", "recreated", "rebooted",
+    "built", "updated", "rolled-back", "failed",
+    # config and data administration
+    "created", "duplicated", "installed", "edited",
+    "backed-up", "restored", "copied",
+})
+IGNORED_RESULTS = frozenset({
+    "dry-run",    # a plan was printed; nothing was touched
+    "listed",     # a report was printed; nothing was touched
+    "unchanged",  # `update` found the image already current
+    "skipped",    # `update` found the verb inapplicable (pull=never, ...)
+    "purged",     # the workload root — this file included — is gone
+})
 
 # One warning per process. A batch (`update --all`) would otherwise repeat the
 # same "can't write" line once per workload.
@@ -136,6 +174,34 @@ def _warn_once(message: str) -> None:
     _logger.warning(f"  ⚠ operations log: {message}")
 
 
+def _log_root(name: str) -> Path | None:
+    """The dir to write this workload's log into, or None if there isn't one.
+
+    `enable` creates the workload root, but the config-authoring verbs (`create`,
+    `install`, `duplicate`, `init`, `edit`) all run *before* a workload is ever
+    enabled, and they have operations worth recording. So a workload that has a
+    config but no root yet gets one made here — the root is root-owned and holds
+    nothing but this file until enable fills it in.
+
+    A name with no config either is a different thing entirely: we'd be recording
+    history for a workload that doesn't exist. That's a caller bug, so it warns
+    and records nothing rather than conjuring a directory for it.
+    """
+    root = workload_root_dir(name)
+    if root.is_dir():
+        return root
+    if not workload_config_path(name).exists():
+        _warn_once(f"no such workload '{name}' ({workload_config_path(name)} "
+                   f"does not exist); not recording")
+        return None
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _warn_once(f"could not create {root}: {e}")
+        return None
+    return root
+
+
 def record(command: str | None, rows: list[dict], *, ok: bool = True) -> None:
     """Append one line per mutated workload. Never raises.
 
@@ -148,15 +214,18 @@ def record(command: str | None, rows: list[dict], *, ok: bool = True) -> None:
 
     for row in rows:
         name = row.get("workload")
-        if not name or row.get("result") in NON_MUTATING_RESULTS:
+        if not name:
             continue
+        result = row.get("result")
+        if result in IGNORED_RESULTS:
+            continue
+        if result not in RECORDED_RESULTS:
+            _warn_once(f"unclassified result {result!r} from {command}; "
+                       f"recording it — add it to oplog.RECORDED_RESULTS or "
+                       f"oplog.IGNORED_RESULTS")
 
-        root = workload_root_dir(name)
-        if not root.is_dir():
-            # Nothing to hang the log off. The workload root is created early in
-            # enable and torn down only by purge, so this means the workload was
-            # never provisioned — worth saying out loud, never worth failing for.
-            _warn_once(f"{root} does not exist; not recording {command} of '{name}'")
+        root = _log_root(name)
+        if root is None:
             continue
 
         entry = {"ts": ts, "command": command, "ok": ok,

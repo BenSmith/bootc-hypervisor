@@ -10,7 +10,7 @@ import io
 import json
 import tomllib
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -579,8 +579,8 @@ class TestPostWriteReportValidateFailure(CatalogTestBase):
     def test_validate_exception_is_reported_not_raised(self):
         with mock.patch("cmd_catalog.WorkloadConfig", side_effect=RuntimeError("nope")):
             buf = io.StringIO()
-            with redirect_stdout(buf):
-                cmd_catalog._post_write_report("whatever", self.manager)
+            with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+                cmd_catalog._post_write_report("whatever", self.manager, "created")
             self.assertIn("could not validate yet", buf.getvalue())
 
 

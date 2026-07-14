@@ -132,11 +132,19 @@ $ sudo workloadctl update --all --json
 
 ## The Operations Log
 
-Every mutating command appends one JSON object per touched workload to
-`/var/lib/workloads/<name>/operations.log`, whether or not you passed `--json`.
-It answers the question the journal can't: not *that* someone ran
+Every command that changes a workload appends one JSON object per touched
+workload to `/var/lib/workloads/<name>/operations.log`, whether or not you passed
+`--json`. It answers the question the journal can't: not *that* someone ran
 `workloadctl update web` — `sudo` already logs that — but what the update
 actually did.
+
+That covers the lifecycle verbs (`enable`, `disable`, `start`, `stop`,
+`restart`, `recreate`, `reboot`, `build`, `update`, `rollback`) and the ones that
+author or rewrite a workload (`create`, `init`, `duplicate`, `install`, `edit`,
+`backup`, `restore`, `cp` *into* a workload). Two stay out by design: `secret`,
+whose credstore is host-global and belongs to no single workload, and `cleanup`,
+which reaps orphans — workloads whose config is already gone, leaving nothing to
+own the record.
 
 ```console
 $ sudo tail -1 /var/lib/workloads/web/operations.log | jq
@@ -181,13 +189,18 @@ Each line is the `--json` result row plus `ts`, `command`, `ok`, `user` and
   another host's history into a fresh workload.
 - **`disable --purge` deletes it** along with the rest of the workload
   directory. The workload is gone; its history goes with it.
-- **Dry-runs and reports record nothing** (`--dry-run`, `rollback --list`).
-- **Writing is best-effort.** If the workload directory doesn't exist — an
-  `enable` that never got as far as provisioning `/var` — the command warns on
-  stderr and carries on. A log line that didn't land is never why an operation
-  fails.
+- **Nothing that changed nothing is recorded.** Dry-runs and reports
+  (`--dry-run`, `rollback --list`), and — this is the one that matters — an
+  `update` that found the image already current. `update --all` is the verb most
+  likely to be on a timer, and a quiet fleet must leave the log exactly as it
+  found it rather than burying its own history under one "nothing happened" line
+  per workload per run.
+- **Writing is best-effort.** If the workload doesn't exist at all, the command
+  warns on stderr and carries on. A log line that didn't land is never why an
+  operation fails.
 
-There is no rotation: one line per mutating operation is a few kilobytes a year.
+There is no rotation, and with no-ops excluded it doesn't need one: a line per
+*real* change is a few kilobytes a year.
 
 ---
 

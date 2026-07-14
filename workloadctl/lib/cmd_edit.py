@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 
+from cli_log import emit_result
 from workload_lib import workload_config_path, workload_service_units
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from service_runtime import restart_workload_service
@@ -204,6 +205,12 @@ def _edit_control_file(args, manager: WorkloadManager):
             pass
 
     print(f"✓ Override saved: {override}")
+    # Both no-op paths above return without an override, so a line here means one
+    # was really kept. `applied` is false by construction: this verb only writes
+    # the file — _print_control_file_next_steps tells the operator which verb
+    # actually pushes it into the running workload.
+    emit_result([{"workload": name, "result": "edited",
+                  "file": rel, "applied": False}])
     _print_control_file_next_steps(config, rel)
 
 
@@ -270,6 +277,7 @@ def cmd_edit(args, manager: WorkloadManager):
     subprocess.run(["diff", "-u", str(backup_path), str(config_path)])
     print()
 
+    applied = False
     if config.enabled:
         if getattr(args, "yes", False):
             print("Apply changes and restart workload? [y/N] y")
@@ -277,6 +285,7 @@ def cmd_edit(args, manager: WorkloadManager):
         else:
             apply = _ask_yes_no("Apply changes and restart workload? [y/N] ")
         if apply:
+            applied = True
             # daemon-reload alone won't regenerate per-workload unit files —
             # only the systemd shell-generator re-runs, and it just emits a
             # oneshot that doesn't fire until next boot. Run workload-generate
@@ -312,6 +321,15 @@ def cmd_edit(args, manager: WorkloadManager):
             print(f"Changes saved but not applied. Run 'sudo workloadctl recreate {args.workload}' to apply.")
     else:
         print("✓ Changes saved (workload is disabled)")
+
+    # Only reached once the edit is validated and kept — an editor that exited
+    # nonzero, an unchanged file, and a rolled-back validation failure all
+    # return above, so a line here means the config on disk really did change.
+    # `applied` is the load-bearing part: a saved-but-not-applied edit is why a
+    # workload's running units can disagree with its TOML, and that is exactly
+    # what someone reads this log to explain.
+    emit_result([{"workload": args.workload, "result": "edited",
+                  "applied": applied}])
 
     backup_path.unlink()
 

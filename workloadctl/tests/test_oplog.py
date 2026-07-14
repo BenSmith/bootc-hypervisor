@@ -30,9 +30,19 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name)
+        self.base = Path(self.tmp.name) / "var"
+        self.etc = Path(self.tmp.name) / "etc"
+        self.base.mkdir()
+        self.etc.mkdir()
         self.enterContext(
             mock.patch.object(workload_lib, "WORKLOADS_BASE", self.base))
+        self.enterContext(
+            mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
+        # workload_config_dir() prefers the env var over the module attr, so an
+        # inherited WORKLOAD_CONFIG_DIR would silently defeat the patch above.
+        self.enterContext(
+            mock.patch.dict(os.environ, {}, clear=False))
+        os.environ.pop("WORKLOAD_CONFIG_DIR", None)
         self.enterContext(mock.patch.object(oplog, "_warned", False))
         self.enterContext(mock.patch.dict(os.environ, {"SUDO_USER": "ben"}))
         # No login session by default, so the shared cases exercise the SUDO_USER
@@ -44,6 +54,14 @@ class _Base(unittest.TestCase):
 
     def _provision(self, name):
         (self.base / name).mkdir(parents=True)
+        return self.base / name / oplog.OPLOG_NAME
+
+    def _declare(self, name):
+        """Give a workload a config but no root dir — the state every
+        config-authoring verb (create/install/edit) records from."""
+        cfg = self.etc / name / "workload.toml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(f'[workload]\nname = "{name}"\n')
         return self.base / name / oplog.OPLOG_NAME
 
     def _record(self, command, rows, ok=True):
@@ -176,14 +194,78 @@ class NonMutatingTest(_Base):
         err = self._record("disable", [{"workload": "gone", "result": "purged"}])
         self.assertEqual(err, "")
 
+    def test_a_no_op_update_records_nothing(self):
+        # The regression. `update --all` reports "unchanged" for every workload
+        # whose image hasn't moved, and it is the verb most likely to be on a
+        # timer — so a no-op run must leave the log exactly as it found it, or a
+        # quiet fleet buries its own history under one line per workload per run.
+        path = self._provision("web")
+        self._record("update", [{"workload": "web", "kind": "container",
+                                 "result": "unchanged"}])
+        self.assertFalse(path.exists())
+
+    def test_a_skipped_update_records_nothing(self):
+        path = self._provision("web")
+        self._record("update", [{"workload": "web", "result": "skipped",
+                                 "reason": "pull=never"}])
+        self.assertFalse(path.exists())
+
+    def test_a_batch_records_only_the_workloads_that_changed(self):
+        # `update --all` over a fleet where one workload actually moved: the
+        # other two leave no file at all, not an "I did nothing" line.
+        moved = self._provision("web")
+        still = self._provision("cache")
+        self._record("update", [
+            {"workload": "web", "result": "updated"},
+            {"workload": "cache", "result": "unchanged"},
+        ])
+        self.assertEqual(json.loads(moved.read_text())["result"], "updated")
+        self.assertFalse(still.exists())
+
+
+class ClassificationTest(_Base):
+    """Every result string a verb emits is on exactly one of the two lists."""
+
+    def test_the_two_lists_are_disjoint(self):
+        self.assertEqual(oplog.RECORDED_RESULTS & oplog.IGNORED_RESULTS, frozenset())
+
+    def test_an_unclassified_result_is_recorded_and_warned_about(self):
+        # The allowlist's failure mode, contained: a verb that grows a new result
+        # string nobody registered still gets its line (losing an operation is
+        # worse than keeping a doubtful one), and says so loudly enough that the
+        # next developer classifies it.
+        path = self._provision("web")
+        err = self._record("frobnicate", [{"workload": "web", "result": "frobbed"}])
+        self.assertIn("unclassified result 'frobbed'", err)
+        self.assertEqual(json.loads(path.read_text())["result"], "frobbed")
+
+
+class UnprovisionedWorkloadTest(_Base):
+    """The config-authoring verbs run before `enable` ever makes a workload root.
+
+    `create`, `install`, `duplicate` and `edit` all have operations worth
+    recording and all of them can run on a workload that has never been enabled,
+    so the root is made on demand rather than the line being dropped.
+    """
+
+    def test_a_declared_workload_gets_its_root_made_on_demand(self):
+        path = self._declare("fresh")
+        err = self._record("create", [{"workload": "fresh", "result": "created"}])
+        self.assertEqual(err, "")
+        self.assertEqual(json.loads(path.read_text())["result"], "created")
+
+    def test_a_workload_with_no_config_is_not_conjured_into_existence(self):
+        # No config anywhere: we'd be writing history for something that doesn't
+        # exist. That's a caller bug, so warn — and above all don't create the
+        # directory, which would then look like an orphan to `cleanup`.
+        err = self._record("enable", [{"workload": "ghost", "result": "enabled"}])
+        self.assertIn("operations log", err)
+        self.assertIn("no such workload 'ghost'", err)
+        self.assertFalse((self.base / "ghost").exists())
+
 
 class BestEffortTest(_Base):
     """Recording must never be why an operation fails."""
-
-    def test_missing_workload_dir_warns_and_continues(self):
-        err = self._record("enable", [{"workload": "ghost", "result": "enabled"}])
-        self.assertIn("operations log", err)
-        self.assertIn("does not exist", err)
 
     def test_unwritable_dir_warns_and_continues(self):
         self._provision("web")
@@ -191,9 +273,15 @@ class BestEffortTest(_Base):
             err = self._record("update", [{"workload": "web", "result": "updated"}])
         self.assertIn("could not write", err)
 
+    def test_uncreatable_root_warns_and_continues(self):
+        self._declare("fresh")
+        with mock.patch.object(oplog.Path, "mkdir", side_effect=OSError("read-only")):
+            err = self._record("create", [{"workload": "fresh", "result": "created"}])
+        self.assertIn("could not create", err)
+
     def test_warns_at_most_once_per_process(self):
-        # `update --all` over eight unprovisioned workloads must not print the
-        # same complaint eight times.
+        # `update --all` over eight unknown workloads must not print the same
+        # complaint eight times.
         err = self._record("update", [
             {"workload": f"ghost{i}", "result": "updated"} for i in range(8)
         ])
@@ -204,8 +292,9 @@ class ReadTest(_Base):
 
     def test_read_returns_entries_oldest_first(self):
         self._provision("web")
-        for cmd in ("enable", "update", "rollback"):
-            self._record(cmd, [{"workload": "web", "result": "x"}])
+        for cmd, result in (("enable", "enabled"), ("update", "updated"),
+                            ("rollback", "rolled-back")):
+            self._record(cmd, [{"workload": "web", "result": result}])
         self.assertEqual([e["command"] for e in oplog.read("web")],
                          ["enable", "update", "rollback"])
         self.assertEqual([e["command"] for e in oplog.read("web", limit=2)],
@@ -242,6 +331,22 @@ class EmitResultIntegrationTest(_Base):
             cli_log.configure(quiet=True, command="stop")
             cli_log.emit_result([{"workload": "web", "result": "stopped"}])
         self.assertEqual(json.loads(path.read_text())["result"], "stopped")
+
+    def test_records_an_admin_verb_that_owns_no_json_document(self):
+        # `restore` prints no cli_log result object (it isn't one of the --json
+        # verbs), but it rewrites the workload's data directory from a portable
+        # archive — the most consequential thing anyone can do to a workload, and
+        # it used to leave no trace at all. emit_result() is the seam: with
+        # json_mode off it feeds the log and nothing else.
+        path = self._provision("web")
+        with redirect_stderr(io.StringIO()):
+            cli_log.configure(command="restore")
+            cli_log.emit_result([{"workload": "web", "result": "restored",
+                                  "archive": "/var/lib/workloads/backups/web.tar.zst"}])
+        entry = json.loads(path.read_text())
+        self.assertEqual(entry["command"], "restore")
+        self.assertEqual(entry["result"], "restored")
+        self.assertTrue(entry["archive"].endswith("web.tar.zst"))
 
 
 if __name__ == "__main__":

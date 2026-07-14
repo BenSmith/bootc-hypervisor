@@ -7,6 +7,7 @@ config that was never valid should not be left on disk to be found later.
 import argparse
 import sys
 
+from cli_log import emit_result
 from workload_lib import workload_config_path
 from validation import validate_workload_name
 from workloadctl_core import (
@@ -170,6 +171,11 @@ def cmd_create(args, manager: WorkloadManager):
         print(f"Error: Failed to validate config: {e}", file=sys.stderr)
         config_path.unlink()
         sys.exit(1)
+
+    # Past the validate-or-unlink gate above, so the config is on disk to stay.
+    # Recorded before the optional enable, which runs in-process and appends its
+    # own line — the log then reads created → enabled, in that order.
+    emit_result([{"workload": name, "result": "created", "source": "cli"}])
 
     if args.enable:
         print()
