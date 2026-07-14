@@ -45,11 +45,22 @@ jobs:
   runtime:
     runs-on: native
     timeout-minutes: 90
+    env:
+      # Per-runner persistent cache, as an absolute path: the runner daemon runs
+      # with no HOME in its environment, so "$HOME/wlrt-cache" resolved to the
+      # filesystem root.
+      WLRT_CACHE: /var/cache/wlrt
     strategy:
       # Independent fidelities: a dev failure must not cancel the gate run (or
-      # vice versa). On a capacity-1 runner the two entries serialize, so they
-      # never contend for /dev/kvm.
+      # vice versa).
       fail-fast: false
+      # The two entries must not run concurrently. Forgejo derives a workspace
+      # path from repo + workflow file + SHA, with no matrix key in it, so
+      # concurrent entries check out into the *same* tree and reset it under one
+      # another — and they would contend for /dev/kvm besides. The runner's
+      # capacity is shared with the image builds and is >1, so the serialization
+      # has to come from here.
+      max-parallel: 1
       matrix:
         mode: [dev, gate]
     steps:
@@ -107,9 +118,9 @@ jobs:
           # qcow2 + stable gate ssh key (gate) under tests/runtime/.cache/. Point
           # that at a per-runner persistent dir (the tp-host wlrt-cache pattern)
           # so runs don't re-download ~500MB or re-run BIB on a fresh workspace.
-          mkdir -p "$HOME/wlrt-cache"
+          mkdir -p "$WLRT_CACHE"
           rm -rf workloadctl/tests/runtime/.cache
-          ln -s "$HOME/wlrt-cache" workloadctl/tests/runtime/.cache
+          ln -s "$WLRT_CACHE" workloadctl/tests/runtime/.cache
 
       - name: Runtime rung (${{ matrix.mode }})
         if: steps.kvm.outputs.available == 'true'
