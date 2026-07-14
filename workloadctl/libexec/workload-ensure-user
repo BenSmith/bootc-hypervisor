@@ -9,6 +9,8 @@ Usage: workload-ensure-user <workload-name>
 """
 
 import base64
+import contextlib
+import fcntl
 import grp
 import hashlib
 import os
@@ -568,6 +570,36 @@ def setup_vm_socket_dir(pw, name: str):
     log(f"  Socket directory: {sock_dir}")
 
 
+def _ssh_keygen(key_path: Path, comment: str, what: str):
+    """Write an Ed25519 keypair to key_path, or raise with what ssh-keygen said.
+
+    ssh-keygen talks on **stdout**, not stderr — the key paths, the fingerprint
+    and the randomart all go there on success, and a failure like
+    `Saving key "/x" failed: Permission denied` goes there too. Reporting
+    `result.stderr` alone therefore yields an empty diagnostic on precisely the
+    runs where one is needed, so take both streams and say so if there were
+    neither.
+    """
+    result = subprocess.run(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", comment,
+         "-f", str(key_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return
+    if key_path.exists():
+        # The key appeared after the caller's exists() guard, so ssh-keygen
+        # refused to overwrite it (it wants an interactive "Overwrite?"). Only a
+        # concurrent provisioning run can have put it there, and it is as good a
+        # key as the one we were about to write — take it. ensure_user_lock()
+        # should make this unreachable; it stays because the alternative to
+        # losing this race gracefully is failing an `enable` for no reason.
+        return
+    said = " / ".join(s.strip() for s in (result.stdout, result.stderr) if s.strip())
+    raise RuntimeError(
+        f"ssh-keygen ({what}) failed: {said or f'no output, exit {result.returncode}'}")
+
+
 def generate_ssh_keypair(pw, name: str):
     """Generate a per-workload Ed25519 SSH keypair if it doesn't exist.
 
@@ -585,13 +617,7 @@ def generate_ssh_keypair(pw, name: str):
     if key_path.exists():
         return  # already generated
 
-    result = subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C",
-         f"workload-{name}@hypervisor", "-f", str(key_path)],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ssh-keygen failed: {result.stderr.strip()}")
+    _ssh_keygen(key_path, f"workload-{name}@hypervisor", "client key")
 
     os.chown(key_path, pw.pw_uid, pw.pw_gid)
     os.chmod(key_path, 0o600)
@@ -629,13 +655,7 @@ def generate_vm_host_keypair(pw, name: str):
     if key_path.exists():
         return  # already generated — keep the pin stable
 
-    result = subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C",
-         f"workload-{name}-host@hypervisor", "-f", str(key_path)],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ssh-keygen (VM host key) failed: {result.stderr.strip()}")
+    _ssh_keygen(key_path, f"workload-{name}-host@hypervisor", "VM host key")
 
     os.chown(key_path, pw.pw_uid, pw.pw_gid)
     os.chmod(key_path, 0o600)
@@ -1098,12 +1118,66 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
     log(f"  Built cloud-init ISO: {iso_path}")
 
 
+# Per-workload provisioning lock. A module constant so tests can redirect it.
+ENSURE_LOCK_DIR = Path("/run/lock/workloadctl")
+
+
+@contextlib.contextmanager
+def ensure_user_lock(name: str):
+    """Serialize provisioning of one workload against a concurrent run of itself.
+
+    `workloadctl enable` starts this script twice for the same workload, at the
+    same time: once directly (cmd_enable → provision_user), and once as the
+    ExecStartPre of the start job the generator enqueues for the unit it has just
+    written. Nearly every step below is check-then-create — the two keypairs, the
+    NVRAM copy, the cloud-init ISO, the volume dirs — so interleaved runs let one
+    process's "does it exist yet?" answer No while the other is midway through
+    creating it.
+
+    ssh-keygen is the step that fails *loudly* when that happens (it will not
+    overwrite a key that appeared after the exists() guard, so it exits nonzero
+    and takes the whole enable down with it, intermittently). It is not the only
+    step that races — just the only one that says so. The rest lose more quietly.
+
+    Serializing is the entire fix: every step here is idempotent, so whichever
+    process takes the lock second wakes to find the work already done and returns
+    without redoing it.
+
+    Degrades to running unlocked if the lock can't be taken. Both real callers are
+    root, so that shouldn't happen — and if it does, running unlocked is merely
+    the status quo ante (a race that usually wins), whereas refusing to provision
+    would be a new way to fail.
+    """
+    fd = None
+    try:
+        ENSURE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        fd = open(ENSURE_LOCK_DIR / f"{name}.lock", "w")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+    except OSError as e:
+        if fd is not None:
+            fd.close()
+            fd = None
+        log(f"  WARNING: could not take the provisioning lock for {name} ({e}); "
+            f"continuing unlocked")
+    try:
+        yield
+    finally:
+        if fd is not None:
+            # Closing drops the flock; no explicit LOCK_UN needed.
+            fd.close()
+
+
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <workload-name>", file=sys.stderr)
         return 1
 
     name = sys.argv[1]
+    with ensure_user_lock(name):
+        return _ensure_user(name)
+
+
+def _ensure_user(name: str) -> int:
     username = workload_username(name)
 
     log(f"Ensuring user setup for workload: {name}")
