@@ -1,16 +1,25 @@
 # Weekly runtime rung (B1) for workloadctl on the Forgejo runner: boots a
 # harness-owned VM and runs the `runtime`-marked checks (`just test-runtime`
-# -> pytest -m runtime). Runs BOTH fidelities via a matrix:
+# -> pytest -m runtime). Runs BOTH fidelities, back to back in one job:
 #   - dev  (WLRT_MODE=dev):  cached Fedora Cloud image + RPM built in-guest.
 #   - gate (WLRT_MODE=gate): the REAL bootc image (registry.local/
 #                            hypervisor-bootc:latest) turned into a bootable
 #                            qcow2 by bootc-image-builder, booted with a
 #                            swtpm-backed vTPM (B1b) — the shipped artifact
 #                            under nested KVM.
-# Mirror of .github/workflows/workloadctl-runtime.yml, but the gate entry is
+# Mirror of .github/workflows/workloadctl-runtime.yml, but the gate rung is
 # Forgejo-only: it needs registry.local (homelab-internal) and privileged BIB,
 # neither of which a GitHub-hosted runner can reach. This is a CADENCE gate,
 # not a PR gate: schedule + manual dispatch only.
+#
+# The two fidelities are sequential steps of a single job, not a `strategy.matrix`:
+# Forgejo expands a matrix into independent jobs and dispatches them all at once
+# (it has no `max-parallel`; `needs` is its only ordering primitive). Concurrent
+# entries would contend for /dev/kvm and — because a workspace path is derived
+# from repo + workflow + SHA, with no matrix key in it — check out into the SAME
+# tree and reset it under one another. One job keeps the two rungs serialized on
+# a runner whose capacity is shared with the image builds. The gate step runs
+# even when dev fails: the fidelities are independent signals.
 #
 # No server-URL gate is needed here: GitHub never reads .forgejo/workflows/,
 # so this file can only ever run on the Forgejo runner. (The .github/ twin
@@ -44,25 +53,14 @@ on:
 jobs:
   runtime:
     runs-on: native
-    timeout-minutes: 90
+    # Both rungs, back to back: dev is ~10min, gate ~12min plus a BIB build on a
+    # cold cache.
+    timeout-minutes: 150
     env:
       # Per-runner persistent cache, as an absolute path: the runner daemon runs
       # with no HOME in its environment, so "$HOME/wlrt-cache" resolved to the
       # filesystem root.
       WLRT_CACHE: /var/cache/wlrt
-    strategy:
-      # Independent fidelities: a dev failure must not cancel the gate run (or
-      # vice versa).
-      fail-fast: false
-      # The two entries must not run concurrently. Forgejo derives a workspace
-      # path from repo + workflow file + SHA, with no matrix key in it, so
-      # concurrent entries check out into the *same* tree and reset it under one
-      # another — and they would contend for /dev/kvm besides. The runner's
-      # capacity is shared with the image builds and is >1, so the serialization
-      # has to come from here.
-      max-parallel: 1
-      matrix:
-        mode: [dev, gate]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -122,9 +120,18 @@ jobs:
           rm -rf workloadctl/tests/runtime/.cache
           ln -s "$WLRT_CACHE" workloadctl/tests/runtime/.cache
 
-      - name: Runtime rung (${{ matrix.mode }})
+      - name: Runtime rung (dev)
         if: steps.kvm.outputs.available == 'true'
         working-directory: workloadctl
         env:
-          WLRT_MODE: ${{ matrix.mode }}
+          WLRT_MODE: dev
+        run: just test-runtime
+
+      - name: Runtime rung (gate)
+        # !cancelled(), not success(): a dev failure must not hide the gate's
+        # verdict on the shipped image.
+        if: ${{ !cancelled() && steps.kvm.outputs.available == 'true' }}
+        working-directory: workloadctl
+        env:
+          WLRT_MODE: gate
         run: just test-runtime

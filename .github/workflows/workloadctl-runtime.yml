@@ -6,7 +6,8 @@
 # dev mode ONLY here. The higher-fidelity gate mode (B1b — the real bootc image
 # via bootc-image-builder + swtpm) needs registry.local (homelab-internal) and
 # privileged BIB, so it runs exclusively on the self-hosted Forgejo native
-# runner — see .forgejo/workflows/workloadctl-runtime.yml (matrix: [dev, gate]).
+# runner — see .forgejo/workflows/workloadctl-runtime.yml, which runs both
+# fidelities as sequential steps of one job.
 #
 # It requires nested KVM. Two gates apply:
 #   1. `github.server_url == 'https://github.com'` keeps the mirrored *Forgejo*
