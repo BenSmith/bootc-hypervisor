@@ -294,7 +294,7 @@ certs rotate normally; only the root is shared.
 ```
 openssl ecparam -name prime256v1 -genkey -noout -out homelab-root.key
 openssl req -x509 -new -key homelab-root.key -sha256 -days 3650 \
-    -subj "/CN=Homelab Root CA/O=miniverse" -out homelab-root.crt
+    -subj "/CN=Homelab Root CA/O=asdf" -out homelab-root.crt
 ```
 Set the Forgejo `HOMELAB_ROOT_CA` secret to the contents of `homelab-root.crt`,
 and back up `homelab-root.key` offline — it is the homelab CA key.
