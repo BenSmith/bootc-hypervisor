@@ -63,6 +63,7 @@ RUN cp /usr/share/rpm/rpmdb.sqlite /usr/share/rpm/rpmdb.sqlite.tmp && \
 # the pcp and gssproxy bootc lint warnings are because these packages (upon which others depend)
 # store data in /var/lib, and bootc would prefer they're in /usr/lib
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+    acl \
     alsa-sof-firmware \
     amd-ucode-firmware \
     atheros-firmware \
@@ -71,6 +72,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     avahi \
     bash-completion \
     bind-utils \
+    bpftrace \
     brcmfmac-firmware \
     bridge-utils \
     btop \
@@ -91,6 +93,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     ethtool \
     exfatprogs \
     fail2ban \
+    fio \
     firewalld \
     fwupd \
     grub2 \
@@ -132,6 +135,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mtr \
     nano \
     nc \
+    ncdu \
     neovim \
     nss-mdns \
     NetworkManager \
