@@ -120,6 +120,17 @@ jobs:
           rm -rf workloadctl/tests/runtime/.cache
           ln -s "$WLRT_CACHE" workloadctl/tests/runtime/.cache
 
+      - name: Reap stale harness VMs
+        if: steps.kvm.outputs.available == 'true'
+        working-directory: workloadctl
+        run: |
+          # This runner is long-lived, so a cancelled run's QEMU survives it —
+          # still running, still holding its scratch dir. Left alone they pile up
+          # and starve the gate's bootc-image-builder build of disk. Sweep first;
+          # a no-op when nothing is stale.
+          just reap-stale-runs
+          df -h /var/tmp
+
       - name: Runtime rung (dev)
         if: steps.kvm.outputs.available == 'true'
         working-directory: workloadctl

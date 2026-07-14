@@ -23,6 +23,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -39,6 +40,20 @@ from vmtarget import VMTarget  # noqa: E402
 
 CACHE_DIR = _HERE / ".cache"
 FEDORA_VERSIONS = _REPO_ROOT / "fedora-versions.yml"
+
+# Parent of the per-run scratch dir. Disk-backed on purpose: a run holds the
+# boot disk (and, in gate mode, the whole bootc-image-builder store — a raw
+# disk plus the qcow2 converted from it, tens of GiB). `/tmp` is a tmpfs sized
+# at half of RAM on Fedora, so the default `mktemp` location puts all of that
+# in memory and a gate build dies with ENOSPC. `/var/tmp` is on real storage.
+# TMPDIR still wins if set, so a caller can point runs at a bigger volume.
+RUN_ROOT = Path(os.environ.get("TMPDIR") or "/var/tmp")
+
+# Prefix of the per-run scratch dirs, and the glob that reaps them. A run that
+# is cancelled or killed never reaches its cleanup, so its dir — and the QEMU
+# still writing into it — outlive the run; `reap_stale_runs()` is what keeps
+# those from accumulating on a long-lived CI runner.
+RUN_PREFIX = "wlrt-run."
 
 # Binaries the dev-mode boot needs beyond /dev/kvm.
 _DEV_BINARIES = ("qemu-system-x86_64", "qemu-img", "cloud-localds", "ssh-keygen")
@@ -586,10 +601,8 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
     if missing:
         raise RuntimeError(f"missing runtime prerequisites: {', '.join(missing)}")
 
-    run_dir = Path(
-        subprocess.run(["mktemp", "-d", "-t", "wlrt-run.XXXXXX"],
-                       capture_output=True, text=True, check=True).stdout.strip()
-    )
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=RUN_PREFIX, dir=RUN_ROOT))
     try:
         # Mode-specific ssh key + disk / seed / TPM; the rest of the boot is
         # identical. dev uses a per-run ephemeral key; gate uses a stable cached
@@ -680,3 +693,38 @@ def _cleanup_run_dir(run_dir: Path) -> None:
         except (OSError, ValueError):
             pass
     shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def reap_stale_runs() -> list[Path]:
+    """Kill any leftover harness VM and drop its run dir; return what was reaped.
+
+    A run that is cancelled or killed never reaches its own cleanup, so its QEMU
+    keeps running and keeps writing into a dir nothing will ever remove. On a
+    long-lived CI runner those accumulate until a gate build has no room left, so
+    the runtime job sweeps first. Best-effort by design: a dir owned by another
+    user is skipped rather than raising.
+
+    `/tmp` is swept alongside RUN_ROOT because that is where runs from before the
+    disk-backed RUN_ROOT landed, and a leaked one there is exactly what starves
+    the tmpfs. Assumes no other harness VM is meant to be alive — true of the
+    runtime job, which runs its fidelities sequentially in one job.
+    """
+    reaped = []
+    for root in {RUN_ROOT, Path("/tmp")}:
+        for run_dir in sorted(root.glob(f"{RUN_PREFIX}*")):
+            if not run_dir.is_dir():
+                continue
+            _cleanup_run_dir(run_dir)
+            reaped.append(run_dir)
+    return reaped
+
+
+if __name__ == "__main__":
+    # `python3 tests/runtime/vmlaunch.py reap` — the pre-flight sweep, so CI (and
+    # a dev box after a Ctrl-C) can reuse the teardown above instead of open-coding
+    # pidfile handling in shell.
+    if sys.argv[1:2] == ["reap"]:
+        for _d in reap_stale_runs():
+            print(f"reaped stale run dir: {_d}")
+    else:
+        sys.exit(f"usage: {sys.argv[0]} reap")

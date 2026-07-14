@@ -22,6 +22,12 @@ test-cli-deploy target:
 test-runtime:
   pytest tests/cli_surface/ -m runtime --target=vm:${WLRT_MODE:-dev} -v
 
+# Kill any harness VM left behind by a cancelled run and drop its scratch dir.
+# A killed run never reaches its own cleanup, so its QEMU keeps running and keeps
+# holding disk; CI sweeps before each runtime rung. Safe when nothing is stale.
+reap-stale-runs:
+  python3 tests/runtime/vmlaunch.py reap
+
 # Full KVM-host verification sweep: CLI surface (container+VM) + runtime rung in
 # both dev and gate fidelity. Run this ON a KVM host — the runtime rung boots
 # QEMU locally, so it can't be driven over SSH. {{target}} is the CLI-surface
