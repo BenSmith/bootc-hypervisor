@@ -875,12 +875,10 @@ extra_groups = ["video", "render", "input", "dialout", "audio"]
 # privileged = false
 
 [storage]
-# Optional: Custom home directory for the workload user
-# Type: string (absolute path)
-# Default: "/var/lib/workloads/{name}"
-# This directory is created automatically
-# Example: "/custom/path/for/workload"
-# home = "/var/lib/workloads/my-custom-path"
+# The workload's directory is always /var/lib/workloads/{name} — it is not
+# configurable. Everything anchored below (./ and @/) resolves under it, and
+# workload_root_dir() hardcodes it. To put a workload's data on another
+# filesystem, mount that filesystem and give the volume an absolute host path.
 
 # Optional: Additional volume mounts
 # Type: array of strings

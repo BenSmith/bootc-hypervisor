@@ -898,6 +898,48 @@ class TestGeneratorVolumeExpansion(unittest.TestCase):
         self.assertIn("/var/lib/workloads/vols/data", service)
         self.assertNotIn("./data", service)
 
+    def _service_for(self, volumes):
+        write_config(self.config_dir, "vols", f"""\
+            [workload]
+            name = "vols"
+
+            [container]
+            image = "myapp"
+
+            [storage]
+            volumes = {volumes}
+        """)
+        run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        return (Path(self.services_dir) / "workload-vols.service").read_text()
+
+    def test_external_volume_gets_requires_mounts_for(self):
+        # A host path outside the workload tree may be its own filesystem, and
+        # podman would silently create the bind source if it were not mounted --
+        # the container would then start healthy over an empty directory.
+        service = self._service_for('["/mnt/models:/models:ro"]')
+        self.assertIn('RequiresMountsFor="/mnt/models"', service)
+
+    def test_anchored_volume_gets_no_requires_mounts_for(self):
+        # Anchored paths live under /var/lib/workloads, which is mounted before
+        # basic.target -- guarding them would be noise.
+        service = self._service_for('["./data:/app/data:rw"]')
+        self.assertNotIn("RequiresMountsFor", service)
+
+    def test_external_volume_paths_are_deduplicated(self):
+        service = self._service_for(
+            '["/mnt/models:/models:ro", "/mnt/models:/also-models:ro"]'
+        )
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("RequiresMountsFor="))
+        self.assertEqual(line.count("/mnt/models"), 1)
+
+    def test_requires_mounts_for_does_not_double_dollar(self):
+        # RequiresMountsFor= is not an Exec directive: systemd does not expand
+        # $VAR there, so uq() must leave a literal '$' alone where dq() doubles
+        # it. A doubled '$' would name a path that does not exist.
+        service = self._service_for('["/mnt/a$b:/models:ro"]')
+        self.assertIn('RequiresMountsFor="/mnt/a$b"', service)
+
 
 class TestGeneratorDevices(unittest.TestCase):
     def setUp(self):
@@ -1798,6 +1840,16 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("RuntimeDirectory=", sidecar)
         # The shared-dir path must be correctly quoted onto ExecStart.
         self.assertIn("--shared-dir=\"/srv/data\"", sidecar)
+
+    def test_virtiofsd_sidecar_guards_external_shared_dir(self):
+        # The sidecar is what opens the host path, so the mount guard lives here
+        # and not on the VM service: an unmounted filesystem would otherwise be
+        # shared into the guest as an empty directory. PartOf= propagates the
+        # failure up to the VM.
+        self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        self.assertIn('RequiresMountsFor="/srv/data"', sidecar)
 
     def test_virtiofsd_uses_exec_type_with_socket_poll(self):
         # virtiofsd 1.x only sends sd_notify READY after QEMU connects,

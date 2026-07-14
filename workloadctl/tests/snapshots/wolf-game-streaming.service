@@ -9,6 +9,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 Requires=nvidia-cdi-generator.service
 After=nvidia-cdi-generator.service
+RequiresMountsFor="/run/udev" "/dev/input"
 
 [Service]
 Type=exec

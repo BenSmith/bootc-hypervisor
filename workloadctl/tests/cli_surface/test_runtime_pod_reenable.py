@@ -20,26 +20,23 @@ Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`
 
 import pytest
 
-from fixtures import _enable_workload, _install_toml, _purge_workload
+from fixtures import _enable_workload, _install_toml, _purge_workload, dump_journal
 
 pytestmark = pytest.mark.runtime
 
 WORKLOAD = "rt-pod"
 
+# The umbrella unit says nothing about which member died; these are where a pod
+# failure actually shows up.
+POD_UNITS = [
+    f"workload-{WORKLOAD}-pod.service",
+    f"workload-{WORKLOAD}-app.service",
+    f"workload-{WORKLOAD}-proxy.service",
+]
 
-def _dump_journal(target, name):
-    """Print the umbrella + pod + member unit journals — the diagnosis on failure."""
-    for unit in (
-        f"workload-{name}.service",
-        f"workload-{name}-pod.service",
-        f"workload-{name}-app.service",
-        f"workload-{name}-proxy.service",
-    ):
-        r = target.run(
-            ["journalctl", "--no-pager", "-n", "30", "-u", unit],
-            sudo=True, check=False,
-        )
-        print(f"\n----- journalctl -u {unit} (tail) -----\n{r.stdout}\n{r.stderr}")
+
+def _dump_pod_journals(target) -> None:
+    dump_journal(target, WORKLOAD, lines=30, extra_units=POD_UNITS)
 
 
 def test_pod_same_boot_reenable(target):
@@ -53,7 +50,7 @@ def test_pod_same_boot_reenable(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            _dump_pod_journals(target)
             raise
 
         # Plain disable — keeps the user + config, so any residual pod/cgroup
@@ -66,7 +63,7 @@ def test_pod_same_boot_reenable(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=180, retries=0)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            _dump_pod_journals(target)
             raise
     finally:
         _purge_workload(target, WORKLOAD)
