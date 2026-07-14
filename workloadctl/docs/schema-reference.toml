@@ -1016,6 +1016,10 @@ ports = ["8080:80", "8443:443"]
 # user@<uid>.service drop-in emitted by the generator; they bind the entire
 # workload subtree including all its containers.
 #
+# VM WORKLOADS take the same block — QEMU runs directly under the VM service unit
+# (no user manager in between), so the caps, the timeouts and custom_directives
+# all bind there instead of on a drop-in. Same keys, same meaning.
+#
 # PER-CONTAINER CAPS (memory_max, cpu_quota, pids_max, etc.): passed as podman
 # flags (--memory, --cpus, --pids-limit, --device-read-bps, --device-write-bps)
 # and bind natively via the user manager's delegated cgroup subtree. All modes

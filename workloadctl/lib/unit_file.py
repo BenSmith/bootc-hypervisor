@@ -95,17 +95,12 @@ class Unit:
     """A whole unit file: optional preamble comments plus ordered sections."""
 
     def __init__(self):
-        self._preamble = []  # ("comment", text) | ("blank",)
+        self._preamble = []  # ("comment", text)
         self._sections = {}  # name -> Section, insertion-ordered
 
     def comment(self, text=""):
         """Append a file-level preamble comment (before the first section)."""
         self._preamble.append(("comment", str(text)))
-        return self
-
-    def blank(self):
-        """Append a blank line to the preamble."""
-        self._preamble.append(("blank",))
         return self
 
     def section(self, name):

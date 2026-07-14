@@ -21,6 +21,7 @@ import time
 
 import pytest
 
+from fixtures import unit_state
 from target import Target
 
 
@@ -30,11 +31,7 @@ from target import Target
 
 def _is_active(target: Target, name: str) -> bool:
     """Return True if the workload service is active."""
-    r = target.run(
-        ["systemctl", "is-active", f"workload-{name}.service"],
-        sudo=False, check=False,
-    )
-    return r.stdout.strip() == "active"
+    return unit_state(target, f"workload-{name}.service") == "active"
 
 
 def _user_exists(target: Target, name: str) -> bool:

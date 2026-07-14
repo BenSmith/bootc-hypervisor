@@ -9,10 +9,13 @@ every exception type.
 """
 
 import io
+import json
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
+
+import cli_log
 
 from tests import load_script
 
@@ -90,6 +93,60 @@ class RunCliExitCodeTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 cli._run_cli()
         self.assertEqual(cm.exception.code, 7)
+
+
+class JsonModeWiringTest(unittest.TestCase):
+    """--json means two different things, and main() must tell them apart.
+
+    On a mutating verb it hands stdout to cli_log, which writes the result
+    object. On a read verb it means the *verb* prints a JSON report and cli_log
+    must not write to stdout at all — because the exit ladder's emit_failure()
+    fires on any non-zero exit, and a `diagnose --json` that legitimately exits 1
+    would otherwise carry a second JSON document tacked onto its report, which
+    nothing downstream can parse.
+    """
+
+    def setUp(self):
+        self.addCleanup(cli_log.reset)
+
+    def _configure_for(self, argv):
+        """Run main() far enough to configure cli_log, then stop."""
+        with mock.patch.object(cli.sys, 'argv', ['workloadctl', *argv]), \
+                mock.patch.object(cli, 'WorkloadManager', mock.Mock()), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cli.main()
+
+    def test_mutating_json_hands_stdout_to_cli_log(self):
+        with mock.patch.object(cli, 'cmd_start'):
+            self._configure_for(['start', '--json', 'web'])
+        self.assertTrue(cli_log.json_enabled())
+
+    def test_read_verb_json_does_not_hand_stdout_to_cli_log(self):
+        with mock.patch.object(cli, 'cmd_diagnose'):
+            self._configure_for(['diagnose', '--json', 'web'])
+        self.assertFalse(cli_log.json_enabled())
+        # ...but prose is still kept off the report's stream.
+        self.assertTrue(cli_log.is_quiet())
+
+    def test_read_verb_json_emits_no_failure_object(self):
+        # The regression itself: a read verb's own JSON report, followed by a
+        # non-zero exit, must leave stdout holding exactly one document.
+        def failing_diagnose(args, manager):
+            print(json.dumps({"workload": "web", "passed": False}))
+            sys.exit(1)
+
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'cmd_diagnose', failing_diagnose), \
+                mock.patch.object(cli.sys, 'argv',
+                                  ['workloadctl', 'diagnose', '--json', 'web']), \
+                mock.patch.object(cli, 'WorkloadManager', mock.Mock()), \
+                redirect_stdout(buf), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cli._run_cli()
+        self.assertEqual(cm.exception.code, 1)
+        # json.loads() is the assertion: it raises on a second document.
+        self.assertEqual(json.loads(buf.getvalue()),
+                         {"workload": "web", "passed": False})
 
 
 class VersionFlagTest(unittest.TestCase):

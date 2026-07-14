@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the shared VM bridge teardown in cmd_disable.
 
-Covers cmd_lifecycle._stop_bridge_if_last_vm: the helper that stops
+Covers cmd_disable._stop_bridge_if_last_vm: the helper that stops
 workload-bridge.service when the disabled workload was the final
 managed-bridge VM workload.
 """
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, call, patch
 
 
 import workload_lib
-import cmd_lifecycle
+import cmd_disable
 from workloadctl_core import WorkloadConfig, VM_BRIDGE_NAME
 
 # Minimal TOML fixtures -------------------------------------------------------
@@ -98,8 +98,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
         tomls = {config_name: toml_text.format(name=config_name)}
         with _WlDir(tomls):
             config = WorkloadConfig(config_name)
-            with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
-                cmd_lifecycle._stop_bridge_if_last_vm(config, manager)
+            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
+                cmd_disable._stop_bridge_if_last_vm(config, manager)
             return run
 
     # 1. Last managed-bridge VM → bridge service is stopped -----------------
@@ -130,8 +130,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
             mgr = _mock_manager([other_config])
 
             config = WorkloadConfig("myvm")
-            with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
-                cmd_lifecycle._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
+                cmd_disable._stop_bridge_if_last_vm(config, mgr)
 
         # systemctl stop workload-bridge.service must NOT appear
         stop_calls = [
@@ -149,8 +149,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
         tomls = {"mywl": CONTAINER_TOML.format(name="mywl")}
         with _WlDir(tomls):
             config = WorkloadConfig("mywl")
-            with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
-                cmd_lifecycle._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
+                cmd_disable._stop_bridge_if_last_vm(config, mgr)
 
         mgr.get_all_configs.assert_not_called()
         run.assert_not_called()
@@ -164,8 +164,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
         with _WlDir(tomls):
             config = WorkloadConfig("customvm")
             self.assertNotEqual(config.vm_bridge, VM_BRIDGE_NAME)
-            with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
-                cmd_lifecycle._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
+                cmd_disable._stop_bridge_if_last_vm(config, mgr)
 
         mgr.get_all_configs.assert_not_called()
         run.assert_not_called()
@@ -180,8 +180,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
             # Pretend get_all_configs returned the *same* workload (edge case)
             mgr = _mock_manager([config])
 
-            with patch.object(cmd_lifecycle.subprocess, "run", MagicMock()) as run:
-                cmd_lifecycle._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
+                cmd_disable._stop_bridge_if_last_vm(config, mgr)
 
         # Should still stop the bridge (self-name is excluded by guard)
         expected = call(

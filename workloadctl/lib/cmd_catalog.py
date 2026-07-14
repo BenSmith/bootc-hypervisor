@@ -18,6 +18,7 @@ import shutil
 import sys
 import tomllib
 
+from cli_log import emit_result
 from workload_lib import iter_workloads, workload_config_dir, workload_config_path, WORKLOAD_BUNDLES_DIR
 from validation import validate_workload_name
 from secrets_template import auto_detect_credentials
@@ -27,7 +28,7 @@ from workloadctl_core import (
     require_root,
     toml_string,
 )
-from cmd_admin import validate_single
+from cmd_validate import validate_single
 
 BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
 
@@ -247,7 +248,7 @@ def _scratch_vm(name: str, manager: WorkloadManager) -> None:
 
     print(f"✓ Created VM stub workload '{name}'")
     print(f"  {dst}")
-    _post_write_report(name, manager)
+    _post_write_report(name, manager, "created", source="vm-stub")
 
 
 def cmd_init(args, manager: WorkloadManager):
@@ -291,7 +292,7 @@ def cmd_init(args, manager: WorkloadManager):
             sys.exit(1)
         print(f"✓ Created scratch workload '{name}'")
         print(f"  {dst}")
-        _post_write_report(name, manager)
+        _post_write_report(name, manager, "created", source="scratch")
         return
 
     if not bundle:
@@ -343,7 +344,7 @@ def cmd_init(args, manager: WorkloadManager):
 
     print(f"✓ Instantiated bundle '{bundle}' as '{name}'")
     print(f"  {dst}")
-    _post_write_report(name, manager)
+    _post_write_report(name, manager, "created", source="bundle", bundle=bundle)
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +404,8 @@ def cmd_duplicate(args, manager: WorkloadManager):
     print(f"✓ Duplicated '{src_name}' → '{new_name}' (bundle '{resolved_bundle}')")
     print(f"  {dst_path}")
     _lint_duplicate(new_name, manager)
-    _post_write_report(new_name, manager)
+    _post_write_report(new_name, manager, "duplicated", source_workload=src_name,
+                       bundle=resolved_bundle)
 
 
 def _lint_duplicate(name: str, manager: WorkloadManager) -> None:
@@ -460,9 +462,19 @@ def _lint_duplicate(name: str, manager: WorkloadManager) -> None:
             print(f"    ⚠ {w}")
 
 
-def _post_write_report(name: str, manager: WorkloadManager) -> None:
+def _post_write_report(name: str, manager: WorkloadManager, result: str,
+                       **detail) -> None:
     """Validate the freshly written config (non-fatal — a fresh copy commonly
-    needs volume dirs created on first enable) and print next steps."""
+    needs volume dirs created on first enable), record the operation, and print
+    next steps.
+
+    Every verb in this module ends here on success, which is why the operations
+    log is written here rather than at each of the five call sites: a new way to
+    author a workload gets recorded by construction. `result` says which one it
+    was ("created" / "duplicated" / "installed") and `detail` carries whatever
+    that verb can add — the bundle it came from, the workload it was copied off.
+    """
+    emit_result([{"workload": name, "result": result, **detail}])
     print()
     try:
         cfg = WorkloadConfig(name)
@@ -519,4 +531,4 @@ def cmd_install(args, manager: WorkloadManager):
     dst = workload_config_path(name)
     print(f"✓ Installed '{name}' from {src}")
     print(f"  {dst}")
-    _post_write_report(name, manager)
+    _post_write_report(name, manager, "installed", source=str(src))

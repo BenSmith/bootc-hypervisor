@@ -25,6 +25,7 @@ import time
 import pytest
 
 from fixtures import (
+    dump_journal,
     _enable_workload, _install_toml, _purge_workload,
     skip_if_no_kvm, skip_if_no_vm_toolchain,
 )
@@ -33,15 +34,6 @@ pytestmark = [pytest.mark.runtime, pytest.mark.slow]
 
 WORKLOAD = "rt-vm"
 SERVICE = f"workload-{WORKLOAD}.service"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "100", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def test_vm_workload_boots_and_is_reachable(target):
@@ -62,13 +54,13 @@ def test_vm_workload_boots_and_is_reachable(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=900, expect_container=False)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         # The VM service is active.
         r = target.run(["systemctl", "is-active", SERVICE], sudo=False, check=False)
         if r.stdout.strip() != "active":
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert r.stdout.strip() == "active", (
             f"{SERVICE} is {r.stdout.strip()!r}, expected active"
         )
@@ -85,7 +77,7 @@ def test_vm_workload_boots_and_is_reachable(target):
                 break
             time.sleep(10)
         if not (last and last.rc == 0 and "rt-vm-reachable" in last.stdout):
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert last is not None and last.rc == 0 and "rt-vm-reachable" in last.stdout, (
             f"`workloadctl exec {WORKLOAD}` never reached the guest over SSH "
             f"within 300s (last rc={None if last is None else last.rc}):\n"

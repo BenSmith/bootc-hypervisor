@@ -13,7 +13,7 @@ import time
 import pytest
 
 from target import Target
-from fixtures import _wait_container_running, _purge_workload
+from fixtures import _wait_container_running, _purge_workload, unit_state
 
 
 # ---------------------------------------------------------------------------
@@ -21,11 +21,7 @@ from fixtures import _wait_container_running, _purge_workload
 # ---------------------------------------------------------------------------
 
 def _is_active(target: Target, name: str) -> bool:
-    r = target.run(
-        ["systemctl", "is-active", f"workload-{name}.service"],
-        sudo=False, check=False,
-    )
-    return r.stdout.strip() == "active"
+    return unit_state(target, f"workload-{name}.service") == "active"
 
 
 def _wait_active(target: Target, name: str, timeout: int = 120) -> bool:

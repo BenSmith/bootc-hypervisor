@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from fixtures import _install_toml, _purge_workload
+from fixtures import _install_toml, _purge_workload, dump_journal
 
 pytestmark = pytest.mark.runtime
 
@@ -33,15 +33,6 @@ SERVICE = "workload-rt-notify.service"
 # States that show systemd actually attempted the start (as opposed to never
 # touching the unit) — any of these, but NEVER "active".
 ATTEMPTED_STATES = {"activating", "failed", "deactivating", "auto-restart", "reloading"}
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "100", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def _active_state(target):
@@ -90,7 +81,7 @@ def test_notify_never_reaches_active(target):
         print(f"\n----- {SERVICE} is-active states over window -----\n{seen}\n"
               f"-------------------------------------------------")
         if not attempted:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert attempted, (
             f"{SERVICE} never entered a start-attempt state {ATTEMPTED_STATES} "
             f"(states seen: {seen}) — enable did not start the unit, so the "

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for purge-time cleanup of /run/workload-env files.
 
-Covers cmd_lifecycle._remove_runtime_env_files — the helper cmd_disable --purge
+Covers cmd_disable._remove_runtime_env_files — the helper cmd_disable --purge
 calls to delete a workload's decrypted .secrets and .env from /run so they don't
 linger root-readable until the next reboot.
 """
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 
 import workload_lib
-import cmd_lifecycle
+import cmd_disable
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
 
@@ -118,7 +118,7 @@ class TestRemoveRuntimeEnvFilesSingle(unittest.TestCase):
             _touch(env_dir,
                    'workload-test-wl.env',
                    'workload-test-wl.secrets')
-            removed = cmd_lifecycle._remove_runtime_env_files(config)
+            removed = cmd_disable._remove_runtime_env_files(config)
             self.assertEqual(
                 sorted(removed),
                 ['workload-test-wl.env', 'workload-test-wl.secrets'])
@@ -126,7 +126,7 @@ class TestRemoveRuntimeEnvFilesSingle(unittest.TestCase):
 
     def test_missing_files_is_noop(self):
         with _Env(SINGLE_TOML, 'test-wl') as (config, env_dir):
-            removed = cmd_lifecycle._remove_runtime_env_files(config)
+            removed = cmd_disable._remove_runtime_env_files(config)
             self.assertEqual(removed, [])
 
     def test_does_not_touch_prefix_collisions(self):
@@ -138,7 +138,7 @@ class TestRemoveRuntimeEnvFilesSingle(unittest.TestCase):
                    'workload-github.env',          # different workload
                    'workload-github.secrets',
                    'workload-git-extra.secrets')   # not a container of 'git'
-            removed = cmd_lifecycle._remove_runtime_env_files(config)
+            removed = cmd_disable._remove_runtime_env_files(config)
             self.assertEqual(
                 sorted(removed),
                 ['workload-git.env', 'workload-git.secrets'])
@@ -159,7 +159,7 @@ class TestRemoveRuntimeEnvFilesMulti(unittest.TestCase):
                    'workload-stack.env',
                    'workload-stack-web.secrets',
                    'workload-stack-db.secrets')
-            removed = cmd_lifecycle._remove_runtime_env_files(config)
+            removed = cmd_disable._remove_runtime_env_files(config)
             self.assertEqual(
                 sorted(removed),
                 ['workload-stack-db.secrets',
@@ -173,7 +173,7 @@ class TestRemoveRuntimeEnvFilesMulti(unittest.TestCase):
             _touch(env_dir,
                    'workload-stack-web.secrets',
                    'workload-stack-cache.secrets')  # 'cache' not a container
-            removed = cmd_lifecycle._remove_runtime_env_files(config)
+            removed = cmd_disable._remove_runtime_env_files(config)
             self.assertEqual(removed, ['workload-stack-web.secrets'])
             self.assertEqual(_names(env_dir), ['workload-stack-cache.secrets'])
 
@@ -182,22 +182,22 @@ class TestStopUserManager(unittest.TestCase):
     """cmd_disable's non-purge path tears down the lingering user manager."""
 
     def test_existing_user_terminates_and_disables_linger(self):
-        with patch.object(cmd_lifecycle.pwd, 'getpwnam',
+        with patch.object(cmd_disable.pwd, 'getpwnam',
                           return_value=SimpleNamespace(pw_uid=10005)), \
-             patch.object(cmd_lifecycle.subprocess, 'run',
+             patch.object(cmd_disable.subprocess, 'run',
                           MagicMock()) as run:
-            acted = cmd_lifecycle._stop_user_manager('_wl-foo')
+            acted = cmd_disable._stop_user_manager('_wl-foo')
         self.assertTrue(acted)
         cmds = [c.args[0] for c in run.call_args_list]
         self.assertIn(['loginctl', 'terminate-user', '10005'], cmds)
         self.assertIn(['loginctl', 'disable-linger', '10005'], cmds)
 
     def test_missing_user_is_noop(self):
-        with patch.object(cmd_lifecycle.pwd, 'getpwnam',
+        with patch.object(cmd_disable.pwd, 'getpwnam',
                           side_effect=KeyError), \
-             patch.object(cmd_lifecycle.subprocess, 'run',
+             patch.object(cmd_disable.subprocess, 'run',
                           MagicMock()) as run:
-            acted = cmd_lifecycle._stop_user_manager('_wl-gone')
+            acted = cmd_disable._stop_user_manager('_wl-gone')
         self.assertFalse(acted)
         run.assert_not_called()
 
@@ -239,23 +239,22 @@ class TestPurgeBestEffort(unittest.TestCase):
 
             args = SimpleNamespace(workload='pp', purge=True)
             exit_code = None
-            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
-                 patch.object(cmd_lifecycle, 'WORKLOADS_BASE', base), \
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
                  patch.object(workload_lib, 'WORKLOADS_BASE', base), \
-                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
-                 patch.object(cmd_lifecycle.time, 'sleep', lambda *_: None), \
-                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_run_files', MagicMock(return_value=[])), \
-                 patch.object(cmd_lifecycle, '_remove_runtime_env_files', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable.time, 'sleep', lambda *_: None), \
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_run_files', MagicMock(return_value=[])), \
+                 patch.object(cmd_disable, '_remove_runtime_env_files', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
-                 patch.object(cmd_lifecycle.shutil, 'rmtree', fake_rmtree), \
-                 patch.object(cmd_lifecycle.pwd, 'getpwnam', side_effect=getpwnam):
+                 patch.object(cmd_disable.shutil, 'rmtree', fake_rmtree), \
+                 patch.object(cmd_disable.pwd, 'getpwnam', side_effect=getpwnam):
                 try:
-                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                    cmd_disable.cmd_disable(args, MagicMock())
                 except SystemExit as e:
                     exit_code = e.code
             return exit_code, removed, data_dir
@@ -287,20 +286,20 @@ class TestPurgeBestEffort(unittest.TestCase):
             stranded.write_text("# unit\n")
             args = SimpleNamespace(workload='pp', purge=False)
             exit_code = None
-            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
-                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_run_host_setup',
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup',
                               MagicMock(side_effect=RuntimeError("boom"))), \
-                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_run_files',
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_run_files',
                               MagicMock(return_value=[
                                   SimpleNamespace(kind='unit', path=stranded)])), \
-                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())):
                 try:
-                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                    cmd_disable.cmd_disable(args, MagicMock())
                 except SystemExit as e:
                     exit_code = e.code
         # later step ran despite the earlier failure
@@ -333,18 +332,18 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             sibling.write_text("x\n")
 
             args = SimpleNamespace(workload='pp', purge=False)
-            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
-                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
                  patch.object(type(config), 'uid', property(lambda self: 10005)):
-                cmd_lifecycle.cmd_disable(args, MagicMock())
+                cmd_disable.cmd_disable(args, MagicMock())
 
         for p in mine:
             self.assertFalse(p.exists(), f"{p} should have been removed")
@@ -379,19 +378,19 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
 
             args = SimpleNamespace(workload='pp', purge=False)
             exit_code = None
-            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
-                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(cmd_lifecycle.subprocess, 'run', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                 patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
                  patch.object(type(config), 'uid', property(raise_absent)):
                 try:
-                    cmd_lifecycle.cmd_disable(args, MagicMock())
+                    cmd_disable.cmd_disable(args, MagicMock())
                 except SystemExit as e:
                     exit_code = e.code
 
@@ -416,17 +415,17 @@ class TestDisableStopsWholeTopology(unittest.TestCase):
         with _Env(toml, name) as (config, _env_dir):
             args = SimpleNamespace(workload=name, purge=False)
             fake_run = MagicMock()
-            with patch.object(cmd_lifecycle, 'require_root', lambda: None), \
-                 patch.object(cmd_lifecycle, 'RUN_SYSTEMD_SYSTEM', run), \
+            with patch.object(cmd_disable, 'require_root', lambda: None), \
+                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
-                 patch.object(cmd_lifecycle.subprocess, 'run', fake_run), \
-                 patch.object(cmd_lifecycle, '_run_host_setup', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_apply_selinux_policy', MagicMock()), \
-                 patch.object(cmd_lifecycle, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_lifecycle, '_stop_bridge_if_last_vm', MagicMock()), \
-                 patch.object(cmd_lifecycle, 'workload_enabled_marker',
+                 patch.object(cmd_disable.subprocess, 'run', fake_run), \
+                 patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
+                 patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
+                 patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
+                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())):
-                cmd_lifecycle.cmd_disable(args, MagicMock())
+                cmd_disable.cmd_disable(args, MagicMock())
         stopped = set()
         for c in fake_run.call_args_list:
             argv = c.args[0]

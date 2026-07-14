@@ -301,6 +301,74 @@ class TestControlCharInjection(unittest.TestCase):
         )
 
 
+class TestVmControlCharInjection(unittest.TestCase):
+    """A VM config reaches root units too, and gets the same guard.
+
+    [resources].slice lands in the VM service's Slice=; a [vm].volumes host path
+    lands in the virtiofsd ExecStart. Both are emitted verbatim, so a newline
+    there would terminate the directive and let the tail parse as a following
+    one. The single exemption is [vm.cloud_init].template_vars, which is
+    substituted into YAML rather than a unit.
+    """
+
+    def _base(self):
+        return {
+            "workload": {"name": "guest"},
+            "vm": {
+                "cloud_image_url": "https://example.com/cloud.qcow2",
+                "cloud_image_checksum": "sha256:" + "d" * 64,
+            },
+        }
+
+    def test_newline_in_slice_rejected(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["resources"] = {"slice": "workloads.slice\nExecStartPre=/bin/evil"}
+        errors = validate_workload_config(cfg)
+        self.assertTrue(
+            any("control character" in e for e in errors),
+            f"newline in [resources].slice not rejected: {errors}",
+        )
+
+    def test_newline_in_volume_host_path_rejected(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["vm"]["volumes"] = ["/srv/data\nExecStartPost=/bin/evil:/mnt/data"]
+        errors = validate_workload_config(cfg)
+        self.assertTrue(
+            any("control character" in e for e in errors),
+            f"newline in [vm].volumes not rejected: {errors}",
+        )
+
+    def test_multiline_template_var_accepted(self):
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["vm"]["cloud_init"] = {
+            "user_data_file": "cloud-init.yaml",
+            "template_vars": {"SETUP": "#!/bin/bash\nset -euo pipefail\ndnf -y update\n"},
+        }
+        errors = validate_workload_config(cfg)
+        self.assertFalse(
+            any("control character" in e for e in errors),
+            f"multi-line template_var wrongly rejected: {errors}",
+        )
+
+    def test_control_char_outside_template_vars_still_rejected(self):
+        # Pruning template_vars must not blind the guard to the rest of the
+        # [vm.cloud_init] table — user_data_file is a path, not YAML.
+        from validation import validate_workload_config
+        cfg = self._base()
+        cfg["vm"]["cloud_init"] = {
+            "user_data_file": "cloud-init.yaml\nx",
+            "template_vars": {"SETUP": "a\nb"},
+        }
+        errors = validate_workload_config(cfg)
+        self.assertTrue(
+            any("control character" in e for e in errors),
+            f"newline in user_data_file not rejected: {errors}",
+        )
+
+
 class TestSecretDollarEscape(unittest.TestCase):
     """Boundary 4: the $${SECRET:x} literal-dollar escape must NOT resolve.
 

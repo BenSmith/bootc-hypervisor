@@ -15,11 +15,15 @@ workloadctl is a Python CLI tool and systemd integration that turns TOML config 
 The system has four main components:
 
 1. **Generator + early-boot oneshot**: A tiny shell systemd generator (`generators/workload-generator`) emits a single oneshot service unit, `workload-generate.service`. That service runs the Python script `generators/workload-generate` during early boot (ordered `After=sysinit.target Before=basic.target`), which reads `/etc/workloads.d/*/workload.toml` and produces systemd-sysusers configs and per-workload service unit files in `/run/systemd/system/`. The Python work is *not* run as a systemd generator because generators are expected to be fast and minimal (see `systemd.generator(7)`); Python import overhead alone can exceed the generator execution budget systemd 258+ enforces. Both the shell generator and the Python script always exit 0 so a failure never blocks boot. The Python script is still read-only with respect to `/var` — all `/var` work is deferred to `workload-ensure-user` at service start.
+
+   The CLI re-runs `workload-generate` post-boot to apply config edits (`enable`, `edit`, `recreate`), and those runs pass **`--workload <name>`**, which narrows the emit to one workload. Boot passes no filter and emits the whole enabled set. The distinction matters: an unfiltered run rewrites *every* enabled workload's unit files and enqueues a `systemctl start` for each, so acting on one workload would (a) silently update a bystander's unit file in `/run` while its service keeps running the old one — and `drift` compares against the files, so the staleness becomes invisible — and (b) start a workload the operator had deliberately stopped. The `--workload` filter is applied after the all-names pre-scan, so a narrowed run still validates `[workload].requires`/`.after` against the full fleet.
 2. **User Setup** (`libexec/workload-ensure-user`): Runs as `ExecStartPre` in each workload service. Configures subordinate UID/GID ranges, creates home and volume directories, writes the EnvironmentFile, and enables linger.
 3. **Workload Services**: Per-workload systemd services that run `podman run` as dedicated `_wl-<name>` users with rootless podman. Default service type is `Type=exec` (activates when podman execs the container process). `Type=notify` is available via `[resources] service_type = "notify"` but is **structurally incompatible** with this architecture, so `Type=exec` stays the default — this is settled, not a pending question. The root cause: systemd attributes an incoming `sd_notify` datagram to the unit owning the *sender's* cgroup, and under rootless + linger the process that emits `READY=1` always lives in `user@<uid>.service`'s cgroup, never in `workload-<name>.service`'s. So the notification is credited to the user manager (the wrong unit) and `workload-<name>.service` never sees it; no `NotifyAccess` tweak on the workload unit can fix this, because the sender is not in that unit's cgroup at all. Both sdnotify policies fail identically for this reason (verified on tp, Fedora 44 / systemd 259, 2026-06-21): with `--sdnotify=conmon` the sender is conmon; with `--sdnotify=healthy` (which additionally requires a healthcheck) podman *does* send `READY=1` once the container is healthy, but the emitter is the re-exec'd libpod podman (`waitForHealthy`), which has migrated into `…/user@<uid>.service/…/podman-<pid>.scope` — same cgroup as conmon, same misattribution (systemd logs `user@<uid>.service: Got notification message from PID …, but reception only permitted for main PID …`). The earlier `--cgroups=split` explanation named the symptom; ADR 001 option 1b does not change the outcome because the notifier is user-manager-resident either way. Use podman-native `--health-cmd` + `workloadctl health`/`update`'s health-verified flow for readiness instead (those work under 1b). The VM substrate's `Type=notify` is unaffected — `workload-vm-notify` sends `READY=1` from a process inside the system unit's own cgroup. Cgroup placement uses **ADR 001 option 1b**: the generator emits a `user@<uid>.service.d/50-workload.conf` drop-in that redirects each workload's user manager into `workloads.slice` (`Slice=workloads.slice`). The container payload follows the user manager and lands at `workloads.slice/user@<uid>.service/…/libpod-<id>.scope` — inside the aggregate slice. Per-workload resource caps (`MemoryHigh`, `CPUWeight`, etc.) go on the same drop-in as `[Service]` directives; per-container caps (`--memory`, `--cpus`, `--pids-limit`, `--device-read-bps/write-bps`) are passed as podman flags and bind natively via the user manager's delegated subtree. There is no `cgroup_exec.py` placement shim — plain `sudo -u` exec works because the container is user-manager-resident. Podman's native `--health-cmd` healthcheck timer fires in the user manager and `--health-on-failure` works without any system-manager replacement. `ExecStopPost=-podman rm -f -t0` is emitted on each container unit because `KillMode=control-group` can't reach the payload (it lives in the user manager's cgroup subtree, not the system unit's). See `docs/adr/001-container-cgroup-placement.md`. Each workload's *head* unit runs two cleanup `ExecStartPre` steps before any other podman call: `ExecStartPre=-/usr/bin/podman system migrate` then `ExecStartPre=-/usr/bin/rm -f /run/user/<uid>/libpod/tmp/pause.pid /run/user/<uid>/libpod/tmp/ns_handles`. The problem: a libpod pause process left over from a previous service invocation gets migrated into `podman-pause-*.scope` under `user@<uid>.service` by any host-side podman call and survives restarts, but its mount namespace pins the old invocation's already-deleted `PrivateTmp` `/tmp`; the next `podman run` takes the rootless join shortcut (`can_use_shortcut` → `join_namespace_or_die`, which ignores `--userns` — so this is independent of keep-id vs host userns) into that stale pause, and pasta then fails its sandbox mount of `/tmp` with ENOENT and the unit restart-loops. `migrate` alone does not fully close this (`runtime_migrate.go` returns before `stopPauseProcess()` if any container stop errors), so the tolerant `rm` of `pause.pid`+`ns_handles` is the belt-and-suspenders: it makes the join shortcut fall through so podman builds a *fresh* pause in the live mount ns. Host-verified on zamd 2026-06-28 (both `--userns=keep-id` and `--userns=host` fail identically against an armed stale pause; the `rm` makes both start clean). Member services must *not* run either step (they would kill the pause out from under live pod infra / sibling containers).
-4. **CLI** (`bin/workloadctl` + `lib/cmd_*.py` + `lib/substrate.py`): Docker/kubectl-like argparse CLI for creating, enabling, disabling, updating, and inspecting workloads. `bin/workloadctl` is a thin (~330-line) argument-parser/dispatcher; each verb's body lives in a `lib/cmd_<group>.py` module (`cmd_lifecycle`, `cmd_inspect`, `cmd_interact`, `cmd_backup`, `cmd_update`, `cmd_drift`, `cmd_secret`, `cmd_admin`, `cmd_catalog`). Substrate-variant verbs (status, health, stats, logs, exec/shell, start/stop/restart/reboot, update/recreate, rollback, backup, incant) route through the **Substrate port** (`lib/substrate.py`); container interactions use `lib/podman.py` (typed Podman wrapper returning structured data from `podman inspect --format=json` rather than go-template strings).
+4. **CLI** (`bin/workloadctl` + `lib/cmd_*.py` + `lib/substrate.py`): Docker/kubectl-like argparse CLI for creating, enabling, disabling, updating, and inspecting workloads. `bin/workloadctl` is a thin (~330-line) argument-parser/dispatcher; each verb's body lives in its own `lib/cmd_<verb>.py` module — `cmd_enable`, `cmd_disable`, `cmd_cleanup`, `cmd_create`, `cmd_validate`, `cmd_diagnose`, `cmd_edit`, `cmd_info`, `cmd_images`, `cmd_stats`, `cmd_health`, `cmd_doctor`, `cmd_drift`, `cmd_secret`, `cmd_catalog`, `cmd_backup`, `cmd_update`, plus the few that keep a small family together (`cmd_lifecycle` = start/stop/restart/recreate/reboot/build, `cmd_inspect` = list/status, `cmd_interact` = logs/exec/shell/cp/incant). `cmd_provision` is the one non-verb module in the group: it holds the provisioning machinery (preflight, user creation, image transfer, unit generation, host-setup hooks, SELinux policy) that enable, disable, and recreate share. Substrate-variant verbs (status, health, stats, logs, exec/shell, start/stop/restart/reboot, update/recreate, rollback, backup, incant) route through the **Substrate port** (`lib/substrate.py`); container interactions use `lib/podman.py` (typed Podman wrapper returning structured data from `podman inspect --format=json` rather than go-template strings).
 
-   **Exit-code boundary (enforced): the library core raises, only the CLI leaf exits.** `sys.exit()` is allowed in `bin/workloadctl` and `lib/cmd_*.py`, and nowhere else in `lib/`. Everything else — `workload_lib`, `workloadctl_core`, `substrate`, `podman`, `qmp`, `unit_file`, `validation`, `vm`, `secrets_template`, `service_runtime`, `imagebuild` — raises a typed exception, and `_run_cli()` in `bin/workloadctl` maps it to a code: `UsageError` → 2, `LifecycleError` → the returncode of the systemctl/podman call that failed, `NotRoot`/`ProvisionFailed`/`WorkloadMasked`/`WorkloadUserNotFound`/`FileNotFoundError` → 1, anything else → traceback + "this looks like a workloadctl bug". `ProvisionFailed`, `BackupError` and `NotApplicable` are also caught at call sites that must keep going (`update --all` tallies per-workload failures rather than dying on the first). The reason is that `SystemExit` inherits `BaseException` so it passes straight through `except Exception:` — harmless at a leaf, a trapdoor in a helper, which takes the process down past a caller that meant to recover. `tests/test_layering.py` walks the AST of every non-`cmd_` module in `lib/` and fails the suite if a `sys.exit`/`os._exit` call appears, so this is a checked invariant, not a convention.
+   **Exit-code boundary (enforced): the library core raises, only the CLI leaf exits.** `sys.exit()` is allowed in `bin/workloadctl` and `lib/cmd_*.py`, and nowhere else in `lib/`. Everything else — `workload_lib`, `workloadctl_core`, `substrate`, `substrate_container`, `substrate_vm`, `backup`, `podman`, `qmp`, `unit_file`, `validation`, `vm`, `secrets_template`, `service_runtime`, `imagebuild` — raises a typed exception, and `_run_cli()` in `bin/workloadctl` maps it to a code: `UsageError` → 2, `LifecycleError` → the returncode of the systemctl/podman call that failed, `NotRoot`/`ProvisionFailed`/`WorkloadMasked`/`WorkloadUserNotFound`/`FileNotFoundError` → 1, anything else → traceback + "this looks like a workloadctl bug". `ProvisionFailed`, `BackupError` and `NotApplicable` are also caught at call sites that must keep going (`update --all` tallies per-workload failures rather than dying on the first). The reason is that `SystemExit` inherits `BaseException` so it passes straight through `except Exception:` — harmless at a leaf, a trapdoor in a helper, which takes the process down past a caller that meant to recover. `tests/test_layering.py` walks the AST of every non-`cmd_` module in `lib/` and fails the suite if a `sys.exit`/`os._exit` call appears, so this is a checked invariant, not a convention.
+
+   **`--dry-run` exists only where a truthful plan can be computed** — `disable` (`_disable_plan`) and `update` (`_update_plan`), plus `cleanup`, which defaults to it. Both plans are built read-only *before* any mutation and returned as lines, rather than by walking the real teardown with the writes switched off: a plan that shares the mutating path is only as trustworthy as the last guard someone remembered to add. They enumerate from the same sources the real path acts on (`workload_run_files`, the passwd db, `/etc/subuid`, the data dir) and report only what is actually present, so what a plan doesn't list, the command won't touch. The other mutating verbs deliberately have no `--dry-run`: for most of them "would restart the service" is a restatement of the verb, not a plan, and a dry-run that cannot be wrong teaches operators to trust it. Applying a config edit is `recreate`, and previewing that edit is `drift` (which already generates into a temp dir and diffs) — not a third flag.
 
 ### Boot Flow
 
@@ -59,6 +63,78 @@ untagged copy via the unit's stdout relay. Filter container output with
 `journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl by unit.
 `podman logs` does not work with passthrough (podman keeps no copy).
 
+### CLI output: prose vs. output
+
+`lib/cli_log.py` owns the CLI's **prose** — what a command says *about* what it
+is doing (progress, status, diagnostics). `info()` goes to stdout,
+`warn()`/`error()` to stderr, so severity survives a redirect. Everything a
+command was *asked* to produce — reports, `--dry-run` plans, JSON documents,
+`incant`/`logs`/`stats` passthrough — stays on plain `print()`.
+
+That split is the whole reason `--quiet` is safe: it raises the level to
+WARNING, so it can silence narration but never a failure, and never the answer.
+`--json` suppresses prose the same way *and* reserves stdout for the result
+object the mutating verbs emit via `emit_result()` (shape in `docs/cli.md`), so
+`update --all --json | jq` can't choke on a progress line. `bin/workloadctl`
+calls `cli_log.configure()` once from the parsed args, and the exit-code ladder
+in `_run_cli()` calls `emit_failure()` so a command that dies still leaves a
+result document behind. Handlers resolve `sys.stdout`/`sys.stderr` per record
+rather than binding at import, so a redirected caller (the test suite) still
+captures what we write.
+
+`--quiet`/`--json` are offered only on the verbs that mutate a workload (enable,
+disable, start, stop, restart, reboot, recreate, build, update, rollback) — the
+ones whose narration goes through cli_log. Offering the flag where it wasn't
+honored would be a lie.
+
+### Operations log
+
+`lib/oplog.py` appends one JSON object per mutated workload to
+`/var/lib/workloads/<name>/operations.log` — the `--json` result row plus `ts`,
+`command`, `ok`, `user` and `user_source`. It hangs off `cli_log.emit_result()`,
+the one call each verb already makes, so the log and `--json` are the same dict
+and can't drift; a verb that learns to report something new records it with no
+second call site. The administrative verbs (`create`/`init`/`duplicate`/
+`install`/`edit`/`backup`/`restore`/`cp`) call `emit_result()` too even though
+they own no `--json` document: with `json_mode` off it feeds the log and nothing
+else. `secret` (host-global credstore) and `cleanup` (reaps orphans that have no
+workload left to own a record) stay out.
+
+`oplog.RECORDED_RESULTS` / `IGNORED_RESULTS` classify every `result` string a verb
+can emit — **a new verb must add its result string to one of them.** It's an
+allowlist because `update --all` reports `"unchanged"` for a fleet that didn't
+move, and a denylist that hadn't heard of that string appended a no-op line per
+workload on every scheduled run, forever (nothing rotates this file). An
+unclassified string is recorded *and* warned about: losing an operation is worse
+than keeping a doubtful one, and the warning is what sends you here.
+
+The config-authoring verbs run before `enable` ever creates `/var/lib/workloads/
+<name>/`, so `record()` makes that root on demand for any workload that has a
+config. A name with no config gets a warning and no directory — otherwise a typo
+would leave something `cleanup` reads as an orphan.
+
+It is a **record, not an audit trail** — only root can run these verbs and root
+can equally delete the file, so it is worthless as a tamper-evident control and
+isn't offered as one. Its value is the half `sudo`'s own journal entry misses:
+not *that* someone ran `update web`, but that the update moved nginx from
+1f2e3d4c to 9a8b7c6d and rolled back on a failed health check.
+
+`user` comes from the kernel's audit **loginuid** first (`/proc/self/loginuid`),
+falling back to `SUDO_USER` and then the real uid — recorded as `user_source`
+`login` / `sudo` / `system`. loginuid is the only unforgeable source and the only
+one that survives `su -`; and its absence positively identifies automation, so a
+timer-driven `update --all` reads as `system` rather than as an indistinguishable
+bare `root`.
+
+Placement is load-bearing: at the workload *root*, beside `state/` and `data/`
+rather than inside either — so backup (which captures only `data/`) doesn't
+import one host's history into a restored workload, and the rootless
+`_wl-<name>` user (who owns `state/`) can't touch its own record. `--purge`
+rmtree's the root and takes the log with it, which is coherent: the workload is
+gone. Dry-runs and reports record nothing. Writes are best-effort — a missing
+directory warns once on stderr and the command carries on. No rotation (a few KB
+a year).
+
 ### Multi-Container Workloads
 
 A workload may run more than one container under the same `_wl-<name>` user, sharing home directory and lifecycle. `workload.mode` selects the topology:
@@ -81,9 +157,13 @@ Stopping the umbrella tears everything down (`PartOf=`). The CLI accepts `<workl
 
 ### Substrate dispatch
 
-The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `control`, `gating_units` — and two implementations, `ContainerSubstrate` and `VMSubstrate`. `get_substrate(config, manager)` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
+The substrate (container vs VM) is a first-class dimension, orthogonal to the verb. `lib/substrate.py` defines a `Substrate` abstract port with a small set of **primitives** — `liveness`, `resource_usage`, `logs`, `exec`/`open_shell`, `lifecycle(action)`, `reprovision`, `rollback_targets`/`rollback_to`, `capture(consistency)`, `endpoints`, `control`, `gating_units` — plus the exception vocabulary (`NotApplicable`, `ProvisionFailed`, `BackupError`, `LifecycleError`) and the `get_substrate(config, manager)` router. The two implementations live beside it, one module each: `lib/substrate_container.py` (`ContainerSubstrate`) and `lib/substrate_vm.py` (`VMSubstrate`). Both import the port for the ABC and the exceptions, so `get_substrate()` imports them inside its body rather than at module scope — the router is the only place that has to know both, and only at call time. `get_substrate()` resolves the implementation from the **declaration** (presence of `[vm]`, i.e. `config.is_vm`), never from runtime state. Each substrate-variant verb is written once and composes primitives; the substrate-specific delta lives only in the port.
 
-A substrate declares the primitives it supports in a `PRIMITIVES` frozenset; optional primitives absent from it (`resource_usage`, `endpoints`, `reprovision`) auto-raise `NotApplicable` with a generated reason via one base-class check. This makes the `(verb, substrate)` capability matrix **computed, not maintained**: e.g. `stats` on a VM reports a self-documenting "not applicable" instead of running `podman stats` against a nonexistent container. `VMSubstrate` omits `resource_usage`/`logs`/`endpoints`; `ContainerSubstrate` supports all three.
+The one primitive with a shared body is `capture`: `lib/backup.py` stages the TOML, the credential blobs and the precious `data/` tree into a temp dir and tars it, and the substrates differ only in how they quiesce the workload first (systemd stop vs QMP vCPU pause), so that difference stays in the callers.
+
+Required primitives are `@abstractmethod`s, so a substrate cannot exist without them. Optional ones (`resource_usage`, `logs`, `endpoints`, `reprovision`) have a base-class default that raises `NotApplicable` with a self-documenting reason, and a substrate opts in by overriding. The `(verb, substrate)` capability matrix is therefore **declared by what each class defines**, not maintained as a list: a verb a substrate can't serve reports "not applicable" rather than running a nonsensical command against it. `ContainerSubstrate` overrides `resource_usage`/`endpoints`/`reprovision`; `VMSubstrate` overrides `resource_usage` (sourced from QMP, see below) and `reprovision`, and leaves `logs`/`endpoints` at the default.
+
+`resource_usage(json_out=True)` returns normalized rows keyed by `STAT_ROW_KEYS`, uniform across substrates so `stats --json` has one schema. A substrate with no source for a key reports `None`, not `0` — a VM has no block-I/O figure because nothing asks QEMU for `query-blockstats`, and a zero there would read as an idle disk rather than as a gap. The VM row is read from `qmp-metrics.sock` (the dedicated read-only monitor the Prometheus exporter also scrapes) via `lib/vm_metrics.py`, never from the control socket `qmp.sock`: a QMP monitor serves one client at a time, so a competing reader there could block `ExecStop`'s `system_powerdown` and force an unclean SIGKILL.
 
 `gating_units()` is a diagnostics primitive: it names the systemd units that must succeed *before* the main service starts. Containers return `[]` (setup is an `ExecStartPre` on the main unit, so a failure surfaces there directly); a VM returns its `workload-<name>-setup.service` + `workload-<name>-build.service`, which run as separate `RemainAfterExit=yes` units. `status`/`_effective_state` walk these so a failed setup/build is reported as `failed` and the culprit unit is named, instead of the main service showing a bland `inactive`/`dependency failed` with the real cause buried.
 
@@ -139,7 +219,7 @@ SELinux userspace compiles `.te`/`.pp` down to), not `.te`, for two reasons:
 Authoring is done with **udica** against a running container; it emits the CIL
 block and the base templates (`/usr/share/udica/templates/*.cil`) that
 workloadctl loads alongside the workload module on `enable`. The enable-time
-loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
+loader lives in `lib/cmd_provision.py` (`apply_selinux_policy`); the
 `[security].selinux_policy` flag is documented in `docs/schema-reference.toml`.
 
 ## Key Commands
@@ -151,12 +231,12 @@ loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
 | `workloadctl duplicate <src> <new>` | Copy a live workload (alias `clone`); resolves `bundle` to the source's, lints host-global settings |
 | `workloadctl create` | Scaffold a from-scratch workload TOML from flags (`--image …`) |
 | `workloadctl enable` | Create user, transfer image, start service |
-| `workloadctl disable` | Stop service, optionally purge user/data |
+| `workloadctl disable` | Stop service, optionally purge user/data (`--dry-run` prints the teardown plan) |
 | `workloadctl start` | Start workload service |
 | `workloadctl stop` | Stop workload service |
 | `workloadctl restart` | Bounce the workload service (keeps the container overlay / VM disks + seed; does **not** apply TOML edits — that's `recreate`) |
 | `workloadctl reboot` | Restart the workload (container: keeps the overlay; VM: guest reboot) |
-| `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure) |
+| `workloadctl update` | Pull new image / rebuild VM disk and recreate (automatic rollback on failure; `--dry-run` prints what it would pull and restart) |
 | `workloadctl recreate` | Recreate from current config (destroys a cattle overlay; rotates VM `system.qcow2`) |
 | `workloadctl rollback` | Roll back to the previous image (VM: restore previous disk generation); `--list` shows targets |
 | `workloadctl status` | Show workload status |
@@ -170,7 +250,7 @@ loader lives in `lib/cmd_lifecycle.py` (`_apply_selinux_policy`); the
 | `workloadctl validate` | Validate TOML config (static, declaration-level) |
 | `workloadctl diagnose` | Diagnose workload runtime setup (user, subuid, linger, SELinux), emits fixes |
 | `workloadctl drift` | Show drift between generated and deployed systemd unit files (exits 1 if out of sync) |
-| `workloadctl stats` | Show live resource usage (containers; N/A for VMs) |
+| `workloadctl stats` | Show live resource usage (containers via podman; VMs via QMP, no `--follow`) |
 | `workloadctl health` | Check health status (scriptable exit code) |
 | `workloadctl secret` | Manage TPM2-encrypted credentials |
 | `workloadctl backup` | Backup config, overrides, and durable data; `--consistency {cold,crash}` for VMs |
@@ -205,8 +285,13 @@ VM workloads use a separate, mutually-exclusive set of sections:
 
 ```
 bin/workloadctl                    # CLI dispatcher (argparse → lib/cmd_*.py)
-lib/cmd_*.py                       # Per-verb-group command bodies (lifecycle, inspect, interact, backup, update, drift, secret, admin)
-lib/substrate.py                   # Substrate port (ContainerSubstrate / VMSubstrate, computed capability matrix)
+lib/cmd_*.py                       # One module per verb (enable, disable, info, health, …); cmd_provision holds the machinery enable/disable/recreate share
+lib/cli_log.py                     # CLI prose channel (info/warn/error, --quiet) + the mutating verbs' --json result object
+lib/oplog.py                       # Per-workload operations log (/var/lib/workloads/<name>/operations.log, JSON Lines)
+lib/substrate.py                   # Substrate port (ABC + exceptions + get_substrate router, computed capability matrix)
+lib/substrate_container.py         # ContainerSubstrate (rootless podman)
+lib/substrate_vm.py                # VMSubstrate (QEMU/KVM, SSH + QMP)
+lib/backup.py                      # capture() implementation shared by both substrates
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
@@ -215,6 +300,7 @@ libexec/workload-metrics           # Prometheus metrics exporter
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
 lib/podman.py                      # Typed Podman wrapper (JSON output, PodmanError, root/user modes)
+lib/vm_metrics.py                  # VM metric collectors (QMP balloon/vCPU, qemu cgroup) shared by the exporter and `stats`
 workloads/<bundle>/                # Shipped bundles: workload.toml (template declaration)
                                    #   co-located with control files (Containerfile, build.sh,
                                    #   setup.sh, policy.cil, cloud-init user-data — any subset)

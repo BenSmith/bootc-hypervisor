@@ -15,7 +15,7 @@ import os
 import re
 from pathlib import Path
 
-from workload_lib import WORKLOADS_BASE, parse_volume_spec
+from workload_lib import parse_volume_spec
 
 
 # --- VM constants ---

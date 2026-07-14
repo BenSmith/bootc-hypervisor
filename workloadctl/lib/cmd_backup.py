@@ -20,6 +20,7 @@ from workload_lib import (
     workload_data_dir,
     workload_service_name,
 )
+from cli_log import emit_result
 from validation import validate_workload_name
 from workloadctl_core import (
     WorkloadConfig,
@@ -121,6 +122,19 @@ def cmd_backup(args, manager: WorkloadManager):
             failed.append({"workload": name, "error": str(e)})
             continue
         backups.append({"workload": name, "archive": str(output), "size_bytes": size_bytes})
+
+    # The archive is the point of the verb, so the log records where it landed
+    # and how big it was — "when was this last backed up, and to what file?" is
+    # otherwise answerable only by globbing the backup dir and trusting mtimes.
+    # cli_log owns no document here (backup prints its own --json), so this
+    # reaches the operations log only.
+    emit_result(
+        [{"workload": b["workload"], "result": "backed-up",
+          "archive": b["archive"], "size_bytes": b["size_bytes"]} for b in backups]
+        + [{"workload": f["workload"], "result": "failed", "reason": f["error"]}
+           for f in failed],
+        ok=not failed,
+    )
 
     if args.json:
         result: dict[str, list] = {"backups": backups}
@@ -308,6 +322,18 @@ def cmd_restore(args, manager: WorkloadManager):
             shutil.copytree(data_staging, dest_data,
                             symlinks=True, dirs_exist_ok=True)
             print(f"  Data dir → {dest_data}")
+
+        # Record before the optional enable below, so the log reads
+        # restored → enabled in the order the two actually happened (`enable`
+        # runs as its own process and writes its own line).
+        emit_result([{
+            "workload": name,
+            "result": "restored",
+            "archive": str(archive),
+            "data": data_staging.is_dir(),
+            "credentials": restored_creds,
+            "force": bool(args.force),
+        }])
 
         print()
 

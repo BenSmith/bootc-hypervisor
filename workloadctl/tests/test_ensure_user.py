@@ -8,6 +8,7 @@ cloud-init template substitution paths without running the rest of the
 """
 
 import contextlib
+import fcntl
 import os
 import shutil
 import tempfile
@@ -1225,11 +1226,45 @@ class TestGenerateSshKeypair(unittest.TestCase):
             home.mkdir()
             pw = _fake_pw(home, uid=10001, gid=10001)
             with mock.patch.object(self.mod.subprocess, "run",
-                                   return_value=types.SimpleNamespace(returncode=1, stderr="bad args")), \
+                                   return_value=types.SimpleNamespace(
+                                       returncode=1, stdout="", stderr="bad args")), \
                  mock.patch("os.chown"):
                 with self.assertRaises(RuntimeError) as ctx:
                     self.mod.generate_ssh_keypair(pw, "myvm")
-                self.assertIn("ssh-keygen failed", str(ctx.exception))
+                self.assertIn("ssh-keygen (client key) failed", str(ctx.exception))
+                self.assertIn("bad args", str(ctx.exception))
+
+    def test_keygen_failure_reports_a_stdout_only_diagnostic(self):
+        # ssh-keygen talks on stdout, not stderr: even a *successful* run leaves
+        # stderr empty. Reporting stderr alone produced a bare "failed:" with
+        # nothing after it — a blank diagnostic on exactly the run that needed
+        # one. Whatever ssh-keygen said must reach the operator.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod.subprocess, "run",
+                                   return_value=types.SimpleNamespace(
+                                       returncode=1,
+                                       stdout='Saving key "/x/k" failed: Permission denied',
+                                       stderr="")), \
+                 mock.patch("os.chown"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.generate_ssh_keypair(pw, "myvm")
+                self.assertIn("Permission denied", str(ctx.exception))
+
+    def test_keygen_failure_with_no_output_still_names_the_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            pw = _fake_pw(home, uid=10001, gid=10001)
+            with mock.patch.object(self.mod.subprocess, "run",
+                                   return_value=types.SimpleNamespace(
+                                       returncode=3, stdout="", stderr="")), \
+                 mock.patch("os.chown"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.generate_ssh_keypair(pw, "myvm")
+                self.assertIn("exit 3", str(ctx.exception))
 
 
 class TestReadSshPubkey(unittest.TestCase):
@@ -1619,6 +1654,92 @@ class TestBuildCloudInitIsoValidation(unittest.TestCase):
              mock.patch.object(self.mod, "log", side_effect=msgs.append):
             self.mod.build_cloud_init_iso(self.pw, cfg, "myvm")
         self.assertTrue(any("ISO build failed" in m for m in msgs))
+
+
+class TestEnsureUserLock(unittest.TestCase):
+    """`enable` runs this script twice for one workload, concurrently.
+
+    Once directly (cmd_enable → provision_user) and once as the ExecStartPre of
+    the start job the generator enqueues. Every step in here is check-then-create,
+    so the two must not interleave: ssh-keygen is simply the step that fails
+    loudly about it (it won't overwrite a key that appeared after the exists()
+    guard), and it took down `enable` intermittently.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_dir = Path(self.tmp.name) / "lock"
+
+    def test_the_lock_is_exclusive_per_workload(self):
+        # A second holder must block while the first is inside the body — that
+        # mutual exclusion is the whole fix.
+        with mock.patch.object(self.mod, "ENSURE_LOCK_DIR", self.lock_dir):
+            with self.mod.ensure_user_lock("web"):
+                held = open(self.lock_dir / "web.lock", "w")
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(held.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.close()
+            # ...and is released on the way out.
+            after = open(self.lock_dir / "web.lock", "w")
+            fcntl.flock(after.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            after.close()
+
+    def test_two_workloads_do_not_block_each_other(self):
+        # The lock is per-workload, not global: enabling `web` must not serialize
+        # behind an unrelated `cache` still provisioning.
+        with mock.patch.object(self.mod, "ENSURE_LOCK_DIR", self.lock_dir):
+            with self.mod.ensure_user_lock("web"):
+                other = open(self.lock_dir / "cache.lock", "w")
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                other.close()
+
+    def test_an_untakeable_lock_warns_and_runs_the_body_anyway(self):
+        # Degrading to unlocked is the status quo ante (a race we usually win);
+        # refusing to provision would be a brand-new way to fail.
+        msgs = []
+        ran = []
+        with mock.patch.object(self.mod, "ENSURE_LOCK_DIR",
+                               Path("/proc/nonexistent/lock")), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            with self.mod.ensure_user_lock("web"):
+                ran.append(True)
+        self.assertEqual(ran, [True])
+        self.assertTrue(any("continuing unlocked" in m for m in msgs))
+
+
+class TestKeygenLosesTheRaceGracefully(unittest.TestCase):
+    """If the lock ever degrades to unlocked, a lost keygen race is still benign."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_a_key_that_appeared_after_the_guard_is_adopted_not_fatal(self):
+        # ssh-keygen refuses to overwrite and exits nonzero. Only a concurrent
+        # provisioning run can have put that key there, and it's as good as the
+        # one we were about to write — so take it rather than fail the enable.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / ".ssh").mkdir(parents=True)
+            pw = _fake_pw(home, uid=10001, gid=10001)
+
+            def _keygen_loses(*a, **kw):
+                # The rival finishes between our exists() guard and our exec.
+                (home / ".ssh" / "id_ed25519").write_text("rival key")
+                (home / ".ssh" / "id_ed25519.pub").write_text("rival pub")
+                return types.SimpleNamespace(
+                    returncode=1,
+                    stdout=f"{home}/.ssh/id_ed25519 already exists.",
+                    stderr="")
+
+            with mock.patch.object(self.mod.subprocess, "run", _keygen_loses), \
+                 mock.patch("os.chown"):
+                self.mod.generate_ssh_keypair(pw, "myvm")  # must not raise
+
+            self.assertEqual((home / ".ssh" / "id_ed25519").read_text(),
+                             "rival key")
 
 
 class TestMain(unittest.TestCase):

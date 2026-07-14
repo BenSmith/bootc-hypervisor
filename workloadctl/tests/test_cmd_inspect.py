@@ -19,7 +19,11 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 
 import workload_lib
+import cmd_health
+import cmd_images
+import cmd_info
 import cmd_inspect
+import cmd_stats
 from workloadctl_core import WorkloadConfig
 
 
@@ -172,7 +176,7 @@ class TestHealthUserManagerPlacement(unittest.TestCase):
              patch('subprocess.run', side_effect=fake_run), \
              patch('sys.stdout', buf):
             try:
-                cmd_inspect.cmd_health(_args(), manager)
+                cmd_health.cmd_health(_args(), manager)
             except SystemExit:
                 pass
         return json.loads(buf.getvalue())
@@ -412,7 +416,7 @@ class TestCmdImages(unittest.TestCase):
             manager.podman = MagicMock(return_value=podman)
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_images(_args(json=True, workload=None,
+                cmd_images.cmd_images(_args(json=True, workload=None,
                                               subcommand='list'), manager)
             data = json.loads(buf.getvalue())
             workloads = {i['workload'] for i in data['images']}
@@ -426,7 +430,7 @@ class TestCmdImages(unittest.TestCase):
             manager = WorkloadManager()
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_images(_args(json=False, workload=None,
+                cmd_images.cmd_images(_args(json=False, workload=None,
                                               subcommand='list'), manager)
             self.assertIn('No workload images found', buf.getvalue())
 
@@ -440,7 +444,7 @@ class TestCmdImages(unittest.TestCase):
             manager.podman = MagicMock(return_value=podman)
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_images(_args(json=False, workload=None,
+                cmd_images.cmd_images(_args(json=False, workload=None,
                                               subcommand='list'), manager)
             self.assertIn('No workload images found', buf.getvalue())
 
@@ -450,12 +454,12 @@ class TestCmdImages(unittest.TestCase):
         podman_instance = MagicMock()
         podman_instance.run.return_value = _ok(stdout='deadbeef\n')
         buf = io.StringIO()
-        with patch.object(cmd_inspect, 'require_root'):
+        with patch.object(cmd_images, 'require_root'):
             with patch('pwd.getpwall', return_value=[entry, other]):
-                with patch.object(cmd_inspect.Podman, 'for_user',
+                with patch.object(cmd_images.Podman, 'for_user',
                                    return_value=podman_instance):
                     with patch('sys.stdout', buf):
-                        cmd_inspect.cmd_images(
+                        cmd_images.cmd_images(
                             _args(json=False, workload=None, subcommand='prune'),
                             MagicMock())
         self.assertIn('Pruning images for _wl-test', buf.getvalue())
@@ -463,10 +467,10 @@ class TestCmdImages(unittest.TestCase):
 
     def test_images_prune_no_images_message(self):
         buf = io.StringIO()
-        with patch.object(cmd_inspect, 'require_root'):
+        with patch.object(cmd_images, 'require_root'):
             with patch('pwd.getpwall', return_value=[]):
                 with patch('sys.stdout', buf):
-                    cmd_inspect.cmd_images(
+                    cmd_images.cmd_images(
                         _args(json=False, workload=None, subcommand='prune'),
                         MagicMock())
         self.assertIn('No images to prune', buf.getvalue())
@@ -486,10 +490,10 @@ class TestCmdInfo(unittest.TestCase):
             manager.user_exists.return_value = False
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), \
-                 patch.object(cmd_inspect, '_vm_qmp_status', return_value=None), \
-                 patch('substrate._vm_guest_ip', return_value=None), \
+                 patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
+                 patch('substrate_vm._vm_guest_ip', return_value=None), \
                  patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=True, workload='test-vm'), manager)
+                cmd_info.cmd_info(_args(json=True, workload='test-vm'), manager)
             data = json.loads(buf.getvalue())
             self.assertEqual(data['vm']['memory'], '2048M')
             self.assertEqual(data['vm']['vcpus'], 2)
@@ -505,14 +509,14 @@ class TestCmdInfo(unittest.TestCase):
             manager.user_exists.return_value = True
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), \
-                 patch.object(cmd_inspect, '_vm_qmp_status', return_value='running'), \
-                 patch('substrate._vm_guest_ip', return_value='192.168.1.5'), \
+                 patch.object(cmd_info, '_vm_qmp_status', return_value='running'), \
+                 patch('substrate_vm._vm_guest_ip', return_value='192.168.1.5'), \
                  patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                               return_value=10010), \
                  patch.object(WorkloadConfig, 'home_dir', new_callable=PropertyMock,
                               return_value=home), \
                  patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=False, workload='test-vm'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-vm'), manager)
             out = buf.getvalue()
             self.assertIn('[VM]', out)
             self.assertIn('System disk:', out)
@@ -531,7 +535,7 @@ class TestCmdInfo(unittest.TestCase):
             }.get(img)
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=True, workload='test-pod'), manager)
+                cmd_info.cmd_info(_args(json=True, workload='test-pod'), manager)
             data = json.loads(buf.getvalue())
             names = {c['name']: c for c in data['containers']}
             self.assertEqual(names['api']['image_id'], 'apiimageidapiimageid')
@@ -539,7 +543,7 @@ class TestCmdInfo(unittest.TestCase):
 
             buf2 = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), patch('sys.stdout', buf2):
-                cmd_inspect.cmd_info(_args(json=False, workload='test-pod'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-pod'), manager)
             out = buf2.getvalue()
             self.assertIn('Containers (pod mode):', out)
             self.assertIn('api: example.com/api:latest', out)
@@ -550,7 +554,7 @@ class TestCmdInfo(unittest.TestCase):
             manager.user_exists.return_value = False
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=False, workload='test-wl'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-wl'), manager)
             out = buf.getvalue()
             self.assertIn('(User not created - workload not enabled)', out)
             self.assertIn('Quick commands:', out)
@@ -560,7 +564,7 @@ class TestCmdInfo(unittest.TestCase):
             manager = MagicMock()
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(
+                cmd_info.cmd_info(
                     types.SimpleNamespace(json=True, workload='test-wl', files=True),
                     manager)
             data = json.loads(buf.getvalue())
@@ -569,7 +573,7 @@ class TestCmdInfo(unittest.TestCase):
 
             buf2 = io.StringIO()
             with patch('sys.stdout', buf2):
-                cmd_inspect.cmd_info(
+                cmd_info.cmd_info(
                     types.SimpleNamespace(json=False, workload='test-wl', files=True),
                     manager)
             self.assertIn('Control files for test-wl', buf2.getvalue())
@@ -580,7 +584,7 @@ class TestCollectControlFiles(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML):
             config = WorkloadConfig('test-wl')
             config.config = {**config.config, 'host': {'setup': '../../etc/passwd'}}
-            files = cmd_inspect._collect_control_files(config)
+            files = cmd_info._collect_control_files(config)
             invalid = [f for f in files if f['source'] == 'invalid']
             self.assertTrue(invalid, 'traversal setup path should surface as invalid')
 
@@ -588,29 +592,29 @@ class TestCollectControlFiles(unittest.TestCase):
         with _WorkloadDir(MINIMAL_TOML):
             config = WorkloadConfig('test-wl')
             buf = io.StringIO()
-            with patch.object(cmd_inspect, '_collect_control_files', return_value=[]):
+            with patch.object(cmd_info, '_collect_control_files', return_value=[]):
                 with patch('sys.stdout', buf):
-                    cmd_inspect._print_control_files(config, json_mode=False)
+                    cmd_info._print_control_files(config, json_mode=False)
             self.assertIn('No control files', buf.getvalue())
 
 
 class TestVmQmpStatus(unittest.TestCase):
     def test_no_socket_returns_none(self):
         with patch('pathlib.Path.exists', return_value=False):
-            self.assertIsNone(cmd_inspect._vm_qmp_status('nope'))
+            self.assertIsNone(cmd_info._vm_qmp_status('nope'))
 
     def test_socket_present_but_connect_fails_returns_none(self):
         with patch('pathlib.Path.exists', return_value=True):
-            with patch.object(cmd_inspect.QMPClient, 'connect',
+            with patch.object(cmd_info.QMPClient, 'connect',
                                side_effect=OSError('nope')):
-                self.assertIsNone(cmd_inspect._vm_qmp_status('nope'))
+                self.assertIsNone(cmd_info._vm_qmp_status('nope'))
 
     def test_socket_present_status_returned(self):
         fake_qmp = MagicMock()
         fake_qmp.execute.return_value = {'return': {'status': 'running'}}
         with patch('pathlib.Path.exists', return_value=True):
-            with patch.object(cmd_inspect, 'QMPClient', return_value=fake_qmp):
-                result = cmd_inspect._vm_qmp_status('name')
+            with patch.object(cmd_info, 'QMPClient', return_value=fake_qmp):
+                result = cmd_info._vm_qmp_status('name')
         self.assertEqual(result, 'running')
         fake_qmp.close.assert_called_once()
 
@@ -618,26 +622,26 @@ class TestVmQmpStatus(unittest.TestCase):
 class TestReadSubid(unittest.TestCase):
     def test_missing_file_returns_none_none(self):
         with patch('builtins.open', side_effect=FileNotFoundError):
-            self.assertEqual(cmd_inspect._read_subid('bob', '/etc/subuid'), (None, None))
+            self.assertEqual(cmd_info._read_subid('bob', '/etc/subuid'), (None, None))
 
     def test_finds_matching_line(self):
         content = "alice:100000:65536\nbob:165536:65536\n"
         m = unittest.mock.mock_open(read_data=content)
         with patch('builtins.open', m):
-            self.assertEqual(cmd_inspect._read_subid('bob', '/etc/subuid'), (165536, 65536))
+            self.assertEqual(cmd_info._read_subid('bob', '/etc/subuid'), (165536, 65536))
 
     def test_no_matching_line_returns_none_none(self):
         content = "alice:100000:65536\n"
         m = unittest.mock.mock_open(read_data=content)
         with patch('builtins.open', m):
-            self.assertEqual(cmd_inspect._read_subid('bob', '/etc/subuid'), (None, None))
+            self.assertEqual(cmd_info._read_subid('bob', '/etc/subuid'), (None, None))
 
 
 class TestCmdStats(unittest.TestCase):
     def test_stats_json_and_follow_conflict_exits(self):
         manager = MagicMock()
         with self.assertRaises(SystemExit) as cm:
-            cmd_inspect.cmd_stats(_args(json=True, follow=True, workload=None), manager)
+            cmd_stats.cmd_stats(_args(json=True, follow=True, workload=None), manager)
         self.assertEqual(cm.exception.code, 1)
 
     def test_stats_vm_not_applicable_exits_zero(self):
@@ -647,10 +651,10 @@ class TestCmdStats(unittest.TestCase):
             sub = MagicMock()
             sub.resource_usage.side_effect = NotApplicable('vm workloads have no stats')
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
                     with self.assertRaises(SystemExit) as cm:
-                        cmd_inspect.cmd_stats(
+                        cmd_stats.cmd_stats(
                             _args(json=False, follow=False, workload='test-vm'), manager)
             self.assertEqual(cm.exception.code, 0)
             self.assertIn('not applicable', buf.getvalue())
@@ -660,9 +664,9 @@ class TestCmdStats(unittest.TestCase):
             manager = MagicMock()
             manager.user_exists.return_value = False
             sub = MagicMock()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with self.assertRaises(SystemExit) as cm:
-                    cmd_inspect.cmd_stats(
+                    cmd_stats.cmd_stats(
                         _args(json=False, follow=False, workload='test-wl'), manager)
             self.assertEqual(cm.exception.code, 1)
 
@@ -672,16 +676,17 @@ class TestCmdStats(unittest.TestCase):
             manager.user_exists.return_value = True
             sub = MagicMock()
             row = {
-                'name': 'workload-test-wl', 'cpu_percent': '1.23%',
-                'mem_usage': '10MB / 100MB', 'mem_percent': '10%',
-                'net_io': '1kB / 2kB', 'block_io': '3kB / 4kB', 'pids': 5,
+                'workload': 'test-wl', 'username': '_wl-test-wl',
+                'container': 'workload-test-wl', 'cpu_percent': 1.23,
+                'mem_usage': 10_000_000, 'mem_limit': 100_000_000, 'mem_percent': 10.0,
+                'net_input': 1000, 'net_output': 2000,
+                'block_input': 3000, 'block_output': 4000, 'pids': 5,
             }
-            sub.resource_usage.return_value = CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps(row), stderr='')
+            sub.resource_usage.return_value = [row]
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
-                    cmd_inspect.cmd_stats(
+                    cmd_stats.cmd_stats(
                         _args(json=True, follow=False, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             self.assertEqual(len(data['stats']), 1)
@@ -697,8 +702,8 @@ class TestCmdStats(unittest.TestCase):
             manager.user_exists = MagicMock(return_value=False)
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_stats(_args(json=False, follow=False, workload=None), manager)
-            self.assertIn('No running workload containers found', buf.getvalue())
+                cmd_stats.cmd_stats(_args(json=False, follow=False, workload=None), manager)
+            self.assertIn('No running workloads found', buf.getvalue())
 
     def test_stats_all_workloads_json_aggregates_running(self):
         with _MultiWorkloadDir({'test-wl': MINIMAL_TOML}) as p:
@@ -710,14 +715,16 @@ class TestCmdStats(unittest.TestCase):
             podman.container_exists.return_value = True
             manager.podman = MagicMock(return_value=podman)
             sub = MagicMock()
-            row = {'name': 'workload-test-wl', 'cpu_percent': 0, 'mem_usage': 0,
-                   'mem_percent': 0, 'net_io': '0 / 0', 'block_io': '0 / 0', 'pids': 1}
-            sub.resource_usage.return_value = CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps(row), stderr='')
+            row = {'workload': 'test-wl', 'username': '_wl-test-wl',
+                   'container': 'workload-test-wl', 'cpu_percent': 0.0,
+                   'mem_usage': 0, 'mem_limit': 0, 'mem_percent': 0.0,
+                   'net_input': 0, 'net_output': 0,
+                   'block_input': 0, 'block_output': 0, 'pids': 1}
+            sub.resource_usage.return_value = [row]
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
-                    cmd_inspect.cmd_stats(_args(json=True, follow=False, workload=None), manager)
+                    cmd_stats.cmd_stats(_args(json=True, follow=False, workload=None), manager)
             data = json.loads(buf.getvalue())
             self.assertEqual(len(data['stats']), 1)
 
@@ -730,10 +737,10 @@ class TestCmdHealthAdditional(unittest.TestCase):
             sub = MagicMock()
             sub.liveness.return_value = {'service_active': True, 'service_state': 'active'}
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_health, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
                     with self.assertRaises(SystemExit) as cm:
-                        cmd_inspect.cmd_health(_args(json=True, workload='test-vm'), manager)
+                        cmd_health.cmd_health(_args(json=True, workload='test-vm'), manager)
             self.assertEqual(cm.exception.code, 0)
             data = json.loads(buf.getvalue())
             self.assertEqual(data['overall'], 'HEALTHY')
@@ -745,10 +752,10 @@ class TestCmdHealthAdditional(unittest.TestCase):
             sub = MagicMock()
             sub.liveness.return_value = {'service_active': True, 'service_state': 'active'}
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_health, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
                     with self.assertRaises(SystemExit) as cm:
-                        cmd_inspect.cmd_health(_args(json=False, workload='test-vm'), manager)
+                        cmd_health.cmd_health(_args(json=False, workload='test-vm'), manager)
             self.assertEqual(cm.exception.code, 1)
             self.assertIn('UNHEALTHY', buf.getvalue())
 
@@ -757,7 +764,7 @@ class TestCmdHealthAdditional(unittest.TestCase):
             manager = MagicMock()
             with patch('sys.stdout', io.StringIO()):
                 with self.assertRaises(SystemExit) as cm:
-                    cmd_inspect.cmd_health(
+                    cmd_health.cmd_health(
                         _args(json=True, workload='test-pod/nope'), manager)
             self.assertEqual(cm.exception.code, 2)
 
@@ -773,7 +780,7 @@ class TestCmdHealthAdditional(unittest.TestCase):
             with patch('subprocess.run', side_effect=fake_run):
                 with patch('sys.stdout', buf):
                     with self.assertRaises(SystemExit) as cm:
-                        cmd_inspect.cmd_health(
+                        cmd_health.cmd_health(
                             _args(json=False, workload='test-pod'), manager)
             self.assertEqual(cm.exception.code, 0)
             out = buf.getvalue()
@@ -798,13 +805,13 @@ class TestCmdHealthAdditional(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10020):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('socket.socket') as sock_cls:
                         sock_cls.return_value.connect_ex.return_value = 1  # closed
                         with patch('subprocess.run', side_effect=fake_run):
                             with patch('sys.stdout', buf):
                                 with self.assertRaises(SystemExit) as cm:
-                                    cmd_inspect.cmd_health(
+                                    cmd_health.cmd_health(
                                         _args(json=True, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             checks = {c['check']: c for c in data['checks']}
@@ -826,11 +833,11 @@ class TestCmdHealthAdditional(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10021):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('subprocess.run', side_effect=fake_run):
                         with patch('sys.stdout', buf):
                             with self.assertRaises(SystemExit) as cm:
-                                cmd_inspect.cmd_health(
+                                cmd_health.cmd_health(
                                     _args(json=True, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             checks = {c['check']: c for c in data['checks']}
@@ -926,10 +933,10 @@ class TestCmdImagesMore(unittest.TestCase):
     def test_prune_swallows_per_user_exception_and_reports_no_images(self):
         entry = types.SimpleNamespace(pw_name='_wl-test', pw_uid=10000, pw_dir='/nonexistent')
         with patch('pwd.getpwall', return_value=[entry]), \
-             patch.object(cmd_inspect, 'require_root'), \
-             patch.object(cmd_inspect.Podman, 'for_user', side_effect=RuntimeError('boom')), \
+             patch.object(cmd_images, 'require_root'), \
+             patch.object(cmd_images.Podman, 'for_user', side_effect=RuntimeError('boom')), \
              patch('sys.stdout', io.StringIO()) as buf:
-            cmd_inspect.cmd_images(_args(subcommand='prune'), MagicMock())
+            cmd_images.cmd_images(_args(subcommand='prune'), MagicMock())
         self.assertIn('No images to prune', buf.getvalue())
 
     def test_human_listing_prints_rows_and_total_with_long_image_elided(self):
@@ -944,7 +951,7 @@ class TestCmdImagesMore(unittest.TestCase):
             manager.podman = MagicMock(return_value=podman)
             buf = io.StringIO()
             with patch('sys.stdout', buf):
-                cmd_inspect.cmd_images(_args(json=False, subcommand=None), manager)
+                cmd_images.cmd_images(_args(json=False, subcommand=None), manager)
             out = buf.getvalue()
             self.assertIn('test-wl', out)
             self.assertIn('Total: 1 workload image(s)', out)
@@ -955,8 +962,8 @@ class TestVmQmpStatusMore(unittest.TestCase):
         fake_qmp = MagicMock()
         fake_qmp.execute.return_value = {'error': 'nope'}
         with patch('pathlib.Path.exists', return_value=True):
-            with patch.object(cmd_inspect, 'QMPClient', return_value=fake_qmp):
-                self.assertIsNone(cmd_inspect._vm_qmp_status('name'))
+            with patch.object(cmd_info, 'QMPClient', return_value=fake_qmp):
+                self.assertIsNone(cmd_info._vm_qmp_status('name'))
 
 
 class TestPrintControlFilesMore(unittest.TestCase):
@@ -974,9 +981,9 @@ class TestPrintControlFilesMore(unittest.TestCase):
             {'file': 'missing.sh', 'source': 'usr', 'path': '/usr/y', 'exists': False},
         ]
         buf = io.StringIO()
-        with patch.object(cmd_inspect, '_collect_control_files', return_value=files):
+        with patch.object(cmd_info, '_collect_control_files', return_value=files):
             with patch('sys.stdout', buf):
-                cmd_inspect._print_control_files(config, json_mode=False)
+                cmd_info._print_control_files(config, json_mode=False)
         out = buf.getvalue()
         self.assertIn('override', out)
         self.assertIn('absolute', out)
@@ -1010,18 +1017,18 @@ class TestCmdInfoMore(unittest.TestCase):
             manager.user_exists.return_value = True
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=fake_run), \
-                 patch.object(cmd_inspect, '_vm_qmp_status', return_value=None), \
-                 patch('substrate._vm_guest_ip', return_value=None), \
+                 patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
+                 patch('substrate_vm._vm_guest_ip', return_value=None), \
                  patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                               return_value=10030), \
                  patch.object(WorkloadConfig, 'home_dir', new_callable=PropertyMock,
                               return_value=home), \
                  patch.object(WorkloadConfig, 'data_dir', new_callable=PropertyMock,
                               return_value=data_dir), \
-                 patch('cmd_inspect._read_subid',
+                 patch('cmd_info._read_subid',
                        side_effect=[(200000, 65536), (200000, 65536)]), \
                  patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=False, workload='test-vm'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-vm'), manager)
             out = buf.getvalue()
             self.assertIn('Data disk:', out)
             self.assertIn('SubUID: 200000 (65536 IDs)', out)
@@ -1035,7 +1042,7 @@ class TestCmdInfoMore(unittest.TestCase):
             manager.podman.return_value.image_id.side_effect = RuntimeError('boom')
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=True, workload='test-pod'), manager)
+                cmd_info.cmd_info(_args(json=True, workload='test-pod'), manager)
             data = json.loads(buf.getvalue())
             self.assertIsNone(data['containers'][0]['image_id'])
 
@@ -1063,17 +1070,17 @@ ports = ["8080:80"]
                  patch('pwd.getpwnam', return_value=fake_pw), \
                  patch('os.getgrouplist', return_value=[10005]), \
                  patch('grp.getgrgid', return_value=types.SimpleNamespace(gr_name='_wl-test-wl')), \
-                 patch('cmd_inspect._read_subid',
+                 patch('cmd_info._read_subid',
                        side_effect=[(100000, 65536), (100000, 65536)]), \
                  patch.object(WorkloadConfig, 'home_dir', new_callable=PropertyMock,
                               return_value=Path('/nonexistent/home')), \
-                 patch.object(cmd_inspect, 'get_substrate') as gs, \
+                 patch.object(cmd_info, 'get_substrate') as gs, \
                  patch('sys.stdout', buf):
                 gs.return_value.endpoints.return_value = [
                     {'host': 'http://x:8080', 'container': '80'},
                     {'host': 'http://y:9090', 'container': None},
                 ]
-                cmd_inspect.cmd_info(_args(json=False, workload='test-wl'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-wl'), manager)
             out = buf.getvalue()
             self.assertIn('ID:     sha256:deadbeefcafe...', out)
             self.assertIn('UID:    10005', out)
@@ -1107,7 +1114,7 @@ ports = ["8080:80"]
                               return_value=home), \
                  patch('pwd.getpwnam', side_effect=KeyError('no such user')), \
                  patch('sys.stdout', buf):
-                cmd_inspect.cmd_info(_args(json=False, workload='test-wl'), manager)
+                cmd_info.cmd_info(_args(json=False, workload='test-wl'), manager)
             out = buf.getvalue()
             self.assertIn('Home:   ' + str(home) + ' (42M used)', out)
             # ActiveEnterTimestamp wasn't a valid @-float -> falls back to state string
@@ -1116,34 +1123,13 @@ ports = ["8080:80"]
 
 class TestStatsHelpersMore(unittest.TestCase):
     def test_parse_percent_invalid_string_returns_zero(self):
-        self.assertEqual(cmd_inspect._stats_parse_percent(object()), 0.0)
-        self.assertEqual(cmd_inspect._stats_parse_percent('n/a'), 0.0)
+        import substrate
+        self.assertEqual(substrate._stat_percent(object()), 0.0)
+        self.assertEqual(substrate._stat_percent('n/a'), 0.0)
 
     def test_parse_io_without_separator_returns_zero_zero(self):
-        self.assertEqual(cmd_inspect._stats_parse_io('garbage'), (0, 0))
-
-    def test_stats_one_not_applicable_prints_and_returns_none(self):
-        from substrate import NotApplicable
-        config = MagicMock(name='cfg')
-        config.name = 'wl'
-        manager = MagicMock()
-        sub = MagicMock()
-        sub.resource_usage.side_effect = NotApplicable('nope')
-        with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
-            with patch('sys.stderr', io.StringIO()) as err:
-                result = cmd_inspect._stats_one(config, manager, ['c'], json_out=False, follow=False)
-        self.assertIsNone(result)
-        self.assertIn('not applicable', err.getvalue())
-
-    def test_stats_one_success_returns_result(self):
-        config = MagicMock()
-        manager = MagicMock()
-        sub = MagicMock()
-        expected = CompletedProcess(args=[], returncode=0, stdout='{}', stderr='')
-        sub.resource_usage.return_value = expected
-        with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
-            result = cmd_inspect._stats_one(config, manager, ['c'], json_out=True, follow=False)
-        self.assertIs(result, expected)
+        import substrate
+        self.assertEqual(substrate._stat_io_pair('garbage'), (0, 0))
 
 
 class TestCmdStatsMore(unittest.TestCase):
@@ -1155,10 +1141,10 @@ class TestCmdStatsMore(unittest.TestCase):
             sub = MagicMock()
             sub.resource_usage.side_effect = NotApplicable('no stats here')
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
                     with self.assertRaises(SystemExit) as cm:
-                        cmd_inspect.cmd_stats(
+                        cmd_stats.cmd_stats(
                             _args(json=False, follow=False, workload='test-wl'), manager)
             self.assertEqual(cm.exception.code, 0)
             self.assertIn('not applicable', buf.getvalue())
@@ -1175,21 +1161,25 @@ class TestCmdStatsMore(unittest.TestCase):
             sub = MagicMock()
             sub.resource_usage.side_effect = NotApplicable('nope')
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
-                    cmd_inspect.cmd_stats(_args(json=True, follow=False, workload=None), manager)
+                    cmd_stats.cmd_stats(_args(json=True, follow=False, workload=None), manager)
             data = json.loads(buf.getvalue())
             self.assertEqual(data['stats'], [])
 
-    def test_all_workloads_vm_excluded_from_running_targets(self):
-        with _MultiWorkloadDir({'test-vm': VM_TOML}):
+    def test_all_workloads_vm_included_in_running_targets(self):
+        with _MultiWorkloadDir({'test-vm': VM_TOML}) as p:
+            (p / 'test-vm' / '.enabled').write_text('')
             from workloadctl_core import WorkloadManager
             manager = WorkloadManager()
             manager.user_exists = MagicMock(return_value=True)
+            sub = MagicMock()
             buf = io.StringIO()
-            with patch('sys.stdout', buf):
-                cmd_inspect.cmd_stats(_args(json=False, follow=False, workload=None), manager)
-            self.assertIn('No running workload containers found', buf.getvalue())
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
+                with patch('sys.stdout', buf):
+                    cmd_stats.cmd_stats(_args(json=False, follow=False, workload=None), manager)
+            self.assertNotIn('No running workloads found', buf.getvalue())
+            sub.resource_usage.assert_called_once_with([])
 
     def test_all_workloads_human_prints_each_and_follow_shows_only_first(self):
         with _MultiWorkloadDir({'test-wl': MINIMAL_TOML}) as p:
@@ -1202,9 +1192,9 @@ class TestCmdStatsMore(unittest.TestCase):
             manager.podman = MagicMock(return_value=podman)
             sub = MagicMock()
             buf = io.StringIO()
-            with patch.object(cmd_inspect, 'get_substrate', return_value=sub):
+            with patch.object(cmd_stats, 'get_substrate', return_value=sub):
                 with patch('sys.stdout', buf):
-                    cmd_inspect.cmd_stats(_args(json=False, follow=True, workload=None), manager)
+                    cmd_stats.cmd_stats(_args(json=False, follow=True, workload=None), manager)
             out = buf.getvalue()
             self.assertIn('--follow with multiple workloads shows only test-wl', out)
             sub.resource_usage.assert_called_once()
@@ -1227,11 +1217,11 @@ class TestCmdHealthMore(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10040):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('subprocess.run', side_effect=fake_run):
                         with patch('sys.stdout', buf):
                             with self.assertRaises(SystemExit) as cm:
-                                cmd_inspect.cmd_health(
+                                cmd_health.cmd_health(
                                     _args(json=False, workload='test-wl'), manager)
             out = buf.getvalue()
             self.assertIn('Workload: test-wl', out)
@@ -1253,11 +1243,11 @@ class TestCmdHealthMore(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10041):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('subprocess.run', side_effect=fake_run):
                         with patch('sys.stdout', buf):
                             with self.assertRaises(SystemExit) as cm:
-                                cmd_inspect.cmd_health(
+                                cmd_health.cmd_health(
                                     _args(json=True, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             checks = {c['check']: c for c in data['checks']}
@@ -1286,13 +1276,13 @@ class TestCmdHealthMore(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10043):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('socket.socket') as sock_cls:
                         sock_cls.return_value.connect_ex.return_value = 0  # open
                         with patch('subprocess.run', side_effect=fake_run):
                             with patch('sys.stdout', buf):
                                 with self.assertRaises(SystemExit) as cm:
-                                    cmd_inspect.cmd_health(
+                                    cmd_health.cmd_health(
                                         _args(json=True, workload='test-wl'), manager)
             # It must have connected to the host port 18080, never 80.
             connected_ports = [c.args[0][1]
@@ -1324,11 +1314,11 @@ class TestCmdHealthMore(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10044):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('subprocess.run', side_effect=fake_run):
                         with patch('sys.stdout', buf):
                             with self.assertRaises(SystemExit) as cm:
-                                cmd_inspect.cmd_health(
+                                cmd_health.cmd_health(
                                     _args(json=True, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             checks = [c['check'] for c in data['checks']]
@@ -1349,7 +1339,7 @@ class TestCmdHealthMore(unittest.TestCase):
         }
         for spec, expected in cases.items():
             with self.subTest(spec=spec):
-                self.assertEqual(cmd_inspect._publish_host_port(spec), expected)
+                self.assertEqual(cmd_health._publish_host_port(spec), expected)
 
     def test_health_single_invalid_port_number_skipped(self):
         toml = PORTS_HEALTH_TOML.replace('ports = ["8080:80"]', 'ports = ["notaport"]')
@@ -1367,11 +1357,11 @@ class TestCmdHealthMore(unittest.TestCase):
             buf = io.StringIO()
             with patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                                return_value=10042):
-                with patch.object(cmd_inspect, 'manager_active', return_value=False):
+                with patch.object(cmd_health, 'manager_active', return_value=False):
                     with patch('subprocess.run', side_effect=fake_run):
                         with patch('sys.stdout', buf):
                             with self.assertRaises(SystemExit) as cm:
-                                cmd_inspect.cmd_health(
+                                cmd_health.cmd_health(
                                     _args(json=True, workload='test-wl'), manager)
             data = json.loads(buf.getvalue())
             checks = [c['check'] for c in data['checks']]

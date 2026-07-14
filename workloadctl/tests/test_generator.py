@@ -2529,6 +2529,9 @@ class TestGeneratorVmResources(unittest.TestCase):
             shutil.rmtree(d)
 
     def test_vm_resource_directives_emitted(self):
+        # The whole shared [resources] block binds to the VM service, not a
+        # hand-picked subset: QEMU runs directly under this unit, so every key a
+        # container gets through its user@{uid} drop-in works here too.
         write_config(self.config_dir, "resvm", """\
             [workload]
             name = "resvm"
@@ -2542,15 +2545,62 @@ class TestGeneratorVmResources(unittest.TestCase):
 
             [resources]
             memory_max = "4G"
+            memory_high = "3G"
+            memory_swap_max = "0"
             cpu_quota = "200%"
             cpu_weight = 300
+            io_weight = 50
+            tasks_max = 4096
+            io_read_bandwidth_max = ["/dev/sda 10M", "/dev/sdb 20M"]
+            io_write_bandwidth_max = ["/dev/sda 5M"]
         """)
         result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         svc = (Path(self.services_dir) / "workload-resvm.service").read_text()
-        self.assertIn("MemoryMax=4G", svc)
-        self.assertIn("CPUQuota=200%", svc)
-        self.assertIn("CPUWeight=300", svc)
+        for directive in (
+            "MemoryMax=4G",
+            "MemoryHigh=3G",
+            "MemorySwapMax=0",
+            "CPUQuota=200%",
+            "CPUWeight=300",
+            "IOWeight=50",
+            "TasksMax=4096",
+            "IOReadBandwidthMax=/dev/sda 10M",
+            "IOReadBandwidthMax=/dev/sdb 20M",
+            "IOWriteBandwidthMax=/dev/sda 5M",
+        ):
+            self.assertIn(directive, svc)
+
+    def test_vm_custom_directives_and_timeouts_applied(self):
+        # An explicit [resources] timeout replaces the VM default (300/90)
+        # rather than being emitted alongside it, and custom_directives reach
+        # the unit — both were silently dropped on the VM path.
+        write_config(self.config_dir, "customvm", """\
+            [workload]
+            name = "customvm"
+
+            [vm]
+            vcpus = 2
+            memory = "2048M"
+            cloud_image_url = "https://example.com/cloud.qcow2"
+            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            user = "fedora"
+
+            [resources]
+            timeout_start_sec = 600
+            timeout_stop_sec = 120
+
+            [resources.custom_directives]
+            OOMPolicy = "continue"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        svc = (Path(self.services_dir) / "workload-customvm.service").read_text()
+        self.assertIn("OOMPolicy=continue", svc)
+        self.assertIn("TimeoutStartSec=600", svc)
+        self.assertIn("TimeoutStopSec=120", svc)
+        self.assertNotIn("TimeoutStartSec=300", svc)
+        self.assertNotIn("TimeoutStopSec=90", svc)
 
     def test_vm_rerun_replaces_bridge_and_main_symlinks(self):
         write_config(self.config_dir, "revm", """\

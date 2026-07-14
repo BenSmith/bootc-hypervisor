@@ -125,3 +125,29 @@ def restart_workload_service(
                        capture_output=True)
         ensure_runtime_dir(uid)
         time.sleep(1.0)
+
+
+def systemctl_show(unit: str, properties: list[str], extra_args: list[str] | None = None) -> dict[str, str]:
+    """Run `systemctl show` and return a {key: value} dict."""
+    r = subprocess.run(
+        ["systemctl", "show", unit, f"--property={','.join(properties)}"] + (extra_args or []),
+        capture_output=True, text=True,
+    )
+    result = {}
+    for line in r.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key:
+            result[key] = value
+    return result
+
+
+def parse_active_since(ts_raw: str):
+    """Parse a `systemctl show --timestamp=unix` ActiveEnterTimestamp value
+    (`@<epoch>`, or empty/`[n/a]` when never active) into a unix-epoch int,
+    or None if unset/unparseable."""
+    if not ts_raw or not ts_raw.startswith("@"):
+        return None
+    try:
+        return int(float(ts_raw[1:]))
+    except ValueError:
+        return None

@@ -61,7 +61,7 @@ def skip_if_no_br0(target: Target):
 
 
 # OVMF firmware search order, mirroring vm.OVMF_CODE_CANDIDATES — the
-# VM path's own pre-flight (lib/cmd_lifecycle.py) requires one of these plus the
+# VM path's own pre-flight (lib/cmd_provision.py) requires one of these plus the
 # qemu binaries + socat. The bootc hypervisor image bakes the whole toolchain;
 # the bare dev cloud image has none of it.
 _OVMF_CODE_CANDIDATES = (
@@ -107,11 +107,36 @@ def poll_vm_reachable(target: Target, name: str, *, token: str = "vm-reachable",
     return last
 
 
-def guest_boot_id(target: Target, name: str) -> str:
-    """Read the guest's current boot_id over `workloadctl exec` (changes on reboot)."""
+def guest_boot_id(target: Target, name: str, *, check: bool = True) -> str:
+    """Read the guest's current boot_id over `workloadctl exec` (changes on reboot).
+
+    `check=False` for the post-reboot poll, where the guest is expected to be
+    unreachable for a while: an unreachable guest returns "" rather than raising,
+    so the caller can loop until the id both appears and differs.
+    """
     r = target.wl_exec(name, "cat /proc/sys/kernel/random/boot_id",
-                       sudo=True, check=True, timeout=60)
-    return r.stdout.strip()
+                       sudo=True, check=check, timeout=60)
+    return r.stdout.strip() if r.rc == 0 else ""
+
+
+# ---------------------------------------------------------------------------
+# Unit state + diagnosis
+# ---------------------------------------------------------------------------
+
+def unit_state(target: Target, service: str) -> str:
+    """The raw `systemctl is-active` word: active / inactive / failed / activating."""
+    return target.run(["systemctl", "is-active", service],
+                      sudo=False, check=False).stdout.strip()
+
+
+def dump_journal(target: Target, name: str, lines: int = 120) -> None:
+    """Print the workload unit's journal tail — the diagnosis on any failure."""
+    r = target.run(
+        ["journalctl", "--no-pager", "-n", str(lines), "-u", f"workload-{name}.service"],
+        sudo=True, check=False,
+    )
+    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
+          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,8 @@ import time
 import unittest
 from pathlib import Path
 
+import vm_metrics as _vm_metrics_mod
+
 from tests import REPO_ROOT, load_script, script_env
 
 
@@ -527,9 +529,9 @@ class TestVMCgroupMetrics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             rel = "workloads.slice/workload-myvm.service"
             self._write_cgroup(root, rel)
-            with self.mock.patch.object(self.mod, "CGROUP_ROOT", Path(root)), \
+            with self.mock.patch.object(_vm_metrics_mod, "CGROUP_ROOT", Path(root)), \
                  self.mock.patch.object(
-                     self.mod, "systemd_show",
+                     _vm_metrics_mod, "systemd_show",
                      return_value={"ControlGroup": "/" + rel}):
                 cg = self.mod.find_vm_cgroup("myvm")
             self.assertIsNotNone(cg)
@@ -537,13 +539,13 @@ class TestVMCgroupMetrics(unittest.TestCase):
 
     def test_find_vm_cgroup_none_when_no_controlgroup(self):
         with self.mock.patch.object(
-                self.mod, "systemd_show", return_value={}):
+                _vm_metrics_mod, "systemd_show", return_value={}):
             self.assertIsNone(self.mod.find_vm_cgroup("myvm"))
 
     def test_find_vm_cgroup_none_when_dir_missing(self):
-        with self.mock.patch.object(self.mod, "CGROUP_ROOT", Path("/nonexistent")), \
+        with self.mock.patch.object(_vm_metrics_mod, "CGROUP_ROOT", Path("/nonexistent")), \
              self.mock.patch.object(
-                 self.mod, "systemd_show",
+                 _vm_metrics_mod, "systemd_show",
                  return_value={"ControlGroup": "/workloads.slice/workload-myvm.service"}):
             self.assertIsNone(self.mod.find_vm_cgroup("myvm"))
 
@@ -748,7 +750,7 @@ class TestVMQMPMetrics(unittest.TestCase):
         self.mod = _load_exporter()
 
     def test_missing_socket_returns_empty(self):
-        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR",
+        with self.mock.patch.object(_vm_metrics_mod, "VM_SOCKET_DIR",
                                     Path("/nonexistent-vm-sock-dir")):
             self.assertEqual(self.mod.get_vm_qmp_metrics("vm"), {})
 
@@ -763,8 +765,8 @@ class TestVMQMPMetrics(unittest.TestCase):
             "query-balloon": {"return": {"actual": 2147483648}},
             "query-cpus-fast": {"return": []},
         }[cmd]
-        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", Path(tmp)), \
-             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+        with self.mock.patch.object(_vm_metrics_mod, "VM_SOCKET_DIR", Path(tmp)), \
+             self.mock.patch.object(_vm_metrics_mod, "QMPClient", return_value=qmp):
             m = self.mod.get_vm_qmp_metrics("vm")
         self.assertEqual(m["balloon_actual_bytes"], 2147483648)
 
@@ -860,9 +862,9 @@ class TestVMQMPVcpuMetrics(unittest.TestCase):
                 {"cpu-index": 1},  # no thread-id → skipped
             ]},
         }[cmd]
-        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
-             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp), \
-             self.mock.patch.object(self.mod, "Path", FakePath):
+        with self.mock.patch.object(_vm_metrics_mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(_vm_metrics_mod, "QMPClient", return_value=qmp), \
+             self.mock.patch.object(_vm_metrics_mod, "Path", FakePath):
             m = self.mod.get_vm_qmp_metrics("vm")
         self.assertIn("vcpu_0_cpu_seconds_total", m)
         self.assertNotIn("vcpu_1_cpu_seconds_total", m)
@@ -874,8 +876,8 @@ class TestVMQMPVcpuMetrics(unittest.TestCase):
             "query-balloon": {"return": {}},
             "query-cpus-fast": {"return": [{"cpu-index": 0, "thread-id": 999999}]},
         }[cmd]
-        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
-             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+        with self.mock.patch.object(_vm_metrics_mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(_vm_metrics_mod, "QMPClient", return_value=qmp):
             m = self.mod.get_vm_qmp_metrics("vm")
         self.assertEqual(m, {})
 
@@ -883,8 +885,8 @@ class TestVMQMPVcpuMetrics(unittest.TestCase):
         vm_dir = self._sock_dir()
         qmp = self.mock.MagicMock()
         qmp.connect.side_effect = OSError("no such socket")
-        with self.mock.patch.object(self.mod, "VM_SOCKET_DIR", vm_dir), \
-             self.mock.patch.object(self.mod, "QMPClient", return_value=qmp):
+        with self.mock.patch.object(_vm_metrics_mod, "VM_SOCKET_DIR", vm_dir), \
+             self.mock.patch.object(_vm_metrics_mod, "QMPClient", return_value=qmp):
             m = self.mod.get_vm_qmp_metrics("vm")
         self.assertEqual(m, {})
         qmp.close.assert_called_once()

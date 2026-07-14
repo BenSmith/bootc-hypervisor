@@ -32,15 +32,16 @@ test-all-runtime target="local":
   just test-runtime
   WLRT_MODE=gate just test-runtime
 
-# Path to the workloadctl checkout on a prepared remote KVM host ($HOME-relative).
-wlrt_remote_path := "projects/miniverse/hypervisor/workloadctl"
+# Where this tree gets rsynced on the remote KVM host, relative to its $HOME.
+# Whatever layout you keep checkouts in is yours, not the project's: set
+# WLRT_REMOTE_PATH to it.
+wlrt_remote_path := env_var_or_default('WLRT_REMOTE_PATH', 'workloadctl')
 
 # Drive the full sweep on a REMOTE prepared host from your laptop: rsync this
 # tree over, then run `test-all-runtime` there and stream the output back. The
 # host must already be set up for the runtime rung — a checkout at
 # {{wlrt_remote_path}} and the wlrt image cache (~/wlrt-cache, preserved via the
-# tests/runtime/.cache exclude below); e.g. tp. Override the path by editing
-# `wlrt_remote_path`.
+# tests/runtime/.cache exclude below).
 test-all-runtime-remote host target="local":
   rsync -a --delete \
     --exclude='.git/' --exclude='__pycache__/' --exclude='*.pyc' \

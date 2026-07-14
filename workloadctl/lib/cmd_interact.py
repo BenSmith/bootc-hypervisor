@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 
+from cli_log import emit_result
 from workload_lib import workload_service_units
 from workloadctl_core import (
     WorkloadConfig,
@@ -162,6 +163,14 @@ def cmd_cp(args, manager: WorkloadManager):
         _cp_to_container(pod, config, target, container_path, host_path)
 
     print("✓ Copied successfully")
+
+    # Only a copy *into* the workload is an operation on it; copying out reads it
+    # and changes nothing, and recording that would be the same no-op noise the
+    # allowlist in oplog exists to keep out.
+    if direction == "to":
+        emit_result([{"workload": workload, "result": "copied",
+                      "container": target, "path": container_path,
+                      "source": host_path}])
 
 
 @contextlib.contextmanager

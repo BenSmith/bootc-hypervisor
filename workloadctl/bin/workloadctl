@@ -16,19 +16,26 @@ try:
 except ImportError:
     __version__ = "0-dev"
 
-from cmd_admin import cmd_create, cmd_diagnose, cmd_edit, cmd_validate
+import cli_log
+from cmd_create import cmd_create
+from cmd_diagnose import cmd_diagnose
+from cmd_edit import cmd_edit
+from cmd_validate import cmd_validate
 from cmd_catalog import cmd_catalog, cmd_duplicate, cmd_init, cmd_install
 from cmd_backup import cmd_backup, cmd_restore
 from cmd_doctor import cmd_doctor
 from cmd_drift import cmd_drift
-from cmd_inspect import (
-    cmd_health, cmd_images, cmd_info, cmd_list,
-    cmd_stats, cmd_status,
-)
+from cmd_health import cmd_health
+from cmd_images import cmd_images
+from cmd_info import cmd_info
+from cmd_inspect import cmd_list, cmd_status
+from cmd_stats import cmd_stats
+from cmd_cleanup import cmd_cleanup
+from cmd_disable import cmd_disable
+from cmd_enable import cmd_enable
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
 from cmd_lifecycle import (
-    cmd_build, cmd_cleanup, cmd_disable, cmd_enable, cmd_reboot,
-    cmd_recreate, cmd_restart, cmd_start, cmd_stop,
+    cmd_build, cmd_reboot, cmd_recreate, cmd_restart, cmd_start, cmd_stop,
 )
 from cmd_secret import cmd_secret
 from cmd_update import cmd_rollback, cmd_update
@@ -54,6 +61,21 @@ def main():
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
+
+    # Options shared by the verbs that mutate a workload. They are the verbs
+    # whose narration goes through cli_log, which is what makes --quiet real:
+    # a flag is only offered where it is actually honored (--quiet on a verb
+    # that printed anyway would be a lie), so the read/report verbs — which
+    # emit output, not prose — don't take it.
+    mutating = argparse.ArgumentParser(add_help=False)
+    # Marks these verbs as the ones whose result object cli_log writes. The read
+    # verbs carry a --json of their own that means something different (see
+    # configure() below), and this is what tells the two apart.
+    mutating.set_defaults(emits_result=True)
+    mutating.add_argument("-q", "--quiet", action="store_true",
+                          help="Suppress progress output; warnings and errors still print")
+    mutating.add_argument("--json", action="store_true",
+                          help="Print a JSON result object instead of progress output")
 
     cp_parser = subparsers.add_parser("cp", help="Copy files to/from container")
     cp_parser.set_defaults(func=cmd_cp)
@@ -114,7 +136,8 @@ def main():
     install_parser.add_argument("src", help="Source directory containing workload.toml")
 
     build_parser = subparsers.add_parser(
-        "build", help="Build a workload's container image from its bundle build context")
+        "build", help="Build a workload's container image from its bundle build context",
+        parents=[mutating])
     build_parser.set_defaults(func=cmd_build)
     build_parser.add_argument("workload", help="Workload name")
 
@@ -151,10 +174,13 @@ def main():
         help="Output diff as JSON",
     )
 
-    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)")
+    disable_parser = subparsers.add_parser("disable", help="Stop and disable a workload (use --purge to also remove user and data)",
+                                           parents=[mutating])
     disable_parser.set_defaults(func=cmd_disable)
     disable_parser.add_argument("--purge", action="store_true",
                                help="Also remove user, home, and subuid/subgid")
+    disable_parser.add_argument("--dry-run", action="store_true",
+                               help="Print the teardown plan without changing anything")
     disable_parser.add_argument("workload", help="Workload name")
 
     edit_parser = subparsers.add_parser("edit", help="Edit config, or a named control file (copy-on-write override)")
@@ -171,7 +197,8 @@ def main():
         help="Apply changes without the interactive confirmation prompt",
     )
 
-    enable_parser = subparsers.add_parser("enable", help="Enable and start a workload")
+    enable_parser = subparsers.add_parser("enable", help="Enable and start a workload",
+                                          parents=[mutating])
     enable_parser.set_defaults(func=cmd_enable)
     enable_parser.add_argument("workload", help="Workload name")
 
@@ -244,15 +271,18 @@ def main():
     logs_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                              help="Workload, or workload/container for multi-container workloads")
 
-    reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)")
+    reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)",
+                                          parents=[mutating])
     reboot_parser.set_defaults(func=cmd_reboot)
     reboot_parser.add_argument("workload", help="Workload name")
 
-    recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)")
+    recreate_parser = subparsers.add_parser("recreate", help="Recreate container from image (destroys overlay)",
+                                            parents=[mutating])
     recreate_parser.set_defaults(func=cmd_recreate)
     recreate_parser.add_argument("workload", help="Workload name")
 
-    restart_parser = subparsers.add_parser("restart", help="Restart a workload service (keeps overlay/disk; does not apply TOML edits)")
+    restart_parser = subparsers.add_parser("restart", help="Restart a workload service (keeps overlay/disk; does not apply TOML edits)",
+                                           parents=[mutating])
     restart_parser.set_defaults(func=cmd_restart)
     restart_parser.add_argument("workload", help="Workload name")
 
@@ -264,7 +294,8 @@ def main():
                                 help="Overwrite existing config, credentials, and home dir")
     restore_parser.add_argument("archive", help="Path to backup archive (.tar.zst)")
 
-    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)")
+    rollback_parser = subparsers.add_parser("rollback", help="Roll back to previous image (VM workloads: restore previous disk generation)",
+                                            parents=[mutating])
     rollback_parser.set_defaults(func=cmd_rollback)
     rollback_parser.add_argument("workload", help="Workload name")
     rollback_parser.add_argument("--list", action="store_true", help="List available rollback targets instead of rolling back")
@@ -331,18 +362,23 @@ def main():
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
     status_parser.add_argument("workload", nargs="?", help="Workload name (or show all if omitted)")
 
-    start_parser = subparsers.add_parser("start", help="Start a workload service")
+    start_parser = subparsers.add_parser("start", help="Start a workload service",
+                                         parents=[mutating])
     start_parser.set_defaults(func=cmd_start)
     start_parser.add_argument("workload", help="Workload name")
 
-    stop_parser = subparsers.add_parser("stop", help="Stop a workload service")
+    stop_parser = subparsers.add_parser("stop", help="Stop a workload service",
+                                        parents=[mutating])
     stop_parser.set_defaults(func=cmd_stop)
     stop_parser.add_argument("workload", help="Workload name")
 
-    update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)")
+    update_parser = subparsers.add_parser("update", help="Pull latest image and restart (VM workloads: rebuild system disk)",
+                                          parents=[mutating])
     update_parser.set_defaults(func=cmd_update)
     update_parser.add_argument("--all", action="store_true", help="Update all enabled workloads")
     update_parser.add_argument("--force", action="store_true", help="Restart even if image unchanged")
+    update_parser.add_argument("--dry-run", action="store_true",
+                               help="Print what would be pulled and restarted, without changing anything")
     update_parser.add_argument("workload", nargs="?", help="Workload name")
 
     validate_parser = subparsers.add_parser("validate", help="Validate workload configuration")
@@ -362,6 +398,23 @@ def main():
     doctor_parser.add_argument("workload", help="Workload name")
 
     args = parser.parse_args()
+
+    # One configure() for the whole process, before any handler can speak.
+    #
+    # Two different flags spell themselves --json. On a read verb it means "my
+    # stdout is a report I print myself"; on a mutating verb it means "cli_log
+    # writes the result object to stdout". Both need prose off stdout, so both
+    # set quiet — but only the second may set json_mode, because json_mode is
+    # what licenses cli_log to *write* a document there. Granting it to a read
+    # verb puts a second JSON object on a stream that already holds a report
+    # (emit_failure fires from the exit ladder on any non-zero exit), and no
+    # parser downstream survives that.
+    json_flag = getattr(args, "json", False)
+    cli_log.configure(
+        quiet=getattr(args, "quiet", False) or json_flag,
+        json_mode=json_flag and getattr(args, "emits_result", False),
+        command=args.command,
+    )
 
     # Create manager
     manager = WorkloadManager()
@@ -383,37 +436,56 @@ def _run_cli() -> int:
     unit-testable. Returns the code the process should exit with; SystemExit
     raised inside main() (handlers that call sys.exit directly) propagates
     unchanged, exactly as before.
+
+    Every failing path also calls cli_log.emit_failure(), which is a no-op
+    unless --json: a scripted caller must get a result document on stdout even
+    when the command died before it could report its own, and this ladder is
+    the one place that sees every way that can happen. A command that already
+    emitted its own result (a partly-failed `update --all`, whose per-workload
+    rows say far more than this backstop could) keeps it.
     """
     try:
         main()
+    except SystemExit as e:
+        if e.code not in (0, None):
+            cli_log.emit_failure(f"command failed (exit {e.code}); see stderr")
+        raise
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
+        cli_log.emit_failure("interrupted")
         return 130
-    except UsageError:
+    except UsageError as e:
         # Message already printed by the raiser; usage errors exit 2.
+        cli_log.emit_failure(str(e))
         return 2
     except LifecycleError as e:
         # Diagnostic (if any) already printed by the raiser; reproduce the
         # exact returncode of the systemctl/podman invocation that failed.
+        cli_log.emit_failure(f"lifecycle command failed (exit {e.returncode})")
         return e.returncode
-    except ProvisionFailed:
+    except ProvisionFailed as e:
         # Raiser prints the "✗ ..." diagnostic. Commands that need to keep going
         # (update --all tallies per-workload failures) catch it themselves; this
         # is the backstop for the ones that just need a clean nonzero exit.
+        cli_log.emit_failure(str(e))
         return 1
     except NotRoot as e:
         print(f"Error: {e}", file=sys.stderr)
+        cli_log.emit_failure(str(e))
         return 1
     except WorkloadMasked as e:
         print(str(e), file=sys.stderr)
+        cli_log.emit_failure(str(e))
         return 1
     except WorkloadUserNotFound as e:
         print(f"Error: {e}", file=sys.stderr)
+        cli_log.emit_failure(str(e))
         return 1
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
+        cli_log.emit_failure(str(e))
         return 1
-    except Exception:
+    except Exception as e:
         # Unexpected: not one of the typed errors above, so it's likely a bug
         # in workloadctl rather than an operator/environment condition. Print
         # the full traceback (not just the message) so a bug report has
@@ -424,6 +496,7 @@ def _run_cli() -> int:
             "Please re-run the command and include the traceback above in a bug report.",
             file=sys.stderr,
         )
+        cli_log.emit_failure(f"internal error: {e!r}")
         return 1
     return 0
 

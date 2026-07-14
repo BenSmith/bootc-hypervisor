@@ -51,6 +51,159 @@ workloadctl [-h] <command> [options]
 
 ---
 
+## Output Options on Mutating Commands
+
+`build`, `disable`, `enable`, `reboot`, `recreate`, `restart`, `rollback`,
+`start`, `stop` and `update` each take two output flags. They are offered only
+on these verbs because only these verbs *narrate* — the read/report commands
+(`list`, `status`, `drift`, …) print output rather than progress, and have
+carried their own `--json` for a long time.
+
+| Flag | Effect |
+|------|--------|
+| `-q`, `--quiet` | Drop the progress narration. Warnings and errors still print, on stderr — `--quiet` silences the commentary, never a failure. |
+| `--json` | Print a JSON result object on stdout instead of the narration, so `workloadctl update --all --json \| jq` is safe. |
+
+Progress goes to stdout, warnings and errors to stderr, so the two survive a
+redirect (`workloadctl update --all >run.log 2>errors.log`).
+
+A command's *output* — a `--dry-run` plan, `rollback --list`'s targets — is not
+narration and is never suppressed: with `--quiet` it still prints, and with
+`--json` it moves into the result object.
+
+### The result object
+
+Every mutating verb reports the same shape, so a script can treat them alike:
+
+```console
+$ sudo workloadctl update --all --json
+{
+  "command": "update",
+  "ok": true,
+  "workloads": [
+    {
+      "workload": "web",
+      "kind": "container",
+      "result": "updated",
+      "images": {
+        "web": {
+          "image": "docker.io/library/nginx:alpine",
+          "old": "sha256:1f2e3d4c5b6a",
+          "new": "sha256:9a8b7c6d5e4f"
+        }
+      },
+      "verify": "healthy"
+    },
+    {
+      "workload": "cache",
+      "kind": "container",
+      "result": "rolled-back",
+      "verify": "crashed"
+    },
+    {
+      "workload": "builder",
+      "kind": "container",
+      "result": "skipped",
+      "reason": "builder uses pull=never (local image) — build it manually"
+    }
+  ],
+  "summary": {
+    "updated": 1, "rolled-back": 1, "skipped": 1, "failed": 0, "unchanged": 0
+  }
+}
+```
+
+- `ok` is the command's overall verdict, and tracks the exit code. A rollback is
+  a *handled* outcome, not a failure: auto-rollback working as designed leaves
+  `ok: true` and exit 0. A failed pull, or a VM rebuild that didn't come back,
+  gives `ok: false` and exit 1.
+- `result` per workload is one of `enabled`, `already-running`, `disabled`,
+  `purged`, `started`, `stopped`, `restarted`, `rebooted`, `recreated`, `built`,
+  `updated`, `unchanged`, `skipped`, `failed`, `rolled-back`, `listed`, or
+  `dry-run`.
+- `reason` explains a `skipped` or `failed` row; `verify` carries the
+  post-restart health verdict; `images` the per-container old→new image IDs.
+- `summary` (update only) counts the rows by result.
+- A command that dies before it can report — bad arguments, not root, an
+  unexpected crash — still emits the document, with `ok: false` and an `error`
+  string. The human-readable diagnostic is on stderr, as always.
+
+---
+
+## The Operations Log
+
+Every command that changes a workload appends one JSON object per touched
+workload to `/var/lib/workloads/<name>/operations.log`, whether or not you passed
+`--json`. It answers the question the journal can't: not *that* someone ran
+`workloadctl update web` — `sudo` already logs that — but what the update
+actually did.
+
+That covers the lifecycle verbs (`enable`, `disable`, `start`, `stop`,
+`restart`, `recreate`, `reboot`, `build`, `update`, `rollback`) and the ones that
+author or rewrite a workload (`create`, `init`, `duplicate`, `install`, `edit`,
+`backup`, `restore`, `cp` *into* a workload). Two stay out by design: `secret`,
+whose credstore is host-global and belongs to no single workload, and `cleanup`,
+which reaps orphans — workloads whose config is already gone, leaving nothing to
+own the record.
+
+```console
+$ sudo tail -1 /var/lib/workloads/web/operations.log | jq
+{
+  "ts": "2026-07-13T18:04:22Z",
+  "command": "update",
+  "ok": true,
+  "user": "ben",
+  "user_source": "login",
+  "workload": "web",
+  "kind": "container",
+  "result": "rolled-back",
+  "verify": "crashed",
+  "images": {
+    "web": {
+      "image": "docker.io/library/nginx:alpine",
+      "old": "sha256:1f2e3d4c5b6a",
+      "new": "sha256:9a8b7c6d5e4f"
+    }
+  }
+}
+```
+
+Each line is the `--json` result row plus `ts`, `command`, `ok`, `user` and
+`user_source` — the same dict, so the log and `--json` cannot drift apart.
+
+`user_source` says how much to trust `user`:
+
+| Source | Means | Notes |
+|--------|-------|-------|
+| `login` | The kernel's audit loginuid (`/proc/self/loginuid`) | The human who logged in, even several privilege hops later. Survives `su -`, which `SUDO_USER` does not, and is the one field here that userspace cannot forge. |
+| `sudo` | `$SUDO_USER` | Fallback when the kernel has no audit support. Just an environment variable, so spoofable — which costs nothing, since root can rewrite this file anyway. |
+| `system` | No login session at all | A systemd unit, a timer, cron. Distinguishing this from a person at a root console is why `loginuid` is consulted first. |
+
+- **It is a record, not an audit trail.** Only root can run these verbs, and
+  root can equally edit or delete the file. It is not tamper-evident and is not
+  offered as a security control.
+- **It lives beside the workload**, not in a host-global file. Lines lead with a
+  UTC timestamp, so `cat /var/lib/workloads/*/operations.log | sort` still gives
+  a host-wide timeline.
+- **Backup skips it.** Only `data/` is captured, so a restore doesn't import
+  another host's history into a fresh workload.
+- **`disable --purge` deletes it** along with the rest of the workload
+  directory. The workload is gone; its history goes with it.
+- **Nothing that changed nothing is recorded.** Dry-runs and reports
+  (`--dry-run`, `rollback --list`), and — this is the one that matters — an
+  `update` that found the image already current. `update --all` is the verb most
+  likely to be on a timer, and a quiet fleet must leave the log exactly as it
+  found it rather than burying its own history under one "nothing happened" line
+  per workload per run.
+- **Writing is best-effort.** If the workload doesn't exist at all, the command
+  warns on stderr and carries on. A log line that didn't land is never why an
+  operation fails.
+
+There is no rotation, and with no-ops excluded it doesn't need one: a line per
+*real* change is a few kilobytes a year.
+
+---
+
 ## Targeting a Container in a Multi-Container Workload
 
 A workload may run more than one container (see [Multi-Container Workloads](workloads.md#multi-container-workloads)). Commands that operate on a container — `exec`, `shell`, `logs`, `health` — accept either the workload alone or a `<workload>/<container>` reference:
@@ -246,12 +399,15 @@ This is idempotent — safe to re-run if a previous enable was interrupted.
 Stop the workload service and remove its `.enabled` marker (`/etc/workloads.d/<name>/.enabled`), so the generator stops emitting its units.
 
 ```
-sudo workloadctl disable [--purge] <workload>
+sudo workloadctl disable [--purge] [--dry-run] <workload>
 ```
 
 | Option | Description |
 |---|---|
 | `--purge` | Also delete the workload user, home directory, and subuid/subgid entries |
+| `--dry-run` | Print the teardown plan and exit without changing anything |
+
+`--dry-run` enumerates exactly what teardown would touch — the units it would stop, the generated unit files it would remove, and (with `--purge`) the subuid/subgid entries, the user, and the data directory with its size. It reports only what is actually present, so anything it doesn't list, `disable` won't touch.
 
 [↑ top](#workloadctl-command-reference)
 
@@ -340,13 +496,16 @@ Values that flow through `EnvironmentFile=` (`XDG_RUNTIME_DIR`, `HOST_IP`, decry
 Pull the latest image and restart the workload.
 
 ```
-sudo workloadctl update [--force] [--all] [<workload>]
+sudo workloadctl update [--force] [--all] [--dry-run] [<workload>]
 ```
 
 | Option | Description |
 |---|---|
 | `--force` | Restart even if the image hasn't changed |
 | `--all` | Update all enabled workloads (skips `pull=never` containers) |
+| `--dry-run` | Print what would be pulled and restarted, without changing anything |
+
+`--dry-run` names the images it would pull (with the image ID each would roll back to), the workloads it would skip as `pull=never`, and the services it would restart. It does not contact the registry, so it reports the plan rather than predicting whether a pull would actually find a new image.
 
 **Container workloads:** Pulls the latest image, restarts, then monitors health checks (or service liveness) and automatically rolls back on failure. With `--all`, all workloads are pulled and restarted first, then verified in a single wait period.
 
@@ -486,8 +645,10 @@ workloadctl stats [--json] [-f] [<workload>]
 
 | Option | Description |
 |---|---|
-| `-f` / `--follow` | Keep updating (live view); incompatible with `--json` |
+| `-f` / `--follow` | Keep updating (live view); incompatible with `--json` and with VM workloads |
 | `--json` | Output raw numeric stats as JSON |
+
+**Container workloads** are measured with `podman stats`. **VM workloads** are measured over QEMU's read-only QMP monitor: CPU percent is derived from the vCPU thread times sampled twice, memory from the guest's balloon against the configured `[vm] memory`. A VM reports `null` for network and block I/O — QEMU is not asked for them, and a zero would read as an idle disk rather than as a gap.
 
 [↑ top](#workloadctl-command-reference)
 

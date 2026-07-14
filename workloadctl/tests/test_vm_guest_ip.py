@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-import substrate
+import substrate_vm as substrate
 from vm import vm_mac_address
 
 

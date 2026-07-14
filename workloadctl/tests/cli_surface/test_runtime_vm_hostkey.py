@@ -28,6 +28,7 @@ import time
 import pytest
 
 from fixtures import (
+    dump_journal,
     _install_toml, _purge_workload, _enable_workload,
     poll_vm_reachable, skip_if_no_kvm, skip_if_no_vm_toolchain,
 )
@@ -35,15 +36,6 @@ from fixtures import (
 pytestmark = [pytest.mark.runtime, pytest.mark.slow]
 
 WORKLOAD = "rt-vm"
-
-
-def _dump_journal(target, name):
-    r = target.run(
-        ["journalctl", "--no-pager", "-n", "100", "-u", f"workload-{name}.service"],
-        sudo=True, check=False,
-    )
-    print(f"\n----- journalctl -u workload-{name}.service (tail) -----\n"
-          f"{r.stdout}\n{r.stderr}\n--------------------------------------------------------")
 
 
 def test_vm_ssh_hostkey_swap_is_refused(target):
@@ -57,14 +49,14 @@ def test_vm_ssh_hostkey_swap_is_refused(target):
         try:
             _enable_workload(target, WORKLOAD, timeout=900, expect_container=False)
         except Exception:
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
             raise
 
         # (1) Positive: exec reaches the guest. StrictHostKeyChecking=yes means
         # this only succeeds if the guest presented the pinned host key.
         good = poll_vm_reachable(target, WORKLOAD, token="rt-vm-pinned", timeout=300)
         if not (good and good.rc == 0 and "rt-vm-pinned" in good.stdout):
-            _dump_journal(target, WORKLOAD)
+            dump_journal(target, WORKLOAD)
         assert good is not None and good.rc == 0 and "rt-vm-pinned" in good.stdout, (
             f"`workloadctl exec {WORKLOAD}` never reached the guest with the pinned "
             f"host key (last rc={None if good is None else good.rc}):\n"
