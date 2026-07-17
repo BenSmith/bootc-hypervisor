@@ -3,9 +3,10 @@
 Test modules are imported as ``tests.<name>``, so this runs before any of them
 and is the one place that knows the checkout layout.
 
-Shipped code in ``lib/`` is a flat set of top-level modules: on a host the RPM's
-.pth file puts ``/usr/libexec/workloadctl`` on sys.path, and from a checkout that
-job is ours. ``tests/`` itself goes on the path too, so sibling helpers (e.g.
+Shipped code in ``lib/`` is a flat set of top-level modules. On a host every
+entrypoint is installed beside them in ``/usr/libexec/workloadctl`` and finds
+them via its own ``sys.path[0]``; from a checkout that job is ours. ``tests/``
+itself goes on the path too, so sibling helpers (e.g.
 ``covhelper``) import by bare name. The entrypoints under ``bin/``, ``generators/``
 and ``libexec/`` have no ``.py`` extension and so cannot be imported by name --
 use :func:`load_script`. Subprocess launches of those scripts need the same lib

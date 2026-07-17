@@ -55,7 +55,7 @@ WLRT_MODE=gate just test-runtime       # gate: real bootc image via bootc-image-
 
 There is no Python package manager / venv — scripts run against the system `python3` (3.14; Fedora 43 and 44 both ship it). `lib/` has no third-party deps; everything is stdlib + `tomllib`.
 
-`lib/` is a flat set of top-level modules, not a package. Exactly one thing puts it on `sys.path`: on a host, the RPM's `%{python3_sitelib}/workloadctl.pth`; in the test suite, `tests/__init__.py` (which also provides `load_script()` for the extension-less entrypoints and `script_env()` for subprocess launches). Test modules import as `tests.<name>` — hence `just test` runs `unittest discover -t .` — and no test module does its own `sys.path` surgery.
+`lib/` is a flat set of top-level modules, not a package. On a host the RPM installs every entrypoint (the CLI, generator, and libexec helpers) *into* `/usr/libexec/workloadctl` alongside the modules, so each finds them via its own `sys.path[0]` — no `.pth`, nothing on any other process's path. The CLI reaches PATH through a thin `%{_bindir}/workloadctl` exec wrapper into that private dir. In the test suite, `tests/__init__.py` puts `lib/` on `sys.path` (and provides `load_script()` for the extension-less entrypoints and `script_env()` for subprocess launches). Test modules import as `tests.<name>` — hence `just test` runs `unittest discover -t .` — and no test module does its own `sys.path` surgery.
 
 ## workloadctl architecture
 

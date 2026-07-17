@@ -14,9 +14,6 @@ BuildArch:      noarch
 # defined by systemd-rpm-macros. Without it rpmbuild emits the literal
 # "%{_unitdir}/..." and fails with: File must begin with "/".
 BuildRequires:  systemd-rpm-macros
-# Likewise %{python3_sitelib} (the workloadctl.pth drop) comes from
-# python3-rpm-macros, which rpm-build does not pull in on its own.
-BuildRequires:  python3-rpm-macros
 
 Requires:       python3 >= 3.14
 Requires:       podman >= 5.3
@@ -55,12 +52,26 @@ UID/subuid namespace, home directory, and rootless podman instance.
 # tarball Source is added.
 
 %install
-install -Dpm 0755 %{_sourcedir}/bin/workloadctl %{buildroot}%{_bindir}/workloadctl
-
-# Private library modules under %{_libexecdir}/workloadctl/.
-# A .pth file in %{python3_sitelib} makes them importable by all workloadctl
-# scripts without any sys.path manipulation.
+# The CLI is the one entrypoint users invoke by bare name off PATH, so it cannot
+# live beside the library the way the generator and libexec helpers do. Install
+# the real program into the private module dir (where its sys.path[0] resolves
+# the lib modules with zero path manipulation) and expose it on PATH through a
+# thin exec wrapper. This keeps the modules private instead of registering a
+# sitewide .pth that would put 21 generic top-level names on every host process's
+# sys.path.
 install -dm 0755 %{buildroot}%{_libexecdir}/workloadctl
+install -pm 0755 %{_sourcedir}/bin/workloadctl \
+    %{buildroot}%{_libexecdir}/workloadctl/workloadctl
+install -dm 0755 %{buildroot}%{_bindir}
+cat > %{buildroot}%{_bindir}/workloadctl << 'EOF'
+#!/bin/sh
+exec %{_libexecdir}/workloadctl/workloadctl "$@"
+EOF
+chmod 0755 %{buildroot}%{_bindir}/workloadctl
+
+# Private library modules under %{_libexecdir}/workloadctl/. Every workloadctl
+# entrypoint is installed into this same directory, so each finds the modules via
+# its own sys.path[0] -- no .pth, no sys.path manipulation.
 for _f in %{_sourcedir}/lib/*.py; do
     install -pm 0644 "$_f" %{buildroot}%{_libexecdir}/workloadctl/
 done
@@ -71,8 +82,6 @@ cat > %{buildroot}%{_libexecdir}/workloadctl/_version.py << 'EOF'
 __version__ = "%{version}-%{release}"
 EOF
 chmod 0644 %{buildroot}%{_libexecdir}/workloadctl/_version.py
-install -dm 0755 %{buildroot}%{python3_sitelib}
-echo '%{_libexecdir}/workloadctl' > %{buildroot}%{python3_sitelib}/workloadctl.pth
 install -Dpm 0755 %{_sourcedir}/generators/workload-generator \
     %{buildroot}%{_prefix}/lib/systemd/system-generators/workload-generator
 
@@ -166,10 +175,10 @@ fi
 %files
 %{_datadir}/licenses/workloadctl/LICENSE
 %{_bindir}/workloadctl
-%{python3_sitelib}/workloadctl.pth
 %{_prefix}/lib/systemd/system-generators/workload-generator
 %dir %{_libexecdir}/workloadctl
 %{_libexecdir}/workloadctl/*.py
+%{_libexecdir}/workloadctl/workloadctl
 %{_libexecdir}/workloadctl/workload-generate
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
