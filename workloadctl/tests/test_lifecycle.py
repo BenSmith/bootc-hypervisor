@@ -1151,6 +1151,10 @@ class TestGenerateUnits(unittest.TestCase):
             gen_call = next(c for c in run_mock.call_args_list
                             if "workload-generate" in c.args[0][0])
             self.assertEqual(gen_call.kwargs["env"]["WORKLOAD_GENERATE_LOG_STDERR"], "1")
+            # --no-start is load-bearing: enable starts the workload itself
+            # AFTER transfer_image; a generator-enqueued start would pin a
+            # fresh container to the stale user-store image.
+            self.assertIn("--no-start", gen_call.args[0])
 
     def test_missing_sysusers_conf_raises_lifecycle_exit_1(self):
         # The generator exits 0 and skips a workload it can't provision (e.g.

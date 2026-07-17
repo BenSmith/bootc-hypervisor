@@ -109,9 +109,11 @@ def cmd_recreate(args, manager: WorkloadManager):
 
     info(f"Recreating workload: {args.workload}")
     info("  Regenerating service files...")
+    # --no-start: reprovision() below owns the restart, after transfer_image —
+    # a generator-enqueued start would race ahead of the transfer.
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-         "--workload", config.name],
+         "--workload", config.name, "--no-start"],
         check=True,
     )
     subprocess.run(["systemctl", "daemon-reload"], check=True)

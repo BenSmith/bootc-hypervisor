@@ -383,11 +383,16 @@ def generate_units(config: WorkloadConfig):
     emits the whole enabled set, so acting on one workload would rewrite every
     other workload's units and enqueue a start job for each — disturbing
     bystanders and hiding their drift.
+
+    `--no-start` keeps the generator from enqueuing its own start job: enable's
+    order (generate → provision user → transfer image → start) is load-bearing,
+    and a generator-enqueued start would cold-start the containers before the
+    image transfer, pinning them to the stale user-store image.
     """
     info("  Generating service files...")
     subprocess.run(
         ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-         "--workload", config.name],
+         "--workload", config.name, "--no-start"],
         check=True,
         env={**os.environ, "WORKLOAD_GENERATE_LOG_STDERR": "1"},
     )

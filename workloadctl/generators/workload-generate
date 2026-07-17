@@ -102,7 +102,17 @@ except Exception as e:
 # (hiding its drift, since `drift` compares against the files in /run) and
 # enqueue a start for a workload the operator had deliberately stopped. Boot
 # passes no filter and emits everything.
+#
+# `--no-start` skips the daemon-reload + start-enqueue block at the end of
+# main(): the caller owns both. Every CLI call site passes it, because each
+# already starts/restarts the workload itself AFTER its remaining provisioning
+# steps — most critically enable's image transfer to the user store. A
+# generator-enqueued start races ahead of that transfer and pins a fresh
+# cattle container to the *stale* user-store image (the transfer then retags
+# :latest seconds too late). Boot passes no flag: there the enqueue is
+# load-bearing (see the block comment in main()).
 ONLY_WORKLOAD = None
+NO_START = False
 _args = sys.argv[1:]
 _positional = []
 _i = 0
@@ -113,6 +123,9 @@ while _i < len(_args):
         _i += 2
     elif _a.startswith("--workload="):
         ONLY_WORKLOAD = _a.split("=", 1)[1]
+        _i += 1
+    elif _a == "--no-start":
+        NO_START = True
         _i += 1
     else:
         _positional.append(_a)
@@ -2240,15 +2253,18 @@ def main():
     # for container startup from inside an early-boot oneshot service —
     # that would delay basic.target until every container is up, and would
     # risk deadlock if any workload transitively depends on something
-    # downstream of basic.target. `systemctl start` on an already-active
-    # unit is a no-op, so re-runs of this script (post-boot config edits
-    # via `workloadctl enable` / edit / etc.) are safe: running workloads
-    # are not disturbed, newly-written ones are started from cold.
+    # downstream of basic.target.
+    #
+    # This block is BOOT-path only in practice: every CLI call site passes
+    # --no-start and does its own daemon-reload + start, because starting
+    # here would run ahead of the caller's later provisioning steps —
+    # enable's user-store image transfer in particular, where a premature
+    # cold start pins the container to the stale image.
     #
     # Gated on SERVICES_DIR being the live systemd directory so test runs
     # (which pass a tmp dir as argv[1]) never touch the host's systemd.
     is_live = SERVICES_DIR == Path("/run/systemd/system")
-    if is_live and written_workloads:
+    if is_live and written_workloads and not NO_START:
         import subprocess
         try:
             subprocess.run(

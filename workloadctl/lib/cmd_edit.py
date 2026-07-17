@@ -298,10 +298,11 @@ def cmd_edit(args, manager: WorkloadManager):
             # explicitly so [container.environment] and other inlined values
             # actually take effect. --workload keeps the run to the workload
             # being edited: an unfiltered run rewrites every enabled workload's
-            # units and starts each one.
+            # units and starts each one. --no-start: the explicit restart below
+            # is the apply step; the generator must not start anything itself.
             subprocess.run(
                 ["/usr/libexec/workloadctl/workload-generate", "/run/systemd/system",
-                 "--workload", config.name],
+                 "--workload", config.name, "--no-start"],
                 check=True,
             )
             subprocess.run(["systemctl", "daemon-reload"], check=True)

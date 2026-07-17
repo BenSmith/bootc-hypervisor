@@ -112,6 +112,21 @@ class TestWorkloadFilter(unittest.TestCase):
         self.assertNotIn("workload-beta.service", services)
         self.assertNotIn("workload-beta.service", wants)
 
+    def test_no_start_flag_parses_and_still_emits(self):
+        # Every CLI call site passes --no-start (the caller owns daemon-reload
+        # + start, after its image transfer). The flag must not be mistaken
+        # for a positional services-dir argument: emission is unchanged, only
+        # the live-path start enqueue is skipped (untestable here — it is
+        # already gated on SERVICES_DIR being /run/systemd/system).
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir,
+                               "--workload", "alpha", "--no-start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        services, wants = self._files()
+        self.assertIn("workload-alpha.service", services)
+        self.assertIn("workload-alpha.service", wants)
+        self.assertNotIn("workload-beta.service", services)
+
     def test_filter_unknown_workload_writes_nothing_and_exits_zero(self):
         # A filter naming a workload that doesn't exist (e.g. a stale CLI
         # invocation racing a purge) must never fail the boot: exit 0, no
