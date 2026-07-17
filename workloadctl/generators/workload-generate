@@ -839,7 +839,15 @@ def _security_args(container, config, mode, name, privileged, extra_groups):
 
 def _device_args(container, uid):
     """--device flags: generic passthrough + input/audio/virtualization
-    convenience flags from [devices]."""
+    convenience flags from [devices].
+
+    --device is for single device NODES (and CDI names). A device DIRECTORY
+    passed as --device has its child nodes enumerated and frozen into the OCI
+    spec at container-create time, so a reused ("pet") container breaks when
+    device numbering renumbers across a reboot. Device directories must be
+    bind-mounted via [storage] volumes instead (resolved live at start) -- the
+    generic `devices` list stays literal --device, and the convenience flags
+    below emit volumes for their directory parts (/dev/input, /dev/snd)."""
     args = []
     devices_config = container.get("devices", {})
     generic_devices = devices_config.get("devices", [])
@@ -848,16 +856,17 @@ def _device_args(container, uid):
 
     # CONVENIENCE FLAGS (multi-device shortcuts)
 
-    # Input devices (2 devices)
+    # Input devices: /dev/input is a directory (volume, tracks renumbering),
+    # /dev/uinput is a single node.
     if devices_config.get("input", False):
         args.extend([
-            "--device /dev/input",
+            "--volume /dev/input:/dev/input",
             "--device /dev/uinput",
         ])
 
-    # Audio devices (device + socket auto-detection)
+    # Audio devices (directory + socket auto-detection)
     if devices_config.get("audio", False):
-        args.append("--device /dev/snd")
+        args.append("--volume /dev/snd:/dev/snd")
         # Mount PulseAudio/PipeWire sockets. XDG_RUNTIME_DIR is deterministically
         # /run/user/<uid> (set by workload-ensure-user's EnvironmentFile), and uid
         # is already known at generation time -- embed it directly rather than

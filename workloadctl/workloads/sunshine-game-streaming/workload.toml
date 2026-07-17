@@ -27,12 +27,13 @@ on_failure = "kill"
 # This configuration requires a render node (/dev/dri/renderD*)
 gpu = "auto"
 
-# input = true is NOT used — it maps to --device /dev/input, which snapshots
-# device nodes at container start. Sunshine's uinput devices appear later, so
-# /dev/input must be a volume bind-mount (live view).
-# audio = true is NOT used — it mounts host PipeWire/PulseAudio sockets, but
-# this container runs its own PipeWire internally. Only /dev/snd is needed.
-devices = ["/dev/uinput", "/dev/snd"]
+# /dev/input and /dev/snd are device directories, so they are bind-mounted via
+# [storage] volumes (live view) rather than passed as --device, which freezes the
+# node list at create time and breaks when device numbering renumbers across a
+# reboot. --device is for single nodes only — hence /dev/uinput stays here.
+# The audio = true convenience flag is also avoided: it adds host PipeWire/Pulse
+# socket mounts we don't want (this container runs its own PipeWire).
+devices = ["/dev/uinput"]
 
 [security]
 userns = "keep-id"
@@ -57,6 +58,7 @@ volumes = [
     "/run/systemd/journal/socket:/run/host-systemd/journal/socket",
     "/run/udev:/run/udev:ro",
     "/dev/input:/dev/input",
+    "/dev/snd:/dev/snd",
 ]
 
 [network]

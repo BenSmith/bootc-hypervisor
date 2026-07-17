@@ -2147,7 +2147,9 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             [devices]
             input = true
         """)
-        self.assertIn("--device /dev/input", svc)
+        # /dev/input is a directory -> bind mount (live view); /dev/uinput is a
+        # single node -> --device.
+        self.assertIn("--volume /dev/input:/dev/input", svc)
         self.assertIn("--device /dev/uinput", svc)
 
     def test_audio_devices_shortcut(self):
@@ -2155,7 +2157,8 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             [devices]
             audio = true
         """)
-        self.assertIn("--device /dev/snd", svc)
+        # /dev/snd is a directory -> bind mount (live view), not --device.
+        self.assertIn("--volume /dev/snd:/dev/snd", svc)
         # uid is embedded directly (not via ${XDG_RUNTIME_DIR} runtime expansion,
         # which resolves to "" -- mounting host "/pulse" -- if the workload's
         # EnvironmentFile is missing at start time).

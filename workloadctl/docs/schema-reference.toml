@@ -654,6 +654,13 @@ files = [
 #   ["nvidia.com/gpu=0"]                - Raw NVIDIA CDI ref. Prefer gpu = "nvidia:<spec>" instead.
 # Note: Device paths must exist on the host and may change on reboot
 # Note: You must add appropriate groups (dialout, video, disk, tpm, etc.) to security.extra_groups
+#
+# --device is for single device NODES (and CDI names). To pass a device
+# DIRECTORY (/dev/snd, /dev/input, /dev/bus/usb, ...) bind-mount it via
+# [storage] volumes instead — e.g. "/dev/snd:/dev/snd". --device enumerates a
+# directory's children and freezes the node list at container-create time, so a
+# reused ("pet") container breaks when device numbering renumbers across a
+# reboot; a bind mount resolves live at start and tracks hotplug.
 devices = ["/dev/ttyUSB0", "/dev/video0"]
 
 # CONVENIENCE FLAGS (for complex multi-device scenarios)
@@ -688,7 +695,9 @@ gpu = "amd"
 # Optional: Enable input device access (/dev/input/*, /dev/uinput)
 # Type: boolean
 # Default: false
-# Expands to: --device /dev/input --device /dev/uinput
+# Expands to: --volume /dev/input:/dev/input --device /dev/uinput
+#   (/dev/input is a directory, so it is bind-mounted for a live view that
+#   survives reboot renumbering; /dev/uinput is a single node.)
 # Useful for: game streaming, virtual input, controllers
 # Requires: extra_groups = ["input"]
 input = true
@@ -696,7 +705,9 @@ input = true
 # Optional: Enable audio device access
 # Type: boolean
 # Default: false
-# Expands to: --device /dev/snd + auto-detects/mounts PulseAudio/PipeWire sockets
+# Expands to: --volume /dev/snd:/dev/snd + auto-detects/mounts PulseAudio/PipeWire
+#   sockets. /dev/snd is a directory, so it is bind-mounted (live view) rather
+#   than passed as --device, which would freeze the node list at create time.
 # Useful for: media servers, game streaming, audio processing
 # Requires: extra_groups = ["audio"]
 # Auto-detects and mounts audio server sockets from /run/user/{uid}/
