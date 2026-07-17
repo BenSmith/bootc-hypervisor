@@ -189,5 +189,90 @@ class ValidateSingleCredentialsTest(unittest.TestCase):
         self.assertGreaterEqual(result["warnings"], 1)
 
 
+class ValidateSingleBuildTest(unittest.TestCase):
+    """validate_single's [build]/[containers.build] checks: containerfile paths
+    must stay inside the build context, per-container containerfiles are checked
+    (and labeled) individually, shared-image build conflicts are lint errors
+    instead of build-time crashes, and a name-less container (a schema error in
+    its own right) must not crash the linter."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+
+    def _validate(self, name, toml):
+        (self.tmp / name).mkdir()
+        (self.tmp / name / "workload.toml").write_text(toml)
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+        return cmd_validate.validate_single(config, manager, json_mode=True)
+
+    @staticmethod
+    def _checks(result, name):
+        return [c for c in result["checks"] if c["check"] == name]
+
+    def test_build_summary_lists_workload_and_container_files(self):
+        result = self._validate(
+            "clitest-multi",
+            '[workload]\nname = "clitest-multi"\nmode = "pod"\n'
+            '[build]\ncontainerfile = "Containerfile.default"\n'
+            '[[containers]]\nname = "a"\n'
+            '[containers.container]\nimage = "localhost/a:latest"\npull = "never"\n'
+            '[containers.build]\ncontainerfile = "Containerfile.a"\n'
+            '[[containers]]\nname = "b"\n'
+            '[containers.container]\nimage = "localhost/b:latest"\npull = "never"\n',
+        )
+        ok = self._checks(result, "build")
+        self.assertEqual(len(ok), 1)
+        self.assertIn("Containerfile.default", ok[0]["message"])
+        self.assertIn("Containerfile.a", ok[0]["message"])
+
+    def test_per_container_traversal_containerfile_errors(self):
+        result = self._validate(
+            "clitest-badcf",
+            '[workload]\nname = "clitest-badcf"\nmode = "pod"\n'
+            '[[containers]]\nname = "a"\n'
+            '[containers.container]\nimage = "localhost/a:latest"\npull = "never"\n'
+            '[containers.build]\ncontainerfile = "../escape"\n',
+        )
+        bad = self._checks(result, "build_containerfile")
+        self.assertEqual(len(bad), 1)
+        self.assertIn("(a)", bad[0]["message"])
+        self.assertFalse(result["passed"])
+        # No misleading ok-summary alongside the error.
+        self.assertEqual(self._checks(result, "build"), [])
+
+    def test_shared_image_build_conflict_errors(self):
+        result = self._validate(
+            "clitest-conflict",
+            '[workload]\nname = "clitest-conflict"\nmode = "pod"\n'
+            '[[containers]]\nname = "a"\n'
+            '[containers.container]\nimage = "localhost/shared:latest"\npull = "never"\n'
+            '[containers.build]\ncontainerfile = "Containerfile.a"\n'
+            '[[containers]]\nname = "b"\n'
+            '[containers.container]\nimage = "localhost/shared:latest"\npull = "never"\n'
+            '[containers.build]\ncontainerfile = "Containerfile.b"\n',
+        )
+        conflict = self._checks(result, "build_conflict")
+        self.assertEqual(len(conflict), 1)
+        self.assertIn("shared", conflict[0]["message"])
+        self.assertFalse(result["passed"])
+
+    def test_nameless_container_does_not_crash_linter(self):
+        result = self._validate(
+            "clitest-noname",
+            '[workload]\nname = "clitest-noname"\nmode = "pod"\n'
+            '[[containers]]\n'
+            '[containers.container]\nimage = "localhost/x:latest"\npull = "never"\n'
+            '[containers.build]\ncontainerfile = "../escape"\n',
+        )
+        bad = self._checks(result, "build_containerfile")
+        self.assertEqual(len(bad), 1)
+        self.assertIn("containers[0]", bad[0]["message"])
+        self.assertFalse(result["passed"])
+
+
 if __name__ == "__main__":
     unittest.main()

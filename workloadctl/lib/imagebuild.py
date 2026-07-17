@@ -40,9 +40,13 @@ def _proxy_build_args() -> list:
     return args
 
 
-def assemble_build_args(config) -> list:
-    """`--build-arg` list: `[build].args` defaults, overridden by `[build].arg_env`
-    host env when set, plus auto-forwarded proxy vars.
+def assemble_build_args(config, job=None) -> list:
+    """`--build-arg` list: the job's args (resolved wholesale by `build_jobs()`
+    — a `[containers.build].args` *replaces* `[build].args`, no merge; without a
+    job, the workload-level `[build].args`), overridden by `[build].arg_env`
+    host env when set, plus auto-forwarded proxy vars. `arg_env` is deliberately
+    workload-level — the transient host-env override knob applies to every
+    image's build; there is no per-container arg_env.
 
     SECURITY: `--build-arg` values are recorded in the image's build history
     (`podman history`). These are meant for non-sensitive knobs — RPM URLs, GPU
@@ -50,7 +54,7 @@ def assemble_build_args(config) -> list:
     use a workloadctl secret (tmpfs at runtime), not a build arg, for anything
     confidential.
     """
-    merged = dict(config.build_args)
+    merged = dict(job.args if job is not None else config.build_args)
     for name in config.build_arg_env:
         val = os.environ.get(name)
         if val is not None:
@@ -95,25 +99,29 @@ def _podman_build(context: Path, containerfile: str, tag: str,
 
 
 def build_image(config) -> int:
-    """Built-in builder: `podman build` the merged context for each pull=never
-    image. Returns the first non-zero exit code, or 0."""
-    images = config.build_images()
-    if not images:
+    """Built-in builder: `podman build` the merged context once per distinct
+    pull=never image, each with its own Containerfile/target (resolved per
+    container via `build_jobs()`). Returns the first non-zero exit code, or 0.
+
+    A single merged context serves every image — all Containerfiles and assets
+    live in the one bundle dir, each built with `-f <its containerfile>`."""
+    jobs = config.build_jobs()
+    if not jobs:
         print(f"Error: no pull=never image to build for '{config.name}'")
         return 1
 
-    build_args = assemble_build_args(config)
     context = materialize_build_context(config)
     try:
-        if not (context / config.build_containerfile).exists():
-            print(f"Error: Containerfile '{config.build_containerfile}' not "
-                  f"found in the build context for '{config.name}'")
-            return 1
         overlaid = " + /etc overrides" if config.override_dir.is_dir() else ""
-        for image in images:
-            print(f"Building {image}  (context: {config.bundle_dir}{overlaid})")
-            rc = _podman_build(context, config.build_containerfile, image,
-                               build_args, config.build_target)
+        for job in jobs:
+            if not (context / job.containerfile).exists():
+                print(f"Error: Containerfile '{job.containerfile}' not found in "
+                      f"the build context for '{config.name}'")
+                return 1
+            print(f"Building {job.image}  (context: {config.bundle_dir}"
+                  f"{overlaid}, -f {job.containerfile})")
+            rc = _podman_build(context, job.containerfile, job.image,
+                               assemble_build_args(config, job), job.target)
             if rc != 0:
                 return rc
         return 0

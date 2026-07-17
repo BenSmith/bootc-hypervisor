@@ -13,6 +13,7 @@ Import chain:
 
 import datetime
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 import pwd
 import sys
@@ -44,6 +45,18 @@ from podman import Podman
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BuildJob:
+    """One image to build: its tag plus the build inputs resolved wholesale from
+    the per-container `[containers.build]` block, or (when the container has none)
+    the workload-level `[build]`. One job per *distinct* pull=never image, in
+    TOML order. See `WorkloadConfig.build_jobs`."""
+    image: str
+    containerfile: str
+    target: str | None = None
+    args: dict = field(default_factory=dict)
+
 
 def parse_workload_ref(ref: str) -> tuple[str, str | None]:
     """Parse 'workload[/container]' into (workload, container_or_None)."""
@@ -445,22 +458,86 @@ class WorkloadConfig:
         """Optional multi-stage `--target` (`[build] target`)."""
         return self.build_config.get("target") or None
 
+    def _container_build_config(self, cname: str) -> dict | None:
+        """The `[containers.build]` block for a given container in multi mode,
+        or None when the container declares none (and in single mode, where the
+        top-level `[build]` applies directly). Presence matters: an *empty*
+        block is a valid self-describing declaration (default Containerfile,
+        no target/args), so absent must be None, not {}."""
+        if not self.is_multi:
+            return None
+        for c in self.config["containers"]:
+            if c["name"] == cname:
+                return c.get("build")
+        return None
+
+    def build_jobs(self) -> list[BuildJob]:
+        """One `BuildJob` per *distinct* `pull = never` image, in TOML order.
+
+        Build inputs resolve **wholesale** (all-or-nothing): a container with its
+        own `[containers.build]` block is fully self-described by that block
+        (containerfile defaults to "Containerfile", no target, no args) and does
+        *not* merge with the workload-level `[build]`. `target` is only meaningful
+        against a specific Containerfile, so a per-container Containerfile must not
+        silently inherit a workload-level target. A container with no
+        `[containers.build]` inherits the workload-level `[build]` wholesale
+        (this is also the single-container case). Since a container's image is
+        tagged exactly as `[container].image`, a pull=never container always
+        matches what gets built — no separate build-tag to drift out of sync.
+
+        (`[build].arg_env` is deliberately NOT part of this resolution: it is
+        the transient host-env override knob and stays workload-level, applied
+        to every job at build time — see imagebuild.assemble_build_args.)
+
+        Containers may share a pull=never image only when they resolve to
+        identical build inputs; anything else would silently build one
+        container's recipe for both, so it raises ValueError instead."""
+        jobs: list[BuildJob] = []
+        by_image: dict[str, tuple[str, BuildJob]] = {}
+        for cname, image, pull in self.container_specs():
+            if pull != "never":
+                continue
+            b = self._container_build_config(cname)
+            if b is not None:   # self-describing block; no workload-level merge
+                job = BuildJob(
+                    image=image,
+                    containerfile=b.get("containerfile", "Containerfile"),
+                    target=b.get("target") or None,
+                    args=dict(b.get("args") or {}),
+                )
+            else:               # inherit the workload-level [build] wholesale
+                job = BuildJob(
+                    image=image,
+                    containerfile=self.build_containerfile,
+                    target=self.build_target,
+                    args=dict(self.build_args),
+                )
+            prev = by_image.get(image)
+            if prev is None:
+                by_image[image] = (cname, job)
+                jobs.append(job)
+            elif job != prev[1]:
+                raise ValueError(
+                    f"containers '{prev[0]}' and '{cname}' share pull=never "
+                    f"image '{image}' but resolve different build inputs — a "
+                    f"shared image must build identically (align or drop one "
+                    f"[containers.build] block)"
+                )
+        return jobs
+
     def build_images(self) -> list[str]:
-        """Distinct `pull = never` images this workload builds locally, in TOML
-        order. The built image is tagged exactly as `[container].image`, so a
-        pull=never container always matches what gets built — there is no
-        separate build-tag to drift out of sync."""
-        seen: list[str] = []
-        for _cname, image, pull in self.container_specs():
-            if pull == "never" and image not in seen:
-                seen.append(image)
-        return seen
+        """Distinct `pull = never` image tags this workload builds locally, in
+        TOML order (the `.image` of every `build_jobs()` entry)."""
+        return [job.image for job in self.build_jobs()]
 
     def has_build_context(self) -> bool:
-        """True if there's a local image to build and a Containerfile resolves
-        (in the /etc override or the /usr bundle). Gates the built-in builder."""
-        return bool(self.build_images()) and \
-            self.resolve_control_file(self.build_containerfile).exists()
+        """True if there's a local image to build and each job's Containerfile
+        resolves (in the /etc override or the /usr bundle). Gates the built-in
+        builder."""
+        jobs = self.build_jobs()
+        return bool(jobs) and all(
+            self.resolve_control_file(job.containerfile).exists() for job in jobs
+        )
 
     @property
     def username(self) -> str:

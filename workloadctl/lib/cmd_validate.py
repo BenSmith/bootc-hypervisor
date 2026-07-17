@@ -254,31 +254,64 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         })
         warnings += 1
 
-    # [build] section: the containerfile names a file *inside* the build
-    # context, so it must be a plain relative path (no traversal). Only checked
-    # when the section is present.
+    # [build] / [containers.build]: a containerfile names a file *inside* the
+    # build context, so it must be a plain relative path (no traversal). Checked
+    # for the top-level section (when present) and every per-container override.
+    build_cfs: list[tuple[str, str]] = []   # (label, containerfile)
     if config.config.get("build"):
-        cf = config.build_containerfile
+        build_cfs.append(("[build]", config.build_containerfile))
+    if config.is_multi:
+        # A name-less container is already a schema error above; don't let the
+        # missing key crash the linter here — fall back to the index for the label.
+        for i, c in enumerate(config.config["containers"]):
+            cf = (c.get("build") or {}).get("containerfile")
+            if cf is not None:
+                build_cfs.append(
+                    (f"[containers.build] ({c.get('name', f'containers[{i}]')})", cf))
+    build_cf_invalid = False
+    for label, cf in build_cfs:
         if Path(cf).is_absolute() or ".." in Path(cf).parts:
             checks.append({
                 "check": "build_containerfile",
                 "passed": False,
                 "severity": "error",
-                "message": f"Invalid [build] containerfile {cf!r}: must be a "
+                "message": f"Invalid {label} containerfile {cf!r}: must be a "
                            f"relative path inside the build context (no '..')",
                 "fix": 'e.g. containerfile = "Containerfile"',
             })
             errors += 1
-        else:
-            summary = f"containerfile={cf}"
-            if config.build_script:
-                summary = f"script={config.build_script}"
+            build_cf_invalid = True
+    if build_cfs and not build_cf_invalid:
+        summary = ", ".join(f"{label} {cf}" for label, cf in build_cfs)
+        if config.build_script:
+            summary = f"script={config.build_script}"
+        checks.append({
+            "check": "build",
+            "passed": True,
+            "severity": "ok",
+            "message": f"Build: {summary}",
+        })
+
+    # Containers sharing a pull=never image must resolve identical build inputs;
+    # build_jobs() refuses the ambiguity, so report it here as a lint error
+    # rather than letting `build` crash on it.
+    if config.is_multi:
+        try:
+            config.build_jobs()
+        except ValueError as e:
             checks.append({
-                "check": "build",
-                "passed": True,
-                "severity": "ok",
-                "message": f"Build: {summary}",
+                "check": "build_conflict",
+                "passed": False,
+                "severity": "error",
+                "message": str(e),
+                "fix": "Align the [containers.build] blocks of containers that "
+                       "share an image, or give them distinct image tags",
             })
+            errors += 1
+        except KeyError:
+            # A name-less container can't be resolved into build jobs; it's
+            # already reported as a schema error above — don't crash the linter.
+            pass
 
     required_file_paths = {e["path"] for e in config.get_required_files()}
     workload_root = str(config.home_dir.parent)

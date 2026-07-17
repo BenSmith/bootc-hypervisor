@@ -85,10 +85,16 @@ def _print_control_file_next_steps(config: WorkloadConfig, rel: str) -> None:
     base = Path(rel).name
     setup = config.config.get("host", {}).get("setup", "")
     # Files that drive an image build: the conventional names plus whatever this
-    # workload actually declares ([build].containerfile / [build].script), so a
-    # `Containerfile.gpu` edit still gets the rebuild hint, not the generic one.
+    # workload actually declares ([build]/[containers.build] containerfiles,
+    # [build].script), so a `Containerfile.gpu` edit still gets the rebuild
+    # hint, not the generic one. Best-effort: a config broken enough to make
+    # build_jobs() refuse must not take `edit` down with it.
     build_files = {"build.sh", "Containerfile",
                    Path(config.build_containerfile).name}
+    try:
+        build_files.update(Path(j.containerfile).name for j in config.build_jobs())
+    except (KeyError, ValueError):
+        pass
     if config.build_script:
         build_files.add(Path(config.build_script).name)
     print()

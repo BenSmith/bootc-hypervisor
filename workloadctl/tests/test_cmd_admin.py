@@ -501,19 +501,20 @@ class AssertNoSymlinkEscapeTest(unittest.TestCase):
 
 
 class PrintControlFileNextStepsTest(unittest.TestCase):
-    def _cfg(self, setup=""):
+    def _cfg(self, setup="", jobs=()):
         cfg = mock.Mock()
         cfg.config = {"host": {"setup": setup}}
         cfg.build_containerfile = "Containerfile"
         cfg.build_script = "build.sh"
+        cfg.build_jobs.return_value = list(jobs)
         cfg.name = "app"
         cfg.override_dir = Path("/etc/workloads.d/app")
         return cfg
 
-    def _steps(self, rel, setup=""):
+    def _steps(self, rel, setup="", jobs=()):
         out = io.StringIO()
         with redirect_stdout(out):
-            cmd_edit._print_control_file_next_steps(self._cfg(setup), rel)
+            cmd_edit._print_control_file_next_steps(self._cfg(setup, jobs), rel)
         return out.getvalue()
 
     def test_policy_cil_hints_enable(self):
@@ -529,6 +530,20 @@ class PrintControlFileNextStepsTest(unittest.TestCase):
 
     def test_generic_file_hints_recreate(self):
         self.assertIn("recreate app", self._steps("caddy/Caddyfile"))
+
+    def test_per_container_containerfile_hints_rebuild(self):
+        from workloadctl_core import BuildJob
+        jobs = [BuildJob(image="localhost/x:latest",
+                         containerfile="Containerfile.vpn")]
+        self.assertIn("build app", self._steps("Containerfile.vpn", jobs=jobs))
+
+    def test_hint_survives_build_jobs_refusal(self):
+        cfg = self._cfg()
+        cfg.build_jobs.side_effect = ValueError("conflict")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cmd_edit._print_control_file_next_steps(cfg, "caddy/Caddyfile")
+        self.assertIn("recreate app", out.getvalue())
 
 
 def _open_router(fake_paths, real_open=open):

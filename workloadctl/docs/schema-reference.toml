@@ -412,6 +412,9 @@ name = "schema-reference"
 #   [containers.security]     capabilities, security_opt, privileged; also
 #                             userns + extra_uidmaps/extra_gidmaps EXCEPT in
 #                             pod mode (where they are workload-level)
+#   [containers.build]        containerfile, target, args — per-container image
+#                             build inputs; shadows the workload-level [build]
+#                             default (see the [build] section below)
 #   [containers.storage]      volumes
 #   [containers.devices]      all device options
 #   [containers.secrets]      files
@@ -966,6 +969,41 @@ ports = ["8080:80", "8443:443"]
 # [build] section at all, `build` Just Works: it runs `podman build` over the
 # resolved build context and tags the result exactly as [container].image.
 #
+# MULTI-IMAGE WORKLOADS: `build` builds every distinct `pull = "never"` image
+# once, in TOML order. When several containers build DIFFERENT images from the
+# same bundle, give each its own Containerfile via a per-container
+# [containers.build] block (containerfile / target / args):
+#
+#   [[containers]]
+#   name = "vpn"
+#   [containers.container]
+#   image = "localhost/stack-vpn:latest"
+#   pull  = "never"
+#   [containers.build]
+#   containerfile = "Containerfile.vpn"
+#
+# A [containers.build] block resolves WHOLESALE (all-or-nothing): it fully
+# describes that image and does NOT merge with this workload-level [build]. An
+# omitted `containerfile` defaults to "Containerfile"; an omitted `target`/`args`
+# means none — a workload-level `target` is only meaningful against the default
+# Containerfile, so it is never silently applied to a per-container one. An
+# EMPTY [containers.build] is a valid self-description (default Containerfile,
+# no target/args); only a container with NO block inherits this [build]
+# wholesale. The one exception is `arg_env`: it stays workload-level and its
+# host-env overrides apply to EVERY image's build (it is the transient
+# operator knob, not part of an image's recipe) — there is no per-container
+# arg_env.
+#
+# Containers may share a pull=never image tag only when they resolve to
+# identical build inputs; conflicting resolutions are refused by `build` and
+# flagged by `validate` rather than silently building one container's recipe
+# for both.
+#
+# All images share ONE merged context (all Containerfiles + assets in the one
+# bundle dir), each built with `-f <its containerfile>`. Because of the shared
+# context, a bare `COPY . /` in one image's Containerfile would sweep the OTHER
+# images' Containerfiles and assets in — COPY specific paths, not `.`.
+#
 # THE BUILD CONTEXT IS OVERRIDE-RESOLVED. workloadctl assembles a merged context
 # — the shipped /usr/share/workloadctl/workloads/<bundle>/ tree with your
 # /etc/workloads.d/<name>/ overrides laid on top, file by file — so editing the
@@ -997,6 +1035,9 @@ ports = ["8080:80", "8443:443"]
 #         the script builds the override-resolved context rather than locating
 #         its own directory. Use only for genuinely imperative builds the
 #         declarative fields above can't express; prefer the built-in builder.
+#         For a multi-image workload the script receives only the FIRST image tag
+#         (WL_TAG); it is expected to build every image itself. Per-container
+#         [containers.build] applies to the built-in builder, not the script.
 # script = "build.sh"
 
 [resources]

@@ -280,6 +280,188 @@ class TestBuildImage(BuildBase):
 
 
 # ---------------------------------------------------------------------------
+# Per-container image builds ([containers.build])
+# ---------------------------------------------------------------------------
+
+class MultiBuildBase(BuildBase):
+    def _multi(self, name, containers, *, build=None):
+        """containers: list of (cname, image, pull, per_container_build_toml)."""
+        body = f'[workload]\nname = "{name}"\nmode = "pod"\n'
+        if build is not None:
+            body += "\n[build]\n" + build
+        for cname, image, pull, cbuild in containers:
+            body += f'\n[[containers]]\nname = "{cname}"\n'
+            body += f'[containers.container]\nimage = "{image}"\npull = "{pull}"\n'
+            if cbuild:
+                body += f"[containers.build]\n{cbuild}"
+        (self.etc / name).mkdir(exist_ok=True)
+        (self.etc / name / "workload.toml").write_text(body)
+        return WorkloadConfig(name)
+
+
+class TestBuildJobs(MultiBuildBase):
+    def test_per_container_containerfile_and_target(self):
+        cfg = self._multi("stack", [
+            ("vpn", "localhost/stack-vpn:latest", "never",
+             'containerfile = "Containerfile.vpn"\n'),
+            ("app", "localhost/stack-app:latest", "never",
+             'containerfile = "Containerfile.app"\ntarget = "runtime"\n'),
+        ])
+        jobs = cfg.build_jobs()
+        self.assertEqual([(j.image, j.containerfile, j.target) for j in jobs], [
+            ("localhost/stack-vpn:latest", "Containerfile.vpn", None),
+            ("localhost/stack-app:latest", "Containerfile.app", "runtime"),
+        ])
+        self.assertEqual(cfg.build_images(),
+                         ["localhost/stack-vpn:latest", "localhost/stack-app:latest"])
+
+    def test_resolution_is_all_or_nothing(self):
+        # A [containers.build] block is self-describing: it does NOT merge with
+        # the workload-level [build]. So a per-container Containerfile that omits
+        # `target` gets NO target (not the workload's) — a workload target is
+        # only meaningful against the default Containerfile. A container with no
+        # [containers.build] at all inherits the workload [build] wholesale.
+        cfg = self._multi("stack", [
+            ("vpn", "localhost/stack-vpn:latest", "never",
+             'containerfile = "Containerfile.vpn"\n'),      # sets cf, not target
+            ("app", "localhost/stack-app:latest", "never", ""),
+        ], build='containerfile = "Containerfile.default"\ntarget = "base"\n')
+        jobs = {j.image: j for j in cfg.build_jobs()}
+        self.assertEqual(jobs["localhost/stack-vpn:latest"].containerfile,
+                         "Containerfile.vpn")               # per-ctr block
+        self.assertIsNone(jobs["localhost/stack-vpn:latest"].target)  # NOT inherited
+        self.assertEqual(jobs["localhost/stack-app:latest"].containerfile,
+                         "Containerfile.default")           # wholesale inherit
+        self.assertEqual(jobs["localhost/stack-app:latest"].target, "base")
+
+    def test_block_without_containerfile_defaults_to_Containerfile(self):
+        # A [containers.build] that sets only args still self-describes: its
+        # containerfile is the built-in "Containerfile" default, NOT the
+        # workload-level [build].containerfile.
+        cfg = self._multi("stack", [
+            ("app", "localhost/stack-app:latest", "never", 'args = { B = "2" }\n'),
+        ], build='containerfile = "Containerfile.default"\n')
+        job = cfg.build_jobs()[0]
+        self.assertEqual(job.containerfile, "Containerfile")
+        self.assertEqual(job.args, {"B": "2"})
+
+    def test_empty_block_still_self_describes(self):
+        # Presence, not content, selects per-container resolution: an EMPTY
+        # [containers.build] means "default Containerfile, no target/args" —
+        # it does not fall back to the workload-level [build].
+        cfg = self._multi("stack", [
+            ("app", "localhost/stack-app:latest", "never",
+             '# empty block\n'),
+        ], build='containerfile = "Containerfile.other"\ntarget = "base"\n')
+        job = cfg.build_jobs()[0]
+        self.assertEqual(job.containerfile, "Containerfile")
+        self.assertIsNone(job.target)
+        self.assertEqual(job.args, {})
+
+    def test_shared_image_with_conflicting_builds_raises(self):
+        # Two pull=never containers may share an image tag only if they resolve
+        # identical build inputs; anything else would silently build the first
+        # container's recipe for both.
+        cfg = self._multi("stack", [
+            ("a", "localhost/shared:latest", "never",
+             'containerfile = "Containerfile.a"\n'),
+            ("b", "localhost/shared:latest", "never", ""),   # inherits [build]
+        ], build='containerfile = "Containerfile.b"\n')
+        with self.assertRaisesRegex(ValueError, "shared"):
+            cfg.build_jobs()
+
+    def test_shared_image_with_identical_builds_dedupes(self):
+        cfg = self._multi("stack", [
+            ("a", "localhost/shared:latest", "never",
+             'containerfile = "Containerfile.x"\n'),
+            ("b", "localhost/shared:latest", "never",
+             'containerfile = "Containerfile.x"\n'),
+        ])
+        self.assertEqual(len(cfg.build_jobs()), 1)
+
+    def test_pull_missing_and_dupes_skipped(self):
+        cfg = self._multi("stack", [
+            ("a", "localhost/shared:latest", "never", ""),
+            ("b", "localhost/shared:latest", "never", ""),   # same image → deduped
+            ("c", "docker.io/library/x:1", "missing", ""),   # pulled → not built
+        ])
+        self.assertEqual(cfg.build_images(), ["localhost/shared:latest"])
+
+    def test_block_args_replace_workload_args_wholesale(self):
+        # All-or-nothing: a [containers.build] with its own args does NOT inherit
+        # the workload-level [build].args (no {A} here, only the block's {B}).
+        cfg = self._multi("stack", [
+            ("app", "localhost/stack-app:latest", "never",
+             'args = { B = "2" }\n'),
+        ], build='args = { A = "1", B = "1" }\n')
+        job = cfg.build_jobs()[0]
+        self.assertEqual(job.args, {"B": "2"})
+
+
+class TestMultiBuildImage(MultiBuildBase):
+    def test_one_podman_build_per_image(self):
+        self._ship("stack", "Containerfile.vpn", "FROM scratch\n")
+        self._ship("stack", "Containerfile.app", "FROM scratch\n")
+        cfg = self._multi("stack", [
+            ("vpn", "localhost/stack-vpn:latest", "never",
+             'containerfile = "Containerfile.vpn"\n'),
+            ("app", "localhost/stack-app:latest", "never",
+             'containerfile = "Containerfile.app"\n'),
+        ])
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(imagebuild.subprocess, "run", side_effect=fake_run), \
+             mock.patch.dict(os.environ, {}, clear=True):
+            with redirect_stdout(io.StringIO()):
+                rc = imagebuild.build_image(cfg)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        # Each image built with its own -f, same materialized context dir.
+        by_tag = {c[c.index("-t") + 1]: c for c in calls}
+        vpn = by_tag["localhost/stack-vpn:latest"]
+        app = by_tag["localhost/stack-app:latest"]
+        self.assertEqual(vpn[vpn.index("-f") + 1],
+                         str(Path(vpn[-1]) / "Containerfile.vpn"))
+        self.assertEqual(app[app.index("-f") + 1],
+                         str(Path(app[-1]) / "Containerfile.app"))
+        self.assertEqual(vpn[-1], app[-1])   # shared context
+        self.assertFalse(Path(vpn[-1]).exists())   # cleaned up
+
+    def test_missing_per_container_containerfile_fails(self):
+        self._ship("stack", "Containerfile.vpn", "FROM scratch\n")
+        # Containerfile.app deliberately not shipped.
+        cfg = self._multi("stack", [
+            ("vpn", "localhost/stack-vpn:latest", "never",
+             'containerfile = "Containerfile.vpn"\n'),
+            ("app", "localhost/stack-app:latest", "never",
+             'containerfile = "Containerfile.app"\n'),
+        ])
+        with mock.patch.object(imagebuild.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = imagebuild.build_image(cfg)
+        self.assertEqual(rc, 1)
+        self.assertIn("Containerfile.app", buf.getvalue())
+
+    def test_has_build_context_requires_all_containerfiles(self):
+        self._ship("stack", "Containerfile.vpn", "FROM scratch\n")
+        cfg = self._multi("stack", [
+            ("vpn", "localhost/stack-vpn:latest", "never",
+             'containerfile = "Containerfile.vpn"\n'),
+            ("app", "localhost/stack-app:latest", "never",
+             'containerfile = "Containerfile.app"\n'),
+        ])
+        self.assertFalse(cfg.has_build_context())   # app's is missing
+        self._ship("stack", "Containerfile.app", "FROM scratch\n")
+        self.assertTrue(WorkloadConfig("stack").has_build_context())
+
+
+# ---------------------------------------------------------------------------
 # Precedence + cmd_build
 # ---------------------------------------------------------------------------
 
