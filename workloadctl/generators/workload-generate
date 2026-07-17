@@ -781,7 +781,10 @@ def _base_run_args(wl_lifecycle, container_name_quoted, mode, name, systemd_mode
         # SyslogIdentifier=). The journald driver would double-log every line:
         # once tagged by conmon, once as untagged podman[pid] via the attached
         # foreground `podman run` relaying container output to unit stdout.
-        # `workloadctl logs` reads the journal by unit, so it is unaffected.
+        # NOTE: journald attributes these passthrough lines to the rootless user
+        # manager's cgroup (user@<uid>.service), not this .service unit, so
+        # `journalctl -u` misses them — `workloadctl logs` ORs the container's
+        # SyslogIdentifier in to catch them (see cmd_interact._journal_selection).
         "--log-driver=passthrough",
     ])
     return args

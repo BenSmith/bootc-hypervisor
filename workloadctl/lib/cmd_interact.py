@@ -62,33 +62,68 @@ def cmd_exec(args, manager: WorkloadManager):
     sys.exit(substrate.exec(exec_args, container=container))
 
 
+def _journal_selection(config, container):
+    """journalctl match args selecting a workload's (or one container's) logs.
+
+    Container workloads run ``--log-driver=passthrough``, so a container's own
+    output is attributed by journald to the rootless user manager's cgroup
+    (``user@<uid>.service``), NOT the workload ``.service`` unit — ``-u <unit>``
+    alone catches only the systemd lifecycle lines, none of the app output. The
+    output IS in the journal, tagged with the container's ``SyslogIdentifier``
+    (its podman ``--name``), so we OR that identifier in alongside the unit.
+    Three fields cover the three line sources, all time-merged by journald:
+    ``_SYSTEMD_UNIT=`` the ``podman run`` supervisor's own messages, ``UNIT=``
+    the PID1 Started/Stopped lines, ``SYSLOG_IDENTIFIER=`` the passthrough app
+    output. A whole multi-container workload ORs every member so its containers
+    interleave into one chronological stream; ``<workload>/<container>`` narrows
+    to one.
+
+    VMs log to a real QEMU *system* unit where ``-u`` works, so they keep it.
+    """
+    if config.is_vm:
+        return ["-u", config.service_name]
+
+    if container is not None:
+        # container_names() and sub_service_names() are index-aligned; for a
+        # single-container workload NAME/NAME this maps to the main unit.
+        units = [dict(zip(config.container_names(),
+                          config.sub_service_names()))[container]]
+        idents = [config.podman_container_name(container)]
+    elif config.is_multi:
+        units = workload_service_units(config)
+        idents = config.podman_targets()
+    else:
+        units = [config.service_name]
+        idents = config.podman_targets()
+
+    terms = ([f"_SYSTEMD_UNIT={u}" for u in units]
+             + [f"UNIT={u}" for u in units]
+             + [f"SYSLOG_IDENTIFIER={i}" for i in idents])
+    # '+' between every term forces a disjunction even across different fields
+    # (same-field matches OR implicitly; different fields would otherwise AND).
+    # journalctl rejects '+' next to the -u/-t convenience flags, so these are
+    # raw FIELD=value matches.
+    selection = []
+    for i, term in enumerate(terms):
+        if i:
+            selection.append("+")
+        selection.append(term)
+    return selection
+
+
 def cmd_logs(args, manager: WorkloadManager):
     """View workload logs"""
     workload, container = parse_workload_ref(args.workload)
     config = WorkloadConfig(workload)
 
+    if container is not None and container not in config.container_names():
+        print(f"Error: container '{container}' not in workload '{workload}'. "
+              f"Available: {', '.join(config.container_names())}", file=sys.stderr)
+        sys.exit(2)
+
     # Build the journalctl command (substrate-agnostic: the substrate's logs()
     # primitive handles any substrate-specific wrapping around this argv).
-    if container is not None:
-        if container not in config.container_names():
-            print(f"Error: container '{container}' not in workload '{workload}'. "
-                  f"Available: {', '.join(config.container_names())}", file=sys.stderr)
-            sys.exit(2)
-        # container_names() and sub_service_names() are index-aligned; for a
-        # single-container workload NAME/NAME this maps to the main unit.
-        unit = dict(zip(config.container_names(),
-                        config.sub_service_names()))[container]
-        cmd = ["journalctl", "-u", unit]
-    elif config.is_multi:
-        # journalctl's `-u 'glob*'` is unreliable (fails with "No data
-        # available" when a matching unit has no journal entries yet), so
-        # pass every emitted unit explicitly.
-        units = workload_service_units(config)
-        cmd = ["journalctl"]
-        for u in units:
-            cmd += ["-u", u]
-    else:
-        cmd = ["journalctl", "-u", config.service_name]
+    cmd = ["journalctl"] + _journal_selection(config, container)
 
     # Add options
     if args.follow:

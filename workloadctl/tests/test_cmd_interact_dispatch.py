@@ -24,6 +24,7 @@ import cmd_interact  # noqa: E402
 
 class _FakeSingle:
     is_multi = False
+    is_vm = False
     mode = "single"
     username = "_wl-web"
     service_name = "workload-web.service"
@@ -34,9 +35,16 @@ class _FakeSingle:
     def sub_service_names(self):
         return ["workload-web.service"]
 
+    def podman_targets(self):
+        return ["workload-web"]
+
+    def podman_container_name(self, name):
+        return "workload-web"
+
 
 class _FakePod:
     is_multi = True
+    is_vm = False
     mode = "pod"
     username = "_wl-app"
     service_name = "workload-app.service"
@@ -46,6 +54,12 @@ class _FakePod:
 
     def sub_service_names(self):
         return ["workload-app-api.service", "workload-app-db.service"]
+
+    def podman_targets(self):
+        return ["workload-app-api", "workload-app-db"]
+
+    def podman_container_name(self, name):
+        return f"workload-app-{name}"
 
 
 class _LogsBase(unittest.TestCase):
@@ -81,15 +95,20 @@ class _LogsBase(unittest.TestCase):
 class LogsUnitListTest(_LogsBase):
     def test_single_uses_one_unit_and_default_lines(self):
         self.assertIsNone(self._run(_FakeSingle(), "web"))
-        # single -> exactly the umbrella unit, defaulted to -n 50.
-        self.assertEqual(self.captured["cmd"],
-                         ["journalctl", "-u", "workload-web.service", "-n", "50"])
+        # single -> the umbrella unit ORed with its passthrough identifier,
+        # defaulted to -n 50. Full selection shape is pinned in
+        # test_cmd_interact.JournalSelectionTest; here just the integration.
+        self.assertEqual(
+            self.captured["cmd"][:6],
+            ["journalctl", "_SYSTEMD_UNIT=workload-web.service", "+",
+             "UNIT=workload-web.service", "+", "SYSLOG_IDENTIFIER=workload-web"])
+        self.assertEqual(self.captured["cmd"][-2:], ["-n", "50"])
 
     def test_multi_threads_service_units_into_journalctl(self):
         # The multi unit list is workload_service_units(config), in order.
         # Its per-mode contents (pod vs net, containers) are pinned in
         # test_workload_run_files; here we assert cmd_logs threads that list
-        # verbatim into `journalctl -u ...`.
+        # verbatim into the _SYSTEMD_UNIT= match terms.
         service_units = [
             "workload-app-setup.service",
             "workload-app.service",
@@ -102,14 +121,23 @@ class LogsUnitListTest(_LogsBase):
             self.assertIsNone(self._run(_FakePod(), "app"))
         m.assert_called_once()
         cmd = self.captured["cmd"]
-        units = [cmd[i + 1] for i, t in enumerate(cmd) if t == "-u"]
+        units = [t.split("=", 1)[1] for t in cmd
+                 if t.startswith("_SYSTEMD_UNIT=")]
         self.assertEqual(units, service_units)
+        # Every container's passthrough identifier is ORed in too.
+        idents = [t.split("=", 1)[1] for t in cmd
+                  if t.startswith("SYSLOG_IDENTIFIER=")]
+        self.assertEqual(idents, ["workload-app-api", "workload-app-db"])
 
     def test_container_target_single_unit(self):
         self.assertIsNone(self._run(_FakePod(), "app/api"))
-        # A container target narrows to just that container's unit.
-        self.assertEqual(self.captured["cmd"],
-                         ["journalctl", "-u", "workload-app-api.service", "-n", "50"])
+        # A container target narrows to just that container's unit + identifier.
+        self.assertEqual(
+            self.captured["cmd"][:6],
+            ["journalctl", "_SYSTEMD_UNIT=workload-app-api.service", "+",
+             "UNIT=workload-app-api.service", "+",
+             "SYSLOG_IDENTIFIER=workload-app-api"])
+        self.assertEqual(self.captured["cmd"][-2:], ["-n", "50"])
 
     def test_unknown_container_target_errors(self):
         code = self._run(_FakePod(), "app/nope")

@@ -267,9 +267,17 @@ def main():
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
     logs_parser.add_argument("-n", "--lines", type=int, metavar="N", help="Show last N lines (default: 50)")
     logs_parser.add_argument("--since", metavar="TIME", help="Show logs since TIME")
-    logs_parser.add_argument("extra_args", nargs="*", help="Additional journalctl arguments")
     logs_parser.add_argument("workload", metavar="WORKLOAD[/CONTAINER]",
                              help="Workload, or workload/container for multi-container workloads")
+    # REMAINDER captures everything after WORKLOAD verbatim and passes it to
+    # journalctl, so any journalctl flag works (-b, -p, -g, -o, -k, -r, ...).
+    # The convenience flags above (-f/-n/--since) stay parsed when placed
+    # *before* WORKLOAD; after it they ride through REMAINDER, which journalctl
+    # handles identically. Must be declared after WORKLOAD so the workload token
+    # isn't swallowed into the passthrough.
+    logs_parser.add_argument("extra_args", nargs=argparse.REMAINDER,
+                             metavar="[-- JOURNALCTL_ARGS]",
+                             help="Additional journalctl arguments (after WORKLOAD)")
 
     reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)",
                                           parents=[mutating])

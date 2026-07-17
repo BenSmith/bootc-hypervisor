@@ -144,11 +144,15 @@ class LogsExtraArgsTest(unittest.TestCase):
 
         class _Single:
             is_multi = False
+            is_vm = False
             mode = "single"
             service_name = "workload-web.service"
 
             def container_names(self):
                 return ["web"]
+
+            def podman_targets(self):
+                return ["workload-web"]
 
         class _Sub:
             def logs(_self, cmd):
@@ -165,6 +169,94 @@ class LogsExtraArgsTest(unittest.TestCase):
         self.assertEqual(cmd[-2:], ["-o", "json"])
         # extra_args present -> default "-n 50" is suppressed.
         self.assertNotIn("-n", cmd)
+
+
+class JournalSelectionTest(unittest.TestCase):
+    """_journal_selection: match-arg construction for `workloadctl logs`.
+
+    Container workloads run --log-driver=passthrough, whose app output journald
+    attributes to user@<uid>.service (not the workload unit), so selection must
+    OR the container's SyslogIdentifier in — and do it with raw FIELD=value
+    matches joined by '+', never the -u/-t flags (journalctl rejects those next
+    to '+').
+    """
+
+    class _Config:
+        def __init__(self, *, is_vm=False, is_multi=False,
+                     service_name="workload-web.service",
+                     names=None, units=None, targets=None):
+            self.is_vm = is_vm
+            self.is_multi = is_multi
+            self.service_name = service_name
+            self._names = names or ["web"]
+            self._units = units or ["workload-web.service"]
+            self._targets = targets or ["workload-web"]
+
+        def container_names(self):
+            return self._names
+
+        def sub_service_names(self):
+            return self._units
+
+        def podman_targets(self):
+            return self._targets
+
+        def podman_container_name(self, name):
+            return f"workload-vt-{name}"
+
+    def _assert_disjunction(self, sel, expected_terms):
+        # Terms in order, '+' between every adjacent pair, and none of the
+        # convenience flags that can't straddle '+'.
+        self.assertEqual([t for t in sel if t != "+"], expected_terms)
+        self.assertEqual(sel.count("+"), len(expected_terms) - 1)
+        self.assertNotIn("-u", sel)
+        self.assertNotIn("-t", sel)
+        # '+' only ever sits between terms, never leading/trailing/doubled.
+        self.assertNotEqual(sel[0], "+")
+        self.assertNotEqual(sel[-1], "+")
+
+    def test_single_workload_ors_unit_and_identifier(self):
+        sel = cmd_interact._journal_selection(self._Config(), None)
+        self._assert_disjunction(sel, [
+            "_SYSTEMD_UNIT=workload-web.service",
+            "UNIT=workload-web.service",
+            "SYSLOG_IDENTIFIER=workload-web",
+        ])
+
+    def test_specific_container_narrows_to_one(self):
+        cfg = self._Config(
+            is_multi=True,
+            names=["vpn", "transmission"],
+            units=["workload-vt-vpn.service", "workload-vt-transmission.service"],
+            targets=["workload-vt-vpn", "workload-vt-transmission"])
+        sel = cmd_interact._journal_selection(cfg, "vpn")
+        self._assert_disjunction(sel, [
+            "_SYSTEMD_UNIT=workload-vt-vpn.service",
+            "UNIT=workload-vt-vpn.service",
+            "SYSLOG_IDENTIFIER=workload-vt-vpn",
+        ])
+
+    def test_whole_multi_ors_every_member(self):
+        cfg = self._Config(
+            is_multi=True,
+            names=["vpn", "transmission"],
+            targets=["workload-vt-vpn", "workload-vt-transmission"])
+        units = ["workload-vt.service", "workload-vt-pod.service",
+                 "workload-vt-vpn.service", "workload-vt-transmission.service"]
+        with mock.patch.object(cmd_interact, "workload_service_units",
+                               lambda c: units):
+            sel = cmd_interact._journal_selection(cfg, None)
+        expected = ([f"_SYSTEMD_UNIT={u}" for u in units]
+                    + [f"UNIT={u}" for u in units]
+                    + ["SYSLOG_IDENTIFIER=workload-vt-vpn",
+                       "SYSLOG_IDENTIFIER=workload-vt-transmission"])
+        self._assert_disjunction(sel, expected)
+
+    def test_vm_keeps_unit_flag(self):
+        # VMs log to a real QEMU system unit; passthrough reasoning doesn't apply.
+        cfg = self._Config(is_vm=True, service_name="workload-git.service")
+        sel = cmd_interact._journal_selection(cfg, None)
+        self.assertEqual(sel, ["-u", "workload-git.service"])
 
 
 class CpSuccessMessageTest(unittest.TestCase):
