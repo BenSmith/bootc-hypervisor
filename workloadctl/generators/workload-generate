@@ -665,17 +665,22 @@ def _gpu_device_args(gpu_vendor, gpu_spec):
                                 nodes, so the umbrella /dev/dri is omitted.
     <spec> is any CDI device name from `nvidia-ctk cdi list`: an index
     ("1") or a stable GPU UUID ("GPU-...").
+
+    The umbrella /dev/dri is a directory, so it is bind-mounted (live view)
+    rather than passed as --device: --device freezes the enumerated node list
+    at container-create time, which breaks a reused ("pet") container when the
+    DRM nodes renumber (GPU add/remove/reseat). /dev/kfd is a single node.
     """
     if gpu_vendor == "amd":
-        return ["--device /dev/kfd", "--device /dev/dri"]
+        return ["--device /dev/kfd", "--volume /dev/dri:/dev/dri"]
     elif gpu_vendor == "nvidia":
         if gpu_spec:
             return [f"--device=nvidia.com/gpu={gpu_spec}"]
-        return ["--device=nvidia.com/gpu=all", "--device /dev/dri"]
+        return ["--device=nvidia.com/gpu=all", "--volume /dev/dri:/dev/dri"]
     elif gpu_vendor in ("intel", "nouveau"):
         # nouveau (and Intel) expose the GPU through the standard DRM render
         # node — no CDI / Container Toolkit involved.
-        return ["--device /dev/dri"]
+        return ["--volume /dev/dri:/dev/dri"]
     return []
 
 

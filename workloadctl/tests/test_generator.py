@@ -968,7 +968,7 @@ class TestGeneratorDevices(unittest.TestCase):
         service = (Path(self.services_dir) / "workload-gpu.service").read_text()
 
         self.assertIn("--device /dev/kfd", service)
-        self.assertIn("--device /dev/dri", service)
+        self.assertIn("--volume /dev/dri:/dev/dri", service)
 
     def test_generic_device(self):
         write_config(self.config_dir, "usb", """\
@@ -2183,7 +2183,7 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             gpu = "nvidia"
         """)
         self.assertIn("--device=nvidia.com/gpu=all", svc)
-        self.assertIn("--device /dev/dri", svc)
+        self.assertIn("--volume /dev/dri:/dev/dri", svc)
 
     def test_gpu_nvidia_specific_card(self):
         svc, _ = self._gen("""
@@ -2199,7 +2199,7 @@ class TestGeneratorContainerFlags(unittest.TestCase):
             [devices]
             gpu = "intel"
         """)
-        self.assertIn("--device /dev/dri", svc)
+        self.assertIn("--volume /dev/dri:/dev/dri", svc)
 
     def test_health_check_directives(self):
         svc, _ = self._gen("""

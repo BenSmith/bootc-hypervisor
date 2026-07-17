@@ -670,11 +670,13 @@ devices = ["/dev/ttyUSB0", "/dev/video0"]
 # Type: string
 # Options: "amd", "nvidia", "intel", "auto", "none", or "nvidia:<spec>"
 # Default: "none"
-# "amd"             - Expands to: --device /dev/kfd --device /dev/dri
+# "amd"             - Expands to: --device /dev/kfd --volume /dev/dri:/dev/dri
 #                     Requires: extra_groups = ["video", "render"]
-# "nvidia"          - Expands to: --device=nvidia.com/gpu=all --device /dev/dri
+# "nvidia"          - Expands to: --device=nvidia.com/gpu=all --volume /dev/dri:/dev/dri
 #                     Requires: extra_groups = ["video"]
-# "intel"           - Expands to: --device /dev/dri
+# "intel"           - Expands to: --volume /dev/dri:/dev/dri
+#                     (/dev/dri is a directory, so it is bind-mounted rather than
+#                     passed as --device, which would freeze the DRM node list.)
 # "auto"            - Detect vendor from sysfs (first GPU wins). Resolves to
 #                     "amd"/"nvidia"/"intel"/"none" — does NOT pin a card.
 # "none"            - No GPU access
