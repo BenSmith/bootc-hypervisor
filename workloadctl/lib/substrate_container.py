@@ -20,7 +20,7 @@ from pathlib import Path
 from backup import backup_impl, print_backup_size
 from cli_log import error, info, warn
 from cmd_provision import ImageTransferError, transfer_one_image
-from podman import Podman, PodmanError
+from podman import PodmanError
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from substrate import (
     LifecycleError,
@@ -415,21 +415,28 @@ class ContainerSubstrate(Substrate):
                     if old_id:
                         break
             old_ids[cname] = old_id
-            # Root's store is the local override channel (see
-            # cmd_provision.transfer_image): when it holds this exact ref — a
-            # `workloadctl build`, or a hand-loaded image — that copy shadows
-            # the registry, so transfer it instead of pulling over it. This
-            # also lets `update` pick up a local rebuild of a pull=never image
-            # in a mixed workload.
-            if Podman.for_root().image_id(image):
-                try:
-                    transfer_one_image(self.config, self.manager, image, pull)
-                except ImageTransferError as e:
-                    error(f"  ✗ {e}")
-                    raise ProvisionFailed(f"transfer failed for {image}")
-            elif pull == "never":
-                continue
-            else:
+            # transfer_one_image owns the local-override gate: it supplies the
+            # image from root's store only for containers this workload builds
+            # itself, and returns False otherwise so third-party images keep
+            # their pull semantics (`newer`/`always` must reach the registry
+            # even if a stray root-store copy of the ref exists).
+            try:
+                handled = transfer_one_image(self.config, self.manager,
+                                             cname, image, pull)
+            except ImageTransferError as e:
+                error(f"  ✗ {e}")
+                raise ProvisionFailed(f"transfer failed for {image}")
+            if not handled:
+                if pull == "never":
+                    continue
+                if not old_id:
+                    # An enabled workload's store should hold its image; empty
+                    # means it was lost (pruned/reset), and this pull silently
+                    # substitutes whatever the registry now serves — with no
+                    # rollback target for this container.
+                    warn(f"  ⚠ No local copy of '{image}' in the workload "
+                         f"store — pulling fresh from the registry, no "
+                         f"rollback target for this container")
                 try:
                     pod.pull(image)
                 except PodmanError as e:

@@ -150,13 +150,32 @@ def _run_build(config: WorkloadConfig) -> int:
     (or a COPY-ed asset) takes effect — unlike the old self-locating build.sh.
     """
     if config.build_script:
+        # The script can tag any ref it likes, but only buildable containers
+        # ([containers.build] or pull=never) are served by the root-store
+        # override channel — warn up front so a script-built image for an
+        # unmarked container isn't silently ignored at enable/update.
+        unmarked = [cname for cname, _, pull in config.container_specs()
+                    if not config.is_buildable(cname, pull)]
+        if unmarked:
+            info(f"Note: not transfer-eligible (no [containers.build] marker, "
+                 f"not pull=never): {', '.join(unmarked)}")
+            info("  These containers stay registry-served; a script-built "
+                 "copy of their image in root's store is ignored.")
         return imagebuild.run_build_script(config)
     if config.has_build_context():
         return imagebuild.build_image(config)
     error(f"Error: nothing to build for '{config.name}'")
-    error("  No locally-built image ([build] block or pull=never) with a "
-          "resolvable Containerfile, and no [build].script — this workload "
-          "pulls a published image.")
+    if config.is_multi and "build" in config.config:
+        # The classic single→multi conversion trap: the top-level [build]
+        # table only supplies inherited build inputs in multi mode; it does
+        # not mark any container buildable.
+        error("  The workload-level [build] table marks nothing buildable in "
+              "multi mode — give each self-built container its own "
+              "[containers.build] block (an empty block works).")
+    else:
+        error("  No locally-built image ([build] block or pull=never) with a "
+              "resolvable Containerfile, and no [build].script — this "
+              "workload pulls a published image.")
     return 1
 
 

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import workload_lib
 import workloadctl_core
 import backup as _backup_mod
+import cmd_provision as _provision_mod
 import substrate_container as _container_mod
 import substrate_vm as _vm_mod
 from substrate import (
@@ -2094,15 +2095,16 @@ class TestContainerLifecycleMore(unittest.TestCase):
 class TestContainerReprovisionFlow(unittest.TestCase):
 
     def setUp(self):
-        # No root-store override by default: reprovision consults root's store
-        # (the local override channel) before pulling.
-        p = patch.object(_container_mod.Podman, 'for_root')
+        # No root-store override by default: transfer_one_image (which owns
+        # the local-override gate) probes root's store before reprovision
+        # falls back to pulling.
+        p = patch.object(_provision_mod.Podman, 'for_root')
         self.for_root = p.start()
         self.for_root.return_value.image_id.return_value = ""
         self.addCleanup(p.stop)
 
-    def _substrate(self, user_exists=True):
-        config = _make_config(SINGLE_TOML, 'test-wl')
+    def _substrate(self, user_exists=True, toml=SINGLE_TOML):
+        config = _make_config(toml, 'test-wl')
         manager = MagicMock()
         manager.user_exists.return_value = user_exists
         return ContainerSubstrate(config, manager), manager
@@ -2188,8 +2190,10 @@ pull = "never"
         self.assertIsNone(old_ids['test-wl'])
         pod.tag.assert_not_called()
 
+    BUILDABLE_TOML = SINGLE_TOML + "\n[build]\n"
+
     def test_root_override_transfers_instead_of_pulling(self):
-        substrate, manager = self._substrate()
+        substrate, manager = self._substrate(toml=self.BUILDABLE_TOML)
         pod = manager.podman.return_value
         pod.image_id.side_effect = ['registry-id', 'local-build-id']
         self.for_root.return_value.image_id.return_value = 'local-build-id'
@@ -2202,9 +2206,22 @@ pull = "never"
         self.assertIsNotNone(result)
         mock_r.assert_called_once()
 
+    def test_root_copy_of_third_party_image_does_not_block_pull(self):
+        # No [build] marker → the override channel doesn't apply: a stray
+        # root-store copy of the ref must not stop pull=missing/newer/always
+        # from reaching the registry (transfer_one_image's gate returns False
+        # before probing either store).
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = 'same-id'
+        self.for_root.return_value.image_id.return_value = 'stray-root-copy'
+        substrate.reprovision()
+        self.for_root.return_value.image_id.assert_not_called()
+        pod.pull.assert_called_once()
+
     def test_root_override_transfer_failure_raises_provision_failed(self):
         from substrate import ProvisionFailed
-        substrate, manager = self._substrate()
+        substrate, manager = self._substrate(toml=self.BUILDABLE_TOML)
         pod = manager.podman.return_value
         pod.image_id.return_value = 'registry-id'
         self.for_root.return_value.image_id.return_value = 'local-build-id'
@@ -2213,6 +2230,21 @@ pull = "never"
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(ProvisionFailed):
                 substrate.reprovision()
+
+    def test_lost_local_copy_warns_before_pull(self):
+        # An enabled workload whose store lost its image gets a fresh registry
+        # pull with no rollback target — that must be said out loud.
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = None
+        with _patch_uid(10001), \
+             patch.object(_container_mod, 'restart_workload_service'), \
+             patch.object(_container_mod, 'ensure_runtime_dir'), \
+             patch.object(_container_mod.time, 'sleep'), \
+             patch.object(_container_mod, 'warn') as mock_warn:
+            substrate.reprovision(force=True)
+        self.assertTrue(any('No local copy' in c.args[0]
+                            for c in mock_warn.call_args_list))
 
     def test_pull_failure_raises_provision_failed(self):
         from podman import PodmanError

@@ -1084,19 +1084,63 @@ class TestProvisionUser(unittest.TestCase):
 # ── transfer_image / transfer_one_image ────────────────────────────────────
 
 class TestTransferImage(unittest.TestCase):
-    def test_considers_every_container_regardless_of_pull(self):
+    def test_non_buildable_container_is_left_alone(self):
+        # No [build] marker → not ours to build → transfer_one_image's gate
+        # returns False without probing either store.
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            manager = MagicMock()
+            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                handled = cmd_provision.transfer_one_image(
+                    cfg, manager, 'test-wl', 'example.com/test:latest', 'missing')
+            self.assertFalse(handled)
+            for_root.assert_not_called()
+            manager.podman.assert_not_called()
+
+    def test_considers_buildable_container_with_pull_missing(self):
+        toml = _CONTAINER_TOML + "\n[build]\n"
+        with _cfg(toml, 'test-wl') as cfg:
             manager = MagicMock()
             with patch.object(cmd_provision, 'transfer_one_image') as one:
                 cmd_provision.transfer_image(cfg, manager)
-            one.assert_called_once_with(cfg, manager, "example.com/test:latest", "missing")
+            one.assert_called_once_with(cfg, manager, "test-wl",
+                                        "example.com/test:latest", "missing")
+
+    def test_multi_mode_gates_per_container(self):
+        # Mixed workload: only the container that owns its image ([containers.
+        # build]) consults the override channel; the third-party sibling's
+        # root-store ref is never probed.
+        toml = """\
+[workload]
+name = "test-wl"
+mode = "pod"
+
+[[containers]]
+name = "app"
+[containers.container]
+image = "example.com/app:latest"
+[containers.build]
+
+[[containers]]
+name = "helper"
+[containers.container]
+image = "example.com/helper:latest"
+"""
+        with _cfg(toml, 'test-wl') as cfg:
+            manager = MagicMock()
+            manager.podman.return_value.image_id.return_value = "have"
+            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                for_root.return_value.image_id.return_value = ""
+                cmd_provision.transfer_image(cfg, manager)
+            for_root.return_value.image_id.assert_called_once_with(
+                "example.com/app:latest")
 
     def test_transfers_pull_never_image(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
             with patch.object(cmd_provision, 'transfer_one_image') as one:
                 cmd_provision.transfer_image(cfg, manager)
-            one.assert_called_once_with(cfg, manager, "example.com/test:latest", "never")
+            one.assert_called_once_with(cfg, manager, "test-wl",
+                                        "example.com/test:latest", "never")
 
     def test_transfer_error_exits(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
@@ -1123,7 +1167,7 @@ class TestTransferImage(unittest.TestCase):
                                             load_res = MagicMock(returncode=0)
                                             active_res = MagicMock(returncode=1)
                                             run_mock.side_effect = [save_res, load_res, active_res]
-                                            cmd_provision.transfer_one_image(cfg, manager, "example.com/test:latest", "never")
+                                            cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
             self.assertEqual(run_mock.call_count, 3)
 
     def test_transfer_one_image_save_failure_exits(self):
@@ -1142,7 +1186,7 @@ class TestTransferImage(unittest.TestCase):
                                             save_res = MagicMock(returncode=1, stderr=b"boom")
                                             run_mock.return_value = save_res
                                             with self.assertRaises(cmd_provision.ImageTransferError):
-                                                cmd_provision.transfer_one_image(cfg, manager, "example.com/test:latest", "never")
+                                                cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
 
     def test_transfer_one_image_missing_everywhere_pull_never_errors(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
@@ -1151,18 +1195,20 @@ class TestTransferImage(unittest.TestCase):
             with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
                 with self.assertRaises(cmd_provision.ImageTransferError):
-                    cmd_provision.transfer_one_image(cfg, manager, "example.com/test:latest", "never")
+                    cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
 
     def test_transfer_one_image_missing_everywhere_pull_missing_is_noop(self):
-        with _cfg(_HOST_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML + "\n[build]\n", 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = ""
             with patch.object(cmd_provision.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
-                cmd_provision.transfer_one_image(cfg, manager, "example.com/test:latest", "missing")
+                handled = cmd_provision.transfer_one_image(
+                    cfg, manager, "test-wl", "example.com/test:latest", "missing")
+            self.assertFalse(handled)
 
     def test_transfer_one_image_root_override_transfers_for_pull_missing(self):
-        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+        with _cfg(_CONTAINER_TOML + "\n[build]\n", 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = "registry-id"
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
@@ -1178,7 +1224,7 @@ class TestTransferImage(unittest.TestCase):
                                             load_res = MagicMock(returncode=0)
                                             active_res = MagicMock(returncode=1)
                                             run_mock.side_effect = [save_res, load_res, active_res]
-                                            cmd_provision.transfer_one_image(cfg, manager, "example.com/test:latest", "missing")
+                                            cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "missing")
             self.assertEqual(run_mock.call_count, 3)
 
 

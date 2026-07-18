@@ -21,6 +21,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from podman import Podman, PodmanError
+
 # workloadctl-owned control files never belong in a build context — a bare
 # `COPY . /` in a Containerfile would otherwise sweep them into the image.
 # ".enabled" is the enabled-marker (workload_lib.ENABLED_MARKER_NAME) that the
@@ -133,9 +135,10 @@ def build_image(config) -> int:
         if len(jobs) == 1:
             alias = f"localhost/{config.name}:latest"
             if jobs[0].image != alias:
-                r = subprocess.run(["podman", "tag", jobs[0].image, alias])
-                if r.returncode != 0:
-                    print(f"Warning: could not alias {jobs[0].image} as {alias}")
+                try:
+                    Podman.for_root().tag(jobs[0].image, alias)
+                except PodmanError as e:
+                    print(f"Warning: could not alias {jobs[0].image} as {alias}: {e}")
         return 0
     finally:
         shutil.rmtree(context, ignore_errors=True)

@@ -461,14 +461,17 @@ image = "ghcr.io/example/workload:latest"
 #   "newer"   - Pull if newer version available in registry
 #   "never"   - Never pull, use only local images (fails if not present)
 #
-# Regardless of policy, ROOT'S IMAGE STORE IS THE LOCAL OVERRIDE CHANNEL:
-# when root's store holds the exact ref a container runs (a `workloadctl
-# build`, or a hand-loaded image), enable/update transfer that copy into the
-# workload user's store, shadowing whatever the registry would serve. Remove
-# the root copy (`sudo podman rmi <ref>`) and the next `update` pulls the
-# published image again. A self-built image the fleet consumes from a registry
-# therefore uses its registry ref + `pull = "missing"` + a [build] block —
-# `pull = "never"` is only for images that exist purely as local builds.
+# For SELF-BUILT images (any container with a [build] marker or pull =
+# "never"), ROOT'S IMAGE STORE IS THE LOCAL OVERRIDE CHANNEL: when root's
+# store holds the exact ref the container runs (a `workloadctl build`, or a
+# hand-loaded image), enable/update transfer that copy into the workload
+# user's store, shadowing whatever the registry would serve. Remove the root
+# copy (`sudo podman rmi <ref>`) and the next `update` pulls the published
+# image again. Third-party images are never overridden — their pull policy
+# keeps its full meaning. A self-built image the fleet consumes from a
+# registry therefore uses its registry ref + `pull = "missing"` + a [build]
+# block; `pull = "never"` is only for images that exist purely as local
+# builds.
 # pull = "missing"
 
 # Optional: systemd container mode
@@ -992,8 +995,8 @@ ports = ["8080:80", "8443:443"]
 # root's store, where it acts as the local override the next enable/update
 # transfers to the workload user (see the pull-policy notes above). In multi
 # mode the marker is per container: a [containers.build] block (this
-# workload-level table only supplies inherited build inputs there). The legacy
-# marker also holds: a `pull = "never"` container is always buildable, and
+# workload-level table only supplies inherited build inputs there). A
+# `pull = "never"` container is always buildable without any [build] block, and
 # with a Containerfile present and no [build] section at all, `build` Just
 # Works for it (default `podman build` over the resolved context).
 #

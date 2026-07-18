@@ -52,12 +52,13 @@ class BuildBase(unittest.TestCase):
             self.addCleanup(p.stop)
         self.manager = WorkloadManager()
 
-    def _config(self, name, *, bundle=None, pull="never", build=None,
-                host_setup=None, extra=""):
+    def _config(self, name, *, bundle=None, image=None, pull="never",
+                build=None, host_setup=None, extra=""):
+        image = image or f"localhost/{name}:latest"
         body = f'[workload]\nname = "{name}"\n'
         if bundle is not None:
             body += f'bundle = "{bundle}"\n'
-        body += f'\n[container]\nimage = "localhost/{name}:latest"\npull = "{pull}"\n'
+        body += f'\n[container]\nimage = "{image}"\npull = "{pull}"\n'
         if host_setup is not None:
             body += f'\n[host]\nsetup = "{host_setup}"\n'
         if build is not None:
@@ -356,9 +357,22 @@ class TestBuildJobs(MultiBuildBase):
         self.assertEqual(cfg.build_jobs(), [])
         self.assertFalse(cfg.is_buildable("app", "missing"))
 
-    def test_buildable_gate_pull_never_is_legacy_signal(self):
+    def test_buildable_gate_pull_never_implies_buildable(self):
         cfg = self._config("app", pull="never")
         self.assertEqual(cfg.build_images(), ["localhost/app:latest"])
+
+    def test_single_registry_image_gets_localhost_alias(self):
+        self._ship("solo", "Containerfile", "FROM scratch\n")
+        cfg = self._config("solo", image="registry.local/workloads/solo:latest",
+                           pull="missing", build="")
+        with mock.patch.object(imagebuild.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(imagebuild.Podman, "for_root") as fr:
+            with redirect_stdout(io.StringIO()):
+                rc = imagebuild.build_image(cfg)
+        self.assertEqual(rc, 0)
+        fr.return_value.tag.assert_called_once_with(
+            "registry.local/workloads/solo:latest", "localhost/solo:latest")
 
     def test_buildable_gate_multi_requires_per_container_block(self):
         # In multi mode the workload-level [build] supplies inherited inputs
@@ -493,7 +507,7 @@ class TestMultiBuildImage(MultiBuildBase):
 # Precedence + cmd_build
 # ---------------------------------------------------------------------------
 
-class TestDispatch(BuildBase):
+class TestDispatch(MultiBuildBase):
     def test_script_takes_precedence(self):
         self._ship("solo", "Containerfile", "FROM scratch\n")
         cfg = self._config("solo", build='script = "build.sh"\n')
@@ -517,6 +531,33 @@ class TestDispatch(BuildBase):
         with redirect_stdout(io.StringIO()), redirect_stdout(io.StringIO()):
             rc = cmd_lifecycle._run_build(cfg)
         self.assertEqual(rc, 1)
+
+    def test_multi_inert_build_table_hints_per_container_markers(self):
+        # single→multi conversion trap: a workload-level [build] marks nothing
+        # buildable in multi mode — the failure must point at [containers.build].
+        cfg = self._multi("stack", [
+            ("app", "example.com/app:latest", "missing", None),
+        ], build='containerfile = "Containerfile"\n')
+        with mock.patch.object(cmd_lifecycle, "error") as mock_err:
+            rc = cmd_lifecycle._run_build(cfg)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("[containers.build]" in c.args[0]
+                            for c in mock_err.call_args_list))
+
+    def test_script_mode_notes_unmarked_containers(self):
+        # The script escape hatch warns which containers a built image can
+        # never reach (not transfer-eligible).
+        cfg = self._multi("stack", [
+            ("app", "localhost/stack:latest", "never", None),
+            ("helper", "example.com/helper:latest", "missing", None),
+        ], build='script = "build.sh"\n')
+        with mock.patch.object(imagebuild, "run_build_script", return_value=0), \
+             mock.patch.object(cmd_lifecycle, "info") as mock_info:
+            rc = cmd_lifecycle._run_build(cfg)
+        self.assertEqual(rc, 0)
+        notes = [c.args[0] for c in mock_info.call_args_list if c.args]
+        self.assertTrue(any("helper" in n for n in notes))
+        self.assertFalse(any("app" in n for n in notes))
 
     def test_cmd_build_rejects_vm(self):
         (self.etc / "vm").mkdir(exist_ok=True)

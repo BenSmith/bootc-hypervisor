@@ -54,10 +54,9 @@ def _image_available(config: WorkloadConfig, image: str) -> bool:
 
     Asks the same question the runtime path answers: root's store (the
     transfer_image() source) first, then the workload user's own store —
-    an image staged directly into the user store (the sanctioned pattern
-    for registries that policy.json rejects host-wide) satisfies the gate
-    too. Root first because on a first enable the workload user doesn't
-    exist yet; in that case only root's store can hold the image.
+    an image staged directly into the user store satisfies the gate too.
+    Root first because on a first enable the workload user doesn't exist
+    yet; in that case only root's store can hold the image.
     """
     if Podman.for_root().image_id(image):
         return True
@@ -288,30 +287,39 @@ class ImageTransferError(Exception):
 def transfer_image(config: WorkloadConfig, manager: WorkloadManager):
     """Push locally-held images from root's store into the workload user store.
 
-    Root's store is the *local override channel*, regardless of pull policy:
-    when it holds the exact ref a container runs (a `workloadctl build`, or a
-    hand-loaded image), that copy is transferred and shadows whatever the
-    registry would serve. For any other pull policy an image absent from both
-    stores is simply left for podman to pull; only `pull = "never"` treats
-    absence as an error, since the root store is then the sole source.
+    Root's store is the *local override channel* for images the workload
+    builds itself (`is_buildable`): when it holds the exact ref such a
+    container runs (a `workloadctl build`, or a hand-loaded image), that copy
+    is transferred and shadows whatever the registry would serve. Third-party
+    images are never overridden — their pull policy (`always`/`newer`
+    especially) keeps its full meaning and root's store isn't even probed. An
+    absent buildable image is an error only for `pull = "never"` (root's store
+    is then the sole source); otherwise podman pulls it per policy.
     Exits the process on failure (enable-path semantics).
     """
     try:
-        for _cname, image, pull in config.container_specs():
-            transfer_one_image(config, manager, image, pull)
+        for cname, image, pull in config.container_specs():
+            transfer_one_image(config, manager, cname, image, pull)
     except ImageTransferError as e:
         error(str(e))
         sys.exit(1)
 
 
 def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
-                       image: str, pull: str):
-    """Transfer a single image into the workload user store if root's store
-    holds it (the local override channel — see `transfer_image`).
+                       cname: str, image: str, pull: str) -> bool:
+    """Apply the local override channel (see `transfer_image`) to one
+    container's image. Owns the whole gate, so callers loop over
+    `container_specs()` unconditionally: a non-buildable container returns
+    False with neither store probed, and a buildable ref absent from root's
+    store returns False so the caller falls back to its pull policy. Returns
+    True when root's store holds the ref — transferred into the user store,
+    or already current there — meaning the override supplied the image and
+    no pull should happen.
 
     Compares image IDs between root and user stores; transfers if the user
     store is missing the image or has a stale copy after a rebuild.
-    Raises ImageTransferError on failure.
+    Raises ImageTransferError on a failed transfer, and for a pull=never
+    image absent from every store (nothing can supply it).
 
     Boundary note (B13): the `podman load` step below hand-builds its own
     sudo invocation instead of going through `Podman.run()`. It needs a
@@ -321,12 +329,25 @@ def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
     set to the same dir for consistency. Documented here rather than growing
     the wrapper's env handling for this one call site (see `Podman.run()`).
     """
+    if not config.is_buildable(cname, pull):
+        return False
     user_image_id = manager.podman(config).image_id(image)
     root_image_id = Podman.for_root().image_id(image)
 
-    need_transfer = root_image_id and root_image_id != user_image_id
+    if not root_image_id:
+        if not user_image_id and pull == "never":
+            info()
+            build_script = config.resolve_control_file("build.sh")
+            if build_script.exists():
+                hint = f"Build the image first:\n  sudo {build_script}"
+            else:
+                hint = f"Build or pull the image '{image}' first."
+            raise ImageTransferError(
+                f"Error: Image '{image}' not found locally and pull=never\n{hint}"
+            )
+        return False
 
-    if need_transfer:
+    if root_image_id != user_image_id:
         if user_image_id:
             info(f"  Root store has an updated '{image}' (rebuild detected), re-transferring...")
         else:
@@ -382,16 +403,7 @@ def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
             if active.returncode == 0:
                 info("  Note: container is still running the old image.")
                 info(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
-    elif not user_image_id and pull == "never":
-        info()
-        build_script = config.resolve_control_file("build.sh")
-        if build_script.exists():
-            hint = f"Build the image first:\n  sudo {build_script}"
-        else:
-            hint = f"Build or pull the image '{image}' first."
-        raise ImageTransferError(
-            f"Error: Image '{image}' not found locally and pull=never\n{hint}"
-        )
+    return True
 
 
 def generate_units(config: WorkloadConfig):
