@@ -60,7 +60,9 @@ Container stdout/stderr go to the host journal via `--log-driver=passthrough`
 `workload-<name>[pid]: ...` (`workload-<wl>-<ctr>` for pod/bridge members).
 Passthrough stores each line exactly once — the journald driver kept a second,
 untagged copy via the unit's stdout relay. Filter container output with
-`journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl by unit.
+`journalctl -t workload-<name>`; `workloadctl logs` wraps journalctl, OR-ing the
+unit with `SYSLOG_IDENTIFIER=` so passthrough app output is included (a unit-only
+filter misses it — journald attributes it to the user manager's cgroup).
 `podman logs` does not work with passthrough (podman keeps no copy).
 
 ### CLI output: prose vs. output
