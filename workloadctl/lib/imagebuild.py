@@ -124,6 +124,18 @@ def build_image(config) -> int:
                                assemble_build_args(config, job), job.target)
             if rc != 0:
                 return rc
+        # Muscle-memory alias: a single-image workload's build is also
+        # reachable as localhost/<name>:latest even when [container].image
+        # names the registry ref the fleet consumes. The build tag itself
+        # (job.image, in root's store) is the local override the next
+        # enable/update transfers; the alias is convenience only, so a tag
+        # failure warns rather than failing the build.
+        if len(jobs) == 1:
+            alias = f"localhost/{config.name}:latest"
+            if jobs[0].image != alias:
+                r = subprocess.run(["podman", "tag", jobs[0].image, alias])
+                if r.returncode != 0:
+                    print(f"Warning: could not alias {jobs[0].image} as {alias}")
         return 0
     finally:
         shutil.rmtree(context, ignore_errors=True)

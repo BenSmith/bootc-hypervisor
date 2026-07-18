@@ -19,7 +19,8 @@ from pathlib import Path
 
 from backup import backup_impl, print_backup_size
 from cli_log import error, info, warn
-from podman import PodmanError
+from cmd_provision import ImageTransferError, transfer_one_image
+from podman import Podman, PodmanError
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from substrate import (
     LifecycleError,
@@ -414,13 +415,26 @@ class ContainerSubstrate(Substrate):
                     if old_id:
                         break
             old_ids[cname] = old_id
-            if pull == "never":
+            # Root's store is the local override channel (see
+            # cmd_provision.transfer_image): when it holds this exact ref — a
+            # `workloadctl build`, or a hand-loaded image — that copy shadows
+            # the registry, so transfer it instead of pulling over it. This
+            # also lets `update` pick up a local rebuild of a pull=never image
+            # in a mixed workload.
+            if Podman.for_root().image_id(image):
+                try:
+                    transfer_one_image(self.config, self.manager, image, pull)
+                except ImageTransferError as e:
+                    error(f"  ✗ {e}")
+                    raise ProvisionFailed(f"transfer failed for {image}")
+            elif pull == "never":
                 continue
-            try:
-                pod.pull(image)
-            except PodmanError as e:
-                error(f"  ✗ Failed to pull {image}: {e.stderr}")
-                raise ProvisionFailed(f"pull failed for {image}")
+            else:
+                try:
+                    pod.pull(image)
+                except PodmanError as e:
+                    error(f"  ✗ Failed to pull {image}: {e.stderr}")
+                    raise ProvisionFailed(f"pull failed for {image}")
             new_id = pod.image_id(image)
             if old_id != new_id:
                 changed = True

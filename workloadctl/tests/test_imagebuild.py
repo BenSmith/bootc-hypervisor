@@ -345,6 +345,34 @@ class TestBuildJobs(MultiBuildBase):
         self.assertEqual(job.containerfile, "Containerfile")
         self.assertEqual(job.args, {"B": "2"})
 
+    def test_buildable_gate_single_build_block_without_pull_never(self):
+        # The zot-consuming shape: registry ref, pull=missing, [build] present.
+        cfg = self._config("app", pull="missing", build="")
+        self.assertEqual(cfg.build_images(), ["localhost/app:latest"])
+        self.assertTrue(cfg.is_buildable("app", "missing"))
+
+    def test_buildable_gate_single_no_build_block_not_buildable(self):
+        cfg = self._config("app", pull="missing")
+        self.assertEqual(cfg.build_jobs(), [])
+        self.assertFalse(cfg.is_buildable("app", "missing"))
+
+    def test_buildable_gate_pull_never_is_legacy_signal(self):
+        cfg = self._config("app", pull="never")
+        self.assertEqual(cfg.build_images(), ["localhost/app:latest"])
+
+    def test_buildable_gate_multi_requires_per_container_block(self):
+        # In multi mode the workload-level [build] supplies inherited inputs
+        # only; a container without pull=never or its own [containers.build]
+        # is not buildable even when the workload table exists.
+        cfg = self._multi("stack", [
+            ("app", "registry.local/workload-stack:latest", "missing",
+             '# empty block\n'),
+            ("db", "docker.io/library/postgres:16", "missing", ""),
+        ], build='containerfile = "Containerfile.default"\n')
+        self.assertEqual(cfg.build_images(),
+                         ["registry.local/workload-stack:latest"])
+        self.assertFalse(cfg.is_buildable("db", "missing"))
+
     def test_empty_block_still_self_describes(self):
         # Presence, not content, selects per-container resolution: an EMPTY
         # [containers.build] means "default Containerfile, no target/args" —

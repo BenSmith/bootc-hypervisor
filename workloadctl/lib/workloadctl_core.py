@@ -50,8 +50,8 @@ from podman import Podman
 class BuildJob:
     """One image to build: its tag plus the build inputs resolved wholesale from
     the per-container `[containers.build]` block, or (when the container has none)
-    the workload-level `[build]`. One job per *distinct* pull=never image, in
-    TOML order. See `WorkloadConfig.build_jobs`."""
+    the workload-level `[build]`. One job per *distinct* locally-built image,
+    in TOML order. See `WorkloadConfig.build_jobs`."""
     image: str
     containerfile: str
     target: str | None = None
@@ -471,8 +471,27 @@ class WorkloadConfig:
                 return c.get("build")
         return None
 
+    def is_buildable(self, cname: str, pull: str) -> bool:
+        """True when this container's image is ours to build locally.
+
+        The explicit marker is a build block: `[containers.build]` for the
+        container in multi mode, the workload-level `[build]` table in single
+        mode (in multi mode the workload-level table only supplies inherited
+        build *inputs*; it does not mark every container buildable — a mixed
+        workload must say per container which images it owns). `pull = "never"`
+        also marks buildable: for a registry-consumable self-built image the
+        pull policy says when to *fetch* while the build block says the image
+        is ours to *build*, but never-pull only makes sense for a local build.
+        """
+        if pull == "never":
+            return True
+        if self.is_multi:
+            return self._container_build_config(cname) is not None
+        return "build" in self.config
+
     def build_jobs(self) -> list[BuildJob]:
-        """One `BuildJob` per *distinct* `pull = never` image, in TOML order.
+        """One `BuildJob` per *distinct* locally-built image, in TOML order
+        (see `is_buildable` for what marks an image locally-built).
 
         Build inputs resolve **wholesale** (all-or-nothing): a container with its
         own `[containers.build]` block is fully self-described by that block
@@ -495,7 +514,7 @@ class WorkloadConfig:
         jobs: list[BuildJob] = []
         by_image: dict[str, tuple[str, BuildJob]] = {}
         for cname, image, pull in self.container_specs():
-            if pull != "never":
+            if not self.is_buildable(cname, pull):
                 continue
             b = self._container_build_config(cname)
             if b is not None:   # self-describing block; no workload-level merge
@@ -518,7 +537,7 @@ class WorkloadConfig:
                 jobs.append(job)
             elif job != prev[1]:
                 raise ValueError(
-                    f"containers '{prev[0]}' and '{cname}' share pull=never "
+                    f"containers '{prev[0]}' and '{cname}' share locally-built "
                     f"image '{image}' but resolve different build inputs — a "
                     f"shared image must build identically (align or drop one "
                     f"[containers.build] block)"
@@ -526,7 +545,7 @@ class WorkloadConfig:
         return jobs
 
     def build_images(self) -> list[str]:
-        """Distinct `pull = never` image tags this workload builds locally, in
+        """Distinct locally-built image tags this workload owns, in
         TOML order (the `.image` of every `build_jobs()` entry)."""
         return [job.image for job in self.build_jobs()]
 

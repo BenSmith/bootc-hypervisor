@@ -78,8 +78,12 @@ def _registry_ref(image: str) -> str:
 
     The `workload-` prefix namespaces self-built images in the registry away
     from the bootc images (hypervisor-bootc, fedora-bootc-minimal) and the
-    pull-through upstream caches.
+    pull-through upstream caches. An image whose [container].image already
+    names the registry (the zot-consuming bundles) passes through unchanged —
+    the build tagged it push-ready.
     """
+    if image.startswith(f"{REGISTRY}/"):
+        return image
     ref = image
     if ref.startswith("localhost/"):
         ref = ref[len("localhost/"):]

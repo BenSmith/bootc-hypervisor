@@ -154,8 +154,9 @@ def _run_build(config: WorkloadConfig) -> int:
     if config.has_build_context():
         return imagebuild.build_image(config)
     error(f"Error: nothing to build for '{config.name}'")
-    error("  No pull=never image with a resolvable Containerfile, and no "
-          "[build].script — this workload pulls a published image.")
+    error("  No locally-built image ([build] block or pull=never) with a "
+          "resolvable Containerfile, and no [build].script — this workload "
+          "pulls a published image.")
     return 1
 
 

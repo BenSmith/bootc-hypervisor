@@ -280,22 +280,38 @@ def provision_user(config: WorkloadConfig):
     subprocess.run(["/usr/libexec/workloadctl/workload-ensure-user", config.name], check=True)
 
 
+class ImageTransferError(Exception):
+    """A root→user image transfer failed (or a pull=never image is absent
+    everywhere). The message is fully formatted for the operator."""
+
+
 def transfer_image(config: WorkloadConfig, manager: WorkloadManager):
-    """Transfer pull=never images from the root store to the workload user store.
+    """Push locally-held images from root's store into the workload user store.
 
-    Runs once per container; containers with any other pull policy are skipped.
+    Root's store is the *local override channel*, regardless of pull policy:
+    when it holds the exact ref a container runs (a `workloadctl build`, or a
+    hand-loaded image), that copy is transferred and shadows whatever the
+    registry would serve. For any other pull policy an image absent from both
+    stores is simply left for podman to pull; only `pull = "never"` treats
+    absence as an error, since the root store is then the sole source.
+    Exits the process on failure (enable-path semantics).
     """
-    for _cname, image, pull in config.container_specs():
-        if pull == "never":
-            _transfer_one_image(config, manager, image)
+    try:
+        for _cname, image, pull in config.container_specs():
+            transfer_one_image(config, manager, image, pull)
+    except ImageTransferError as e:
+        error(str(e))
+        sys.exit(1)
 
 
-def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image: str):
-    """Transfer a single pull=never image into the workload user store.
+def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
+                       image: str, pull: str):
+    """Transfer a single image into the workload user store if root's store
+    holds it (the local override channel — see `transfer_image`).
 
     Compares image IDs between root and user stores; transfers if the user
     store is missing the image or has a stale copy after a rebuild.
-    Exits the process on failure.
+    Raises ImageTransferError on failure.
 
     Boundary note (B13): the `podman load` step below hand-builds its own
     sudo invocation instead of going through `Podman.run()`. It needs a
@@ -330,11 +346,10 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 capture_output=True,
             )
             if save_result.returncode != 0:
-                error(
+                raise ImageTransferError(
                     f"Error: Failed to save image '{image}': "
                     f"{save_result.stderr.decode(errors='replace')}",
                 )
-                sys.exit(1)
 
             # TMPDIR=config.home_dir: Podman.run()/_build_cmd() has no env
             # override hook, so this bypasses the wrapper (see the class
@@ -349,11 +364,10 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
                 cwd=config.home_dir,
             )
             if load_result.returncode != 0:
-                error(
+                raise ImageTransferError(
                     f"Error: Failed to transfer image '{image}': "
                     f"{load_result.stderr.decode(errors='replace')}",
                 )
-                sys.exit(1)
         finally:
             try:
                 os.unlink(tmp_path)
@@ -368,16 +382,16 @@ def _transfer_one_image(config: WorkloadConfig, manager: WorkloadManager, image:
             if active.returncode == 0:
                 info("  Note: container is still running the old image.")
                 info(f"  Run 'sudo workloadctl recreate {config.name}' to restart with the new image.")
-    elif not user_image_id:
+    elif not user_image_id and pull == "never":
         info()
-        error(f"Error: Image '{image}' not found locally and pull=never")
         build_script = config.resolve_control_file("build.sh")
         if build_script.exists():
-            error("Build the image first:")
-            error(f"  sudo {build_script}")
+            hint = f"Build the image first:\n  sudo {build_script}"
         else:
-            error(f"Build or pull the image '{image}' first.")
-        sys.exit(1)
+            hint = f"Build or pull the image '{image}' first."
+        raise ImageTransferError(
+            f"Error: Image '{image}' not found locally and pull=never\n{hint}"
+        )
 
 
 def generate_units(config: WorkloadConfig):

@@ -2093,6 +2093,14 @@ class TestContainerLifecycleMore(unittest.TestCase):
 
 class TestContainerReprovisionFlow(unittest.TestCase):
 
+    def setUp(self):
+        # No root-store override by default: reprovision consults root's store
+        # (the local override channel) before pulling.
+        p = patch.object(_container_mod.Podman, 'for_root')
+        self.for_root = p.start()
+        self.for_root.return_value.image_id.return_value = ""
+        self.addCleanup(p.stop)
+
     def _substrate(self, user_exists=True):
         config = _make_config(SINGLE_TOML, 'test-wl')
         manager = MagicMock()
@@ -2179,6 +2187,32 @@ pull = "never"
         cfg, old_ids = result
         self.assertIsNone(old_ids['test-wl'])
         pod.tag.assert_not_called()
+
+    def test_root_override_transfers_instead_of_pulling(self):
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.side_effect = ['registry-id', 'local-build-id']
+        self.for_root.return_value.image_id.return_value = 'local-build-id'
+        with _patch_uid(10001), \
+             patch.object(_container_mod, 'restart_workload_service') as mock_r, \
+             patch.object(_container_mod, 'transfer_one_image') as mock_t:
+            result = substrate.reprovision()
+        mock_t.assert_called_once()
+        pod.pull.assert_not_called()
+        self.assertIsNotNone(result)
+        mock_r.assert_called_once()
+
+    def test_root_override_transfer_failure_raises_provision_failed(self):
+        from substrate import ProvisionFailed
+        substrate, manager = self._substrate()
+        pod = manager.podman.return_value
+        pod.image_id.return_value = 'registry-id'
+        self.for_root.return_value.image_id.return_value = 'local-build-id'
+        with patch.object(_container_mod, 'transfer_one_image',
+                          side_effect=_container_mod.ImageTransferError("boom")), \
+             patch('sys.stderr', io.StringIO()):
+            with self.assertRaises(ProvisionFailed):
+                substrate.reprovision()
 
     def test_pull_failure_raises_provision_failed(self):
         from podman import PodmanError

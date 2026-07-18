@@ -460,6 +460,15 @@ image = "ghcr.io/example/workload:latest"
 #   "always"  - Always pull image on start (latest version)
 #   "newer"   - Pull if newer version available in registry
 #   "never"   - Never pull, use only local images (fails if not present)
+#
+# Regardless of policy, ROOT'S IMAGE STORE IS THE LOCAL OVERRIDE CHANNEL:
+# when root's store holds the exact ref a container runs (a `workloadctl
+# build`, or a hand-loaded image), enable/update transfer that copy into the
+# workload user's store, shadowing whatever the registry would serve. Remove
+# the root copy (`sudo podman rmi <ref>`) and the next `update` pulls the
+# published image again. A self-built image the fleet consumes from a registry
+# therefore uses its registry ref + `pull = "missing"` + a [build] block —
+# `pull = "never"` is only for images that exist purely as local builds.
 # pull = "missing"
 
 # Optional: systemd container mode
@@ -977,12 +986,18 @@ ports = ["8080:80", "8443:443"]
 [build]
 # Optional: how `workloadctl build <name>` builds this workload's image.
 #
-# Only relevant for locally-built images, i.e. a [container] (or [[containers]])
-# with `pull = "never"`. With a Containerfile present in the bundle and no
-# [build] section at all, `build` Just Works: it runs `podman build` over the
-# resolved build context and tags the result exactly as [container].image.
+# PRESENCE OF THIS SECTION MARKS THE IMAGE LOCALLY BUILDABLE. A single-
+# container workload with a [build] table (even empty) owns its image:
+# `workloadctl build` produces it — tagged exactly as [container].image — into
+# root's store, where it acts as the local override the next enable/update
+# transfers to the workload user (see the pull-policy notes above). In multi
+# mode the marker is per container: a [containers.build] block (this
+# workload-level table only supplies inherited build inputs there). The legacy
+# marker also holds: a `pull = "never"` container is always buildable, and
+# with a Containerfile present and no [build] section at all, `build` Just
+# Works for it (default `podman build` over the resolved context).
 #
-# MULTI-IMAGE WORKLOADS: `build` builds every distinct `pull = "never"` image
+# MULTI-IMAGE WORKLOADS: `build` builds every distinct locally-built image
 # once, in TOML order. When several containers build DIFFERENT images from the
 # same bundle, give each its own Containerfile via a per-container
 # [containers.build] block (containerfile / target / args):
@@ -1007,7 +1022,7 @@ ports = ["8080:80", "8443:443"]
 # operator knob, not part of an image's recipe) — there is no per-container
 # arg_env.
 #
-# Containers may share a pull=never image tag only when they resolve to
+# Containers may share a locally-built image tag only when they resolve to
 # identical build inputs; conflicting resolutions are refused by `build` and
 # flagged by `validate` rather than silently building one container's recipe
 # for both.
