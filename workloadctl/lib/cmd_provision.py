@@ -28,7 +28,7 @@ from workload_lib import (
     workload_root_dir,
 )
 from podman import Podman
-from workloadctl_core import WorkloadConfig, WorkloadManager
+from workloadctl_core import WorkloadConfig, WorkloadManager, WorkloadUserNotFound
 from substrate import LifecycleError
 
 
@@ -47,6 +47,27 @@ class SelinuxPolicyError(Exception):
 
 UDICA_TEMPLATE_DIR = Path("/usr/share/udica/templates")
 _BUNDLES_DIR = WORKLOAD_BUNDLES_DIR
+
+
+def _image_available(config: WorkloadConfig, image: str) -> bool:
+    """True if a pull=never image is reachable by the workload's containers.
+
+    Asks the same question the runtime path answers: root's store (the
+    transfer_image() source) first, then the workload user's own store —
+    an image staged directly into the user store (the sanctioned pattern
+    for registries that policy.json rejects host-wide) satisfies the gate
+    too. Root first because on a first enable the workload user doesn't
+    exist yet; in that case only root's store can hold the image.
+    """
+    if Podman.for_root().image_id(image):
+        return True
+    try:
+        uid = config.uid
+    except WorkloadUserNotFound:
+        return False
+    return bool(
+        Podman.for_user(config.username, uid, config.home_dir).image_id(image)
+    )
 
 
 def preflight_checks(config: WorkloadConfig) -> bool:
@@ -106,7 +127,7 @@ def preflight_checks(config: WorkloadConfig) -> bool:
     from workload_lib import expand_volume_path
     # Check pull=never images exist locally (once per container)
     for _cname, image, pull in config.container_specs():
-        if pull == "never" and not Podman.for_root().image_id(image):
+        if pull == "never" and not _image_available(config, image):
             info(f"  ✗ Image '{image}' not found locally and pull=never")
             build_script = config.resolve_control_file("build.sh")
             if build_script.exists():

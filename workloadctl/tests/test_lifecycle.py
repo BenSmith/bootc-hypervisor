@@ -917,6 +917,23 @@ class TestPreflightChecks(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("not found locally", buf.getvalue())
 
+    def test_pull_never_user_store_only_image_passes(self):
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 15000
+        fake_pw.pw_gid = 15000
+        with _cfg(_HOST_TOML, 'test-wl') as cfg:
+            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
+                with patch.object(cmd_provision.Podman, 'for_root') as for_root, \
+                        patch.object(cmd_provision.Podman, 'for_user') as for_user, \
+                        patch('pwd.getpwnam', return_value=fake_pw):
+                    for_root.return_value.image_id.return_value = ""
+                    for_user.return_value.image_id.return_value = "sha256:def"
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        ok = cmd_provision.preflight_checks(cfg)
+            self.assertTrue(ok)
+            for_user.assert_called_once_with(cfg.username, 15000, cfg.home_dir)
+
     def test_pull_never_present_image_passes(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
