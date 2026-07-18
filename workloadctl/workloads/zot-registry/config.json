@@ -26,31 +26,31 @@
       "registries": [
         {
           "urls": ["https://registry-1.docker.io"],
-          "onDemand": false,
+          "onDemand": true,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://ghcr.io"],
-          "onDemand": false,
+          "onDemand": true,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://quay.io"],
-          "onDemand": false,
+          "onDemand": true,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://registry.fedoraproject.org"],
-          "onDemand": false,
+          "onDemand": true,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         },
         {
           "urls": ["https://codeberg.org"],
-          "onDemand": false,
+          "onDemand": true,
           "tlsVerify": true,
           "content": [{ "prefix": "**" }]
         }
