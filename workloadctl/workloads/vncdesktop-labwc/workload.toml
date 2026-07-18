@@ -41,8 +41,8 @@
 name = "vncdesktop-labwc"
 
 [container]
-image = "localhost/vncdesktop-labwc:latest"
-pull = "never"
+image = "registry.local/workload-vncdesktop-labwc:latest"
+pull = "missing"
 
 [container.environment]
 # Set a VNC password (recommended). Without this, VNC has no authentication.
@@ -84,3 +84,8 @@ memory_max = "4G"
 memory_high = "3G"
 cpu_quota = "200%"
 tasks_max = 16384
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

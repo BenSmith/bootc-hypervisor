@@ -2,8 +2,8 @@
 name = "wolf-game-streaming"
 
 [container]
-image = "localhost/wolf-game-streaming:latest"
-pull = "never"
+image = "registry.local/workload-wolf-game-streaming:latest"
+pull = "missing"
 
 [container.health]
 cmd = "pgrep -x wolf > /dev/null || exit 1"

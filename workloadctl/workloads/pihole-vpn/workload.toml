@@ -37,8 +37,8 @@ required_files = [
 ]
 
 [container]
-image = "localhost/pihole-vpn:latest"
-pull = "never"
+image = "registry.local/workload-pihole-vpn:latest"
+pull = "missing"
 
 [container.health]
 cmd = "dig +short +time=2 @127.0.0.1 pi.hole || exit 1"
@@ -80,3 +80,8 @@ capabilities = ["NET_ADMIN"]
 memory_max = "256M"
 memory_high = "192M"
 cpu_quota = "20%"
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

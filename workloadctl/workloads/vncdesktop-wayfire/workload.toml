@@ -2,8 +2,8 @@
 name = "vncdesktop-wayfire"
 
 [container]
-image = "localhost/vncdesktop-wayfire:latest"
-pull = "never"
+image = "registry.local/workload-vncdesktop-wayfire:latest"
+pull = "missing"
 systemd = "always"
 
 [container.environment]
@@ -58,3 +58,8 @@ memory_max = "4G"
 memory_high = "3G"
 cpu_quota = "200%"
 tasks_max = 16384
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

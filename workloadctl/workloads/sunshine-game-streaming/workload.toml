@@ -2,8 +2,8 @@
 name = "sunshine-game-streaming"
 
 [container]
-image = "localhost/sunshine-game-streaming:latest"
-pull = "never"
+image = "registry.local/workload-sunshine-game-streaming:latest"
+pull = "missing"
 systemd = "always"
 
 [container.environment]

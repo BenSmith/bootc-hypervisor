@@ -19,9 +19,9 @@ EnvironmentFile=-/run/workload-env/workload-squid.env
 ExecStartPre=-/usr/bin/podman system migrate
 ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__UID__/libpod/tmp/ns_handles
 
-# Image pulling handled by podman run --pull=never
+# Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-squid" --hostname "squid" --rm --replace --init --sdnotify=ignore --pull=never --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=512M --cpus=0.5 --network="pasta" --publish 3128:3128 --volume "/var/lib/workloads/squid/data/squid.conf":"/etc/squid/squid.conf":"ro" --volume "/var/lib/workloads/squid/data/cache":"/var/spool/squid" --env HOST_IP=${HOST_IP} --health-cmd "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "localhost/squid:latest"
+ExecStart=/usr/bin/podman run --name "workload-squid" --hostname "squid" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=512M --cpus=0.5 --network="pasta" --publish 3128:3128 --volume "/var/lib/workloads/squid/data/squid.conf":"/etc/squid/squid.conf":"ro" --volume "/var/lib/workloads/squid/data/cache":"/var/spool/squid" --env HOST_IP=${HOST_IP} --health-cmd "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1" --health-interval=30s --health-start-period=10s --health-on-failure=kill "registry.local/workload-squid:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-squid"
 ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-squid"

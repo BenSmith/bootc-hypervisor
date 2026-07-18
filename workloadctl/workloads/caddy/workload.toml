@@ -50,8 +50,8 @@ required_files = [
 ]
 
 [container]
-image = "localhost/caddy:latest"
-pull = "never"
+image = "registry.local/workload-caddy:latest"
+pull = "missing"
 
 [container.health]
 # Liveness only — we don't care WHAT Caddy answered, just that it answered.
@@ -104,3 +104,8 @@ service_type = "simple"
 memory_max = "256M"
 memory_high = "128M"
 cpu_quota = "100%"
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

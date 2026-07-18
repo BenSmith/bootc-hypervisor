@@ -37,8 +37,8 @@ required_files = [
 ]
 
 [container]
-image = "localhost/squid:latest"
-pull = "never"
+image = "registry.local/workload-squid:latest"
+pull = "missing"
 
 [container.health]
 cmd = "squidclient -h 127.0.0.1 -p 3128 mgr:info > /dev/null 2>&1 || exit 1"
@@ -64,3 +64,7 @@ memory_max = "512M"
 memory_high = "384M"
 cpu_quota = "50%"
 
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

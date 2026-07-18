@@ -45,8 +45,8 @@
 name = "vncdesktop-sway"
 
 [container]
-image = "localhost/vncdesktop-sway:latest"
-pull = "never"
+image = "registry.local/workload-vncdesktop-sway:latest"
+pull = "missing"
 systemd = "always"
 
 [container.environment]
@@ -101,3 +101,8 @@ memory_max = "4G"
 memory_high = "3G"
 cpu_quota = "200%"
 tasks_max = 16384
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

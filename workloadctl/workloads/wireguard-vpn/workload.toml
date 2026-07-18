@@ -23,8 +23,8 @@ required_files = [
 ]
 
 [container]
-image = "localhost/wireguard-vpn:latest"
-pull = "never"
+image = "registry.local/workload-wireguard-vpn:latest"
+pull = "missing"
 
 [container.health]
 cmd = "wg show wg0 > /dev/null 2>&1 || exit 1"
@@ -55,3 +55,8 @@ capabilities = ["NET_ADMIN"]
 memory_max = "128M"
 memory_high = "96M"
 cpu_quota = "20%"
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]

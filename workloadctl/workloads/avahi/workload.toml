@@ -45,8 +45,8 @@
 name = "avahi"
 
 [container]
-image = "localhost/avahi:latest"
-pull = "never"
+image = "registry.local/workload-avahi:latest"
+pull = "missing"
 
 [container.environment]
 # Whitespace or comma separated, with or without the .local suffix.
@@ -78,3 +78,8 @@ service_type = "simple"
 memory_max = "128M"
 memory_high = "96M"
 cpu_quota = "50%"
+
+# Marks the image locally buildable: `workloadctl build` produces the same
+# ref into root's store, which overrides the registry copy on the next
+# enable/update. CI publishes the canonical copy to registry.local.
+[build]
