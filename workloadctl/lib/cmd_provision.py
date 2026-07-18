@@ -55,8 +55,11 @@ def _image_available(config: WorkloadConfig, image: str) -> bool:
     Asks the same question the runtime path answers: root's store (the
     transfer_image() source) first, then the workload user's own store —
     an image staged directly into the user store satisfies the gate too.
-    Root first because on a first enable the workload user doesn't exist
-    yet; in that case only root's store can hold the image.
+    (The user store is a legitimate source in its own right: the override
+    channel transfers there, and `containers-storage` is policy-exempt, so
+    an operator can also stage an image with `sudo -u _wl-<name> podman
+    load`.) Root first because on a first enable the workload user doesn't
+    exist yet; in that case only root's store can hold the image.
     """
     if Podman.for_root().image_id(image):
         return True

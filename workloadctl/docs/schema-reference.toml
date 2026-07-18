@@ -468,7 +468,10 @@ image = "ghcr.io/example/workload:latest"
 # user's store, shadowing whatever the registry would serve. Remove the root
 # copy (`sudo podman rmi <ref>`) and the next `update` pulls the published
 # image again. Third-party images are never overridden — their pull policy
-# keeps its full meaning. A self-built image the fleet consumes from a
+# keeps its full meaning. Note the override wins for ANY pull policy on a
+# self-built image: with a root copy present, even `always`/`newer` are
+# shadowed (no registry fetch on enable/update) until the root copy is
+# removed. A self-built image the fleet consumes from a
 # registry therefore uses its registry ref + `pull = "missing"` + a [build]
 # block; `pull = "never"` is only for images that exist purely as local
 # builds.

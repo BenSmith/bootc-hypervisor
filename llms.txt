@@ -81,7 +81,7 @@ config.toml                               bootc-image-builder config (user setup
 config-iso.toml                           ISO-specific image builder config
 policy.json                               Container image signature policy
 policy-local.json                         Permissive policy for local builds
-policy-hypervisor.json.template           Policy template with registry allowlist
+policy-hypervisor.json.template           Policy template (accept-by-default; sigstoreSigned scopes)
 policy-minimal.json.template              Minimal policy template
 
 security/
@@ -167,6 +167,7 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-amd:44
 4. **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to git/images.
 5. **Explicit hardware opt-in** — No device access by default; convenience flags for GPU, audio, input, KVM.
 6. **fuse-overlayfs hardlink workaround** — Containerfiles break ostree rpmdb hardlinks before `dnf install` to avoid database corruption (see hypervisor.Containerfile).
+7. **Image trust is scoped signing, not source gating** — The shipped `policy.json` (from `policy-hypervisor.json.template`) is **accept-by-default**: any registry serves any workload image without policy friction. Integrity is enforced only where this project ships signatures: `ghcr.io/__REGISTRY_NAMESPACE__` (the bootc images) and `registry.local/workloads` (CI-built workload images) are `sigstoreSigned` with `/etc/pki/containers/cosign.pub`, signatures fetched from the registries themselves (`registries.d/*.yaml` `use-sigstore-attachments`). Everything else — third-party pulls, zot's pull-through caches of upstream — is consciously unsigned: the signature asserts "bytes CI pushed", never provenance about upstream. The root→user local-override transfer (`containers-storage` transport) is policy-exempt by construction.
 
 ## Documentation
 
