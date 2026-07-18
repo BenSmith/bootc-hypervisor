@@ -1,5 +1,5 @@
 {
-  "default": [{"type": "reject"}],
+  "default": [{"type": "insecureAcceptAnything"}],
   "transports": {
     "docker": {
       "ghcr.io/__REGISTRY_NAMESPACE__": [
@@ -10,16 +10,7 @@
             "type": "matchRepository"
           }
         }
-      ],
-      "registry.local": [{"type": "insecureAcceptAnything"}],
-      "registry.fedoraproject.org": [{"type": "insecureAcceptAnything"}],
-      "docker.io": [{"type": "insecureAcceptAnything"}],
-      "quay.io": [{"type": "insecureAcceptAnything"}],
-      "codeberg.org": [{"type": "insecureAcceptAnything"}]
-    },
-    "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
-    "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},
-    "oci-archive": {"": [{"type": "insecureAcceptAnything"}]},
-    "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
+      ]
+    }
   }
 }
