@@ -37,7 +37,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-pihole-vpn:latest"
+image = "registry.local/workloads/pihole-vpn:latest"
 pull = "missing"
 
 [container.health]

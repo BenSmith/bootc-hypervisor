@@ -10,6 +10,15 @@
             "type": "matchRepository"
           }
         }
+      ],
+      "registry.local/workloads": [
+        {
+          "type": "sigstoreSigned",
+          "keyPath": "/etc/pki/containers/cosign.pub",
+          "signedIdentity": {
+            "type": "matchRepository"
+          }
+        }
       ]
     }
   }

@@ -365,12 +365,12 @@ class TestBuildJobs(MultiBuildBase):
         # only; a container without pull=never or its own [containers.build]
         # is not buildable even when the workload table exists.
         cfg = self._multi("stack", [
-            ("app", "registry.local/workload-stack:latest", "missing",
+            ("app", "registry.local/workloads/stack:latest", "missing",
              '# empty block\n'),
             ("db", "docker.io/library/postgres:16", "missing", ""),
         ], build='containerfile = "Containerfile.default"\n')
         self.assertEqual(cfg.build_images(),
-                         ["registry.local/workload-stack:latest"])
+                         ["registry.local/workloads/stack:latest"])
         self.assertFalse(cfg.is_buildable("db", "missing"))
 
     def test_empty_block_still_self_describes(self):

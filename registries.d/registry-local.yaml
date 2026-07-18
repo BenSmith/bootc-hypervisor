@@ -1,0 +1,7 @@
+# Sigstore signatures for registry.local live in the registry itself as
+# cosign-compatible attachments (sha256-<digest>.sig tags), not on a lookaside
+# server. Hosts need this to FETCH those signatures when policy.json enforces
+# sigstoreSigned for registry.local/workloads (the CI-signed workload images).
+docker:
+  registry.local:
+    use-sigstore-attachments: true

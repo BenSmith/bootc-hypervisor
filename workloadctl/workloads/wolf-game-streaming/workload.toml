@@ -2,7 +2,7 @@
 name = "wolf-game-streaming"
 
 [container]
-image = "registry.local/workload-wolf-game-streaming:latest"
+image = "registry.local/workloads/wolf-game-streaming:latest"
 pull = "missing"
 
 [container.health]

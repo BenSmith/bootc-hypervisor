@@ -2,7 +2,7 @@
 name = "wayfire-game-streaming"
 
 [container]
-image = "registry.local/workload-wayfire-game-streaming:latest"
+image = "registry.local/workloads/wayfire-game-streaming:latest"
 pull = "missing"
 systemd = "always"
 

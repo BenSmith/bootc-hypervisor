@@ -2,9 +2,10 @@ name: Build Workload Images
 
 # Builds the self-built workload container images (the `pull = never`,
 # localhost/<name>:latest bundles) and publishes them to the homelab registry
-# as registry.local/workload-<name>:<tag>. This is what lets a host consume a
-# prebuilt image (registry.local/workload-<name>:latest + pull=newer) instead
-# of running `workloadctl build` locally on every box.
+# as registry.local/workloads/<name>:<tag>. This is what lets a host consume a
+# prebuilt image (registry.local/workloads/<name>:latest + pull=missing,
+# refreshed via `workloadctl update`) instead of running `workloadctl build`
+# locally on every box.
 #
 # Mostly dormant: on push it only rebuilds the workloads whose bundle actually
 # changed (these images rarely move). workflow_dispatch can force a subset or

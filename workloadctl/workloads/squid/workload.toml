@@ -37,7 +37,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-squid:latest"
+image = "registry.local/workloads/squid:latest"
 pull = "missing"
 
 [container.health]

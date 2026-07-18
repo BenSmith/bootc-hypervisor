@@ -2,7 +2,7 @@
 name = "sunshine-game-streaming"
 
 [container]
-image = "registry.local/workload-sunshine-game-streaming:latest"
+image = "registry.local/workloads/sunshine-game-streaming:latest"
 pull = "missing"
 systemd = "always"
 

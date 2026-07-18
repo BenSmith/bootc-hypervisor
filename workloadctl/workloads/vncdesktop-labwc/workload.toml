@@ -41,7 +41,7 @@
 name = "vncdesktop-labwc"
 
 [container]
-image = "registry.local/workload-vncdesktop-labwc:latest"
+image = "registry.local/workloads/vncdesktop-labwc:latest"
 pull = "missing"
 
 [container.environment]

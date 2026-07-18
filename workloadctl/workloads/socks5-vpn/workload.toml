@@ -24,7 +24,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-socks5-vpn:latest"
+image = "registry.local/workloads/socks5-vpn:latest"
 pull = "missing"
 
 [container.health]

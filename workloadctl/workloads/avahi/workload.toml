@@ -45,7 +45,7 @@
 name = "avahi"
 
 [container]
-image = "registry.local/workload-avahi:latest"
+image = "registry.local/workloads/avahi:latest"
 pull = "missing"
 
 [container.environment]

@@ -2,7 +2,7 @@
 name = "vncdesktop-wayfire"
 
 [container]
-image = "registry.local/workload-vncdesktop-wayfire:latest"
+image = "registry.local/workloads/vncdesktop-wayfire:latest"
 pull = "missing"
 systemd = "always"
 

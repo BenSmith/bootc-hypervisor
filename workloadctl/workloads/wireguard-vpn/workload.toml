@@ -23,7 +23,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-wireguard-vpn:latest"
+image = "registry.local/workloads/wireguard-vpn:latest"
 pull = "missing"
 
 [container.health]

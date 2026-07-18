@@ -18,6 +18,7 @@ LABEL org.opencontainers.image.description="Bootc-based hypervisor with podman/l
 COPY policy.json /etc/containers/policy.json
 COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY registries.d/ghcr.io.yaml /etc/containers/registries.d/ghcr.io.yaml
+COPY registries.d/registry-local.yaml /etc/containers/registries.d/registry-local.yaml
 COPY registries.conf.d/mirrors.conf /etc/containers/registries.conf.d/mirrors.conf
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 # Work around pasta's loopback splice() throughput regression (see the file's

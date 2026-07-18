@@ -49,7 +49,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-proxy-stack:latest"
+image = "registry.local/workloads/proxy-stack:latest"
 pull = "missing"
 
 [container.health]

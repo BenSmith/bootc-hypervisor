@@ -74,20 +74,23 @@ def _all_buildable() -> list[str]:
 
 
 def _registry_ref(image: str) -> str:
-    """localhost/<x>:<tag> -> <REGISTRY>/workload-<x>:<tag>.
+    """localhost/<x>:<tag> -> <REGISTRY>/workloads/<x>:<tag>.
 
-    The `workload-` prefix namespaces self-built images in the registry away
+    The `workloads/` path namespaces self-built images in the registry away
     from the bootc images (hypervisor-bootc, fedora-bootc-minimal) and the
-    pull-through upstream caches. An image whose [container].image already
-    names the registry (the zot-consuming bundles) passes through unchanged —
-    the build tagged it push-ready.
+    pull-through upstream caches — and, being a real path component, it is
+    what policy.json's `registry.local/workloads` sigstoreSigned scope
+    matches (a flat name-prefix like `workload-<x>` is not scopeable). An
+    image whose [container].image already names the registry (the
+    zot-consuming bundles) passes through unchanged — the build tagged it
+    push-ready.
     """
     if image.startswith(f"{REGISTRY}/"):
         return image
     ref = image
     if ref.startswith("localhost/"):
         ref = ref[len("localhost/"):]
-    return f"{REGISTRY}/workload-{ref}"
+    return f"{REGISTRY}/workloads/{ref}"
 
 
 def cmd_list() -> int:

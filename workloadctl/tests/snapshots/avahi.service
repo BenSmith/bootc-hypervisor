@@ -21,7 +21,7 @@ ExecStartPre=-/usr/bin/rm -f /run/user/__UID__/libpod/tmp/pause.pid /run/user/__
 
 # Image pulling handled by podman run --pull=missing
 
-ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.5 --network="host" --env HOST_IP=${HOST_IP} --env ALIASES="zot registry" --health-cmd "avahi-daemon --check" --health-interval=60s --health-timeout=35s --health-retries=3 --health-start-period=10s --health-on-failure=kill "registry.local/workload-avahi:latest"
+ExecStart=/usr/bin/podman run --name "workload-avahi" --hostname "avahi" --rm --replace --init --sdnotify=ignore --pull=missing --log-driver=passthrough --userns=keep-id:uid=0,gid=0 --security-opt=seccomp=/usr/share/containers/seccomp-workload-baseline.json --memory=128M --cpus=0.5 --network="host" --env HOST_IP=${HOST_IP} --env ALIASES="zot registry" --health-cmd "avahi-daemon --check" --health-interval=60s --health-timeout=35s --health-retries=3 --health-start-period=10s --health-on-failure=kill "registry.local/workloads/avahi:latest"
 
 ExecStop=/usr/bin/podman stop -t 10 "workload-avahi"
 ExecStopPost=-/usr/bin/podman rm -f -t0 "workload-avahi"

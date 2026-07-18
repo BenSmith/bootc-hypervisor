@@ -45,7 +45,7 @@
 name = "vncdesktop-sway"
 
 [container]
-image = "registry.local/workload-vncdesktop-sway:latest"
+image = "registry.local/workloads/vncdesktop-sway:latest"
 pull = "missing"
 systemd = "always"
 

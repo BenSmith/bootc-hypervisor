@@ -59,7 +59,7 @@ required_files = [
 ]
 
 [container]
-image = "registry.local/workload-smb-server:latest"
+image = "registry.local/workloads/smb-server:latest"
 pull = "missing"
 
 # The smb-server image ships only the `samba` package (server side); smbclient
