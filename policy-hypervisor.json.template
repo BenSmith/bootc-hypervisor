@@ -1,7 +1,8 @@
 {
-  "default": [{"type": "insecureAcceptAnything"}],
+  "default": [{"type": "reject"}],
   "transports": {
     "docker": {
+      "": [{"type": "insecureAcceptAnything"}],
       "ghcr.io/__REGISTRY_NAMESPACE__": [
         {
           "type": "sigstoreSigned",
@@ -11,7 +12,7 @@
           }
         }
       ],
-      "registry.local/workloads": [
+      "registry.local": [
         {
           "type": "sigstoreSigned",
           "keyPath": "/etc/pki/containers/cosign.pub",
@@ -20,6 +21,10 @@
           }
         }
       ]
-    }
+    },
+    "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},
+    "oci-archive": {"": [{"type": "insecureAcceptAnything"}]},
+    "docker-daemon": {"": [{"type": "insecureAcceptAnything"}]}
   }
 }
