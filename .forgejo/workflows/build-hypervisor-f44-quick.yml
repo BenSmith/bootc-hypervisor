@@ -56,7 +56,10 @@ jobs:
 
       - name: Render policy.json
         env:
-          OWNER: ${{ github.repository_owner }}
+          # Hardcoded canonical ghcr publish namespace (ghcr.io/bensmith); the
+          # Forgejo mirror's github.repository_owner is the Forgejo user, not the
+          # ghcr owner. See build-hypervisor.yml for the full rationale.
+          OWNER: bensmith
         run: |
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
               policy-hypervisor.json.template > policy.json

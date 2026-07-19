@@ -73,11 +73,14 @@ jobs:
 
       - name: Render policy.json
         env:
-          OWNER: ${{ github.repository_owner }}
+          # Hardcoded: the ghcr.io sigstore scope must name the canonical
+          # publish namespace (ghcr.io/bensmith, where the GitHub pipeline signs
+          # and pushes). On the Forgejo mirror github.repository_owner is the
+          # Forgejo user (ben), not the ghcr owner, so deriving it here scopes
+          # the rule to a namespace that holds nothing. registry.local trust
+          # comes from the template.
+          OWNER: bensmith
         run: |
-          # Scope the ghcr.io rule to this repo's owner (matches the GitHub
-          # pipeline's ${OWNER}) rather than hardcoding a namespace, so forks
-          # trust their own subtree. registry.local trust comes from the template.
           sed -e "s|__REGISTRY_NAMESPACE__|${OWNER}|g" \
               policy-minimal.json.template > policy.json
           cat policy.json
