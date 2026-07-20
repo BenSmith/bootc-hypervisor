@@ -233,9 +233,8 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     mkdir -p /etc/systemd/resolved.conf.d && \
     printf '[Resolve]\nMulticastDNS=resolve\n' > /etc/systemd/resolved.conf.d/10-mdns.conf
 
-RUN set -eux; \
-    dnf -y install lvm2; \
-    printf 'add_dracutmodules+=" lvm dm "\n' \
+# force lvm into initramfs so it will activate the lv during boot
+RUN printf 'add_dracutmodules+=" lvm dm "\n' \
       > /usr/lib/dracut/dracut.conf.d/50-lvm.conf; \
     kver=$(cd /usr/lib/modules && echo *); \
     dracut --reproducible -f --no-hostonly --add ostree \
