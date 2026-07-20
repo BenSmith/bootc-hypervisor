@@ -2,7 +2,7 @@
 
 proxy := env_var_or_default('HTTP_PROXY', '')
 build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
-local_registry := 'registry.local:5000'
+local_registry := 'registry.local'
 tag := `date +%Y%m%d-%H%M`
 fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml`)
 
@@ -268,7 +268,7 @@ build-iso-nvidia-negativo17 rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-nvidia:negativo17 nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
 
 build-iso-nvidia-negativo17-local rootfs="xfs":
-  @just _build-iso {{local_registry}}/hypervisor-nvidia:negativo17-latest nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
+  @just _build-iso {{local_registry}}/hypervisor-nvidia:negativo17 nvidia-negativo17 HV-NV-NEG17 hypervisor-nvidia-negativo17 {{rootfs}}
 
 build-iso-amd rootfs="xfs":
   @just _build-iso ghcr.io/bensmith/hypervisor-amd:latest amd HV-AMD hypervisor-amd {{rootfs}}
