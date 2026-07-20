@@ -237,8 +237,10 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
 RUN printf 'add_dracutmodules+=" lvm dm "\n' \
       > /usr/lib/dracut/dracut.conf.d/50-lvm.conf; \
     kver=$(cd /usr/lib/modules && echo *); \
-    dracut --reproducible -f --no-hostonly --add ostree \
-      /usr/lib/modules/$kver/initramfs.img $kver
+    mkdir -p /tmp/dracut; \
+    dracut --reproducible -f --no-hostonly --add ostree --tmpdir /tmp/dracut \
+      /usr/lib/modules/$kver/initramfs.img $kver; \
+    rm -rf /tmp/dracut
 
 # SELinux: allow containers to access host devices (GPU, input)
 RUN setsebool -P container_use_devices on
