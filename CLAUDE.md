@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two coupled projects in one repo:
 
 1. **Bootc hypervisor images** (repo root) — immutable Fedora bootc OS images for a homelab virtualization host. Built as a layered chain of Containerfiles, published to `ghcr.io/bensmith/`, signed with cosign (keyless OIDC). Atomic upgrades + instant rollback via `bootc`.
-2. **workloadctl** (`workloadctl/`) — a standalone, RPM-packaged Python tool (no bootc dependency) that turns `/etc/workloads.d/*.toml` files into isolated rootless-podman container workloads *and* KVM/QEMU VMs. It ships inside the hypervisor image but is developed and tested independently.
+2. **workloadctl** (`workloadctl/`) — a standalone, RPM-packaged Python tool (no bootc dependency) that turns `/etc/workloads.d/<name>/workload.toml` bundles into isolated rootless-podman container workloads *and* KVM/QEMU VMs. It ships inside the hypervisor image but is developed and tested independently.
 
 The image is the *delivery vehicle*; workloadctl is where almost all application logic lives.
 
@@ -73,17 +73,16 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 - `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
 - `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (`VM_BRIDGE_NAME`, UID math).
 - `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics).
-- `workloads.d/` — real example/shipped workload TOMLs. `docs/schema-reference.toml` is the annotated full schema.
+- `workloads/<name>/` — the shipped bundles. Each is a directory with `workload.toml` at minimum, plus optional extras it needs: a `Containerfile` for self-built images, `README.md`, `cloud-init/`, additional unit files. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.
-- `containers/<name>/` — custom container images that some workloads use, each with its own `Containerfile` + `build.sh`.
 
 ### Workload topologies
 
-`workload.mode` selects how a TOML maps to units: `single` (one `[container]`), `pod` (multiple `[[containers]]` sharing a netns, talk on localhost), `bridge` (per-container netns on an auto-created `workload-<name>-net`, resolve by container name). The generator's `normalize_containers()` collapses single/multi shapes so single-container TOMLs produce byte-identical units. Container-targeted CLI commands accept `<workload>/<container>`. `workloads.d/webproxy-demo.toml` is the smallest bridge-mode example.
+`workload.mode` selects how a TOML maps to units: `single` (one `[container]`), `pod` (multiple `[[containers]]` sharing a netns, talk on localhost), `bridge` (per-container netns on an auto-created `workload-<name>-net`, resolve by container name). The generator's `normalize_containers()` collapses single/multi shapes so single-container TOMLs produce byte-identical units. Container-targeted CLI commands accept `<workload>/<container>`. `workloads/webproxy-demo/` is the smallest bridge-mode example.
 
 ### VM workloads
 
-A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads.d/virtual-forgejo.toml` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
 
 ## Secrets
 
