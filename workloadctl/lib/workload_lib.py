@@ -777,6 +777,57 @@ def expand_volume_path(vol_spec: str, home_dir: str) -> str:
     return f"{host}:{guest}:{opts}"
 
 
+# --- Instance token expansion ---
+
+# ${WORKLOAD_*} tokens usable in workload.toml values that must name the
+# instance. Deliberately the same vocabulary cmd_provision.host_setup_env()
+# exports to [host] setup scripts, so a bundle spells its own identity one way
+# whether it's doing so from TOML or from shell.
+WORKLOAD_TOKEN_PATTERN = re.compile(r'\$\{(WORKLOAD_[A-Z_]+)\}')
+
+
+def workload_tokens(name: str) -> dict:
+    """The ${WORKLOAD_*} token table for one instance."""
+    return {
+        "WORKLOAD_NAME": name,
+        "WORKLOAD_INSTANCE_DIR": str(workload_config_dir() / name),
+        "WORKLOAD_ROOT_DIR": str(workload_root_dir(name)),
+        "WORKLOAD_STATE_DIR": str(workload_state_dir(name)),
+        "WORKLOAD_DATA_DIR": str(workload_data_dir(name)),
+    }
+
+
+# Derived from the table itself so the two can't drift; the instance name is
+# irrelevant to the key set.
+WORKLOAD_TOKEN_NAMES = frozenset(workload_tokens("_"))
+
+
+def expand_workload_tokens(value: str, name: str) -> str:
+    """Expand ${WORKLOAD_*} tokens in a config value against instance `name`.
+
+    Exists because a bundle can be instantiated under a different name
+    (`init --as`), so any absolute path a TOML hardcodes for *itself* is wrong
+    for every instance but the first. The alternative — writing
+    /etc/workloads.d/<bundle>/... literally — silently points at a workload
+    that doesn't exist.
+
+    Unknown WORKLOAD_ tokens raise: a typo left to pass through would reach
+    podman verbatim as a path that can never resolve, and failing at generate
+    time with the token named is far easier to diagnose than a container that
+    won't start.
+    """
+    tokens = workload_tokens(name)
+
+    def sub(m):
+        key = m.group(1)
+        if key not in tokens:
+            raise ValueError(
+                f"unknown token ${{{key}}} (known: {', '.join(sorted(tokens))})")
+        return tokens[key]
+
+    return WORKLOAD_TOKEN_PATTERN.sub(sub, value)
+
+
 # --- Quoting ---
 
 def dq(s: str) -> str:

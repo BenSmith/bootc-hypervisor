@@ -18,7 +18,8 @@ import vm
 from workload_lib import (
     WORKLOADS_BASE, USERNAME_PREFIX, MAX_NAME_LENGTH, GENERATOR_OWNED_DIRECTIVES,
     workload_username, workload_service_name, workload_container_name,
-    workload_home_dir, workload_state_dir, expand_volume_path, dq,
+    workload_home_dir, workload_state_dir, expand_volume_path,
+    expand_workload_tokens, dq,
     infer_workload_mode, normalize_containers,
     virtiofs_tag, parse_volume_spec,
     selinux_module_name, selinux_type_name,
@@ -417,6 +418,43 @@ class TestExpandVolumePath(unittest.TestCase):
     def test_traversal_rejected(self):
         with self.assertRaises(ValueError):
             expand_volume_path("./../escape:/x", self.home)
+
+
+class TestExpandWorkloadTokens(unittest.TestCase):
+    def test_instance_dir(self):
+        self.assertEqual(
+            expand_workload_tokens("seccomp=${WORKLOAD_INSTANCE_DIR}/seccomp.json", "games"),
+            "seccomp=/etc/workloads.d/games/seccomp.json")
+
+    def test_all_tokens(self):
+        self.assertEqual(
+            expand_workload_tokens(
+                "${WORKLOAD_NAME}|${WORKLOAD_ROOT_DIR}|"
+                "${WORKLOAD_STATE_DIR}|${WORKLOAD_DATA_DIR}", "games"),
+            "games|/var/lib/workloads/games|"
+            "/var/lib/workloads/games/state|/var/lib/workloads/games/data")
+
+    def test_multiple_occurrences(self):
+        self.assertEqual(expand_workload_tokens("${WORKLOAD_NAME}-${WORKLOAD_NAME}", "w"),
+                         "w-w")
+
+    def test_value_without_tokens_untouched(self):
+        self.assertEqual(expand_workload_tokens("label=disable", "games"), "label=disable")
+
+    def test_non_workload_dollar_braces_untouched(self):
+        """Only WORKLOAD_-prefixed names are ours; leave anything else alone."""
+        self.assertEqual(expand_workload_tokens("${HOME}/x", "games"), "${HOME}/x")
+
+    def test_unknown_token_raises(self):
+        with self.assertRaises(ValueError) as cm:
+            expand_workload_tokens("${WORKLOAD_HOME_DIR}/x", "games")
+        self.assertIn("WORKLOAD_HOME_DIR", str(cm.exception))
+
+    def test_expands_to_instance_not_bundle(self):
+        """The whole point: a bundle instantiated under another name must
+        resolve to the instance's paths, never the bundle's."""
+        out = expand_workload_tokens("${WORKLOAD_INSTANCE_DIR}/seccomp.json", "games")
+        self.assertNotIn("gamedev-sway", out)
 
 
 class TestDq(unittest.TestCase):

@@ -10,12 +10,16 @@ vm.validate_vm_config.
 Installed to /usr/libexec/workloadctl/validation.py.
 """
 
+import re
+
 from workload_lib import (
     MAX_CONTAINER_NAME_LENGTH,
     CONTAINER_NAME_PATTERN,
     MAX_NAME_LENGTH,
     NAME_PATTERN,
     HOST_USERNS_OPT_IN,
+    WORKLOAD_TOKEN_NAMES,
+    WORKLOAD_TOKEN_PATTERN,
     _LIFTED_CONTAINER_KEYS,
     infer_workload_kind,
     infer_workload_mode,
@@ -80,6 +84,52 @@ def _reject_control_chars(node, path: str, errors: list[str]):
             _reject_control_chars(v, f"{path}[{i}]", errors)
 
 
+# Config paths whose values get expand_workload_tokens() applied, as produced by
+# the _reject_* walkers: "security.security_opt[0]" in single mode,
+# "containers[0].security.security_opt[0]" in pod/bridge mode. Widening token
+# expansion to another field means adding it here, or validate will reject the
+# very syntax the generator just learned to honor.
+_TOKEN_EXPANDING_PATH = re.compile(r'(?:^|\.)security\.security_opt\[\d+\]$')
+
+
+def _reject_bad_workload_tokens(node, path: str, errors: list[str]):
+    """Recursively flag ${WORKLOAD_*} tokens that will not be expanded.
+
+    Two failure modes, both of which otherwise surface far from their cause:
+
+      - a misspelled token in a field that *does* expand — the generator drops
+        the whole option and warns into the journal at boot, which is a long
+        way from the person who typed it;
+      - a correct token in a field that does not expand — it reaches podman as
+        a literal "${WORKLOAD_DATA_DIR}" path that can never resolve.
+
+    Catching both at validate time is the point: the bug this guards against
+    validated clean and failed halfway through host setup.
+    """
+    if isinstance(node, str):
+        for m in WORKLOAD_TOKEN_PATTERN.finditer(node):
+            token = m.group(1)
+            where = path or "value"
+            if token not in WORKLOAD_TOKEN_NAMES:
+                errors.append(
+                    f"{where}: unknown token ${{{token}}} "
+                    f"(known: {', '.join(sorted(WORKLOAD_TOKEN_NAMES))})"
+                )
+            elif not _TOKEN_EXPANDING_PATH.search(path):
+                errors.append(
+                    f"{where}: ${{{token}}} is not expanded here "
+                    f"(only security_opt expands ${{WORKLOAD_*}} tokens); "
+                    f"it would reach podman as a literal string"
+                )
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            child = f"{path}.{k}" if path else str(k)
+            _reject_bad_workload_tokens(v, child, errors)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _reject_bad_workload_tokens(v, f"{path}[{i}]", errors)
+
+
 def _vm_scannable(config: dict) -> dict:
     """A copy of a VM config with [vm.cloud_init].template_vars pruned.
 
@@ -107,11 +157,15 @@ def validate_workload_config(config: dict) -> list[str]:
 
     if kind == "vm":
         _reject_control_chars(_vm_scannable(config), "", errors)
+        # No VM field expands tokens, so any ${WORKLOAD_*} here is a mistake —
+        # the walker's own path check reports it as such.
+        _reject_bad_workload_tokens(_vm_scannable(config), "", errors)
         errors.extend(validate_vm_config(config))
         return errors
 
     # --- container validation ---
     _reject_control_chars(config, "", errors)
+    _reject_bad_workload_tokens(config, "", errors)
 
     has_container = "container" in config
     has_containers = "containers" in config

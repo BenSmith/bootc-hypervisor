@@ -301,6 +301,77 @@ class TestControlCharInjection(unittest.TestCase):
         )
 
 
+class TestWorkloadTokenValidation(unittest.TestCase):
+    """Boundary: a ${WORKLOAD_*} token that will not be expanded must be
+    rejected at validate time rather than reaching podman as a literal path.
+
+    Only security_opt expands these. The two ways to get it wrong — a typo in a
+    field that does expand, and a correct token in a field that doesn't — both
+    otherwise fail late: the first as a dropped option warned about in the boot
+    journal, the second as a container that won't start.
+    """
+
+    def _base(self):
+        return {
+            "workload": {"name": "app"},
+            "container": {"image": "localhost/x:latest"},
+        }
+
+    def _errors(self, cfg):
+        from validation import validate_workload_config
+        return validate_workload_config(cfg)
+
+    def test_valid_token_in_security_opt_accepted(self):
+        cfg = self._base()
+        cfg["security"] = {"security_opt": ["seccomp=${WORKLOAD_INSTANCE_DIR}/s.json"]}
+        self.assertEqual(self._errors(cfg), [])
+
+    def test_unknown_token_rejected(self):
+        cfg = self._base()
+        cfg["security"] = {"security_opt": ["seccomp=${WORKLOAD_HOME_DIR}/s.json"]}
+        errors = self._errors(cfg)
+        self.assertTrue(any("unknown token" in e and "WORKLOAD_HOME_DIR" in e
+                            for e in errors), errors)
+
+    def test_valid_token_in_non_expanding_field_rejected(self):
+        for mutate in (
+            lambda c: c.__setitem__("storage", {"volumes": ["${WORKLOAD_DATA_DIR}/x:/x"]}),
+            lambda c: c.__setitem__("devices", {"devices": ["${WORKLOAD_ROOT_DIR}/dev"]}),
+            lambda c: c["container"].__setitem__(
+                "environment", {"K": "${WORKLOAD_NAME}"}),
+        ):
+            cfg = self._base()
+            mutate(cfg)
+            errors = self._errors(cfg)
+            self.assertTrue(any("not expanded here" in e for e in errors),
+                            f"unexpanded token not rejected: {errors}")
+
+    def test_multi_container_security_opt_accepted(self):
+        cfg = {
+            "workload": {"name": "app", "mode": "pod"},
+            "containers": [{
+                "name": "a",
+                "container": {"image": "localhost/x:latest"},
+                "security": {"security_opt": ["seccomp=${WORKLOAD_INSTANCE_DIR}/s.json"]},
+            }],
+        }
+        self.assertEqual(self._errors(cfg), [])
+
+    def test_no_tokens_is_clean(self):
+        cfg = self._base()
+        cfg["security"] = {"security_opt": ["label=disable"]}
+        self.assertEqual(self._errors(cfg), [])
+
+    def test_vm_config_tokens_rejected(self):
+        """No VM field expands tokens, so any of them there is a mistake."""
+        cfg = {
+            "workload": {"name": "vm1"},
+            "vm": {"image": "x.qcow2", "volumes": ["${WORKLOAD_DATA_DIR}/v:/v"]},
+        }
+        self.assertTrue(any("not expanded here" in e for e in self._errors(cfg)),
+                        self._errors(cfg))
+
+
 class TestVmControlCharInjection(unittest.TestCase):
     """A VM config reaches root units too, and gets the same guard.
 

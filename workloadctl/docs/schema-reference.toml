@@ -827,6 +827,23 @@ virtualization = true
 #   # Disable SELinux for troubleshooting
 #   security_opt = ["label=disable"]
 #
+# ${WORKLOAD_*} tokens expand against the *instance*, so a bundle can point at
+# a per-instance file without hardcoding its own name (which `init --as` would
+# make wrong). These five, a subset of the seven a [host] setup script gets in
+# its environment (WORKLOAD_BUNDLE and WORKLOAD_USER are shell-only):
+#   ${WORKLOAD_NAME} ${WORKLOAD_INSTANCE_DIR} ${WORKLOAD_ROOT_DIR}
+#   ${WORKLOAD_STATE_DIR} ${WORKLOAD_DATA_DIR}
+#
+# security_opt is currently the ONLY field that expands them. `validate`
+# rejects a ${WORKLOAD_*} token anywhere else rather than letting it reach
+# podman as a literal string.
+#
+#   # Read a seccomp profile the setup script wrote beside this workload.toml
+#   security_opt = ["seccomp=${WORKLOAD_INSTANCE_DIR}/seccomp.json"]
+#
+# An unknown ${WORKLOAD_*} token drops the whole option with a warning rather
+# than blocking boot; a dropped seccomp= falls back to the baseline profile.
+#
 # security_opt = []
 
 # Optional: Ship a per-workload SELinux type

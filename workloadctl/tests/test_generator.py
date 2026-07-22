@@ -2084,6 +2084,39 @@ class TestGeneratorContainerFlags(unittest.TestCase):
         # baseline is suppressed when the workload provides its own seccomp
         self.assertNotIn("seccomp=", svc.replace("seccomp=/custom.json", ""))
 
+    def test_security_opt_expands_instance_tokens(self):
+        """A bundle points at a per-instance file via ${WORKLOAD_*} rather than
+        hardcoding its own name, which `init --as` would make wrong."""
+        svc, _ = self._gen("""
+            [security]
+            security_opt = ["seccomp=${WORKLOAD_INSTANCE_DIR}/seccomp.json"]
+        """, name="games")
+        self.assertIn(
+            f"--security-opt=seccomp={Path(self.config_dir) / 'games'}/seccomp.json", svc)
+        self.assertNotIn("${WORKLOAD_INSTANCE_DIR}", svc)
+
+    def test_security_opt_unknown_token_skips_workload(self):
+        """A bad token fails validation, so the generator logs it and emits no
+        unit at all — it never reaches the expansion step. The generator still
+        keeps its own drop-and-warn fallback (see _base_run_args) for a config
+        that somehow bypasses validate; expand_workload_tokens() is unit-tested
+        directly for that path."""
+        write_config(self.config_dir, "app", """\
+            [workload]
+            name = "app"
+
+            [container]
+            image = "myapp"
+
+            [security]
+            security_opt = ["seccomp=${WORKLOAD_NOPE}/x.json"]
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        # Exit 0 regardless: a bad config must never block boot.
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((Path(self.services_dir) / "workload-app.service").exists())
+        self.assertIn("WORKLOAD_NOPE", result.stderr)
+
     def test_privileged_emits_flag_and_warns(self):
         svc, result = self._gen("""
             [security]

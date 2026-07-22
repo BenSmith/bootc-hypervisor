@@ -64,18 +64,24 @@ def _workload_uid(conf_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _normalize(text: str, uid: str | None, svc_dir: str | None = None) -> str:
+def _normalize(text: str, uid: str | None, svc_dir: str | None = None,
+               cfg_dir: str | None = None) -> str:
     """Mask machine-dependent fragments before comparing.
 
     - The workload's allocated UID → __UID__
     - The test's per-run services tmpdir → __SVCDIR__ (setup service's
       systemd-sysusers ExecStart references SERVICES_DIR, which we pass as
       a tempdir during tests)
+    - The test's per-run config tmpdir → __CFGDIR__ (a ${WORKLOAD_INSTANCE_DIR}
+      token in security_opt expands to the live config dir, which is a
+      TemporaryDirectory here and would otherwise differ on every run)
     """
     if uid:
         text = re.sub(rf'(?<!\d){re.escape(uid)}(?!\d)', '__UID__', text)
     if svc_dir:
         text = text.replace(svc_dir, "__SVCDIR__")
+    if cfg_dir:
+        text = text.replace(cfg_dir, "__CFGDIR__")
     return text
 
 
@@ -155,7 +161,7 @@ class TestWorkloadSnapshots(unittest.TestCase):
                     outputs.append((suffix, unit_path.read_text()))
 
                 for snap_name, raw in outputs:
-                    actual = _normalize(raw, uid, str(svc))
+                    actual = _normalize(raw, uid, str(svc), str(cfg))
                     snap = SNAPSHOTS_DIR / snap_name
                     if update or not snap.exists():
                         snap.write_text(actual)

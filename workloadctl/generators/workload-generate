@@ -65,7 +65,7 @@ try:
         WORKLOAD_CONFIG_DIR, GENERATOR_OWNED_DIRECTIVES,
         ENABLED_MARKER_NAME, iter_workloads,
         workload_username, workload_root_dir, workload_state_dir, workload_data_dir,
-        expand_volume_path, dq, uq,
+        expand_volume_path, expand_workload_tokens, dq, uq,
         normalize_containers, infer_workload_mode,
         infer_workload_kind,
         get_next_uid, subid_lock,
@@ -804,7 +804,22 @@ def _security_args(container, config, mode, name, privileged, extra_groups):
     for cap in capabilities:
         args.append(f"--cap-add={cap}")
 
+    # ${WORKLOAD_*} expands against the *instance* name, not the bundle's: a
+    # seccomp= profile written by a [host] setup script lives beside the
+    # instance's own workload.toml, and `init --as` makes those two names
+    # differ. Pure string substitution — no I/O, boot-path safe.
     security_opts = container.get("security", {}).get("security_opt", [])
+    expanded_opts = []
+    for opt in security_opts:
+        try:
+            expanded_opts.append(expand_workload_tokens(opt, name))
+        except ValueError as e:
+            # Never block boot on a bad token. Dropping the opt is the
+            # conservative direction — a dropped seccomp= falls back to the
+            # baseline below rather than running unfiltered.
+            log_msg(f"WARNING: {name}: ignoring security_opt {opt!r}: {e}",
+                    level="warning")
+    security_opts = expanded_opts
     for opt in security_opts:
         args.append(f"--security-opt={opt}")
 
