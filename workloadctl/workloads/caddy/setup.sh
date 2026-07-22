@@ -13,8 +13,13 @@
 # key file. Idempotent. Called by workloadctl enable/disable.
 set -euo pipefail
 
-WORKLOAD_NAME="caddy"
-DATA_DIR="/var/lib/workloads/${WORKLOAD_NAME}/data"
+# Instance context comes from workloadctl (see host_setup_env() in
+# lib/cmd_provision.py). Required, not defaulted: this bundle can be
+# instantiated under another name via `init --as`, and falling back to the
+# bundle name here would silently provision paths for a workload that doesn't
+# exist.
+WORKLOAD_NAME="${WORKLOAD_NAME:?not set — run via workloadctl enable/disable}"
+DATA_DIR="${WORKLOAD_DATA_DIR:?not set — run via workloadctl enable/disable}"
 PKI_DIR="${DATA_DIR}/pki"
 CA_KEY="${DATA_DIR}/homelab-root.key"
 SNIPPET="${PKI_DIR}/homelab-ca.caddyfile"

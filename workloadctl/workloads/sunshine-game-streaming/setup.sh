@@ -9,10 +9,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RELAY_SERVICE="sunshine-udev-relay.service"
+
+# Instance context comes from workloadctl (see host_setup_env() in
+# lib/cmd_provision.py). Required, not defaulted: this bundle can be
+# instantiated under another name via `init --as`, and falling back to the
+# bundle name here would silently provision paths for a workload that doesn't
+# exist.
+WORKLOAD_NAME="${WORKLOAD_NAME:?not set — run via workloadctl enable/disable}"
+WORKLOAD_USER="${WORKLOAD_USER:?not set — run via workloadctl enable/disable}"
+
+# Keyed to the instance, not the bundle: the relay unit is host-global, so two
+# instances of this bundle would otherwise fight over one unit file.
+RELAY_SERVICE="${WORKLOAD_NAME}-udev-relay.service"
 RELAY_UNIT="/etc/systemd/system/${RELAY_SERVICE}"
-WORKLOAD_NAME="sunshine-game-streaming"
-WORKLOAD_USER="_wl-${WORKLOAD_NAME}"
 
 # Homelab-CA-signed TLS cert for Sunshine's web UI (https://<host>:47990).
 # The leaf is minted here on the host and mounted read-only into the container

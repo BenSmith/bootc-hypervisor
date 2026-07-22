@@ -739,6 +739,20 @@ pull = "never"
 setup = "setup.sh"
 """
 
+# An instance whose bundle differs from its name, as `init --as` produces.
+_HOST_BUNDLE_TOML = """\
+[workload]
+name = "{name}"
+bundle = "{bundle}"
+
+[container]
+image = "example.com/test:latest"
+pull = "never"
+
+[host]
+setup = "setup.sh"
+"""
+
 _GROUPS_TOML = """\
 [workload]
 name = "{name}"
@@ -1319,6 +1333,27 @@ class TestRunHostSetup(unittest.TestCase):
                 with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
                     cmd_provision.run_host_setup(cfg, "enable")
             self.assertEqual(run_mock.call_args.args[0][1], "enable")
+
+    def test_env_carries_instance_not_bundle(self):
+        """A renamed instance (`init --as`) must run its bundle's setup script
+        against the *instance's* name, user and dirs. Passing the bundle name
+        would send the script at /var/lib/workloads/<bundle> while enable's
+        other steps used <instance>, half-provisioning the host."""
+        with _cfg(_HOST_BUNDLE_TOML, 'games', bundle='gamedev-sway') as cfg:
+            with patch.object(cmd_provision.Path, 'exists', return_value=True):
+                with patch.object(cmd_provision.subprocess, 'run',
+                                  return_value=MagicMock(returncode=0)) as run_mock:
+                    cmd_provision.run_host_setup(cfg, "enable")
+            env = run_mock.call_args.kwargs["env"]
+        self.assertEqual(env["WORKLOAD_NAME"], "games")
+        self.assertEqual(env["WORKLOAD_BUNDLE"], "gamedev-sway")
+        self.assertEqual(env["WORKLOAD_USER"], "_wl-games")
+        self.assertEqual(env["WORKLOAD_ROOT_DIR"], "/var/lib/workloads/games")
+        self.assertEqual(env["WORKLOAD_DATA_DIR"], "/var/lib/workloads/games/data")
+        self.assertEqual(env["WORKLOAD_STATE_DIR"], "/var/lib/workloads/games/state")
+        self.assertTrue(env["WORKLOAD_INSTANCE_DIR"].endswith("/games"))
+        # The ambient environment is inherited, not replaced.
+        self.assertIn("PATH", env)
 
 
 # ── SELinux helpers ──────────────────────────────────────────────────────────

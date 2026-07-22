@@ -22,6 +22,10 @@ from cli_log import error, info, warn
 from workload_lib import (
     selinux_module_name,
     selinux_type_name,
+    workload_config_dir,
+    workload_data_dir,
+    workload_state_dir,
+    workload_username,
     WORKLOAD_BUNDLES_DIR,
     NAME_PATTERN,
     RUN_SYSTEMD_SYSTEM,
@@ -477,10 +481,38 @@ def start_service(config: WorkloadConfig):
     subprocess.run(["systemctl", "start", "--no-block", config.service_name], check=True)
 
 
+def host_setup_env(config: WorkloadConfig) -> dict:
+    """The instance context a [host] setup script runs against.
+
+    A setup script lives in the *bundle* but acts on an *instance*, and those
+    are different names the moment someone runs `init --as` / `duplicate`: the
+    bundle stays `gamedev-sway` while the instance is `games`. A script that
+    hardcodes its own bundle name therefore touches paths belonging to a
+    workload that doesn't exist — and because enable's earlier steps (users,
+    units, unit symlinks) already used the *instance* name, the two halves
+    disagree and the host is left half-provisioned.
+
+    So the resolved names are passed in rather than left to the script to
+    guess. Scripts should treat these as required (`${WORKLOAD_NAME:?}`) —
+    defaulting to a baked-in literal reintroduces exactly the bug.
+    """
+    name = config.name
+    return {
+        "WORKLOAD_NAME": name,
+        "WORKLOAD_BUNDLE": config.bundle,
+        "WORKLOAD_USER": workload_username(name),
+        "WORKLOAD_INSTANCE_DIR": str(workload_config_dir() / name),
+        "WORKLOAD_ROOT_DIR": str(workload_root_dir(name)),
+        "WORKLOAD_STATE_DIR": str(workload_state_dir(name)),
+        "WORKLOAD_DATA_DIR": str(workload_data_dir(name)),
+    }
+
+
 def run_host_setup(config: WorkloadConfig, action: str):
     """Run host setup script if configured in [host] section.
 
-    The setup script receives 'enable' or 'disable' as its first argument.
+    The setup script receives 'enable' or 'disable' as its first argument, and
+    the instance context of host_setup_env() in its environment.
     It is expected to be idempotent in both directions.
     """
     setup_script = config.config.get("host", {}).get("setup", "")
@@ -499,6 +531,7 @@ def run_host_setup(config: WorkloadConfig, action: str):
     result = subprocess.run(
         [str(script_path), action],
         capture_output=False,
+        env={**os.environ, **host_setup_env(config)},
     )
     if result.returncode != 0:
         error(f"  Error: Host setup script exited with code {result.returncode}")
