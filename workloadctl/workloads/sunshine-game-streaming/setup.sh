@@ -8,8 +8,6 @@
 # Idempotent in both directions. Called by workloadctl enable/disable.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 # Instance context comes from workloadctl (see host_setup_env() in
 # lib/cmd_provision.py). Required, not defaulted: this bundle can be
 # instantiated under another name via `init --as`, and falling back to the
@@ -17,6 +15,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # exist.
 WORKLOAD_NAME="${WORKLOAD_NAME:?not set — run via workloadctl enable/disable}"
 WORKLOAD_USER="${WORKLOAD_USER:?not set — run via workloadctl enable/disable}"
+
+# The udev-relay helper, resolved through the same /etc→/usr override chain
+# workloadctl applies to setup.sh itself (resolve_control_file). We can't reach
+# it via $0's dir: the override chain is per-file, so this script may be running
+# from an operator override in ${WORKLOAD_INSTANCE_DIR} that carries only
+# setup.sh, with no udev-relay beside it. Prefer an override copy, else the
+# shipped bundle's — the shell mirror of ${WORKLOAD_INSTANCE_DIR}→${WORKLOAD_BUNDLE_DIR}.
+UDEV_RELAY="${WORKLOAD_INSTANCE_DIR:?not set — run via workloadctl enable/disable}/udev-relay"
+[ -f "$UDEV_RELAY" ] || UDEV_RELAY="${WORKLOAD_BUNDLE_DIR:?not set — run via workloadctl enable/disable}/udev-relay"
 
 # Keyed to the instance, not the bundle: the relay unit is host-global, so two
 # instances of this bundle would otherwise fight over one unit file.
@@ -173,7 +180,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/udev-relay ${WORKLOAD_USER}
+ExecStart=/usr/bin/python3 ${UDEV_RELAY} ${WORKLOAD_USER}
 Restart=on-failure
 RestartSec=3
 

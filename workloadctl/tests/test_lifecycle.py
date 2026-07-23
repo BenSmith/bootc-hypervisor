@@ -1347,6 +1347,10 @@ class TestRunHostSetup(unittest.TestCase):
             env = run_mock.call_args.kwargs["env"]
         self.assertEqual(env["WORKLOAD_NAME"], "games")
         self.assertEqual(env["WORKLOAD_BUNDLE"], "gamedev-sway")
+        # The bundle dir keys off the *bundle*, not the instance, so a script
+        # can reach a sibling helper (udev-relay) even when run from an /etc
+        # override that carries only setup.sh.
+        self.assertTrue(env["WORKLOAD_BUNDLE_DIR"].endswith("/gamedev-sway"))
         self.assertEqual(env["WORKLOAD_USER"], "_wl-games")
         self.assertEqual(env["WORKLOAD_ROOT_DIR"], "/var/lib/workloads/games")
         self.assertEqual(env["WORKLOAD_DATA_DIR"], "/var/lib/workloads/games/data")
