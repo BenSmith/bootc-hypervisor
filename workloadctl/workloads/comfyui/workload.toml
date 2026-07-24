@@ -1,0 +1,146 @@
+# ComfyUI - Node-based AI image/video/audio generation interface
+#
+# Powers Stable Diffusion, SDXL, Flux, Wan Video, and hundreds of community
+# workflows. Web UI and REST API on port 8188.
+#
+# >>> See README.md in this directory for the GPU/vendor build matrix, the ROCm
+# >>> support caveat, model layout, custom nodes, and troubleshooting.
+#
+# Self-built image (Containerfile ships with the bundle); CI publishes it as
+# registry.local/workloads/comfyui:latest.
+#
+#   sudo workloadctl build comfyui     # only if not consuming the CI image
+#   sudo workloadctl enable comfyui
+#   # then open http://<host-ip>:8188
+#
+# GPU: there is no cross-vendor image. The VENDOR IS FIXED AT BUILD TIME by the
+# PyTorch wheel index; gpu = "auto" below then passes through whatever the host
+# has. Leave that key alone and choose here instead:
+#
+#   sudo workloadctl build comfyui                                   # NVIDIA (cu128, default)
+#   sudo workloadctl build comfyui --build-arg CUDA_INDEX=rocm7.1    # AMD
+#   sudo workloadctl build comfyui --build-arg CUDA_INDEX=cpu        # CPU only (slow)
+#
+# Two traps, both documented at length in README.md:
+#   - A vendor mismatch does NOT fail the unit. A CUDA image on a non-NVIDIA
+#     host starts and generates on CPU. Check with:
+#       workloadctl logs comfyui | head -20
+#   - On AMD, CHECK YOUR CARD IS IN ROCm's SUPPORT MATRIX FIRST. An unsupported
+#     GPU does not fall back to CPU — torch enumerates it, then SIGSEGVs on the
+#     first kernel launch, which becomes a restart loop. Force CPU with --cpu in
+#     COMFYUI_ARGS if in doubt.
+#
+# Models go in /var/lib/workloads/comfyui/data/models (the entrypoint seeds the
+# subdirectory tree on first start); outputs land in .../data/output.
+#
+# Port mapping: 8188 is the ComfyUI default. If another workload uses it,
+# change the left side to something else (e.g. "18188:8188").
+
+[workload]
+name = "comfyui"
+
+[container]
+image = "registry.local/workloads/comfyui:latest"
+pull = "missing"
+# ComfyUI starts via its Python entrypoint: main.py --listen --port 8188
+# The Containerfile wraps this as the default CMD.
+
+[container.health]
+# ComfyUI serves its web UI and /api/ endpoints on 8188. /api/object_info
+# returns 200 without requiring any models loaded, making it a reliable
+# readiness probe.
+cmd = "curl -sf http://localhost:8188/api/object_info > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "120s"
+on_failure = "kill"
+
+[container.environment]
+# Listen on all interfaces (required to reach via the published port)
+COMFYUI_ARGS = "--listen 0.0.0.0 --port 8188"
+# Extra CLI flags for ComfyUI's main.py. Common additions:
+#   --force-fp16             — force fp16 even if the GPU reports fp32-capable
+#   --highvram               — keep everything in VRAM (faster, higher VRAM use)
+#   --normalvram             — balance VRAM between model+workflow (default)
+#   --lowvram                — minimise VRAM use (slower, for <6 GB cards)
+# Append here, e.g.:
+#   COMFYUI_ARGS = "--listen 0.0.0.0 --port 8188 --highvram"
+
+[devices]
+# Like oobabooga, there is no cross-vendor image here — the VENDOR IS CHOSEN AT
+# BUILD TIME by the wheel index (see the Containerfile's CUDA_INDEX arg), and
+# this key just passes the matching devices through. "auto" keeps the two in
+# step: rebuild for ROCm and an AMD host automatically gets /dev/kfd + /dev/dri
+# with no edit here.
+#
+# On an NVIDIA host this resolves to --device=nvidia.com/gpu=all plus a
+# start-time guard that fails the unit if the CDI spec is missing.
+#
+# PIN THE CARD ON A SHARED OR MULTI-GPU HOST. "auto" on NVIDIA expands to
+# nvidia.com/gpu=all — EVERY card, not one — so ComfyUI will happily load a
+# model onto a GPU another workload is already using. That is the live setup on
+# this fleet: gamedev-sway and game-dev-nvidia share a single RTX 4080 SUPER,
+# and wayfire-game-streaming pins by UUID for exactly this reason. 16 GB does
+# not go far between a streaming desktop and an SDXL/Flux graph.
+#   gpu = "nvidia:GPU-<uuid>"    # `nvidia-ctk cdi list` to find the UUID
+#
+# Unlike Sunshine, ComfyUI is not made NONDETERMINISTIC by this — torch takes
+# device 0 — so the failure is contention (OOM, thrashing), not a random card.
+#
+# Separately, on a hybrid box (Intel iGPU + NVIDIA dGPU) "auto" resolves by the
+# FIRST card in sysfs order and can land on the iGPU, leaving ComfyUI quietly on
+# CPU. The generator logs a warning whenever it sees more than one candidate.
+gpu = "auto"
+
+[security]
+# render — access /dev/dri/renderD* (required for CUDA interop with VAAPI
+# on hybrid systems, and for the nvidia-ctk CDI hook itself).
+extra_groups = ["video", "render"]
+
+[storage]
+volumes = [
+    # Models directory — drop checkpoints, LoRAs, VAE, ControlNet, etc. here.
+    "./models:/comfyui/models",
+    # Output directory — generated images/videos land here.
+    "./output:/comfyui/output",
+    # Custom nodes directory — git clone community nodes here.
+    "./custom_nodes:/comfyui/custom_nodes",
+    # User data — workflow history, browser preferences, etc.
+    "./user:/comfyui/user",
+    # Input directory — drag-and-drop images and files land here.
+    "./input:/comfyui/input",
+]
+
+[network]
+mode = "pasta"
+ports = ["8188:8188"]
+
+[resources]
+# Never swap — a diffusion model that starts paging will thrash the host far
+# longer than an OOM kill would cost.
+memory_swap_max = "0"
+# Torch dataloaders and some custom nodes use shared memory; podman's 64 MB
+# default is too tight.
+shm_size = "1g"
+# Set memory_max to bound the workload, e.g. SDXL at ~16G, Flux at ~32G:
+# memory_max = "24G"
+
+[build]
+# Present-but-empty is the whole point: a [build] table — even with no keys —
+# marks this container's image as self-built, which does two things.
+#
+#   1. `workloadctl build comfyui` owns the image: it runs the default
+#      `podman build` over this bundle (the Containerfile beside this file) and
+#      tags the result exactly as [container].image above.
+#   2. CI picks the bundle up automatically. .forgejo/scripts/ci-workload-images.py
+#      globs workloads/*/workload.toml and selects on has_build_context(), so
+#      there is no matrix to register comfyui in — it builds and pushes a signed
+#      registry.local/workloads/comfyui:latest on the next bundle change.
+#
+# Paired with `pull = "missing"` above, that is the documented recipe for an
+# image the fleet consumes from the registry while still being locally
+# buildable: root's image store shadows the registry copy whenever a
+# `workloadctl build` has run, until you `podman rmi` it.
+#
+# No keys are needed here — the defaults (Containerfile in the bundle dir, no
+# target, no args) are exactly right. Vendor selection is a --build-arg at build
+# time, not a stored default, so it deliberately does NOT live here.

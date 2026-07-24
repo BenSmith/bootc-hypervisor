@@ -1,0 +1,155 @@
+# ComfyUI container image — Fedora 44 + PyTorch (CUDA)
+#
+# Build:
+#   sudo workloadctl build comfyui
+#
+# Or manually:
+#   podman build -t registry.local/workloads/comfyui:latest .
+#
+# Size is dominated by PyTorch's bundled GPU libraries and varies a lot by
+# CUDA_INDEX — measured on Fedora 44 / podman 5.8:
+#   cu128    9.23 GB      cpu    (much smaller, no GPU runtime)
+#   rocm7.1  16.2 GB
+# First build is ~5-15 minutes, almost all of it downloading wheels.
+#
+# NO CUDA BASE IMAGE IS NEEDED. The PyTorch wheels from the cu128 index vendor
+# the entire CUDA userspace as `nvidia-*-cu12` dependencies, and the workload's
+# `gpu = "nvidia"` passes the driver, libcuda, and nvidia-smi in from the host
+# via CDI (nvidia-container-toolkit). A plain Fedora base is all that is left.
+
+FROM registry.fedoraproject.org/fedora:44
+
+LABEL org.opencontainers.image.title="ComfyUI"
+LABEL org.opencontainers.image.description="Node-based AI image/video generation interface"
+LABEL org.opencontainers.image.source="https://github.com/comfyanonymous/ComfyUI"
+
+# ── System deps ──────────────────────────────────────────────────────
+# python3 on F44 is 3.14; every ComfyUI dependency has a cp314 wheel, an
+# abi3 wheel (av, tokenizers, safetensors), or is pure Python.
+#
+# gcc/gcc-c++/python3-devel are kept in the final image on purpose: custom
+# nodes are installed at RUNTIME (`workloadctl exec comfyui ...`) and a good
+# number of them compile C extensions on first import. They cost ~400 MB
+# against a ~10 GB image.
+#
+# mesa-libGL/libglvnd-glx/glib2 satisfy the libGL.so.1 + libgthread lookups
+# that opencv-python and PyOpenGL do at import time.
+RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
+        ca-certificates \
+        curl \
+        gcc \
+        gcc-c++ \
+        git-core \
+        glib2 \
+        libgomp \
+        libglvnd-glx \
+        make \
+        mesa-libEGL \
+        mesa-libGL \
+        python3 \
+        python3-devel \
+        python3-pip \
+        tar \
+        unzip \
+        wget \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# F44 dropped the consolidated CA bundle files in favour of the directory-hash
+# format, which breaks anything reading the bundle *file* (see the note in
+# fedora-versions.yml). Restore the legacy names as symlinks to the stable
+# extracted bundle — Fedora's documented permanent fix.
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
+# ── Virtualenv ───────────────────────────────────────────────────────
+# Fedora marks the system interpreter externally-managed (PEP 668), so pip
+# refuses to install into it. A venv is the supported route and keeps the
+# ComfyUI dependency tree off the OS python.
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv "$VIRTUAL_ENV"
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# ── Install PyTorch with CUDA ────────────────────────────────────────
+# Bump these together — the three versions are released as a matched set, and
+# the index must carry a cp314 wheel for EACH of the three (F44's python3 is
+# 3.14). Verify a bump, or a new CUDA_INDEX, with:
+#
+#   IDX=cu128; V=2.11.0
+#   curl -sL "https://download.pytorch.org/whl/$IDX/torch/" | grep "torch-$V.*cp314-cp314-manylinux"
+#
+# cu128 (CUDA 12.8) is the conservative NVIDIA choice: 12.x wheels run on any
+# 12.x host driver thanks to CUDA minor-version compatibility, whereas the
+# cu13x indexes require a 580+ driver.
+#
+# CUDA_INDEX values verified to carry this exact triple as cp314 wheels:
+#   cu128, rocm7.1, rocm7.2, cpu
+# Known NOT to work: rocm6.2 (no cp314 wheels at all), rocm6.4 and rocm7.0
+# (cap at torch 2.9.1), xpu (has torchvision/torchaudio but not torch 2.11.0).
+# Switching to one of those requires moving the pins too, not just the index.
+ARG TORCH_VERSION=2.11.0
+ARG TORCHVISION_VERSION=0.26.0
+ARG TORCHAUDIO_VERSION=2.11.0
+ARG CUDA_INDEX=cu128
+
+RUN pip install --no-cache-dir \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "torchaudio==${TORCHAUDIO_VERSION}" \
+        --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
+
+# Freeze the trio so the ComfyUI requirements install below cannot quietly
+# resolve a different torch out from under the pins above. If upstream ever
+# needs a newer torch, this fails the BUILD loudly instead of silently
+# swapping in a CPU-only or mismatched-CUDA wheel at runtime.
+RUN printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' \
+        "${TORCH_VERSION}" "${TORCHVISION_VERSION}" "${TORCHAUDIO_VERSION}" \
+        > /opt/torch-constraints.txt
+
+# ── Install ComfyUI ─────────────────────────────────────────────────
+# A tagged release, for reproducibility. Available tags:
+#   https://github.com/comfyanonymous/ComfyUI/tags
+ARG COMFYUI_VERSION=v0.28.3
+RUN git clone --depth 1 --branch "${COMFYUI_VERSION}" \
+        https://github.com/comfyanonymous/ComfyUI.git /comfyui
+
+WORKDIR /comfyui
+RUN pip install --no-cache-dir -c /opt/torch-constraints.txt -r requirements.txt
+
+# xformers is deliberately NOT installed. Torch 2.x routes attention through
+# scaled_dot_product_attention (flash / mem-efficient backends built in), which
+# is what ComfyUI uses by default; xformers pins an exact torch version and
+# would drag the pins above with it.
+
+# ── Seed data for first-run volume population ────────────────────────
+# The workload bind-mounts host directories over models/, custom_nodes/,
+# input/ and user/. An empty mount would MASK content the repo ships —
+# models/configs/*.yaml (needed to load .ckpt checkpoints) and
+# custom_nodes/websocket_image_save.py (the SaveImageWebsocket node the
+# official API examples use). Stash a pristine copy; the entrypoint restores
+# anything missing on each start, without clobbering user files.
+RUN mkdir -p /opt/comfyui-defaults && \
+    for d in models custom_nodes input user; do \
+        mkdir -p "/comfyui/$d" && \
+        cp -a "/comfyui/$d" "/opt/comfyui-defaults/$d"; \
+    done
+
+# ── Entrypoint ───────────────────────────────────────────────────────
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Extra CLI flags for ComfyUI's main.py. Overridden by the workload TOML's
+# [container.environment]. The entrypoint word-splits this, so it must stay a
+# plain string — see entrypoint.sh.
+ENV COMFYUI_ARGS="--listen 0.0.0.0 --port 8188"
+
+EXPOSE 8188
+
+# No HEALTHCHECK here on purpose: [container.health] in workload.toml emits
+# --health-cmd on the podman run line, which wins. A second copy in the image
+# would only drift.
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
