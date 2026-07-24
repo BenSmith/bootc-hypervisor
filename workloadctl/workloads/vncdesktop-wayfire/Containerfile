@@ -63,7 +63,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wofi \
     xdg-utils \
     xorg-x11-server-Xwayland \
-    && dnf clean all
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 RUN sed -i 's/^hosts:.*/hosts: files myhostname resolve [!UNAVAIL=return] dns/' /etc/nsswitch.conf
 
