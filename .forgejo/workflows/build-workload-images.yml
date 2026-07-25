@@ -43,8 +43,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Need the previous commit to diff changed bundles on push.
-          fetch-depth: 2
+          # Full history, not a fixed depth. The push diff below needs
+          # github.event.before, which can sit arbitrarily deep: a batched push
+          # of N commits, or a merge commit whose first parent is the old tip.
+          # If it isn't in the clone the diff is skipped and the run degrades
+          # silently to building *every* bundle. Repo is small; depth 0 is cheap.
+          fetch-depth: 0
 
       - name: Compute build matrix
         id: r
@@ -60,6 +64,9 @@ jobs:
             if git rev-parse --quiet --verify "${BEFORE}^{commit}" >/dev/null 2>&1; then
               CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${SHA}")"
             else
+              # Announce it: this fallback builds everything, so a silent hit
+              # looks like a legitimately huge matrix rather than a broken diff.
+              echo "::warning::before-sha ${BEFORE} not resolvable — building all workloads"
               CHANGED_FILES=""
               SELECT="all"
             fi
