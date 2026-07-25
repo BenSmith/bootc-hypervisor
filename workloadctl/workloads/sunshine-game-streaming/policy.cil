@@ -53,6 +53,28 @@
     (allow process container_file_t (sock_file (mounton)))
     (allow process user_tmp_t (sock_file (mounton)))
 
+    ; Wayland clients allocate their pixel buffers as shared memory and mmap
+    ; them, which needs `map` on tmpfs_t. Without it every client that draws
+    ; dies the moment it tries to, while the compositor itself stays up -- so
+    ; the session comes up with a background and no windows and nothing looks
+    ; unhealthy. Diagnosed on vncdesktop-sway, where foot failed in shm.c
+    ; ("failed to mmap SHM backing memory file: Permission denied").
+    ;
+    ; The rest of this group is bwrap/pressure-vessel building the Steam sandbox
+    ; root on the tmpfs above: create/mount/watch its dirs, fully manage files
+    ; there (create, mmap+exec staged binaries, link/rename/unlink, bind-mount
+    ; over them) plus its symlinks, associate a proc mount, and unmount the
+    ; bind-mounted container_file_t mounts on teardown. Granted directly to
+    ; container_init_t by container-selinux's base policy, but not inherited by
+    ; a per-workload type, so they must be enumerated here. Same set that
+    ; wayfire-game-streaming -- a fork of this bundle -- captured at runtime.
+    (allow process tmpfs_t (dir (create mounton setattr watch)))
+    (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
+    (allow process tmpfs_t (lnk_file (create unlink)))
+    (allow process container_file_t (filesystem (unmount)))
+    (allow process proc_t (file (ioctl)))
+    (allow process proc_t (filesystem (associate)))
+
     ; Steam IPC: /tmp sockets and temp files (user_tmp_t).
     (allow process user_tmp_t (dir (open read write search getattr add_name remove_name ioctl lock)))
     (allow process user_tmp_t (file (open read write create getattr unlink lock map)))
