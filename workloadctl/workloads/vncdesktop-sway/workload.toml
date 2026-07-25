@@ -83,11 +83,15 @@ on_failure = "kill"
 # Optional render node for GPU-accelerated rendering. Falls back to software
 # rendering automatically if no usable render node is exposed.
 #
-# NVIDIA hosts get software rendering regardless of what is set here: sway
-# cannot allocate a screencopy buffer on an NVIDIA render node, and the failure
-# is silent (wayvnc keeps running and reporting healthy while serving a frozen,
-# input-dead session). start-sway detects that case and falls back. Setting
-# WLR_RENDERER in [container.environment] overrides the fallback.
+# NVIDIA hosts get software rendering regardless of what is set here. With a
+# render node, sway names it as the ext-image-copy-capture device, wayvnc
+# allocates its capture buffer there, and sway then cannot import it back --
+# reported as wl_display NO_MEMORY. The failure is silent (wayvnc keeps running
+# and reporting healthy while serving a frozen, input-dead session). Under
+# pixman no capture device is advertised, so wayvnc uses wl_shm and it works.
+# start-sway detects the NVIDIA case and falls back; see the long comment there
+# for the full mechanism. Setting WLR_RENDERER in [container.environment]
+# overrides the fallback.
 gpu = "auto"
 
 [security]

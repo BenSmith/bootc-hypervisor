@@ -457,16 +457,43 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 
 # Software rendering unless there is a render node we can actually use.
 #
-# NVIDIA is excluded deliberately. On an NVIDIA host sway fails to allocate a
-# buffer for wayvnc's screencopy request: the compositor answers with
-# wl_display NO_MEMORY, wayvnc loses its Wayland connection, and from then on it
-# serves a frozen, input-dead session while its process stays up -- so nothing
-# restarts and the workload still looks healthy. It fires when a client
-# connects and capture starts, not at a fixed time. Reproduced with both
-# gpu = "auto" and gpu = "nvidia"; gpu = "none" is stable. This is specific to
-# this compositor: vncdesktop-wayfire is fine on the same GPU with the same
-# packages, so it is not a missing-driver problem and adding NVIDIA userspace
-# would not address it.
+# NVIDIA is excluded deliberately, to keep wayvnc off the dmabuf capture path.
+#
+# sway (>= 1.11) offers ext-image-copy-capture-v1, and wayvnc prefers it over
+# the deprecated zwlr_screencopy. On that protocol wlroots advertises a capture
+# device to the client only when the renderer holds a DRM fd -- it stats the fd
+# and sends its dev_t plus the renderer's modifier list
+# (types/ext_image_capture_source_v1/base.c, set_constraints_from_swapchain).
+# So with a render node, sway names the NVIDIA node and wayvnc allocates its
+# capture buffer there via gbm. sway then cannot import what comes back:
+# wlr_buffer_try_from_resource() returns NULL in attach_buffer and wlroots
+# reports that as wl_display NO_MEMORY (types/wlr_ext_image_copy_capture_v1.c),
+# which is a misuse of the error -- nothing actually ran out of memory. wayvnc
+# loses its Wayland connection and from then on serves a frozen, input-dead
+# session while its process stays up, so nothing restarts and the workload
+# still looks healthy. It fires when a client connects and capture starts, not
+# at a fixed time. Reproduced with both gpu = "auto" and gpu = "nvidia";
+# gpu = "none" is stable.
+#
+# Under pixman wlr_renderer_get_drm_fd() is -1, so no capture device and no
+# dmabuf formats are advertised at all and wayvnc has nothing to use but wl_shm.
+# That is why the fallback works -- it removes the only reason sway offers the
+# dmabuf path, rather than fixing the import.
+#
+# Note that vncdesktop-wayfire being fine on the same GPU is NOT evidence that
+# this is sway-specific. No released wayfire implements ext-image-copy-capture
+# (added 2025-09-24, in no tag through v0.10.1), so wayvnc falls back to
+# zwlr_screencopy there, which always offers a shm buffer and never names a
+# device. The two bundles are on different capture protocols, not different
+# hardware support -- expect this to reach wayfire once Fedora ships a build
+# carrying that commit.
+#
+# Untested narrower option if you want the GPU back: WLR_EGL_NO_MODIFIERS=1
+# forces linear buffers and would help if the import failure is a modifier
+# mismatch. It needs adding to PassEnvironment below first. To tell which of
+# the two import failures you have, check sway's own log at the moment wayvnc
+# dies -- wlr_buffer_try_from_resource() logs either "Unknown buffer type" or
+# "Failed to create %s buffer" immediately before the NO_MEMORY.
 #
 # /dev/nvidiactl is the marker -- the NVIDIA CDI spec brings it in alongside the
 # render nodes. WLR_RENDERER set in the environment overrides all of this, for
