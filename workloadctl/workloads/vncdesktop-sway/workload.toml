@@ -69,13 +69,6 @@ NO_AT_BRIDGE = "1"
 # default to 5900) -- i.e. under [network] mode = "host". With an isolated mode
 # the collision is better solved by publishing to a different host port.
 # VNC_PORT = "5901"
-# wayvnc log level (quiet/error/warning/info/debug/trace). Unset = wayvnc's
-# default (warning). "debug" is the useful ceiling -- "trace" adds nothing,
-# because Fedora's neatvnc is built with -DNDEBUG and every nvnc_trace call is
-# compiled out. For diagnostics only: the extra output shares the host unit's
-# rate-limit budget with every other daemon here and will evict the lines you
-# are trying to read, so turn it off again afterwards.
-# WAYVNC_LOG_LEVEL = "debug"
 
 [container.health]
 # Track the compositor, matching vncdesktop-wayfire: if sway is gone the

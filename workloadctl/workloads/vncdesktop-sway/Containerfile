@@ -644,16 +644,7 @@ fi
 
 cd
 
-# WAYVNC_LOG_LEVEL raises wayvnc's verbosity from the TOML instead of by
-# rebuilding the image. "debug" is the useful ceiling: "trace" buys nothing,
-# because nvnc_trace is #ifndef NDEBUG and Fedora builds with -DNDEBUG, so every
-# nvnc_trace call is compiled out of the shipped binary (see the note under
-# .reference/notes/ -- this is why the "Choosing SHM/DMA-BUF format" lines can
-# never appear). Unset by default: the extra output shares the host unit's
-# LogRateLimitBurst=250 with every other daemon here. Unquoted ${:+} on purpose:
-# unset expands to no argument at all.
-# shellcheck disable=SC2086
-exec /usr/bin/wayvnc ${WAYVNC_LOG_LEVEL:+--log-level=$WAYVNC_LOG_LEVEL} 0.0.0.0 "${VNC_PORT:-5900}"
+exec /usr/bin/wayvnc 0.0.0.0 "${VNC_PORT:-5900}"
 SCRIPT
 
 RUN chmod +x /usr/local/bin/start-wayvnc
@@ -667,7 +658,7 @@ Requires=set-resolution.service
 [Service]
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /usr/local/bin/start-wayvnc
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME VNC_PORT WAYVNC_LOG_LEVEL
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME VNC_PORT
 Restart=on-failure
 RestartSec=3
 Type=simple
