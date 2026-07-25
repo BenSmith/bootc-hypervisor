@@ -15,6 +15,18 @@
     (blockinherit net_container)
     (typeattributeset container_init_domain (process))
 
+    ; Host journal forwarding: the container's journald sends datagrams to the
+    ; bind-mounted host socket (ForwardToSocket= in the Containerfile). That
+    ; needs sendto on syslogd_t plus write on the socket file, both of which the
+    ; base policy grants through the syslog_client_type attribute. container_t is
+    ; a member of it; a udica-derived type is not — blockinherit copies the
+    ; container block's *rules*, not attribute memberships assigned to
+    ; container_t elsewhere in the base policy. Without this, connect() fails
+    ; EACCES and forwarding is silently dead (journald logs forwarding errors at
+    ; debug level so it never recurses into itself), leaving the host journal
+    ; with podman's own output only. Restores parity with plain container_t.
+    (typeattributeset syslog_client_type (process))
+
     ; bwrap mounts a tmpfs for the sandbox's /tmp-home and /tmp-run.
     (allow process tmpfs_t (filesystem (mount remount)))
     ; bwrap mounts a fresh devpts inside the sandbox.
@@ -33,9 +45,8 @@
     (allow process tmpfs_t (file (create open mounton execute map)))
     (allow process tmpfs_t (lnk_file (create)))
     (allow process container_file_t (filesystem (unmount)))
-    ; ioctl on a /proc file; write the journald/syslog socket.
+    ; ioctl on a /proc file.
     (allow process proc_t (file (ioctl)))
-    (allow process syslogd_var_run_t (sock_file (write)))
 
     ; Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
     (allow process udev_var_run_t (dir (read)))

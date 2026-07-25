@@ -147,6 +147,7 @@ class LogsExtraArgsTest(unittest.TestCase):
             is_vm = False
             mode = "single"
             service_name = "workload-web.service"
+            uid = 10007
 
             def container_names(self):
                 return ["web"]
@@ -184,13 +185,21 @@ class JournalSelectionTest(unittest.TestCase):
     class _Config:
         def __init__(self, *, is_vm=False, is_multi=False,
                      service_name="workload-web.service",
-                     names=None, units=None, targets=None):
+                     names=None, units=None, targets=None, uid=10007):
             self.is_vm = is_vm
             self.is_multi = is_multi
             self.service_name = service_name
             self._names = names or ["web"]
             self._units = units or ["workload-web.service"]
             self._targets = targets or ["workload-web"]
+            self._uid = uid
+
+        @property
+        def uid(self):
+            # uid=None models a workload whose user doesn't exist yet.
+            if self._uid is None:
+                raise cmd_interact.WorkloadUserNotFound("web")
+            return self._uid
 
         def container_names(self):
             return self._names
@@ -221,6 +230,25 @@ class JournalSelectionTest(unittest.TestCase):
             "_SYSTEMD_UNIT=workload-web.service",
             "UNIT=workload-web.service",
             "SYSLOG_IDENTIFIER=workload-web",
+            "_UID=10007",
+        ])
+
+    def test_uid_term_catches_forwarded_container_journal(self):
+        """systemd-in-container bundles forward their in-container journal to
+        the host socket; those entries carry an in-container identifier and
+        _SYSTEMD_UNIT=user@<uid>.service, so _UID is the only term that selects
+        them. Its absence is what made `logs` stop at podman's own output."""
+        sel = cmd_interact._journal_selection(self._Config(uid=10003), None)
+        self.assertIn("_UID=10003", sel)
+
+    def test_no_workload_user_yet_omits_uid_term(self):
+        # Never-enabled workload: no user to key on, but unit/identifier terms
+        # must still produce a usable selection rather than raising.
+        sel = cmd_interact._journal_selection(self._Config(uid=None), None)
+        self._assert_disjunction(sel, [
+            "_SYSTEMD_UNIT=workload-web.service",
+            "UNIT=workload-web.service",
+            "SYSLOG_IDENTIFIER=workload-web",
         ])
 
     def test_specific_container_narrows_to_one(self):
@@ -235,6 +263,9 @@ class JournalSelectionTest(unittest.TestCase):
             "UNIT=workload-vt-vpn.service",
             "SYSLOG_IDENTIFIER=workload-vt-vpn",
         ])
+        # _UID is workload-wide; including it here would widen a deliberately
+        # narrowed <workload>/<container> selection back to every container.
+        self.assertNotIn("_UID=10007", sel)
 
     def test_whole_multi_ors_every_member(self):
         cfg = self._Config(
@@ -249,7 +280,8 @@ class JournalSelectionTest(unittest.TestCase):
         expected = ([f"_SYSTEMD_UNIT={u}" for u in units]
                     + [f"UNIT={u}" for u in units]
                     + ["SYSLOG_IDENTIFIER=workload-vt-vpn",
-                       "SYSLOG_IDENTIFIER=workload-vt-transmission"])
+                       "SYSLOG_IDENTIFIER=workload-vt-transmission",
+                       "_UID=10007"])
         self._assert_disjunction(sel, expected)
 
     def test_vm_keeps_unit_flag(self):

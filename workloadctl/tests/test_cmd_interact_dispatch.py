@@ -27,6 +27,7 @@ class _FakeSingle:
     is_vm = False
     mode = "single"
     username = "_wl-web"
+    uid = 10007
     service_name = "workload-web.service"
 
     def container_names(self):
@@ -47,6 +48,7 @@ class _FakePod:
     is_vm = False
     mode = "pod"
     username = "_wl-app"
+    uid = 10008
     service_name = "workload-app.service"
 
     def container_names(self):

@@ -15,6 +15,7 @@ from workload_lib import workload_service_units
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
+    WorkloadUserNotFound,
     parse_workload_ref,
     resolve_container_target,
 )
@@ -78,27 +79,45 @@ def _journal_selection(config, container):
     interleave into one chronological stream; ``<workload>/<container>`` narrows
     to one.
 
+    A fourth field, ``_UID=``, catches what the other three structurally cannot:
+    bundles that run systemd as PID 1 give every service's output to their *own*
+    in-container journald, and bridge it to the host with journald's
+    ``ForwardToSocket=`` aimed at the bind-mounted host journal socket. Those
+    entries keep their in-container ``SYSLOG_IDENTIFIER`` (``sunshine``,
+    ``sway``, ``systemd``) and are stamped ``_SYSTEMD_UNIT=user@<uid>.service``
+    from the sender's cgroup, so none of the three terms above match them. Each
+    workload owns a dedicated user, which makes ``_UID`` an exact per-workload
+    selector — and a trustworthy one: journald stamps it from ``SO_PEERCRED``
+    and clients cannot forge ``_``-prefixed fields, so a workload can spoof its
+    display identifier but not its provenance. It is workload-wide by
+    construction, so ``<workload>/<container>`` omits it rather than silently
+    widening back to every container.
+
     VMs log to a real QEMU *system* unit where ``-u`` works, so they keep it.
     """
     if config.is_vm:
         return ["-u", config.service_name]
 
+    uids = []
     if container is not None:
         # container_names() and sub_service_names() are index-aligned; for a
         # single-container workload NAME/NAME this maps to the main unit.
         units = [dict(zip(config.container_names(),
                           config.sub_service_names()))[container]]
         idents = [config.podman_container_name(container)]
-    elif config.is_multi:
-        units = workload_service_units(config)
-        idents = config.podman_targets()
     else:
-        units = [config.service_name]
+        units = workload_service_units(config) if config.is_multi \
+            else [config.service_name]
         idents = config.podman_targets()
+        # No user yet (never enabled) just means there are no forwarded entries
+        # to select — the unit/identifier terms still work, so don't fail.
+        with contextlib.suppress(WorkloadUserNotFound):
+            uids = [config.uid]
 
     terms = ([f"_SYSTEMD_UNIT={u}" for u in units]
              + [f"UNIT={u}" for u in units]
-             + [f"SYSLOG_IDENTIFIER={i}" for i in idents])
+             + [f"SYSLOG_IDENTIFIER={i}" for i in idents]
+             + [f"_UID={u}" for u in uids])
     # '+' between every term forces a disjunction even across different fields
     # (same-field matches OR implicitly; different fields would otherwise AND).
     # journalctl rejects '+' next to the -u/-t convenience flags, so these are

@@ -16,6 +16,18 @@
     (blockinherit net_container)
     (typeattributeset container_init_domain (process))
 
+    ; Host journal forwarding: the container's journald sends datagrams to the
+    ; bind-mounted host socket (ForwardToSocket= in the Containerfile). That
+    ; needs sendto on syslogd_t plus write on the socket file, both of which the
+    ; base policy grants through the syslog_client_type attribute. container_t is
+    ; a member of it; a udica-derived type is not — blockinherit copies the
+    ; container block's *rules*, not attribute memberships assigned to
+    ; container_t elsewhere in the base policy. Without this, connect() fails
+    ; EACCES and forwarding is silently dead (journald logs forwarding errors at
+    ; debug level so it never recurses into itself), leaving the host journal
+    ; with podman's own output only. Restores parity with plain container_t.
+    (typeattributeset syslog_client_type (process))
+
     ; Input devices: /dev/uinput + /dev/input/event* (event_device_t on Fedora).
     (allow process event_device_t (chr_file (open read write ioctl getattr)))
     (allow process event_device_t (dir (open read search getattr)))
@@ -53,9 +65,8 @@
     ; builds its root on a tmpfs: create/mount/setattr/watch dirs, and fully
     ; manage files there (create, mmap+exec staged binaries, link/rename/unlink,
     ; bind-mount over them) plus its symlinks; associate a proc mount. Plus:
-    ; ioctl on a /proc file, create entries in a self-owned dir, write the
-    ; journald/syslog socket, getattr a /run socket, and Xwayland setattr's an
-    ; X DRI/input device node.
+    ; ioctl on a /proc file, create entries in a self-owned dir, getattr a /run
+    ; socket, and Xwayland setattr's an X DRI/input device node.
     (allow process tmpfs_t (dir (create mounton setattr watch)))
     (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
     (allow process tmpfs_t (lnk_file (create unlink)))
@@ -63,7 +74,6 @@
     (allow process proc_t (filesystem (associate)))
     (allow process self (dir (write add_name)))
     (allow process self (file (create)))
-    (allow process syslogd_var_run_t (sock_file (write)))
     (allow process var_run_t (sock_file (getattr write)))
     (allow process xserver_misc_device_t (chr_file (setattr)))
     ; Xwayland: connect to the X server's /tmp/.X11-unix socket.
