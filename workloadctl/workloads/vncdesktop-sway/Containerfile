@@ -1,7 +1,9 @@
 # Headless Sway Desktop (VNC)
 #
 # Sway runs headlessly (WLR_BACKENDS=headless). Access via wayvnc on
-# port 5900. Set VNC_PASSWORD to enable authentication.
+# port 5900, or VNC_PORT if set -- the other vncdesktop-* bundles default to
+# 5900 too, so anything sharing a network namespace with them needs one moved.
+# Set VNC_PASSWORD to enable authentication.
 #
 # Build:
 #   sudo workloadctl build vncdesktop-sway
@@ -47,6 +49,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     sudo \
     sway \
     swappy \
+    swaybg \
     systemd \
     systemd-udev \
     thunar \
@@ -154,6 +157,9 @@ set $term foot
 set $menu fuzzel
 
 ### Output
+# Needs the swaybg package: sway does not draw backgrounds itself, it execs
+# swaybg for this. Weak deps are off in the dnf install above, so the sway
+# package will not pull it in -- without it this line silently yields black.
 output * bg #383c4a solid_color
 
 ### Appearance
@@ -224,6 +230,11 @@ exec dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
 exec xdg-user-dirs-update
 exec mako
 exec waybar
+# Start a terminal so a fresh session has something on screen. Sway with no
+# clients renders only the background, which is indistinguishable from a broken
+# compositor over VNC -- and recovering needs a keybinding you cannot discover
+# from the blank screen itself.
+exec $term
 SWAY
 
 # --- waybar config ---
@@ -444,10 +455,32 @@ export HOME="/home/${CONTAINER_USER}"
 export XDG_RUNTIME_DIR="/run/user/${CONTAINER_UID}"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 
-ls /dev/dri/renderD* >/dev/null 2>&1 || {
-    export WLR_RENDERER=pixman
-    export LIBGL_ALWAYS_SOFTWARE=1
-}
+# Software rendering unless there is a render node we can actually use.
+#
+# NVIDIA is excluded deliberately. On an NVIDIA host sway fails to allocate a
+# buffer for wayvnc's screencopy request: the compositor answers with
+# wl_display NO_MEMORY, wayvnc loses its Wayland connection, and from then on it
+# serves a frozen, input-dead session while its process stays up -- so nothing
+# restarts and the workload still looks healthy. It fires when a client
+# connects and capture starts, not at a fixed time. Reproduced with both
+# gpu = "auto" and gpu = "nvidia"; gpu = "none" is stable. This is specific to
+# this compositor: vncdesktop-wayfire is fine on the same GPU with the same
+# packages, so it is not a missing-driver problem and adding NVIDIA userspace
+# would not address it.
+#
+# /dev/nvidiactl is the marker -- the NVIDIA CDI spec brings it in alongside the
+# render nodes. WLR_RENDERER set in the environment overrides all of this, for
+# an NVIDIA setup where this turns out to work.
+if [ -z "${WLR_RENDERER:-}" ]; then
+    use_gpu=0
+    if ls /dev/dri/renderD* >/dev/null 2>&1 && [ ! -e /dev/nvidiactl ]; then
+        use_gpu=1
+    fi
+    if [ "$use_gpu" = 0 ]; then
+        export WLR_RENDERER=pixman
+        export LIBGL_ALWAYS_SOFTWARE=1
+    fi
+fi
 
 dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile &
 
@@ -466,7 +499,10 @@ Description=Sway Wayland Compositor (headless)
 Requires=xdg-runtime-dir.service
 
 [Service]
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE
+# WLR_RENDERER/LIBGL_ALWAYS_SOFTWARE are passed so the renderer probe in
+# start-sway can be overridden from [container.environment] -- without this a
+# WLR_RENDERER set in the workload TOML would be silently dropped here.
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE WLR_RENDERER LIBGL_ALWAYS_SOFTWARE
 Restart=on-failure
 RestartSec=3
 TasksMax=infinity
@@ -576,7 +612,7 @@ else
 fi
 
 cd
-exec /usr/bin/wayvnc 0.0.0.0 5900
+exec /usr/bin/wayvnc 0.0.0.0 "${VNC_PORT:-5900}"
 SCRIPT
 
 RUN chmod +x /usr/local/bin/start-wayvnc
@@ -590,7 +626,7 @@ Requires=set-resolution.service
 [Service]
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /usr/local/bin/start-wayvnc
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME VNC_PORT
 Restart=on-failure
 RestartSec=3
 Type=simple

@@ -3,6 +3,9 @@
 # sway runs in headless wlroots mode; wayvnc serves it on TCP 5900.
 # GPU acceleration via /dev/dri/renderD* if available, falls back to software.
 #
+# A terminal is started automatically, so a fresh session is never a blank
+# screen. Close it and you are back to bare background — Ctrl+Alt+Return.
+#
 # Keyboard shortcuts (Ctrl+Alt is the primary modifier — Super is typically
 # intercepted by the local DE before reaching the VNC server):
 #   Ctrl+Alt+Return         - Terminal (foot)
@@ -61,16 +64,30 @@ NO_AT_BRIDGE = "1"
 # VNC_PASSWORD = "${SECRET:vncdesktop-sway-password}"
 # VNC_USERNAME = "desktop"
 # DESKTOP_RESOLUTION = "1920x1080"
+# Port wayvnc listens on inside the container. Only needed when this shares a
+# network namespace with another wayvnc bundle (vncdesktop-wayfire/-labwc also
+# default to 5900) -- i.e. under [network] mode = "host". With an isolated mode
+# the collision is better solved by publishing to a different host port.
+# VNC_PORT = "5901"
 
 [container.health]
-cmd = "pgrep -x wayvnc > /dev/null || exit 1"
+# Track the compositor, matching vncdesktop-wayfire: if sway is gone the
+# container has nothing left to serve, whereas wayvnc exiting is recoverable on
+# its own (wayvnc.service is Restart=on-failure).
+cmd = "pgrep -x sway > /dev/null || exit 1"
 interval = "30s"
 start_period = "15s"
 on_failure = "kill"
 
 [devices]
 # Optional render node for GPU-accelerated rendering. Falls back to software
-# rendering automatically if no /dev/dri/renderD* is exposed.
+# rendering automatically if no usable render node is exposed.
+#
+# NVIDIA hosts get software rendering regardless of what is set here: sway
+# cannot allocate a screencopy buffer on an NVIDIA render node, and the failure
+# is silent (wayvnc keeps running and reporting healthy while serving a frozen,
+# input-dead session). start-sway detects that case and falls back. Setting
+# WLR_RENDERER in [container.environment] overrides the fallback.
 gpu = "auto"
 
 [security]
