@@ -101,7 +101,7 @@ ENV GDK_BACKEND=wayland \
 
 # --- labwc compositor config (system-wide; user can override via ~/.config/labwc) ---
 
-RUN mkdir -p /etc/xdg/labwc && cat > /etc/xdg/labwc/rc.xml << 'EOF'
+RUN mkdir -p /etc/xdg/labwc && cat > /etc/xdg/labwc/rc.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <labwc_config>
 
@@ -224,7 +224,7 @@ RUN mkdir -p /etc/xdg/labwc && cat > /etc/xdg/labwc/rc.xml << 'EOF'
 </labwc_config>
 EOF
 
-RUN cat > /etc/xdg/labwc/environment << 'EOF'
+RUN cat > /etc/xdg/labwc/environment <<'EOF'
 XCURSOR_THEME=Adwaita
 XCURSOR_SIZE=24
 GTK_THEME=Arc-Dark
@@ -233,7 +233,7 @@ LANG=C.UTF-8
 LC_ALL=C.UTF-8
 EOF
 
-RUN cat > /etc/xdg/labwc/autostart << 'EOF'
+RUN cat > /etc/xdg/labwc/autostart <<'EOF'
 xdg-user-dirs-update
 swaybg -c '#383c4a' &
 wl-paste --watch cliphist store &
@@ -251,7 +251,7 @@ RUN mkdir -p /usr/local/share/applications && \
             > /usr/local/share/applications/${f}.desktop ; \
     done
 
-RUN cat > /usr/local/share/applications/btop.desktop << 'EOF'
+RUN cat > /usr/local/share/applications/btop.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=btop++
@@ -260,7 +260,7 @@ Exec=foot --window-size-chars=80x24 btop
 Categories=System;Monitor;
 EOF
 
-RUN cat > /usr/local/share/applications/thunar.desktop << 'EOF'
+RUN cat > /usr/local/share/applications/thunar.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=Thunar File Manager
@@ -281,7 +281,7 @@ RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
 # (idle_inhibitor, battery, backlight, network, pulseaudio, wlr/taskbar all
 # caused segfaults or runaway memory usage during testing).
 
-RUN mkdir -p /etc/xdg/waybar && cat > /etc/xdg/waybar/config.jsonc << 'EOF'
+RUN mkdir -p /etc/xdg/waybar && cat > /etc/xdg/waybar/config.jsonc <<'EOF'
 {
     "modules-left": [],
     "modules-center": ["clock"],
@@ -302,7 +302,7 @@ RUN mkdir -p /etc/xdg/waybar && cat > /etc/xdg/waybar/config.jsonc << 'EOF'
 }
 EOF
 
-RUN cat > /etc/xdg/waybar/style.css << 'EOF'
+RUN cat > /etc/xdg/waybar/style.css <<'EOF'
 * {
     font-family: Cantarell, sans-serif;
     font-size: 13px;
@@ -341,7 +341,7 @@ window#waybar {
 }
 EOF
 
-RUN mkdir -p /etc/xdg/foot && cat > /etc/xdg/foot/foot.ini << 'EOF'
+RUN mkdir -p /etc/xdg/foot && cat > /etc/xdg/foot/foot.ini <<'EOF'
 [main]
 font=JetBrains Mono:size=11
 pad=4x4
@@ -377,7 +377,7 @@ bright6=34e2e2
 bright7=eeeeec
 EOF
 
-RUN mkdir -p /etc/xdg/fuzzel && cat > /etc/xdg/fuzzel/fuzzel.ini << 'EOF'
+RUN mkdir -p /etc/xdg/fuzzel && cat > /etc/xdg/fuzzel/fuzzel.ini <<'EOF'
 [main]
 font=Cantarell:size=12
 icon-theme=Papirus-Dark
@@ -403,7 +403,7 @@ radius=4
 exit-immediately-if-empty=yes
 EOF
 
-RUN mkdir -p /etc/xdg/mako && cat > /etc/xdg/mako/config << 'EOF'
+RUN mkdir -p /etc/xdg/mako && cat > /etc/xdg/mako/config <<'EOF'
 background-color=#383c4a
 border-color=#5294e2
 border-radius=4
@@ -419,7 +419,7 @@ EOF
 
 # --- Theme: GTK settings (system-wide) and Arc-Labwc window decorations ---
 
-RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini << 'EOF'
+RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini <<'EOF'
 [Settings]
 gtk-button-images=0
 gtk-cursor-theme-name=Adwaita
@@ -437,7 +437,7 @@ gtk-xft-hintstyle=hintmedium
 gtk-xft-rgba=rgb
 EOF
 
-RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini << 'EOF'
+RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini <<'EOF'
 [Settings]
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
@@ -449,7 +449,7 @@ EOF
 # Arc-Labwc window decoration theme — based on Arc-Dark color palette.
 # /usr/share/themes is searched by labwc.
 RUN mkdir -p /usr/share/themes/Arc-Labwc/openbox-3 && \
-    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc << 'EOF'
+    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc <<'EOF'
 border.width: 1
 padding.height: 5
 window.client.padding.height: 0
@@ -520,7 +520,7 @@ EOF
 
 # --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
 
-RUN cat > /etc/profile.d/desktop-prompt.sh << 'EOF'
+RUN cat > /etc/profile.d/desktop-prompt.sh <<'EOF'
 if [ "$PS1" ]; then
     PS1='\[\033[01;36m\][labwc]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
 fi
@@ -530,7 +530,7 @@ EOF
 # Starts a per-session D-Bus, the labwc compositor on the headless backend,
 # sizes the virtual output, then starts wayvnc on 0.0.0.0:5900.
 
-RUN cat > /usr/local/bin/start-desktop.sh << 'STARTUP' && chmod 0755 /usr/local/bin/start-desktop.sh
+RUN cat > /usr/local/bin/start-desktop.sh <<'STARTUP' && chmod 0755 /usr/local/bin/start-desktop.sh
 #!/bin/bash
 set -e
 

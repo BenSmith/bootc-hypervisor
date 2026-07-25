@@ -126,11 +126,13 @@ typecheck:
 #   DL3018/DL3041: apk/dnf package version pinning — intentional; we want
 #                  the latest stable package from the distro repo
 #   DL3059: consecutive RUN — intentional for readability and layer isolation
-# Excluded: vncdesktop-labwc — XML inside a heredoc makes hadolint choke on
-# the leading '<' of XML tags, treating them as Dockerfile instructions.
+# hadolint's heredoc parser is picky in two ways that are invisible in shell:
+# the delimiter must follow '<<' with no space ("<<'EOF'", not "<< 'EOF'"), and
+# a terminator line must be followed by a blank line before the next
+# instruction. Violating either makes it parse heredoc *content* as Dockerfile
+# instructions, which is why the errors point at innocent lines.
 lint-containerfiles:
   find workloads -name Containerfile \
-    ! -path 'workloads/vncdesktop-labwc/*' \
     | sort \
     | xargs hadolint \
         --ignore DL3006 \
