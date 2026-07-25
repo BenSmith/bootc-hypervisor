@@ -503,7 +503,8 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 #
 # To close it, run once with the GPU on and collect both sides at the moment
 # wayvnc dies:
-#   - wayvnc --log-level=trace  -> logs "Choosing SHM format ..." or
+#   - WAYVNC_LOG_LEVEL = "trace" in [container.environment] (start-wayvnc turns
+#     it into --log-level)  -> logs "Choosing SHM format ..." or
 #     "Choosing DMA-BUF format ...". That alone says which path it really took
 #     and resolves the contradiction above.
 #   - sway's own log -> wlr_buffer_try_from_resource() logs "Unknown buffer
@@ -678,7 +679,15 @@ else
 fi
 
 cd
-exec /usr/bin/wayvnc 0.0.0.0 "${VNC_PORT:-5900}"
+
+# WAYVNC_LOG_LEVEL exists for the trace-level run described in start-sway: at
+# --log-level=trace wayvnc names the buffer path it chose ("Choosing SHM/DMA-BUF
+# format ..."), which is the missing half of the "no memory" evidence. Unset by
+# default -- trace shares the host unit's LogRateLimitBurst=250 with every other
+# daemon here, so leaving it on evicts the lines it exists to capture. Unquoted
+# ${:+} on purpose: unset expands to no argument at all.
+# shellcheck disable=SC2086
+exec /usr/bin/wayvnc ${WAYVNC_LOG_LEVEL:+--log-level=$WAYVNC_LOG_LEVEL} 0.0.0.0 "${VNC_PORT:-5900}"
 SCRIPT
 
 RUN chmod +x /usr/local/bin/start-wayvnc
@@ -692,7 +701,7 @@ Requires=set-resolution.service
 [Service]
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /usr/local/bin/start-wayvnc
-PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME VNC_PORT
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME VNC_PORT WAYVNC_LOG_LEVEL
 Restart=on-failure
 RestartSec=3
 Type=simple

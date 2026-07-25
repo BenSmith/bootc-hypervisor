@@ -69,6 +69,14 @@ NO_AT_BRIDGE = "1"
 # default to 5900) -- i.e. under [network] mode = "host". With an isolated mode
 # the collision is better solved by publishing to a different host port.
 # VNC_PORT = "5901"
+# wayvnc log level (quiet/error/warning/info/debug/trace). Unset = wayvnc's
+# default. Set this to "trace" only for the one diagnostic run described in the
+# [devices] note below: it makes wayvnc name the buffer path it actually chose
+# ("Choosing SHM format ..." vs "Choosing DMA-BUF format ..."), which is the
+# missing half of the "no memory" evidence. Do not leave it on -- trace shares
+# the host unit's rate-limit budget with every other daemon here and will evict
+# the lines you are trying to read.
+# WAYVNC_LOG_LEVEL = "trace"
 
 [container.health]
 # Track the compositor, matching vncdesktop-wayfire: if sway is gone the
