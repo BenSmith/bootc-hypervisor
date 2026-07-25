@@ -465,7 +465,9 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 # a few tens of seconds in, when a viewer connects and capture starts. It then
 # serves a frozen, input-dead session while its process stays up, so nothing
 # restarts it and the workload still looks healthy. Reproduced with both
-# gpu = "auto" and gpu = "nvidia"; gpu = "none" is stable.
+# gpu = "auto" and gpu = "nvidia"; gpu = "none" is stable. But it did NOT
+# reproduce on 2026-07-25 with the GPU forced on -- see the run notes below
+# before assuming this fallback is still earning its keep.
 #
 # The fallback is empirical: three runs, GPU is the only variable. The *reason*
 # it works is NOT established -- read on before trusting any story about it.
@@ -483,17 +485,30 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 #    requests wayvnc makes, all are plain calloc()/wl_resource_create() failure
 #    checks except one: attach_buffer in types/wlr_ext_image_copy_capture_v1.c,
 #    where wlr_buffer_try_from_resource() returned NULL, i.e. the compositor
-#    did not recognise the buffer the client attached. That is a misuse of the
-#    error -- nothing ran out of memory.
+#    did not recognise the buffer the client attached. That would be a misuse
+#    of the error -- nothing ran out of memory. (This site is now EXCLUDED;
+#    see the next paragraph. It is left here because the survey of sites is
+#    still the useful part.)
 #
-# And this is the part that does not close: wayvnc only takes the dmabuf path
-# under --gpu (enable_gpu_features defaults false, set solely by that flag --
-# no config-file key -- and without it rate_format() scores every dmabuf format
-# 0, so config_dma_buffers() bails). start-wayvnc below does not pass --gpu,
-# which leaves wl_shm, and a wl_shm buffer cannot fail that import: sway calls
-# wlr_renderer_init_wl_shm(), so wl_shm is always wlroots' own and its
-# from_resource() cannot return NULL. So the site is certain and the trigger is
-# not. Do not write a mechanism into this file that is not backed by a log.
+# That contradiction is now closed, and it closes against attach_buffer.
+# wayvnc only takes the dmabuf path under --gpu (enable_gpu_features defaults
+# false, set solely by that flag -- no config-file key -- and without it
+# rate_format() scores every dmabuf format 0, so config_dma_buffers() bails),
+# and start-wayvnc below does not pass --gpu. That was the reading; on
+# 2026-07-25 it was confirmed by measurement, with sway genuinely on the GPU:
+# `ls -l /proc/<pid>/fd` showed sway holding 31 descriptors across
+# /dev/nvidia0, /dev/nvidia1, /dev/nvidiactl and renderD128/129 -- and wayvnc
+# holding not one, neither this bundle's nor vncdesktop-wayfire's. A dmabuf
+# import needs a render node, so both are on wl_shm. And a wl_shm buffer
+# cannot fail that import: sway calls wlr_renderer_init_wl_shm(), so wl_shm is
+# always wlroots' own and its from_resource() cannot return NULL.
+#
+# So the one site that survived reading is ruled out by the client never being
+# on its path. That does not leave us nowhere: per the survey above, every
+# remaining no_memory site is a plain calloc()/wl_resource_create() failure
+# check, so whatever posts it really did fail an allocation. A genuine OOM
+# under the 4G ceiling moves from "rejected" to leading hypothesis. Still: do
+# not write a mechanism into this file that is not backed by a log.
 #
 # Ruled out by reading, so nobody re-treads them: a libwayland event flood
 # (connection buffers are bounded and fail E2BIG, not ENOMEM); an SELinux-denied
@@ -501,16 +516,34 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 # linux-dmabuf feedback (wayvnc binds zwp_linux_dmabuf_v1 at version 3, which
 # has no feedback request).
 #
-# To close it, run once with the GPU on and collect both sides at the moment
-# wayvnc dies:
-#   - WAYVNC_LOG_LEVEL = "trace" in [container.environment] (start-wayvnc turns
-#     it into --log-level)  -> logs "Choosing SHM format ..." or
-#     "Choosing DMA-BUF format ...". That alone says which path it really took
-#     and resolves the contradiction above.
-#   - sway's own log -> wlr_buffer_try_from_resource() logs "Unknown buffer
-#     type" or "Failed to create %s buffer". Note it also has a third, silent
-#     path (class != wl_buffer, no log at all), so "neither line appeared" is
-#     itself a result worth recording.
+# The 2026-07-25 GPU-on run, for the record: WLR_RENDERER=gles2 defeated this
+# fallback, sway took the GPU (the fds above), a viewer connected, capture
+# started -- and nothing died. The old failure came within tens of seconds of
+# capture starting. Confound, stated so nobody quotes this as "gles2 is safe":
+# the NVIDIA module was akmods-built the same day (610.43.03) as part of the
+# host image that run booted, so "the renderer choice is fine" and "the new
+# driver fixed it" are not separated by this run.
+#
+# Do NOT try to settle the buffer path with wayvnc trace logging -- it cannot
+# work. nvnc_trace is wrapped in #ifndef NDEBUG (neatvnc, include/neatvnc.h)
+# and Fedora builds with -DNDEBUG, so the "Choosing SHM format ..." /
+# "Choosing DMA-BUF format ..." calls at ext-image-copy-capture.c:410 and :440
+# are compiled out of the shipped binary; --log-level=trace can never print
+# them. Verified by their absence in a run where lines 326 and 470 of that same
+# file -- which bracket them, and are ordinary nvnc_log DEBUG -- both printed.
+# WAYVNC_LOG_LEVEL is still worth having for everything nvnc_log does emit.
+#
+# What would move this forward now, in order:
+#   - Soak the GPU-on configuration. If it stays up, the fallback below is
+#     obsolete and this block becomes a historical note.
+#   - If it dies again, raise memory_max from 4G to 12G and repeat. See the
+#     OOM reasoning above -- that is now the hypothesis with support.
+#   - sway's own log needs `-d` to say anything at all: without it sway logs at
+#     error level, and wlroots' renderer/EGL init lines never appear. Adding it
+#     is an image change, so do it deliberately rather than mid-repro.
+#   - wlr_buffer_try_from_resource() logs "Unknown buffer type" or "Failed to
+#     create %s buffer", but also has a silent path (class != wl_buffer, no log
+#     at all), so "neither line appeared" is itself a result worth recording.
 #
 # Note that vncdesktop-wayfire being fine on the same GPU is NOT evidence that
 # this is sway-specific. No released wayfire implements ext-image-copy-capture

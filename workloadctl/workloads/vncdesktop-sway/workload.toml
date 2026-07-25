@@ -98,10 +98,12 @@ on_failure = "kill"
 # falls back to pixman, which is stable.
 #
 # The fallback is empirical -- GPU is the only variable across the runs, but the
-# mechanism is NOT established, and two earlier write-ups of it in this repo
-# were wrong. start-sway carries the full evidence: what is proven, what does
-# not close, which theories are already ruled out, and the one trace-level run
-# that would settle it. Read that before repeating any explanation of this.
+# mechanism is NOT established, and earlier write-ups of it in this repo were
+# wrong. As of 2026-07-25 the crash no longer reproduces with the GPU forced on
+# (WLR_RENDERER = "gles2"), so this fallback may already be obsolete; it stays
+# until that has soaked. start-sway carries the full evidence: what is proven,
+# what has since been ruled out by measurement, and what would actually move it
+# forward. Read that before repeating any explanation of this.
 #
 # Setting WLR_RENDERER in [container.environment] overrides the fallback.
 gpu = "auto"
