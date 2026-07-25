@@ -2161,12 +2161,35 @@ class TestGeneratorContainerFlags(unittest.TestCase):
         self.assertIn("--device-read-bps=/dev/sda:10mb", svc)
         self.assertIn("--device-write-bps=/dev/sda:5mb", svc)
 
-    def test_memory_high_per_container_warns(self):
-        svc, result = self._gen("""
+    def test_memory_high_workload_level_does_not_warn(self):
+        """Single mode: [resources] is the *workload-level* table (it reaches the
+        container dict only via normalize_containers), and it binds as MemoryHigh=
+        in the user@{uid} drop-in. Warning here would flag correct config."""
+        _, result = self._gen("""
             [resources]
             memory_high = "1G"
         """)
-        self.assertIn("per-container memory_high is not settable", result.stderr)
+        self.assertNotIn("memory_high is not settable", result.stderr)
+
+    def test_memory_high_per_container_warns(self):
+        write_config(self.config_dir, "multi", """\
+            [workload]
+            name = "multi"
+            mode = "bridge"
+
+            [[containers]]
+            name = "web"
+
+            [containers.container]
+            image = "myapp"
+
+            [containers.resources]
+            memory_high = "1G"
+        """)
+        result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("multi/web: per-container memory_high is not settable",
+                      result.stderr)
 
     def test_cpu_weight_flag(self):
         svc, _ = self._gen("""

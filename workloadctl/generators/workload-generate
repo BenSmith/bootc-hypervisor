@@ -909,7 +909,7 @@ def _device_args(container, uid):
     return args
 
 
-def _cgroup_args(container, name):
+def _cgroup_args(container, name, mode):
     """--shm-size/--pids-limit/--memory/--cpus/--cpu-shares/--device-read-bps/
     --device-write-bps flags from [resources], plus their warnings."""
     args = []
@@ -944,13 +944,19 @@ def _cgroup_args(container, name):
                     f"'{c_res['cpu_quota']}' to --cpus; skipping", level="warning")
     if "cpu_weight" in c_res:
         args.append(f"--cpu-shares={c_res['cpu_weight']}")
-    if "memory_high" in c_res:
+    if "memory_high" in c_res and mode != "single":
         # ADR 001 source-verified: no podman flag writes memory.high.
         # --memory-reservation maps to memory.low, not memory.high.
         # Use workload-level memory_high (in the drop-in) for soft limits.
-        log_msg(f"WARNING: {name}: per-container memory_high is not settable via "
-                f"podman flags (ADR 001); use workload-level memory_high instead",
-                level="warning")
+        #
+        # Only reachable from a per-container [[containers]].resources block. In
+        # single mode normalize_containers() copies the *workload-level*
+        # [resources] table in here, and that one is already honoured verbatim as
+        # MemoryHigh= in the user@<uid> drop-in — warning about it would tell the
+        # author to do the thing they just did.
+        log_msg(f"WARNING: {name}/{container['name']}: per-container memory_high is "
+                f"not settable via podman flags (ADR 001); use workload-level "
+                f"memory_high instead", level="warning")
     for spec in c_res.get("io_read_bandwidth_max", []):
         parts = spec.split(None, 1)
         if len(parts) == 2:
@@ -1438,7 +1444,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     podman_args.extend(_device_args(container, uid))
 
-    podman_args.extend(_cgroup_args(container, name))
+    podman_args.extend(_cgroup_args(container, name, mode))
 
     # Network configuration.
     #  - single: workload-level [network] mode + ports.
