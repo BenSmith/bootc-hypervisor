@@ -310,6 +310,9 @@ Requires=container-bootstrap.service
 Type=oneshot
 RemainAfterExit=yes
 PassEnvironment=CONTAINER_UID CONTAINER_GID
+# Would otherwise tag as bare `sh`, which collides with every other shell
+# oneshot reaching the host journal.
+SyslogIdentifier=xdg-runtime-dir
 ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 
 [Install]
@@ -330,6 +333,20 @@ TasksMax=infinity
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER LANG NO_AT_BRIDGE
+
+# Without SyslogIdentifier= systemd names the stream after the ExecStart binary
+# -- `setpriv` for every unit here -- so no daemon's output is findable by tag.
+# +console is the belt to that braces: journald.conf.d sets Storage=volatile and
+# forwards to the host over ForwardToSocket=, and that forward was observed
+# silently delivering nothing on vncdesktop-sway (2026-07-25), which cost us the
+# only copy of a crash log. Console goes to container PID1's stdout, which
+# podman passthrough puts in the host journal under `workload-<name>` -- the
+# path proven to work. Applied to the compositor and the servers only; the
+# support units get an identifier but stay off console, since the host unit's
+# LogRateLimitBurst=250 is shared and chatty duplicates would evict real lines.
+SyslogIdentifier=wayfire
+StandardOutput=journal+console
+StandardError=journal+console
 
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
@@ -396,6 +413,7 @@ Requires=wayfire-wayland-ready.service
 Type=oneshot
 RemainAfterExit=yes
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
+SyslogIdentifier=set-resolution
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /bin/sh -c '. /run/wayland-display.env && export XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60"'
@@ -447,6 +465,11 @@ Type=simple
 Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USERNAME
+
+# See wayfire.service above for why both of these are set.
+SyslogIdentifier=wayvnc
+StandardOutput=journal+console
+StandardError=journal+console
 
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
     /usr/local/bin/start-wayvnc

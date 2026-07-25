@@ -440,6 +440,9 @@ Requires=container-bootstrap.service
 ExecStart=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 PassEnvironment=CONTAINER_UID CONTAINER_GID
 RemainAfterExit=yes
+# Would otherwise tag as bare `sh`, which collides with every other shell
+# oneshot reaching the host journal.
+SyslogIdentifier=xdg-runtime-dir
 Type=oneshot
 
 [Install]
@@ -556,6 +559,20 @@ RestartSec=3
 TasksMax=infinity
 Type=simple
 
+# Without SyslogIdentifier= systemd names the stream after the ExecStart binary,
+# which is `setpriv` here, not sway -- so the compositor's own diagnostics were
+# unfindable by tag. +console is the belt to that braces: journald.conf.d sets
+# Storage=volatile and forwards to the host over ForwardToSocket=, and on
+# 2026-07-25 that forward silently delivered nothing -- a wayvnc crash that was
+# reproduced twice left no sway output on the host at all, and purging the
+# workload destroyed the only copy. Console goes to the container PID1's stdout,
+# which podman passthrough puts in the host journal under `workload-<name>`;
+# that path is proven to work. Duplicate lines if the forward starts working
+# again are a cheap price for not losing the log a third time.
+SyslogIdentifier=sway
+StandardOutput=journal+console
+StandardError=journal+console
+
 Environment=GDK_BACKEND=wayland
 Environment=LIBSEAT_BACKEND=noop
 Environment=MOZ_ENABLE_WAYLAND=1
@@ -626,6 +643,7 @@ ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --k
     /bin/sh -c '. /run/wayland-display.env && export XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} WAYLAND_DISPLAY && wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60"'
 
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
+SyslogIdentifier=set-resolution
 RemainAfterExit=yes
 Type=oneshot
 
@@ -678,6 +696,12 @@ PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER VNC_PASSWORD VNC_USER
 Restart=on-failure
 RestartSec=3
 Type=simple
+
+# See the matching block in sway.service: the default identifier would be
+# `setpriv`, and +console guarantees the host journal actually receives this.
+SyslogIdentifier=wayvnc
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
