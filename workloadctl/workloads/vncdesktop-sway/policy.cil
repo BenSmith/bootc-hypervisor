@@ -35,6 +35,27 @@
     (allow process container_file_t (sock_file (mounton)))
     (allow process user_tmp_t (sock_file (mounton)))
 
+    ; Wayland clients allocate their pixel buffers as shared memory and mmap
+    ; them, which needs `map` on tmpfs_t. Without it every client that draws
+    ; dies at startup -- foot fails in shm.c ("failed to mmap SHM backing memory
+    ; file: Permission denied") and waybar exits right after parsing its config,
+    ; so the session comes up with a background and no windows, and a terminal
+    ; keybinding appears to do nothing because each launch dies immediately.
+    ;
+    ; The rest of this group is bwrap populating the sandbox root on the tmpfs
+    ; above: create/mount its dirs, stage and exec the glycin loaders
+    ; (execute+map => running code mmap'd from tmpfs), create its symlinks, and
+    ; unmount the bind-mounted container_file_t mounts on teardown. All granted
+    ; directly to container_init_t by container-selinux's base policy, but not
+    ; inherited by a per-workload type, so they must be enumerated here.
+    ; Mirrors vncdesktop-wayfire/policy.cil, which has carried these already.
+    (allow process tmpfs_t (dir (create mounton)))
+    (allow process tmpfs_t (file (create open mounton execute map)))
+    (allow process tmpfs_t (lnk_file (create)))
+    (allow process container_file_t (filesystem (unmount)))
+    ; ioctl on a /proc file.
+    (allow process proc_t (file (ioctl)))
+
     ; Hardware probing via the bind-mounted /run/udev (mesa, libinput, etc.).
     (allow process udev_var_run_t (dir (read)))
     (allow process udev_var_run_t (file (getattr open read)))
