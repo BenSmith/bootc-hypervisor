@@ -64,7 +64,7 @@ test:
 
 # Run unit tests only (no integration)
 test-unit:
-  python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics -v
+  python3 -m unittest tests.test_workload_lib tests.test_generator tests.test_write_env tests.test_metrics tests.test_stdlib_only -v
 
 # Run integration tests
 test-integration:
