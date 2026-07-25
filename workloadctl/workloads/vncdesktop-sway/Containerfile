@@ -470,88 +470,19 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 # before assuming this fallback is still earning its keep.
 #
 # The fallback is empirical: three runs, GPU is the only variable. The *reason*
-# it works is NOT established -- read on before trusting any story about it.
+# it works is NOT established, and two earlier write-ups of it in this repo were
+# wrong and had to be retracted. Do not write a mechanism into this file that is
+# not backed by a log.
 #
-# What is proven, against the exact shipped versions (Fedora 44: sway 1.11,
-# wlroots 0.20.2, wayvnc 0.9.1, no downstream patches; the log's
-# "../src/main.c:516" matches wayvnc 0.9.x and no other release):
+# The full investigation -- what is proven, what has since been ruled out by
+# measurement (attach_buffer, and wayvnc trace logging as a technique), the
+# 2026-07-25 GPU-on run that did not reproduce, and what would actually move it
+# forward -- lives in:
 #
-#  - Protocol: sway 1.11 registers both ext_image_copy_capture_manager_v1 and
-#    ext_output_image_capture_source_manager_v1 (sway/server.c), and wayvnc's
-#    screencopy_create() takes ext-image-copy-capture unconditionally when both
-#    are present, so zwlr_screencopy is not in play here.
-#  - "no memory" is wl_*_post_no_memory(), which posts on wl_display -- hence
-#    the wl_display#1 in the log. Of every such site reachable from the
-#    requests wayvnc makes, all are plain calloc()/wl_resource_create() failure
-#    checks except one: attach_buffer in types/wlr_ext_image_copy_capture_v1.c,
-#    where wlr_buffer_try_from_resource() returned NULL, i.e. the compositor
-#    did not recognise the buffer the client attached. That would be a misuse
-#    of the error -- nothing ran out of memory. (This site is now EXCLUDED;
-#    see the next paragraph. It is left here because the survey of sites is
-#    still the useful part.)
+#   .reference/notes/vncdesktop-sway-wayvnc-no-memory.md
 #
-# That contradiction is now closed, and it closes against attach_buffer.
-# wayvnc only takes the dmabuf path under --gpu (enable_gpu_features defaults
-# false, set solely by that flag -- no config-file key -- and without it
-# rate_format() scores every dmabuf format 0, so config_dma_buffers() bails),
-# and start-wayvnc below does not pass --gpu. That was the reading; on
-# 2026-07-25 it was confirmed by measurement, with sway genuinely on the GPU:
-# `ls -l /proc/<pid>/fd` showed sway holding 31 descriptors across
-# /dev/nvidia0, /dev/nvidia1, /dev/nvidiactl and renderD128/129 -- and wayvnc
-# holding not one, neither this bundle's nor vncdesktop-wayfire's. A dmabuf
-# import needs a render node, so both are on wl_shm. And a wl_shm buffer
-# cannot fail that import: sway calls wlr_renderer_init_wl_shm(), so wl_shm is
-# always wlroots' own and its from_resource() cannot return NULL.
-#
-# So the one site that survived reading is ruled out by the client never being
-# on its path. That does not leave us nowhere: per the survey above, every
-# remaining no_memory site is a plain calloc()/wl_resource_create() failure
-# check, so whatever posts it really did fail an allocation. A genuine OOM
-# under the 4G ceiling moves from "rejected" to leading hypothesis. Still: do
-# not write a mechanism into this file that is not backed by a log.
-#
-# Ruled out by reading, so nobody re-treads them: a libwayland event flood
-# (connection buffers are bounded and fail E2BIG, not ENOMEM); an SELinux-denied
-# mmap of the client pool (that is WL_SHM_ERROR_INVALID_FD, not no_memory);
-# linux-dmabuf feedback (wayvnc binds zwp_linux_dmabuf_v1 at version 3, which
-# has no feedback request).
-#
-# The 2026-07-25 GPU-on run, for the record: WLR_RENDERER=gles2 defeated this
-# fallback, sway took the GPU (the fds above), a viewer connected, capture
-# started -- and nothing died. The old failure came within tens of seconds of
-# capture starting. Confound, stated so nobody quotes this as "gles2 is safe":
-# the NVIDIA module was akmods-built the same day (610.43.03) as part of the
-# host image that run booted, so "the renderer choice is fine" and "the new
-# driver fixed it" are not separated by this run.
-#
-# Do NOT try to settle the buffer path with wayvnc trace logging -- it cannot
-# work. nvnc_trace is wrapped in #ifndef NDEBUG (neatvnc, include/neatvnc.h)
-# and Fedora builds with -DNDEBUG, so the "Choosing SHM format ..." /
-# "Choosing DMA-BUF format ..." calls at ext-image-copy-capture.c:410 and :440
-# are compiled out of the shipped binary; --log-level=trace can never print
-# them. Verified by their absence in a run where lines 326 and 470 of that same
-# file -- which bracket them, and are ordinary nvnc_log DEBUG -- both printed.
-# WAYVNC_LOG_LEVEL is still worth having for everything nvnc_log does emit.
-#
-# What would move this forward now, in order:
-#   - Soak the GPU-on configuration. If it stays up, the fallback below is
-#     obsolete and this block becomes a historical note.
-#   - If it dies again, raise memory_max from 4G to 12G and repeat. See the
-#     OOM reasoning above -- that is now the hypothesis with support.
-#   - sway's own log needs `-d` to say anything at all: without it sway logs at
-#     error level, and wlroots' renderer/EGL init lines never appear. Adding it
-#     is an image change, so do it deliberately rather than mid-repro.
-#   - wlr_buffer_try_from_resource() logs "Unknown buffer type" or "Failed to
-#     create %s buffer", but also has a silent path (class != wl_buffer, no log
-#     at all), so "neither line appeared" is itself a result worth recording.
-#
-# Note that vncdesktop-wayfire being fine on the same GPU is NOT evidence that
-# this is sway-specific. No released wayfire implements ext-image-copy-capture
-# (added 2025-09-24, in no tag through v0.10.1), so wayvnc falls back to
-# zwlr_screencopy there, which always offers a shm buffer and never names a
-# device. The two bundles are on different capture protocols, not different
-# hardware support -- expect this to reach wayfire once Fedora ships a build
-# carrying that commit.
+# Read that before changing this block or explaining the crash to anyone. Note
+# .reference/ is gitignored, so that file is local-only.
 #
 # /dev/nvidiactl is the marker -- the NVIDIA CDI spec brings it in alongside the
 # render nodes. WLR_RENDERER set in the environment overrides all of this, for
@@ -713,12 +644,14 @@ fi
 
 cd
 
-# WAYVNC_LOG_LEVEL exists for the trace-level run described in start-sway: at
-# --log-level=trace wayvnc names the buffer path it chose ("Choosing SHM/DMA-BUF
-# format ..."), which is the missing half of the "no memory" evidence. Unset by
-# default -- trace shares the host unit's LogRateLimitBurst=250 with every other
-# daemon here, so leaving it on evicts the lines it exists to capture. Unquoted
-# ${:+} on purpose: unset expands to no argument at all.
+# WAYVNC_LOG_LEVEL raises wayvnc's verbosity from the TOML instead of by
+# rebuilding the image. "debug" is the useful ceiling: "trace" buys nothing,
+# because nvnc_trace is #ifndef NDEBUG and Fedora builds with -DNDEBUG, so every
+# nvnc_trace call is compiled out of the shipped binary (see the note under
+# .reference/notes/ -- this is why the "Choosing SHM/DMA-BUF format" lines can
+# never appear). Unset by default: the extra output shares the host unit's
+# LogRateLimitBurst=250 with every other daemon here. Unquoted ${:+} on purpose:
+# unset expands to no argument at all.
 # shellcheck disable=SC2086
 exec /usr/bin/wayvnc ${WAYVNC_LOG_LEVEL:+--log-level=$WAYVNC_LOG_LEVEL} 0.0.0.0 "${VNC_PORT:-5900}"
 SCRIPT

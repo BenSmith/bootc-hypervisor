@@ -70,13 +70,12 @@ NO_AT_BRIDGE = "1"
 # the collision is better solved by publishing to a different host port.
 # VNC_PORT = "5901"
 # wayvnc log level (quiet/error/warning/info/debug/trace). Unset = wayvnc's
-# default. Set this to "trace" only for the one diagnostic run described in the
-# [devices] note below: it makes wayvnc name the buffer path it actually chose
-# ("Choosing SHM format ..." vs "Choosing DMA-BUF format ..."), which is the
-# missing half of the "no memory" evidence. Do not leave it on -- trace shares
-# the host unit's rate-limit budget with every other daemon here and will evict
-# the lines you are trying to read.
-# WAYVNC_LOG_LEVEL = "trace"
+# default (warning). "debug" is the useful ceiling -- "trace" adds nothing,
+# because Fedora's neatvnc is built with -DNDEBUG and every nvnc_trace call is
+# compiled out. For diagnostics only: the extra output shares the host unit's
+# rate-limit budget with every other daemon here and will evict the lines you
+# are trying to read, so turn it off again afterwards.
+# WAYVNC_LOG_LEVEL = "debug"
 
 [container.health]
 # Track the compositor, matching vncdesktop-wayfire: if sway is gone the
@@ -101,9 +100,10 @@ on_failure = "kill"
 # mechanism is NOT established, and earlier write-ups of it in this repo were
 # wrong. As of 2026-07-25 the crash no longer reproduces with the GPU forced on
 # (WLR_RENDERER = "gles2"), so this fallback may already be obsolete; it stays
-# until that has soaked. start-sway carries the full evidence: what is proven,
-# what has since been ruled out by measurement, and what would actually move it
-# forward. Read that before repeating any explanation of this.
+# until that has soaked. The full evidence -- what is proven, what has since
+# been ruled out by measurement, and what would actually move it forward -- is
+# in .reference/notes/vncdesktop-sway-wayvnc-no-memory.md (gitignored, so
+# local-only). Read that before repeating any explanation of this.
 #
 # Setting WLR_RENDERER in [container.environment] overrides the fallback.
 gpu = "auto"
