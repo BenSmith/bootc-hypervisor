@@ -80,25 +80,9 @@ start_period = "15s"
 on_failure = "kill"
 
 [devices]
-# Optional render node for GPU-accelerated rendering. Falls back to software
-# rendering automatically if no usable render node is exposed.
-#
-# NVIDIA hosts get software rendering regardless of what is set here. With a
-# render node, wayvnc dies a few tens of seconds in with "wl_display#1: error 2:
-# no memory" and then serves a frozen, input-dead session while its process
-# stays up and keeps reporting healthy. start-sway detects the NVIDIA case and
-# falls back to pixman, which is stable.
-#
-# The fallback is empirical -- GPU is the only variable across the runs, but the
-# mechanism is NOT established, and earlier write-ups of it in this repo were
-# wrong. As of 2026-07-25 the crash no longer reproduces with the GPU forced on
-# (WLR_RENDERER = "gles2"), so this fallback may already be obsolete; it stays
-# until that has soaked. The full evidence -- what is proven, what has since
-# been ruled out by measurement, and what would actually move it forward -- is
-# in .reference/notes/vncdesktop-sway-wayvnc-no-memory.md (gitignored, so
-# local-only). Read that before repeating any explanation of this.
-#
-# Setting WLR_RENDERER in [container.environment] overrides the fallback.
+# Optional render node for GPU-accelerated rendering. start-sway falls back to
+# software rendering if no usable render node is exposed; setting WLR_RENDERER
+# in [container.environment] overrides that probe either way.
 gpu = "auto"
 
 [security]
