@@ -84,14 +84,18 @@ on_failure = "kill"
 # rendering automatically if no usable render node is exposed.
 #
 # NVIDIA hosts get software rendering regardless of what is set here. With a
-# render node, sway names it as the ext-image-copy-capture device, wayvnc
-# allocates its capture buffer there, and sway then cannot import it back --
-# reported as wl_display NO_MEMORY. The failure is silent (wayvnc keeps running
-# and reporting healthy while serving a frozen, input-dead session). Under
-# pixman no capture device is advertised, so wayvnc uses wl_shm and it works.
-# start-sway detects the NVIDIA case and falls back; see the long comment there
-# for the full mechanism. Setting WLR_RENDERER in [container.environment]
-# overrides the fallback.
+# render node, wayvnc dies a few tens of seconds in with "wl_display#1: error 2:
+# no memory" and then serves a frozen, input-dead session while its process
+# stays up and keeps reporting healthy. start-sway detects the NVIDIA case and
+# falls back to pixman, which is stable.
+#
+# The fallback is empirical -- GPU is the only variable across the runs, but the
+# mechanism is NOT established, and two earlier write-ups of it in this repo
+# were wrong. start-sway carries the full evidence: what is proven, what does
+# not close, which theories are already ruled out, and the one trace-level run
+# that would settle it. Read that before repeating any explanation of this.
+#
+# Setting WLR_RENDERER in [container.environment] overrides the fallback.
 gpu = "auto"
 
 [security]
