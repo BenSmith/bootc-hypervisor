@@ -36,7 +36,8 @@ image = "docker.io/library/nginx:alpine"
 
 
 class _FakeVMSub:
-    """Stands in for VMSubstrate so isinstance() can pick VMs out of a batch."""
+    """Marks which fake config in a batch is a VM. cmd_update reads
+    config.is_vm rather than the substrate's type, so this is only a tag."""
 
 
 class _FakeSub:
@@ -59,6 +60,7 @@ class _FakeConfig:
     def __init__(self, name, sub):
         self.name = name
         self._sub = sub
+        self.is_vm = isinstance(sub, _FakeVMSub)
 
     def container_images(self):
         return [(self.name, f"docker.io/{self.name}:latest")]
@@ -101,7 +103,6 @@ class UpdateJsonTest(unittest.TestCase):
 
     def setUp(self):
         self.enterContext(mock.patch.object(cmd_update, "require_root", lambda: None))
-        self.enterContext(mock.patch.object(cmd_update, "VMSubstrate", _FakeVMSub))
         self.enterContext(mock.patch.object(
             cmd_update, "get_substrate", lambda c, m: c._sub))
         self.manager = mock.Mock()

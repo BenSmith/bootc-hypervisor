@@ -25,10 +25,12 @@ from pathlib import Path
 
 import service_runtime
 from workload_lib import (
+    UID_MIN, UID_MAX,
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind,
     virtiofs_tags, parse_volume_spec, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
+    workload_env_dir,
 )
 from vm import VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars
 from secrets_template import substitute_template
@@ -96,10 +98,9 @@ def configure_subuid_subgid(pw, config):
     uid = pw.pw_uid
     username = pw.pw_name
 
-    base_uid = 10000
-    if uid < base_uid:
-        raise ValueError(f"UID {uid} is below minimum workload UID {base_uid}")
-    uid_offset = uid - base_uid
+    if uid < UID_MIN:
+        raise ValueError(f"UID {uid} is below minimum workload UID {UID_MIN}")
+    uid_offset = uid - UID_MIN
     # Place subid ranges above the Fedora useradd window (SUB_UID_MIN=524288).
     # Old formula (100000 + offset*100000) collides with that window for low UIDs.
     # New formula: 600100000 + (offset * 65536); max end ≈ 3.4G, within uint32.
@@ -111,7 +112,7 @@ def configure_subuid_subgid(pw, config):
         raise ValueError(
             f"Subuid range for UID {uid} would overflow uint32 "
             f"({subid_start}+{count}-1 > 4294967295). "
-            f"UID must be in range 10000-52948."
+            f"UID must be in range {UID_MIN}-{UID_MAX}."
         )
 
     main_entry = f"{username}:{subid_start}:{count}"
@@ -426,8 +427,14 @@ def write_environment_file(name, pw, config):
     (which depends on the UID). This allows the generator to create service
     files before the user exists.
     """
-    env_dir = Path("/run/workload-env")
-    env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # No mode= here: systemd/workloads-dirs.conf owns this directory's mode and
+    # tmpfiles runs under sysinit.target, long before any workload's
+    # ExecStartPre — so exist_ok=True makes a mode= argument dead, and 0700
+    # would be wrong anyway (see that file: the workload user must traverse
+    # this dir to read its own --env-file). Bare mkdir is the boot-order
+    # fallback only.
+    env_dir = workload_env_dir()
+    env_dir.mkdir(parents=True, exist_ok=True)
 
     lines = [
         f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",

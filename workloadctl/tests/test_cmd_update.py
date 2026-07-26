@@ -33,13 +33,16 @@ class _FakeSub:
 
 
 class _FakeVMSub(_FakeSub):
-    """A VM substrate — cmd_update branches on isinstance(.., VMSubstrate)."""
+    """A VM substrate. cmd_update no longer branches on the substrate's type —
+    it asks config.is_vm, the same declaration-derived flag get_substrate()
+    routes on — so this class now only marks which fake config is a VM."""
 
 
 class _FakeConfig:
     def __init__(self, name, sub):
         self.name = name
         self._sub = sub
+        self.is_vm = isinstance(sub, _FakeVMSub)
 
 
 def _ns(**kw):
@@ -51,10 +54,10 @@ def _ns(**kw):
 
 class UpdateDispatchTest(unittest.TestCase):
     def setUp(self):
-        # require_root and VMSubstrate-for-isinstance and _verify_all are the
-        # three seams; patch them for every test.
+        # require_root and _verify_all are the two seams; patch them for every
+        # test. VM-ness rides on _FakeConfig.is_vm, so no substrate type needs
+        # patching in.
         self.enterContext(mock.patch.object(cmd_update, "require_root", lambda: None))
-        self.enterContext(mock.patch.object(cmd_update, "VMSubstrate", _FakeVMSub))
         self.manager = mock.Mock()
 
     def _run(self, args, configs=None, verify_returns=0):

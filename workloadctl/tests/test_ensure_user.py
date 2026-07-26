@@ -998,23 +998,30 @@ class TestWriteEnvironmentFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_dir = Path(tmp) / "run" / "workload-env"
             pw = _fake_pw(Path(tmp), uid=10042, gid=10042)
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                env_dir if p == "/run/workload-env" else Path(p))), \
+            with mock.patch.dict(os.environ, {"WORKLOAD_ENV_DIR": str(env_dir)}), \
                  mock.patch.object(self.mod, "_detect_host_ip", return_value="10.0.0.5"):
                 self.mod.write_environment_file("myapp", pw, {})
             content = (env_dir / "workload-myapp.env").read_text()
             self.assertIn("XDG_RUNTIME_DIR=/run/user/10042", content)
             self.assertIn("HOST_IP=10.0.0.5", content)
 
-    def test_env_dir_created_mode_0700(self):
+    def test_env_dir_created_when_absent(self):
+        """The mkdir is a boot-order fallback, not the mode's owner.
+
+        systemd/workloads-dirs.conf declares /run/workload-env 0755 and
+        tmpfiles runs under sysinit.target, so in production the directory
+        always exists before this code runs and no mode= would apply. 0755 is
+        load-bearing there (the rootless workload user has to traverse it to
+        read its own --env-file), so this asserts creation only — the mode is
+        deliberately not this function's contract.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             env_dir = Path(tmp) / "run" / "workload-env"
             pw = _fake_pw(Path(tmp), uid=10042, gid=10042)
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                env_dir if p == "/run/workload-env" else Path(p))), \
+            with mock.patch.dict(os.environ, {"WORKLOAD_ENV_DIR": str(env_dir)}), \
                  mock.patch.object(self.mod, "_detect_host_ip", return_value=""):
                 self.mod.write_environment_file("myapp", pw, {})
-            self.assertEqual(oct(env_dir.stat().st_mode & 0o777), "0o700")
+            self.assertTrue(env_dir.is_dir())
 
 
 class TestEnableLinger(unittest.TestCase):

@@ -182,6 +182,7 @@ def cmd_secret(args, manager: WorkloadManager):
             cmd = [
                 "systemd-creds", "encrypt",
                 f"--with-key={key_type}",
+                f"--name={name}",
                 str(Path(args.file).expanduser()),
                 str(cred_file)
             ]

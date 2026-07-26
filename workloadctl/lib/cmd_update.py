@@ -19,7 +19,6 @@ from substrate import (
     NotApplicable,
     rollback_tag,
 )
-from substrate_vm import VMSubstrate
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +242,10 @@ def _reprovision_one(config: WorkloadConfig, manager: WorkloadManager, *,
     row to report before it exits nonzero.
     """
     substrate = get_substrate(config, manager)
-    is_vm = isinstance(substrate, VMSubstrate)
+    # config.is_vm is the declaration-derived truth get_substrate() itself
+    # routes on — asking the config keeps the substrate port private to the
+    # router instead of importing a concrete substrate across the boundary.
+    is_vm = config.is_vm
     row = {
         "workload": config.name,
         "kind": "vm" if is_vm else "container",

@@ -116,7 +116,11 @@ class CreateTest(SecretTestBase):
         cmd = captured["cmd"]
         self.assertIn("--with-key=host", cmd)        # override honored
         self.assertIn(str(secret_file), cmd)         # file path passed through
-        self.assertNotIn("--name=api", cmd)          # --name only for stdin mode
+        # --name is passed in every mode (stdin, file, rotate, import). systemd-
+        # creds would infer it from the destination basename, but only while the
+        # destination stays cred_dir/<name> — pass it explicitly so the embedded
+        # name never silently depends on that.
+        self.assertIn("--name=api", cmd)
 
 
 class DeleteTest(SecretTestBase):
