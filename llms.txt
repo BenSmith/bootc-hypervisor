@@ -80,9 +80,9 @@ man/cosy.1                                cosy man page
 config.toml                               bootc-image-builder config (user setup for ISOs)
 config-iso.toml                           ISO-specific image builder config
 policy.json                               Container image signature policy
-policy-local.json                         Permissive policy for local builds
-policy-hypervisor.json.template           Policy template (accept-by-default; sigstoreSigned scopes)
-policy-minimal.json.template              Minimal policy template
+policy-local.json                         Permissive policy — build-base-local only, never a published image
+policy-hypervisor.json.template           Policy template: reject-by-default + sigstoreSigned for ghcr.io/<ns> and registry.local
+policy-minimal.json.template              Same, for the minimal image (ghcr.io/<ns> signed; ghcr.io + registry.local open)
 
 security/
   seatd_container.cil                     SELinux module (CIL): allow containers to use seatd socket

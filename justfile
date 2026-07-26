@@ -43,7 +43,15 @@ build-minimal version=fedora_version rechunk="false":
     echo "Cloning Fedora bootc manifests..."
     git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
   fi
-  cp policy-local.json manifests/policy.json
+  # NB: this recipe builds with *upstream's* Containerfile (via their `just
+  # build` below), not our fedora-bootc-minimal.Containerfile. Upstream's
+  # Containerfile and Justfile reference neither policy.json nor cosign.pub, so
+  # the image built here does NOT carry our /etc/containers/policy.json or
+  # /etc/pki/containers/cosign.pub layer — only CI's build does. There used to
+  # be a `cp policy-local.json manifests/policy.json` here; nothing consumed it.
+  # If this is ever switched to our Containerfile (see R14), it needs
+  # policy-minimal.json.template rendered to manifests/policy.json and
+  # cosign.pub copied into manifests/, the way the CI workflows do it.
   echo "Building fedora-bootc-minimal:{{version}}..."
   cd manifests
   FEDORA_VERSION={{version}} TIER=minimal BUILDER="sudo podman" \
