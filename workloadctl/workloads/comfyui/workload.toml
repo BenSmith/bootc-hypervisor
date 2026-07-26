@@ -77,10 +77,10 @@ COMFYUI_ARGS = "--listen 0.0.0.0 --port 8188"
 #
 # PIN THE CARD ON A SHARED OR MULTI-GPU HOST. "auto" on NVIDIA expands to
 # nvidia.com/gpu=all — EVERY card, not one — so ComfyUI will happily load a
-# model onto a GPU another workload is already using. That is the live setup on
-# this fleet: gamedev-sway and game-dev-nvidia share a single RTX 4080 SUPER,
-# and wayfire-game-streaming pins by UUID for exactly this reason. 16 GB does
-# not go far between a streaming desktop and an SDXL/Flux graph.
+# model onto a GPU another workload is already using. That is the common failure
+# where a streaming desktop and a diffusion workload co-tenant, and why
+# wayfire-game-streaming pins by UUID. 16 GB does not go far between a streaming
+# desktop and an SDXL/Flux graph.
 #   gpu = "nvidia:GPU-<uuid>"    # `nvidia-ctk cdi list` to find the UUID
 #
 # Unlike Sunshine, ComfyUI is not made NONDETERMINISTIC by this — torch takes

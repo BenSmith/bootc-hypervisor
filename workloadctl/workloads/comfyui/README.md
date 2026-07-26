@@ -71,11 +71,10 @@ than hoping — append `--cpu` to `COMFYUI_ARGS`.
 ### Pin the card on a shared or multi-GPU host
 
 On NVIDIA, `auto` expands to `nvidia.com/gpu=all` — *every* card, not one. So
-ComfyUI will load a model onto a GPU another workload is already using. That is
-the live arrangement on this fleet: `gamedev-sway` and `game-dev-nvidia` share a
-single RTX 4080 SUPER, and `wayfire-game-streaming` pins by UUID for exactly this
-reason. 16 GB does not stretch between a streaming desktop and an SDXL or Flux
-graph.
+ComfyUI will load a model onto a GPU another workload is already using. This is
+the common failure on a host where a streaming desktop and a diffusion workload
+co-tenant — which is why `wayfire-game-streaming` pins by UUID. 16 GB does not
+stretch between a streaming desktop and an SDXL or Flux graph.
 
 ```toml
 gpu = "nvidia:GPU-<uuid>"     # nvidia-ctk cdi list

@@ -54,18 +54,19 @@ you have to register the backends.
 incrementing `GPU_ID` each time (`0`, `1`, …). SwarmUI then routes and queues
 generations across them.
 
-The payoff on onepiece: the 4080 SUPER and the 5070 Ti each hold a *different*
-model and both stay busy, instead of one model being resident at a time. Given
-the ~16 GB per-card ceiling and a roster where most models want most of a card,
-that is the difference between the collection being usable and not.
+The payoff on a multi-GPU host: each card holds a *different* model and both
+stay busy, instead of one model being resident at a time. On cards in the ~16 GB
+class, where most models want most of a card, that is the difference between a
+model collection being usable and not.
 
 If you must drive multiple GPUs from the Comfy Workflow tab directly, use
 **MultiGPU → Use All** at the top left, which spreads queued requests across
 backends.
 
 The trade-off is stated in `workload.toml`: SwarmUI assumes it owns every card
-it can see, so do not co-tenant it with `gamedev-sway` or
-`wayfire-game-streaming` without pinning `gpu` to a UUID first.
+it can see, so do not co-tenant it with a streaming desktop
+(`wayfire-game-streaming`, `vncdesktop-sway`) without pinning `gpu` to a UUID
+first.
 
 ## Models — where things go
 

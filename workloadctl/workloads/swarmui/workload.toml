@@ -60,15 +60,16 @@ SWARMUI_ARGS = ""
 #
 # SwarmUI's whole design premise is a "swarm" of GPUs: you register one ComfyUI
 # backend per card (Server → Backends → add a backend, increment GPU_ID on each)
-# and it routes and queues generations across them. On this host that means the
-# 4080 SUPER and the 5070 Ti each hold a different model and both stay busy,
-# instead of one model being resident at a time. Handing SwarmUI a single card
-# throws that away.
+# and it routes and queues generations across them. On a multi-GPU host that
+# means each card holds a different model and all of them stay busy, instead of
+# one model being resident at a time. Handing SwarmUI a single card throws that
+# away.
 #
 # The corollary is that SwarmUI must NOT share cards with another GPU workload.
-# It assumes it owns what it can see, and will schedule onto a card that
-# gamedev-sway or wayfire-game-streaming is already using — 16 GB per card does
-# not absorb that. If you need to co-tenant, pin here and accept single-GPU:
+# It assumes it owns what it can see, and will schedule onto a card that a
+# streaming desktop (wayfire-game-streaming, vncdesktop-sway) is already using —
+# 16 GB per card does not absorb that. If you need to co-tenant, pin here and
+# accept single-GPU:
 #   gpu = "nvidia:GPU-<uuid>"    # `nvidia-ctk cdi list` to find the UUID
 #
 # Unlike the comfyui bundle there is no vendor baked into this image: SwarmUI
@@ -107,8 +108,8 @@ ports = ["7801:7801"]
 # NO AUTHENTICATION BY DEFAULT, and this publishes on all host interfaces —
 # the same caveat that applies to llama-swap on :8080. Anyone who can reach the
 # host can generate, browse every image in Output, and read Settings. That is
-# fine on a trusted LAN and NOT fine if onepiece ever becomes reachable beyond
-# it. SwarmUI ships an account system (Server → Users) — turn it on before
+# fine on a trusted LAN and NOT fine if the host is ever reachable beyond it.
+# SwarmUI ships an account system (Server → Users) — turn it on before
 # exposing this, or leave the port bound to localhost and reach it over SSH.
 
 [resources]

@@ -204,8 +204,8 @@ write_files:
       systemctl enable --now systemd-timesyncd || true
 
       # mDNS via systemd-resolved alone — it both publishes this VM's hostname
-      # (<hostname>.local) and resolves remote .local names (registry.local,
-      # zamd.local) for CI. The VM only needs to announce a single name (its
+      # (<hostname>.local) and resolves remote .local names (registry.local and
+      # the build host) for CI. The VM only needs to announce a single name (its
       # own hostname), which resolved does natively, so there is no separate
       # avahi responder here — that avoids two mDNS stacks fighting over
       # UDP/5353, the collision bug that motivated this design. (Contrast the

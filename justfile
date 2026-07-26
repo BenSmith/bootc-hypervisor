@@ -496,7 +496,7 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
     echo "IP address: $ip_addr"
     echo ""
     echo "To connect:"
-    echo "  ssh ben@$ip_addr"
+    echo "  ssh ${VM_USER:-$(whoami)}@$ip_addr"
     echo "  sudo virsh console {{vmname}}         # Serial console (Ctrl+] to exit)"
   else
     echo "IP address: (timeout waiting for DHCP - check with: sudo virsh domifaddr {{vmname}})"
