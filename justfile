@@ -5,6 +5,8 @@ build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 local_registry := 'registry.local'
 tag := `date +%Y%m%d-%H%M`
 fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml`)
+# Pinned rechunker image tag, same source of truth the CI workflows read.
+rechunker := env_var_or_default('RECHUNKER', `yq '.rechunker' fedora-versions.yml`)
 
 # Rechunk an image in user storage (copies to root, rechunks, copies back)
 _rechunk image:
@@ -43,43 +45,57 @@ build-minimal version=fedora_version rechunk="false":
     echo "Cloning Fedora bootc manifests..."
     git clone --depth 1 https://gitlab.com/fedora/bootc/base-images.git manifests
   fi
-  # NB: this recipe builds with *upstream's* Containerfile (via their `just
-  # build` below), not our fedora-bootc-minimal.Containerfile. Upstream's
-  # Containerfile and Justfile reference neither policy.json nor cosign.pub, so
-  # the image built here does NOT carry our /etc/containers/policy.json or
-  # /etc/pki/containers/cosign.pub layer — only CI's build does. There used to
-  # be a `cp policy-local.json manifests/policy.json` here; nothing consumed it.
-  # If this is ever switched to our Containerfile (see R14), it needs
-  # policy-minimal.json.template rendered to manifests/policy.json and
-  # cosign.pub copied into manifests/, the way the CI workflows do it.
+  # Build the way the CI workflows do: OUR fedora-bootc-minimal.Containerfile (a
+  # podman-4-compatible fork of upstream's) with the manifests clone as build
+  # context, so the image gets the two COPY lines upstream's Containerfile does
+  # not have — the enforcing policy and the cosign pubkey it references.
+  #
+  # This recipe used to cd into manifests/ and run *upstream's* `just build`,
+  # which ignores policy.json/cosign.pub entirely — so the local image carried
+  # Fedora's stock permissive policy, on an image these ghcr.io tags can push.
+  # (The rootfs was the same either way: upstream's TIER=minimal resolves
+  # --manifest=fedora-minimal, which install-manifests ships as a legacy alias
+  # for the `minimal` CI passes; the two yaml files are byte-identical.)
+  sed -e 's|__REGISTRY_NAMESPACE__|bensmith|g' \
+      policy-minimal.json.template > manifests/policy.json
+  cp cosign.pub manifests/cosign.pub
   echo "Building fedora-bootc-minimal:{{version}}..."
-  cd manifests
-  FEDORA_VERSION={{version}} TIER=minimal BUILDER="sudo podman" \
-    BUILDER_EXTRA="--network=host --env=http_proxy={{proxy}} --env=https_proxy={{proxy}}" \
-    http_proxy={{proxy}} https_proxy={{proxy}} \
-    just build
-  cd ..
-  # Upstream tags as localhost/fedora-bootc:minimal — add our tags
-  sudo podman tag localhost/fedora-bootc:minimal \
+  # --network=host and the proxy env are the one deliberate difference from CI:
+  # local builds may sit behind HTTP_PROXY, the runners don't.
+  http_proxy={{proxy}} https_proxy={{proxy}} \
+  sudo podman build \
+    --security-opt=label=disable \
+    --cap-add=all \
+    --device /dev/fuse \
+    --network=host \
+    --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
+    -f fedora-bootc-minimal.Containerfile \
+    --build-arg MANIFEST=minimal \
+    --build-arg VERSION={{version}} \
+    --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:{{version}} \
+    --build-arg REPOS_IMAGE=quay.io/fedora/fedora:{{version}} \
+    -t localhost/fedora-bootc-minimal:build \
+    manifests
+  sudo podman inspect localhost/fedora-bootc-minimal:build >/dev/null
+  STAGED=localhost/fedora-bootc-minimal:build
+  if [ "{{rechunk}}" == "true" ]; then
+    echo "Rechunking image..."
+    sudo podman run --rm --privileged \
+      -v /var/lib/containers:/var/lib/containers \
+      quay.io/fedora/fedora-bootc:{{rechunker}} \
+      /usr/libexec/bootc-base-imagectl rechunk \
+      localhost/fedora-bootc-minimal:build \
+      localhost/fedora-bootc-minimal:rechunked
+    STAGED=localhost/fedora-bootc-minimal:rechunked
+  fi
+  sudo podman tag "$STAGED" \
     localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
     localhost/fedora-bootc-minimal:{{version}} \
     localhost/fedora-bootc-minimal:latest \
     ghcr.io/bensmith/fedora-bootc-minimal:{{version}} \
     ghcr.io/bensmith/fedora-bootc-minimal:latest
-  if [ "{{rechunk}}" == "true" ]; then
-    echo "Rechunking image..."
-    sudo podman run --rm --privileged \
-      -v /var/lib/containers:/var/lib/containers \
-      quay.io/fedora/fedora-bootc:{{version}} \
-      /usr/libexec/bootc-base-imagectl rechunk \
-      localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
-      localhost/fedora-bootc-minimal:rechunked
-    sudo podman tag localhost/fedora-bootc-minimal:rechunked \
-      localhost/fedora-bootc-minimal:{{version}}-{{tag}} \
-      localhost/fedora-bootc-minimal:{{version}} \
-      localhost/fedora-bootc-minimal:latest
-    sudo podman rmi localhost/fedora-bootc-minimal:rechunked
-  fi
+  # Drop the staging tag; the five tags above keep the image alive.
+  sudo podman rmi "$STAGED"
   echo "Copying image to user storage..."
   sudo podman save localhost/fedora-bootc-minimal:{{version}} | podman load
   sudo podman save localhost/fedora-bootc-minimal:latest | podman load
