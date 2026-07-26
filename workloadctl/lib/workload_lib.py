@@ -331,29 +331,46 @@ def subid_files_with_entries(username: str) -> list[Path]:
     return found
 
 
-def _rewrite_subid_file(path: Path, lines: list[str]) -> None:
-    """Replace path's contents with lines, atomically, preserving mode+owner.
+def replace_file_atomically(
+    path: Path | str,
+    content: str | bytes,
+    *,
+    default_mode: int = 0o644,
+    owner: tuple[int, int] | None = None,
+) -> None:
+    """Replace path's whole contents with content, atomically.
 
-    A whole-file rewrite of /etc/subuid cannot be done in place. podman and
-    newuidmap read these files WITHOUT taking SUBID_LOCK, so a truncate-then-
-    write would expose a partial file to a reader that has no way to detect it,
-    and a crash mid-write would leave it truncated permanently — losing every
-    workload's mapping, not just the one being removed. Write a sibling temp
-    file and rename it on: readers then see either the old file or the new one.
+    Use this for any file that already holds content worth keeping, whenever a
+    reader could observe the write or a crash could outlive it. A plain
+    write_text() truncates first, so it has two failure modes: a concurrent
+    reader sees a partial file with no way to detect that it is partial, and an
+    interrupted write leaves the file permanently truncated — destroying content
+    the writer never meant to touch. Writing a sibling temp file and renaming it
+    on means readers see either the whole old file or the whole new one, and a
+    crash leaves the old one intact.
+
+    Mode and ownership are carried over from the file being replaced, so the
+    rename cannot silently reset them; default_mode and owner apply only when
+    there is no existing file. The temp lands in path's own directory because
+    rename is atomic only within a filesystem.
     """
+    path = Path(path)
     tmp = path.with_name("." + path.name + ".tmp")
     try:
         st = path.stat()
         mode, uid, gid = stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid
     except FileNotFoundError:
-        mode, uid, gid = 0o644, 0, 0
-    body = "\n".join(lines) + ("\n" if lines else "")
+        mode = default_mode
+        uid, gid = owner if owner is not None else (0, 0)
+    if owner is not None:
+        uid, gid = owner
+    body = content.encode() if isinstance(content, str) else content
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
-        os.write(fd, body.encode())
+        os.write(fd, body)
         # Durability before the rename: the rename is atomic w.r.t. readers, but
         # without the fsync a crash can land the rename while the data blocks
-        # are still unwritten, leaving a zero-length /etc/subuid.
+        # are still unwritten, leaving a zero-length file.
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -361,10 +378,22 @@ def _rewrite_subid_file(path: Path, lines: list[str]) -> None:
     try:
         os.chown(tmp, uid, gid)
     except (PermissionError, OSError):
-        # Non-root can't chown; the rewrite paths all require root anyway, so
-        # losing ownership here would be a bug elsewhere, not a reason to fail.
+        # Non-root can't chown; the callers that need a specific owner all
+        # require root anyway, so losing ownership here would be a bug
+        # elsewhere, not a reason to fail the write.
         pass
     os.replace(tmp, path)
+
+
+def _rewrite_subid_file(path: Path, lines: list[str]) -> None:
+    """Replace path's contents with lines, atomically.
+
+    Atomicity is not optional here: podman and newuidmap read /etc/subuid and
+    /etc/subgid WITHOUT taking SUBID_LOCK, so cooperating writers alone can't
+    make a truncate-then-write safe, and a crash mid-write would lose every
+    workload's mapping rather than just the one being removed.
+    """
+    replace_file_atomically(path, "\n".join(lines) + ("\n" if lines else ""))
 
 
 def remove_subid_entries(username: str) -> list[Path]:

@@ -1693,7 +1693,7 @@ class TestSubidFileHelpers(unittest.TestCase):
     These are the most security-relevant files the tool writes — a lost or
     mangled range silently removes a workload's isolation — so the format
     parsing and the rewrite mechanics are pinned here rather than left to the
-    command modules that used to each carry a copy.
+    command modules that call them.
     """
 
     def setUp(self):
@@ -1820,6 +1820,70 @@ class TestSubidFileHelpers(unittest.TestCase):
         self.assertEqual(
             workload_lib.subid_files_with_entries("_wl-a"), [self.subuid]
         )
+
+
+class TestReplaceFileAtomically(unittest.TestCase):
+    """The general whole-file replacement used anywhere a reader could observe
+    the write or a crash could outlive it. The subid rewrite is one caller; the
+    others are `edit`'s restore-on-validation-failure and the VM host-key pin.
+    """
+
+    def setUp(self):
+        self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.dir / "target"
+
+    def test_replaces_content_and_leaves_no_temp(self):
+        self.path.write_text("old\n")
+        workload_lib.replace_file_atomically(self.path, "new\n")
+        self.assertEqual(self.path.read_text(), "new\n")
+        self.assertEqual(list(self.dir.glob(".*")), [])
+
+    def test_destination_holds_old_content_until_the_rename(self):
+        """The whole point: a concurrent reader sees the old file or the new
+        one, never a half-written one."""
+        self.path.write_text("old\n")
+        seen = []
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            seen.append(Path(dst).read_text())
+            return real_replace(src, dst)
+
+        with patch.object(workload_lib.os, "replace", spy_replace):
+            workload_lib.replace_file_atomically(self.path, "new\n")
+        self.assertEqual(seen, ["old\n"])
+
+    def test_temp_is_a_sibling_so_the_rename_stays_on_one_filesystem(self):
+        self.path.write_text("old\n")
+        seen = []
+        with patch.object(workload_lib.os, "replace",
+                          lambda src, dst: seen.append(Path(src).parent)):
+            workload_lib.replace_file_atomically(self.path, "new\n")
+        self.assertEqual(seen, [self.path.parent])
+        (self.dir / ("." + self.path.name + ".tmp")).unlink()
+
+    def test_existing_mode_survives_the_replace(self):
+        self.path.write_text("old\n")
+        os.chmod(self.path, 0o600)
+        workload_lib.replace_file_atomically(self.path, "new\n", default_mode=0o644)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_default_mode_applies_only_when_creating(self):
+        workload_lib.replace_file_atomically(self.path, "new\n", default_mode=0o600)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_accepts_bytes(self):
+        workload_lib.replace_file_atomically(self.path, b"\x00binary\n")
+        self.assertEqual(self.path.read_bytes(), b"\x00binary\n")
+
+    def test_unwritable_owner_is_not_fatal(self):
+        """chown fails for a non-root caller; the write must still land, since
+        every caller that depends on ownership already requires root."""
+        self.path.write_text("old\n")
+        with patch.object(workload_lib.os, "chown",
+                          side_effect=PermissionError("not root")):
+            workload_lib.replace_file_atomically(self.path, "new\n", owner=(1, 1))
+        self.assertEqual(self.path.read_text(), "new\n")
 
 
 if __name__ == "__main__":

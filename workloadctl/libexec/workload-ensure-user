@@ -31,7 +31,7 @@ from workload_lib import (
     virtiofs_tags, parse_volume_spec, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
     workload_env_dir,
-    append_subid_entries, subgid_file, subuid_file,
+    append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
 from vm import VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars
 from secrets_template import substitute_template
@@ -707,9 +707,11 @@ def write_vm_known_hosts(pw, name: str, host_pubkey: str):
             return
     except OSError:
         pass
-    known_hosts.write_text(line)
-    os.chown(known_hosts, pw.pw_uid, pw.pw_gid)
-    os.chmod(known_hosts, 0o644)
+    # Atomic: the CLI reads this file with StrictHostKeyChecking=yes and takes no
+    # lock, so a `vm ssh` running concurrently with a restart could otherwise
+    # read the pin mid-rewrite and fail against a truncated line.
+    replace_file_atomically(known_hosts, line, default_mode=0o644,
+                            owner=(pw.pw_uid, pw.pw_gid))
     log(f"  Pinned VM host key in {known_hosts}")
 
 

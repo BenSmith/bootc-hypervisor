@@ -6,6 +6,7 @@ validated before they are kept: a config that no longer validates is restored
 from the pre-edit copy. Control-file names are checked against traversal and
 symlink escape before anything is opened.
 """
+import atexit
 import os
 from pathlib import Path
 import shlex
@@ -15,7 +16,9 @@ import sys
 import tempfile
 
 from cli_log import emit_result
-from workload_lib import workload_config_path, workload_service_units
+from workload_lib import (
+    replace_file_atomically, workload_config_path, workload_service_units,
+)
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from service_runtime import restart_workload_service
 from cmd_validate import validate_single
@@ -233,11 +236,22 @@ def cmd_edit(args, manager: WorkloadManager):
         print(f"Error: Workload config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Create backup using mkstemp to avoid TOCTOU race
-    backup_fd, backup_str = tempfile.mkstemp(prefix=f"workload-{args.workload}-", suffix=".toml")
+    # mkstemp rather than a predictable name, to avoid a TOCTOU race. dir= puts
+    # the backup in the config's own directory: restoring it is a rename, and
+    # rename is atomic only within a filesystem, so a backup in /tmp could only
+    # ever be copied back byte by byte. The name is dotted so it stays out of
+    # the way of anything walking the workload directory.
+    original = config_path.read_text()
+    backup_fd, backup_str = tempfile.mkstemp(
+        dir=config_path.parent, prefix=f".workload-{args.workload}-", suffix=".toml")
     os.close(backup_fd)
     backup_path = Path(backup_str)
     shutil.copy2(config_path, backup_path)
+    # The explicit unlinks below cover the expected exits; this covers the rest.
+    # Now that the backup sits next to the config instead of in /tmp, anything
+    # that leaks it — an editor killed by a signal, a failed apply step — leaves
+    # a stray file in /etc that nothing else will ever clean up.
+    atexit.register(lambda: backup_path.unlink(missing_ok=True))
 
     # Open editor
     editor_argv = _editor_argv()
@@ -263,7 +277,9 @@ def cmd_edit(args, manager: WorkloadManager):
         if not validation["passed"]:
             print()
             if _ask_yes_no("Validation failed. Restore backup? [y/N] "):
-                shutil.copy2(backup_path, config_path)
+                # Atomic: an interrupted restore must not leave a half-written
+                # config, which would destroy the very file this is rescuing.
+                replace_file_atomically(config_path, original)
                 print("Backup restored")
             else:
                 print("Config saved with errors - fix before enabling")
@@ -272,7 +288,7 @@ def cmd_edit(args, manager: WorkloadManager):
     except Exception as e:
         print(f"Error loading config: {e}", file=sys.stderr)
         if _ask_yes_no("Restore backup? [y/N] "):
-            shutil.copy2(backup_path, config_path)
+            replace_file_atomically(config_path, original)
             print("Backup restored")
         backup_path.unlink()
         sys.exit(1)

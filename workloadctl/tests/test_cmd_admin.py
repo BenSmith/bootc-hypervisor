@@ -923,6 +923,92 @@ class CmdValidateTest(unittest.TestCase):
         self.assertFalse(data["all_passed"])
 
 
+class EditRestoreTest(unittest.TestCase):
+    """cmd_edit's restore-on-validation-failure path.
+
+    The backup is the operator's only copy of a config they just hand-edited,
+    so where it lives and how it lands back matter: it has to sit on the same
+    filesystem as the config for the restore to be a rename, and it must not
+    outlive the command.
+    """
+
+    ORIGINAL = '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        self.wl = self.tmp / "app"
+        self.wl.mkdir()
+        self.config = self.wl / "workload.toml"
+        self.config.write_text(self.ORIGINAL)
+        self.enterContext(mock.patch.object(cmd_edit, "require_root", lambda: None))
+        self.manager = mock.Mock()
+
+    def _run(self, new_text, *, answer="y", passed=False):
+        def fake_editor(argv, **kw):
+            Path(argv[-1]).write_text(new_text)
+            return mock.Mock(returncode=0)
+
+        ns = argparse.Namespace(workload="app", file=None, yes=False)
+        self.enterContext(mock.patch.object(cmd_edit.subprocess, "run", fake_editor))
+        self.enterContext(mock.patch.object(
+            cmd_edit, "validate_single", lambda *a, **k: {"passed": passed}))
+        self.enterContext(mock.patch.object(
+            cmd_edit, "_ask_yes_no", lambda prompt: answer == "y"))
+        out = io.StringIO()
+        code = None
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                cmd_edit.cmd_edit(ns, self.manager)
+        except SystemExit as e:
+            code = e.code
+        return code, out.getvalue()
+
+    def test_failed_validation_restores_the_original(self):
+        code, out = self._run('[workload]\nname = "app"\nbroken\n')
+        self.assertEqual(code, 1)
+        self.assertIn("Backup restored", out)
+        self.assertEqual(self.config.read_text(), self.ORIGINAL)
+
+    def test_declining_the_restore_keeps_the_edit(self):
+        code, out = self._run("[workload]\nbroken\n", answer="n")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.config.read_text(), "[workload]\nbroken\n")
+
+    def test_backup_is_a_sibling_of_the_config(self):
+        """A backup in /tmp is on another filesystem, which makes an atomic
+        restore impossible — pin the location, not just the outcome."""
+        seen = []
+        real_mkstemp = cmd_edit.tempfile.mkstemp
+
+        def spy_mkstemp(*a, **kw):
+            seen.append(kw.get("dir"))
+            return real_mkstemp(*a, **kw)
+
+        with mock.patch.object(cmd_edit.tempfile, "mkstemp", spy_mkstemp):
+            self._run("[workload]\nbroken\n")
+        self.assertEqual(seen, [self.config.parent])
+
+    def test_backup_does_not_outlive_the_command(self):
+        self._run("[workload]\nbroken\n")
+        self.assertEqual(sorted(p.name for p in self.wl.iterdir()), ["workload.toml"])
+
+    def test_restore_never_exposes_a_partial_config(self):
+        """The restore goes through replace_file_atomically, so a reader racing
+        it sees the edited file or the original, never a truncated one."""
+        seen = []
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            seen.append(Path(dst).read_text())
+            return real_replace(src, dst)
+
+        with mock.patch.object(workload_lib.os, "replace", spy_replace):
+            self._run("[workload]\nbroken\n")
+        self.assertIn("[workload]\nbroken\n", seen)
+        self.assertEqual(self.config.read_text(), self.ORIGINAL)
+
+
 class EditControlFileTest(unittest.TestCase):
     """_edit_control_file: seeding, editor-failure rollback, and the two
     no-op-discard branches (identical-to-default, empty new file)."""
