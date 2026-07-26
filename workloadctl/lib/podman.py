@@ -304,7 +304,7 @@ class Podman:
         caller through the same sudo -u / XDG_RUNTIME_DIR / HOME identity as
         the typed methods (via `_build_cmd`), so it's a thin convenience, not
         a raw subprocess call. Boundary note (B13): a couple of call sites
-        legitimately bypass even this — `cmd_provision.transfer_one_image`
+        legitimately bypass even this — `provisioning.transfer_one_image`
         needs a `TMPDIR` override this class doesn't expose (podman load's
         temp files must land somewhere the target user can write), and the
         exporter builds a `Podman.for_user(...)` instance straight from a

@@ -17,7 +17,7 @@ from cli_log import emit_result, error, info
 from workload_lib import workload_config_path
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import get_substrate, service_active
-from cmd_provision import transfer_image
+from provisioning import transfer_image
 
 
 # ---------------------------------------------------------------------------

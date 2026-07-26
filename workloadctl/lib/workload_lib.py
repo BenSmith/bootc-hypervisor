@@ -953,7 +953,7 @@ def expand_volume_path(vol_spec: str, home_dir: str) -> str:
 # --- Instance token expansion ---
 
 # ${WORKLOAD_*} tokens usable in workload.toml values that must name the
-# instance. Deliberately the same vocabulary cmd_provision.host_setup_env()
+# instance. Deliberately the same vocabulary provisioning.host_setup_env()
 # exports to [host] setup scripts, so a bundle spells its own identity one way
 # whether it's doing so from TOML or from shell.
 WORKLOAD_TOKEN_PATTERN = re.compile(r'\$\{(WORKLOAD_[A-Z_]+)\}')

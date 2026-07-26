@@ -219,7 +219,7 @@ class TestPreflightDataAnchoring(unittest.TestCase):
     def _run_preflight(self, base, toml_text):
         import workload_lib
         import workloadctl_core as core
-        import cmd_provision
+        import provisioning
         toml_dir = base / "tomls"
         toml_dir.mkdir(exist_ok=True)
         (toml_dir / "wltest").mkdir(exist_ok=True)
@@ -227,7 +227,7 @@ class TestPreflightDataAnchoring(unittest.TestCase):
         with mock.patch.object(workload_lib, "WORKLOADS_BASE", base), \
              mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", toml_dir):
             config = core.WorkloadConfig("wltest")
-            cmd_provision.preflight_checks(config)
+            provisioning.preflight_checks(config)
 
     def test_required_file_autocopied_and_data_dir_autocreated(self):
         import shutil as _shutil

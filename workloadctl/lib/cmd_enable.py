@@ -15,9 +15,10 @@ from cli_log import emit_result, error, info
 from workload_lib import workload_config_path, workload_enabled_marker
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
-from cmd_provision import (
+from provisioning import (
     apply_selinux_policy,
     generate_units,
+    ImageTransferError,
     preflight_checks,
     provision_user,
     run_host_setup,
@@ -88,7 +89,15 @@ def cmd_enable(args, manager: WorkloadManager):
         raise
     provision_user(config)
     if not config.is_vm:
-        transfer_image(config, manager)
+        # Same shape as the SELinux step: the diagnostic is the raiser's, the
+        # machine-readable result is this layer's.
+        try:
+            transfer_image(config, manager)
+        except ImageTransferError as e:
+            error(str(e))
+            emit_result([{"workload": args.workload, "result": "failed",
+                          "reason": str(e)}], ok=False)
+            sys.exit(1)
     start_service(config)
 
     already_running = subprocess.run(

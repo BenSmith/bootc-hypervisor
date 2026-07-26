@@ -707,7 +707,7 @@ import cmd_cleanup
 import cmd_disable
 import cmd_enable
 import cmd_lifecycle
-import cmd_provision
+import provisioning
 
 
 class TestSubidLockSharedConstant(unittest.TestCase):
@@ -943,34 +943,34 @@ class TestPreflightChecks(unittest.TestCase):
 
     def test_missing_required_executable_fails(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"podman"})):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which(missing={"podman"})):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("podman", buf.getvalue())
 
     def test_missing_recommended_executable_warns_but_passes(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"semanage"})):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which(missing={"semanage"})):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertTrue(ok)
             self.assertIn("semanage", buf.getvalue())
 
     def test_pull_never_missing_image_fails(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = ""
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("not found locally", buf.getvalue())
 
@@ -979,26 +979,26 @@ class TestPreflightChecks(unittest.TestCase):
         fake_pw.pw_uid = 15000
         fake_pw.pw_gid = 15000
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root, \
-                        patch.object(cmd_provision.Podman, 'for_user') as for_user, \
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Podman, 'for_root') as for_root, \
+                        patch.object(provisioning.Podman, 'for_user') as for_user, \
                         patch('pwd.getpwnam', return_value=fake_pw):
                     for_root.return_value.image_id.return_value = ""
                     for_user.return_value.image_id.return_value = "sha256:def"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertTrue(ok)
             for_user.assert_called_once_with(cfg.username, 15000, cfg.home_dir)
 
     def test_pull_never_present_image_passes(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertTrue(ok)
 
     def test_required_files_auto_copy_from_hint(self):
@@ -1015,12 +1015,12 @@ class TestPreflightChecks(unittest.TestCase):
                 with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                     with patch.object(workload_lib, 'WORKLOADS_BASE', Path(wl_base)):
                         cfg = WorkloadConfig('test-wl')
-                        with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                        with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                            with patch.object(provisioning.Podman, 'for_root') as for_root:
                                 for_root.return_value.image_id.return_value = "sha256:abc"
                                 buf = io.StringIO()
                                 with redirect_stdout(buf):
-                                    ok = cmd_provision.preflight_checks(cfg)
+                                    ok = provisioning.preflight_checks(cfg)
                         self.assertTrue(ok)
                         self.assertIn("Copied config template", buf.getvalue())
 
@@ -1034,34 +1034,34 @@ class TestPreflightChecks(unittest.TestCase):
             )
             with patch.object(workload_lib, 'WORKLOAD_CONFIG_DIR', p):
                 cfg = WorkloadConfig('test-wl')
-                with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                    with patch.object(provisioning.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "sha256:abc"
                         buf = io.StringIO()
                         with redirect_stdout(buf):
-                            ok = cmd_provision.preflight_checks(cfg)
+                            ok = provisioning.preflight_checks(cfg)
                 self.assertFalse(ok)
                 self.assertIn("Missing required files", buf.getvalue())
 
     def test_missing_extra_group_fails(self):
         with _cfg(_GROUPS_TOML, 'test-wl', group="definitely-not-a-real-group-xyz") as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("Missing groups", buf.getvalue())
 
     def test_host_mode_unprivileged_port_warns(self):
         with _cfg(_HOSTNET_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Podman, 'for_root') as for_root:
                     for_root.return_value.image_id.return_value = "sha256:abc"
                     fake_path = MagicMock()
                     fake_path.read_text.return_value = "1024\n"
-                    with patch.object(cmd_provision.Path, '__new__', side_effect=lambda cls, *a, **k: Path.__new__(cls) if a and a[0] != "/proc/sys/net/ipv4/ip_unprivileged_port_start" else fake_path):
+                    with patch.object(provisioning.Path, '__new__', side_effect=lambda cls, *a, **k: Path.__new__(cls) if a and a[0] != "/proc/sys/net/ipv4/ip_unprivileged_port_start" else fake_path):
                         # simplest: just patch the specific sysctl path via read_text monkeypatch
                         pass
                     # Directly patch Path.read_text won't be reliable cross-cutting; instead
@@ -1069,52 +1069,52 @@ class TestPreflightChecks(unittest.TestCase):
                     # verify function tolerates missing /proc file (Exception branch).
                     buf = io.StringIO()
                     with redirect_stdout(buf):
-                        ok = cmd_provision.preflight_checks(cfg)
+                        ok = provisioning.preflight_checks(cfg)
             # Real hosts normally have unpriv_start=0 or the file may not parse;
             # either way preflight must not crash and volumes/groups still pass.
             self.assertTrue(ok)
 
     def test_vm_missing_qemu_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which(missing={"qemu-system-x86_64"})):
+            with patch.object(provisioning.shutil, 'which', self._patched_which(missing={"qemu-system-x86_64"})):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    ok = cmd_provision.preflight_checks(cfg)
+                    ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("Missing required VM executables", buf.getvalue())
 
     def test_vm_missing_kvm_device_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Path, 'exists', return_value=False):
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Path, 'exists', return_value=False):
                     with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                         buf = io.StringIO()
                         with redirect_stdout(buf):
-                            ok = cmd_provision.preflight_checks(cfg)
+                            ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("/dev/kvm not found", buf.getvalue())
 
     def test_vm_missing_ovmf_fails(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                    with patch.object(cmd_provision.Path, 'read_text', return_value="allow _workload-br\n"):
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Path, 'exists', return_value=True):
+                    with patch.object(provisioning.Path, 'read_text', return_value="allow _workload-br\n"):
                         with patch('vm.find_ovmf_code', return_value=None):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                ok = cmd_provision.preflight_checks(cfg)
+                                ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("OVMF firmware", buf.getvalue())
 
     def test_vm_all_checks_pass(self):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
-            with patch.object(cmd_provision.shutil, 'which', self._patched_which()):
-                with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                    with patch.object(cmd_provision.Path, 'read_text', return_value="allow _workload-br\n"):
+            with patch.object(provisioning.shutil, 'which', self._patched_which()):
+                with patch.object(provisioning.Path, 'exists', return_value=True):
+                    with patch.object(provisioning.Path, 'read_text', return_value="allow _workload-br\n"):
                         with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
                             buf = io.StringIO()
                             with redirect_stdout(buf):
-                                ok = cmd_provision.preflight_checks(cfg)
+                                ok = provisioning.preflight_checks(cfg)
             self.assertTrue(ok)
 
 
@@ -1127,9 +1127,9 @@ class TestProvisionUser(unittest.TestCase):
         # workload-ensure-user. No UID allocation or .conf rendering here
         # anymore (the generator is the single producer — see generate_units).
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
                 run_mock.return_value = MagicMock(returncode=0)
-                cmd_provision.provision_user(cfg)
+                provisioning.provision_user(cfg)
             sysusers_call = run_mock.call_args_list[0]
             self.assertEqual(sysusers_call.args[0][0], "systemd-sysusers")
             self.assertTrue(sysusers_call.args[0][1].endswith("workload-test-wl.conf"))
@@ -1146,8 +1146,8 @@ class TestTransferImage(unittest.TestCase):
         # returns False without probing either store.
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
-                handled = cmd_provision.transfer_one_image(
+            with patch.object(provisioning.Podman, 'for_root') as for_root:
+                handled = provisioning.transfer_one_image(
                     cfg, manager, 'test-wl', 'example.com/test:latest', 'missing')
             self.assertFalse(handled)
             for_root.assert_not_called()
@@ -1157,8 +1157,8 @@ class TestTransferImage(unittest.TestCase):
         toml = _CONTAINER_TOML + "\n[build]\n"
         with _cfg(toml, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_provision, 'transfer_one_image') as one:
-                cmd_provision.transfer_image(cfg, manager)
+            with patch.object(provisioning, 'transfer_one_image') as one:
+                provisioning.transfer_image(cfg, manager)
             one.assert_called_once_with(cfg, manager, "test-wl",
                                         "example.com/test:latest", "missing")
 
@@ -1185,27 +1185,30 @@ image = "example.com/helper:latest"
         with _cfg(toml, 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = "have"
-            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
-                cmd_provision.transfer_image(cfg, manager)
+                provisioning.transfer_image(cfg, manager)
             for_root.return_value.image_id.assert_called_once_with(
                 "example.com/app:latest")
 
     def test_transfers_pull_never_image(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_provision, 'transfer_one_image') as one:
-                cmd_provision.transfer_image(cfg, manager)
+            with patch.object(provisioning, 'transfer_one_image') as one:
+                provisioning.transfer_image(cfg, manager)
             one.assert_called_once_with(cfg, manager, "test-wl",
                                         "example.com/test:latest", "never")
 
-    def test_transfer_error_exits(self):
+    def test_transfer_error_propagates(self):
+        """Library code raises; the command layer decides the exit. Exiting here
+        would take the process down past `recreate`, which has its own
+        recovery."""
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
-            with patch.object(cmd_provision, 'transfer_one_image',
-                              side_effect=cmd_provision.ImageTransferError("boom")):
-                with self.assertRaises(SystemExit):
-                    cmd_provision.transfer_image(cfg, manager)
+            with patch.object(provisioning, 'transfer_one_image',
+                              side_effect=provisioning.ImageTransferError("boom")):
+                with self.assertRaises(provisioning.ImageTransferError):
+                    provisioning.transfer_image(cfg, manager)
 
     def test_transfer_one_image_needs_transfer_when_stale(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
@@ -1213,18 +1216,18 @@ image = "example.com/helper:latest"
             manager.podman.return_value.image_id.return_value = "old-id"
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
                 with patch.object(type(cfg), 'gid', new_callable=lambda: property(lambda _: 12345)):
-                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                    with patch.object(provisioning.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "new-id"
-                        with patch.object(cmd_provision.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
-                            with patch.object(cmd_provision.os, 'close'):
-                                with patch.object(cmd_provision.os, 'chown'):
-                                    with patch.object(cmd_provision.os, 'unlink'):
-                                        with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                        with patch.object(provisioning.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
+                            with patch.object(provisioning.os, 'close'):
+                                with patch.object(provisioning.os, 'chown'):
+                                    with patch.object(provisioning.os, 'unlink'):
+                                        with patch.object(provisioning.subprocess, 'run') as run_mock:
                                             save_res = MagicMock(returncode=0)
                                             load_res = MagicMock(returncode=0)
                                             active_res = MagicMock(returncode=1)
                                             run_mock.side_effect = [save_res, load_res, active_res]
-                                            cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
+                                            provisioning.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
             self.assertEqual(run_mock.call_count, 3)
 
     def test_transfer_one_image_save_failure_exits(self):
@@ -1233,34 +1236,34 @@ image = "example.com/helper:latest"
             manager.podman.return_value.image_id.return_value = ""
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
                 with patch.object(type(cfg), 'gid', new_callable=lambda: property(lambda _: 12345)):
-                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                    with patch.object(provisioning.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "new-id"
-                        with patch.object(cmd_provision.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
-                            with patch.object(cmd_provision.os, 'close'):
-                                with patch.object(cmd_provision.os, 'chown'):
-                                    with patch.object(cmd_provision.os, 'unlink'):
-                                        with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                        with patch.object(provisioning.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
+                            with patch.object(provisioning.os, 'close'):
+                                with patch.object(provisioning.os, 'chown'):
+                                    with patch.object(provisioning.os, 'unlink'):
+                                        with patch.object(provisioning.subprocess, 'run') as run_mock:
                                             save_res = MagicMock(returncode=1, stderr=b"boom")
                                             run_mock.return_value = save_res
-                                            with self.assertRaises(cmd_provision.ImageTransferError):
-                                                cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
+                                            with self.assertRaises(provisioning.ImageTransferError):
+                                                provisioning.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
 
     def test_transfer_one_image_missing_everywhere_pull_never_errors(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = ""
-            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
-                with self.assertRaises(cmd_provision.ImageTransferError):
-                    cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
+                with self.assertRaises(provisioning.ImageTransferError):
+                    provisioning.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "never")
 
     def test_transfer_one_image_missing_everywhere_pull_missing_is_noop(self):
         with _cfg(_CONTAINER_TOML + "\n[build]\n", 'test-wl') as cfg:
             manager = MagicMock()
             manager.podman.return_value.image_id.return_value = ""
-            with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+            with patch.object(provisioning.Podman, 'for_root') as for_root:
                 for_root.return_value.image_id.return_value = ""
-                handled = cmd_provision.transfer_one_image(
+                handled = provisioning.transfer_one_image(
                     cfg, manager, "test-wl", "example.com/test:latest", "missing")
             self.assertFalse(handled)
 
@@ -1270,18 +1273,18 @@ image = "example.com/helper:latest"
             manager.podman.return_value.image_id.return_value = "registry-id"
             with patch.object(type(cfg), 'uid', new_callable=lambda: property(lambda _: 12345)):
                 with patch.object(type(cfg), 'gid', new_callable=lambda: property(lambda _: 12345)):
-                    with patch.object(cmd_provision.Podman, 'for_root') as for_root:
+                    with patch.object(provisioning.Podman, 'for_root') as for_root:
                         for_root.return_value.image_id.return_value = "local-build-id"
-                        with patch.object(cmd_provision.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
-                            with patch.object(cmd_provision.os, 'close'):
-                                with patch.object(cmd_provision.os, 'chown'):
-                                    with patch.object(cmd_provision.os, 'unlink'):
-                                        with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                        with patch.object(provisioning.tempfile, 'mkstemp', return_value=(99, "/tmp/fake.tar")):
+                            with patch.object(provisioning.os, 'close'):
+                                with patch.object(provisioning.os, 'chown'):
+                                    with patch.object(provisioning.os, 'unlink'):
+                                        with patch.object(provisioning.subprocess, 'run') as run_mock:
                                             save_res = MagicMock(returncode=0)
                                             load_res = MagicMock(returncode=0)
                                             active_res = MagicMock(returncode=1)
                                             run_mock.side_effect = [save_res, load_res, active_res]
-                                            cmd_provision.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "missing")
+                                            provisioning.transfer_one_image(cfg, manager, "test-wl", "example.com/test:latest", "missing")
             self.assertEqual(run_mock.call_count, 3)
 
 
@@ -1295,10 +1298,10 @@ class TestGenerateUnits(unittest.TestCase):
                 # The produced-artifact check passes when the generator's
                 # sysusers .conf is present.
                 (run / "workload-test-wl.conf").touch()
-                with patch.object(cmd_provision, 'RUN_SYSTEMD_SYSTEM', run):
-                    with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                with patch.object(provisioning, 'RUN_SYSTEMD_SYSTEM', run):
+                    with patch.object(provisioning.subprocess, 'run') as run_mock:
                         run_mock.return_value = MagicMock(returncode=0)
-                        cmd_provision.generate_units(cfg)
+                        provisioning.generate_units(cfg)
             cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertTrue(any("workload-generate" in c[0] for c in cmds))
             self.assertIn(["systemctl", "daemon-reload"], cmds)
@@ -1318,13 +1321,13 @@ class TestGenerateUnits(unittest.TestCase):
         # surface a printed error + LifecycleError(1), not proceed to sysusers.
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
             with tempfile.TemporaryDirectory() as run_d:
-                with patch.object(cmd_provision, 'RUN_SYSTEMD_SYSTEM', Path(run_d)):
-                    with patch.object(cmd_provision.subprocess, 'run',
+                with patch.object(provisioning, 'RUN_SYSTEMD_SYSTEM', Path(run_d)):
+                    with patch.object(provisioning.subprocess, 'run',
                                       return_value=MagicMock(returncode=0)):
                         buf = io.StringIO()
                         with redirect_stderr(buf):
-                            with self.assertRaises(cmd_provision.LifecycleError) as ctx:
-                                cmd_provision.generate_units(cfg)
+                            with self.assertRaises(provisioning.LifecycleError) as ctx:
+                                provisioning.generate_units(cfg)
             self.assertEqual(ctx.exception.returncode, 1)
             self.assertIsInstance(ctx.exception.returncode, int)
             self.assertIn("produced no units", buf.getvalue())
@@ -1333,9 +1336,9 @@ class TestGenerateUnits(unittest.TestCase):
 class TestStartService(unittest.TestCase):
     def test_resets_failed_and_starts(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
                 run_mock.return_value = MagicMock(returncode=0)
-                cmd_provision.start_service(cfg)
+                provisioning.start_service(cfg)
             cmds = [c.args[0] for c in run_mock.call_args_list]
             self.assertIn(["systemctl", "reset-failed", cfg.service_name], cmds)
             self.assertIn(["systemctl", "start", "--no-block", cfg.service_name], cmds)
@@ -1346,35 +1349,39 @@ class TestStartService(unittest.TestCase):
 class TestRunHostSetup(unittest.TestCase):
     def test_no_setup_configured_is_noop(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
-                cmd_provision.run_host_setup(cfg, "enable")
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
+                provisioning.run_host_setup(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_missing_script_warns_no_exit(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_provision.run_host_setup(cfg, "enable")
+                provisioning.run_host_setup(cfg, "enable")
             self.assertIn("not found", buf.getvalue())
 
-    def test_script_failure_on_enable_exits(self):
+    def test_script_failure_on_enable_raises_with_the_scripts_returncode(self):
+        """The CLI ladder exits with LifecycleError.returncode, so carrying the
+        script's own code is what makes `enable` report what actually failed
+        rather than a flat 1."""
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=1)):
-                    with self.assertRaises(SystemExit):
-                        cmd_provision.run_host_setup(cfg, "enable")
+            with patch.object(provisioning.Path, 'exists', return_value=True):
+                with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=3)):
+                    with self.assertRaises(LifecycleError) as ctx:
+                        provisioning.run_host_setup(cfg, "enable")
+        self.assertEqual(ctx.exception.returncode, 3)
 
-    def test_script_failure_on_disable_does_not_exit(self):
+    def test_script_failure_on_disable_does_not_raise(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=1)):
-                    cmd_provision.run_host_setup(cfg, "disable")  # must not raise
+            with patch.object(provisioning.Path, 'exists', return_value=True):
+                with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=1)):
+                    provisioning.run_host_setup(cfg, "disable")  # must not raise
 
     def test_script_success_runs(self):
         with _cfg(_HOST_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
-                    cmd_provision.run_host_setup(cfg, "enable")
+            with patch.object(provisioning.Path, 'exists', return_value=True):
+                with patch.object(provisioning.subprocess, 'run', return_value=MagicMock(returncode=0)) as run_mock:
+                    provisioning.run_host_setup(cfg, "enable")
             self.assertEqual(run_mock.call_args.args[0][1], "enable")
 
     def test_env_carries_instance_not_bundle(self):
@@ -1384,10 +1391,10 @@ class TestRunHostSetup(unittest.TestCase):
         other steps used <instance>, half-provisioning the host."""
         with _cfg(_HOST_BUNDLE_TOML, 'games',
                   bundle='sunshine-streaming') as cfg:
-            with patch.object(cmd_provision.Path, 'exists', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run',
+            with patch.object(provisioning.Path, 'exists', return_value=True):
+                with patch.object(provisioning.subprocess, 'run',
                                   return_value=MagicMock(returncode=0)) as run_mock:
-                    cmd_provision.run_host_setup(cfg, "enable")
+                    provisioning.run_host_setup(cfg, "enable")
             env = run_mock.call_args.kwargs["env"]
         self.assertEqual(env["WORKLOAD_NAME"], "games")
         self.assertEqual(env["WORKLOAD_BUNDLE"], "sunshine-streaming")
@@ -1411,33 +1418,33 @@ class TestSelinuxHelpers(unittest.TestCase):
     def test_selinux_available_true(self):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = True
-        with patch.object(cmd_provision.shutil, 'which', return_value="/usr/sbin/semodule"):
-            with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', fake_dir):
-                self.assertTrue(cmd_provision._selinux_available())
+        with patch.object(provisioning.shutil, 'which', return_value="/usr/sbin/semodule"):
+            with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', fake_dir):
+                self.assertTrue(provisioning._selinux_available())
 
     def test_selinux_available_false_no_semodule(self):
-        with patch.object(cmd_provision.shutil, 'which', return_value=None):
-            self.assertFalse(cmd_provision._selinux_available())
+        with patch.object(provisioning.shutil, 'which', return_value=None):
+            self.assertFalse(provisioning._selinux_available())
 
     def test_selinux_enforcing_true(self):
-        with patch.object(cmd_provision.subprocess, 'run',
+        with patch.object(provisioning.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Enforcing\n")):
-            self.assertTrue(cmd_provision._selinux_enforcing())
+            self.assertTrue(provisioning._selinux_enforcing())
 
     def test_selinux_enforcing_false_permissive(self):
-        with patch.object(cmd_provision.subprocess, 'run',
+        with patch.object(provisioning.subprocess, 'run',
                           return_value=MagicMock(returncode=0, stdout="Permissive\n")):
-            self.assertFalse(cmd_provision._selinux_enforcing())
+            self.assertFalse(provisioning._selinux_enforcing())
 
     def test_selinux_enforcing_getenforce_missing(self):
-        with patch.object(cmd_provision.subprocess, 'run', side_effect=FileNotFoundError):
-            self.assertFalse(cmd_provision._selinux_enforcing())
+        with patch.object(provisioning.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertFalse(provisioning._selinux_enforcing())
 
     def test_available_bundles_empty_when_dir_missing(self):
         fake_dir = MagicMock()
         fake_dir.is_dir.return_value = False
-        with patch.object(cmd_provision, '_BUNDLES_DIR', fake_dir):
-            self.assertEqual(cmd_provision._available_bundles(), [])
+        with patch.object(provisioning, '_BUNDLES_DIR', fake_dir):
+            self.assertEqual(provisioning._available_bundles(), [])
 
     def test_available_bundles_lists_dirs_with_policy(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1445,21 +1452,21 @@ class TestSelinuxHelpers(unittest.TestCase):
             (p / "foo").mkdir()
             (p / "foo" / "policy.cil").write_text("")
             (p / "bar").mkdir()  # no policy.cil -> excluded
-            with patch.object(cmd_provision, '_BUNDLES_DIR', p):
-                self.assertEqual(cmd_provision._available_bundles(), ["foo"])
+            with patch.object(provisioning, '_BUNDLES_DIR', p):
+                self.assertEqual(provisioning._available_bundles(), ["foo"])
 
     def test_print_available_bundles_suggests_close_match(self):
-        with patch.object(cmd_provision, '_available_bundles', return_value=["forgejo"]):
+        with patch.object(provisioning, '_available_bundles', return_value=["forgejo"]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_provision._print_available_bundles("forgeejo")
+                provisioning._print_available_bundles("forgeejo")
             self.assertIn("did you mean 'forgejo'", buf.getvalue())
 
     def test_print_available_bundles_noop_when_none_available(self):
-        with patch.object(cmd_provision, '_available_bundles', return_value=[]):
+        with patch.object(provisioning, '_available_bundles', return_value=[]):
             buf = io.StringIO()
             with redirect_stderr(buf):
-                cmd_provision._print_available_bundles("anything")
+                provisioning._print_available_bundles("anything")
             self.assertEqual(buf.getvalue(), "")
 
 
@@ -1468,49 +1475,49 @@ class TestSelinuxHelpers(unittest.TestCase):
 class TestApplySelinuxPolicy(unittest.TestCase):
     def test_noop_when_not_selinux_policy(self):
         with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
-                cmd_provision.apply_selinux_policy(cfg, "enable")
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
+                provisioning.apply_selinux_policy(cfg, "enable")
             run_mock.assert_not_called()
 
     def test_enable_hard_fails_when_tooling_missing_and_enforcing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=False):
-                with patch.object(cmd_provision, '_selinux_enforcing', return_value=True):
-                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
-                        cmd_provision.apply_selinux_policy(cfg, "enable")
+            with patch.object(provisioning, '_selinux_available', return_value=False):
+                with patch.object(provisioning, '_selinux_enforcing', return_value=True):
+                    with self.assertRaises(provisioning.SelinuxPolicyError):
+                        provisioning.apply_selinux_policy(cfg, "enable")
 
     def test_enable_warns_when_tooling_missing_and_permissive(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=False):
-                with patch.object(cmd_provision, '_selinux_enforcing', return_value=False):
+            with patch.object(provisioning, '_selinux_available', return_value=False):
+                with patch.object(provisioning, '_selinux_enforcing', return_value=False):
                     buf = io.StringIO()
                     with redirect_stderr(buf):
-                        cmd_provision.apply_selinux_policy(cfg, "enable")  # no raise
+                        provisioning.apply_selinux_policy(cfg, "enable")  # no raise
                     self.assertIn("WARNING", buf.getvalue())
 
     def test_disable_never_hard_fails_when_tooling_missing(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=False):
-                with patch.object(cmd_provision, '_selinux_enforcing', return_value=True):
-                    cmd_provision.apply_selinux_policy(cfg, "disable")  # must not raise
+            with patch.object(provisioning, '_selinux_available', return_value=False):
+                with patch.object(provisioning, '_selinux_enforcing', return_value=True):
+                    provisioning.apply_selinux_policy(cfg, "disable")  # must not raise
 
     def test_disable_removes_loaded_module(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            module = cmd_provision.selinux_module_name(cfg.name)
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+            module = provisioning.selinux_module_name(cfg.name)
+            with patch.object(provisioning, '_selinux_available', return_value=True):
+                with patch.object(provisioning.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout=f"{module}\nother_mod\n")
-                    cmd_provision.apply_selinux_policy(cfg, "disable")
+                    provisioning.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(len(remove_calls), 1)
             self.assertEqual(remove_calls[0].args[0][2], module)
 
     def test_disable_skips_removal_when_not_loaded(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
-                with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+            with patch.object(provisioning, '_selinux_available', return_value=True):
+                with patch.object(provisioning.subprocess, 'run') as run_mock:
                     run_mock.return_value = MagicMock(returncode=0, stdout="other_mod\n")
-                    cmd_provision.apply_selinux_policy(cfg, "disable")
+                    provisioning.apply_selinux_policy(cfg, "disable")
             remove_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-r"]]
             self.assertEqual(remove_calls, [])
 
@@ -1519,50 +1526,50 @@ class TestApplySelinuxPolicy(unittest.TestCase):
             'name = "test-wl"', 'name = "test-wl"\nbundle = "bad_name"'
         )
         with _CfgDir(toml, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+            with patch.object(provisioning, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
-                        cmd_provision.apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(provisioning.SelinuxPolicyError):
+                        provisioning.apply_selinux_policy(cfg, "enable")
                 self.assertIn("invalid", buf.getvalue())
 
     def test_enable_missing_template_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
+            with patch.object(provisioning, '_selinux_available', return_value=True):
                 buf = io.StringIO()
                 with redirect_stderr(buf):
-                    with self.assertRaises(cmd_provision.SelinuxPolicyError):
-                        cmd_provision.apply_selinux_policy(cfg, "enable")
+                    with self.assertRaises(provisioning.SelinuxPolicyError):
+                        provisioning.apply_selinux_policy(cfg, "enable")
                 self.assertIn("template not found", buf.getvalue())
 
     def test_enable_installs_module_success(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
-                with patch.object(cmd_provision.WorkloadConfig, 'resolve_control_file') as resolve:
+            with patch.object(provisioning, '_selinux_available', return_value=True):
+                with patch.object(provisioning.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', Path(td)):
-                            with patch.object(cmd_provision.subprocess, 'run') as run_mock:
+                        with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', Path(td)):
+                            with patch.object(provisioning.subprocess, 'run') as run_mock:
                                 run_mock.return_value = MagicMock(returncode=0)
-                                cmd_provision.apply_selinux_policy(cfg, "enable")
+                                provisioning.apply_selinux_policy(cfg, "enable")
                     install_calls = [c for c in run_mock.call_args_list if c.args[0][0:2] == ["semodule", "-i"]]
                     self.assertEqual(len(install_calls), 1)
 
     def test_enable_install_failure_exits(self):
         with _cfg(_SELINUX_TOML, 'test-wl') as cfg:
-            with patch.object(cmd_provision, '_selinux_available', return_value=True):
-                with patch.object(cmd_provision.WorkloadConfig, 'resolve_control_file') as resolve:
+            with patch.object(provisioning, '_selinux_available', return_value=True):
+                with patch.object(provisioning.WorkloadConfig, 'resolve_control_file') as resolve:
                     with tempfile.TemporaryDirectory() as td:
                         template = Path(td) / "policy.cil"
                         template.write_text("(blockinherit __WL_MODULE__ base)\n")
                         resolve.return_value = template
-                        with patch.object(cmd_provision, 'UDICA_TEMPLATE_DIR', Path(td)):
-                            with patch.object(cmd_provision.subprocess, 'run',
-                                              side_effect=cmd_provision.subprocess.CalledProcessError(1, ["semodule"])):
-                                with self.assertRaises(cmd_provision.SelinuxPolicyError):
-                                    cmd_provision.apply_selinux_policy(cfg, "enable")
+                        with patch.object(provisioning, 'UDICA_TEMPLATE_DIR', Path(td)):
+                            with patch.object(provisioning.subprocess, 'run',
+                                              side_effect=provisioning.subprocess.CalledProcessError(1, ["semodule"])):
+                                with self.assertRaises(provisioning.SelinuxPolicyError):
+                                    provisioning.apply_selinux_policy(cfg, "enable")
 
 
 # ── cmd_enable ────────────────────────────────────────────────────────────────

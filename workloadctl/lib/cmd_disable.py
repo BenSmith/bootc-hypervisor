@@ -32,7 +32,7 @@ from workloadctl_core import (
     format_size,
     require_root,
 )
-from cmd_provision import apply_selinux_policy, run_host_setup
+from provisioning import apply_selinux_policy, run_host_setup
 
 
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:

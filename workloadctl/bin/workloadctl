@@ -39,6 +39,7 @@ from cmd_lifecycle import (
 )
 from cmd_secret import cmd_secret
 from cmd_update import cmd_rollback, cmd_update
+from provisioning import ImageTransferError
 from substrate import LifecycleError, ProvisionFailed
 from workloadctl_core import (
     NotRoot,
@@ -471,6 +472,12 @@ def _run_cli() -> int:
         # exact returncode of the systemctl/podman invocation that failed.
         cli_log.emit_failure(f"lifecycle command failed (exit {e.returncode})")
         return e.returncode
+    except ImageTransferError as e:
+        # Backstop for `recreate`, which has no per-workload result to emit.
+        # `enable` catches this itself so it can emit one.
+        print(f"Error: {e}", file=sys.stderr)
+        cli_log.emit_failure(str(e))
+        return 1
     except ProvisionFailed as e:
         # Raiser prints the "✗ ..." diagnostic. Commands that need to keep going
         # (update --all tallies per-workload failures) catch it themselves; this

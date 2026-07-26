@@ -19,7 +19,7 @@ from pathlib import Path
 
 from backup import backup_impl, print_backup_size
 from cli_log import error, info, warn
-from cmd_provision import ImageTransferError, transfer_one_image
+from provisioning import ImageTransferError, transfer_one_image
 from podman import PodmanError
 from service_runtime import ensure_runtime_dir, restart_workload_service
 from substrate import (

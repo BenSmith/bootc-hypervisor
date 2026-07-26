@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Instance context comes from workloadctl (see host_setup_env() in
-# lib/cmd_provision.py). Required, not defaulted: this bundle can be
+# lib/provisioning.py). Required, not defaulted: this bundle can be
 # instantiated under another name via `init --as`, and falling back to the
 # bundle name here would silently provision paths for a workload that doesn't
 # exist.

@@ -53,6 +53,11 @@ class TestNoExitInLibraryCore(unittest.TestCase):
         names = [p.name for p in _core_modules()]
         self.assertIn("workload_lib.py", names)
         self.assertIn("substrate.py", names)
+        # The provisioning steps enable/disable/recreate share. It is the one
+        # module whose helpers have multiple command-layer callers, so it is
+        # where an exit does the most damage — and a `cmd_` filename would
+        # have exempted it from this whole module.
+        self.assertIn("provisioning.py", names)
         self.assertGreater(len(names), 5)
 
     def test_no_process_exit_in_core(self):

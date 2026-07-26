@@ -1,5 +1,5 @@
 """
-cmd_provision — the provisioning steps enable, disable and recreate share.
+provisioning — the provisioning steps enable, disable and recreate share.
 
 Everything here acts on the host on a workload's behalf: pre-flight checks, the
 user/UID provisioning that consumes the generator's output, image transfer into
@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 
 from cli_log import error, info, warn
@@ -302,14 +301,10 @@ def transfer_image(config: WorkloadConfig, manager: WorkloadManager):
     especially) keeps its full meaning and root's store isn't even probed. An
     absent buildable image is an error only for `pull = "never"` (root's store
     is then the sole source); otherwise podman pulls it per policy.
-    Exits the process on failure (enable-path semantics).
+    Raises ImageTransferError; the caller decides what that costs.
     """
-    try:
-        for cname, image, pull in config.container_specs():
-            transfer_one_image(config, manager, cname, image, pull)
-    except ImageTransferError as e:
-        error(str(e))
-        sys.exit(1)
+    for cname, image, pull in config.container_specs():
+        transfer_one_image(config, manager, cname, image, pull)
 
 
 def transfer_one_image(config: WorkloadConfig, manager: WorkloadManager,
@@ -521,6 +516,9 @@ def run_host_setup(config: WorkloadConfig, action: str):
     The setup script receives 'enable' or 'disable' as its first argument, and
     the instance context of host_setup_env() in its environment.
     It is expected to be idempotent in both directions.
+
+    On the enable path a nonzero exit raises LifecycleError carrying the
+    script's own returncode; on the disable path it is reported and tolerated.
     """
     setup_script = config.config.get("host", {}).get("setup", "")
     if not setup_script:
@@ -543,7 +541,10 @@ def run_host_setup(config: WorkloadConfig, action: str):
     if result.returncode != 0:
         error(f"  Error: Host setup script exited with code {result.returncode}")
         if action == "enable":
-            sys.exit(1)
+            # A teardown that fails is reported and tolerated — disable has to be
+            # able to finish. An enable that fails must not proceed to start a
+            # service whose host prerequisites aren't there.
+            raise LifecycleError(result.returncode)
 
 
 def _selinux_available() -> bool:
