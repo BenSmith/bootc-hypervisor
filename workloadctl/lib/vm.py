@@ -39,22 +39,19 @@ VM_BRIDGE_NAME = "_workload-br"
 # Managed-bridge network config is HOST-LEVEL, not per-VM (ADR 002): the bridge
 # is one host-global refcounted resource, so its subnet/DNS can't coherently
 # take per-VM overrides. Single source of truth = the subnet CIDR
-# (WORKLOADCTL_VM_BRIDGE_SUBNET), from which the gateway IP, CIDR, and — the
-# ADR-002 fix — the DHCP range are all DERIVED, so a relocated bridge hands
-# guests addresses on its own subnet instead of a stale hardcoded window.
+# (WORKLOADCTL_VM_BRIDGE_SUBNET), from which the gateway IP, CIDR, and DHCP
+# range are all DERIVED, so a relocated bridge hands guests addresses on its
+# own subnet.
 def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
     """Derive (gateway_ip, gateway_cidr, normalized_subnet, dhcp_range) for the
     managed VM bridge from a single subnet CIDR.
 
     The gateway is the first host address; the DHCP window is offsets .100–.199
-    within the subnet (reproducing the historical 192.168.200.100–199 range on
-    the /24 default). On a subnet too small for that window the range falls
-    back to the full usable span (first host after the gateway through the
-    last host) instead of collapsing onto a single clamped address. Deriving
-    the range from the subnet is the ADR-002 fix: the range used to be
-    hardcoded, so a non-default subnet handed guests addresses off the wrong
-    subnet. Raises ValueError if the subnet leaves no leasable address after
-    the gateway (/31, /32).
+    within the subnet. On a subnet too small for that window the range falls
+    back to the full usable span (first host after the gateway through the last
+    host) instead of collapsing onto a single clamped address. Raises
+    ValueError if the subnet leaves no leasable address after the gateway
+    (/31, /32).
     """
     net = ipaddress.ip_network(subnet_cidr, strict=False)
     gateway = net.network_address + 1

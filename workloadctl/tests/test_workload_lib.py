@@ -454,7 +454,7 @@ class TestExpandWorkloadTokens(unittest.TestCase):
         """The whole point: a bundle instantiated under another name must
         resolve to the instance's paths, never the bundle's."""
         out = expand_workload_tokens("${WORKLOAD_INSTANCE_DIR}/seccomp.json", "games")
-        self.assertNotIn("gamedev-sway", out)
+        self.assertNotIn("wayfire-game-streaming", out)
 
 
 class TestDq(unittest.TestCase):

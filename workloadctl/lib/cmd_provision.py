@@ -486,11 +486,11 @@ def host_setup_env(config: WorkloadConfig) -> dict:
 
     A setup script lives in the *bundle* but acts on an *instance*, and those
     are different names the moment someone runs `init --as` / `duplicate`: the
-    bundle stays `gamedev-sway` while the instance is `games`. A script that
-    hardcodes its own bundle name therefore touches paths belonging to a
-    workload that doesn't exist — and because enable's earlier steps (users,
-    units, unit symlinks) already used the *instance* name, the two halves
-    disagree and the host is left half-provisioned.
+    bundle stays `wayfire-game-streaming` while the instance is `games`. A
+    script that hardcodes its own bundle name therefore touches paths belonging
+    to a workload that doesn't exist — and because enable's earlier steps
+    (users, units, unit symlinks) already used the *instance* name, the two
+    halves disagree and the host is left half-provisioned.
 
     So the resolved names are passed in rather than left to the script to
     guess. Scripts should treat these as required (`${WORKLOAD_NAME:?}`) —
@@ -501,7 +501,8 @@ def host_setup_env(config: WorkloadConfig) -> dict:
         "WORKLOAD_NAME": name,
         "WORKLOAD_BUNDLE": config.bundle,
         # The shipped /usr control-file tree, so a script can reach a sibling
-        # helper (e.g. gamedev-sway's udev-relay) even when it is itself running
+        # helper (e.g. wayfire-game-streaming's udev-relay) even when it is itself
+        # running
         # from an /etc override that carries only setup.sh — the override chain
         # is per-file, so ${WORKLOAD_INSTANCE_DIR}→${WORKLOAD_BUNDLE_DIR} is the
         # shell-side mirror of resolve_control_file().
