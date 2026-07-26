@@ -33,9 +33,8 @@ class _FakeSub:
 
 
 class _FakeVMSub(_FakeSub):
-    """A VM substrate. cmd_update no longer branches on the substrate's type —
-    it asks config.is_vm, the same declaration-derived flag get_substrate()
-    routes on — so this class now only marks which fake config is a VM."""
+    """Marks which fake config is a VM. cmd_update reads config.is_vm, so the
+    substrate's own type is never inspected."""
 
 
 class _FakeConfig:

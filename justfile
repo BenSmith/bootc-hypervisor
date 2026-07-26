@@ -47,15 +47,9 @@ build-minimal version=fedora_version rechunk="false":
   fi
   # Build the way the CI workflows do: OUR fedora-bootc-minimal.Containerfile (a
   # podman-4-compatible fork of upstream's) with the manifests clone as build
-  # context, so the image gets the two COPY lines upstream's Containerfile does
-  # not have — the enforcing policy and the cosign pubkey it references.
-  #
-  # This recipe used to cd into manifests/ and run *upstream's* `just build`,
-  # which ignores policy.json/cosign.pub entirely — so the local image carried
-  # Fedora's stock permissive policy, on an image these ghcr.io tags can push.
-  # (The rootfs was the same either way: upstream's TIER=minimal resolves
-  # --manifest=fedora-minimal, which install-manifests ships as a legacy alias
-  # for the `minimal` CI passes; the two yaml files are byte-identical.)
+  # context. Upstream's own Containerfile has no policy.json/cosign.pub COPY, so
+  # only this path produces an image carrying the enforcing policy and the cosign
+  # pubkey its keyPath references — which these ghcr.io tags make publishable.
   sed -e 's|__REGISTRY_NAMESPACE__|bensmith|g' \
       policy-minimal.json.template > manifests/policy.json
   cp cosign.pub manifests/cosign.pub
@@ -117,14 +111,8 @@ sync-cosy:
 build-base: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
-  # Release recipe: it tags ghcr.io/bensmith/... below, so the image must ship
-  # the *enforcing* policy the CI pipelines ship — "default": reject, plus
-  # cosign sigstoreSigned for our own namespaces. Rendered from the same
-  # template CI uses. policy-local.json ("insecureAcceptAnything" for
-  # everything) belongs to build-base-local only; baking it into a
-  # ghcr.io-tagged image means one `podman push` from publishing a host that
-  # trusts any registry. The namespace is the canonical publish namespace,
-  # matching the -t tags below and Forgejo's hardcoded OWNER.
+  # Release recipe — it tags ghcr.io/bensmith/... below, so it ships the same
+  # enforcing policy CI does. policy-local.json belongs to build-base-local only.
   sed -e 's|__REGISTRY_NAMESPACE__|bensmith|g' \
       policy-hypervisor.json.template > policy.json
   http_proxy={{proxy}} https_proxy={{proxy}} \

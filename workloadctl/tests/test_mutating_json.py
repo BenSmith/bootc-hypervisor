@@ -37,7 +37,7 @@ image = "docker.io/library/nginx:alpine"
 
 class _FakeVMSub:
     """Marks which fake config in a batch is a VM. cmd_update reads
-    config.is_vm rather than the substrate's type, so this is only a tag."""
+    config.is_vm, so the substrate's own type is never inspected."""
 
 
 class _FakeSub:

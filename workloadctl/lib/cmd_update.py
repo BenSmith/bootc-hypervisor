@@ -242,9 +242,8 @@ def _reprovision_one(config: WorkloadConfig, manager: WorkloadManager, *,
     row to report before it exits nonzero.
     """
     substrate = get_substrate(config, manager)
-    # config.is_vm is the declaration-derived truth get_substrate() itself
-    # routes on — asking the config keeps the substrate port private to the
-    # router instead of importing a concrete substrate across the boundary.
+    # config.is_vm is the declaration-derived flag get_substrate() routes on;
+    # asking the config keeps the substrate port private to the router.
     is_vm = config.is_vm
     row = {
         "workload": config.name,
