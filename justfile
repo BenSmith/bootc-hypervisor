@@ -93,7 +93,16 @@ sync-cosy:
 build-base: sync-cosy
   #!/usr/bin/env bash
   set -euo pipefail
-  cp policy-local.json policy.json
+  # Release recipe: it tags ghcr.io/bensmith/... below, so the image must ship
+  # the *enforcing* policy the CI pipelines ship — "default": reject, plus
+  # cosign sigstoreSigned for our own namespaces. Rendered from the same
+  # template CI uses. policy-local.json ("insecureAcceptAnything" for
+  # everything) belongs to build-base-local only; baking it into a
+  # ghcr.io-tagged image means one `podman push` from publishing a host that
+  # trusts any registry. The namespace is the canonical publish namespace,
+  # matching the -t tags below and Forgejo's hardcoded OWNER.
+  sed -e 's|__REGISTRY_NAMESPACE__|bensmith|g' \
+      policy-hypervisor.json.template > policy.json
   http_proxy={{proxy}} https_proxy={{proxy}} \
   podman build \
     --env=http_proxy={{proxy}} --env=https_proxy={{proxy}} \
