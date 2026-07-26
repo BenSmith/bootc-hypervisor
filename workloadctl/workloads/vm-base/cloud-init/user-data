@@ -24,6 +24,12 @@ ssh_pwauth: false
 # pins it (StrictHostKeyChecking=yes), so a custom seed MUST install it or
 # provisioning fails. base64 (encoding: b64) keeps the multi-line PEM on one
 # line; sshd picks it up on first boot before it starts.
+#
+# ssh_deletekeys: false is required, not optional. cc_ssh defaults it to true,
+# which wipes /etc/ssh/ssh_host_* and regenerates — and it runs *after*
+# write_files, so the pinned key would be installed and then discarded.
+ssh_deletekeys: false
+
 write_files:
   - path: /etc/ssh/ssh_host_ed25519_key
     permissions: '0600'

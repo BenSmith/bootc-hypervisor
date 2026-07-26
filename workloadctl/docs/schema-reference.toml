@@ -251,8 +251,11 @@ name = "schema-reference"
 #                                   user_data_file must install it via a
 #                                   write_files entry for
 #                                   /etc/ssh/ssh_host_ed25519_key (encoding: b64)
-#                                   or provisioning fails. The default seed does
-#                                   this automatically.
+#                                   or provisioning fails. Pair that entry with
+#                                   `ssh_deletekeys: false` — cloud-init's ssh
+#                                   module runs after write_files and otherwise
+#                                   regenerates the key you just installed. The
+#                                   default seed does all of this automatically.
 #   ${WORKLOADCTL_VM_HOST_PUBKEY} - The matching SSH host public key.
 #
 # Notes:

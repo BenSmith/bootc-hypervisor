@@ -1117,6 +1117,9 @@ These magic variables are always injected:
 **Host-key pinning (required for custom seeds).** The CLI verifies the guest with `StrictHostKeyChecking=yes` against a pinned host key, so a custom `user_data_file` **must install that host key or provisioning fails** (no trust-on-first-use). Drop this into the seed — base64 keeps the multi-line PEM on one line, which a YAML `write_files` block scalar can't otherwise carry:
 
 ```yaml
+# Required alongside write_files — see below.
+ssh_deletekeys: false
+
 write_files:
   - path: /etc/ssh/ssh_host_ed25519_key
     permissions: '0600'
@@ -1128,6 +1131,12 @@ write_files:
     owner: root:root
     content: ${WORKLOADCTL_VM_HOST_PUBKEY}
 ```
+
+`ssh_deletekeys: false` is not optional here. cloud-init's `ssh` module runs
+*after* `write_files` and defaults to deleting `/etc/ssh/ssh_host_*` and
+generating fresh keys — which discards the key you just wrote, leaving a guest
+that fails the pin with `REMOTE HOST IDENTIFICATION HAS CHANGED`. Seed rendering
+rejects a `write_files` injection that omits it.
 
 The default seed (no `user_data_file`) installs and pins the host key automatically.
 

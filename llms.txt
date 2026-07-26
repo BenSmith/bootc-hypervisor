@@ -77,7 +77,8 @@ workloadctl/                              Workload management system (see worklo
 bin/cosy                                  Interactive container session wrapper
 man/cosy.1                                cosy man page
 
-config.toml                               bootc-image-builder config (user setup for ISOs)
+config.toml                               bootc-image-builder config (VM user setup) — gitignored, generated
+                                          by the `_generate-vm-config` justfile recipe from VM_USER/VM_PASSWORD/VM_SSH_KEY
 config-iso.toml                           ISO-specific image builder config
 policy.json                               Container image signature policy
 policy-local.json                         Permissive policy — build-base-local only, never a published image

@@ -998,8 +998,10 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # neither the raw private key nor its base64 form, the guest would
         # present a self-generated key that fails verification — fail
         # provisioning now rather than ship an unreachable VM (no TOFU fallback).
-        if (host_private_key.strip() not in user_data_text
-                and host_key_b64 not in user_data_text):
+        via_ssh_keys = "ed25519_private" in user_data_text
+        via_write_files = (host_private_key.strip() in user_data_text
+                           or host_key_b64 in user_data_text)
+        if not via_ssh_keys and not via_write_files:
             raise RuntimeError(
                 f"[vm.cloud_init].user_data_file for {name} does not install the "
                 f"workload's SSH host key: the CLI pins the host key "
@@ -1007,6 +1009,22 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 f"Add a write_files entry writing /etc/ssh/ssh_host_ed25519_key "
                 f"from ${{WORKLOADCTL_VM_HOST_KEY_B64}} (encoding: b64), or an "
                 f"ssh_keys: block carrying ${{WORKLOADCTL_VM_HOST_KEY}}."
+            )
+        # write_files alone is not enough: cc_ssh runs after cc_write_files and
+        # ssh_deletekeys defaults to true, so it deletes /etc/ssh/ssh_host_* and
+        # regenerates — silently discarding the key just written and leaving a
+        # guest that fails the pin. cc_ssh consumes an ssh_keys: block itself, so
+        # that form needs no opt-out; write_files must disable the delete.
+        if via_write_files and not via_ssh_keys and not re.search(
+                r"^\s*ssh_deletekeys\s*:\s*(false|no|off|0)\s*$",
+                user_data_text, re.M | re.I):
+            raise RuntimeError(
+                f"[vm.cloud_init].user_data_file for {name} installs the SSH host "
+                f"key with write_files but does not set `ssh_deletekeys: false`. "
+                f"cloud-init's ssh module runs after write_files and defaults to "
+                f"deleting and regenerating /etc/ssh/ssh_host_*, so the pinned key "
+                f"would be discarded and the guest would fail host-key "
+                f"verification. Add `ssh_deletekeys: false` to the seed."
             )
     else:
         # Default mode: built-in cloud-config with SSH key + optional disks.

@@ -186,7 +186,14 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             if path.exists():
                 body = path.read_text()
                 if "WORKLOADCTL_VM_HOST_KEY" not in body:
-                    path.write_text(body + "\nhost_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
+                    # ssh_deletekeys: false is part of the same contract — a
+                    # write_files-style injection without it is rejected,
+                    # because cc_ssh would regenerate the key afterwards.
+                    path.write_text(
+                        body
+                        + "\nssh_deletekeys: false"
+                        + "\nhost_key: ${WORKLOADCTL_VM_HOST_KEY}\n"
+                    )
         import shutil as _shutil
         with mock.patch.object(self.mod.os, "chown", lambda *a, **kw: None), \
              mock.patch.object(self.mod, "VM_SOCKET_DIR", self.runtime), \
@@ -344,6 +351,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def test_user_data_written_0600(self):
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nhostname: test\n"
+                      "ssh_deletekeys: false\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -367,6 +375,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def test_seed_dir_removed_after_iso_build(self):
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nhostname: test\n"
+                      "ssh_deletekeys: false\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -395,6 +404,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         cut short by a crash (rmtree is mocked here to simulate that)."""
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\nhostname: test\n"
+                      "ssh_deletekeys: false\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         # _run_build mocks shutil.rmtree, so the seed dir survives the build —
@@ -469,7 +479,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         satisfies the (c) contract."""
         ud = self.config_dir / "user-data"
         ud.write_text(
-            "#cloud-config\nwrite_files:\n"
+            "#cloud-config\nssh_deletekeys: false\nwrite_files:\n"
             "  - path: /etc/ssh/ssh_host_ed25519_key\n"
             "    encoding: b64\n"
             "    content: ${WORKLOADCTL_VM_HOST_KEY_B64}\n"
@@ -481,6 +491,40 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         import base64 as _b64
         want_b64 = _b64.b64encode(FAKE_HOST_PRIV.encode()).decode()
         self.assertIn(want_b64, self._read_user_data())
+        known = (self.home / ".ssh" / "vm_known_hosts").read_text()
+        self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
+
+    def test_write_files_host_key_without_deletekeys_opt_out_refused(self):
+        """write_files installs the key, then cc_ssh regenerates it — cc_ssh
+        runs later and ssh_deletekeys defaults to true. The guest ends up
+        presenting a self-generated key and fails the pin, so refuse the seed
+        rather than provision a VM that cannot be reached."""
+        ud = self.config_dir / "user-data"
+        ud.write_text(
+            "#cloud-config\nwrite_files:\n"
+            "  - path: /etc/ssh/ssh_host_ed25519_key\n"
+            "    encoding: b64\n"
+            "    content: ${WORKLOADCTL_VM_HOST_KEY_B64}\n"
+        )
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg, inject_host_key=False)
+        self.assertIn("ssh_deletekeys", str(ctx.exception))
+        # Refused before anything is pinned.
+        self.assertFalse((self.home / ".ssh" / "vm_known_hosts").exists())
+
+    def test_ssh_keys_block_needs_no_deletekeys_opt_out(self):
+        """cc_ssh consumes an ssh_keys: block itself, so that form survives the
+        regeneration step and must not be forced to disable it."""
+        ud = self.config_dir / "user-data"
+        ud.write_text(
+            "#cloud-config\nssh_keys:\n"
+            "  ed25519_private: |\n"
+            "    ${WORKLOADCTL_VM_HOST_KEY}\n"
+            "  ed25519_public: ${WORKLOADCTL_VM_HOST_PUBKEY}\n"
+        )
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg, inject_host_key=False)
         known = (self.home / ".ssh" / "vm_known_hosts").read_text()
         self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
 

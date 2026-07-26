@@ -29,6 +29,11 @@ users:
     ssh_authorized_keys:
       - ${WORKLOADCTL_SSH_KEY}
 
+# Keep the host key written below. cc_ssh defaults ssh_deletekeys to true, which
+# wipes /etc/ssh/ssh_host_* and regenerates — and it runs *after* write_files, so
+# without this the pinned key is installed and then immediately thrown away.
+ssh_deletekeys: false
+
 write_files:
   # SSH host key (S1). The CLI pins the guest host key
   # (StrictHostKeyChecking=yes), so this custom seed MUST install it or
