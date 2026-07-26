@@ -174,12 +174,17 @@ jobs:
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
+          PUBLISHED=("${VERSIONED}" "${FLOATING}")
           sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
           if [ "${VERSION}" = "${STABLE}" ]; then
             sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:latest"
+            PUBLISHED+=("latest")
           fi
 
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "digest=${DIGEST}"
+            printf 'tags<<EOF\n%s\nEOF\n' "${PUBLISHED[*]}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Sign base
         env:
@@ -188,6 +193,20 @@ jobs:
           DIGEST: ${{ steps.push_base.outputs.digest }}
         run: |
           cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+
+      - name: Verify base
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          DIGEST: ${{ steps.push_base.outputs.digest }}
+          TAGS: ${{ steps.push_base.outputs.tags }}
+        run: |
+          # Every published tag must resolve to the signed manifest, not just
+          # the digest that was signed.
+          cosign verify --key cosign.pub "${IMAGE_BASE}@${DIGEST}" > /dev/null
+          for t in $TAGS; do
+            cosign verify --key cosign.pub "${IMAGE_BASE}:${t}" > /dev/null
+            echo "signature verified: ${IMAGE_BASE}:${t}"
+          done
 
       - name: Summary
         env:
@@ -363,11 +382,13 @@ jobs:
           sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
 
+          PUBLISHED=("${VERSIONED}" "${FLOATING_TAG}")
           sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
             STABLE_FLOATING="${FLOATING:-latest}"
             sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
+            PUBLISHED+=("${STABLE_FLOATING}")
           fi
 
           {
@@ -375,6 +396,7 @@ jobs:
             echo "versioned_tag=${VERSIONED}"
             echo "floating_tag=${FLOATING_TAG}"
             echo "digest=$(cat /tmp/digest.txt)"
+            printf 'tags<<EOF\n%s\nEOF\n' "${PUBLISHED[*]}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign variant
@@ -385,6 +407,21 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+
+      - name: Verify variant
+        if: steps.gate.outputs.build == 'true'
+        env:
+          IMAGE_BASE: ${{ steps.push.outputs.image_base }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.push.outputs.tags }}
+        run: |
+          # Every published tag must resolve to the signed manifest, not just
+          # the digest that was signed.
+          cosign verify --key cosign.pub "${IMAGE_BASE}@${DIGEST}" > /dev/null
+          for t in $TAGS; do
+            cosign verify --key cosign.pub "${IMAGE_BASE}:${t}" > /dev/null
+            echo "signature verified: ${IMAGE_BASE}:${t}"
+          done
 
       - name: Summary
         if: steps.gate.outputs.build == 'true'

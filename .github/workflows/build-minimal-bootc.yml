@@ -157,18 +157,18 @@ jobs:
             TAGS+=("latest")
           fi
 
-          FIRST=true
-          for t in "${TAGS[@]}"; do
-            sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${t}"
-            if [ "${FIRST}" = "true" ]; then
-              sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
-              FIRST=false
-            else
-              sudo podman push "${IMAGE_BASE}:${t}"
-            fi
-          done
-
+          # Only the dated tag is pushed: a second `podman push` of the same
+          # local image yields a different manifest digest, which the signature
+          # over the first digest would not cover, so the floating tags are
+          # skopeo-copied from that digest instead.
+          DATED="${TAGS[0]}"
+          sudo podman tag localhost/${IMAGE_NAME}:rechunked "${IMAGE_BASE}:${DATED}"
+          sudo podman push --digestfile /tmp/digest.txt "${IMAGE_BASE}:${DATED}"
           DIGEST=$(cat /tmp/digest.txt)
+
+          for t in "${TAGS[@]:1}"; do
+            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${t}"
+          done
           {
             printf 'tags<<EOF\n%s\nEOF\n' "${TAGS[*]}"
             echo "digest=${DIGEST}"
@@ -181,6 +181,20 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_BASE}@${DIGEST}"
+
+      - name: Verify signatures
+        env:
+          IMAGE_BASE: ${{ steps.params.outputs.image_base }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.push.outputs.tags }}
+        run: |
+          # Every published tag must resolve to the signed manifest, not just
+          # the digest that was signed.
+          cosign verify --key cosign.pub "${IMAGE_BASE}@${DIGEST}" > /dev/null
+          for t in $TAGS; do
+            cosign verify --key cosign.pub "${IMAGE_BASE}:${t}" > /dev/null
+            echo "signature verified: ${IMAGE_BASE}:${t}"
+          done
 
       - name: Summary
         env:
