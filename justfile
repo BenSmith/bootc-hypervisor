@@ -491,39 +491,6 @@ aio-local vmname="hypervisor-test" memory="4096" vcpus="2" rootfs="xfs" size="20
   echo "  sudo virsh destroy {{vmname}}         # Force power off"
   echo "  sudo virsh undefine {{vmname}}        # Delete VM config"
 
-# Check that .github/workflows/ and .forgejo/workflows/ don't diverge on
-# shared job names and key build arguments.  Forgejo intentionally omits some
-# workflow_dispatch options (e.g. nvidia-rpmfusion) and has runner-specific
-# differences — compare only the structurally-shared parts.
-check-workflow-drift:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  drift=0
-  for wf in build-hypervisor.yml build-minimal-bootc.yml; do
-    gh=".github/workflows/$wf"
-    fg=".forgejo/workflows/$wf"
-    [ -f "$gh" ] || { echo "MISSING: $gh"; drift=1; continue; }
-    [ -f "$fg" ] || { echo "MISSING: $fg"; drift=1; continue; }
-    # Extract job names (keys under 'jobs:')
-    gh_jobs=$(grep -E '^\s{2}[a-zA-Z0-9_-]+:' "$gh" | sed 's/^ *//;s/:$//' | sort)
-    fg_jobs=$(grep -E '^\s{2}[a-zA-Z0-9_-]+:' "$fg" | sed 's/^ *//;s/:$//' | sort)
-    if [ "$gh_jobs" != "$fg_jobs" ]; then
-      echo "DRIFT [$wf] job names:"
-      diff <(echo "$gh_jobs") <(echo "$fg_jobs") || true
-      drift=1
-    fi
-    # Extract 'build-args:' blocks (images / variants pushed)
-    gh_args=$(grep -A5 'build-args:' "$gh" | grep -v 'build-args:' | sort)
-    fg_args=$(grep -A5 'build-args:' "$fg" | grep -v 'build-args:' | sort)
-    if [ "$gh_args" != "$fg_args" ]; then
-      echo "DRIFT [$wf] build-args:"
-      diff <(echo "$gh_args") <(echo "$fg_args") || true
-      drift=1
-    fi
-  done
-  [ "$drift" -eq 0 ] && echo "Workflow drift check: OK"
-  exit $drift
-
 # === Tests ==================================================================
 
 test:
