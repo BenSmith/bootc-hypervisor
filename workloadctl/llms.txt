@@ -41,7 +41,11 @@ workload-{name}.service → individual containers start via podman run
 
 - Username: `_wl-{name}` (e.g., `_wl-webserver`)
 - UID range: 10000-52948 (42,949 max workloads)
-- Subuid formula: `100000 + (uid_offset * 100000)`, count=65536
+- Subuid formula: `600100000 + (uid_offset * 65536)`, count=65536, where
+  `uid_offset = uid - UID_MIN`. The base clears Fedora `useradd`'s own subid
+  window (`SUB_UID_MIN=524288`), which a lower base overlaps at low UIDs.
+  Authoritative in `libexec/workload-ensure-user`; the ranges are written by
+  `workload_lib.append_subid_entries()`
 - Home directory: `/var/lib/workloads/{name}`
 - Shell: `/usr/sbin/nologin`
 

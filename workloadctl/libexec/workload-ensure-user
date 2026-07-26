@@ -102,9 +102,10 @@ def configure_subuid_subgid(pw, config):
     if uid < UID_MIN:
         raise ValueError(f"UID {uid} is below minimum workload UID {UID_MIN}")
     uid_offset = uid - UID_MIN
-    # Place subid ranges above the Fedora useradd window (SUB_UID_MIN=524288).
-    # Old formula (100000 + offset*100000) collides with that window for low UIDs.
-    # New formula: 600100000 + (offset * 65536); max end ≈ 3.4G, within uint32.
+    # The base places every range above the window Fedora's own useradd allocates
+    # subids from (SUB_UID_MIN=524288 in /etc/login.defs). A lower base overlaps it
+    # at low UIDs, which would let a useradd-created user share subordinate IDs
+    # with a workload. Documented in docs/workloads.md; this is the only source.
     subid_start = 600100000 + (uid_offset * 65536)
     count = 65536
 

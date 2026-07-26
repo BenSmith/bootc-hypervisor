@@ -2132,12 +2132,24 @@ When you disable a workload (`workloadctl disable`, which removes the `.enabled`
 
 Each workload needs a unique subordinate UID/GID range for rootless containers.
 
-**Formula:** `100000 + (uid_offset * 100000)` with 65536 UIDs/GIDs, where `uid_offset = uid - 10000`
-- Workload UID 10001: subuid range 200000:65536
-- Workload UID 10002: subuid range 300000:65536
+**Formula:** `600100000 + (uid_offset * 65536)` with 65536 UIDs/GIDs, where `uid_offset = uid - 10000`
+- Workload UID 10000: subuid range 600100000:65536
+- Workload UID 10001: subuid range 600165536:65536
+- Workload UID 10002: subuid range 600231072:65536
+
+The `600100000` base puts every range above the window Fedora's own `useradd`
+allocates from (`SUB_UID_MIN=524288` in `/etc/login.defs`). A lower base overlaps
+that window at low UIDs, so a workload and a `useradd`-created user could be
+handed the same subordinate IDs — which would let one workload's containers map
+into another's UID space. The formula is authoritative in
+`libexec/workload-ensure-user`; nothing else derives it.
 
 **Impact:**
-- UIDs are capped at 52948, supporting up to **42,948 workloads** per host before the subuid range would overflow uint32. This limit is unlikely to be reached in practice but is worth knowing if you are planning large-scale deployments.
+- UIDs are capped at 52948, supporting up to **42,949 workloads** per host. That
+  bound is retained from an earlier allocation scheme rather than being a limit of
+  this one: the top of the range lands at 3,414,805,663, leaving ~880M of headroom
+  below the uint32 ceiling that `/etc/subuid` consumers require. Raising it is a
+  deliberate change to `UID_MAX`, not a formula fix.
 - Changing a workload's UID requires manual `/etc/subuid` and `/etc/subgid` cleanup
 
 ### Areas Needing Improvement
