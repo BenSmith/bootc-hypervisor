@@ -2117,6 +2117,54 @@ class TestCmdCleanup(unittest.TestCase):
             self.assertIn("_wl-orphan", userdel_calls[0].args[0])
             self.assertIn("Cleanup complete", buf.getvalue())
 
+    def test_apply_sweeps_the_whole_root_of_an_orphaned_user_in_one_pass(self):
+        """`userdel -r` clears only pw_dir (= <root>/state). data/ and
+        operations.log live beside it, so unless the root is claimed as an
+        orphaned dir they survive --apply and need a second run to disappear."""
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = base / "orphan"
+        (root / "state").mkdir(parents=True)
+        (root / "data").mkdir()
+        (root / "data" / "precious.db").write_text("x")
+        (root / "operations.log").write_text("{}\n")
+        orphan = self._fake_pwent("_wl-orphan", 15001)
+
+        with _RootBypass():
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
+                with patch('pwd.getpwall', return_value=[orphan]):
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
+                            # userdel is stubbed, so state/ stays; the assertion is
+                            # that the root goes regardless of what userdel did.
+                            with patch.object(cmd_cleanup.subprocess, 'run',
+                                              return_value=MagicMock(returncode=0)):
+                                buf = io.StringIO()
+                                with redirect_stdout(buf):
+                                    cmd_cleanup.cmd_cleanup(
+                                        _ns(apply=True, json=False), MagicMock())
+        self.assertFalse(root.exists(), "one --apply should leave nothing behind")
+        self.assertIn(str(root), buf.getvalue())
+
+    def test_dry_run_plan_names_the_root_it_will_remove(self):
+        """The plan has to list the root, or --apply removes more than it said."""
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (base / "orphan" / "data").mkdir(parents=True)
+        orphan = self._fake_pwent("_wl-orphan", 15001)
+
+        with _RootBypass():
+            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
+                with patch('pwd.getpwall', return_value=[orphan]):
+                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', base):
+                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
+                            buf = io.StringIO()
+                            with redirect_stdout(buf):
+                                cmd_cleanup.cmd_cleanup(
+                                    _ns(apply=False, json=True), MagicMock())
+        data = json.loads(buf.getvalue())
+        self.assertEqual(data["orphan_dirs"], [str(base / "orphan")])
+        self.assertEqual(data["removed_dirs"], [])
+        self.assertTrue((base / "orphan").exists())
+
     def test_apply_rewrites_subuid_subgid_without_dropping_other_entries(self):
         """Removing an orphaned user's subuid/subgid range must strip only
         that user's line — a prefix-matching bug here would corrupt the UID

@@ -96,6 +96,18 @@ def cmd_cleanup(args, manager: WorkloadManager):
             if expected_user not in existing_users and d.name not in configured_names:
                 orphaned_dirs.append(d)
 
+    # The scan above skips a dir whose user still exists — which is every dir
+    # belonging to a user in orphaned_users, since those users are removed below.
+    # `userdel -r` only clears pw_dir (= <root>/state), so data/ and
+    # operations.log would survive and be swept on a *later* run. Claim the whole
+    # root here instead, so one --apply is enough and the plan says what happens.
+    # Derived from the same workloads_base the scan above uses, not from
+    # workload_root_dir(), so there is one base path in play for the whole sweep.
+    for entry in orphaned_users:
+        root = workloads_base / entry.pw_name[len(USERNAME_PREFIX):]
+        if root.exists() and root not in orphaned_dirs:
+            orphaned_dirs.append(root)
+
     if args.json and not apply:
         print(json.dumps({
             "dry_run": True,
