@@ -118,15 +118,14 @@ jobs:
           FLOATING="${VERSION}"
 
           # Sign at push — see docs/ci-image-signing.md. Key from the runner's
-          # systemd credentials; unsigned + warning if not sealed.
+          # systemd credentials; the job fails if they are not sealed.
           CREDS=/run/credentials/forgejo-runner.service
-          SIGN_ARGS=()
-          if sudo test -s "${CREDS}/cosign-key"; then
-            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
-                       --sign-passphrase-file "${CREDS}/cosign-pass")
-          else
-            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
+            exit 1
           fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
 
           sudo podman tag "localhost/hypervisor-bootc:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
@@ -242,13 +241,12 @@ jobs:
           FLOATING_TAG="${PREFIX}${VERSION}"
 
           CREDS=/run/credentials/forgejo-runner.service
-          SIGN_ARGS=()
-          if sudo test -s "${CREDS}/cosign-key"; then
-            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
-                       --sign-passphrase-file "${CREDS}/cosign-pass")
-          else
-            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
+            exit 1
           fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
 
           sudo podman tag "localhost/${IMAGE}:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"

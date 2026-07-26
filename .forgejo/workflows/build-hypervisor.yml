@@ -172,17 +172,17 @@ jobs:
           # passphrase are host-key-sealed systemd credentials decrypted into
           # the runner service's tmpfs (sealed once by the seal-signing-key
           # workflow — docs/ci-image-signing.md); no Forgejo secrets involved.
-          # Missing credentials → push unsigned with a warning. The floating
-          # tags are skopeo-copied from the signed digest in the same repo,
-          # so the digest-addressed signature already covers them.
+          # Missing credentials → the job fails; nothing unsigned reaches
+          # the registry. The floating tags are skopeo-copied from the signed
+          # digest in the same repo, so the digest-addressed signature already
+          # covers them.
           CREDS=/run/credentials/forgejo-runner.service
-          SIGN_ARGS=()
-          if sudo test -s "${CREDS}/cosign-key"; then
-            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
-                       --sign-passphrase-file "${CREDS}/cosign-pass")
-          else
-            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
+            exit 1
           fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
 
           sudo podman tag "localhost/hypervisor-bootc:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
@@ -358,13 +358,12 @@ jobs:
           # tags are digest copies in the same repo, already covered by the
           # digest-addressed signature. See docs/ci-image-signing.md.
           CREDS=/run/credentials/forgejo-runner.service
-          SIGN_ARGS=()
-          if sudo test -s "${CREDS}/cosign-key"; then
-            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
-                       --sign-passphrase-file "${CREDS}/cosign-pass")
-          else
-            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
+            exit 1
           fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
 
           sudo podman tag "localhost/${IMAGE}:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"

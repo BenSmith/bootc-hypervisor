@@ -124,15 +124,14 @@ jobs:
           # Sign at push via containers/image — same sealed-key setup as
           # build-hypervisor.yml (no cosign CLI; its *.local scheme race broke
           # signing). Key + passphrase are host-key-sealed systemd credentials
-          # in the runner's tmpfs; missing creds => push unsigned with a warning.
+          # in the runner's tmpfs; missing creds fail the job.
           CREDS=/run/credentials/forgejo-runner.service
-          SIGN_ARGS=()
-          if sudo test -s "${CREDS}/cosign-key"; then
-            SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
-                       --sign-passphrase-file "${CREDS}/cosign-pass")
-          else
-            echo "::warning::no signing credential at ${CREDS}/cosign-key — pushing unsigned. Run the seal-signing-key workflow."
+          if ! sudo test -s "${CREDS}/cosign-key"; then
+            echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
+            exit 1
           fi
+          SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
+                     --sign-passphrase-file "${CREDS}/cosign-pass")
 
           while IFS= read -r ref; do
             [ -n "$ref" ] || continue
