@@ -5,7 +5,9 @@ COPY workloadctl/ /workloadctl/
 RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
         rpm-build python3 just systemd-rpm-macros python3-rpm-macros && \
     dnf clean all && \
-    cd /workloadctl && just test && just rpm-build
+    cd /workloadctl && \
+    rm -rf rpmbuild && \
+    just test && just rpm-build
 
 FROM ${BASE_IMAGE}
 
@@ -266,10 +268,20 @@ RUN if [ "$ENABLE_PASSWORDLESS_SUDO" = "true" ]; then \
 # The RPM is also cached at a known path so workload-ensure-user can bundle it
 # into VM cloud-init ISOs at runtime.
 COPY --from=rpm-builder /workloadctl/rpmbuild/RPMS/noarch/ /tmp/wl-rpms/
-RUN rpm=$(echo /tmp/wl-rpms/workloadctl-*.rpm) && \
-    test -f "$rpm" && \
-    dnf install -y "$rpm" && \
-    install -Dpm 0644 "$rpm" /usr/share/workloadctl/workloadctl.rpm && \
+# Exactly one RPM, asserted out loud. The release is timestamped, so the only way
+# to name it is a glob — and a glob that matches several expands to a list that
+# `dnf install` would happily take, silently installing whichever came last and
+# caching the wrong one at /usr/share/workloadctl. A glob matching none expands
+# to itself. Both are build-stopping, so say which happened: the failure lands
+# hundreds of layers deep and reads as unexplained if it doesn't.
+RUN set -- /tmp/wl-rpms/workloadctl-*.rpm && \
+    if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then \
+        echo "expected exactly one workloadctl RPM in /tmp/wl-rpms, got $#:" >&2; \
+        ls -l /tmp/wl-rpms >&2; \
+        exit 1; \
+    fi && \
+    dnf install -y "$1" && \
+    install -Dpm 0644 "$1" /usr/share/workloadctl/workloadctl.rpm && \
     rm -rf /tmp/wl-rpms && \
     dnf clean all
 

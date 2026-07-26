@@ -37,6 +37,12 @@ jobs:
       - name: Build RPM
         working-directory: workloadctl
         run: |
+          # This runs on a persistent `native` runner, so the workspace can carry
+          # untracked files between runs and `just rpm-build` only ever adds to
+          # rpmbuild/. Left alone, the timestamped glob below matches every RPM
+          # the runner has ever built and publish picks one arbitrarily — an old
+          # package uploaded under a green run.
+          rm -rf rpmbuild
           just rpm-build
           mkdir -p /tmp/wl-rpm-${{ github.run_id }}
           cp rpmbuild/RPMS/noarch/workloadctl-*.rpm /tmp/wl-rpm-${{ github.run_id }}/
@@ -60,6 +66,13 @@ jobs:
           PKG_PUBLISH_TOKEN: ${{ secrets.PKG_PUBLISH_TOKEN }}
         run: |
           rpm=(/tmp/wl-rpm-${{ github.run_id }}/workloadctl-*.rpm)
+          # "$rpm" is element 0, so more than one match would publish whichever
+          # sorted first with nothing in the log to say so.
+          if [ "${#rpm[@]}" -ne 1 ] || [ ! -f "${rpm[0]}" ]; then
+            echo "expected exactly one RPM to publish, got ${#rpm[@]}:"
+            ls -l /tmp/wl-rpm-${{ github.run_id }}/
+            exit 1
+          fi
           code=$(curl -sS -o /tmp/pkg-upload.log -w "%{http_code}" \
             -H "Authorization: token ${PKG_PUBLISH_TOKEN}" \
             --upload-file "$rpm" \

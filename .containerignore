@@ -1,0 +1,41 @@
+# Build context exclusions for the builds whose context is this directory
+# (hypervisor.Containerfile and the nvidia/amd variants). build-minimal uses
+# manifests/ as its context and is unaffected.
+#
+# This is not a size optimisation with a correctness side effect — it is the
+# other way round. `.gitignore` does not exclude anything from a podman build
+# context, so every local build artifact under this tree got tarred up and
+# handed to the builder. workloadctl/rpmbuild/ is the one that bites: the
+# rpm-builder stage COPYs workloadctl/ wholesale, so a host that has ever run
+# `just rpm-build` shipped its whole RPM history into the stage, and the
+# `workloadctl-*.rpm` glob downstream then matched every one of them.
+#
+# Anything COPYed by a Containerfile must stay out of this list even when it is
+# gitignored — bin/cosy, man/cosy.1 and the generated policy.json all are.
+
+.git
+.gitignore
+
+# Upstream source clones kept for reference (gigabytes, never built from).
+.reference
+
+# Local build output.
+workloadctl/rpmbuild
+rpm/rpm-output
+output
+base-images
+bootc-src
+manifests
+rpmmd
+store
+
+# Editor / agent / test tooling state.
+.idea
+.claude
+.mcp.json
+__pycache__
+.coverage
+.coverage.*
+htmlcov
+.mypy_cache
+.ruff_cache
