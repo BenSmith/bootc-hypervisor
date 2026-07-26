@@ -393,7 +393,14 @@ jobs:
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
 
           if [ "${VERSION}" = "${STABLE}" ]; then
-            STABLE_FLOATING="${FLOATING:-latest}"
+            # matrix.variant.floating is the variant's stable alias
+            # (negativo17, rpmfusion) and is empty for the unprefixed amd
+            # variant, which claims :latest.
+            if [ -n "${FLOATING}" ]; then
+              STABLE_FLOATING="${FLOATING}"
+            else
+              STABLE_FLOATING="latest"
+            fi
             sudo skopeo copy \
               "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${STABLE_FLOATING}"
           fi
