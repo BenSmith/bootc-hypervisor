@@ -118,6 +118,7 @@ jobs:
             --device /dev/fuse \
             -f fedora-bootc-minimal.Containerfile \
             --build-arg MANIFEST=minimal \
+            --build-arg VERSION=${VERSION} \
             --build-arg BUILDER_IMAGE=quay.io/fedora/fedora:${VERSION} \
             --build-arg REPOS_IMAGE=quay.io/fedora/fedora:${VERSION} \
             -t localhost/${IMAGE_NAME}:build \
