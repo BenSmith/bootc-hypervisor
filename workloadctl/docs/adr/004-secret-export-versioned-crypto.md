@@ -51,5 +51,5 @@ threat model (off-host storage/transport) is exactly where integrity matters.
 - Export output format changes (v2 header); import stays compatible with v1.
 - `docs/cli.md` / `docs/workloads.md` note the format version and the integrity
   guarantee.
-- See B14 in `docs/wip/code-review-2026-07-open-items.md` for the implementation card
-  (this ADR resolves the D5 gate on B14).
+- Implemented in `lib/cmd_secret.py` (`export` writes the v2 format; `import`
+  accepts v1 and v2).

@@ -7,9 +7,8 @@ to a local QEMU guest, key auth, throwaway host key) and adds the
 snapshot/revert/poweroff lifecycle the runtime harness needs to reset guest
 state between check groups in ~1s instead of re-booting.
 
-Stdlib only (see docs/wip/test-suite-improvement-plan.md dependency policy: the
-launcher/lifecycle layer stays stdlib and reuses the lib QMPClient rather than
-adding a second QMP implementation).
+Stdlib only, like the rest of the tree: the launcher/lifecycle layer reuses the
+lib QMPClient rather than adding a second QMP implementation.
 """
 
 import os

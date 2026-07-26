@@ -13,7 +13,7 @@ bootable qcow2 with the `wlrt` test user baked in, boots it under an emulated
 TPM2 (swtpm), and hands back the same `VMTarget` with no rpm deploy (workloadctl
 ships in the image). Checks never branch on mode.
 
-Stdlib only. See docs/wip/test-suite-improvement-plan.md Part 1.
+Stdlib only.
 """
 
 import hashlib

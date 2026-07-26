@@ -1126,10 +1126,10 @@ def _service_identity(svc, service_type, slice_name, systemd_mode, user_name, ho
 def _resource_overrides(svc, resources, name):
     """Service-level resource overrides (TimeoutStart/StopSec + custom_directives).
     This is the custom_directives splice point: every directive emitted from here
-    on down must use .add(), never .set(), or a user's shadowing custom_directive
-    line would collapse into the generator's own later line instead of both
-    surviving for systemd's last-wins to pick between (see the .set()/.add()
-    invariant in docs/wip/a1-generator-refactor.md)."""
+    on down must use .add(), never .set(), or it will overwrite a user's line in
+    place and destroy it. See "The set()/add() splice-point invariant" in
+    lib/unit_file.py for what add() does and does not guarantee, and for why a
+    default that must yield to the user has to skip emitting itself."""
     service_directives = []
     if "timeout_start_sec" in resources:
         service_directives.append(("TimeoutStartSec", resources['timeout_start_sec']))
@@ -1934,8 +1934,8 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
 
     svc.blank()
     # custom_directives splice point: every directive from here down uses .add(),
-    # never .set(), so a user's shadowing line and the generator's own both
-    # survive for systemd's last-wins to pick between (see _resource_overrides).
+    # never .set(), so the generator cannot overwrite a user's line in place
+    # (see _resource_overrides, and lib/unit_file.py for the full invariant).
     _resource_overrides(svc, resources, name)
 
     # Restart policy. QEMU runs with -no-reboot, so a guest reboot AND a guest

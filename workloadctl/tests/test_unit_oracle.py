@@ -15,8 +15,7 @@ job. Three properties per emitted unit:
       for them — a generator leaking host networking or privilege into a unit
       that did not request it is a real security regression.
 
-No root required; the generator writes into temp dirs. See
-docs/wip/test-suite-improvement-plan.md phase A2.
+No root required; the generator writes into temp dirs.
 """
 
 import configparser

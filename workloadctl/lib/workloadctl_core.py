@@ -387,8 +387,8 @@ class WorkloadConfig:
 
         This is the single chokepoint every control-file lookup goes through so
         overrides apply uniformly — the /usr→/etc vendor→admin drop-in idiom
-        (systemd's `systemctl edit`/`cat`). See docs/wip/workload-bundles.md
-        "Control files — lazy override".
+        (systemd's `systemctl edit`/`cat`). See docs/workloads.md
+        "Customizing control files".
         """
         return self.resolve_control_file_with_source(relpath)[0]
 

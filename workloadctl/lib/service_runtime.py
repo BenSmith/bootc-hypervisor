@@ -4,8 +4,8 @@ service_runtime — systemd/logind runtime primitives keyed on (uid, service_nam
 Split out of workloadctl_core so `substrate` (and any other consumer) can depend
 on these without importing the WorkloadConfig/WorkloadManager domain model. These
 functions have zero domain-model dependency — they speak only to systemctl /
-loginctl about a uid and a unit name. See
-docs/wip/refactor-service-runtime-and-naming.md.
+loginctl about a uid and a unit name. `tests/test_layering.py` enforces the
+direction of that dependency.
 """
 
 import os

@@ -21,6 +21,44 @@ Layout contract (see ``Unit.render``):
     them, except leading/trailing blanks are trimmed (the inter-block
     separator is owned by render, so callers need not balance them);
   - the file ends with exactly one trailing newline.
+
+The ``set()``/``add()`` splice-point invariant
+---------------------------------------------
+``set()`` collapses to one line per key; ``add()`` appends. Choosing between
+them is a correctness decision, not a style one, and the reason is *where* the
+user's ``[resources] custom_directives`` land in the file.
+
+``generators/workload-generate`` splices them in early, from
+``_resource_overrides()`` — before credentials, exec lines, logging and
+hardening. So from that point on, a key the generator is about to emit may
+already be present **as the user's line**. The rule:
+
+    after the custom_directives splice, emit with ``add()``, never ``set()``.
+
+``set()`` searches for the key and rewrites that line in place. Post-splice,
+the line it finds is the user's, so their value is destroyed and the emitted
+unit carries no trace that it was ever supplied. For a repeatable directive
+that is outright data loss — a user adding a second ``ExecStartPre=`` gets it
+swallowed rather than appended.
+
+**What ``add()`` does and does not buy.** It preserves the user's line, so the
+conflict stays visible in the rendered unit and nothing is silently dropped. It
+does *not* make the override take effect: both lines are emitted, the
+generator's comes later, and systemd's last-wins rule for single-valued
+directives therefore picks the **generator's** value. Verified — a workload
+setting ``custom_directives = {SyslogIdentifier = "mine"}`` renders
+``SyslogIdentifier=mine`` and then ``SyslogIdentifier=workload-<name>``, and
+the unit runs with the latter.
+
+**So a default that must actually yield to the user has to opt out at the
+source**, by not emitting itself at all:
+
+    if "LogRateLimitIntervalSec" not in custom_d:
+        svc.add("LogRateLimitIntervalSec", 30)
+
+``GENERATOR_OWNED_DIRECTIVES`` (``workload_lib``) warns for keys known to be
+generator-managed, but it is only a warning list: it neither prevents a later
+``set()`` nor covers every managed key.
 """
 
 

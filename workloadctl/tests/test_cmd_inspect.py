@@ -4,7 +4,7 @@
 Focus: Check 3, the user-manager slice-placement probe. This is the safety net
 for converging that check's inline `systemctl is-active user@<uid>.service` onto
 service_runtime — the tests pin the observable health output so the refactor can
-be proven behaviour-preserving. See docs/wip/refactor-service-runtime-and-naming.md.
+be proven behaviour-preserving.
 """
 
 import io

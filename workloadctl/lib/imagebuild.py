@@ -13,7 +13,7 @@ The **merged context** is the build analogue of `info --files`: the shipped
 on top, file by file. Materializing it is what makes overriding a `Containerfile`
 (or a `COPY`-ed asset) actually take effect — the original self-locating
 `build.sh` pinned the context to wherever the script resolved, silently ignoring
-overrides. See docs/wip/workload-bundles.md.
+overrides. See docs/workloads.md "Customizing control files".
 """
 import os
 import shutil

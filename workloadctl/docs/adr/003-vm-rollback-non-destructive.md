@@ -48,4 +48,5 @@ generation is safe and pruned normally.
 - Each rollback adds one generation (the rotated-out current disk); `rollback_keep`
   pruning must apply to the rotated disk like any other generation.
 - `rollback_targets()` will list the rotated-out disk as a normal generation.
-- See B17 in `docs/wip/code-review-2026-07-open-items.md` for the implementation card.
+- Implemented in `VMSubstrate.rollback_targets()` / `apply_rollback()`
+  (`lib/substrate_vm.py`).

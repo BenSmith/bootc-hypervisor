@@ -72,5 +72,6 @@ cost (nothing sets these today) and lets the DHCP-range fix fall out naturally.
   to drop the per-VM fields and document the host-level knob.
 - The dhcp-range-from-subnet fix means the managed bridge is relocatable for the first
   time (e.g. to avoid a `192.168.200.0/24` clash on the host LAN).
-- See B16 in `docs/wip/code-review-2026-07-open-items.md` for the implementation
-  card (Opus: schema + generator + validation, snapshot-tested).
+- Implemented: `managed_bridge_params()` in `lib/vm.py` derives
+  `VM_BRIDGE_IP`/`VM_BRIDGE_CIDR`/`VM_BRIDGE_SUBNET`/`VM_DHCP_RANGE` from the
+  host-level subnet; `validate_vm_config` rejects the per-VM fields.
