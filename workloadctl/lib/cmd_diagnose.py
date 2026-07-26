@@ -15,8 +15,12 @@ import sys
 from workload_lib import (
     expand_volume_path,
     HOST_USERNS_OPT_IN,
+    read_subid_entry,
     selinux_module_name,
     selinux_type_name,
+    subgid_file,
+    subid_files_with_entries,
+    subuid_file,
     units_outdated,
 )
 from validation import uses_host_userns
@@ -51,20 +55,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
 
     # Check 2: Subuid/subgid configured
     if user_exists:
-        subuid_exists = False
-        subgid_exists = False
-        try:
-            with open("/etc/subuid", "r") as f:
-                if any(line.startswith(f"{config.username}:") for line in f):
-                    subuid_exists = True
-        except FileNotFoundError:
-            pass
-        try:
-            with open("/etc/subgid", "r") as f:
-                if any(line.startswith(f"{config.username}:") for line in f):
-                    subgid_exists = True
-        except FileNotFoundError:
-            pass
+        with_entries = subid_files_with_entries(config.username)
+        subuid_exists = subuid_file() in with_entries
+        subgid_exists = subgid_file() in with_entries
 
         if subuid_exists and subgid_exists:
             _check("subid_configured", True, "Subuid/subgid configured")
@@ -274,20 +267,22 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     userns_mode = config.config.get("security", {}).get("userns", "keep-id")
     if userns_mode == "host" and user_exists:
         try:
-            with open("/etc/subuid", "r") as f:
-                for line in f:
-                    if line.startswith(f"{config.username}:"):
-                        parts = line.strip().split(':')
-                        if len(parts) == 3:
-                            subuid_start = int(parts[1])
-                            subuid_count = int(parts[2])
-                            subuid_end = subuid_start + subuid_count - 1
-                            _check("uid_mapping", True,
-                                   f"UID mapping configured: container UIDs 1-{subuid_count} → host UIDs {subuid_start}-{subuid_end}")
-                            break
-                else:
-                    _check("uid_mapping", False, "Cannot calculate UID mapping (subuid not found)",
-                           fix="Check /etc/subuid configuration")
+            entry = read_subid_entry(config.username, subuid_file())
+            if entry is not None:
+                subuid_start, subuid_count = entry
+                subuid_end = subuid_start + subuid_count - 1
+                _check("uid_mapping", True,
+                       f"UID mapping configured: container UIDs 1-{subuid_count} → host UIDs {subuid_start}-{subuid_end}")
+            elif subuid_file() in subid_files_with_entries(config.username):
+                # A line for this user exists but doesn't parse as
+                # user:start:count. Distinct from absence: the fix is to repair
+                # the entry, not to re-run enable.
+                _check("uid_mapping", False,
+                       f"Error reading subuid: malformed {subuid_file()} entry for {config.username}",
+                       fix=f"Repair the {config.username} line in {subuid_file()}")
+            else:
+                _check("uid_mapping", False, "Cannot calculate UID mapping (subuid not found)",
+                       fix=f"Check {subuid_file()} configuration")
         except Exception as e:
             _check("uid_mapping", False, f"Error reading subuid: {e}")
 

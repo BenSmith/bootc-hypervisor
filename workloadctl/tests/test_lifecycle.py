@@ -711,16 +711,57 @@ import cmd_provision
 
 
 class TestSubidLockSharedConstant(unittest.TestCase):
-    """A11/A5: the subuid/subgid flock only mutexes if every participant uses
-    the identical primitive — cmd_disable must go through workload_lib's
-    shared subid_lock() context manager (which names the one SUBID_LOCK path)
-    rather than re-spelling its own flock."""
+    """A11/A5/R1: the subuid/subgid flock only mutexes if every participant uses
+    the identical primitive. Mutators go through workload_lib's
+    remove_subid_entries(), which takes the one shared subid_lock() itself —
+    a caller that hand-rolls read-filter-write reintroduces the race even when
+    it remembers to lock, because a read and a write that each take the lock
+    separately is not an atomic read-modify-write."""
 
-    def test_cmd_lifecycle_uses_shared_lock(self):
-        self.assertIs(cmd_disable.subid_lock, workload_lib.subid_lock)
+    def test_mutators_share_the_lock_owning_helper(self):
+        self.assertIs(cmd_disable.remove_subid_entries,
+                      workload_lib.remove_subid_entries)
+        self.assertIs(cmd_cleanup.remove_subid_entries,
+                      workload_lib.remove_subid_entries)
         self.assertEqual(
             workload_lib.SUBID_LOCK, Path("/run/lock/workload-subid.lock")
         )
+
+    def test_remove_holds_the_lock_across_read_and_write(self):
+        """The lock must span the whole rewrite, not just bracket it: a range
+        appended between our read and our write would otherwise be lost."""
+        events = []
+
+        @contextlib.contextmanager
+        def tracking_lock():
+            events.append("lock")
+            try:
+                yield
+            finally:
+                events.append("unlock")
+
+        with tempfile.TemporaryDirectory() as td:
+            subuid = Path(td) / "subuid"
+            subgid = Path(td) / "subgid"
+            subuid.write_text("_wl-gone:600100000:65536\n_wl-stay:600200000:65536\n")
+            subgid.write_text("_wl-gone:600100000:65536\n")
+
+            real_rewrite = workload_lib._rewrite_subid_file
+
+            def tracking_rewrite(path, lines):
+                events.append(f"write:{path.name}")
+                return real_rewrite(path, lines)
+
+            with patch.object(workload_lib, 'subid_lock', tracking_lock), \
+                 patch.object(workload_lib, '_rewrite_subid_file', tracking_rewrite), \
+                 patch.object(workload_lib, 'SUBUID_FILE', subuid), \
+                 patch.object(workload_lib, 'SUBGID_FILE', subgid):
+                changed = workload_lib.remove_subid_entries("_wl-gone")
+
+        self.assertEqual(changed, [subuid, subgid])
+        # Both writes land inside a single lock/unlock pair.
+        self.assertEqual(events,
+                         ["lock", "write:subuid", "write:subgid", "unlock"])
 
 
 def _ns(**kw):
@@ -828,18 +869,20 @@ def _cfg(toml, name, **fmt):
     return _CfgDir(toml.format(name=name, **fmt), name)
 
 
+@contextlib.contextmanager
 def _no_subid_files():
-    """Patch Path.exists so /etc/subuid and /etc/subgid report absent (real
-    Path.exists is used for everything else) — lets cmd_disable's purge path
-    skip the subuid/subgid rewrite without touching the real /etc files."""
-    _orig_exists = Path.exists
+    """Point the subid constants at absent paths so the purge/cleanup rewrite is
+    a no-op.
 
-    def fake_exists(self, *a, **kw):
-        if str(self) in ("/etc/subuid", "/etc/subgid"):
-            return False
-        return _orig_exists(self, *a, **kw)
-
-    return patch.object(Path, 'exists', fake_exists)
+    Redirects the constants rather than faking Path.exists: remove_subid_entries
+    reads and rewrites through workload_lib.SUBUID_FILE, so an exists() fake
+    leaves it operating on the host's real /etc/subuid — which a root test runner
+    would actually rewrite.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        with patch.object(workload_lib, 'SUBUID_FILE', Path(td) / "absent-subuid"), \
+             patch.object(workload_lib, 'SUBGID_FILE', Path(td) / "absent-subgid"):
+            yield
 
 
 # ── _effective_state ────────────────────────────────────────────────────────
@@ -1651,9 +1694,7 @@ class TestCmdDisableAdditional(unittest.TestCase):
                     with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             with patch.object(cmd_disable, 'workload_root_dir', return_value=Path(d) / "nope"):
-                                with patch.object(cmd_disable, 'subid_lock', contextlib.nullcontext):
-                                    with patch.object(cmd_disable, 'open', unittest.mock.mock_open(), create=True):
-                                        with _no_subid_files():
+                                with _no_subid_files():
                                             buf = io.StringIO()
                                             with redirect_stdout(buf):
                                                 cmd_disable.cmd_disable(_ns(workload="test-wl", purge=True), manager)
@@ -1698,9 +1739,7 @@ class TestCmdDisableAdditional(unittest.TestCase):
                     with patch.object(cmd_disable.subprocess, 'run', return_value=MagicMock(returncode=0)):
                         with patch('pwd.getpwnam', side_effect=KeyError):
                             with patch.object(cmd_disable, 'workload_root_dir', return_value=wl_dir):
-                                with patch.object(cmd_disable, 'subid_lock', contextlib.nullcontext):
-                                    with patch.object(cmd_disable, 'open', unittest.mock.mock_open(), create=True):
-                                        with _no_subid_files():
+                                with _no_subid_files():
                                             cmd_disable.cmd_disable(_ns(workload="test-wl", purge=True), manager)
             self.assertFalse(wl_dir.exists())
 
@@ -2083,44 +2122,40 @@ class TestCmdCleanup(unittest.TestCase):
         that user's line — a prefix-matching bug here would corrupt the UID
         mapping of a different, still-active workload sharing the file."""
         orphan = self._fake_pwent("_wl-orphan", 15001)
-        subuid_content = "_wl-orphan:600100000:65536\n_wl-keep:600200000:65536\n"
-        subgid_content = "_wl-orphan:600100000:65536\n_wl-keep:600200000:65536\n"
+        content = "_wl-orphan:600100000:65536\n_wl-keep:600200000:65536\n"
 
-        def fake_exists(self):
-            return str(self) in ("/etc/subuid", "/etc/subgid")
+        # Real files in a tmpdir rather than a patched Path.write_text: the
+        # rewrite is a temp-file + os.replace (readers of /etc/subuid never take
+        # SUBID_LOCK, so it cannot truncate in place), which no write_text patch
+        # would intercept. Asserting on the resulting bytes also checks the
+        # replace actually landed, which mocking the writer cannot.
+        with tempfile.TemporaryDirectory() as td:
+            subuid = Path(td) / "subuid"
+            subgid = Path(td) / "subgid"
+            subuid.write_text(content)
+            subgid.write_text(content)
 
-        def fake_read_text(self):
-            if str(self) == "/etc/subuid":
-                return subuid_content
-            if str(self) == "/etc/subgid":
-                return subgid_content
-            return ""
+            with _RootBypass(), \
+                 patch.object(workload_lib, 'SUBUID_FILE', subuid), \
+                 patch.object(workload_lib, 'SUBGID_FILE', subgid), \
+                 patch.object(cmd_cleanup, 'iter_workloads', return_value=[]), \
+                 patch('pwd.getpwall', return_value=[orphan]), \
+                 patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")), \
+                 patch.object(cmd_cleanup.shutil, 'which', return_value=None), \
+                 patch.object(cmd_cleanup.subprocess, 'run',
+                              return_value=MagicMock(returncode=0)):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    cmd_cleanup.cmd_cleanup(_ns(apply=True, json=True), MagicMock())
 
-        written = {}
-
-        def fake_write_text(self, content):
-            written[str(self)] = content
-
-        with _RootBypass():
-            with patch.object(cmd_cleanup, 'iter_workloads', return_value=[]):
-                with patch('pwd.getpwall', return_value=[orphan]):
-                    with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path("/nonexistent-dir-xyz")):
-                        with patch.object(cmd_cleanup.shutil, 'which', return_value=None):
-                            with patch.object(cmd_cleanup.subprocess, 'run',
-                                               return_value=MagicMock(returncode=0)):
-                                with patch.object(Path, 'exists', new=fake_exists), \
-                                     patch.object(Path, 'read_text', new=fake_read_text), \
-                                     patch.object(Path, 'write_text', new=fake_write_text):
-                                    buf = io.StringIO()
-                                    with redirect_stdout(buf):
-                                        cmd_cleanup.cmd_cleanup(_ns(apply=True, json=True), MagicMock())
-
-        self.assertIn("/etc/subuid", written)
-        self.assertIn("/etc/subgid", written)
-        self.assertNotIn("_wl-orphan", written["/etc/subuid"])
-        self.assertIn("_wl-keep:600200000:65536", written["/etc/subuid"])
-        self.assertNotIn("_wl-orphan", written["/etc/subgid"])
-        self.assertIn("_wl-keep:600200000:65536", written["/etc/subgid"])
+            for path in (subuid, subgid):
+                text = path.read_text()
+                self.assertNotIn("_wl-orphan", text)
+                self.assertIn("_wl-keep:600200000:65536", text)
+                # No temp file left behind next to the real one.
+                self.assertEqual(
+                    list(Path(td).glob(".*.tmp")), [],
+                    "atomic rewrite left a temp file behind")
 
     def test_orphaned_dir_detected_and_removed_on_apply(self):
         with tempfile.TemporaryDirectory() as base_dir:

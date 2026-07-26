@@ -4,6 +4,7 @@
 import contextlib
 import os
 import socket
+import stat
 import tempfile
 import threading
 import unittest
@@ -1684,6 +1685,141 @@ class TestCollectConfigWarnings(unittest.TestCase):
                "security": {"userns": "private"}}
         # VMs don't use userns/lifecycle-in-mode; those must not fire.
         self.assertEqual(collect_config_warnings(cfg), [])
+
+
+class TestSubidFileHelpers(unittest.TestCase):
+    """R6: one parser and one mutator for /etc/subuid + /etc/subgid.
+
+    These are the most security-relevant files the tool writes — a lost or
+    mangled range silently removes a workload's isolation — so the format
+    parsing and the rewrite mechanics are pinned here rather than left to the
+    command modules that used to each carry a copy.
+    """
+
+    def setUp(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.dir = tmp
+        self.subuid = tmp / "subuid"
+        self.subgid = tmp / "subgid"
+        self.enterContext(patch.object(workload_lib, "SUBUID_FILE", self.subuid))
+        self.enterContext(patch.object(workload_lib, "SUBGID_FILE", self.subgid))
+        self.enterContext(patch.object(workload_lib, "SUBID_LOCK", tmp / "subid.lock"))
+
+    def test_accessors_follow_a_redirected_constant(self):
+        # The whole reason these are functions: an importing module must not
+        # capture a stale copy (same contract as workload_config_dir()).
+        self.assertEqual(workload_lib.subuid_file(), self.subuid)
+        self.assertEqual(workload_lib.subgid_file(), self.subgid)
+        self.assertEqual(workload_lib.subid_files(), (self.subuid, self.subgid))
+
+    def test_read_entry_parses_start_and_count(self):
+        self.subuid.write_text("_wl-a:600100000:65536\n")
+        self.assertEqual(
+            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+        )
+
+    def test_read_entry_returns_none_when_absent_or_missing_file(self):
+        self.subuid.write_text("_wl-other:600100000:65536\n")
+        self.assertIsNone(workload_lib.read_subid_entry("_wl-a", self.subuid))
+        self.assertIsNone(
+            workload_lib.read_subid_entry("_wl-a", self.dir / "nope")
+        )
+
+    def test_read_entry_returns_none_on_malformed_line(self):
+        # Callers (info, diagnose) are read-only reporters; a corrupt file must
+        # not raise out of them.
+        self.subuid.write_text("_wl-a:notanumber:alsobad\n")
+        self.assertIsNone(workload_lib.read_subid_entry("_wl-a", self.subuid))
+
+    def test_read_entry_takes_only_the_main_range(self):
+        # extra_groups append supplementary `user:GID:1` lines after the main
+        # range; the first match is the mapping that matters.
+        self.subuid.write_text("_wl-a:600100000:65536\n_wl-a:989:1\n")
+        self.assertEqual(
+            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+        )
+
+    def test_prefix_match_does_not_catch_a_longer_username(self):
+        """`_wl-app` must not match `_wl-app2` — the bug class that would strip
+        a different, still-running workload's mapping."""
+        self.subuid.write_text("_wl-app2:600200000:65536\n")
+        self.subgid.write_text("_wl-app2:600200000:65536\n")
+        self.assertIsNone(workload_lib.read_subid_entry("_wl-app", self.subuid))
+        self.assertEqual(workload_lib.subid_files_with_entries("_wl-app"), [])
+        self.assertEqual(workload_lib.remove_subid_entries("_wl-app"), [])
+        self.assertIn("_wl-app2", self.subuid.read_text())
+
+    def test_remove_strips_only_the_named_user(self):
+        self.subuid.write_text("_wl-a:1:2\n_wl-b:3:4\n")
+        self.subgid.write_text("_wl-a:1:2\n_wl-b:3:4\n_wl-a:989:1\n")
+        changed = workload_lib.remove_subid_entries("_wl-a")
+        self.assertEqual(changed, [self.subuid, self.subgid])
+        self.assertEqual(self.subuid.read_text(), "_wl-b:3:4\n")
+        self.assertEqual(self.subgid.read_text(), "_wl-b:3:4\n")
+
+    def test_remove_reports_only_files_it_changed(self):
+        self.subuid.write_text("_wl-a:1:2\n")
+        self.subgid.write_text("_wl-b:3:4\n")
+        self.assertEqual(
+            workload_lib.remove_subid_entries("_wl-a"), [self.subuid]
+        )
+
+    def test_remove_of_last_entry_leaves_an_empty_file_not_a_stray_newline(self):
+        self.subuid.write_text("_wl-a:1:2\n")
+        workload_lib.remove_subid_entries("_wl-a")
+        self.assertEqual(self.subuid.read_text(), "")
+
+    def test_remove_is_atomic_and_preserves_mode(self):
+        """The rewrite must land via rename, not truncate-in-place: podman and
+        newuidmap read these files without taking SUBID_LOCK, so a partial
+        write is observable by a reader that cannot detect it."""
+        self.subuid.write_text("_wl-a:1:2\n_wl-b:3:4\n")
+        os.chmod(self.subuid, 0o640)
+        self.subgid.write_text("_wl-b:3:4\n")
+
+        seen = []
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            # At the moment of the rename the destination still holds the OLD
+            # content — never a truncated or partial version.
+            seen.append(Path(dst).read_text())
+            return real_replace(src, dst)
+
+        with patch.object(workload_lib.os, "replace", spy_replace):
+            workload_lib.remove_subid_entries("_wl-a")
+
+        self.assertEqual(seen, ["_wl-a:1:2\n_wl-b:3:4\n"])
+        self.assertEqual(self.subuid.read_text(), "_wl-b:3:4\n")
+        self.assertEqual(stat.S_IMODE(self.subuid.stat().st_mode), 0o640)
+        self.assertEqual(list(self.dir.glob(".*.tmp")), [])
+
+    def test_remove_leaves_no_temp_file_when_nothing_matches(self):
+        self.subuid.write_text("_wl-b:3:4\n")
+        workload_lib.remove_subid_entries("_wl-a")
+        self.assertEqual(list(self.dir.glob(".*.tmp")), [])
+
+    def test_append_adds_lines_and_creates_nothing_for_empty(self):
+        self.subuid.write_text("_wl-a:1:2\n")
+        workload_lib.append_subid_entries(self.subuid, ["_wl-b:3:4"])
+        self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n_wl-b:3:4\n")
+        workload_lib.append_subid_entries(self.subuid, [])
+        self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n_wl-b:3:4\n")
+
+    def test_append_is_reentrant_under_an_outer_lock(self):
+        """workload-ensure-user appends while already holding subid_lock(); the
+        inner acquire must be a no-op, not a same-process deadlock."""
+        self.subuid.write_text("")
+        with workload_lib.subid_lock():
+            workload_lib.append_subid_entries(self.subuid, ["_wl-a:1:2"])
+        self.assertEqual(self.subuid.read_text(), "_wl-a:1:2\n")
+
+    def test_files_with_entries_skips_absent_files(self):
+        self.subuid.write_text("_wl-a:1:2\n")
+        # subgid intentionally not created
+        self.assertEqual(
+            workload_lib.subid_files_with_entries("_wl-a"), [self.subuid]
+        )
 
 
 if __name__ == "__main__":

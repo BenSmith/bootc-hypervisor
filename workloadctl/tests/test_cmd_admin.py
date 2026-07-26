@@ -610,7 +610,31 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             return True
         return _exists
 
+    def _stage_subid_files(self):
+        """Point workload_lib's subid constants at real files under self.tmp.
+
+        The subid readers go through Path.read_text as well as open(), so an
+        open() router alone leaves some of them reading the host's real
+        /etc/subuid. Redirecting the constants covers both, and keeps `None`
+        meaning "file absent".
+        """
+        paths = {}
+        for attr, name, content in (
+            ("SUBUID_FILE", "subuid", self._subuid),
+            ("SUBGID_FILE", "subgid", self._subgid),
+        ):
+            path = self.tmp / name
+            if content is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_text(content)
+            paths[attr] = path
+            self.enterContext(mock.patch.object(workload_lib, attr, path))
+        return paths
+
     def _run(self, json_mode=True, false_substrings=()):
+        self._stage_subid_files()
         opener = _open_router({
             "/etc/subuid": self._subuid,
             "/etc/subgid": self._subgid,

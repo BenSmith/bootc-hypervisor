@@ -11,6 +11,7 @@ import fcntl
 import os
 import pwd
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -202,8 +203,10 @@ def workload_username(name: str) -> str:
 
 
 # Flock guarding the subuid/subgid UID-allocation critical section (#4). Must be
-# the identical path across every participant (workload-ensure-user, cmd_lifecycle
-# enable + disable/purge) or the flock stops mutexing.
+# the identical path across every participant (workload-ensure-user,
+# workload-generate, cmd_enable, cmd_disable/purge, cmd_cleanup) or the flock
+# stops mutexing. Prefer the remove_/append_subid_entries() helpers below, which
+# take the lock themselves, over hand-rolling a read-modify-write here.
 SUBID_LOCK = Path("/run/lock/workload-subid.lock")
 
 # Reentrancy state for subid_lock(): the enable path holds the lock across
@@ -260,6 +263,147 @@ def subid_lock():
             fcntl.flock(_subid_lock_fd.fileno(), fcntl.LOCK_UN)
             _subid_lock_fd.close()
             _subid_lock_fd = None
+
+
+# The two files the subid lock exists to protect. Named here for the same reason
+# every other path this module owns is: so no caller has to spell them, and so
+# the read/parse/mutate helpers below are the only implementations of the
+# `username:start:count` format.
+SUBUID_FILE = Path("/etc/subuid")
+SUBGID_FILE = Path("/etc/subgid")
+
+
+def subuid_file() -> Path:
+    """Call-time reader for SUBUID_FILE. Same rationale as
+    workload_config_dir(): `from workload_lib import SUBUID_FILE` binds a copy,
+    so a single patch.object(workload_lib, "SUBUID_FILE", tmp) would not reach
+    it. Callers go through this and are redirected together."""
+    return SUBUID_FILE
+
+
+def subgid_file() -> Path:
+    """Call-time reader for SUBGID_FILE. See subuid_file()."""
+    return SUBGID_FILE
+
+
+def subid_files() -> tuple[Path, Path]:
+    """Both subid files, resolved at call time."""
+    return (subuid_file(), subgid_file())
+
+
+def read_subid_entry(username: str, path: Path | str) -> tuple[int, int] | None:
+    """Return (start, count) for username's main range in path, else None.
+
+    Only the first matching line is considered: the main range is the one
+    `username:<start>:<count>` entry: supplementary group entries added by
+    extra_groups share the username prefix but are appended after it.
+    """
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith(f"{username}:"):
+                    parts = line.strip().split(":")
+                    if len(parts) == 3:
+                        try:
+                            return int(parts[1]), int(parts[2])
+                        except ValueError:
+                            return None
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return None
+
+
+def subid_files_with_entries(username: str) -> list[Path]:
+    """Which of the subid files currently carry any entry for username.
+
+    Used by the disable/cleanup dry-run reporting, so it answers "is there
+    something to remove" without taking the lock — a stale answer only affects
+    a preview line, and remove_subid_entries() re-reads under the lock anyway.
+    """
+    found = []
+    for path in subid_files():
+        try:
+            text = path.read_text()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        if any(line.startswith(f"{username}:") for line in text.splitlines()):
+            found.append(path)
+    return found
+
+
+def _rewrite_subid_file(path: Path, lines: list[str]) -> None:
+    """Replace path's contents with lines, atomically, preserving mode+owner.
+
+    A whole-file rewrite of /etc/subuid cannot be done in place. podman and
+    newuidmap read these files WITHOUT taking SUBID_LOCK, so a truncate-then-
+    write would expose a partial file to a reader that has no way to detect it,
+    and a crash mid-write would leave it truncated permanently — losing every
+    workload's mapping, not just the one being removed. Write a sibling temp
+    file and rename it on: readers then see either the old file or the new one.
+    """
+    tmp = path.with_name("." + path.name + ".tmp")
+    try:
+        st = path.stat()
+        mode, uid, gid = stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid
+    except FileNotFoundError:
+        mode, uid, gid = 0o644, 0, 0
+    body = "\n".join(lines) + ("\n" if lines else "")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, body.encode())
+        # Durability before the rename: the rename is atomic w.r.t. readers, but
+        # without the fsync a crash can land the rename while the data blocks
+        # are still unwritten, leaving a zero-length /etc/subuid.
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, mode)
+    try:
+        os.chown(tmp, uid, gid)
+    except (PermissionError, OSError):
+        # Non-root can't chown; the rewrite paths all require root anyway, so
+        # losing ownership here would be a bug elsewhere, not a reason to fail.
+        pass
+    os.replace(tmp, path)
+
+
+def remove_subid_entries(username: str) -> list[Path]:
+    """Drop every subuid/subgid entry for username. Returns the files changed.
+
+    Takes SUBID_LOCK itself and holds it across the whole read-filter-write of
+    both files, which is what makes this safe to call concurrently with an
+    enable that is appending under the same lock. Callers must NOT hand-roll
+    this: a read and a write that each take the lock separately is not an
+    atomic read-modify-write, and drops a range appended in between.
+    """
+    changed = []
+    with subid_lock():
+        for path in subid_files():
+            try:
+                text = path.read_text()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            kept = [line for line in text.splitlines()
+                    if not line.startswith(f"{username}:")]
+            if len(kept) != len(text.splitlines()):
+                _rewrite_subid_file(path, kept)
+                changed.append(path)
+    return changed
+
+
+def append_subid_entries(path: Path | str, entries: list[str]) -> None:
+    """Append entries (`username:start:count` strings) to path under the lock.
+
+    Append rather than rewrite on purpose: O_APPEND adds only this workload's
+    lines and can never drop another's, so it stays correct even against a
+    writer that skipped the lock.
+    """
+    if not entries:
+        return
+    with subid_lock():
+        with open(path, "a") as f:
+            for entry in entries:
+                f.write(entry + "\n")
 
 
 # Per-run tracking set: `get_next_uid` records UIDs allocated during this

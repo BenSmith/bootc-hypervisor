@@ -16,6 +16,7 @@ from vm import VM_SOCKET_DIR
 from qmp import QMPClient
 from service_runtime import parse_active_since, systemctl_show
 from substrate import get_substrate
+from workload_lib import read_subid_entry, subgid_file, subuid_file
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -44,18 +45,13 @@ def _vm_qmp_status(name: str) -> str | None:
     finally:
         qmp.close()
 
-def _read_subid(username: str, path: str) -> tuple:
-    """Return (start, count) from /etc/subuid or /etc/subgid, or (None, None)."""
-    try:
-        with open(path) as f:
-            for line in f:
-                if line.startswith(f"{username}:"):
-                    parts = line.strip().split(":")
-                    if len(parts) == 3:
-                        return int(parts[1]), int(parts[2])
-    except (FileNotFoundError, ValueError):
-        pass
-    return None, None
+def _read_subid(username: str, path: Path | str) -> tuple:
+    """(start, count) for username in path, or (None, None).
+
+    Thin shape adapter over read_subid_entry(): the info payload carries the
+    pair as two separate keys, so absence has to spread into both.
+    """
+    return read_subid_entry(username, path) or (None, None)
 
 def _collect_control_files(config) -> list[dict]:
     """Merged view of a workload's bundle control files (build.sh, Containerfile,
@@ -188,8 +184,8 @@ def cmd_info(args, manager: WorkloadManager):
                 vm_uid = config.uid
             except Exception:
                 pass
-        vm_subuid_start, vm_subuid_count = _read_subid(config.username, "/etc/subuid") if user_exists else (None, None)
-        vm_subgid_start, vm_subgid_count = _read_subid(config.username, "/etc/subgid") if user_exists else (None, None)
+        vm_subuid_start, vm_subuid_count = _read_subid(config.username, subuid_file()) if user_exists else (None, None)
+        vm_subgid_start, vm_subgid_count = _read_subid(config.username, subgid_file()) if user_exists else (None, None)
 
         # Service state
         svc_props = systemctl_show(
@@ -312,8 +308,8 @@ def cmd_info(args, manager: WorkloadManager):
             groups = [_grp.getgrgid(gid).gr_name for gid in os.getgrouplist(config.username, pw.pw_gid)]
         except (KeyError, OSError):
             pass
-    subuid_start, subuid_count = _read_subid(config.username, "/etc/subuid") if user_exists else (None, None)
-    subgid_start, subgid_count = _read_subid(config.username, "/etc/subgid") if user_exists else (None, None)
+    subuid_start, subuid_count = _read_subid(config.username, subuid_file()) if user_exists else (None, None)
+    subgid_start, subgid_count = _read_subid(config.username, subgid_file()) if user_exists else (None, None)
 
     # Storage
     storage_home = None

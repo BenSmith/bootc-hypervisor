@@ -17,7 +17,9 @@ import tomllib
 
 from workload_lib import (
     iter_workloads,
+    remove_subid_entries,
     selinux_module_name,
+    subid_files_with_entries,
     USERNAME_PREFIX,
     WORKLOADS_BASE,
     workload_username,
@@ -126,14 +128,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
         if orphaned_users:
             print(f"Orphaned users ({len(orphaned_users)}):")
             for entry in orphaned_users:
-                has_subid_entries = False
-                for subid_file in ["/etc/subuid", "/etc/subgid"]:
-                    if Path(subid_file).exists() and any(
-                        line.startswith(f"{entry.pw_name}:")
-                        for line in Path(subid_file).read_text().splitlines()
-                    ):
-                        has_subid_entries = True
-                        break
+                has_subid_entries = bool(subid_files_with_entries(entry.pw_name))
                 extras = []
                 if Path(entry.pw_dir).exists():
                     extras.append("has home dir")
@@ -173,12 +168,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
         subprocess.run(["loginctl", "disable-linger", str(uid)], check=False,
                        capture_output=True)
 
-        for subid_file in ["/etc/subuid", "/etc/subgid"]:
-            p = Path(subid_file)
-            if p.exists():
-                lines = [line for line in p.read_text().splitlines()
-                         if not line.startswith(f"{username}:")]
-                p.write_text("\n".join(lines) + ("\n" if lines else ""))
+        remove_subid_entries(username)
 
         subprocess.run(["userdel", "-r", username], check=False, capture_output=True)
         removed_users.append(username)

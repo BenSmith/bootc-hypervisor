@@ -18,7 +18,8 @@ import time
 from cli_log import emit_result, error, info, json_enabled
 from workload_lib import (
     RUN_SYSTEMD_SYSTEM,
-    subid_lock,
+    remove_subid_entries,
+    subid_files_with_entries,
     workload_enabled_marker,
     workload_root_dir,
     workload_run_files,
@@ -163,12 +164,10 @@ def _disable_plan(config: WorkloadConfig, manager: WorkloadManager, purge: bool)
             if sock_dir.exists():
                 lines.append(f"remove VM socket dir: {sock_dir}")
         else:
-            subid = [f for f in ("/etc/subuid", "/etc/subgid")
-                     if Path(f).exists()
-                     and any(line.startswith(f"{config.username}:")
-                             for line in Path(f).read_text().splitlines())]
+            subid = subid_files_with_entries(config.username)
             if subid:
-                lines.append(f"remove subuid/subgid entries from: {', '.join(subid)}")
+                lines.append("remove subuid/subgid entries from: "
+                             + ", ".join(str(p) for p in subid))
 
         if user_present:
             lines.append(f"kill user sessions and delete user: {config.username}")
@@ -352,13 +351,7 @@ def cmd_disable(args, manager: WorkloadManager):
         else:
             try:
                 info("  Removing subuid/subgid entries...")
-                with subid_lock():
-                    for file in ["/etc/subuid", "/etc/subgid"]:
-                        p = Path(file)
-                        if p.exists():
-                            lines = [line for line in p.read_text().splitlines()
-                                     if not line.startswith(f"{config.username}:")]
-                            p.write_text("\n".join(lines) + ("\n" if lines else ""))
+                remove_subid_entries(config.username)
             except Exception as e:
                 failures.append(f"remove subuid/subgid entries: {e}")
 

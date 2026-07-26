@@ -31,6 +31,7 @@ from workload_lib import (
     virtiofs_tags, parse_volume_spec, normalize_containers,
     workload_state_dir, workload_data_dir, workload_root_dir, subid_lock,
     workload_env_dir,
+    append_subid_entries, subgid_file, subuid_file,
 )
 from vm import VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars
 from secrets_template import substitute_template
@@ -138,8 +139,8 @@ def configure_subuid_subgid(pw, config):
     # calls get_next_uid), so there's no nested re-acquire.
     with subid_lock():
         changed = False
-        for path, required_entries in [("/etc/subuid", required_uid_entries),
-                                        ("/etc/subgid", required_gid_entries)]:
+        for path, required_entries in [(subuid_file(), required_uid_entries),
+                                       (subgid_file(), required_gid_entries)]:
             try:
                 with open(path, "r") as f:
                     existing = f.read()
@@ -161,10 +162,11 @@ def configure_subuid_subgid(pw, config):
                     missing.append(entry)
 
             if missing:
-                with open(path, "a") as f:
-                    for entry in missing:
-                        f.write(entry + "\n")
-                        log(f"  Configured {Path(path).name} entry: {entry}")
+                # Already inside subid_lock(); the re-acquire is a reentrant
+                # no-op (see workload_lib._subid_lock_depth).
+                append_subid_entries(path, missing)
+                for entry in missing:
+                    log(f"  Configured {path.name} entry: {entry}")
                 changed = True
 
     # Migrate podman storage to use new subuid/subgid mappings
