@@ -143,9 +143,10 @@ jobs:
           # the runner service's tmpfs (sealed once by the seal-signing-key
           # workflow — docs/ci-image-signing.md); no Forgejo secrets involved.
           # Missing credentials → the job fails; nothing unsigned reaches
-          # the registry. Only the first push signs: the signature is
-          # digest-addressed (sha256-<digest>.sig in the same repo), so
-          # further tags of the same image are already covered.
+          # the registry. Only the dated tag is pushed: a second `podman push`
+          # of the same local image yields a different manifest digest, which
+          # the first push's digest-addressed signature would not cover, so the
+          # floating tags are skopeo-copied from the signed digest instead.
           CREDS=/run/credentials/forgejo-runner.service
           if ! sudo test -s "${CREDS}/cosign-key"; then
             echo "::error::no signing credential at ${CREDS}/cosign-key — refusing to push unsigned. Run the seal-signing-key workflow, then re-run this build."
@@ -154,28 +155,26 @@ jobs:
           SIGN_ARGS=(--sign-by-sigstore-private-key "${CREDS}/cosign-key"
                      --sign-passphrase-file "${CREDS}/cosign-pass")
 
-          FIRST=true
-          for t in "${TAGS[@]}"; do
-            sudo podman tag "localhost/${IMAGE_NAME}:rechunked-${VERSION}" "${IMAGE_BASE}:${t}"
-            if [ "${FIRST}" = "true" ]; then
-              sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${t}"
-              FIRST=false
-            else
-              sudo podman push "${IMAGE_BASE}:${t}"
-            fi
-          done
-
+          DATED="${TAGS[0]}"
+          sudo podman tag "localhost/${IMAGE_NAME}:rechunked-${VERSION}" "${IMAGE_BASE}:${DATED}"
+          sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${DATED}"
           DIGEST=$(cat /tmp/digest.txt)
+
+          for t in "${TAGS[@]:1}"; do
+            sudo skopeo copy "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${t}"
+          done
           # A push can succeed without attaching a signature; the shipped policy.json
           # then refuses the image, so verify the attachment resolves and validates
           # before anything downstream consumes this digest.
           printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
             "${IMAGE_BASE}" "$(pwd)/cosign.pub" > /tmp/verify-policy.json
-          if ! sudo podman pull -q --signature-policy=/tmp/verify-policy.json "${IMAGE_BASE}@${DIGEST}" >/dev/null; then
-            echo "::error::signature verification failed for ${IMAGE_BASE}@${DIGEST} — the push did not produce a valid signature"
-            exit 1
-          fi
-          echo "signature verified: ${IMAGE_BASE}@${DIGEST}"
+          for ref in "${IMAGE_BASE}@${DIGEST}" "${TAGS[@]/#/${IMAGE_BASE}:}"; do
+            if ! sudo podman pull -q --signature-policy=/tmp/verify-policy.json "${ref}" >/dev/null; then
+              echo "::error::signature verification failed for ${ref} — it does not resolve to a signed manifest"
+              exit 1
+            fi
+            echo "signature verified: ${ref}"
+          done
           {
             printf 'tags<<EOF\n%s\nEOF\n' "${TAGS[*]}"
             echo "versioned_tag=${VERSION}-${TAG}"
