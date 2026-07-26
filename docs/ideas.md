@@ -153,7 +153,7 @@ real "online backup."
 1. **Host:** add an `org.qemu.guest_agent.0` virtio-serial channel to the QEMU
    argv in the VM launch helper (`libexec/workload-vm-*`).
 2. **Guest:** `qemu-guest-agent` installed + enabled in the VM image — trivial
-   once the guest is a bootc image we control (`docs/wip/vm-workloads-direction.md`),
+   once the guest is a bootc image we control,
    another bootstrap step on the current Fedora-Cloud+cloud-init guest.
 
 **When picked up:** add `app` as a third level to the existing

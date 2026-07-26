@@ -20,7 +20,7 @@
 > unnoticed until B3 read `/proc/<pid>/cgroup` directly.
 
 **Date:** 2026-06-10 (capturing a decision originally made on branch
-`resource-caps-split`; see `docs/resource-caps-and-split-review.md`).
+`resource-caps-split`).
 Updated 2026-06-11 with option 1b spike results.
 
 ## Context
@@ -70,8 +70,7 @@ bind it directly.
   See spike item 8 + the 2026-07-12 addendum. Since 1b is shipped, notify is
   unavailable in practice.)
 - ❌ Pod mode can't use split, so pods get **no** per-unit enforcement —
-  mitigated by `user-<uid>.slice` drop-ins (C11 in
-  `docs/architecture-and-followup-review-2026-06-10.md`). The rejection is
+  mitigated by `user-<uid>.slice` drop-ins. The rejection is
   structural (verified in the podman source, `.reference/podman`): pod members
   inherit `CgroupParent = <pod cgroup>` (`libpod/runtime_ctr.go:421-433`) and
   split+cgroup-parent is rejected outright
@@ -432,7 +431,8 @@ unit that owns the sender's cgroup **or** watches the sender's PID, and
 `NotifyAccess` gates *authorization*, never *candidacy* — so 1b's out-of-cgroup
 sender is unreachable regardless of `NotifyAccess=all`, while split's in-cgroup
 conmon is delivered. This is the same reason Quadlet's notify path works: Quadlet
-defaults to `--cgroups=split` (`.reference/podman` `options/cgroups.md`).
+defaults to `--cgroups=split` (upstream podman docs, `options/cgroups.md`;
+local clone under the gitignored `.reference/podman`).
 
 **Decision unchanged.** Adopting split to gain notify would reintroduce exactly
 the tax 1b was chosen to shed — `cgroup_exec.py`, the healthcheck-timer shim

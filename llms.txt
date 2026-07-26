@@ -97,7 +97,6 @@ systemd/
 docs/
   emergency-recovery.md                   Boot recovery procedures
   TROUBLESHOOTING.md                      Common issues and fixes
-  vm-tests.md                             VM integration test documentation
 
 .github/workflows/
   build-minimal-bootc.yml                 Weekly build: fedora-bootc-minimal (Sat 2am UTC)

@@ -84,6 +84,10 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
 
+## Docs policy: tracked files may not cite untracked docs
+
+A citation has to be followable from a clean checkout. `workloadctl/docs/wip/` is gitignored, so nothing tracked may point into it — and don't cite a doc you intend to write later; write it, or state the fact inline instead. `workloadctl/tests/test_doc_citations.py` enforces this repo-wide (every `*.md` reference in every tracked file must resolve to a tracked file) and runs in the normal `just test`.
+
 ## Secrets
 
 systemd credentials (`systemd-creds`), AES256-GCM with TPM2 (or host key fallback), decrypted into tmpfs at runtime. Encrypted blobs are safe to commit into images. Reference in env with `${SECRET:name}`. Managed via `workloadctl secret`.

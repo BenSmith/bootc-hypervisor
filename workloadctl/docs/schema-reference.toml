@@ -869,7 +869,7 @@ virtualization = true
 #         (blockinherit net_container)    ; if the workload needs the network
 #         (allow process <target_type> (<class> (<perms>))))
 # Author new policy with `udica` against a running container. See
-# docs/workload-bundles.md and llms.txt "SELinux confinement" for the rationale.
+# llms.txt "SELinux confinement" for the rationale.
 # selinux_policy = false
 
 # Optional: Additional system groups for the workload user

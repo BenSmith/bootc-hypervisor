@@ -137,7 +137,7 @@ CONF
 # --- Polkit stub ---
 # Required for Steam's logind D-Bus PowerOff call (Power menu → Turn Off).
 # polkitd cannot start in a rootless container (requires CAP_SYS_ADMIN for PID
-# namespace introspection). See gamescope-baremetal/NOTES.md for full details.
+# namespace introspection). See NOTES.md in this bundle for full details.
 
 RUN cat > /usr/local/bin/polkit-stub <<'SCRIPT'
 #!/usr/bin/python3

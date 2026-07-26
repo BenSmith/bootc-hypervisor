@@ -20,7 +20,8 @@
 #      GitHub-hosted ubuntu-24.04 runners expose /dev/kvm; if a future runner
 #      does not, the job records that and exits green rather than failing.
 #
-# No secrets are used. See docs/wip/test-suite-improvement-plan.md task D1.
+# No secrets are used. See workloadctl/tests/runtime/vmlaunch.py for what the
+# harness boots and why.
 #
 # HUMAN REVIEW: runner choice and the runtime dependency set below are a
 # best-effort starting point. The dev-mode harness builds the RPM and boots a

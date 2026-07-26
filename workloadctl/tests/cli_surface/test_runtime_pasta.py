@@ -2,8 +2,7 @@
 test_runtime_pasta.py — B4 runtime check: pasta restart resilience, proven on a
 real kernel.
 
-Guards the "pasta stale-pause" failure (see llms.txt and
-.reference/notes/custom-workload-runtime-gotchas-2026-06-28.md §1): a libpod
+Guards the "pasta stale-pause" failure (see llms.txt): a libpod
 pause process left over from a previous invocation, whose PrivateTmp `/tmp` has
 been destroyed, gets joined by the next `podman run` via the rootless join
 shortcut, and pasta then fails its sandbox mount with

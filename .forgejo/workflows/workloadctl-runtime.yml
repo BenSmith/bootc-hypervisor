@@ -38,8 +38,8 @@
 # exercises the current artifact; a manual dispatch tests whatever is on the
 # registry now.
 #
-# No secrets are used. See workloadctl/docs/wip/test-suite-remaining.md (D1)
-# and the project review's B1b notes for the design.
+# No secrets are used. The dev/gate split and the swtpm requirement are
+# documented in workloadctl/tests/runtime/ (vmlaunch.py, vmtarget.py).
 name: workloadctl runtime
 
 on:

@@ -3,8 +3,7 @@ test_runtime_linger_runtime_dir.py — C1 GAP #6: linger is effective (the user
 *manager* is running), not merely "the runtime dir happens to exist", and it
 stays that way across CLI polls and a same-name/same-UID recycle.
 
-The hard-won invariant (see .reference/notes/linger-and-runtime-dir.md, Layer 4):
-effective linger == `systemctl is-active user@<uid>.service` == active. The mere
+The hard-won invariant: effective linger == `systemctl is-active user@<uid>.service` == active. The mere
 existence of `/run/user/<uid>` is NOT proof — every `sudo -u _wl-… podman` opens
 a `pam_systemd` login session that creates the dir for ~50ms and tears it down on
 close, which looks identical to effective linger. workloadctl's fix gates every

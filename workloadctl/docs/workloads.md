@@ -2287,7 +2287,7 @@ All workloads run with a hardened seccomp profile that restricts which kernel sy
 | `process_vm_readv/writev` | Read/write another process's memory directly |
 | `keyctl` | Kernel keyring manipulation |
 
-Most service containers (web servers, databases, media servers) never call these syscalls. If your workload does, you'll see `Operation not permitted` errors at startup — see the [troubleshooting guide](TROUBLESHOOTING.md) for diagnosis steps.
+Most service containers (web servers, databases, media servers) never call these syscalls. If your workload does, you'll see `Operation not permitted` errors at startup — see the [troubleshooting guide](../../docs/TROUBLESHOOTING.md) for diagnosis steps.
 
 **Override for workloads that need a blocked syscall:**
 ```toml

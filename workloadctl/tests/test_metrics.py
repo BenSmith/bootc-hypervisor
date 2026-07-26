@@ -446,7 +446,7 @@ class TestMetricsRobustness(unittest.TestCase):
 
     def test_non_toml_files_ignored(self):
         """Files that aren't .toml are not read."""
-        (Path(self.config_dir) / "readme.md").write_text("# not a config")
+        (Path(self.config_dir) / "readme.txt").write_text("not a config")
         (Path(self.config_dir) / "backup.toml.bak").write_text("junk")
 
         write_config(self.config_dir, "real", """\
