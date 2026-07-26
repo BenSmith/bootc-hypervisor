@@ -123,6 +123,9 @@ jobs:
           mkdir -p bin man
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+          # cosy is fetched from a mutable branch and COPYed into /usr/bin of a
+          # signed image, so the checksum is the pin. Re-pin with `just update-cosy`.
+          sha256sum -c cosy.sha256
 
       - name: Login to GHCR
         env:
@@ -320,6 +323,9 @@ jobs:
           mkdir -p bin man
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
           curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+          # cosy is fetched from a mutable branch and COPYed into /usr/bin of a
+          # signed image, so the checksum is the pin. Re-pin with `just update-cosy`.
+          sha256sum -c cosy.sha256
 
       - name: Login to GHCR
         if: steps.gate.outputs.build == 'true'

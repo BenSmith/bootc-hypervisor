@@ -4,9 +4,16 @@ proxy := env_var_or_default('HTTP_PROXY', '')
 build_dir := env_var_or_default('BUILD_DIR', '/var/tmp/hypervisor-build')
 local_registry := 'registry.local'
 tag := `date +%Y%m%d-%H%M`
-fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml`)
+# Both backticks below fall back to sed because `just` evaluates every variable
+# in the file before running *any* recipe, and the default arm of
+# env_var_or_default() is evaluated even when the variable is set. So a missing
+# `yq` takes down recipes that never touch these values — `install-hooks`,
+# `test`, everything delegating into workloadctl/ — and exporting
+# FEDORA_VERSION does not get you out of it. `yq` stays the primary reader; the
+# sed arm reads the same file, so there is still one source of truth.
+fedora_version := env_var_or_default('FEDORA_VERSION', `yq '.stable' fedora-versions.yml 2>/dev/null || sed -n 's/^stable:[[:space:]]*\([^[:space:]#]*\).*/\1/p' fedora-versions.yml`)
 # Pinned rechunker image tag, same source of truth the CI workflows read.
-rechunker := env_var_or_default('RECHUNKER', `yq '.rechunker' fedora-versions.yml`)
+rechunker := env_var_or_default('RECHUNKER', `yq '.rechunker' fedora-versions.yml 2>/dev/null || sed -n 's/^rechunker:[[:space:]]*\([^[:space:]#]*\).*/\1/p' fedora-versions.yml`)
 
 # Rechunk an image in user storage (copies to root, rechunks, copies back)
 _rechunk image:
@@ -95,18 +102,56 @@ build-minimal version=fedora_version rechunk="false":
   sudo podman save localhost/fedora-bootc-minimal:latest | podman load
   echo "Build complete: localhost/fedora-bootc-minimal:{{version}}"
 
+# Stage bin/cosy + man/cosy.1 for the Containerfile COPY, from the sibling
+# checkout if there is one, else from upstream. Both are gitignored, so this is
+# the only thing standing between an unauthenticated fetch and /usr/bin in a
+# signed image — hence the checksum gate against cosy.sha256.
 sync-cosy:
   #!/usr/bin/env bash
   set -euo pipefail
   mkdir -p bin man
-  if [ -f ../cosy/src/cosy ] && [ -f ../cosy/src/cosy.1 ]; then
-    cp ../cosy/src/cosy bin/cosy
-    cp ../cosy/src/cosy.1 man/cosy.1
+  if [ -f ../cosy/cosy ] && [ -f ../cosy/cosy.1 ]; then
+    echo "Using local cosy checkout (../cosy)"
+    cp ../cosy/cosy bin/cosy
+    cp ../cosy/cosy.1 man/cosy.1
   else
     echo "Local cosy not found, fetching from GitHub..."
     curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
     curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
   fi
+  # Verified for both sources, not just the fetch: build-base tags
+  # ghcr.io/bensmith/..., so an in-progress local edit would otherwise ride into
+  # a release image as silently as a moved upstream branch would.
+  if ! sha256sum -c cosy.sha256; then
+    echo "" >&2
+    echo "cosy does not match the pin in cosy.sha256." >&2
+    echo "If this change is intended, run: just update-cosy" >&2
+    exit 1
+  fi
+
+# Re-pin cosy.sha256 to whatever sync-cosy would currently stage. Separate from
+# sync-cosy on purpose: re-pinning is a decision, not a build step.
+update-cosy:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  mkdir -p bin man
+  if [ -f ../cosy/cosy ] && [ -f ../cosy/cosy.1 ]; then
+    cp ../cosy/cosy bin/cosy; cp ../cosy/cosy.1 man/cosy.1
+    src="local ../cosy ($(git -C ../cosy rev-parse --short HEAD 2>/dev/null || echo unknown))"
+  else
+    curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy -o bin/cosy
+    curl -fsSL https://raw.githubusercontent.com/BenSmith/cosy/main/cosy.1 -o man/cosy.1
+    src="github BenSmith/cosy main"
+  fi
+  # Carry every comment line over verbatim except the provenance line, which is
+  # rewritten — the rationale in that header is the durable part of this file.
+  { grep '^#' cosy.sha256 | grep -v '^# Corresponds to'
+    echo "# Corresponds to cosy: ${src}"
+    sha256sum bin/cosy man/cosy.1
+  } > cosy.sha256.new
+  mv cosy.sha256.new cosy.sha256
+  echo "Re-pinned cosy.sha256 from ${src}:"
+  sha256sum bin/cosy man/cosy.1
 
 build-base: sync-cosy
   #!/usr/bin/env bash

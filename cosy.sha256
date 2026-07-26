@@ -1,0 +1,12 @@
+# Pinned checksums for the vendored `cosy` files that hypervisor.Containerfile
+# COPYs into /usr/bin and /usr/share/man. `just sync-cosy` verifies against this
+# and refuses to proceed on a mismatch; `just update-cosy` re-pins deliberately.
+#
+# These are the supply-chain pin. The fetch URL points at a mutable branch, so
+# the checksum — not the ref — is what makes the fetch trustworthy: if upstream
+# main moves, the build fails loudly instead of quietly baking new code into an
+# image that everything else in this chain is cosign-verified.
+#
+# Corresponds to cosy: local ../cosy (b4370f6)
+038fd92715035449689f041dbc62979b88ac6602b5091db7e3e2d6c2a5cdaef4  bin/cosy
+22ba09625364aa21f0d5056c74ce6450cdbb3763165d374411374479d2a259a7  man/cosy.1
