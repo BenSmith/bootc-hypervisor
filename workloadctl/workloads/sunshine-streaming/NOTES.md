@@ -1,4 +1,4 @@
-# Sunshine Game Streaming Workload — Implementation Notes
+# Sunshine Streaming Workload — Implementation Notes
 
 This document covers the design decisions, pitfalls, and debugging lessons
 learned while deploying a headless desktop + Sunshine game streaming container
@@ -13,18 +13,25 @@ The container runs a full systemd init that starts:
 
 1. **container-bootstrap.service** — one-shot first-boot user/group creation
 2. **polkit-stub.service** — D-Bus polkit substitute (real polkitd can't run rootless)
-3. **labwc.service** — headless Wayland compositor (`WLR_BACKENDS=headless`)
-4. **sunshine.service** — game streaming server (captures display via wlr-screencopy)
-5. **wayvnc.service** — VNC fallback for debugging
-6. **sunshine-input-bridge.service** — evdev-to-Wayland input injection
-7. **Audio stack** — PipeWire + WirePlumber + pipewire-pulse (started from labwc autostart)
-8. **Steam Big Picture** — launched from labwc autostart
+3. **seatd.service** — libseat session so wayfire's libinput backend can open input devices
+4. **wayfire.service** — headless Wayland compositor (`WLR_BACKENDS=headless,libinput`)
+5. **wayfire-wayland-ready.service** — oneshot barrier; blocks until the Wayland socket exists
+6. **sunshine.service** — game streaming server (captures display via wlr-screencopy)
+7. **wayvnc.service** — VNC fallback for debugging (not enabled; no auth, binds all interfaces)
+8. **Audio stack** — pipewire.service + wireplumber.service + pipewire-pulse.service
+9. **Steam Big Picture** — launched from wayfire's autostart
+
+Anything needing the display orders itself `After=wayfire-wayland-ready.service`
+rather than after `wayfire.service`, because the compositor's unit is up before
+its socket is.
 
 The host hypervisor system manages the container as a workload:
-- Dedicated `_wl-sunshine-game-streaming` system user (UID 10000+)
+- Dedicated `_wl-sunshine-streaming` system user (UID 10000+)
 - Rootless podman with `userns=keep-id`
-- Persistent home volume at `/var/lib/workloads/sunshine-game-streaming/home`
-- Host `setup.sh` configures uinput kernel module, udev rules, and SELinux policy
+- Persistent home volume at `/var/lib/workloads/sunshine-streaming/home`
+- Host `setup.sh` loads the uinput module, installs the udev relay, mints the
+  web UI's TLS cert, and advertises the host over mDNS. SELinux policy is loaded
+  by `workloadctl enable` from `[security].selinux_policy`, not by the script.
 
 ---
 
@@ -82,11 +89,11 @@ member of the group.
 `/etc/subuid` and `/etc/subgid` for every group in `extra_groups`:
 
 ```
-_wl-sunshine-game-streaming:600100000:65536  # main subuid range (this UID's; see docs/workloads.md)
-_wl-sunshine-game-streaming:39:1           # video (GID 39)
-_wl-sunshine-game-streaming:63:1           # audio (GID 63)
-_wl-sunshine-game-streaming:104:1          # render (GID 104)
-_wl-sunshine-game-streaming:105:1          # input (GID 105)
+_wl-sunshine-streaming:600100000:65536  # main subuid range (this UID's; see docs/workloads.md)
+_wl-sunshine-streaming:39:1           # video (GID 39)
+_wl-sunshine-streaming:63:1           # audio (GID 63)
+_wl-sunshine-streaming:104:1          # render (GID 104)
+_wl-sunshine-streaming:105:1          # input (GID 105)
 ```
 
 After modifying these files, `podman system migrate` must be run for the
@@ -117,10 +124,10 @@ tasks. 16384 is comfortable.
 **Verification**:
 ```bash
 # Systemd limit
-systemctl show workload-sunshine-game-streaming --property=TasksMax
+systemctl show workload-sunshine-streaming --property=TasksMax
 
 # Podman limit
-podman inspect -f '{{.HostConfig.PidsLimit}}' workload-sunshine-game-streaming
+podman inspect -f '{{.HostConfig.PidsLimit}}' workload-sunshine-streaming
 ```
 
 ---
@@ -135,25 +142,35 @@ Sunshine versions.
 one-shot service. Failed because `hostname -I` returned empty — the bootstrap
 runs at `After=sysinit.target`, before the network is fully up.
 
-**Fix**: Moved CSRF setup to a dedicated `sunshine-csrf-setup` script that runs
-as `ExecStartPre` in `sunshine.service`. At that point the network is
-guaranteed up (sunshine starts well after boot). The script:
+**Fix**: Moved CSRF setup into `/usr/local/bin/sunshine-prestart`, which runs as
+`ExecStartPre` in `sunshine.service`. At that point the network is guaranteed up
+(sunshine starts well after boot). Every input it reads can change between
+restarts, so it rewrites rather than appends — it strips the lines it owns
+(`port=`, `adapter_name=`, `encoder=`, `csrf_allowed_origins=`, `cert=`,
+`pkey=`) from the user's sunshine.conf and re-derives them:
 
-1. Strips any existing `csrf_allowed_origins` line (IPs may change between restarts)
-2. Builds the origins list from `hostname -I`
-3. Appends localhost and hostname variants
-4. Writes the result to the user's sunshine.conf
+- **origins** from `hostname -I`, plus localhost and hostname variants
+- **adapter_name + encoder** from the PCI vendor of the visible render node
+  (`0x10de` → nvenc, `0x1002`/`0x8086` → vaapi). With `gpu` pinned in the TOML
+  only one `/dev/dri/renderD*` is mounted, so the loop selects that GPU.
+- **cert/pkey** when `setup.sh` minted a Homelab-CA-signed pair (mounted
+  read-only at `/etc/sunshine/tls`); absent, Sunshine self-signs.
 
 ```bash
-# /usr/local/bin/sunshine-csrf-setup (runs as ExecStartPre in sunshine.service)
+# /usr/local/bin/sunshine-prestart (ExecStartPre in sunshine.service)
+WEB_PORT=$((SUNSHINE_PORT + 1))
 ORIGINS=""
-for ip in $(hostname -I); do
+for ip in $(hostname -I 2>/dev/null); do
     [ -n "$ORIGINS" ] && ORIGINS="${ORIGINS},"
-    ORIGINS="${ORIGINS}https://${ip}:47990"
+    ORIGINS="${ORIGINS}https://${ip}:${WEB_PORT}"
 done
-ORIGINS="${ORIGINS},https://localhost:47990,https://$(hostname):47990"
+ORIGINS="${ORIGINS},https://localhost:${WEB_PORT},https://$(hostname):${WEB_PORT}"
 echo "csrf_allowed_origins=${ORIGINS}" >> "$CONF"
 ```
+
+The web UI port is not a constant: it is `SUNSHINE_PORT + 1`, and
+`SUNSHINE_PORT` is settable per instance so two Sunshine hosts can share a
+machine's port space (host networking).
 
 **Config file hierarchy**:
 - System defaults: `/etc/sunshine/sunshine.conf` (baked into image, read-only)
@@ -162,41 +179,29 @@ echo "csrf_allowed_origins=${ORIGINS}" >> "$CONF"
 
 ---
 
-## Keyboard Modifier Keys (Shift, Ctrl, Alt)
+## Input from Moonlight Clients
 
-**Problem**: Typing in the Moonlight client produced characters but modifier
-keys had no effect — Shift didn't produce uppercase, Ctrl+C didn't work, pipe
-character (`|`) appeared as backslash.
+There is no input-injection bridge in this bundle. Sunshine creates uinput
+devices (mouse/keyboard/touch/pen/gamepad) when a Moonlight client connects, and
+wayfire's libinput backend consumes them natively — `WLR_BACKENDS` is
+`headless,libinput`, `seatd` supplies the libseat session, and the host udev
+database is bind-mounted read-only at `/run/udev` for the property lookups.
 
-**Root cause**: The Wayland `zwp_virtual_keyboard_v1` protocol requires
-explicit `modifiers` events (opcode 2) in addition to `key` events (opcode 1).
-The input bridge was only sending key events.
+**Pitfall**: libinput only learns about a device from a udev netlink *hotplug*
+event, and those don't survive the crossing into the container. libudev requires
+the sender UID to be 0, and the host udevd's UID 0 maps to an unprivileged
+("nobody") UID inside the container's user namespace, so the events are dropped
+— devices created after the container started are invisible, which is every
+device Sunshine makes.
 
-**Fix**: Added xkb state tracking to the keyboard handler. After each key
-event, the bridge:
-
-1. Updates an xkb state machine with the key press/release
-2. Serializes the modifier state (depressed, latched, locked, layout)
-3. If modifiers changed, sends a `modifiers` event to the compositor
-
-```python
-direction = XKB_KEY_DOWN if ev_value == 1 else XKB_KEY_UP
-xkb_lib.xkb_state_update_key(xkb_state, ev_code + 8, direction)
-mods = (
-    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_DEPRESSED),
-    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_LATCHED),
-    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_MOD_LOCKED),
-    xkb_lib.xkb_state_serialize_mods(xkb_state, XKB_LAYOUT_EFFECTIVE),
-)
-if mods != prev_mods:
-    conn.send(_msg(kb_id, 2, _u32(mods[0]), _u32(mods[1]),
-                   _u32(mods[2]), _u32(mods[3])))
-    prev_mods = mods
-```
-
-**Pitfall**: `XKB_LAYOUT_EFFECTIVE` is `128` (1 << 7), NOT `64` (which is
-`XKB_LAYOUT_LOCKED`). Using the wrong value causes the compositor to
-misinterpret layout state.
+The container can't re-broadcast them itself: with host networking the netlink
+socket lives in the host's network namespace, where a rootless container has no
+`CAP_NET_ADMIN`. Hence the host-side `udev-relay` that `setup.sh` installs as a
+service: it re-broadcasts the host's input events with the sender UID declared
+(via `SCM_CREDENTIALS`) as the host UID that the container's UID 0 maps to, read
+from the live container's `/proc/<pid>/uid_map`. It relays only virtual (uinput)
+devices, and the UID filter that makes it work also stops it looping on its own
+broadcasts. See the module docstring in `udev-relay` for the wire format.
 
 ---
 
@@ -240,10 +245,10 @@ pressure-vessel.
 
 ---
 
-## SELinux Policy (sunshine-game-streaming.cil)
+## SELinux Policy (policy.cil)
 
 This was the most iterative and time-consuming part of the deployment. The
-container ships a per-workload SELinux type, `wl_sunshine_game_streaming.process`
+container ships a per-workload SELinux type, `wl_sunshine_streaming.process`
 (via `[security].selinux_policy`). The rule discovery below was done against
 `container_init_t` (the stock systemd-container PID 1 context) and the same
 rules now apply to the workload's own type. Every new component surfaced new
@@ -260,7 +265,7 @@ denials.
 
 **Input devices** (`event_device_t`):
 - Sunshine creates virtual input devices via `/dev/uinput`
-- The input bridge reads evdev events from `/dev/input/eventX`
+- wayfire's libinput backend reads evdev events from `/dev/input/eventX`
 - Both paths are labeled `event_device_t` on Fedora
 - Permissions: `chr_file { open read write ioctl getattr }`, `dir { open read search getattr }`
 
@@ -311,14 +316,14 @@ runs systemd so all processes use `container_init_t`.
 
 ### Policy installation on bootc
 
-The policy is a udica-style CIL block (`sunshine-game-streaming.cil`) loaded by
+The policy is a udica-style CIL block (`policy.cil` in this bundle) loaded by
 `workloadctl enable` (via `[security].selinux_policy`) — no `checkmodule`
 compile step; CIL loads directly. It writes to `/var/lib/selinux`, which is
 writable on bootc systems (only `/usr` is immutable). Roughly what enable does:
 
 ```bash
-# __WL_MODULE__ -> wl_sunshine_game_streaming, then:
-sudo semodule -i wl_sunshine_game_streaming.cil /usr/share/udica/templates/*.cil
+# __WL_MODULE__ -> wl_sunshine_streaming, then:
+sudo semodule -i wl_sunshine_streaming.cil /usr/share/udica/templates/*.cil
 ```
 
 **Key gotcha:** because the container runs systemd (`--systemd=always`), the
@@ -326,8 +331,11 @@ type must be attributed into `container_init_domain`
 (`(typeattributeset container_init_domain (process))` in the CIL) — without it
 systemd-as-PID1 exits 255 with *no AVCs* (it's a missing attribute, not a denied
 rule). `(blockinherit container)` alone gives a `container_t`-equivalent, which
-is not init-capable. The `setup.sh` host hook now only handles the non-SELinux
-prerequisites (uinput module, udev rule, the udev relay).
+is not init-capable. `setup.sh` handles only the non-SELinux prerequisites: the
+uinput module load, the udev relay, the TLS cert, and the mDNS advertisement.
+The `/dev/uinput` group-access udev rule and the module autoload config are
+image-owned (`/usr/lib/udev/rules.d/72-uinput-input.rules`,
+`/usr/lib/modules-load.d/uinput.conf`), so they persist across bootc upgrades.
 
 ### SELinux research sources
 
@@ -351,28 +359,30 @@ GID 63).
 **Fix**:
 1. Added `audio` to `extra_groups` in the workload TOML
 2. Added `/dev/snd` to `devices` list
-3. The container does NOT use host PipeWire/PulseAudio — it runs its own
-   PipeWire stack internally, configured in the labwc autostart script
-4. PipeWire is configured to use ALSA directly, auto-detecting the analog
-   output card
+3. The container does NOT use host PipeWire/PulseAudio — it runs its own stack
+   as three systemd units (`pipewire`, `wireplumber`, `pipewire-pulse`), each
+   started as the container user after `container-bootstrap.service`
+4. WirePlumber auto-detects the ALSA devices under `/dev/snd`; there is no
+   card-selection config to maintain
 
-The autostart script dynamically discovers the ALSA card:
-```bash
-while IFS= read -r line; do
-    n=$(echo "$line" | sed -n 's/^card \([0-9]*\):.*/\1/p')
-    if [ -n "$n" ] && echo "$line" | grep -qi analog; then
-        card_num="$n"
-        alsa_card="hw:$card_num,0"
-        break
-    fi
-done < <(aplay -l 2>/dev/null)
-```
+`audio = true` is deliberately *not* set in the TOML: that flag bind-mounts the
+host's PipeWire/Pulse sockets in, which would put a second sound server in front
+of the one this container runs. `/dev/snd` comes in as a `[storage]` volume
+rather than a `--device` because it is a directory whose node list changes across
+reboots.
 
 ---
 
 ## Container Log Access
 
 Getting logs out of the container proved surprisingly difficult.
+
+**Use `workloadctl logs sunshine-streaming`.** Units run with
+`--log-driver=passthrough`, so `podman logs` fails outright; journald attributes
+the app's output to the rootless user manager's cgroup rather than the workload
+unit, and `workloadctl logs` is what ORs the right journal filters together. Raw
+per-service output: `journalctl -t sunshine` (or `-t wayfire`, `-t wireplumber`,
+… — every unit in the image sets its own `SyslogIdentifier`).
 
 **What doesn't work**:
 - `journalctl -M <machine>` — rootless containers aren't registered as machines
@@ -381,13 +391,14 @@ Getting logs out of the container proved surprisingly difficult.
 - `podman exec` — fails with cgroup permission errors via sudo
 - Direct journal file access — container uses volatile journal (no on-disk files)
 
-**What works**: `nsenter` via the container's init PID:
+**For anything that isn't the journal** — reading Steam's log files, poking at
+container state — go in with `nsenter` via the container's init PID:
 
 ```bash
 # Get the container's init PID
-PID=$(cd /tmp && sudo -u _wl-sunshine-game-streaming \
+PID=$(cd /tmp && sudo -u _wl-sunshine-streaming \
     XDG_RUNTIME_DIR=/run/user/10000 \
-    podman inspect -f '{{.State.Pid}}' workload-sunshine-game-streaming)
+    podman inspect -f '{{.State.Pid}}' workload-sunshine-streaming)
 
 # Run commands inside the container's namespaces
 sudo nsenter -t $PID -m -p -- <command>
@@ -440,7 +451,9 @@ affects deployment in several ways:
 
 ### Firewall ports
 
-Sunshine requires the following ports:
+Every port Sunshine uses derives from the base port, so don't hardcode them —
+`setup.sh` prints the exact `firewall-cmd` invocation for the instance's base at
+the end of `enable`. At the default base of 47989 that is:
 
 ```bash
 sudo firewall-cmd --permanent \
@@ -449,11 +462,16 @@ sudo firewall-cmd --permanent \
 sudo firewall-cmd --reload
 ```
 
-- 47990/tcp — Sunshine web UI (HTTPS)
-- 47984/tcp — HTTPS API
-- 47989/tcp — RTSP
-- 48010/tcp — Control
-- 47998-48000/udp — Video/audio streaming
+| Offset from base | Default | Purpose |
+|------------------|---------|---------|
+| base − 5 | 47984/tcp | HTTPS API |
+| base | 47989/tcp | Base port |
+| base + 1 | 47990/tcp | Web UI (HTTPS) |
+| base + 21 | 48010/tcp | RTSP |
+| base + 9 … +11 | 47998-48000/udp | Video/audio/input |
+
+The UDP range is the one that gets forgotten: pairing succeeds without it, then
+the stream dies.
 
 ### Key environment variables
 
@@ -463,6 +481,8 @@ sudo firewall-cmd --reload
 | `CONTAINER_USER` | `desktop` | Container user name |
 | `CONTAINER_UID` | `1000` | Container user UID |
 | `CONTAINER_GID` | `1000` | Container user GID |
+| `DESKTOP_RESOLUTION` | `1920x1080` | Headless output mode, applied by `wlr-randr` from wayfire's autostart |
+| `SUNSHINE_PORT` | unset (47989) | Base port. Set only to coexist with another Sunshine host on the same machine; `setup.sh` reads it from the instance TOML and advertises that base over mDNS |
 
 ### Capabilities
 

@@ -45,7 +45,7 @@
     ; bind-mounted container_file_t mounts on teardown. Granted directly to
     ; container_t by container-selinux's base policy, but not inherited by a
     ; per-workload type, so they must be enumerated here. Same set that
-    ; wayfire-game-streaming captured at runtime against the same Steam stack.
+    ; sunshine-streaming captured at runtime against the same Steam stack.
     (allow process tmpfs_t (dir (create mounton setattr watch)))
     (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
     (allow process tmpfs_t (lnk_file (create unlink)))

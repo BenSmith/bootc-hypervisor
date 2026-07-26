@@ -1,4 +1,4 @@
-; Per-workload SELinux policy for the sunshine-game-streaming workload container.
+; Per-workload SELinux policy for the sunshine-streaming workload container.
 ; __WL_MODULE__ is substituted with the name-keyed block name at enable time.
 ;
 ; The container runs systemd (--systemd=always), so the type is attributed into
@@ -44,41 +44,40 @@
     ; GPU/driver sysfs writes.
     (allow process sysfs_t (file (write)))
 
-    ; Steam bwrap sandbox (srt-bwrap / pressure-vessel) remounts/mounts.
+    ; Steam bwrap sandbox (srt-bwrap / pressure-vessel) remounts/mounts, and
+    ; unmounts its bind mounts on teardown.
     (allow process bpf_t (filesystem (remount)))
     (allow process cgroup_t (filesystem (remount)))
     (allow process pstore_t (filesystem (remount)))
     (allow process tmpfs_t (filesystem (remount)))
+    (allow process device_t (filesystem (remount)))
     (allow process devpts_t (filesystem (mount)))
+    (allow process container_file_t (filesystem (unmount)))
     (allow process container_file_t (sock_file (mounton)))
     (allow process user_tmp_t (sock_file (mounton)))
-
-    ; Wayland clients allocate their pixel buffers as shared memory and mmap
-    ; them, which needs `map` on tmpfs_t. Without it every client that draws
-    ; dies the moment it tries to, while the compositor itself stays up -- so
-    ; the session comes up with a background and no windows and nothing looks
-    ; unhealthy. Diagnosed on vncdesktop-sway, where foot failed in shm.c
-    ; ("failed to mmap SHM backing memory file: Permission denied").
-    ;
-    ; The rest of this group is bwrap/pressure-vessel building the Steam sandbox
-    ; root on the tmpfs above: create/mount/watch its dirs, fully manage files
-    ; there (create, mmap+exec staged binaries, link/rename/unlink, bind-mount
-    ; over them) plus its symlinks, associate a proc mount, and unmount the
-    ; bind-mounted container_file_t mounts on teardown. Granted directly to
-    ; container_init_t by container-selinux's base policy, but not inherited by
-    ; a per-workload type, so they must be enumerated here. Same set that
-    ; wayfire-game-streaming -- a fork of this bundle -- captured at runtime.
-    (allow process tmpfs_t (dir (create mounton setattr watch)))
-    (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
-    (allow process tmpfs_t (lnk_file (create unlink)))
-    (allow process container_file_t (filesystem (unmount)))
-    (allow process proc_t (file (ioctl)))
-    (allow process proc_t (filesystem (associate)))
 
     ; Steam IPC: /tmp sockets and temp files (user_tmp_t).
     (allow process user_tmp_t (dir (open read write search getattr add_name remove_name ioctl lock)))
     (allow process user_tmp_t (file (open read write create getattr unlink lock map)))
     (allow process user_tmp_t (sock_file (create write getattr setattr unlink)))
+
+    ; Captured at runtime (audit2allow). The bwrap/pressure-vessel sandbox
+    ; builds its root on a tmpfs: create/mount/setattr/watch dirs, and fully
+    ; manage files there (create, mmap+exec staged binaries, link/rename/unlink,
+    ; bind-mount over them) plus its symlinks; associate a proc mount. Plus:
+    ; ioctl on a /proc file, create entries in a self-owned dir, getattr a /run
+    ; socket, and Xwayland setattr's an X DRI/input device node.
+    (allow process tmpfs_t (dir (create mounton setattr watch)))
+    (allow process tmpfs_t (file (create map execute link mounton open rename setattr unlink)))
+    (allow process tmpfs_t (lnk_file (create unlink)))
+    (allow process proc_t (file (ioctl)))
+    (allow process proc_t (filesystem (associate)))
+    (allow process self (dir (write add_name)))
+    (allow process self (file (create)))
+    (allow process var_run_t (sock_file (getattr write)))
+    (allow process xserver_misc_device_t (chr_file (setattr)))
+    ; Xwayland: connect to the X server's /tmp/.X11-unix socket.
+    (allow process xserver_t (unix_stream_socket (connectto)))
 
     ; Wine/Proton PE loader: executable heap, NULL-page map, text relocations.
     (allow process container_file_t (file (execmod)))

@@ -1,8 +1,8 @@
 [workload]
-name = "wayfire-game-streaming"
+name = "sunshine-streaming"
 
 [container]
-image = "registry.local/workloads/wayfire-game-streaming:latest"
+image = "registry.local/workloads/sunshine-streaming:latest"
 pull = "missing"
 systemd = "always"
 
@@ -48,7 +48,7 @@ capabilities = [
 extra_groups = ["video", "render", "input", "audio"]
 # Map container root to the workload user on the host as well, so files
 # created by container-bootstrap (running as uid 0 inside) end up owned by
-# _wl-wayfire-game-streaming on the host — same as files created by desktop
+# _wl-sunshine-streaming on the host — same as files created by desktop
 # (mapped via the keep-id suffix above). Without this, root-created dirs like
 # /home/desktop/.config land on a subuid the host workload user can't touch.
 extra_uidmaps = ["+0:@{UID}:1"]
@@ -103,5 +103,5 @@ setup = "setup.sh"
 # that release goes stale, override the URL per build (dnf installs from a URL
 # directly — fetch only, no local file):
 #   sudo SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v.../Sunshine-...rpm \
-#       workloadctl build wayfire-game-streaming
+#       workloadctl build sunshine-streaming
 arg_env = ["SUNSHINE_RPM_URL"]

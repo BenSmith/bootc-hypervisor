@@ -1383,19 +1383,19 @@ class TestRunHostSetup(unittest.TestCase):
         would send the script at /var/lib/workloads/<bundle> while enable's
         other steps used <instance>, half-provisioning the host."""
         with _cfg(_HOST_BUNDLE_TOML, 'games',
-                  bundle='wayfire-game-streaming') as cfg:
+                  bundle='sunshine-streaming') as cfg:
             with patch.object(cmd_provision.Path, 'exists', return_value=True):
                 with patch.object(cmd_provision.subprocess, 'run',
                                   return_value=MagicMock(returncode=0)) as run_mock:
                     cmd_provision.run_host_setup(cfg, "enable")
             env = run_mock.call_args.kwargs["env"]
         self.assertEqual(env["WORKLOAD_NAME"], "games")
-        self.assertEqual(env["WORKLOAD_BUNDLE"], "wayfire-game-streaming")
+        self.assertEqual(env["WORKLOAD_BUNDLE"], "sunshine-streaming")
         # The bundle dir keys off the *bundle*, not the instance, so a script
         # can reach a sibling helper (udev-relay) even when run from an /etc
         # override that carries only setup.sh.
         self.assertTrue(
-            env["WORKLOAD_BUNDLE_DIR"].endswith("/wayfire-game-streaming"))
+            env["WORKLOAD_BUNDLE_DIR"].endswith("/sunshine-streaming"))
         self.assertEqual(env["WORKLOAD_USER"], "_wl-games")
         self.assertEqual(env["WORKLOAD_ROOT_DIR"], "/var/lib/workloads/games")
         self.assertEqual(env["WORKLOAD_DATA_DIR"], "/var/lib/workloads/games/data")

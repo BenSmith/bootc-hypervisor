@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host setup for the sunshine-game-streaming workload.
+# Host setup for the sunshine-streaming workload.
 #
 # Usage:
 #   setup.sh enable   — configure host prerequisites
@@ -171,7 +171,7 @@ enable() {
     # namespace), and a rootless host-networked container can't re-broadcast
     # them itself (no CAP_NET_ADMIN over the host net namespace). This host
     # service re-broadcasts input events with a corrected sender UID so
-    # labwc's libinput sees Sunshine's devices appear at runtime.
+    # wayfire's libinput sees Sunshine's devices appear at runtime.
     echo "  [host] Installing udev input-event relay..."
     cat > "$RELAY_UNIT" <<UNIT
 [Unit]

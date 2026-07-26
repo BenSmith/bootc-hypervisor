@@ -85,9 +85,15 @@ class TestDocCitations(unittest.TestCase):
 
     def _violations(self):
         found = []
+        own = Path(__file__).resolve().relative_to(GIT_ROOT).as_posix()
         for rel in sorted(self.tracked):
             path = GIT_ROOT / rel
             if not path.is_file():
+                continue
+            # This module's own `*.md` strings are the fixtures the regression
+            # test feeds the checker: names chosen precisely because they do not
+            # resolve. Scanning them would make the file fail itself.
+            if rel == own:
                 continue
             try:
                 text = path.read_text()

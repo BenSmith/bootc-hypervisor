@@ -65,7 +65,7 @@ backends.
 
 The trade-off is stated in `workload.toml`: SwarmUI assumes it owns every card
 it can see, so do not co-tenant it with a streaming desktop
-(`wayfire-game-streaming`, `vncdesktop-sway`) without pinning `gpu` to a UUID
+(`sunshine-streaming`, `vncdesktop-sway`) without pinning `gpu` to a UUID
 first.
 
 ## Models — where things go

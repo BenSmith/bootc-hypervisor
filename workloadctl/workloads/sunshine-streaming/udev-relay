@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Relay host udev input-hotplug events into the rootless workload container.
 
-The wayfire-game-streaming container runs wayfire's libinput backend, which
+The sunshine-streaming container runs wayfire's libinput backend, which
 learns about input devices from udev netlink hotplug events. Sunshine creates
 its uinput devices (mouse/keyboard/touch/pen/gamepad) only when a Moonlight
 client connects. The host udevd processes those devices and broadcasts the
@@ -115,7 +115,7 @@ def properties(msg):
 
 
 def main():
-    user = sys.argv[1] if len(sys.argv) > 1 else "_wl-wayfire-game-streaming"
+    user = sys.argv[1] if len(sys.argv) > 1 else "_wl-sunshine-streaming"
     container = "workload-" + user[len("_wl-"):]
 
     sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW,

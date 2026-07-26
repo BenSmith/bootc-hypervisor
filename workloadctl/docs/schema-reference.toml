@@ -1013,7 +1013,7 @@ ports = ["8080:80", "8443:443"]
 # two different names — so never hardcode the bundle name in the script, and
 # never default these (`${WORKLOAD_NAME:-mybundle}` reintroduces the bug):
 #   WORKLOAD_NAME          instance name           e.g. games
-#   WORKLOAD_BUNDLE        bundle it came from     e.g. wayfire-game-streaming
+#   WORKLOAD_BUNDLE        bundle it came from     e.g. sunshine-streaming
 #   WORKLOAD_USER          _wl-<instance>          e.g. _wl-games
 #   WORKLOAD_INSTANCE_DIR  /etc/workloads.d/<instance>
 #   WORKLOAD_ROOT_DIR      /var/lib/workloads/<instance>

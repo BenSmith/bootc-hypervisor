@@ -1,7 +1,7 @@
-# Headless Desktop + Sunshine Streaming
+# Headless Desktop + Sunshine Streaming (Wayfire)
 #
-# labwc runs headlessly (WLR_BACKENDS=headless,libinput; no KMS).
-# Input from Moonlight clients arrives as Sunshine uinput devices. labwc's
+# Wayfire runs headlessly (WLR_BACKENDS=headless,libinput; no KMS).
+# Input from Moonlight clients arrives as Sunshine uinput devices. Wayfire's
 # libinput backend picks them up natively via the host udev database (mounted
 # read-only at /run/udev by the workload); seatd provides the libseat session.
 # Host udev hotplug events don't reach the container's libudev (it drops them --
@@ -10,40 +10,41 @@
 # a corrected UID for the devices Sunshine creates at runtime.
 # Sunshine captures the virtual display via wlr-screencopy, encodes with VAAPI
 # on the AMD render node, and streams to Moonlight clients.
-# Steam Big Picture is the default session; the full labwc desktop is always
+# Steam Big Picture is the default session; the full wayfire desktop is always
 # accessible by minimising/exiting Steam.
 #
+# NOTES.md in this bundle covers the pitfalls behind these choices: podman's
+# userns/uidmap exclusivity, supplementary-GID delegation, the pids limit, the
+# SELinux type, and how logs get out of the container.
+#
 # Build:
-#   sudo workloadctl build sunshine-game-streaming
+#   sudo workloadctl build sunshine-streaming
 #
 # Run:
-#   workload-ctl enable sunshine-game-streaming
+#   workload-ctl enable sunshine-streaming
+
+ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/Sunshine-2026.516.143833-1.fc44.x86_64.rpm
 
 FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     adwaita-cursor-theme \
+    adwaita-icon-theme \
     alsa-utils \
-    arc-theme \
     bash-completion \
-    btop \
     dbus-daemon \
     diffutils \
     egl-utils \
+    fira-code-fonts \
     firefox \
     foot \
-    fuzzel \
-    geany \
-    git-core \
     glibc-langpack-en \
     glx-utils \
     google-noto-sans-fonts \
     grim \
     hostname \
+    htop \
     imv \
-    jetbrains-mono-fonts \
-    labwc \
-    labwc-menu-generator \
     less \
     libevdev \
     libinput \
@@ -57,7 +58,6 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-vulkan-drivers \
     nano \
     neovim \
-    papirus-icon-theme \
     pciutils \
     pipewire \
     pipewire-alsa \
@@ -73,21 +73,22 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     swaybg \
     systemd \
     systemd-udev \
-    thunar \
-    tmux \
     util-linux \
     vulkan-loader \
     vulkan-tools \
-    waybar \
+    wayfire \
+    wayfire-config-manager \
     wayvnc \
     wdisplays \
     wf-recorder \
+    wf-shell \
     wireplumber \
     wl-clipboard \
     wlr-randr \
+    wlrctl \
+    wofi \
     xdg-desktop-portal \
     xdg-desktop-portal-wlr \
-    xdg-user-dirs \
     xdg-utils \
     xdotool \
     xorg-x11-server-Xwayland \
@@ -113,19 +114,42 @@ RUN dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \
     dnf install -y steam mesa-va-drivers-freeworld && \
     dnf clean all
 
+# Fedora 44 dropped the consolidated CA bundle files (cert.pem, ca-bundle.crt,
+# ca-certificates.crt) and their /etc/ssl symlinks in favour of the faster
+# directory-hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile
+# System tools (curl/git) use the hash dir and still work, but apps with a
+# bundled TLS stack that read the consolidated bundle *file* — here Steam's
+# OpenSSL — fail with "unable to load trusted SSL root certificates", so every
+# HTTPS request returns "http error 0", the bootstrap self-update never
+# completes, and Steam refuses to start. Restore the legacy names as symlinks to
+# the stable extracted bundle (Fedora's documented permanent approach; the
+# `update-ca-trust extract --rhbz2387674` temp flag is intentionally avoided —
+# it's discouraged for automation and slated for removal).
+RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
+    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
+    ln -sf "$B" /etc/pki/tls/cert.pem && \
+    ln -sf "$B" /etc/ssl/cert.pem
+
 # --- Sunshine ---
-# Sunshine captures the labwc display via wlr-screencopy and encodes
-# with VAAPI. Moonlight clients pair via the web UI at https://<host>:47990.
+# Sunshine captures the wayfire display via wlr-screencopy and encodes with
+# the GPU's hardware encoder. Encoder + adapter are detected at runtime from
+# the visible /dev/dri/renderD* node's PCI vendor — see sunshine-prestart.
+# This keeps the same image working on NVIDIA and AMD/Intel hosts; the only
+# per-host setting is `gpu = ...` in the workload TOML.
 # Pre-release RPM URL changes frequently — pass via build arg:
 #   podman build --build-arg SUNSHINE_RPM_URL=https://... .
 
-ARG SUNSHINE_RPM_URL=https://github.com/LizardByte/Sunshine/releases/download/v2026.516.143833/Sunshine-2026.516.143833-1.fc44.x86_64.rpm
+# Re-declare ARG after FROM so it's in scope for this build stage.
+# (Pre-FROM ARGs are only available to the FROM instruction itself.)
+ARG SUNSHINE_RPM_URL
+
 RUN dnf install -y "${SUNSHINE_RPM_URL}" && \
     dnf clean all
 
 # Sunshine system-wide defaults. The user can override in ~/.config/sunshine/.
-# output_name: labwc headless virtual output (set by wlr-randr in autostart).
 # encoder + adapter_name are appended at startup by sunshine-prestart.
+# output_name: wayfire headless virtual output (set by wlr-randr in autostart).
 RUN mkdir -p /etc/sunshine && \
     cat > /etc/sunshine/sunshine.conf <<'CONF'
 output_name=HEADLESS-1
@@ -137,7 +161,7 @@ CONF
 # --- Polkit stub ---
 # Required for Steam's logind D-Bus PowerOff call (Power menu → Turn Off).
 # polkitd cannot start in a rootless container (requires CAP_SYS_ADMIN for PID
-# namespace introspection). See NOTES.md in this bundle for full details.
+# namespace introspection).
 
 RUN cat > /usr/local/bin/polkit-stub <<'SCRIPT'
 #!/usr/bin/python3
@@ -195,7 +219,7 @@ RUN cat > /usr/lib/systemd/system/polkit-stub.service <<'UNIT'
 [Unit]
 Description=Polkit stub (grants login1 actions only)
 After=dbus.socket
-Before=labwc.service
+Before=wayfire.service
 
 [Service]
 Type=simple
@@ -216,463 +240,276 @@ CONF
 
 # --- GTK settings ---
 
-RUN mkdir -p /etc/gtk-3.0 && cat > /etc/gtk-3.0/settings.ini <<'INI'
+RUN mkdir -p /etc/gtk-3.0 /etc/gtk-4.0 && \
+    cat > /etc/gtk-3.0/settings.ini <<'INI' && cp /etc/gtk-3.0/settings.ini /etc/gtk-4.0/settings.ini
 [Settings]
-gtk-button-images=0
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
 gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
-gtk-enable-event-sounds=0
-gtk-enable-input-feedback-sounds=0
-gtk-font-name=Cantarell 11
-gtk-icon-theme-name=Papirus-Dark
-gtk-menu-images=0
-gtk-theme-name=Arc-Dark
-gtk-toolbar-style=GTK_TOOLBAR_ICONS
-gtk-xft-antialias=1
-gtk-xft-hinting=1
-gtk-xft-hintstyle=hintmedium
-gtk-xft-rgba=rgb
+gtk-font-name=Noto Sans 11
+gtk-application-prefer-dark-theme=1
 INI
 
-RUN mkdir -p /etc/gtk-4.0 && cat > /etc/gtk-4.0/settings.ini <<'INI'
-[Settings]
-gtk-cursor-theme-name=Adwaita
-gtk-cursor-theme-size=24
-gtk-font-name=Cantarell 11
-gtk-icon-theme-name=Papirus-Dark
-gtk-theme-name=Arc-Dark
+# --- Wayfire config ---
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/wayfire.ini <<'INI'
+[core]
+plugins = \
+  alpha \
+  animate \
+  autostart \
+  command \
+  cube \
+  decoration \
+  expo \
+  fast-switcher \
+  fisheye \
+  foreign-toplevel \
+  grid \
+  move \
+  oswitch \
+  place \
+  resize \
+  switcher \
+  vswitch \
+  wayfire-shell \
+  window-rules \
+  wm-actions \
+  wobbly \
+  zoom
+
+[command]
+binding_terminal = <super> KEY_ENTER
+command_terminal = foot
+
+binding_launcher = <super> KEY_D
+command_launcher = wofi --show run --style /etc/xdg/wofi/style.css
+
+binding_close = <super> KEY_Q
+command_close = wlrctl toplevel close
+
+binding_menu = BTN_RIGHT
+command_menu = wofi --show run --style /etc/xdg/wofi/style.css
+
+[move]
+activate = <super> BTN_LEFT
+
+[resize]
+activate = <super> BTN_MIDDLE
+
+[fast-switcher]
+activate = <alt> KEY_TAB
+
+[vswitch]
+binding_left = <super> KEY_LEFT
+binding_down = <super> KEY_DOWN
+binding_up = <super> KEY_UP
+binding_right = <super> KEY_RIGHT
+
+[wm-actions]
+toggle_fullscreen = <super> KEY_F
+
+[grid]
+slot_bl = <super> KEY_KP1
+slot_b = <super> KEY_KP2
+slot_br = <super> KEY_KP3
+slot_l = <super> KEY_KP4
+slot_c = <super> KEY_KP5
+slot_r = <super> KEY_KP6
+slot_tl = <super> KEY_KP7
+slot_t = <super> KEY_KP8
+slot_tr = <super> KEY_KP9
+
+[cube]
+activate = <ctrl> <alt> BTN_LEFT
+background = 0.051 0.082 0.125 1.0
+
+[animate]
+open_animation = zoom
+close_animation = zoom
+duration = 300
+
+[wobbly]
+friction = 3.0
+spring_k = 8.0
+
+[decoration]
+active_color = 0.0 0.831 1.0 1.0
+inactive_color = 0.118 0.176 0.251 1.0
+
 INI
 
-# --- Arc-Labwc window decoration theme ---
+# --- wf-shell config ---
 
-RUN mkdir -p /usr/share/themes/Arc-Labwc/openbox-3 && \
-    cat > /usr/share/themes/Arc-Labwc/openbox-3/themerc <<'EOF'
-border.width: 1
-padding.height: 5
-window.client.padding.height: 0
-window.client.padding.width: 0
-window.handle.width: 0
-window.label.text.justify: center
-window.titlebar.padding.height: 2
-window.titlebar.padding.width: 5
+RUN cat > /etc/xdg/wf-shell.ini <<'INI'
+[panel]
+widgets_left = menu
+widgets_center = window-list
+widgets_right = clock
+position = top
+minimal_height = 32
 
-window.button.height: 20
-window.button.spacing: 0
-window.button.width: 28
-
-window.active.border.color:                 #5294e2
-window.active.button.hover.image.color:     #ffffff
-window.active.button.pressed.image.color:   #5294e2
-window.active.button.unpressed.image.color: #d3dae3
-window.active.label.text.color:             #ffffff
-window.active.title.bg.color:               #4b5162
-window.active.title.bg:                     Solid
-
-window.inactive.border.color:                 #404552
-window.inactive.button.unpressed.image.color: #676a72
-window.inactive.label.text.color:             #9da0a8
-window.inactive.title.bg.color:               #383c4a
-window.inactive.title.bg:                     Solid
-
-menu.border.color: #2b2e3b
-menu.border.width: 1
-menu.items.active.bg.color: #4b5162
-menu.items.active.text.color: #ffffff
-menu.items.bg.color: #383c4a
-menu.items.padding.x: 6
-menu.items.padding.y: 4
-menu.items.text.color: #d3dae3
-menu.overlap.x: -4
-menu.overlap.y: 0
-menu.separator.color: #5294e2
-menu.separator.padding.height: 3
-menu.separator.padding.width: 6
-menu.separator.width: 1
-menu.width.max: 300
-menu.width.min: 140
-
-osd.bg.color: #383c4a
-osd.label.text.color: #5294e2
-osd.border.width: 1
-osd.window-switcher.width: 600
-osd.window-switcher.padding: 8
-osd.window-switcher.item.padding.x: 12
-osd.window-switcher.item.padding.y: 12
-osd.window-switcher.item.active.border.width: 1
-osd.window-switcher.preview.border.width: 2
-osd.window-switcher.preview.border.color: #5294e2
-osd.workspace-switcher.boxes.width: 150
-osd.workspace-switcher.boxes.height: 40
-osd.workspace-switcher.boxes.border.width: 1
-
-snapping.overlay.edge.bg.color: #5294e280
-snapping.overlay.region.bg.color: #5294e280
-EOF
-
-# --- labwc config ---
-
-RUN mkdir -p /etc/xdg/labwc && \
-    cat > /etc/xdg/labwc/rc.xml <<'XML'
-<?xml version="1.0" encoding="UTF-8"?>
-<labwc_config>
-
-  <core>
-    <gap>6</gap>
-  </core>
-
-  <theme>
-    <name>Arc-Labwc</name>
-    <cornerRadius>4</cornerRadius>
-    <font place="ActiveWindow">
-      <name>Cantarell</name>
-      <size>10</size>
-      <slant>Normal</slant>
-      <weight>Bold</weight>
-    </font>
-    <font place="InactiveWindow">
-      <name>Cantarell</name>
-      <size>10</size>
-      <slant>Normal</slant>
-      <weight>Normal</weight>
-    </font>
-  </theme>
-
-  <desktops>
-    <popupTime>500</popupTime>
-    <names>
-      <name>1</name>
-      <name>2</name>
-      <name>3</name>
-      <name>4</name>
-    </names>
-  </desktops>
-
-  <keyboard>
-    <default/>
-
-    <keybind key="W-Return">
-      <action name="Execute"><command>foot</command></action>
-    </keybind>
-    <keybind key="W-d">
-      <action name="Execute"><command>fuzzel</command></action>
-    </keybind>
-    <keybind key="W-q">
-      <action name="Close"/>
-    </keybind>
-    <keybind key="W-f">
-      <action name="ToggleMaximize"/>
-    </keybind>
-    <keybind key="W-h">
-      <action name="SnapToEdge"><direction>left</direction></action>
-    </keybind>
-    <keybind key="W-l">
-      <action name="SnapToEdge"><direction>right</direction></action>
-    </keybind>
-    <keybind key="W-k">
-      <action name="SnapToEdge"><direction>up</direction></action>
-    </keybind>
-    <keybind key="W-j">
-      <action name="SnapToEdge"><direction>down</direction></action>
-    </keybind>
-    <keybind key="W-Tab">
-      <action name="NextWindow"/>
-    </keybind>
-    <keybind key="W-S-Tab">
-      <action name="PreviousWindow"/>
-    </keybind>
-    <keybind key="W-1">
-      <action name="GoToDesktop"><to>1</to></action>
-    </keybind>
-    <keybind key="W-2">
-      <action name="GoToDesktop"><to>2</to></action>
-    </keybind>
-    <keybind key="W-3">
-      <action name="GoToDesktop"><to>3</to></action>
-    </keybind>
-    <keybind key="W-4">
-      <action name="GoToDesktop"><to>4</to></action>
-    </keybind>
-    <keybind key="W-S-1">
-      <action name="SendToDesktop"><to>1</to><follow>yes</follow></action>
-    </keybind>
-    <keybind key="W-S-2">
-      <action name="SendToDesktop"><to>2</to><follow>yes</follow></action>
-    </keybind>
-    <keybind key="W-S-3">
-      <action name="SendToDesktop"><to>3</to><follow>yes</follow></action>
-    </keybind>
-    <keybind key="W-S-4">
-      <action name="SendToDesktop"><to>4</to><follow>yes</follow></action>
-    </keybind>
-  </keyboard>
-
-  <mouse>
-    <default/>
-    <context name="Root">
-      <mousebind button="Right" action="Press">
-        <action name="ShowMenu"><menu>root-menu</menu></action>
-      </mousebind>
-    </context>
-  </mouse>
-
-</labwc_config>
-XML
+[dock]
+position = bottom
+INI
 
 # --- Foot terminal config ---
 
 RUN mkdir -p /etc/xdg/foot && \
     cat > /etc/xdg/foot/foot.ini <<'INI'
 [main]
-font=JetBrains Mono:size=11
-pad=4x4
-initial-window-size-chars=80x25
+font=Fira Code:size=14
+initial-window-size-chars=100x30
 shell=/bin/bash -l
 
-[scrollback]
-lines=10000
-
-[mouse]
-hide-when-typing=yes
-
 [colors-dark]
-alpha=1.0
-background=383c4a
-foreground=d3dae3
-
-regular0=1c2023
-regular1=c0392b
-regular2=4e9a06
-regular3=c4a000
-regular4=5294e2
-regular5=75507b
-regular6=06989a
-regular7=d3dae3
-
-bright0=555753
-bright1=ef2929
-bright2=8ae234
-bright3=fce94f
-bright4=729fcf
-bright5=ad7fa8
-bright6=34e2e2
-bright7=eeeeec
-INI
-
-# --- Fuzzel launcher config ---
-
-RUN mkdir -p /etc/xdg/fuzzel && \
-    cat > /etc/xdg/fuzzel/fuzzel.ini <<'INI'
-[main]
-font=Cantarell:size=12
-icon-theme=Papirus-Dark
-icons-enabled=yes
-lines=12
-terminal=foot -e
-width=35
-
-[colors]
-background=383c4aff
-border=5294e2ff
-match=5294e2ff
-selection-match=5294e2ff
-selection-text=ffffffff
-selection=4b5162ff
-text=d3dae3ff
-
-[border]
-width=1
-radius=4
-
-[dmenu]
-exit-immediately-if-empty=yes
+background=0d1520
+foreground=c8dde8
+regular0=111d2e
+regular1=ff4d6d
+regular2=00c896
+regular3=f0c060
+regular4=4090d8
+regular5=8060c8
+regular6=00c8d8
+regular7=8899aa
+bright0=1e2d40
+bright1=ff6b85
+bright2=00e8aa
+bright3=f8d880
+bright4=60b0f0
+bright5=a080e8
+bright6=00e8f0
+bright7=c8dde8
 INI
 
 # --- Mako notification config ---
 
 RUN mkdir -p /etc/xdg/mako && \
     cat > /etc/xdg/mako/config <<'INI'
-background-color=#383c4a
-border-color=#5294e2
-border-radius=4
-border-size=1
-default-timeout=5000
-font=Cantarell 11
-margin=10
-max-visible=5
-padding=10
-text-color=#d3dae3
-width=320
+background-color=#111d2e
+text-color=#c8dde8
+border-color=#00d4ff
+border-radius=8
+border-size=2
+width=380
+padding=12
+margin=8
+font=Noto Sans 11
 INI
 
-# --- Autostart ---
-# Order: audio → virtual display resolution → waybar → sunshine → steam BPM
-# Sunshine must start after labwc has created the Wayland socket.
-# Steam runs in Big Picture (tenfoot) mode; the labwc desktop is always
-# accessible by exiting or minimising Steam.
+# --- Wofi launcher style ---
 
-RUN cat > /etc/xdg/labwc/autostart <<'SH'
-#!/bin/bash
-export XDG_RUNTIME_DIR=/run/user/$(id -u)
-
-# --- User dirs ---
-xdg-user-dirs-update
-
-# --- Display resolution ---
-wlr-randr --output HEADLESS-1 --custom-mode "${DESKTOP_RESOLUTION:-1920x1080}@60Hz"
-
-# --- Audio ---
-alsa_card=""
-card_num=""
-while IFS= read -r line; do
-    n=$(echo "$line" | sed -n 's/^card \([0-9]*\):.*/\1/p')
-    if [ -n "$n" ] && echo "$line" | grep -qi analog; then
-        card_num="$n"
-        alsa_card="hw:$card_num,0"
-        break
-    fi
-done < <(aplay -l 2>/dev/null)
-
-if [ -n "$alsa_card" ]; then
-    mkdir -p ~/.config/pipewire/pipewire.conf.d
-    cat > ~/.config/pipewire/pipewire.conf.d/10-alsa-sink.conf <<EOF
-context.objects = [
-    { factory = adapter
-        args = {
-            factory.name     = api.alsa.pcm.sink
-            node.name        = "alsa-sink"
-            node.description = "ALSA Analog Output"
-            media.class      = "Audio/Sink"
-            api.alsa.path    = "$alsa_card"
-        }
-    }
-]
-EOF
-    pipewire &
-    i=0
-    until [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    wireplumber &
-    pipewire-pulse &
-    i=0
-    until wpctl status >/dev/null 2>&1; do
-        sleep 0.1; i=$((i+1))
-        [ $i -ge 100 ] && break
-    done
-    [ -n "$card_num" ] && amixer -c "$card_num" sset Master 74% unmute >/dev/null 2>&1
-fi
-
-# --- Desktop chrome ---
-swaybg -c '#383c4a' &
-wl-paste --watch cliphist store &
-mako &
-sleep 0.5 && waybar &
-
-# --- Steam Big Picture ---
-# STEAM_DISABLE_BROWSER_SANDBOX: steamwebhelper's Chromium sandbox can't
-#   nest inside the container's user namespace.
-STEAM_DISABLE_BROWSER_SANDBOX=1 \
-steam -tenfoot &
-SH
-
-# --- .desktop entry overrides and right-click menu ---
-
-RUN mkdir -p /usr/local/share/applications && \
-    for f in foot-server footclient thunar-bulk-rename thunar-settings; do \
-        printf '[Desktop Entry]\nType=Application\nName=hidden\nNoDisplay=true\n' \
-            > /usr/local/share/applications/${f}.desktop ; \
-    done
-
-RUN cat > /usr/local/share/applications/btop.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=btop++
-Icon=btop
-Exec=foot --window-size-chars=80x24 btop
-Categories=System;Monitor;
-EOF
-
-RUN cat > /usr/local/share/applications/thunar.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Thunar File Manager
-Icon=org.xfce.thunar
-Exec=thunar
-Categories=Utility;FileManager;
-MimeType=inode/directory;
-EOF
-
-RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
-
-# --- Waybar config ---
-
-RUN mkdir -p /etc/xdg/waybar && \
-    cat > /etc/xdg/waybar/config.jsonc <<'JSON'
-{
-    "modules-left": [],
-    "modules-center": ["clock"],
-    "modules-right": ["cpu", "memory"],
-    "clock": {
-        "format": "{:%a %b %d  %H:%M}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
-    },
-    "cpu": {
-        "format": "cpu {usage}%",
-        "tooltip": false,
-        "interval": 2
-    },
-    "memory": {
-        "format": "mem {}%",
-        "interval": 5
-    }
-}
-JSON
-
-RUN cat > /etc/xdg/waybar/style.css <<'CSS'
-* {
-    font-family: Cantarell, sans-serif;
+RUN mkdir -p /etc/xdg/wofi && \
+    cat > /etc/xdg/wofi/style.css <<'CSS'
+window {
+    background-color: #0d1520;
+    border: 2px solid #00d4ff;
+    border-radius: 10px;
+    color: #c8dde8;
+    font-family: "Noto Sans";
     font-size: 13px;
 }
-
-window#waybar {
-    background-color: #383c4a;
-    color: #d3dae3;
-    border-bottom: 2px solid #2b2e3b;
+#input {
+    background-color: #111d2e;
+    border: 1px solid #1e2d40;
+    border-radius: 6px;
+    color: #c8dde8;
+    padding: 8px 12px;
+    margin: 8px;
+    outline: none;
 }
-
-#clock {
-    color: #d3dae3;
-    padding: 0 12px;
+#outer-box {
+    padding: 6px;
 }
-
-#cpu,
-#memory {
-    color: #9da0a8;
-    padding: 0 10px;
+#entry {
+    padding: 6px 12px;
+    border-radius: 5px;
+    margin: 2px 4px;
 }
-
-#cpu:hover,
-#memory:hover {
-    color: #d3dae3;
+#entry:selected {
+    background-color: #1e3550;
 }
-
-#cpu.warning,
-#memory.warning {
-    color: #e67e22;
+#text {
+    color: #c8dde8;
 }
-
-#cpu.critical,
-#memory.critical {
-    color: #e74c3c;
+#text:selected {
+    color: #00d4ff;
 }
 CSS
 
-# --- labwc systemd service ---
+# --- PipeWire systemd services ---
+# PipeWire, WirePlumber, and PipeWire-Pulse run as the container user.
+# WirePlumber auto-detects ALSA devices from /dev/snd — no manual config needed.
 
-RUN cat > /usr/lib/systemd/system/labwc.service <<'UNIT'
+RUN cat > /usr/lib/systemd/system/pipewire.service <<'UNIT'
 [Unit]
-Description=Labwc Wayland Compositor (headless)
+Description=PipeWire Multimedia Service
+After=container-bootstrap.service
+Requires=container-bootstrap.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+SyslogIdentifier=pipewire
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/wireplumber.service <<'UNIT'
+[Unit]
+Description=WirePlumber Session Manager
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+SyslogIdentifier=wireplumber
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/wireplumber'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN cat > /usr/lib/systemd/system/pipewire-pulse.service <<'UNIT'
+[Unit]
+Description=PipeWire PulseAudio Compatibility
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3
+PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
+SyslogIdentifier=pipewire-pulse
+
+ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && exec /usr/bin/pipewire-pulse'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+
+# --- Wayfire systemd service ---
+
+RUN cat > /usr/lib/systemd/system/wayfire.service <<'UNIT'
+[Unit]
+Description=Wayfire Wayland Compositor (headless)
 After=container-bootstrap.service polkit-stub.service seatd.service
 Requires=seatd.service
 
@@ -691,11 +528,11 @@ PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER DESKTOP_RESOLUTION
 # (2026-07-25), which cost us the only copy of a crash log. Console goes to
 # container PID1's stdout, which podman passthrough puts in the host journal
 # under `workload-<name>` -- the path proven to work. Applied to the compositor
-# and the servers only; support units stay off console, since the host unit's
-# LogRateLimitBurst=250 is shared and chatty duplicates would evict real lines.
-# (seatd/polkit-stub exec their binary directly, so their identifiers are
-# already right and they need nothing.)
-SyslogIdentifier=labwc
+# and the servers only; pipewire/wireplumber/pipewire-pulse get an identifier
+# but stay off console, since the host unit's LogRateLimitBurst=250 is shared
+# and their chatter would evict real lines. (seatd/polkit-stub exec their binary
+# directly, so their identifiers are already right and they need nothing.)
+SyslogIdentifier=wayfire
 StandardOutput=journal+console
 StandardError=journal+console
 
@@ -715,19 +552,21 @@ ExecStartPre=/bin/sh -c 'ls /dev/dri/renderD* 2>/dev/null | grep -q . || echo LI
 ExecStartPre=/bin/sh -c 'mkdir -p /run/user/${CONTAINER_UID} && chown ${CONTAINER_UID}:${CONTAINER_GID} /run/user/${CONTAINER_UID} && chmod 0700 /run/user/${CONTAINER_UID}'
 ExecStartPre=/bin/sh -c 'while [ ! -S /run/seatd.sock ]; do sleep 0.1; done'
 ExecStart=/usr/bin/setpriv --reuid=${CONTAINER_UID} --regid=${CONTAINER_GID} --keep-groups -- \
-    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} && cd && exec /usr/bin/dbus-run-session /usr/bin/labwc'
+    /bin/sh -c 'export HOME=/home/${CONTAINER_USER} XDG_RUNTIME_DIR=/run/user/${CONTAINER_UID} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${CONTAINER_UID}/bus; CFG="$HOME/.config/wayfire/wayfire.ini"; mkdir -p "$HOME/.config/wayfire" && printf "@include /etc/xdg/wayfire.ini\n\n[autostart]\npanel = wf-panel\nbackground = wf-background\ndock = wf-dock\nresolution = wlr-randr --output HEADLESS-1 --custom-mode ${DESKTOP_RESOLUTION}@60Hz\nsteam = env STEAM_DISABLE_BROWSER_SANDBOX=1 steam -silent\nnotifications = mako\n" > "$CFG"; export WAYFIRE_CONFIG_FILE="$CFG"; dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile & cd && exec /usr/bin/wayfire'
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 # --- Wayland ready gate ---
-# Oneshot that blocks until labwc's Wayland socket exists. Services that
+# Oneshot that blocks until wayfire's Wayland socket exists. Services that
 # need the display (sunshine, wayvnc) depend on this instead
 # of each polling independently.
 
 RUN cat > /usr/local/bin/wait-for-wayland <<'SCRIPT'
 #!/bin/sh
+# Wait for any wayland-N socket to appear, then write WAYLAND_DISPLAY to an
+# environment file that downstream services can source.
 RUNTIME_DIR="/run/user/${CONTAINER_UID}"
 ENV_FILE="/run/wayland-display.env"
 
@@ -746,11 +585,11 @@ SCRIPT
 
 RUN chmod +x /usr/local/bin/wait-for-wayland
 
-RUN cat > /usr/lib/systemd/system/labwc-wayland-ready.service <<'UNIT'
+RUN cat > /usr/lib/systemd/system/wayfire-wayland-ready.service <<'UNIT'
 [Unit]
-Description=Wait for labwc Wayland socket
-After=labwc.service
-Requires=labwc.service
+Description=Wait for wayfire Wayland socket
+After=wayfire.service
+Requires=wayfire.service
 
 [Service]
 Type=oneshot
@@ -763,7 +602,7 @@ WantedBy=multi-user.target
 UNIT
 
 # --- Sunshine systemd service ---
-# Runs as the container user after labwc has created the Wayland socket.
+# Runs as the container user after wayfire has created the Wayland socket.
 # Restart=on-failure ensures it recovers from network drops and crashes.
 
 # --- Sunshine prestart ---
@@ -831,8 +670,8 @@ SCRIPT
 RUN cat > /usr/lib/systemd/system/sunshine.service <<'UNIT'
 [Unit]
 Description=Sunshine GameStream host
-After=labwc-wayland-ready.service
-Requires=labwc-wayland-ready.service
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
 
 [Service]
 Type=simple
@@ -840,7 +679,7 @@ Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER SUNSHINE_PORT
 
-# See labwc.service above for why both of these are set.
+# See wayfire.service above for why both of these are set.
 SyslogIdentifier=sunshine
 StandardOutput=journal+console
 StandardError=journal+console
@@ -868,8 +707,8 @@ UNIT
 RUN cat > /usr/lib/systemd/system/wayvnc.service <<'UNIT'
 [Unit]
 Description=wayvnc VNC server
-After=labwc-wayland-ready.service
-Requires=labwc-wayland-ready.service
+After=wayfire-wayland-ready.service
+Requires=wayfire-wayland-ready.service
 
 [Service]
 Type=simple
@@ -877,7 +716,7 @@ Restart=on-failure
 RestartSec=3
 PassEnvironment=CONTAINER_UID CONTAINER_GID CONTAINER_USER
 
-# See labwc.service above for why both of these are set.
+# See wayfire.service above for why both of these are set.
 SyslogIdentifier=wayvnc
 StandardOutput=journal+console
 StandardError=journal+console
@@ -890,18 +729,18 @@ WantedBy=multi-user.target
 UNIT
 
 # --- seatd ---
-# labwc's libinput backend needs a libseat session to open input devices.
+# wayfire's libinput backend needs a libseat session to open input devices.
 # A container has no logind seat, so we run seatd. SEATD_VTBOUND=0 gives a
 # VT-less seat (the default VT-bound seat fails — no tty0 in a container).
 # seatd runs as root (no User=) so it can create /run/seatd.sock and inherits
 # PID 1's keep-groups, including `input`, to open /dev/input/event* devices.
-# -g input makes the socket reachable by labwc running as the container user.
+# -g input makes the socket reachable by wayfire running as the container user.
 
 RUN cat > /usr/lib/systemd/system/seatd.service <<'UNIT'
 [Unit]
 Description=seatd seat management daemon (VT-less)
 After=container-bootstrap.service
-Before=labwc.service
+Before=wayfire.service
 
 [Service]
 Type=simple
@@ -944,7 +783,7 @@ done
 # Ensure Sunshine user config directory exists with correct ownership.
 # chown .config itself, not just .config/sunshine -- mkdir -p creates the
 # .config parent as root, leaving the desktop user unable to write its own
-# config (labwc, gtk, Steam, ...) there.
+# config (wayfire, gtk, Steam, ...) there.
 mkdir -p "$HOME_DIR/.config/sunshine"
 chown -R "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.config"
 
@@ -956,7 +795,7 @@ chmod 0440 /etc/sudoers.d/container-user
 if ! grep -q 'PS1=' "$HOME_DIR/.bashrc" 2>/dev/null; then
     cat >> "$HOME_DIR/.bashrc" <<'PROMPT'
 if [ "$PS1" ]; then
-    PS1='\[\033[01;35m\][sunshine]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
+    PS1='\[\033[01;35m\][wayfire]\[\033[01;32m\] \u:\w\$\[\033[0m\] '
 fi
 PROMPT
     chown "$CONTAINER_UID:$CONTAINER_GID" "$HOME_DIR/.bashrc"
@@ -971,7 +810,7 @@ Description=First-boot container bootstrap
 ConditionPathExists=!/etc/container-bootstrapped
 DefaultDependencies=no
 After=sysinit.target
-Before=labwc.service
+Before=wayfire.service
 
 [Service]
 Type=oneshot
@@ -1015,21 +854,9 @@ RUN mkdir -p /etc/systemd/system && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-control.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd-kernel.socket && \
     ln -sf /dev/null /etc/systemd/system/systemd-udevd.service && \
-    systemctl enable labwc labwc-wayland-ready sunshine seatd container-bootstrap systemd-logind polkit-stub && \
-    chmod +x /etc/xdg/labwc/autostart /usr/local/bin/container-bootstrap \
+    systemctl enable wayfire wayfire-wayland-ready sunshine seatd container-bootstrap systemd-logind polkit-stub pipewire wireplumber pipewire-pulse && \
+    chmod +x /usr/local/bin/container-bootstrap \
              /usr/local/bin/polkit-stub /usr/local/bin/sunshine-prestart
-
-# Fedora 44 dropped the consolidated CA bundle files in favour of the directory-
-# hash format — https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile —
-# which breaks apps with a bundled TLS stack that read the bundle *file* (e.g.
-# Sunshine/Steam: "unable to load trusted SSL root certificates", "http error 0").
-# Restore the legacy names as symlinks to the stable extracted bundle (Fedora's
-# documented permanent fix; the --rhbz2387674 temp flag is intentionally avoided).
-RUN B=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem && \
-    ln -sf "$B" /etc/pki/tls/certs/ca-bundle.crt && \
-    ln -sf "$B" /etc/pki/tls/certs/ca-certificates.crt && \
-    ln -sf "$B" /etc/pki/tls/cert.pem && \
-    ln -sf "$B" /etc/ssl/cert.pem
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/sbin/init"]
