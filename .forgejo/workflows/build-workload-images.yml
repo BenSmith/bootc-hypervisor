@@ -138,6 +138,16 @@ jobs:
             repo="${ref%:*}"   # strip :latest
             sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "$ref"
             DIGEST=$(cat /tmp/digest.txt)
+            # A push can succeed without attaching a signature; the shipped policy.json
+            # then refuses the image, so verify the attachment resolves and validates
+            # before anything downstream consumes this digest.
+            printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
+              "${repo}" "$(pwd)/cosign.pub" > /tmp/verify-policy.json
+            if ! sudo podman pull -q --signature-policy=/tmp/verify-policy.json "${repo}@${DIGEST}" >/dev/null; then
+              echo "::error::signature verification failed for ${repo}@${DIGEST} — the push did not produce a valid signature"
+              exit 1
+            fi
+            echo "signature verified: ${repo}@${DIGEST}"
             # Dated tag = pinned rollback ref; digest copy is already covered by
             # the digest-addressed signature.
             sudo skopeo copy "docker://${repo}@${DIGEST}" "docker://${repo}:${TAG}"

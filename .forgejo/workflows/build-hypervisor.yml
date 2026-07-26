@@ -187,6 +187,16 @@ jobs:
           sudo podman tag "localhost/hypervisor-bootc:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
+          # A push can succeed without attaching a signature; the shipped policy.json
+          # then refuses the image, so verify the attachment resolves and validates
+          # before anything downstream consumes this digest.
+          printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
+            "${IMAGE_BASE}" "$(pwd)/cosign.pub" > /tmp/verify-policy.json
+          if ! sudo podman pull -q --signature-policy=/tmp/verify-policy.json "${IMAGE_BASE}@${DIGEST}" >/dev/null; then
+            echo "::error::signature verification failed for ${IMAGE_BASE}@${DIGEST} — the push did not produce a valid signature"
+            exit 1
+          fi
+          echo "signature verified: ${IMAGE_BASE}@${DIGEST}"
 
           sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING}"
@@ -368,6 +378,16 @@ jobs:
           sudo podman tag "localhost/${IMAGE}:rechunked-${VERSION}" "${IMAGE_BASE}:${VERSIONED}"
           sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "${IMAGE_BASE}:${VERSIONED}"
           DIGEST=$(cat /tmp/digest.txt)
+          # A push can succeed without attaching a signature; the shipped policy.json
+          # then refuses the image, so verify the attachment resolves and validates
+          # before anything downstream consumes this digest.
+          printf '{"default":[{"type":"reject"}],"transports":{"docker":{"%s":[{"type":"sigstoreSigned","keyPath":"%s","signedIdentity":{"type":"matchRepository"}}]}}}' \
+            "${IMAGE_BASE}" "$(pwd)/cosign.pub" > /tmp/verify-policy.json
+          if ! sudo podman pull -q --signature-policy=/tmp/verify-policy.json "${IMAGE_BASE}@${DIGEST}" >/dev/null; then
+            echo "::error::signature verification failed for ${IMAGE_BASE}@${DIGEST} — the push did not produce a valid signature"
+            exit 1
+          fi
+          echo "signature verified: ${IMAGE_BASE}@${DIGEST}"
 
           sudo skopeo copy \
             "docker://${IMAGE_BASE}@${DIGEST}" "docker://${IMAGE_BASE}:${FLOATING_TAG}"
