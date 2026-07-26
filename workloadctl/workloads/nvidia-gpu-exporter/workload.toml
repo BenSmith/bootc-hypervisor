@@ -65,7 +65,7 @@ mode = "pasta"
 # Published on all host interfaces so alloy (its own netns) can scrape it via
 # host.containers.internal:9835 — the same reach the workload-exporter uses.
 # GPU telemetry is low-sensitivity, but if this host faces an untrusted LAN,
-# bind it to a specific interface ("192.168.x.y:9835:9835") or firewall :9835.
+# bind it to a specific interface ("203.0.113.y:9835:9835") or firewall :9835.
 ports = ["9835:9835"]
 
 [resources]

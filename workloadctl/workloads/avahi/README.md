@@ -179,7 +179,7 @@ at the wrong one. Override it in the toml:
 
 ```toml
 [container.environment]
-HOST_IP = "192.168.1.50"
+HOST_IP = "203.0.113.50"
 ALIASES = "zot registry"
 ```
 

@@ -20,7 +20,7 @@
 #        sudo firewall-cmd --reload
 #
 #      Or restrict to local network only:
-#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="5050" protocol="tcp" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" port port="5050" protocol="tcp" accept'
 #        sudo firewall-cmd --reload
 #
 # Web UI:

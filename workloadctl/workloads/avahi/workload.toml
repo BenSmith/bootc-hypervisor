@@ -36,7 +36,7 @@
 #   - mDNS only crosses one broadcast domain. Across VLANs you need a reflector.
 #   - Names are first-come-first-serve on the LAN; pick unique aliases per host.
 #   - HOST_IP is auto-detected from the default route. Override with
-#     HOST_IP = "192.168.1.50" in [container.environment] if needed.
+#     HOST_IP = "203.0.113.50" in [container.environment] if needed.
 #   - Each alias becomes its own A record with no reverse PTR (the container
 #     uses `avahi-publish -a -R` internally). This is what lets N aliases
 #     coexist on a single IP — see README.md "How it works".

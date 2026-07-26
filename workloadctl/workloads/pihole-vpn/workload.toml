@@ -18,8 +18,8 @@
 #        sudo firewall-cmd --reload
 #
 #      Or restrict to your local subnet (more secure):
-#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="dns" accept'
-#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" service name="http" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" service name="dns" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" service name="http" accept'
 #        sudo firewall-cmd --reload
 #
 #   4. Run gravity to download blocklists:

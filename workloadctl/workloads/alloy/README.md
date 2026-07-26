@@ -7,7 +7,7 @@ and traces to the central otel-lgtm backend.
 
 | Variable | Example | Purpose |
 |----------|---------|---------|
-| `CENTRAL_HOST` | `192.168.1.10` | otel-lgtm host. A LAN IP/hostname for a remote backend; `host.containers.internal` if otel-lgtm runs on this same host (see Networking). |
+| `CENTRAL_HOST` | `203.0.113.10` | otel-lgtm host. A LAN IP/hostname for a remote backend; `host.containers.internal` if otel-lgtm runs on this same host (see Networking). |
 | `HOST_LABEL` | `gaming` | Short name for this machine |
 | `ROLE_LABEL` | `gaming` | Role tag (gaming, nas, networking, thin-client) |
 

@@ -28,7 +28,7 @@
 #      be added over SMB — see the [storage] section below.
 #
 #   3. Configure the firewall (LAN-only — recommended):
-#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="8096" protocol="tcp" accept'
+#        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" port port="8096" protocol="tcp" accept'
 #        sudo firewall-cmd --reload
 #
 #   4. Open http://<host-ip>:8096 and complete first-run setup. Add a library
