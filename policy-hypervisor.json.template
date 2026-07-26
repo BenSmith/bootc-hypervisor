@@ -2,7 +2,6 @@
   "default": [{"type": "reject"}],
   "transports": {
     "docker": {
-      "": [{"type": "insecureAcceptAnything"}],
       "ghcr.io/__REGISTRY_NAMESPACE__": [
         {
           "type": "sigstoreSigned",
@@ -20,7 +19,13 @@
             "type": "matchRepository"
           }
         }
-      ]
+      ],
+      "docker.io": [{"type": "insecureAcceptAnything"}],
+      "ghcr.io": [{"type": "insecureAcceptAnything"}],
+      "quay.io": [{"type": "insecureAcceptAnything"}],
+      "codeberg.org": [{"type": "insecureAcceptAnything"}],
+      "mcr.microsoft.com": [{"type": "insecureAcceptAnything"}],
+      "registry.fedoraproject.org": [{"type": "insecureAcceptAnything"}]
     },
     "containers-storage": {"": [{"type": "insecureAcceptAnything"}]},
     "docker-archive": {"": [{"type": "insecureAcceptAnything"}]},

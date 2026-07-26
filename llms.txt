@@ -81,10 +81,9 @@ config.toml                               bootc-image-builder config (user setup
 config-iso.toml                           ISO-specific image builder config
 policy.json                               Container image signature policy
 policy-local.json                         Permissive policy — build-base-local only, never a published image
-policy-hypervisor.json.template           Policy template: sigstoreSigned for ghcr.io/<ns> and registry.local, every other
-                                          docker: ref accepted unverified (the docker "" scope) — see point 7 below
-policy-minimal.json.template              Stricter: no docker "" scope, so unlisted registries hit the reject default
-                                          (ghcr.io/<ns> signed; ghcr.io + registry.local explicitly open)
+policy-hypervisor.json.template           Policy template: reject-by-default; sigstoreSigned for ghcr.io/<ns> and
+                                          registry.local, allowlisted-unverified for the 6 registries workloads use
+policy-minimal.json.template              Same shape, narrower: ghcr.io/<ns> signed; ghcr.io + registry.local open
 
 security/
   seatd_container.cil                     SELinux module (CIL): allow containers to use seatd socket
@@ -169,7 +168,7 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-amd:44
 4. **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to git/images.
 5. **Explicit hardware opt-in** — No device access by default; convenience flags for GPU, audio, input, KVM.
 6. **fuse-overlayfs hardlink workaround** — Containerfiles break ostree rpmdb hardlinks before `dnf install` to avoid database corruption (see hypervisor.Containerfile).
-7. **Image trust is scoped signing, not source gating** — The shipped `policy.json` (from `policy-hypervisor.json.template`) is **accept-by-default**: any registry serves any workload image without policy friction. Integrity is enforced only where this project ships signatures: `ghcr.io/__REGISTRY_NAMESPACE__` (the bootc images) and `registry.local/workloads` (CI-built workload images) are `sigstoreSigned` with `/etc/pki/containers/cosign.pub`, signatures fetched from the registries themselves (`registries.d/*.yaml` `use-sigstore-attachments`). Everything else — third-party pulls, zot's pull-through caches of upstream — is consciously unsigned: the signature asserts "bytes CI pushed", never provenance about upstream. The root→user local-override transfer (`containers-storage` transport) is policy-exempt by construction.
+7. **Image trust is scoped signing over a registry allowlist** — The shipped `policy.json` (from `policy-hypervisor.json.template`) is **reject-by-default, and the default is live**: there is deliberately no `""` scope under the `docker` transport, so a ref on any registry not named in the file is refused before a layer moves. Two tiers sit above that default. *Signature required:* `ghcr.io/__REGISTRY_NAMESPACE__` (the bootc images) and `registry.local` (CI-built workload images) are `sigstoreSigned` with `/etc/pki/containers/cosign.pub`, signatures fetched from the registries themselves (`registries.d/*.yaml` `use-sigstore-attachments`). *Allowlisted but unverified:* `docker.io`, `ghcr.io`, `quay.io`, `codeberg.org`, `mcr.microsoft.com`, `registry.fedoraproject.org` — the registries the shipped workloads and the build recipes actually pull from. Third-party images stay consciously unsigned, because the signature asserts "bytes CI pushed" and never provenance about upstream; what the allowlist adds is that a *typo'd or injected* ref pointing somewhere else fails closed instead of silently resolving. The cost is real and worth knowing: **adopting a workload from a new registry means adding it here**, or the pull fails with "Source image rejected". More-specific scopes win, which is why `ghcr.io/__REGISTRY_NAMESPACE__` stays signature-gated despite `ghcr.io` being open. The root→user local-override transfer (`containers-storage` transport) is policy-exempt by construction.
 
 ## Documentation
 
