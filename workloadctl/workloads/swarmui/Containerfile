@@ -1,0 +1,178 @@
+# SwarmUI container image — multi-stage: .NET 8 SDK builder → ASP.NET 8 runtime
+#
+# Build:
+#   sudo workloadctl build swarmui
+#
+# Or manually:
+#   podman build -t registry.local/workloads/swarmui:latest .
+#
+# This image does NOT contain PyTorch. SwarmUI downloads and installs its own
+# ComfyUI backend (venv + torch + CUDA userspace, ~10 GB) into the dlbackend
+# volume at RUNTIME, on first backend setup. See README.md "First run".
+#
+# WHY MULTI-STAGE — measured, not assumed. A single-stage SDK build came out at
+# 3.6 GB, and `podman history` + `du` attributed it to three separate wastes,
+# none of which is the app:
+#
+#   931 MB  /root/.nuget          package cache left behind by `dotnet build`
+#   326 MB  runtimes/{win-x64,osx-*,linux-musl-x64,linux-arm64,win}
+#   ~550 MB SDK + bundled PowerShell over the ASP.NET runtime
+#
+# Splitting the build off discards the first and third; the RID prune below
+# handles the second. The app itself is only a few hundred MB.
+#
+# THE COST, and how to buy it back:
+# SwarmUI compiles third-party extensions AT RUNTIME, itself — ExtensionsManager
+# .BuildExtension shells out to `dotnet build <ext>.csproj -o src/bin/extensions/
+# <name>/` and then Assembly.LoadFile()s the result, and Utilities.cs runs
+# `dotnet --list-sdks` purely to warn when that will not work. So it needs the
+# real SDK on PATH, not the ASP.NET runtime. Built-in extensions (Grid
+# Generator, Dynamic Thresholding, the ComfyUI backend) are compiled into the
+# main build and are unaffected either way.
+#
+# The SDK is only ~550 MB of the ~2.2 GB saved here, so this is a separate knob
+# from the other two wins. To keep in-place extension builds:
+#
+#   podman build --build-arg RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim ...
+#   sudo workloadctl build swarmui --build-arg RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
+#
+# That still discards the NuGet cache and the dead RIDs, so it lands near 2 GB
+# rather than the original 3.6 GB. The first extension build then has to restore
+# packages over the network, which is a one-off of a minute or so — the result
+# is cached in src/bin/extensions/ and reused on later starts. This workload
+# needs egress for the ComfyUI backend install anyway.
+#
+# Nothing else regresses in the default slim build: the entrypoint execs the
+# server binary directly and never invokes the SDK (see entrypoint.sh).
+ARG RUNTIME_BASE=mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim
+#
+# WHY NOT A FEDORA BASE, unlike every other bundle in this repo:
+# SwarmUI's csproj pins <TargetFramework>net8.0</TargetFramework>, and building
+# net8.0 needs the matching targeting pack. Fedora 44 ships only newer dotnet
+# SDKs, so a Fedora base would depend on the net8.0 targeting pack still being
+# carried by whatever SDK Fedora has that week. Microsoft's SDK 8.0 image is
+# the combination upstream builds and tests against, and it is the same base
+# their own launchtools/StandardDockerfile.docker uses. The deviation is
+# deliberate; revisit if SwarmUI retargets.
+
+# ══ Stage 1: build ═══════════════════════════════════════════════════
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS builder
+
+# git is the only extra the builder needs; the SDK image has the rest.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# MUST be a git clone, not a tarball. launchtools/linux-build-logic.sh does
+#   if [ -d .git ]; then cur_head=`git rev-parse HEAD` ... else
+#     printf "WARNING: YOU DID NOT CLONE FROM GIT. THIS WILL BREAK SOME
+#             SYSTEMS. PLEASE INSTALL PER THE README."; sleep 5
+# and SwarmUI reads its own git metadata at startup to report its version. The
+# .git directory (22 MB) is therefore carried into the runtime stage on purpose.
+#
+# Tagged release for reproducibility: https://github.com/mcmonkeyprojects/SwarmUI/releases
+ARG SWARMUI_VERSION=0.9.8-Beta
+RUN git clone --depth 1 --branch "${SWARMUI_VERSION}" \
+        https://github.com/mcmonkeyprojects/SwarmUI.git /SwarmUI
+
+WORKDIR /SwarmUI
+
+# Podman's userns mapping can make the work tree look foreign-owned to git even
+# when the container runs as root. Upstream hits the same thing and applies the
+# same blanket fix.
+RUN git config --global --add safe.directory '*'
+
+# Writing last_build is not optional even though the runtime stage never runs
+# linux-build-logic.sh: it is what makes the tree look "already built" to
+# anyone who does run the upstream scripts (a debug shell, a future revert to
+# single-stage). The script compares it against `git rev-parse HEAD` and, on
+# mismatch, prints "You did a git pull without building" and touches
+# must_rebuild — which without an SDK present would be an unrecoverable state
+# rather than a slow one.
+RUN dotnet build src/SwarmUI.csproj --configuration Release -o ./src/bin/live_release \
+    && git rev-parse HEAD > src/bin/last_build \
+    && test -f src/bin/live_release/SwarmUI.dll
+
+# Drop build intermediates and every runtime identifier except the one this
+# image can actually execute. linux-x64 is ~298 MB and is kept; the rest are
+# dead weight in a glibc x86-64 container. Guarded with `find -delete` on an
+# explicit allowlist so a new RID appearing upstream fails loudly at the
+# smoke test rather than being silently shipped.
+RUN rm -rf src/obj \
+    && find src/bin/live_release/runtimes -mindepth 1 -maxdepth 1 -type d \
+         ! -name 'linux-x64' -exec rm -rf {} + \
+    && ls src/bin/live_release/runtimes
+
+# ══ Stage 2: runtime ═════════════════════════════════════════════════
+# RUNTIME_BASE is declared as a global ARG above the first FROM so it is usable
+# here; swap it for the sdk image to keep in-place extension builds.
+FROM ${RUNTIME_BASE}
+
+LABEL org.opencontainers.image.title="SwarmUI"
+LABEL org.opencontainers.image.description="Modular AI image generation web UI, ComfyUI-backed"
+LABEL org.opencontainers.image.source="https://github.com/mcmonkeyprojects/SwarmUI"
+
+# ── System deps ──────────────────────────────────────────────────────
+# These serve the RUNTIME-installed ComfyUI, not SwarmUI itself, which is why
+# they belong in this stage rather than the builder.
+#
+# python3.11 is named explicitly (rather than relying on bookworm's default
+# python3, which is also 3.11) to mirror upstream's Dockerfile — SwarmUI builds
+# the ComfyUI venv against whatever `python3.11` resolves to, and a silent
+# major bump in a future base image would break the backend install, not the
+# build, i.e. it would fail late and confusingly.
+#
+# libglib2.0-0 + libgl1 satisfy the libGL.so.1 / libgthread lookups that the
+# ControlNet preprocessor nodes do at import time.
+#
+# build-essential and python3.11-dev are here on purpose: ComfyUI custom nodes
+# are installed at runtime and a good number compile C extensions on first
+# import. They are the single largest remaining cost in this image (~760 MB of
+# apt with them). Dropping them would shrink it a lot and break custom-node
+# installs the first time one needs a compiler — not a trade worth making
+# silently, so it is called out here instead.
+#
+# git is required at runtime, not just at build: SwarmUI reads its own commit
+# to report its version, and the ComfyUI backend install clones repositories.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        python3.11 \
+        python3.11-dev \
+        python3.11-venv \
+        python3-pip \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git config --global --add safe.directory '*'
+
+COPY --from=builder /SwarmUI /SwarmUI
+WORKDIR /SwarmUI
+
+# DOTNET_ROOT is pinned to the runtime's real install path. It is no longer
+# defusing the dotnet-10 auto-install branch in linux-build-logic.sh — the
+# entrypoint does not run that script at all — but the apphost still resolves
+# the shared runtime through it, and the aspnet image, like the SDK image,
+# installs to /usr/share/dotnet via `COPY --from=installer ["/dotnet",
+# "/usr/share/dotnet"]` without setting the variable itself.
+ENV DOTNET_ROOT=/usr/share/dotnet
+
+# Extra CLI flags appended to the server invocation. Overridden by the workload
+# TOML's [container.environment]. The entrypoint word-splits this, so it must
+# stay a plain string — see entrypoint.sh.
+ENV SWARMUI_ARGS=""
+
+EXPOSE 7801
+
+# No HEALTHCHECK here on purpose: [container.health] in workload.toml emits
+# --health-cmd on the podman run line, which wins. A second copy in the image
+# would only drift.
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

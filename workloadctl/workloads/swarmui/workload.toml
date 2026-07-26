@@ -1,0 +1,142 @@
+# SwarmUI - Modular AI image generation web UI, ComfyUI-backed
+#
+# A full generation suite rather than a bare node editor: a Generate tab for
+# normal prompting, a Comfy Workflow tab exposing the unrestricted node graph, a
+# model browser, image history, and the Grid Generator. ComfyUI is the ENGINE
+# underneath — SwarmUI installs and supervises it — so model support tracks
+# ComfyUI while the UI stays approachable.
+#
+# >>> See README.md in this directory for first-run setup, the multi-GPU backend
+# >>> layout, model directory layout, and the text-encoder override procedure.
+#
+# Self-built image (Containerfile ships with the bundle); CI publishes it as
+# registry.local/workloads/swarmui:latest.
+#
+#   sudo workloadctl build swarmui
+#   sudo workloadctl enable swarmui
+#   # then open http://<host-ip>:7801
+#
+# RELATIONSHIP TO THE comfyui BUNDLE: they are alternatives, not layers. Both can
+# run (ports 7801 and 8188 do not clash) but each carries its own PyTorch — the
+# comfyui bundle bakes it into the image at build time, SwarmUI downloads it into
+# dlbackend at runtime — so running both costs ~20 GB of disk to no benefit.
+# Pick one. SwarmUI is the better default on a multi-GPU host; see [devices].
+
+[workload]
+name = "swarmui"
+
+[container]
+image = "registry.local/workloads/swarmui:latest"
+pull = "missing"
+# Starts via launch-linux.sh --forward_restart --launch_mode none --host 0.0.0.0
+# The Containerfile wraps this in entrypoint.sh.
+
+[container.health]
+# SwarmUI serves its UI on 7801 from process start, before any backend is
+# configured, so / is a valid readiness probe even on a fresh install where no
+# ComfyUI backend exists yet.
+#
+# start_period is 180s rather than comfyui's 120s. The .NET build is already
+# done in the image, but on a COLD volume SwarmUI runs its first-launch data
+# setup before binding — and if you have set the backend to auto-install on
+# start, that window also covers a multi-GB download.
+cmd = "curl -sf http://localhost:7801/ > /dev/null 2>&1 || exit 1"
+interval = "30s"
+start_period = "180s"
+on_failure = "kill"
+
+[container.environment]
+# Extra CLI flags appended to launch-linux.sh. The entrypoint word-splits this.
+# Useful additions:
+#   --data_dir <path>       — relocate Data/ (leave alone; the volume handles it)
+#   --port <n>              — change the listen port (also change [network] below)
+#   --loglevel debug        — verbose logging, useful for backend install failures
+SWARMUI_ARGS = ""
+
+[devices]
+# NOTE THE INVERSION vs the comfyui bundle, which warns you to pin a single card
+# by UUID. Here "auto" — every GPU — is the CORRECT setting, and pinning would be
+# the mistake.
+#
+# SwarmUI's whole design premise is a "swarm" of GPUs: you register one ComfyUI
+# backend per card (Server → Backends → add a backend, increment GPU_ID on each)
+# and it routes and queues generations across them. On this host that means the
+# 4080 SUPER and the 5070 Ti each hold a different model and both stay busy,
+# instead of one model being resident at a time. Handing SwarmUI a single card
+# throws that away.
+#
+# The corollary is that SwarmUI must NOT share cards with another GPU workload.
+# It assumes it owns what it can see, and will schedule onto a card that
+# gamedev-sway or wayfire-game-streaming is already using — 16 GB per card does
+# not absorb that. If you need to co-tenant, pin here and accept single-GPU:
+#   gpu = "nvidia:GPU-<uuid>"    # `nvidia-ctk cdi list` to find the UUID
+#
+# Unlike the comfyui bundle there is no vendor baked into this image: SwarmUI
+# asks which accelerator to target during the backend install wizard and builds
+# the ComfyUI venv accordingly. So "auto" here really is vendor-agnostic, and an
+# AMD host needs no rebuild — just a different answer in the wizard.
+gpu = "auto"
+
+[security]
+# render — access /dev/dri/renderD* (required for CUDA interop with VAAPI on
+# hybrid systems, and for the nvidia-ctk CDI hook itself).
+extra_groups = ["video", "render"]
+
+[storage]
+volumes = [
+    # SwarmUI's own state: settings, sessions, the user database, saved presets,
+    # and backend configuration. THIS is the file that remembers your per-GPU
+    # backend layout — losing it means redoing the wizard, not redownloading.
+    "./data:/SwarmUI/Data",
+    # The downloaded ComfyUI backend: its git checkout, its venv, PyTorch, the
+    # CUDA userspace, and (via HOME, see entrypoint.sh) pip and HuggingFace
+    # caches. Budget ~15 GB. Kept as its own volume so it can be blown away and
+    # rebuilt without touching settings or models.
+    "./dlbackend:/SwarmUI/dlbackend",
+    # Models — checkpoints, diffusion models, text encoders, VAEs, LoRAs.
+    # SwarmUI seeds the subdirectory tree on first start. See README.md for
+    # which model goes in which subdirectory; it is not guessable.
+    "./models:/SwarmUI/Models",
+    # Generated images, organised into dated subdirectories.
+    "./output:/SwarmUI/Output",
+]
+
+[network]
+mode = "pasta"
+ports = ["7801:7801"]
+# NO AUTHENTICATION BY DEFAULT, and this publishes on all host interfaces —
+# the same caveat that applies to llama-swap on :8080. Anyone who can reach the
+# host can generate, browse every image in Output, and read Settings. That is
+# fine on a trusted LAN and NOT fine if onepiece ever becomes reachable beyond
+# it. SwarmUI ships an account system (Server → Users) — turn it on before
+# exposing this, or leave the port bound to localhost and reach it over SSH.
+
+[resources]
+# Never swap — a diffusion model that starts paging will thrash the host far
+# longer than an OOM kill would cost.
+memory_swap_max = "0"
+# Torch dataloaders and some ComfyUI custom nodes use shared memory; podman's
+# 64 MB default is too tight.
+shm_size = "1g"
+# Deliberately unset. Sizing this is harder than for the comfyui bundle, because
+# SwarmUI holds the .NET server AND one Python/ComfyUI child process per
+# registered backend, each with its own host-RAM copy of whatever it is loading.
+# Two backends on the 16 GB cards want noticeably more than one. Measure with
+# `workloadctl stats swarmui` under real load before capping:
+# memory_max = "48G"
+
+[build]
+# Present-but-empty marks this container's image as self-built, which does two
+# things:
+#
+#   1. `workloadctl build swarmui` owns the image: it runs the default
+#      `podman build` over this bundle (the Containerfile beside this file) and
+#      tags the result exactly as [container].image above.
+#   2. CI picks the bundle up automatically. .forgejo/scripts/ci-workload-images.py
+#      globs workloads/*/workload.toml and selects on has_build_context(), so
+#      there is no matrix to register swarmui in.
+#
+# No keys are needed — the defaults (Containerfile in the bundle dir, no target,
+# no args) are exactly right. To pin a different SwarmUI release, pass it at
+# build time rather than storing it here:
+#   sudo workloadctl build swarmui --build-arg SWARMUI_VERSION=0.9.9-Beta
