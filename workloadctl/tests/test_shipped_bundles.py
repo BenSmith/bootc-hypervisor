@@ -163,5 +163,61 @@ class TestShippedBundlesGenerate(unittest.TestCase):
                         )
 
 
+class TestBaselineIsComparable(unittest.TestCase):
+    """`just snapshot-baseline` is only useful if two renders differ *only* where
+    behavior differs — otherwise a refactor diff drowns in noise and stops being
+    read, which is the failure mode that removing the committed fixtures was meant
+    to avoid. Nothing else covers `normalize_baseline`, so this is what keeps it
+    honest when the generator learns to emit a new host-dependent value.
+    """
+
+    def _render(self, root: Path) -> dict[str, str]:
+        units = root / "units"
+        units.mkdir(parents=True)
+        _, sys_d, cfg = generate_all(units)
+        masked = normalize_baseline(units, sys_d, cfg)
+        self.assertGreater(masked, 0, "normalize_baseline rewrote nothing")
+        return {
+            p.name: p.read_text()
+            for p in [*units.glob("*.service"), *sys_d.glob("*.conf")]
+        }
+
+    def test_two_renders_in_different_dirs_are_identical(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            first = self._render(Path(a))
+            second = self._render(Path(b))
+
+        self.assertEqual(
+            sorted(first), sorted(second), "renders disagree on which files exist"
+        )
+        differing = [name for name in first if first[name] != second[name]]
+        self.assertEqual(
+            differing, [],
+            "these files differ between two renders of identical input, so "
+            f"normalize_baseline is missing a host-dependent value: {differing[:5]}",
+        )
+
+    def test_normalized_baseline_names_no_local_path(self):
+        """No baseline text may name this checkout or this tmp dir.
+
+        Distinct from the comparison above, which only catches values that differ
+        *between* two renders on one machine. A path that is stable locally — the
+        checkout root, embedded because someone resolved a bundle path against the
+        source tree — compares clean here and still makes a baseline untransferable
+        between machines or worktrees. The masked tokens are the whole point: what
+        is left should be the units as a host would see them.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rendered = self._render(root)
+
+        for local, label in ((str(ROOT), "checkout root"), (tmp, "tmp dir")):
+            offenders = sorted(n for n, t in rendered.items() if local in t)
+            self.assertEqual(
+                offenders, [],
+                f"{label} {local} survives normalization in: {offenders[:5]}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
