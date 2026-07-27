@@ -70,31 +70,43 @@ for the wrong one:
 Reach for contract or oracle by default. Reach for snapshot only when the
 literal text is the thing under test.
 
-### `tests/snapshots/` is a refactor instrument, not a gate
+### Don't commit rendered units — render a baseline instead
 
-The corpus under `tests/snapshots/` — one `.conf` + every emitted unit for all
-shipped bundles, driven by the single test in `tests/test_snapshots.py` — is not
-an instance of the "Snapshot test" shape above, and reading it as one invites
-the wrong conclusion (it is exhaustive rather than curated, so it looks like
-change-detector mass).
+Byte-for-byte fixtures for the shipped bundles do not belong in the tree, for two
+reasons that will apply again to whatever tempts you next:
 
-Its job is to make a large refactor reviewable: regenerate, then diff, and every
-behavioral change to any bundle's units shows up in one place. That is why the
-byte comparison **warns rather than fails**, and why a missing fixture is written
-on first run instead of erroring — during a refactor you want the new baseline,
-not a red suite. `STRICT_SNAPSHOTS=1` turns drift into a failure for a gate that
-should block on it.
+- **The output is regenerable in ~0.2s** from the same TOMLs, byte-identically.
+  Committing output that cheap to recompute buys nothing a command cannot.
+- **An exhaustive corpus that only warns on drift goes stale**, and one that fails
+  on drift makes every intentional generator change a two-step ritual. Neither is
+  a good trade at this size — with ~70 commits touching the generator or
+  `workloads/` in six months, staleness wins by default.
 
-The consequence to be aware of: outside a refactor nothing forces anyone to act
-on the warning, so a stale fixture can sit in the tree indefinitely (one had —
-`vncdesktop-sway.service` kept a `pgrep -x wayvnc` health command for several
-commits after the bundle deliberately moved to `pgrep -x sway`). Accept drift
-with `UPDATE_SNAPSHOTS=1 just test` when you see it warn.
+What such a corpus is genuinely for — making a large generator refactor
+reviewable — needs nothing committed, because a baseline renders at any commit:
 
-Enforcement lives elsewhere and does fail hard: the structural oracle
-(`test_unit_oracle.py`), the curated 20-fixture matrix in
-`test_generator_snapshot.py` — which commits no golden files and gates on
-`systemd-analyze verify` — and the per-behavior contract tests.
+```bash
+just snapshot-baseline /tmp/before     # on the pre-refactor commit
+# ...refactor...
+just snapshot-baseline /tmp/after
+diff -ru /tmp/before/units /tmp/after/units
+```
+
+`normalize_baseline()` masks the allocated UID, the render dir and the config dir,
+so two renders differ only where behavior differs — two baselines taken into
+different directories come out byte-identical.
+
+The shipped bundles do get a test, `tests/test_shipped_bundles.py`, asserting
+existence rather than text: the generator exits 0 with every bundle enabled at
+once, and each bundle gets its sysusers conf plus every unit its mode implies.
+That check matters because it is the only one that runs the generator over the
+**real** bundles — the
+20-fixture matrix in `test_generator_snapshot.py` is synthetic, so it cannot catch
+a shipped TOML that crashes the generator or silently drops a per-container unit.
+
+Unit *shape* is enforced by the structural oracle (`test_unit_oracle.py`), and
+`test_generator_snapshot.py` gates every fixture through `systemd-analyze verify`.
+Neither commits golden files either.
 
 ## Ground rules
 

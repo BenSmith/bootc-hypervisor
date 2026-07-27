@@ -70,11 +70,27 @@ test-unit:
 test-integration:
   python3 -m unittest tests.test_integration -v
 
-# Regenerate snapshot test fixtures after intentional generator changes.
-# Re-runs the generator over every TOML in workloads.d/ and writes the
-# normalized output to tests/snapshots/. Review with `git diff tests/snapshots/`.
-test-snapshot-update:
-  UPDATE_SNAPSHOTS=1 python3 -m unittest tests.test_snapshots -v
+# Render every shipped bundle's units into DIR, for diffing across a refactor.
+# Nothing is committed: take a baseline before the change, another after, and
+# `diff -ru` them. Every behavioral difference across all bundles shows up in one
+# place, which is what a large generator refactor needs.
+#
+#   just snapshot-baseline /tmp/before     # on the pre-refactor commit
+#   ...refactor...
+#   just snapshot-baseline /tmp/after
+#   diff -ru /tmp/before /tmp/after
+snapshot-baseline dir:
+  #!/usr/bin/env python3
+  import sys, pathlib
+  sys.path[:0] = [".", "lib"]
+  from tests.test_shipped_bundles import generate_all, normalize_baseline
+  dest = pathlib.Path("{{dir}}").resolve()
+  units = dest / "units"
+  units.mkdir(parents=True, exist_ok=True)
+  tomls, sys_d, cfg = generate_all(units)
+  masked = normalize_baseline(units, sys_d, cfg)
+  print(f"{len(tomls)} bundles -> {units} (sysusers: {sys_d}); "
+        f"normalized {masked} files")
 
 # Run the unit suite under coverage.py (dev-only), print a per-file report.
 # COVERAGE_PROCESS_START makes tests that shell out to our scripts route the
