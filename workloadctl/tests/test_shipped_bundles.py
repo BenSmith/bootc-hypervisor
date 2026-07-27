@@ -212,7 +212,11 @@ class TestBaselineIsComparable(unittest.TestCase):
             rendered = self._render(root)
 
         for local, label in ((str(ROOT), "checkout root"), (tmp, "tmp dir")):
-            offenders = sorted(n for n, t in rendered.items() if local in t)
+            # Anchored, so a checkout at e.g. /workloadctl doesn't match the
+            # substring inside /usr/libexec/workloadctl: an occurrence preceded
+            # by a path character is a different path that merely ends the same.
+            ref = re.compile(rf'(?<![\w.\-/]){re.escape(local)}(?![\w.\-])')
+            offenders = sorted(n for n, t in rendered.items() if ref.search(t))
             self.assertEqual(
                 offenders, [],
                 f"{label} {local} survives normalization in: {offenders[:5]}",

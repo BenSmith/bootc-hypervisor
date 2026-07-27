@@ -229,6 +229,52 @@ class TestEnableDisable:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
             target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
 
+    @pytest.mark.vm
+    @pytest.mark.mutating
+    @pytest.mark.destructive
+    @pytest.mark.slow
+    def test_disable_purge_removes_vm_state(self, target, fresh_vm, record_property):
+        """disable --purge takes a VM's substrate state with it, and says so.
+
+        Every VM fixture already tears down through `disable --purge`, but as
+        best-effort with errors ignored (`fixtures.py:_purge_workload`) — so that
+        path runs constantly while asserting nothing, and could fail in every test
+        without turning the suite red. This is the assertion: purge *succeeds*, and
+        the state `VMSubstrate.teardown` owns is actually gone afterwards.
+
+        The socket dir is the VM-specific half (QMP + serial sockets under
+        /run/workload-vm/<name>, meaningless once the guest is gone); the user and
+        home are the shared half, checked here too because a VM purge takes a
+        different route to them than a container purge does.
+        """
+        record_property("cell", "disable_purge/vm")
+        name = fresh_vm
+        sock_dir = f"/run/workload-vm/{name}"
+
+        # Precondition: the sockets exist while the guest runs, otherwise their
+        # absence afterwards would prove nothing.
+        pre = target.run(["test", "-d", sock_dir], sudo=True, check=False)
+        assert pre.rc == 0, (
+            f"{sock_dir} absent while the VM is running — this test cannot tell a "
+            f"successful teardown from a path that was never created"
+        )
+
+        # check=True is the whole point: the fixture teardown passes check=False.
+        target.wl(f"disable --purge {name}", check=True, timeout=180)
+
+        post = target.run(["test", "-d", sock_dir], sudo=True, check=False)
+        assert post.rc != 0, f"VM socket dir survived purge: {sock_dir}"
+        assert not _user_exists(target, name), f"User _wl-{name} survived purge"
+        assert not _home_exists(target, name), (
+            f"Home /var/lib/workloads/{name} survived purge"
+        )
+
+        # The subuid/subgid ranges outlive the user if teardown misses them, and
+        # would then be handed to whoever next claims the UID.
+        for db in ("/etc/subuid", "/etc/subgid"):
+            r = target.run(["grep", "-c", f"^_wl-{name}:", db], sudo=True, check=False)
+            assert r.rc != 0, f"_wl-{name} still has entries in {db} after purge"
+
 
 # ---------------------------------------------------------------------------
 # start / stop

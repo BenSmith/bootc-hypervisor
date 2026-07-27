@@ -12,6 +12,7 @@ import time
 import pytest
 
 from conftest import skip_if_no_kvm
+from fixtures import unit_state
 from target import Target
 
 
@@ -348,6 +349,65 @@ class TestDiagnose:
         record_property("cell", "diagnose/broken")
         r = target.wl(f"diagnose {clitest_broken}", check=False)
         assert "Traceback" not in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+class TestDoctor:
+    """`doctor` is the aggregate an operator runs when something is already
+    wrong, and almost all of its input is host state — this boot's generator
+    journal lines, live unit properties, drift computed by re-running the
+    generator, health. A unit test has to mock away the entire subject, so this
+    rung is the only place its behaviour against a real host is observable.
+    """
+
+    def test_doctor_reports_on_a_live_workload(self, target, clitest_single,
+                                               record_property):
+        """doctor produces a real report and exits on its documented ladder.
+
+        rc 0 means healthy and 1 means problems found, so both are legitimate
+        here and the exit code alone would not show the command did any work.
+        Asserting the main unit appears in the report is what proves it actually
+        inspected the host rather than bailing early.
+        """
+        record_property("cell", "doctor/container")
+        r = target.wl(f"doctor {clitest_single}", check=False, timeout=120)
+        assert "Traceback" not in r.stderr, f"doctor crashed: {r.stderr}"
+        assert r.rc in (0, 1), (
+            f"doctor exited {r.rc}, outside its documented 0-healthy/1-problems "
+            f"ladder: {r.stderr}"
+        )
+        assert f"workload-{clitest_single}.service" in r.stdout, (
+            f"doctor reported no unit rows for {clitest_single}; it did not "
+            f"inspect the host:\n{r.stdout}"
+        )
+
+    def test_doctor_does_not_change_state(self, target, clitest_single,
+                                          record_property):
+        """doctor is read-only — running it must not disturb the workload.
+
+        It reaches deep into live state (drift regenerates units to compare, and
+        health can shell out to the runtime), so "read-only" is a property that
+        could quietly stop holding. An operator runs this *while* debugging a
+        production workload; restarting it under them would be its own outage.
+        """
+        record_property("cell", "doctor/container")
+        before = unit_state(target, f"workload-{clitest_single}.service")
+        target.wl(f"doctor {clitest_single}", check=False, timeout=120)
+        after = unit_state(target, f"workload-{clitest_single}.service")
+        assert before == after, (
+            f"doctor changed {clitest_single} from {before!r} to {after!r}"
+        )
+
+    def test_doctor_broken_toml_fails_cleanly(self, target, clitest_broken,
+                                              record_property):
+        """doctor on an unparseable config reports the fault, not a traceback."""
+        record_property("cell", "doctor/broken")
+        r = target.wl(f"doctor {clitest_broken}", check=False, timeout=60)
+        assert "Traceback" not in r.stderr, f"doctor crashed: {r.stderr}"
+        assert r.rc != 0, "doctor exited 0 on an invalid workload config"
 
 
 # ---------------------------------------------------------------------------
