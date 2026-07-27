@@ -113,6 +113,29 @@ def _expected_units(stem: str, toml_text: str) -> list[tuple[str, str]]:
 
 
 class TestWorkloadSnapshots(unittest.TestCase):
+    def test_no_orphaned_snapshots(self):
+        """Every snapshot stem still has a bundle behind it.
+
+        This is the one thing the corpus can assert with teeth. Content drift only
+        warns and a missing fixture is rewritten on the next run, so an orphan is
+        the single failure mode nothing else notices: the generator is driven from
+        `workloads/*/workload.toml`, so once a bundle is deleted its fixtures can
+        never be regenerated. They freeze, and then read as "unchanged" in the very
+        refactor diff this corpus exists to produce — reassuring, and wrong.
+
+        Stems come from the `.conf` files: one per workload, unlike `.service`
+        which is many-per-workload in pod and bridge mode.
+        """
+        bundles = {p.parent.name for p in WORKLOADS_DIR.glob("*/workload.toml")}
+        stems = {p.stem for p in SNAPSHOTS_DIR.glob("*.conf")}
+        orphans = stems - bundles
+        self.assertEqual(
+            orphans, set(),
+            f"snapshot fixtures with no bundle: {sorted(orphans)}. The bundle was "
+            f"removed but its fixtures were not; delete "
+            f"{', '.join(f'tests/snapshots/{o}*' for o in sorted(orphans))}",
+        )
+
     def test_all_workloads_match_snapshots(self):
         SNAPSHOTS_DIR.mkdir(exist_ok=True)
         update = os.environ.get("UPDATE_SNAPSHOTS") == "1"
