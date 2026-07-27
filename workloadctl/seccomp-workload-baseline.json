@@ -386,7 +386,6 @@
         "setgroups",
         "setgroups32",
         "setitimer",
-        "setns",
         "setpgid",
         "setpriority",
         "setregid",

@@ -66,18 +66,11 @@ class TestSeccompBaseline(unittest.TestCase):
                 f"{sorted(overlap)} appear in both the allow list and a "
                 f"{s['action']} entry")
 
-    # `setns` is in the plain allow list *and* in the deny-unless-CAP_SYS_ADMIN
-    # entry, so the capability gate on it is at best order-dependent. The other
-    # five names in that gated set are correctly absent from the plain allow
-    # list, which is what marks this one as a slip rather than a decision.
-    # Recorded rather than fixed: dropping it from the allow list is a runtime
-    # behaviour change for any workload that calls setns without CAP_SYS_ADMIN.
-    KNOWN_UNGATED_DESPITE_CAP_GATE = {"setns"}
-
     def test_capability_gated_denials_are_not_quietly_undone(self):
-        """A name in the plain allow list overrides — or races — the cap-gated
-        deny that was meant to restrict it. Asserting the exact set means a new
-        one cannot join the existing exception unnoticed."""
+        """A name in the plain allow list wins over the cap-gated deny that was
+        meant to restrict it — measured, not assumed: with `setns` in both, a
+        container under this profile got EBADF from `setns(-1, 0)` rather than
+        the EPERM the gate implies. So an overlap silently disables the gate."""
         allowed = self._ungated_allow_names()
         undone = set()
         for s in self.profile["syscalls"]:
@@ -86,7 +79,21 @@ class TestSeccompBaseline(unittest.TestCase):
             if not (s.get("includes") or s.get("excludes")):
                 continue
             undone |= allowed & set(s["names"])
-        self.assertEqual(undone, self.KNOWN_UNGATED_DESPITE_CAP_GATE)
+        self.assertEqual(undone, set())
+
+    def test_setns_is_only_reachable_with_cap_sys_admin(self):
+        """This profile is deliberately stricter than upstream containers-common
+        here: upstream lists `setns` in both the plain allow list and the
+        deny-unless-CAP_SYS_ADMIN entry, which leaves it reachable by every
+        rootless container. `setns` joins an existing namespace given an fd — the
+        one syscall in that gated set most worth denying — and no shipped
+        workload grants CAP_SYS_ADMIN, so the gate costs us nothing."""
+        self.assertNotIn("setns", self._ungated_allow_names())
+        gated = [s for s in self.profile["syscalls"]
+                 if "setns" in s["names"]]
+        self.assertEqual(len(gated), 2, "expected only the includes/excludes pair")
+        for s in gated:
+            self.assertTrue(s.get("includes") or s.get("excludes"))
 
     def test_futex2_family_is_allowed(self):
         """Denying futex2 while allowing `futex` gains nothing — the same
