@@ -263,13 +263,17 @@ class VMSubstrate(Substrate):
     def gating_units(self) -> list[str]:
         return workload_service_units(self.config, roles={"setup", "build"})
 
+    def address(self) -> str | None:
+        """The guest's IP on the VM bridge, or None if it isn't resolvable yet."""
+        return _vm_guest_ip(self.config.name, self.config.vm_bridge)
+
     def exec(
         self,
         argv: list[str],
         *,
         container: str | None = None,
     ) -> int:
-        guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+        guest_ip = self.address()
         if not guest_ip:
             error(
                 f"Error: could not determine IP for VM '{self.config.name}'",
@@ -293,7 +297,7 @@ class VMSubstrate(Substrate):
         # an explicit recovery path when --console is passed or SSH can't
         # reach the VM (no lease, no network, sshd down).
         if not console:
-            guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+            guest_ip = self.address()
             if guest_ip:
                 ssh_cmd = _vm_ssh_command(self.config, guest_ip, connect_timeout=5)
                 result = subprocess.run(ssh_cmd)
@@ -345,7 +349,7 @@ class VMSubstrate(Substrate):
             if result.returncode != 0:
                 raise LifecycleError(result.returncode)
         elif action == "reboot":
-            guest_ip = _vm_guest_ip(self.config.name, self.config.vm_bridge)
+            guest_ip = self.address()
             if not guest_ip:
                 error(
                     f"Error: could not determine IP for VM '{self.config.name}'",

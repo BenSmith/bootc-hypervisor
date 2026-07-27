@@ -33,7 +33,7 @@ Required primitives (always present, ``@abstractmethod``):
     rollback_targets, rollback_to, rollback, control
 
 Optional primitives (base-class default, override to support):
-    resource_usage, logs, endpoints, reprovision
+    resource_usage, logs, endpoints, address, reprovision
 """
 
 from __future__ import annotations
@@ -201,7 +201,7 @@ class Substrate(ABC):
         lifecycle, rollback_targets, rollback_to, rollback, control
 
     Optional primitives (base-class default; override to support):
-        resource_usage, logs, endpoints, reprovision
+        resource_usage, logs, endpoints, address, reprovision
     """
 
     def __init__(self, config, manager):
@@ -399,6 +399,22 @@ class Substrate(ABC):
         raise NotApplicable(
             f"endpoints: not applicable for {substrate_kind} "
             f"(no endpoints primitive)"
+        )
+
+    def address(self) -> str | None:
+        """Return the workload's own address on the host network, if it has one.
+
+        Returns None when the substrate does have addresses but this workload's
+        is not resolvable right now (not booted, no DHCP lease yet) — a runtime
+        condition the caller reports, not an error.
+
+        Raises NotApplicable where the substrate has no such notion at all: a
+        rootless container shares the host's network stack, so there is no
+        address to return and never will be.
+        """
+        raise NotApplicable(
+            f"address: not applicable for {type(self).__name__} "
+            f"(no address primitive)"
         )
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):

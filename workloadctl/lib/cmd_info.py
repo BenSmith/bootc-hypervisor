@@ -145,7 +145,6 @@ def _print_control_files(config, json_mode=False):
 
 def cmd_info(args, manager: WorkloadManager):
     """Show detailed workload information"""
-    from substrate_vm import _vm_guest_ip
     import grp as _grp
     config = WorkloadConfig(args.workload)
 
@@ -171,8 +170,10 @@ def cmd_info(args, manager: WorkloadManager):
             if p.suffix[5:].isdigit()
         ) if home_dir.exists() else []
 
-        # Guest IP from DHCP leases
-        guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+        # Guest IP from DHCP leases. None here is "not resolvable yet", which
+        # this dump reports as such; the NotApplicable case can't arise because
+        # the branch is already gated on is_vm.
+        guest_ip = get_substrate(config, manager).address()
 
         # QMP status
         qmp_status = _vm_qmp_status(config.name)
