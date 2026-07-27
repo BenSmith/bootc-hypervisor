@@ -170,10 +170,12 @@ def cmd_info(args, manager: WorkloadManager):
             if p.suffix[5:].isdigit()
         ) if home_dir.exists() else []
 
-        # Guest IP from DHCP leases. None here is "not resolvable yet", which
-        # this dump reports as such; the NotApplicable case can't arise because
-        # the branch is already gated on is_vm.
-        guest_ip = get_substrate(config, manager).address()
+        # Guest IP from DHCP leases. An empty list is "not resolvable yet",
+        # which this dump reports as such; NotApplicable can't arise because the
+        # branch is already gated on is_vm. The `guest_ip` JSON key is a scalar
+        # for compatibility, so take the first of however many the port returns.
+        addrs = get_substrate(config, manager).addresses()
+        guest_ip = addrs[0] if addrs else None
 
         # QMP status
         qmp_status = _vm_qmp_status(config.name)

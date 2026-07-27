@@ -18,22 +18,38 @@ Usage pattern:
 
 Capability matrix
 -----------------
-Optional primitives have a base-class default. ``resource_usage`` and
-``endpoints`` default to raising ``NotApplicable`` with a hand-written
-reason; a concrete substrate that supports one overrides the method
-directly. ``logs`` defaults to running the given journalctl argv (both
-substrates' service journals land on the host journal), so it's optional
-in the sense that a substrate *may* override it, not that it's normally
-unsupported. ``reprovision`` is always overridden by both concrete
+Optional primitives have a base-class default. ``resource_usage``,
+``endpoints`` and ``addresses`` default to raising ``NotApplicable`` with
+a hand-written reason; a concrete substrate that supports one overrides
+the method directly. ``logs`` defaults to running the given journalctl argv
+(both substrates' service journals land on the host journal), so it's
+optional in the sense that a substrate *may* override it, not that it's
+normally unsupported. ``reprovision`` is always overridden by both concrete
 substrates (each has its own not-applicable conditions), so the base
 implementation exists only as a documented contract.
+
+Two different questions, two different channels
+-----------------------------------------------
+"This substrate cannot answer" and "it can, and right now there is nothing"
+are separate answers, and every primitive splits them the same way:
+
+    capability answer      -> raise NotApplicable
+    supported, none today  -> return the type's empty value, in band
+
+So ``endpoints`` returns ``[]`` when no ports are published, ``addresses``
+returns ``[]`` when the guest has no lease yet, and ``reprovision`` returns
+``None`` when the workload is already up to date — none of which is an error
+condition, and none of which a caller should have to catch. Prefer an empty
+container to a ``None`` sentinel when adding a primitive: it keeps the
+"nothing" case the same shape as the "something" case, so callers iterate
+instead of branching.
 
 Required primitives (always present, ``@abstractmethod``):
     liveness, gating_units, capture, exec, open_shell, lifecycle,
     rollback_targets, rollback_to, rollback, control
 
 Optional primitives (base-class default, override to support):
-    resource_usage, logs, endpoints, address, reprovision
+    resource_usage, logs, endpoints, addresses, reprovision
 """
 
 from __future__ import annotations
@@ -201,7 +217,7 @@ class Substrate(ABC):
         lifecycle, rollback_targets, rollback_to, rollback, control
 
     Optional primitives (base-class default; override to support):
-        resource_usage, logs, endpoints, address, reprovision
+        resource_usage, logs, endpoints, addresses, reprovision
     """
 
     def __init__(self, config, manager):
@@ -401,20 +417,22 @@ class Substrate(ABC):
             f"(no endpoints primitive)"
         )
 
-    def address(self) -> str | None:
-        """Return the workload's own address on the host network, if it has one.
+    def addresses(self) -> list[str]:
+        """Return the addresses this workload is reachable at on the host network.
 
-        Returns None when the substrate does have addresses but this workload's
-        is not resolvable right now (not booted, no DHCP lease yet) — a runtime
-        condition the caller reports, not an error.
+        Empty when the substrate does have addresses but none is resolvable
+        right now (not booted, no DHCP lease yet) — a runtime condition the
+        caller reports, not an error. A list because a guest can legitimately
+        have several (IPv4 + IPv6, a second NIC); callers that need exactly one
+        take the first.
 
         Raises NotApplicable where the substrate has no such notion at all: a
         rootless container shares the host's network stack, so there is no
-        address to return and never will be.
+        address of its own to return and never will be.
         """
         raise NotApplicable(
-            f"address: not applicable for {type(self).__name__} "
-            f"(no address primitive)"
+            f"addresses: not applicable for {type(self).__name__} "
+            f"(no addresses primitive)"
         )
 
     def reprovision(self, *, force: bool = False, recreate: bool = False):

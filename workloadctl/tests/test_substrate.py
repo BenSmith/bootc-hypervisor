@@ -1253,26 +1253,26 @@ class TestCapabilityMatrix(unittest.TestCase):
             substrate.endpoints()
         self.assertIn('endpoints', cm.exception.reason)
 
-    # VMSubstrate: address present → the guest IP, and None when there is no
-    # lease yet. None is a runtime condition on a *supported* primitive, so it
+    # VMSubstrate: addresses present → the guest IP, and empty when there is no
+    # lease yet. Empty is a runtime condition on a *supported* primitive, so it
     # must not be conflated with the NotApplicable below.
-    def test_vm_address_returns_guest_ip(self):
+    def test_vm_addresses_returns_guest_ip(self):
         substrate = VMSubstrate(self._vm_config(), None)
         with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'):
-            self.assertEqual(substrate.address(), '10.0.0.5')
+            self.assertEqual(substrate.addresses(), ['10.0.0.5'])
 
-    def test_vm_address_returns_none_when_unresolvable(self):
+    def test_vm_addresses_empty_when_unresolvable(self):
         substrate = VMSubstrate(self._vm_config(), None)
         with patch.object(_vm_mod, '_vm_guest_ip', return_value=None):
-            self.assertIsNone(substrate.address())
+            self.assertEqual(substrate.addresses(), [])
 
-    # ContainerSubstrate: address absent → NotApplicable (a rootless container
+    # ContainerSubstrate: addresses absent → NotApplicable (a rootless container
     # shares the host network stack; there is no address to grow into).
-    def test_container_address_raises_not_applicable(self):
+    def test_container_addresses_raises_not_applicable(self):
         substrate = ContainerSubstrate(self._container_config(), MagicMock())
         with self.assertRaises(NotApplicable) as cm:
-            substrate.address()
-        self.assertIn('address', cm.exception.reason)
+            substrate.addresses()
+        self.assertIn('addresses', cm.exception.reason)
 
     # ContainerSubstrate: resource_usage present → no NotApplicable
     def test_container_resource_usage_does_not_raise(self):

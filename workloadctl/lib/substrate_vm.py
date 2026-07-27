@@ -5,9 +5,9 @@ Implements the Substrate port for workloads with a ``[vm]`` section: raw
 QEMU/KVM on the shared ``_workload-br`` bridge, reached over SSH (guest
 interior) and QMP (QEMU monitor).
 
-Optional primitives implemented here: resource_usage, reprovision. ``endpoints``
-uses the base-class NotApplicable default, and ``logs`` uses the base default
-(the VM's QEMU service journal is on the host journal).
+Optional primitives implemented here: resource_usage, reprovision, addresses.
+``endpoints`` uses the base-class NotApplicable default, and ``logs`` uses the
+base default (the VM's QEMU service journal is on the host journal).
 """
 
 from __future__ import annotations
@@ -147,9 +147,9 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
 class VMSubstrate(Substrate):
     """Substrate for VM workloads ([vm] section in TOML).
 
-    Overrides reprovision and resource_usage (see below); endpoints uses the
-    base-class NotApplicable default, and logs uses the base default (the VM's
-    QEMU service journal is on the host journal).
+    Overrides reprovision, resource_usage and addresses (see below); endpoints
+    uses the base-class NotApplicable default, and logs uses the base default
+    (the VM's QEMU service journal is on the host journal).
     """
 
     # Wall-clock gap between the two vCPU-time samples cpu_percent is derived
@@ -263,9 +263,14 @@ class VMSubstrate(Substrate):
     def gating_units(self) -> list[str]:
         return workload_service_units(self.config, roles={"setup", "build"})
 
-    def address(self) -> str | None:
-        """The guest's IP on the VM bridge, or None if it isn't resolvable yet."""
+    def _guest_ip(self) -> str | None:
+        """The single address the SSH paths need; None if not resolvable yet."""
         return _vm_guest_ip(self.config.name, self.config.vm_bridge)
+
+    def addresses(self) -> list[str]:
+        """The guest's addresses on the VM bridge; empty until it has a lease."""
+        ip = self._guest_ip()
+        return [ip] if ip else []
 
     def exec(
         self,
@@ -273,7 +278,7 @@ class VMSubstrate(Substrate):
         *,
         container: str | None = None,
     ) -> int:
-        guest_ip = self.address()
+        guest_ip = self._guest_ip()
         if not guest_ip:
             error(
                 f"Error: could not determine IP for VM '{self.config.name}'",
@@ -297,7 +302,7 @@ class VMSubstrate(Substrate):
         # an explicit recovery path when --console is passed or SSH can't
         # reach the VM (no lease, no network, sshd down).
         if not console:
-            guest_ip = self.address()
+            guest_ip = self._guest_ip()
             if guest_ip:
                 ssh_cmd = _vm_ssh_command(self.config, guest_ip, connect_timeout=5)
                 result = subprocess.run(ssh_cmd)
@@ -349,7 +354,7 @@ class VMSubstrate(Substrate):
             if result.returncode != 0:
                 raise LifecycleError(result.returncode)
         elif action == "reboot":
-            guest_ip = self.address()
+            guest_ip = self._guest_ip()
             if not guest_ip:
                 error(
                     f"Error: could not determine IP for VM '{self.config.name}'",
