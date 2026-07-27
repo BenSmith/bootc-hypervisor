@@ -4,7 +4,8 @@ substrate_container — the container substrate.
 Implements the Substrate port for single / pod / bridge container workloads,
 backed by one rootless podman instance per workload user.
 
-Optional primitives implemented here: resource_usage, endpoints, reprovision.
+Optional primitives implemented here: resource_usage, endpoints, reprovision,
+teardown, teardown_plan.
 ``logs`` uses the base default (the service journal is the host journal).
 """
 
@@ -31,8 +32,13 @@ from substrate import (
     rollback_tag,
     service_active,
 )
-from workload_lib import workload_service_units
-from workloadctl_core import resolve_container_target
+from workload_lib import (
+    RUN_SYSTEMD_SYSTEM,
+    remove_subid_entries,
+    subid_files_with_entries,
+    workload_service_units,
+)
+from workloadctl_core import WorkloadUserNotFound, resolve_container_target
 
 
 def _interactive_exec_flags() -> list[str]:
@@ -564,6 +570,43 @@ class ContainerSubstrate(Substrate):
         """Run ``podman <argv>`` as the workload user via the rootless wrapper."""
         result = self.manager.run_podman(self.config, *argv)
         return result.returncode
+
+    def teardown(self, *, purge: bool) -> list[str]:
+        """Remove what a container workload owns beyond its generated files.
+
+        Two things: the ``user@<uid>.service.d`` drop-in directory, which pins the
+        user manager into workloads.slice and is left empty once the fragment is
+        unlinked, and — on purge only — the subuid/subgid ranges, which outlive the
+        user and would otherwise be handed to whoever next claims the UID.
+        """
+        failures: list[str] = []
+
+        # The UID lookup raises once the user is gone; nothing to prune then.
+        try:
+            (RUN_SYSTEMD_SYSTEM / f"user@{self.config.uid}.service.d").rmdir()
+        except (OSError, WorkloadUserNotFound):
+            pass
+
+        if purge:
+            try:
+                info("  Removing subuid/subgid entries...")
+                remove_subid_entries(self.config.username)
+            except Exception as e:
+                failures.append(f"remove subuid/subgid entries: {e}")
+
+        return failures
+
+    def teardown_plan(self, *, purge: bool) -> list[str]:
+        """Describe teardown. The drop-in prune is deliberately not listed: it is
+        a consequence of removing the generated files the plan already names, not
+        a separate act on operator-visible state."""
+        if not purge:
+            return []
+        subid = subid_files_with_entries(self.config.username)
+        if not subid:
+            return []
+        return ["remove subuid/subgid entries from: "
+                + ", ".join(str(p) for p in subid)]
 
     def _has_any_rollback_tag(self) -> bool:
         """Return True if any rollback tag exists (even if already applied)."""

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for the shared VM bridge teardown in cmd_disable.
+"""Unit tests for the shared VM bridge teardown.
 
-Covers cmd_disable._stop_bridge_if_last_vm: the helper that stops
-workload-bridge.service when the disabled workload was the final
-managed-bridge VM workload.
+Covers VMSubstrate.teardown: stopping workload-bridge.service when the disabled
+workload was the final managed-bridge VM. The bridge is shared infrastructure, so
+"am I the last one out" is the whole of the logic worth testing — the guards that
+keep a container, a VM on its own bridge, or a miscounted enabled-list from
+tearing down a bridge something else still needs.
 """
 
 import tempfile
@@ -13,7 +15,10 @@ from unittest.mock import MagicMock, call, patch
 
 
 import workload_lib
-import cmd_disable
+import substrate_container
+import substrate_vm
+from substrate_container import ContainerSubstrate
+from substrate_vm import VMSubstrate
 from workloadctl_core import WorkloadConfig, VM_BRIDGE_NAME
 
 # Minimal TOML fixtures -------------------------------------------------------
@@ -90,16 +95,20 @@ def _mock_manager(configs: list[WorkloadConfig]) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 class TestStopBridgeIfLastVm(unittest.TestCase):
-    """Direct tests of the _stop_bridge_if_last_vm helper."""
+    """Direct tests of the bridge half of VMSubstrate.teardown.
+
+    purge=False throughout: the bridge comes down at either depth, so the shallow
+    one isolates it from the socket-dir removal that purge adds.
+    """
 
     def _run(self, config_name, manager, toml_text):
-        """Load a WorkloadConfig for config_name from a temp dir and call the
-        helper with the supplied manager mock."""
+        """Load a WorkloadConfig for config_name from a temp dir and tear down its
+        VM substrate with the supplied manager mock."""
         tomls = {config_name: toml_text.format(name=config_name)}
         with _WlDir(tomls):
             config = WorkloadConfig(config_name)
-            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
-                cmd_disable._stop_bridge_if_last_vm(config, manager)
+            with patch.object(substrate_vm.subprocess, "run", MagicMock()) as run:
+                VMSubstrate(config, manager).teardown(purge=False)
             return run
 
     # 1. Last managed-bridge VM → bridge service is stopped -----------------
@@ -130,8 +139,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
             mgr = _mock_manager([other_config])
 
             config = WorkloadConfig("myvm")
-            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
-                cmd_disable._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(substrate_vm.subprocess, "run", MagicMock()) as run:
+                VMSubstrate(config, mgr).teardown(purge=False)
 
         # systemctl stop workload-bridge.service must NOT appear
         stop_calls = [
@@ -144,13 +153,17 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
     # 3. Disabling a container (non-VM) workload → no bridge check ----------
 
     def test_container_workload_skips_bridge_check(self):
-        """Non-VM workload: helper returns immediately, get_all_configs not called."""
+        """A container substrate has no bridge to reason about: it never consults
+        the workload list and never stops the service. Structural now that the two
+        teardowns are separate classes, but the bridge is shared state, so it is
+        worth asserting the container path cannot reach it."""
         mgr = _mock_manager([])
         tomls = {"mywl": CONTAINER_TOML.format(name="mywl")}
         with _WlDir(tomls):
             config = WorkloadConfig("mywl")
-            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
-                cmd_disable._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(substrate_container.subprocess, "run",
+                              MagicMock()) as run:
+                ContainerSubstrate(config, mgr).teardown(purge=False)
 
         mgr.get_all_configs.assert_not_called()
         run.assert_not_called()
@@ -164,8 +177,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
         with _WlDir(tomls):
             config = WorkloadConfig("customvm")
             self.assertNotEqual(config.vm_bridge, VM_BRIDGE_NAME)
-            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
-                cmd_disable._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(substrate_vm.subprocess, "run", MagicMock()) as run:
+                VMSubstrate(config, mgr).teardown(purge=False)
 
         mgr.get_all_configs.assert_not_called()
         run.assert_not_called()
@@ -180,8 +193,8 @@ class TestStopBridgeIfLastVm(unittest.TestCase):
             # Pretend get_all_configs returned the *same* workload (edge case)
             mgr = _mock_manager([config])
 
-            with patch.object(cmd_disable.subprocess, "run", MagicMock()) as run:
-                cmd_disable._stop_bridge_if_last_vm(config, mgr)
+            with patch.object(substrate_vm.subprocess, "run", MagicMock()) as run:
+                VMSubstrate(config, mgr).teardown(purge=False)
 
         # Should still stop the bridge (self-name is excluded by guard)
         expected = call(

@@ -1274,6 +1274,83 @@ class TestCapabilityMatrix(unittest.TestCase):
             substrate.addresses()
         self.assertIn('addresses', cm.exception.reason)
 
+    # --- teardown / teardown_plan ------------------------------------------
+    # Both substrates implement the pair, so what matters is that each removes
+    # only its own state, that purge is what gates the destructive half, and that
+    # the plan describes exactly what teardown would do. A plan that drifts from
+    # the act is worse than no plan: `disable --dry-run` is what an operator reads
+    # before agreeing to destroy data.
+
+    def test_container_teardown_removes_subid_ranges_only_on_purge(self):
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with patch.object(_container_mod, 'remove_subid_entries') as rm:
+            self.assertEqual(substrate.teardown(purge=False), [])
+            rm.assert_not_called()
+            self.assertEqual(substrate.teardown(purge=True), [])
+            rm.assert_called_once_with(substrate.config.username)
+
+    def test_container_teardown_reports_subid_failure_without_raising(self):
+        """Teardown collects instead of raising — one stuck resource must not
+        strand the rest of a best-effort disable."""
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with patch.object(_container_mod, 'remove_subid_entries',
+                          side_effect=OSError('/etc/subuid is read-only')):
+            failures = substrate.teardown(purge=True)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('subuid', failures[0])
+        self.assertIn('read-only', failures[0])
+
+    def test_container_teardown_plan_mirrors_what_purge_removes(self):
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        subid = [Path('/etc/subuid'), Path('/etc/subgid')]
+        with patch.object(_container_mod, 'subid_files_with_entries',
+                          return_value=subid):
+            self.assertEqual(substrate.teardown_plan(purge=False), [])
+            plan = substrate.teardown_plan(purge=True)
+        self.assertEqual(len(plan), 1)
+        self.assertIn('/etc/subuid', plan[0])
+        self.assertIn('/etc/subgid', plan[0])
+
+    def test_container_teardown_plan_omits_absent_subid_entries(self):
+        """Nothing there → nothing promised. The plan is only trustworthy if what
+        it omits is genuinely untouched."""
+        substrate = ContainerSubstrate(self._container_config(), MagicMock())
+        with patch.object(_container_mod, 'subid_files_with_entries',
+                          return_value=[]):
+            self.assertEqual(substrate.teardown_plan(purge=True), [])
+
+    def test_vm_teardown_removes_socket_dir_only_on_purge(self):
+        config = self._vm_config()
+        manager = MagicMock()
+        manager.get_all_configs.return_value = []
+        substrate = VMSubstrate(config, manager)
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_dir = Path(tmp) / config.name
+            sock_dir.mkdir()
+            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+                 patch.object(_vm_mod.subprocess, 'run', MagicMock()):
+                substrate.teardown(purge=False)
+                self.assertTrue(sock_dir.exists(),
+                                'a non-purge disable keeps the socket dir')
+                substrate.teardown(purge=True)
+                self.assertFalse(sock_dir.exists())
+
+    def test_vm_teardown_plan_mirrors_what_purge_removes(self):
+        config = self._vm_config()
+        manager = MagicMock()
+        manager.get_all_configs.return_value = []
+        substrate = VMSubstrate(config, manager)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / config.name).mkdir()
+            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)):
+                shallow = substrate.teardown_plan(purge=False)
+                deep = substrate.teardown_plan(purge=True)
+        # The bridge line appears at both depths (it comes down either way); the
+        # socket dir only on purge.
+        self.assertTrue(any('bridge' in line for line in shallow))
+        self.assertFalse(any('socket dir' in line for line in shallow))
+        self.assertTrue(any('socket dir' in line for line in deep))
+
     # ContainerSubstrate: resource_usage present → no NotApplicable
     def test_container_resource_usage_does_not_raise(self):
         manager = MagicMock()

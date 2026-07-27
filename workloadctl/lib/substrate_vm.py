@@ -5,7 +5,8 @@ Implements the Substrate port for workloads with a ``[vm]`` section: raw
 QEMU/KVM on the shared ``_workload-br`` bridge, reached over SSH (guest
 interior) and QMP (QEMU monitor).
 
-Optional primitives implemented here: resource_usage, reprovision, addresses.
+Optional primitives implemented here: resource_usage, reprovision, addresses,
+teardown, teardown_plan.
 ``endpoints`` uses the base-class NotApplicable default, and ``logs`` uses the
 base default (the VM's QEMU service journal is on the host journal).
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -591,3 +593,59 @@ class VMSubstrate(Substrate):
         # Apply the most recent (highest generation number) snapshot.
         latest = targets[-1]
         self.rollback_to(latest)
+
+
+    def _last_managed_bridge_vm(self) -> bool:
+        """True if this workload is the last enabled VM on the shared bridge.
+
+        The bridge is shared infrastructure, so it comes down only when nothing
+        else needs it. A VM on its own bridge never owns the shared one.
+        """
+        if self.config.vm_bridge != VM_BRIDGE_NAME:
+            return False
+        return not any(
+            c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != self.config.name
+            for c in self.manager.get_all_configs(enabled_only=True)
+        )
+
+    def teardown(self, *, purge: bool) -> list[str]:
+        """Remove what a VM workload owns beyond its generated files.
+
+        On purge, the runtime socket dir (QMP + serial sockets, stale once the
+        guest is stopped). At both depths, the shared bridge when this was the
+        last VM using it — so the interface, dnsmasq and the nftables NAT table
+        go away without waiting for a reboot.
+        """
+        failures: list[str] = []
+
+        if purge:
+            try:
+                sock_dir = VM_SOCKET_DIR / self.config.name
+                if sock_dir.exists():
+                    shutil.rmtree(sock_dir, ignore_errors=True)
+            except Exception as e:
+                failures.append(f"remove VM socket dir: {e}")
+
+        try:
+            if self._last_managed_bridge_vm():
+                subprocess.run(
+                    ["systemctl", "stop", "workload-bridge.service"],
+                    check=False,
+                    capture_output=True,
+                )
+                info("  Stopped shared VM bridge (no managed-bridge VMs remain)")
+        except Exception as e:
+            failures.append(f"stop shared VM bridge: {e}")
+
+        return failures
+
+    def teardown_plan(self, *, purge: bool) -> list[str]:
+        """Describe teardown, reporting only what is actually present."""
+        lines = []
+        if purge:
+            sock_dir = VM_SOCKET_DIR / self.config.name
+            if sock_dir.exists():
+                lines.append(f"remove VM socket dir: {sock_dir}")
+        if self._last_managed_bridge_vm():
+            lines.append("stop shared VM bridge (last bridged VM)")
+        return lines

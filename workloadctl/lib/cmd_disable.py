@@ -17,18 +17,14 @@ import time
 
 from cli_log import emit_result, error, info, json_enabled
 from workload_lib import (
-    RUN_SYSTEMD_SYSTEM,
-    remove_subid_entries,
-    subid_files_with_entries,
     workload_enabled_marker,
     workload_root_dir,
     workload_run_files,
 )
-from vm import VM_BRIDGE_NAME, VM_SOCKET_DIR
+from substrate import get_substrate
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
-    WorkloadUserNotFound,
     format_size,
     require_root,
 )
@@ -74,33 +70,6 @@ def _stop_user_manager(username: str) -> bool:
     subprocess.run(["loginctl", "disable-linger", str(uid)],
                    check=False, capture_output=True)
     return True
-
-def _stop_bridge_if_last_vm(config: WorkloadConfig, manager: WorkloadManager):
-    """Stop the shared VM bridge service when no managed-bridge VMs remain enabled.
-
-    Called at the end of cmd_disable (purge and non-purge alike).  If the
-    disabled workload was not itself a managed-bridge VM, returns immediately
-    without consulting the workload list.  When it *was* the last such workload,
-    stops workload-bridge.service so the _workload-br interface, dnsmasq, and
-    nftables NAT table are torn down without waiting for a reboot.
-    """
-    if not (config.is_vm and config.vm_bridge == VM_BRIDGE_NAME):
-        return
-
-    still_needed = any(
-        c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != config.name
-        for c in manager.get_all_configs(enabled_only=True)
-    )
-    if still_needed:
-        return
-
-    subprocess.run(
-        ["systemctl", "stop", "workload-bridge.service"],
-        check=False,
-        capture_output=True,
-    )
-    info("  Stopped shared VM bridge (no managed-bridge VMs remain)")
-
 
 def _dir_size(path: Path) -> str:
     """Human size of a directory tree, or 'unknown' if it can't be measured."""
@@ -159,16 +128,6 @@ def _disable_plan(config: WorkloadConfig, manager: WorkloadManager, purge: bool)
             lines.append("remove runtime env/secret files:")
             lines.extend(f"    {p}" for p in env_files)
 
-        if config.is_vm:
-            sock_dir = VM_SOCKET_DIR / config.name
-            if sock_dir.exists():
-                lines.append(f"remove VM socket dir: {sock_dir}")
-        else:
-            subid = subid_files_with_entries(config.username)
-            if subid:
-                lines.append("remove subuid/subgid entries from: "
-                             + ", ".join(str(p) for p in subid))
-
         if user_present:
             lines.append(f"kill user sessions and delete user: {config.username}")
         else:
@@ -182,13 +141,7 @@ def _disable_plan(config: WorkloadConfig, manager: WorkloadManager, purge: bool)
             lines.append(f"stop lingering user manager for {config.username}")
         lines.append(f"keep user, home and subuid ranges for {config.username}")
 
-    if config.is_vm and config.vm_bridge == VM_BRIDGE_NAME:
-        still_needed = any(
-            c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != config.name
-            for c in manager.get_all_configs(enabled_only=True)
-        )
-        if not still_needed:
-            lines.append("stop shared VM bridge (last bridged VM)")
+    lines.extend(get_substrate(config, manager).teardown_plan(purge=purge))
 
     return lines
 
@@ -199,6 +152,7 @@ def cmd_disable(args, manager: WorkloadManager):
 
     config = WorkloadConfig(args.workload)
     purge = args.purge
+    substrate = get_substrate(config, manager)
 
     if getattr(args, "dry_run", False):
         plan = _disable_plan(config, manager, purge)
@@ -298,14 +252,16 @@ def cmd_disable(args, manager: WorkloadManager):
                 rf.path.unlink(missing_ok=True)
             except OSError as e:
                 failures.append(f"remove {rf.path}: {e}")
-        if not config.is_vm:
-            # Prune the now-empty user@<uid>.service.d drop-in dir. The UID lookup
-            # raises once the user is gone; nothing to prune in that case.
-            try:
-                (RUN_SYSTEMD_SYSTEM / f"user@{config.uid}.service.d").rmdir()
-            except (OSError, WorkloadUserNotFound):
-                pass
     attempt("remove /run unit files", _remove_run_files)
+
+    # Substrate-specific state: the container drop-in dir / subuid ranges, the VM
+    # socket dir / shared bridge. Runs before daemon-reload so systemd sees the
+    # drop-in dir gone in the same pass, and before the user teardown below so the
+    # subuid ranges are released while the user still exists. Failures join the
+    # same best-effort list; teardown() collects rather than raises, and attempt()
+    # is belt-and-braces for an unexpected one.
+    attempt("substrate teardown",
+            lambda: failures.extend(substrate.teardown(purge=purge)))
     attempt("reload systemd",
             lambda: subprocess.run(["systemctl", "daemon-reload"], check=False))
 
@@ -339,21 +295,6 @@ def cmd_disable(args, manager: WorkloadManager):
             _remove_runtime_env_files(config)
         except Exception as e:
             failures.append(f"remove runtime env files: {e}")
-
-        if config.is_vm:
-            try:
-                # Clean up the runtime socket directory
-                vm_sock_dir = VM_SOCKET_DIR / config.name
-                if vm_sock_dir.exists():
-                    shutil.rmtree(vm_sock_dir, ignore_errors=True)
-            except Exception as e:
-                failures.append(f"remove VM socket dir: {e}")
-        else:
-            try:
-                info("  Removing subuid/subgid entries...")
-                remove_subid_entries(config.username)
-            except Exception as e:
-                failures.append(f"remove subuid/subgid entries: {e}")
 
         if uid is not None:
             try:
@@ -401,8 +342,6 @@ def cmd_disable(args, manager: WorkloadManager):
                 info(f"  Stopped lingering user manager for {config.username}")
         attempt("stop lingering user manager", _stop_lingering_user_manager)
         success_msg = f"✓ Workload '{args.workload}' disabled and stopped (use --purge to fully remove)"
-
-    attempt("stop shared VM bridge", lambda: _stop_bridge_if_last_vm(config, manager))
 
     result = "purged" if purge else "disabled"
 

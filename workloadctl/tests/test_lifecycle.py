@@ -29,6 +29,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
+import substrate_container
 import workload_lib
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
@@ -716,10 +717,14 @@ class TestSubidLockSharedConstant(unittest.TestCase):
     remove_subid_entries(), which takes the one shared subid_lock() itself —
     a caller that hand-rolls read-filter-write reintroduces the race even when
     it remembers to lock, because a read and a write that each take the lock
-    separately is not an atomic read-modify-write."""
+    separately is not an atomic read-modify-write.
+
+    `disable` reaches it through ContainerSubstrate.teardown (subuid ranges are
+    container-substrate state), which is why the port implementation is the
+    participant checked here rather than cmd_disable."""
 
     def test_mutators_share_the_lock_owning_helper(self):
-        self.assertIs(cmd_disable.remove_subid_entries,
+        self.assertIs(substrate_container.remove_subid_entries,
                       workload_lib.remove_subid_entries)
         self.assertIs(cmd_cleanup.remove_subid_entries,
                       workload_lib.remove_subid_entries)

@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import workload_lib
 import cmd_disable
+import substrate_container
+from substrate_vm import VMSubstrate
 import workloadctl_core
 from workloadctl_core import WorkloadConfig
 
@@ -248,7 +250,7 @@ class TestPurgeBestEffort(unittest.TestCase):
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
                  patch.object(cmd_disable, 'workload_run_files', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, '_remove_runtime_env_files', MagicMock()), \
-                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
                  patch.object(cmd_disable.shutil, 'rmtree', fake_rmtree), \
@@ -295,7 +297,7 @@ class TestPurgeBestEffort(unittest.TestCase):
                               MagicMock(return_value=[
                                   SimpleNamespace(kind='unit', path=stranded)])), \
                  patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())):
                 try:
@@ -333,13 +335,13 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
 
             args = SimpleNamespace(workload='pp', purge=False)
             with patch.object(cmd_disable, 'require_root', lambda: None), \
-                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
                  patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
                  patch.object(type(config), 'uid', property(lambda self: 10005)):
@@ -379,13 +381,13 @@ class TestDisableRemovesRunFiles(unittest.TestCase):
             args = SimpleNamespace(workload='pp', purge=False)
             exit_code = None
             with patch.object(cmd_disable, 'require_root', lambda: None), \
-                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', MagicMock()), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
                  patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())), \
                  patch.object(type(config), 'uid', property(raise_absent)):
@@ -416,13 +418,13 @@ class TestDisableStopsWholeTopology(unittest.TestCase):
             args = SimpleNamespace(workload=name, purge=False)
             fake_run = MagicMock()
             with patch.object(cmd_disable, 'require_root', lambda: None), \
-                 patch.object(cmd_disable, 'RUN_SYSTEMD_SYSTEM', run), \
+                 patch.object(substrate_container, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(workload_lib, 'RUN_SYSTEMD_SYSTEM', run), \
                  patch.object(cmd_disable.subprocess, 'run', fake_run), \
                  patch.object(cmd_disable, 'run_host_setup', MagicMock()), \
                  patch.object(cmd_disable, 'apply_selinux_policy', MagicMock()), \
                  patch.object(cmd_disable, '_stop_user_manager', MagicMock(return_value=False)), \
-                 patch.object(cmd_disable, '_stop_bridge_if_last_vm', MagicMock()), \
+                 patch.object(VMSubstrate, 'teardown', MagicMock(return_value=[])), \
                  patch.object(cmd_disable, 'workload_enabled_marker',
                               MagicMock(return_value=MagicMock())):
                 cmd_disable.cmd_disable(args, MagicMock())

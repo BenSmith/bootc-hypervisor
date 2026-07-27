@@ -26,7 +26,9 @@ the method directly. ``logs`` defaults to running the given journalctl argv
 optional in the sense that a substrate *may* override it, not that it's
 normally unsupported. ``reprovision`` is always overridden by both concrete
 substrates (each has its own not-applicable conditions), so the base
-implementation exists only as a documented contract.
+implementation exists only as a documented contract. ``teardown`` and
+``teardown_plan`` default to ``[]``: a substrate with no state of its own to
+remove is a coherent substrate, not one missing a capability.
 
 Two different questions, two different channels
 -----------------------------------------------
@@ -49,7 +51,8 @@ Required primitives (always present, ``@abstractmethod``):
     rollback_targets, rollback_to, rollback, control
 
 Optional primitives (base-class default, override to support):
-    resource_usage, logs, endpoints, addresses, reprovision
+    resource_usage, logs, endpoints, addresses, reprovision, teardown,
+    teardown_plan
 """
 
 from __future__ import annotations
@@ -217,7 +220,8 @@ class Substrate(ABC):
         lifecycle, rollback_targets, rollback_to, rollback, control
 
     Optional primitives (base-class default; override to support):
-        resource_usage, logs, endpoints, addresses, reprovision
+        resource_usage, logs, endpoints, addresses, reprovision, teardown,
+    teardown_plan
     """
 
     def __init__(self, config, manager):
@@ -455,6 +459,37 @@ class Substrate(ABC):
         # not-applicable conditions (e.g. pull=never); reaching the base
         # implementation is a programming error, not a runtime condition.
         raise NotImplementedError(f"{type(self).__name__} must override reprovision()")
+
+    def teardown(self, *, purge: bool) -> list[str]:
+        """Remove the substrate-specific state a workload leaves behind.
+
+        Everything `disable` tears down through `workload_run_files` is substrate-
+        agnostic and stays in the caller; this covers only what one substrate has
+        and the other does not — a container's subuid/subgid ranges and its user
+        manager drop-in, a VM's socket dir and the shared bridge.
+
+        `purge` picks the depth `disable` was asked for: False keeps the
+        workload's identity and data, True removes them. Steps that are correct at
+        both depths run either way.
+
+        Returns human-readable failures rather than raising, because `disable` is
+        best-effort by construction: one stuck resource must not strand the
+        others, so implementations attempt every step independently and report
+        what did not come apart. An empty list means the teardown was clean, and
+        the base implementation returns one because "no state of my own" is a
+        legitimate answer — not a capability gap, so no NotApplicable here.
+        """
+        return []
+
+    def teardown_plan(self, *, purge: bool) -> list[str]:
+        """The substrate-specific lines `disable --dry-run` prints.
+
+        Mirrors ``teardown``: whatever one removes, the other must describe, or
+        the plan stops being a promise. Read-only and computed from what is
+        actually present, so it never lists a removal that would be a no-op —
+        an operator can trust that what this omits, `disable` won't touch.
+        """
+        return []
 
 
 # ---------------------------------------------------------------------------
