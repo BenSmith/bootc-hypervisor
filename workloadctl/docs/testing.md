@@ -70,6 +70,32 @@ for the wrong one:
 Reach for contract or oracle by default. Reach for snapshot only when the
 literal text is the thing under test.
 
+### `tests/snapshots/` is a refactor instrument, not a gate
+
+The corpus under `tests/snapshots/` — one `.conf` + every emitted unit for all
+shipped bundles, driven by the single test in `tests/test_snapshots.py` — is not
+an instance of the "Snapshot test" shape above, and reading it as one invites
+the wrong conclusion (it is exhaustive rather than curated, so it looks like
+change-detector mass).
+
+Its job is to make a large refactor reviewable: regenerate, then diff, and every
+behavioral change to any bundle's units shows up in one place. That is why the
+byte comparison **warns rather than fails**, and why a missing fixture is written
+on first run instead of erroring — during a refactor you want the new baseline,
+not a red suite. `STRICT_SNAPSHOTS=1` turns drift into a failure for a gate that
+should block on it.
+
+The consequence to be aware of: outside a refactor nothing forces anyone to act
+on the warning, so a stale fixture can sit in the tree indefinitely (one had —
+`vncdesktop-sway.service` kept a `pgrep -x wayvnc` health command for several
+commits after the bundle deliberately moved to `pgrep -x sway`). Accept drift
+with `UPDATE_SNAPSHOTS=1 just test` when you see it warn.
+
+Enforcement lives elsewhere and does fail hard: the structural oracle
+(`test_unit_oracle.py`), the curated 20-fixture matrix in
+`test_generator_snapshot.py` — which commits no golden files and gates on
+`systemd-analyze verify` — and the per-behavior contract tests.
+
 ## Ground rules
 
 - **Stdlib-only for shipped code.** `lib/`, `bin/`, `generators/`,
