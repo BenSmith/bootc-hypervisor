@@ -170,12 +170,10 @@ def cmd_info(args, manager: WorkloadManager):
             if p.suffix[5:].isdigit()
         ) if home_dir.exists() else []
 
-        # Guest IP from DHCP leases. An empty list is "not resolvable yet",
-        # which this dump reports as such; NotApplicable can't arise because the
-        # branch is already gated on is_vm. The `guest_ip` JSON key is a scalar
-        # for compatibility, so take the first of however many the port returns.
-        addrs = get_substrate(config, manager).addresses()
-        guest_ip = addrs[0] if addrs else None
+        # Guest addresses from DHCP leases / ARP / mDNS. An empty list is "not
+        # resolvable yet", which this dump reports as such; NotApplicable can't
+        # arise because the branch is already gated on is_vm.
+        guest_ips = get_substrate(config, manager).addresses()
 
         # QMP status
         qmp_status = _vm_qmp_status(config.name)
@@ -210,7 +208,7 @@ def cmd_info(args, manager: WorkloadManager):
                 "system_disk": str(system_disk) if system_disk.exists() else None,
                 "data_disk": str(data_disk) if data_disk.exists() else None,
                 "rollback_generations": gens,
-                "guest_ip": guest_ip,
+                "guest_ips": guest_ips,
                 "qmp_status": qmp_status,
             },
             "user": {
@@ -243,8 +241,9 @@ def cmd_info(args, manager: WorkloadManager):
             print(f"  Data disk:   {data_disk}")
         if gens:
             print(f"  Rollback generations: {', '.join(f'gen-{g}' for g in gens)}")
-        if guest_ip:
-            print(f"  Guest IP:   {guest_ip}")
+        if guest_ips:
+            label = "Guest IP:  " if len(guest_ips) == 1 else "Guest IPs: "
+            print(f"  {label} {', '.join(guest_ips)}")
         if qmp_status:
             print(f"  QMP status: {qmp_status}")
         print()
@@ -268,7 +267,7 @@ def cmd_info(args, manager: WorkloadManager):
         print()
         print("Quick commands:")
         print(f"  Console:  workloadctl shell {config.name}")
-        if guest_ip:
+        if guest_ips:
             print(f"  SSH:      workloadctl exec {config.name} -- bash")
         print(f"  Logs:     workloadctl logs -f {config.name}")
         print(f"  Update:   sudo workloadctl update {config.name}")

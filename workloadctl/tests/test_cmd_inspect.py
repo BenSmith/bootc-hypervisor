@@ -24,6 +24,7 @@ import cmd_images
 import cmd_info
 import cmd_inspect
 import cmd_stats
+from substrate_vm import VMSubstrate
 from workloadctl_core import WorkloadConfig
 
 
@@ -498,7 +499,39 @@ class TestCmdInfo(unittest.TestCase):
             self.assertEqual(data['vm']['memory'], '2048M')
             self.assertEqual(data['vm']['vcpus'], 2)
             self.assertIsNone(data['vm']['system_disk'])
+            # No lease yet is an empty list, not null and not a missing key:
+            # the substrate port answers "supported, nothing right now" in band.
+            self.assertEqual(data['vm']['guest_ips'], [])
             self.assertFalse(data['user']['exists'])
+
+    def test_info_vm_json_reports_every_address(self):
+        """A guest can have more than one address (IPv4 + IPv6, second NIC), so
+        --json carries the whole list the port returns rather than the first."""
+        with _WorkloadDir(VM_TOML, name='test-vm'):
+            manager = MagicMock()
+            manager.user_exists.return_value = False
+            buf = io.StringIO()
+            with patch('subprocess.run', side_effect=self._base_run()), \
+                 patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
+                 patch.object(VMSubstrate, 'addresses',
+                              return_value=['192.168.1.5', 'fd00::5']), \
+                 patch('sys.stdout', buf):
+                cmd_info.cmd_info(_args(json=True, workload='test-vm'), manager)
+            data = json.loads(buf.getvalue())
+            self.assertEqual(data['vm']['guest_ips'], ['192.168.1.5', 'fd00::5'])
+
+    def test_info_vm_human_pluralises_multiple_addresses(self):
+        with _WorkloadDir(VM_TOML, name='test-vm'):
+            manager = MagicMock()
+            manager.user_exists.return_value = False
+            buf = io.StringIO()
+            with patch('subprocess.run', side_effect=self._base_run()), \
+                 patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
+                 patch.object(VMSubstrate, 'addresses',
+                              return_value=['192.168.1.5', 'fd00::5']), \
+                 patch('sys.stdout', buf):
+                cmd_info.cmd_info(_args(json=False, workload='test-vm'), manager)
+            self.assertIn('Guest IPs:  192.168.1.5, fd00::5', buf.getvalue())
 
     def test_info_vm_human_with_disks_and_ip(self):
         with _WorkloadDir(VM_TOML, name='test-vm') as p:
