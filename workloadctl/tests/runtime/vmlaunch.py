@@ -8,10 +8,11 @@ workloadctl RPM into the guest, snapshots a clean baseline, and hands back a
 `VMTarget` the pytest checks drive unchanged.
 
 gate mode boots the REAL bootc image instead: bootc-image-builder turns
-`localhost/hypervisor-bootc:latest` (override via WLRT_GATE_IMAGE) into a
-bootable qcow2 with the `wlrt` test user baked in, boots it under an emulated
-TPM2 (swtpm), and hands back the same `VMTarget` with no rpm deploy (workloadctl
-ships in the image). Checks never branch on mode.
+`registry.local/hypervisor-bootc:latest` (the shipped artifact; override via
+WLRT_GATE_IMAGE) into a bootable qcow2 with the `wlrt` test user baked in, boots
+it under an emulated TPM2 (swtpm), and hands back the same `VMTarget` with no rpm
+deploy — workloadctl ships in the image, so gate mode reports on whatever RPM
+that image was built with, not on the local tree. Checks never branch on mode.
 
 Stdlib only.
 """

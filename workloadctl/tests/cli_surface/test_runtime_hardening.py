@@ -15,11 +15,19 @@ genuinely in effect on the live main process:
   * `/usr` is **read-only** in that namespace (`ProtectSystem=strict` enforced),
     read straight from `/proc/<mainpid>/mountinfo`.
 
+A second check covers the other hardening layer on the same workload: the podman
+seccomp baseline. `seccomp-workload-baseline.json` gates `setns` behind
+CAP_SYS_ADMIN, and whether that gate is *enforced* is invisible to a test that
+reads the JSON — a name in the profile's plain allow list silently overrides the
+cap-gated deny. Only a syscall on a real kernel can tell the difference.
+
 Reuses the minimal rt-basic workload (single/pasta) — hardening is topology-
 independent, so the smallest running unit is enough.
 
 Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`).
 """
+
+import re
 
 import pytest
 
@@ -29,6 +37,18 @@ pytestmark = pytest.mark.runtime
 
 WORKLOAD = "rt-basic"
 SERVICE = "workload-rt-basic.service"
+
+# Calls setns(2) with a deliberately invalid fd, so the errno separates the two
+# layers: EPERM (1) can only come from seccomp, while EBADF (9) means the call
+# reached the kernel and failed its own fd check — i.e. seccomp let it through.
+_SETNS_PROBE = (
+    "import ctypes, ctypes.util\n"
+    "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+    "libc.setns(-1, 0)\n"
+    "print(ctypes.get_errno())\n"
+)
+
+EPERM, EBADF = 1, 9
 
 
 def _show(target, service, prop):
@@ -59,6 +79,79 @@ def _governing_mount(mountinfo_text, path):
         if governs and (best_mp is None or len(mp) > len(best_mp)):
             best_mp, best_opts = mp, opts
     return best_mp, best_opts
+
+
+def _seccomp_profile_from_unit(target, service):
+    """The profile path the live unit actually passes to podman, or None."""
+    r = target.run(["systemctl", "cat", service], sudo=True, check=True)
+    m = re.search(r"--security-opt[= ]seccomp=(\S+)", r.stdout)
+    return m.group(1) if m else None
+
+
+def _setns_errno(target, profile, *, cap_sys_admin=False):
+    """Run the setns probe in a container under `profile`; return its errno.
+
+    `--rootfs /:O` reuses the host's own filesystem as a throwaway overlay rather
+    than pulling an image: the guest ships python3 (workloadctl requires it) but
+    the workload fixture image is caddy:2-alpine, which has neither python nor a
+    compiler. Note --rootfs takes the command positionally, so every flag has to
+    precede it.
+    """
+    argv = ["podman", "run", "--rm"]
+    if cap_sys_admin:
+        argv += ["--cap-add", "SYS_ADMIN"]
+    argv += ["--security-opt", f"seccomp={profile}",
+             "--rootfs", "/:O", "python3", "-c", _SETNS_PROBE]
+    r = target.run(argv, sudo=True, check=True)
+    return int(r.stdout.strip().splitlines()[-1])
+
+
+def test_setns_is_denied_without_cap_sys_admin(target):
+    """The baseline profile's CAP_SYS_ADMIN gate on `setns` is enforced on a real
+    kernel, applied through the path the units really use.
+
+    The unit-level test (tests/test_seccomp_baseline.py) can only assert the JSON.
+    It cannot see that a name in the plain allow list silently overrides the
+    cap-gated deny — which is exactly what happened here: `setns` sat in both, and
+    the gate was inert, so every workload could join an existing namespace given
+    an fd. Asserting *both* directions is what makes this meaningful: EPERM alone
+    would also pass for a profile that denies everything.
+    """
+    _install_toml(target, "rt-basic.toml")
+    try:
+        try:
+            _enable_workload(target, WORKLOAD, timeout=180)
+        except Exception:
+            dump_journal(target, WORKLOAD)
+            raise
+
+        profile = _seccomp_profile_from_unit(target, SERVICE)
+        assert profile, (
+            f"{SERVICE} passes no --security-opt seccomp= to podman; the baseline "
+            f"profile is not being applied at all"
+        )
+        exists = target.run(["test", "-f", profile], sudo=True, check=False)
+        assert exists.rc == 0, f"unit names a seccomp profile that is absent: {profile}"
+
+        capless = _setns_errno(target, profile)
+        with_cap = _setns_errno(target, profile, cap_sys_admin=True)
+        print(f"\n----- setns under {profile} -----\n"
+              f"capless errno={capless} (want {EPERM}/EPERM)\n"
+              f"CAP_SYS_ADMIN errno={with_cap} (want {EBADF}/EBADF)\n"
+              f"---------------------------------")
+
+        assert capless == EPERM, (
+            f"setns returned errno {capless}, not EPERM: the CAP_SYS_ADMIN gate in "
+            f"{profile} is not enforced (errno {EBADF}/EBADF means the syscall "
+            f"reached the kernel, i.e. an ungated allow is overriding the gate)"
+        )
+        assert with_cap == EBADF, (
+            f"setns returned errno {with_cap} with CAP_SYS_ADMIN, not EBADF: the "
+            f"profile denies it even *with* the capability, so the gate is a "
+            f"blanket deny rather than a gate"
+        )
+    finally:
+        _purge_workload(target, WORKLOAD)
 
 
 def test_workload_unit_sandbox_live(target):
