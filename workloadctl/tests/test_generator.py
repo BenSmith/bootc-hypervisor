@@ -1909,6 +1909,36 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertEqual(len(exec_starts), 1, exec_starts)
         self.assertIn("/usr/sbin/dnsmasq", exec_starts[0])
 
+    def test_bridge_firewalld_step_uses_our_own_zone(self):
+        # The bridge used to be pushed into libvirt's zone. workloadctl runs VMs
+        # on raw QEMU and does not require libvirt, so on an ordinary Fedora host
+        # with firewalld and no libvirt that zone does not exist -- both
+        # firewall-cmd calls failed, the last one's status became the
+        # ExecStartPre's, and every VM workload died on a failed dependency.
+        self._write_vm_config()
+        self._run()
+        bridge = self._read("workload-bridge.service")
+        fw = [line for line in bridge.splitlines() if "firewall-cmd" in line]
+        self.assertEqual(len(fw), 1, fw)
+        self.assertIn("--zone=workloadctl", fw[0])
+        self.assertNotIn("--zone=libvirt", bridge)
+
+    def test_bridge_firewalld_step_cannot_fail_the_unit(self):
+        # Best-effort by design: a missing or stale zone must not take the
+        # bridge -- and with it every VM workload -- down with it. The step ends
+        # on a warning rather than on the exit status of a firewall-cmd.
+        self._write_vm_config()
+        self._run()
+        bridge = self._read("workload-bridge.service")
+        fw = [line for line in bridge.splitlines() if "firewall-cmd" in line][0]
+        # No "-" prefix trick: the guarantee is in the script, so a reader of the
+        # unit sees why it is safe.
+        self.assertIn("systemctl is-active --quiet firewalld || exit 0", fw)
+        self.assertIn("--change-interface=_workload-br && exit 0", fw)
+        # The failure path warns and says how to fix it.
+        self.assertIn("guest DHCP/DNS may be blocked", fw)
+        self.assertIn("firewall-cmd --reload", fw)
+
     def test_bridge_service_has_no_before_workload_generate(self):
         # workload-generate is a generator that runs before any unit
         # activation; Before= on a finished unit is a no-op and was just

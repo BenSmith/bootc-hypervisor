@@ -36,6 +36,12 @@ VM_GUEST_UID = 1000
 # won't adopt an unrelated interface; it must stay <=15 chars (Linux IFNAMSIZ).
 # Override to e.g. "br0" to attach VMs directly to a pre-existing LAN bridge.
 VM_BRIDGE_NAME = "_workload-br"
+# firewalld zone the managed bridge is placed in, shipped by the RPM as
+# /usr/lib/firewalld/zones/workloadctl.xml. Our own zone, not libvirt's: we run
+# VMs on raw QEMU, so on a host without libvirt that zone doesn't exist, and
+# borrowing it would inherit another project's policy either way. The zone file
+# pins this same interface name so the binding survives a firewalld reload.
+VM_BRIDGE_FIREWALLD_ZONE = "workloadctl"
 # Managed-bridge network config is HOST-LEVEL, not per-VM (ADR 002): the bridge
 # is one host-global refcounted resource, so its subnet/DNS can't coherently
 # take per-VM overrides. Single source of truth = the subnet CIDR

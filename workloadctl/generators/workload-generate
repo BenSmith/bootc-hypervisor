@@ -75,7 +75,7 @@ try:
     )
     from vm import (
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
-        VM_REBOOT_EXIT_CODE,
+        VM_BRIDGE_FIREWALLD_ZONE, VM_REBOOT_EXIT_CODE,
         VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
         vm_mac_address, find_ovmf_code, parse_memory_mib,
     )
@@ -1676,14 +1676,24 @@ def generate_vm_bridge_service() -> str:
             "\"{ type nat hook postrouting priority 100; }\" && "
             "nft add rule ip workload_nat postrouting "
             f"ip saddr {bridge_subnet} ip daddr != {bridge_subnet} masquerade'")
-    # If firewalld is active, put the bridge in the libvirt zone so DHCP/DNS
-    # broadcasts from guests aren't rejected (no-op if firewalld absent).
+    # If firewalld is active, put the bridge in *our* zone (shipped by the RPM
+    # as /usr/lib/firewalld/zones/{zone}.xml) so guests' DHCP/DNS to the host
+    # isn't rejected and their forwarded traffic is accepted. This used to
+    # borrow libvirt's zone, which fails hard on any host without libvirt
+    # installed — workloadctl runs VMs on raw QEMU and doesn't require it.
+    # Best-effort by design: a missing/stale zone must not take the bridge (and
+    # with it every VM workload) down, so the failure path warns with the fix
+    # and exits 0. `--change-interface` is idempotent and succeeds whether or
+    # not the interface is already bound, or even present.
+    zone = VM_BRIDGE_FIREWALLD_ZONE
     svc.add("ExecStartPre",
             "/bin/bash -c '"
-            "if systemctl is-active --quiet firewalld; then "
-            f"firewall-cmd -q --zone=libvirt --add-interface={bridge} 2>/dev/null || "
-            f"firewall-cmd -q --zone=libvirt --change-interface={bridge}; "
-            "fi'")
+            "systemctl is-active --quiet firewalld || exit 0; "
+            f"firewall-cmd -q --zone={zone} --change-interface={bridge} && exit 0; "
+            f"echo \"workload-bridge: firewalld is active but {bridge} could not be "
+            f"placed in the {zone} zone -- guest DHCP/DNS may be blocked. Check that "
+            f"/usr/lib/firewalld/zones/{zone}.xml is installed, then run "
+            "firewall-cmd --reload.\" >&2'")
     # dnsmasq DHCP — managed bridge only.  Daemonizes and writes its pidfile;
     # ExecStart exits 0 and RemainAfterExit keeps the service active.
     # --bind-dynamic (not --bind-interfaces): receives DHCP broadcasts from

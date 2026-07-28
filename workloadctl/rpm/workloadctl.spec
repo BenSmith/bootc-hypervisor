@@ -14,6 +14,15 @@ BuildArch:      noarch
 # defined by systemd-rpm-macros. Without it rpmbuild emits the literal
 # "%{_unitdir}/..." and fails with: File must begin with "/".
 BuildRequires:  systemd-rpm-macros
+# firewalld-filesystem owns /usr/lib/firewalld/zones, where our VM-bridge zone
+# lands. It is a dependency-free noarch package of directories and macros; it
+# does NOT pull in firewalld itself, so a container-only host stays
+# firewall-daemon-free and the zone file just sits there unread. Deliberately
+# NOT a BuildRequires: the %%post reload is written out longhand rather than
+# using this package's %%firewalld_reload macro, because an undefined macro
+# expands to nothing — building the RPM from a checkout on a host that happens
+# to lack the package would silently ship a package that never reloads.
+Requires:       firewalld-filesystem
 
 Requires:       python3 >= 3.14
 Requires:       podman >= 5.3
@@ -122,6 +131,12 @@ install -Dpm 0644 %{_sourcedir}/systemd/workloads-dirs.conf \
 install -Dpm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
     %{buildroot}%{_datadir}/containers/seccomp-workload-baseline.json
 
+# firewalld zone for the managed VM bridge. Vendor dir (/usr/lib), not
+# /etc/firewalld/zones: an admin copy in /etc shadows the shipped one forever,
+# so package updates to the zone would silently stop applying.
+install -Dpm 0644 %{_sourcedir}/firewalld/workloadctl.xml \
+    %{buildroot}%{_prefix}/lib/firewalld/zones/workloadctl.xml
+
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
 
@@ -152,6 +167,13 @@ install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 %post
 %systemd_post workload-exporter.timer workload-exporter-disk.timer
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
+# A running firewalld only learns about a newly installed zone file on reload.
+# Without this, the first VM enabled after an install would find the zone
+# missing and come up with guest DHCP/DNS blocked. This is what
+# firewalld-filesystem's %%firewalld_reload macro expands to; spelled out so a
+# build host without that package can't silently drop it. No-op when firewalld
+# isn't installed or isn't running.
+test -x /usr/bin/firewall-cmd && firewall-cmd --reload --quiet || :
 
 %preun
 %systemd_preun workload-exporter.timer workload-exporter-disk.timer
@@ -170,6 +192,8 @@ if [ $1 -eq 0 ]; then
     if [ -f /etc/qemu/bridge.conf ]; then
         sed -i '/^allow _workload-br$/d' /etc/qemu/bridge.conf 2>/dev/null || :
     fi
+    # Drop the now-removed zone out of firewalld's runtime state too.
+    test -x /usr/bin/firewall-cmd && firewall-cmd --reload --quiet || :
 fi
 
 %files
@@ -195,6 +219,7 @@ fi
 %{_presetdir}/80-workloadctl.preset
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 %{_datadir}/containers/seccomp-workload-baseline.json
+%{_prefix}/lib/firewalld/zones/workloadctl.xml
 %{_datadir}/bash-completion/completions/workloadctl
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/

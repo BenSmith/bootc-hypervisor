@@ -985,6 +985,8 @@ VM workloads use a shared host bridge `_workload-br` (`192.168.200.0/24`). DHCP 
 
 VMs are not accessible from outside the host without explicit port forwarding on the host. To expose a VM service, add an iptables/nftables DNAT rule or a host-side proxy.
 
+If firewalld is running, `workload-bridge.service` places `_workload-br` in the **`workloadctl` zone**, shipped by the RPM at `/usr/lib/firewalld/zones/workloadctl.xml`. Modeled on firewalld's `nm-shared`: guests may reach the host's DHCP and DNS (the bridge dnsmasq) and ping the gateway, everything else addressed to the host is rejected, and forwarded traffic is accepted so guests reach the outside world through the bridge's NAT. The zone binds the interface by name, so the assignment survives a `firewall-cmd --reload`. Placing the bridge in the zone is best-effort — if the zone is missing the bridge still comes up and the service logs what to fix, rather than failing and taking every VM workload down with it. (Earlier versions borrowed libvirt's zone, which does not exist on a host without libvirt installed.)
+
 The managed bridge's subnet and upstream DNS are **host-level** configuration, not per-VM (see [ADR 002](adr/002-vm-bridge-host-level-network-config.md)) — the bridge is a single host-global resource shared by all VMs. Override them for the whole host via `WORKLOADCTL_VM_BRIDGE_SUBNET` (a CIDR, e.g. `10.100.0.0/24`) and `WORKLOADCTL_VM_BRIDGE_DNS` (comma-separated IPs); the gateway IP and the DHCP range are derived from the subnet. There is no `[vm.network].subnet` / `[vm.network].dns` — setting them is rejected.
 
 #### Custom bridge

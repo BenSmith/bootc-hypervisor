@@ -25,6 +25,7 @@ from pathlib import Path
 
 SPEC = Path(__file__).resolve().parent.parent / "rpm" / "workloadctl.spec"
 REAL_BRIDGE_CONF = "/etc/qemu/bridge.conf"
+REAL_FIREWALL_CMD = "/usr/bin/firewall-cmd"
 
 # Real spec sections that terminate the %postun body. A %macro call like
 # %systemd_postun_with_restart is NOT a section — it's stripped, not a boundary.
@@ -42,8 +43,12 @@ def _extract_postun_body() -> str:
     for line in lines[start + 1:]:
         if _SECTION_RE.match(line):
             break  # next spec section — body ends here
-        if line.startswith("%"):
-            continue  # RPM macro line — not shell, drop it
+        if line.lstrip().startswith("%"):
+            # RPM macro line — not shell, drop it. Match it at any indentation:
+            # macros expand wherever they appear, so a macro nested inside the
+            # uninstall `if` (e.g. %{?firewalld_reload}) is just as much a macro
+            # as one at column 0, and feeding it to sh makes `%` a job spec.
+            continue
         body.append(line)
     return "\n".join(body)
 
@@ -66,6 +71,17 @@ class TestPostunScriptlet(unittest.TestCase):
         stub.chmod(0o755)
         self._bin_dir = bin_dir
 
+        # Stub firewall-cmd: the scriptlet's reload resolves through PATH, so on
+        # a host that actually has firewalld this keeps the test from reloading
+        # the developer's live firewall.
+        self._firewall_log = tmp / "firewall-cmd.log"
+        fw_stub = bin_dir / "firewall-cmd"
+        fw_stub.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{self._firewall_log}"\n'
+        )
+        fw_stub.chmod(0o755)
+
         self._bridge_conf = tmp / "bridge.conf"
 
         # Real scriptlet body with the hardcoded bridge path pointed at our temp
@@ -73,6 +89,11 @@ class TestPostunScriptlet(unittest.TestCase):
         body = _extract_postun_body().replace(REAL_BRIDGE_CONF,
                                               str(self._bridge_conf))
         self.assertNotIn(REAL_BRIDGE_CONF, body)
+        # The reload's `test -x` guard names firewall-cmd by absolute path;
+        # point it at the stub so the branch is exercised the same way whether
+        # or not the test host has firewalld installed.
+        body = body.replace(REAL_FIREWALL_CMD, str(fw_stub))
+        self.assertNotIn(REAL_FIREWALL_CMD, body)
         self._script = body
 
     def tearDown(self):
@@ -93,6 +114,11 @@ class TestPostunScriptlet(unittest.TestCase):
         if not self._semanage_log.exists():
             return []
         return self._semanage_log.read_text().splitlines()
+
+    def _firewall_calls(self):
+        if not self._firewall_log.exists():
+            return []
+        return self._firewall_log.read_text().splitlines()
 
     # ── uninstall ($1 == 0) ──────────────────────────────────────────────────
 
@@ -128,17 +154,25 @@ class TestPostunScriptlet(unittest.TestCase):
             "allow br0\nallow virbr0\n",
         )
 
+    def test_uninstall_reloads_firewalld_so_the_zone_disappears(self):
+        # The VM-bridge zone file is gone by %postun time, but a running
+        # firewalld keeps serving it from runtime state until a reload.
+        self._run("0")
+        self.assertEqual(self._firewall_calls(), ["--reload --quiet"])
+
     # ── upgrade ($1 >= 1) ────────────────────────────────────────────────────
 
     def test_upgrade_is_a_noop(self):
         self._bridge_conf.write_text("allow _workload-br\nallow br0\n")
         self._run("1")
-        # Bridge file untouched and semanage never called.
+        # Bridge file untouched, semanage never called, firewall left alone —
+        # the zone is still installed on an upgrade.
         self.assertEqual(
             self._bridge_conf.read_text(),
             "allow _workload-br\nallow br0\n",
         )
         self.assertEqual(self._semanage_calls(), [])
+        self.assertEqual(self._firewall_calls(), [])
 
 
 class TestPostunSpecText(unittest.TestCase):

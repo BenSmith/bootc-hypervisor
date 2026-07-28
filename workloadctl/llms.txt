@@ -320,6 +320,7 @@ docs/testing.md                    # Test-value rubric: rung model, oracle/contr
 systemd/                           # systemd units (workloads.slice, metrics timer)
 completions/                       # Bash completions
 seccomp-workload-baseline.json     # Default seccomp profile
+firewalld/workloadctl.xml          # firewalld zone for the managed VM bridge (our own, not libvirt's)
 tests/                             # Test suite
 ```
 
