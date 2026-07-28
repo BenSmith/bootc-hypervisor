@@ -224,7 +224,96 @@ def _wait_active(target: Target, name: str, timeout: int = 120):
     r = target.run(["systemctl", "status", "--no-pager", service], sudo=False, check=False)
     raise TimeoutError(
         f"Workload '{name}' did not become active within {timeout}s:\n{r.stdout}\n{r.stderr}"
+        f"{failed_dependency_report(target, service)}"
     )
+
+
+# Dependency states that mean "this unit is not the reason we are here".
+# `inactive` is deliberately in the healthy set: a successful Type=oneshot
+# without RemainAfterExit reads `inactive` forever, and `After=` pulls in a
+# pile of those. What distinguishes a real fault is Result= — systemd keeps the
+# last run's outcome there, so an exit-code/timeout/signal failure is visible
+# even once the unit has gone inactive again.
+_DEP_PROPS = ("Requires", "Requisite", "BindsTo", "After")
+_HEALTHY_ACTIVE_STATES = frozenset({"active", "inactive", "reloading"})
+
+
+def failed_dependency_report(target: Target, service: str,
+                             *, max_units: int = 3, lines: int = 30) -> str:
+    """Describe the *dependencies* of `service` that are not healthy.
+
+    A unit whose job fails with result 'dependency' reports only
+    `Active: inactive (dead)` about itself — the name of the unit that actually
+    broke appears nowhere in its own status. Without this, a failure here says
+    "did not become active within 600s" and nothing more, and finding the cause
+    means a separate manual SSH session. (Written after an R18 bridge failure
+    cost 40m51s across five fixture setups to diagnose that way.)
+
+    Best-effort and never raises: this runs on a path that is already failing,
+    and a diagnostic that can itself throw would mask the original error.
+    """
+    try:
+        shown = target.run(
+            ["systemctl", "show", service,
+             *(f"--property={p}" for p in _DEP_PROPS)],
+            sudo=False, check=False,
+        )
+        deps: list[str] = []
+        for line in shown.stdout.splitlines():
+            _, _, value = line.partition("=")
+            for dep in value.split():
+                if dep != service and dep not in deps:
+                    deps.append(dep)
+
+        unhealthy: list[tuple[str, str, str]] = []
+        for dep in deps:
+            props = target.run(
+                # `--` because unit names can begin with a dash (`-.mount`),
+                # which systemctl otherwise parses as an option.
+                ["systemctl", "show",
+                 "--property=ActiveState", "--property=SubState",
+                 "--property=Result", "--", dep],
+                sudo=False, check=False,
+            )
+            fields = dict(
+                line.partition("=")[::2] for line in props.stdout.splitlines() if "=" in line
+            )
+            state = fields.get("ActiveState", "")
+            result = fields.get("Result", "")
+            # No ActiveState at all means the query itself failed, not that the
+            # unit is unhealthy — saying nothing beats a false accusation.
+            if not state or (state in _HEALTHY_ACTIVE_STATES and result in ("success", "")):
+                continue
+            unhealthy.append((dep, f"{state} ({fields.get('SubState', '')})", result))
+
+        if not deps:
+            # systemd reports no dependencies for a unit it cannot load either,
+            # so this is not the same statement as "healthy dependencies".
+            return ("\n----- dependencies -----\n"
+                    f"systemd lists no dependencies for {service} "
+                    "(it may not exist, or may never have been loaded)\n"
+                    "------------------------")
+        if not unhealthy:
+            return ("\n----- dependencies -----\n"
+                    f"all {len(deps)} dependencies of {service} look healthy; "
+                    "the fault is in the unit itself\n"
+                    "------------------------")
+
+        out = ["\n----- failed dependencies -----"]
+        for dep, state, result in unhealthy[:max_units]:
+            out.append(f"{dep}: {state} result={result}")
+            j = target.run(
+                ["journalctl", "--no-pager", "-n", str(lines), "-u", dep],
+                sudo=True, check=False,
+            )
+            out.append(j.stdout.rstrip() or j.stderr.rstrip())
+        if len(unhealthy) > max_units:
+            out.append(f"... and {len(unhealthy) - max_units} more: "
+                       + ", ".join(d for d, _, _ in unhealthy[max_units:]))
+        out.append("-------------------------------")
+        return "\n".join(out)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must not mask the timeout
+        return f"\n(failed-dependency report unavailable: {exc!r})"
 
 
 def _wait_container_running(target: Target, name: str, timeout: int = 120):

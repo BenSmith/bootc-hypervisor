@@ -14,10 +14,11 @@ test_cmd_drift, substrate liveness via test_substrate). Pinned here:
 
 import argparse
 import io
+import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -167,6 +168,67 @@ class UnitRowsTest(unittest.TestCase):
         self.assertTrue(rows[0]["problem"])
         self.assertEqual(rows[0]["n_restarts"], 4)
         self.assertEqual(rows[0]["journal_tail"], ["pasta: pivot_root ENOENT"])
+
+
+class UnloadableConfigTest(unittest.TestCase):
+    """A config that will not load is a negative result, not a crash.
+
+    doctor is what an operator runs when something is *already* wrong, so the
+    unloadable-config case is squarely inside its job. Before this was fixed,
+    `WorkloadConfig` raising (name/directory mismatch, malformed TOML, missing
+    file) escaped to the CLI's top-level handler, which printed a traceback and
+    "This looks like a workloadctl bug" — found by the rung-3 doctor/broken
+    cell against a real host. validate/diagnose already routed the same failure
+    through `load_config_or_exit`; doctor now does too.
+    """
+
+    def setUp(self):
+        self.enterContext(mock.patch.object(cmd_doctor, "require_root", lambda: None))
+
+    def _run_with_load_error(self, exc, json_mode=False):
+        out, err = io.StringIO(), io.StringIO()
+        ns = argparse.Namespace(workload="app", json=json_mode)
+
+        def boom(name):
+            raise exc
+
+        code = None
+        with mock.patch.object(cmd_doctor, "WorkloadConfig", boom):
+            try:
+                with redirect_stdout(out), redirect_stderr(err):
+                    cmd_doctor.cmd_doctor(ns, mock.Mock())
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_unloadable_config_exits_1_with_a_reason(self):
+        code, out, err = self._run_with_load_error(
+            ValueError("Workload name 'app-wrong' must match directory 'app'"))
+        self.assertEqual(code, 1)
+        self.assertIn("cannot load workload 'app'", err)
+        self.assertIn("must match directory", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_unloadable_config_json_mode_stays_json(self):
+        code, out, err = self._run_with_load_error(
+            ValueError("bad toml"), json_mode=True)
+        self.assertEqual(code, 1)
+        payload = json.loads(out)
+        self.assertEqual(payload["workload"], "app")
+        self.assertFalse(payload["passed"])
+        self.assertIn("bad toml", payload["error"])
+
+    def test_masked_still_wins_over_the_generic_path(self):
+        """WorkloadMasked must keep its own exit-0 branch.
+
+        It is a subclass-of-Exception too, so the ordering of the two handlers
+        is load-bearing: fold it into the generic one and a deliberately masked
+        workload starts reporting as a fault.
+        """
+        code, out, err = self._run_with_load_error(
+            cmd_doctor.WorkloadMasked("app is masked"))
+        self.assertEqual(code, 0)
+        self.assertIn("Workload masked", out)
 
 
 if __name__ == "__main__":

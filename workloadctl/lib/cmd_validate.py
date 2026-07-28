@@ -10,6 +10,7 @@ import grp
 import json
 from pathlib import Path
 import sys
+from typing import NoReturn
 
 from workload_lib import (
     CREDSTORE_DIR,
@@ -492,11 +493,25 @@ def load_config_or_exit(name: str, json_mode: bool = False) -> WorkloadConfig:
     try:
         return WorkloadConfig(name)
     except Exception as e:
-        if json_mode:
-            print(json.dumps({"workload": name, "passed": False, "error": str(e)}, indent=2))
-        else:
-            print(f"Error: cannot load workload '{name}': {e}", file=sys.stderr)
-        sys.exit(1)
+        report_config_load_failure(name, e, json_mode=json_mode)
+
+
+def report_config_load_failure(name: str, exc: BaseException,
+                               *, json_mode: bool = False) -> NoReturn:
+    """Report a config that would not load, then exit 1. Never returns.
+
+    Split out of load_config_or_exit so a caller that has already caught the
+    failure itself can report it *with the exception it actually saw* instead
+    of re-loading to provoke a second one. cmd_doctor is that caller: it has to
+    handle WorkloadMasked on its own terms first, so it cannot delegate the
+    whole load. Re-loading would be both a wasted read and a lie whenever the
+    two attempts fail differently.
+    """
+    if json_mode:
+        print(json.dumps({"workload": name, "passed": False, "error": str(exc)}, indent=2))
+    else:
+        print(f"Error: cannot load workload '{name}': {exc}", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_validate(args, manager: WorkloadManager):

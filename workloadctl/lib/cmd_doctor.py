@@ -3,9 +3,10 @@ cmd_doctor — one-shot aggregate diagnosis for a workload.
 
 Collapses the manual failure-diagnosis loop (generator journal → unit states
 → setup checks → drift → health) into a single skimmable report. Read-only:
-doctor never mutates state. Leaf module: it imports collectors and substrate
-primitives only, never other cmd_* entry points, so it never becomes a node in
-a cycle between the verb modules.
+doctor never mutates state. Leaf module: it imports collectors, reporters and
+substrate primitives only, never another verb's cmd_* entry point, so it never
+becomes a node in a cycle between the verb modules. (cmd_validate is already in
+this graph transitively — cmd_diagnose imports the same reporter.)
 """
 
 import json
@@ -14,6 +15,7 @@ import sys
 
 from cmd_diagnose import collect_diagnose_checks
 from cmd_drift import collect_drift
+from cmd_validate import report_config_load_failure
 from substrate import get_substrate
 from workload_lib import units_outdated, workload_config_path, workload_run_files
 from workloadctl_core import WorkloadConfig, WorkloadMasked, require_root
@@ -128,8 +130,7 @@ def _unit_rows(config) -> list[dict]:
 def cmd_doctor(args, manager):
     """Aggregate report: generator journal + unit states + setup checks +
     drift + health for one workload. Read-only. Exit 0 healthy, 1 problems
-    found; unknown-workload/bad-args surface through the CLI's usual
-    exception→exit-code ladder (matching health/diagnose)."""
+    found, 1 with a one-line reason if the config cannot be loaded at all."""
     require_root()
     try:
         config = WorkloadConfig(args.workload)
@@ -137,6 +138,17 @@ def cmd_doctor(args, manager):
         # Masked is a deliberate operator state, not a fault.
         print(f"Workload masked: {e}")
         sys.exit(0)
+    except Exception as e:
+        # doctor is a report verb like validate/diagnose: a config that cannot
+        # be loaded (name/directory mismatch, malformed TOML, missing file) is a
+        # normal negative result, not a workloadctl bug, and must not escape to
+        # the top-level "this looks like a workloadctl bug" traceback handler —
+        # doctor is what an operator reaches for when something is *already*
+        # broken, so that is exactly the case it has to survive. Shares the
+        # reporter (not load_config_or_exit) so the message carries the failure
+        # we actually caught; masked is handled above on its own terms, which is
+        # why the whole load can't just be delegated.
+        report_config_load_failure(args.workload, e, json_mode=args.json)
     name = config.name
 
     gen_lines = _generator_lines(name)
