@@ -2809,5 +2809,69 @@ class TestGeneratorVmResources(unittest.TestCase):
         self.assertIn("m _wl-grpvm render", sysusers)
 
 
+class TestEnqueueStarts(unittest.TestCase):
+    """The boot-path start enqueue — batched, with a per-unit fallback.
+
+    This is the generator's dominant cost at boot (see the docstring on
+    enqueue_starts for the measurements), and it is gated on SERVICES_DIR being
+    the live /run/systemd/system, so the subprocess-level generator tests above
+    never reach it. Drive it directly instead.
+    """
+
+    def setUp(self):
+        self.gen = _load_generator_module()
+
+    def _calls(self, returncodes):
+        """Run enqueue_starts over 3 workloads; return the argv of each call."""
+        seen = []
+        codes = iter(returncodes)
+
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            return mock.MagicMock(returncode=next(codes, 0))
+
+        self.gen.enqueue_starts(["a", "b", "c"], run=fake_run)
+        return seen
+
+    def test_one_call_for_the_whole_set(self):
+        """N workloads must cost one systemctl invocation, not N.
+
+        Each call is ~27ms of fork/exec plus a D-Bus round trip on a slow host,
+        paid Before=basic.target — so a per-unit loop puts the boot delay
+        directly under operator control of how many workloads they enable.
+        """
+        calls = self._calls([0])
+        self.assertEqual(calls, [[
+            "systemctl", "start", "--no-block",
+            "workload-a.service", "workload-b.service", "workload-c.service",
+        ]])
+
+    def test_a_rejected_batch_retries_each_unit_alone(self):
+        """One bad unit must not keep every healthy workload down."""
+        calls = self._calls([1, 0, 0, 0])
+        self.assertEqual(len(calls), 4, f"expected batch + 3 retries: {calls}")
+        self.assertEqual(
+            [c[-1] for c in calls[1:]],
+            ["workload-a.service", "workload-b.service", "workload-c.service"])
+
+    def test_a_raising_batch_still_retries(self):
+        """A subprocess-level failure is a rejection, not a reason to give up."""
+        seen = []
+
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            if len(seen) == 1:
+                raise OSError("boom")
+            return mock.MagicMock(returncode=0)
+
+        self.gen.enqueue_starts(["a", "b"], run=fake_run)
+        self.assertEqual(len(seen), 3, f"expected batch + 2 retries: {seen}")
+
+    def test_no_workloads_makes_no_calls(self):
+        seen = []
+        self.gen.enqueue_starts([], run=lambda *a, **k: seen.append(a))
+        self.assertEqual(seen, [])
+
+
 if __name__ == "__main__":
     unittest.main()

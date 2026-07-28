@@ -2073,6 +2073,52 @@ def generate_vm_workload(config, user_name: str, uid: int):
     return name
 
 
+def enqueue_starts(names, run=None):
+    """Enqueue a start job for each named workload, in ONE systemctl call.
+
+    Batched on purpose. This is the only part of the generator whose cost
+    scales with the workload count, and it dominated everything else: on a slow
+    host each `systemctl start` costs ~27ms in fork/exec plus a D-Bus round
+    trip, so 40 workloads spent 1.09s here against 77ms for all the actual
+    generation work (TOML parse, validation, unit emission, UID allocation
+    combined). Since this runs Before=basic.target, that was 1.09s of pure boot
+    delay. One batched call costs about what a single one did.
+
+    Falls back to one call per unit if the batch is rejected. A batched start
+    is a single request: if any one unit fails to load — a malformed unit file,
+    a name systemd refuses — systemctl can reject the whole set, and every
+    healthy workload would silently stay down. The retry pays the per-call
+    overhead again, but only on a boot that is already degraded, and it
+    confines the damage to the unit that actually caused it.
+    """
+    import subprocess
+    run = run or subprocess.run
+    units = [f"workload-{name}.service" for name in names]
+    if not units:
+        return
+    try:
+        rc = run(["systemctl", "start", "--no-block", *units],
+                 check=False, timeout=30).returncode
+    except Exception as e:
+        log_msg(f"Batch enqueue failed: {e}", level="warning")
+        rc = 1
+
+    if rc == 0:
+        log_msg(f"  Enqueued start for {len(units)} workload service(s)")
+        return
+
+    log_msg(f"Batch enqueue returned {rc}; retrying individually",
+            level="warning")
+    for unit in units:
+        try:
+            run(["systemctl", "start", "--no-block", unit],
+                check=False, timeout=30)
+            log_msg(f"  Enqueued start for {unit}")
+        except Exception as e:
+            log_msg(f"  Failed to enqueue start for {unit}: {e}",
+                    level="warning")
+
+
 def main():
     """Main generator logic."""
     log_msg(f"Checking {WORKLOAD_CONFIG_DIR}")
@@ -2323,18 +2369,7 @@ def main():
         except Exception as e:
             log_msg(f"daemon-reload failed: {e}", level="warning")
 
-        for name in written_workloads:
-            try:
-                subprocess.run(
-                    ["systemctl", "start", "--no-block",
-                     f"workload-{name}.service"],
-                    check=False,
-                    timeout=30,
-                )
-                log_msg(f"  Enqueued start for workload-{name}.service")
-            except Exception as e:
-                log_msg(f"  Failed to enqueue start for workload-{name}: {e}",
-                        level="warning")
+        enqueue_starts(written_workloads)
 
 
 if __name__ == "__main__":
