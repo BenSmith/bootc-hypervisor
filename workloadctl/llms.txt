@@ -388,6 +388,18 @@ While workloads run as individual user accounts, workload configs under `/etc/wo
 
 **Untrusted or third-party configs are out of scope for this tool.** A config with access to `/etc/workloads.d/` can request arbitrary capabilities, mount any path, and run setup commands as root. Never enable a workload from an untrusted TOML source.
 
+### Image trust
+
+Container images are governed by the host `/etc/containers/policy.json` (built from `policy-hypervisor.json.template` at the repo root), which is **refuse-by-default**: `"default": [{"type": "reject"}]` and no `""` scope under the docker transport. Eight scopes are listed. `registry.local` and `ghcr.io/<our-namespace>` require `sigstoreSigned` against `/etc/pki/containers/cosign.pub`; `docker.io`, bare `ghcr.io`, `quay.io`, `codeberg.org`, `mcr.microsoft.com` and `registry.fedoraproject.org` are `insecureAcceptAnything`. Anything outside those eight cannot be pulled at all. Most-specific-scope-wins is what lets a third-party `ghcr.io/<someone-else>` image through while our own `ghcr.io` namespace stays signature-enforced.
+
+So: **our own images are signature-verified; third-party images are accepted unsigned, by design** — workloads must be able to consume public registries, and a homelab has no path to signatures upstream doesn't publish.
+
+The compensating control is that **drift is confined to a deliberate verb**. `pull` is not an update-time setting: it becomes `podman run --pull=<policy>` in the unit's `ExecStart`, so `always`/`newer` re-pull on *every* service start — every boot, every restart — with no health check and no rollback. Shipped bundles therefore use `missing` or `never` only (enforced by `tests/test_workloads.py`); an image is pulled once and then held. Changing it means running `workloadctl update`, which pulls the current tag, tags the outgoing image as a rollback target, restarts, health-checks, and rolls back on failure (`lib/cmd_update.py`, `lib/substrate_container.py`).
+
+Two consequences worth stating plainly. Nothing is digest-pinned, so `update` fetches whatever a tag now points at — "pinned" here means pinned *in time*, not pinned by content. And several third-party tags float without looking like it (`:vulkan`, `:server-vulkan`, `:default-cpu` move exactly like `:latest`); those bundles carry a comment saying so, because the tag alone misleads a reader in a way `:latest` does not.
+
+`pull = "never"` means never *from a registry*, not never changes: `is_buildable` treats it as locally built, so root's image store still supplies it through the override channel (see `transfer_one_image`). A workload where every container is `never` is skipped by `update` entirely, with a build hint.
+
 ## License
 
 MIT

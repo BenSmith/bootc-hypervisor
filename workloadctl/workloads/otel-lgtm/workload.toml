@@ -44,9 +44,11 @@ name = "otel-lgtm"
 
 [container]
 image = "docker.io/grafana/otel-lgtm:latest"
-# "newer" pulls only when a newer tag is available; falls back to local copy
-# if the registry is unreachable.
-pull = "newer"
+# Pinned in time: `missing` pulls once and holds that image across restarts and
+# reboots. This tag moves, and a boot-time re-pull would swap it with no health
+# check and no rollback. Drift happens only via `workloadctl update`, which has
+# both.
+pull = "missing"
 
 [container.health]
 # Probe Grafana (3000) and OTLP gRPC (4317) to confirm the all-in-one is

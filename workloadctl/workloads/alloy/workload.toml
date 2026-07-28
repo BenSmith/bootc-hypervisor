@@ -29,7 +29,11 @@ required_files = [
 
 [container]
 image = "docker.io/grafana/alloy:latest"
-pull = "newer"
+# Pinned in time, not by digest: `missing` pulls once and then holds that image
+# across every restart and reboot. The tag moves, so `newer` would re-pull on
+# each service start — unattended drift on the one path that has no health check
+# and no rollback. `workloadctl update` still pulls the newest tag, with both.
+pull = "missing"
 
 [container.health]
 # The UI/metrics server (12345) is probed from inside the container, so this

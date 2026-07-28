@@ -286,7 +286,7 @@ def cmd_init(args, manager: WorkloadManager):
             f'\n'
             f'[container]\n'
             f'image = "CHANGE_ME"\n'
-            f'pull = "newer"\n'
+            f'pull = "missing"\n'
         )
         dst = workload_config_path(name)
         if dst.parent.exists():

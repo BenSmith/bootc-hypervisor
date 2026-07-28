@@ -464,6 +464,14 @@ image = "ghcr.io/example/workload:latest"
 #   "newer"   - Pull if newer version available in registry
 #   "never"   - Never pull, use only local images (fails if not present)
 #
+# HOUSE RULE: shipped bundles use "missing" (or "never"), never "always" or
+# "newer". This value lands in the unit's `podman run --pull=` line, so
+# "always"/"newer" re-pull on EVERY service start — that is unattended image
+# drift at boot, on the one path with no health check and no rollback. Keep
+# drift on the deliberate path: `workloadctl update` pulls the current tag
+# regardless of this setting (except "never"), verifies health afterwards, and
+# rolls back to the previous image if the workload fails to come up.
+#
 # For SELF-BUILT images (any container with a [build] marker or pull =
 # "never"), ROOT'S IMAGE STORE IS THE LOCAL OVERRIDE CHANNEL: when root's
 # store holds the exact ref the container runs (a `workloadctl build`, or a

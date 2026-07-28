@@ -36,9 +36,10 @@ name = "nvidia-gpu-exporter"
 
 [container]
 image = "docker.io/utkuozdemir/nvidia_gpu_exporter:1.10.0"
-# "newer" pulls when a newer tag is published; falls back to the local copy if
-# the registry is unreachable.
-pull = "newer"
+# The tag above is a real version pin, so `newer` would rarely fire — but the
+# house rule is uniform: no workload re-pulls on its own at service start.
+# Upgrades come from editing the tag, or from `workloadctl update`.
+pull = "missing"
 # No command override: the image's default entrypoint serves /metrics on
 # 0.0.0.0:9835 and calls nvidia-smi (injected below) on each scrape.
 

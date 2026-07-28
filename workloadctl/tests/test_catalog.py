@@ -122,7 +122,10 @@ class TestInitScratch(CatalogTestBase):
         self.assertEqual(data["workload"]["name"], "coolapp")
         self.assertNotIn("bundle", data["workload"])
         self.assertEqual(data["container"]["image"], "CHANGE_ME")
-        self.assertEqual(data["container"]["pull"], "newer")
+        # "missing", not "newer": the stub teaches the house rule that no
+        # workload re-pulls at service start (see
+        # test_no_bundle_re_pulls_at_service_start).
+        self.assertEqual(data["container"]["pull"], "missing")
 
     def test_scratch_name_is_interpolated_not_literal(self):
         # Use a distinct name so a hardcoded "myapp" or "{name}" stub is caught.

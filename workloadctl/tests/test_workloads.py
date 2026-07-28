@@ -668,6 +668,40 @@ class TestWorkloadCrossConfigConsistency(unittest.TestCase):
                                      f"{name} mounts wireguard config but userns "
                                      f"!= keep-id:uid=0,gid=0")
 
+    def test_no_bundle_re_pulls_at_service_start(self):
+        """No shipped bundle sets pull = "always" or "newer".
+
+        `pull` is not an update-time setting: the generator writes it into the
+        unit's `podman run --pull=` line, so "always"/"newer" re-pull the tag on
+        *every* service start — every boot, every restart. That is unattended
+        image drift on the one path with no health check and no rollback, and
+        several of our third-party tags float without looking like it
+        (`:vulkan`, `:server-vulkan`, `:default-cpu`). Bundles hold their image
+        with "missing" (or "never") and drift only through `workloadctl
+        update`, which tags a rollback target, health-checks, and reverts on
+        failure. See the "Image trust" section of llms.txt.
+
+        Reads the raw TOMLs rather than ALL_WORKLOADS so multi-container
+        bundles, which SKIP_FILES excludes, are covered too.
+        """
+        for filename, toml_path in _bundle_tomls():
+            with open(toml_path, "rb") as f:
+                config = tomllib.load(f)
+            blocks = [("", config.get("container", {}))]
+            blocks += [(c.get("name", "?"), c.get("container", {}))
+                       for c in config.get("containers", [])]
+            for cname, block in blocks:
+                pull = block.get("pull")
+                if pull is None:
+                    continue
+                with self.subTest(workload=filename, container=cname):
+                    self.assertIn(
+                        pull, ("missing", "never"),
+                        f'{filename}{"/" + cname if cname else ""} sets '
+                        f'pull = "{pull}", which re-pulls on every service '
+                        f"start. Use \"missing\" and change the image with "
+                        f"`workloadctl update`.")
+
     def test_host_userns_configs_carry_optin(self):
         """Any shipped workload using userns=host must acknowledge it via
         unsafe_host_userns (S5) — otherwise it fails validation and won't

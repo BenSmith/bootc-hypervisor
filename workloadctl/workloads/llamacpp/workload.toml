@@ -25,7 +25,10 @@ name = "llamacpp"
 
 [container]
 image = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
-pull = "newer"
+# `:server-vulkan` reads like a pin but moves exactly like `:latest`. `missing`
+# pulls once and holds that image across restarts and reboots; drift happens
+# only via `workloadctl update`, which health-checks and can roll back.
+pull = "missing"
 command = [
     "--host", "0.0.0.0",
     "--port", "8080",

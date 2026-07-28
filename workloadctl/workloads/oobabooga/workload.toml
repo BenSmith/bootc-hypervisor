@@ -30,7 +30,10 @@ name = "oobabooga"
 
 [container]
 image = "docker.io/atinoda/text-generation-webui:default-cpu"
-pull = "newer"
+# `:default-cpu` reads like a pin but moves exactly like `:latest`. `missing`
+# pulls once and holds that image across restarts and reboots; drift happens
+# only via `workloadctl update`, which health-checks and can roll back.
+pull = "missing"
 # This image's entrypoint runs `python3.13 server.py $EXTRA_LAUNCH_ARGS`; launch
 # flags go through that env var, NOT a command override (overriding the command
 # replaces server.py and the flags get handed to the entrypoint shell instead).
