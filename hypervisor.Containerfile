@@ -234,14 +234,22 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
         -not -path '/var/lib/rpm/*' \
         -delete && \
     find /var -depth -type d -empty -delete && \
-    LINT_OUT=$(bootc container lint 2>&1) || { \
-        UNEXPECTED=$(echo "$LINT_OUT" | grep -i 'warning\|error' | \
-            grep -v 'gssproxy\|/var/lib/pcp\|rpm-state\|/var/lib/rpm'); \
-        if [ -n "$UNEXPECTED" ]; then \
-            echo "bootc container lint: unexpected warnings:" && \
-            echo "$LINT_OUT" && exit 1; \
-        fi; \
-    }; true
+    bootc container lint --fatal-warnings \
+        --skip var-tmpfiles --skip var-log --skip nonempty-run-tmp
+# ^ Warnings are FATAL, minus three named exemptions. This replaced a
+# `LINT_OUT=$(...) || { grep -v <paths>; }` allowlist that could never fire:
+# every lint it filtered for is type `warning`, and without --fatal-warnings
+# bootc exits 0 on warnings, so the `||` branch was unreachable and the lint
+# was decorative. `--skip` is the supported mechanism (`--list` names them).
+#
+# The three exemptions, all verified against the published image:
+#   var-tmpfiles     the four /var trees the find above deliberately preserves
+#                    (gssproxy, pcp, rpm-state, rpm) plus dnf repo metadata
+#   var-log          /var/log/dnf5.log, recreated by dnf layers after this one
+#   nonempty-run-tmp /run/{fail2ban,gluster,lock,...}, created by package
+#                    install; masked by the runtime tmpfs anyway
+# Everything else — including every fatal lint — now fails the build. Adding a
+# skip should mean "we looked and accepted it", so name the lint, don't widen.
 
 # Ensure device access groups exist, propagate to /etc/group, set privileged port sysctl.
 # /usr/lib/group is immutable on bootc; /etc/group is mutable and needed for usermod.
@@ -265,17 +273,45 @@ RUN printf 'add_dracutmodules+=" lvm dm "\n' \
     rm -rf /tmp/dracut; \
     rmdir /var/roothome 2>/dev/null || true
 
-# SELinux: allow containers to access host devices (GPU, input)
-RUN setsebool -P container_use_devices on
+# SELinux: device access is NOT granted host-wide here. This image used to run
+# `setsebool -P container_use_devices on`, which reads like "GPU access" but
+# expands to read/write/ioctl/map on every device_node type — ~200 of them,
+# including fixed_disk_device_t, lvm_control_t, kvm_device_t and tpm_device_t —
+# for the container_domain *attribute*, which every udica-derived
+# wl_<name>.process type is a member of. It was the one grant a per-workload
+# policy.cil could not scope down.
+#
+# Nothing needs that breadth. What GPU workloads actually touch (verified
+# against a live /run/cdi/nvidia.yaml) is two types:
+#   dri_device_t          /dev/dri/card*, renderD*  — already allowed with no
+#                         boolean at all (open+map via container_use_dri_devices,
+#                         on by default); also covers AMD, alongside
+#                         hsa_device_t (/dev/kfd) which is unconditional
+#   xserver_misc_device_t /dev/nvidia*, nvidiactl, nvidia-uvm*, nvidia-caps/*
+#                         — granted in the hypervisor-nvidia-* variants only,
+#                         via container_use_xserver_devices
+# and /dev/input for KMS desktops, gated below.
+#
+# NOTE for existing hosts: the SELinux policy store lives in /etc and is rebuilt
+# locally by `workloadctl enable` (semodule -i), so ostree's 3-way merge keeps
+# the host's copy and this removal does NOT reach a machine on `bootc upgrade`.
+# Fresh installs only. On an already-deployed host, run:
+#   sudo setsebool -P container_use_devices off
+# `workloadctl doctor` reports the boolean's state against this intent.
 
-# SELinux: gate container access to the host seatd socket (KMS desktops) behind
-# the seatd_container_connect boolean, shipped OFF so the host-wide container_t
-# grant is inert until a KMS desktop is run:
+# SELinux: two host-wide container_t grants whose consumers are bare containers
+# (desktop-containers/desktop-*-kms), which have no per-workload type to carry
+# them. Both ship OFF, so the grants are inert until a KMS desktop is run — and
+# a KMS desktop needs both:
 #   sudo setsebool -P seatd_container_connect on
-COPY security/seatd_container.cil security/pasta_sandbox.cil /tmp/
+#   sudo setsebool -P container_input_devices on
+COPY security/seatd_container.cil security/container_input_devices.cil \
+     security/pasta_sandbox.cil /tmp/
 RUN rm -rf /etc/selinux/targeted/tmp /etc/selinux/targeted/previous 2>/dev/null; \
-    semodule -i /tmp/seatd_container.cil /tmp/pasta_sandbox.cil && \
-    rm -f /tmp/seatd_container.cil /tmp/pasta_sandbox.cil
+    semodule -i /tmp/seatd_container.cil /tmp/container_input_devices.cil \
+                /tmp/pasta_sandbox.cil && \
+    rm -f /tmp/seatd_container.cil /tmp/container_input_devices.cil \
+          /tmp/pasta_sandbox.cil
 
 # Optional: Enable passwordless sudo for local development
 # Enabled with: podman build --build-arg ENABLE_PASSWORDLESS_SUDO=true

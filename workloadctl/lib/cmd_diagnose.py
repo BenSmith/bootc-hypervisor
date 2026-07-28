@@ -29,6 +29,70 @@ from substrate import service_active
 from cmd_validate import load_config_or_exit
 
 
+def _gpu_vendors(config) -> set[str]:
+    """GPU vendors declared by any container's ``[devices] gpu``.
+
+    Reads the raw TOML in both shapes — top-level ``[devices]`` for single
+    mode, per-entry for ``[[containers]]`` — and returns the vendor half of
+    ``vendor[:spec]``. "none" and absent are omitted, so an empty set means
+    the workload asked for no GPU.
+    """
+    cfg = config.config
+    sections = [cfg, *(cfg.get("containers") or [])]
+    vendors = set()
+    for section in sections:
+        gpu = (section.get("devices") or {}).get("gpu", "none")
+        if gpu and gpu != "none":
+            vendors.add(gpu.partition(":")[0])
+    return vendors
+
+
+def _getsebool(name: str) -> bool | None:
+    """State of an SELinux boolean, or None when it can't be determined.
+
+    None covers three cases the caller must not treat as "off": no
+    getsebool binary, SELinux disabled, and a boolean this policy version
+    doesn't define.
+    """
+    if not shutil.which("getsebool"):
+        return None
+    result = subprocess.run(
+        ["getsebool", name], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip().endswith("on")
+
+
+def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
+                      module: str | None) -> tuple[bool, str, str | None]:
+    """Verdict for NVIDIA device access under SELinux: (passed, message, fix).
+
+    Split out from the collector so the four outcomes are testable without
+    standing up a workload. `module` is the workload's own SELinux module
+    name, or None if it ships no policy.cil. See the caller for why only the
+    no-path-at-all case fails.
+    """
+    if xserver is None and blanket is None:
+        return (True, "NVIDIA GPU requested; SELinux boolean state unknown "
+                      "(getsebool unavailable or SELinux disabled)", None)
+    if xserver:
+        return (True, "NVIDIA device access allowed "
+                      "(container_use_xserver_devices on)", None)
+    if blanket:
+        return (True, "NVIDIA device access allowed via the legacy blanket "
+                      "container_use_devices — narrow it: setsebool -P "
+                      "container_use_xserver_devices on, then setsebool -P "
+                      "container_use_devices off", None)
+    if module:
+        return (True, f"NVIDIA GPU requested; no host boolean grants "
+                      f"xserver_misc_device_t, so access must come from "
+                      f"{module}", None)
+    return (False, "NVIDIA GPU requested but nothing grants access to "
+                   "/dev/nvidia* (xserver_misc_device_t) — expect permission "
+                   "denied from the CUDA runtime",
+            "sudo setsebool -P container_use_xserver_devices on")
+
+
 def collect_diagnose_checks(config, manager: WorkloadManager):
     """Run the diagnose check battery and return (checks, passed).
 
@@ -114,6 +178,38 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                 _check("selinux_module", False,
                        f"SELinux module not loaded: {module}",
                        fix=f"sudo workloadctl enable {config.name}")
+
+    # Check: NVIDIA device nodes reachable under SELinux.
+    #
+    # /dev/nvidia*, nvidiactl, nvidia-uvm* and nvidia-caps/* are all
+    # xserver_misc_device_t, and unlike DRI (dri_device_t, covered by the
+    # default-on container_use_dri_devices) and ROCm (hsa_device_t,
+    # unconditional) nothing grants it by default. The base image deliberately
+    # grants no device access host-wide, so an NVIDIA workload reaches those
+    # nodes one of three ways: container_use_xserver_devices, which the
+    # hypervisor-nvidia-* variants set and which covers container_t; its own
+    # policy.cil, which is how a workload with a udica-derived type must do it
+    # (the boolean is written against container_t, not container_domain); or
+    # the legacy blanket container_use_devices, which works but hands every
+    # container every device_node type and should be migrated off.
+    #
+    # Only the no-path-at-all case fails. A host still carrying the blanket
+    # boolean is working, not broken, so it passes with the migration in the
+    # message — image-side SELinux changes don't reach existing hosts on
+    # `bootc upgrade` (the policy store is in /etc and semodule -i has made it
+    # locally modified), so that state is expected on any machine that predates
+    # the scoped policy and shouldn't read as a fault.
+    vendors = _gpu_vendors(config)
+    wants_nvidia = "nvidia" in vendors or (
+        "auto" in vendors and Path("/dev/nvidia0").exists()
+    )
+    if wants_nvidia:
+        passed, message, fix = gpu_selinux_check(
+            _getsebool("container_use_xserver_devices"),
+            _getsebool("container_use_devices"),
+            selinux_module_name(config.name) if config.selinux_policy else None,
+        )
+        _check("gpu_selinux", passed, message, fix=fix)
 
     # Check 4: Runtime directory exists
     if user_exists:

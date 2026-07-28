@@ -10,6 +10,9 @@
 ;     sudo setsebool -P seatd_container_connect on    # before
 ;     sudo setsebool -P seatd_container_connect off   # after
 ;
+; A KMS desktop needs the input half too — see container_input_devices.cil,
+; which is the same shape and flipped by the same step.
+;
 (boolean seatd_container_connect false)
 (booleanif seatd_container_connect
     (true

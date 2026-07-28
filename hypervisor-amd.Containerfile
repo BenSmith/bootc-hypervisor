@@ -29,7 +29,10 @@ RUN printf '# AMD ROCm KFD device - render group access for AI workloads\n' > /u
 
 # AMD GPUs work with podman automatically via CDI
 RUN mkdir -p /etc/cdi && \
-    bootc container lint
+    bootc container lint --fatal-warnings \
+        --skip var-tmpfiles --skip var-log --skip nonempty-run-tmp
+# ^ Same exemptions as the base image; see the comment on the lint call in
+# hypervisor.Containerfile for why each is skipped and why warnings are fatal.
 
 # rocm-smi tries to use libdrm_amdgpu.so, this is a workaround to provide it
 RUN ln -s /usr/lib64/libdrm_amdgpu.so.1 /usr/lib64/libdrm_amdgpu.so

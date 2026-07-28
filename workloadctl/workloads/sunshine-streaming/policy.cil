@@ -75,7 +75,13 @@
     (allow process self (dir (write add_name)))
     (allow process self (file (create)))
     (allow process var_run_t (sock_file (getattr write)))
-    (allow process xserver_misc_device_t (chr_file (setattr)))
+    ; NVIDIA device nodes (/dev/nvidia*, nvidiactl, nvidia-uvm*, nvidia-caps/*)
+    ; and the X DRI node Xwayland setattr's — all xserver_misc_device_t. Stated
+    ; here rather than inherited: the NVIDIA images set
+    ; container_use_xserver_devices, but that boolean is written against
+    ; container_t, not the container_domain attribute this type belongs to.
+    (allow process xserver_misc_device_t
+        (chr_file (append getattr ioctl lock map open read setattr write)))
     ; Xwayland: connect to the X server's /tmp/.X11-unix socket.
     (allow process xserver_t (unix_stream_socket (connectto)))
 

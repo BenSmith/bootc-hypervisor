@@ -41,14 +41,27 @@ secret store again.
 
 1. Reads `secrets.COSIGN_SECRET` / `secrets.COSIGN_PASSWORD` — the only time
    those are used.
-2. `systemd-creds encrypt --with-key=host` each one into
-   `/etc/forgejo-runner/creds/cosign-key.cred` and `cosign-pass.cred`.
-3. Writes a `forgejo-runner.service.d/50-signing-creds.conf` drop-in with
+2. Copies any credentials already sealed into
+   `/etc/forgejo-runner/creds/backup-<UTC timestamp>/`.
+3. `systemd-creds encrypt --with-key=host` each one into
+   `/etc/forgejo-runner/creds/cosign-key.cred.new` and `cosign-pass.cred.new`.
+4. Decrypts both `.new` blobs and compares the SHA-256 of what comes back with
+   the SHA-256 of what went in, then moves them into place. A mismatch aborts
+   with the live credentials untouched.
+5. Writes a `forgejo-runner.service.d/50-signing-creds.conf` drop-in with
    `LoadCredentialEncrypted=` for both, so systemd decrypts them into the
    service's credential tmpfs at start.
-4. Schedules the runner restart with `systemd-run --on-active=30` rather than
+6. Schedules the runner restart with `systemd-run --on-active=30` rather than
    restarting inline — an immediate restart would kill the very job doing the
    sealing.
+
+Steps 2 and 4 exist because of the interaction between two other facts on this
+page: the blobs are bound to this VM and regenerable from nowhere else, and the
+documented flow deletes `COSIGN_SECRET` from Forgejo once the first seal works.
+Without them, a re-run with a mangled secret would overwrite the only live copy
+of the signing key and the source it could be rebuilt from would already be
+gone. Digests are compared rather than values so neither the key nor the
+passphrase can reach the job log.
 
 `--with-key=host` binds the ciphertext to the VM's
 `/var/lib/systemd/credential.secret`. That is the point: the sealed files are

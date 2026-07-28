@@ -60,6 +60,20 @@ RUN echo -e "blacklist nouveau\noptions nouveau modeset=0" \
     echo -e "nvidia\nnvidia_uvm\nnvidia_drm\nnvidia_modeset" \
     > /etc/modules-load.d/nvidia.conf
 
+# SELinux: let containers use the NVIDIA device nodes. The base image grants no
+# device access host-wide (see the SELinux block in hypervisor.Containerfile);
+# this is the one place where blanket access to a device type is the image's
+# whole purpose, so it is on by default here and nowhere else.
+#
+# xserver_misc_device_t is what /dev/nvidia*, nvidiactl, nvidia-uvm{,-tools} and
+# nvidia-caps/* are labelled — the complete device surface of the CDI spec, the
+# rest of which is dri_device_t and already allowed. Note the stock boolean is
+# written against container_t, NOT the container_domain attribute, so it does
+# not reach udica-derived wl_<name>.process types; workloads with their own
+# policy.cil state the grant themselves (vncdesktop-sway, vncdesktop-wayfire,
+# sunshine-streaming do).
+RUN setsebool -P container_use_xserver_devices on
+
 # Generate CDI specification for nvidia-container-toolkit (modern approach for podman/crun)
 # Install service to generate CDI spec on first boot
 COPY systemd/nvidia-cdi-generator.service /etc/systemd/system/nvidia-cdi-generator.service
@@ -68,7 +82,10 @@ RUN printf '[Unit]\nDescription=Initialize NVIDIA UVM device nodes\nBefore=workl
     systemctl enable nvidia-persistenced && \
     systemctl enable nvidia-init.service && \
     systemctl enable nvidia-cdi-generator.service && \
-    bootc container lint
+    bootc container lint --fatal-warnings \
+        --skip var-tmpfiles --skip var-log --skip nonempty-run-tmp
+# ^ Same exemptions as the base image; see the comment on the lint call in
+# hypervisor.Containerfile for why each is skipped and why warnings are fatal.
 
 LABEL org.opencontainers.image.title="Hypervisor Bootc Image - NVIDIA (negativo17)"
 LABEL org.opencontainers.image.description="Bootc-based hypervisor with NVIDIA GPU support via negativo17 repository"

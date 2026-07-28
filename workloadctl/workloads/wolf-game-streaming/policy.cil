@@ -65,4 +65,13 @@
     ; even when neverallow checking is on (host runs expand-check=0 today).
     (typeattributeset mmap_low_domain_type (process))
     (allow process self (memprotect (mmap_zero)))
-    (allow process container_file_t (file (execmod))))
+    (allow process container_file_t (file (execmod)))
+
+    ; NVIDIA device nodes (/dev/nvidia*, nvidiactl, nvidia-uvm*, nvidia-caps/*)
+    ; on a GPU host — xserver_misc_device_t. Stated here rather than inherited:
+    ; the NVIDIA images set container_use_xserver_devices, but that boolean is
+    ; written against container_t, not the container_domain attribute this type
+    ; belongs to. DRI (dri_device_t) needs nothing — the base policy grants it
+    ; to container_domain unconditionally.
+    (allow process xserver_misc_device_t
+        (chr_file (append getattr ioctl lock map open read setattr write))))

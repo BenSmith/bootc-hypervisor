@@ -1,0 +1,25 @@
+; Allow containers to read evdev input devices and create virtual ones —
+; /dev/input/event* and /dev/uinput, both event_device_t on Fedora.
+;
+; This is the input half of the KMS desktop story; seatd_container.cil is the
+; seat half, and a KMS desktop needs both. Like that one, the grant is on
+; container_t rather than a per-workload type because its consumers are bare
+; `cosy` containers (desktop-containers/desktop-*-kms), not workloadctl
+; workloads, so there is no wl_<name>.process type to attach it to. Gated OFF
+; by default so the host-wide grant is inert until someone runs a KMS desktop:
+;
+;     sudo setsebool -P container_input_devices on     # with seatd_container_connect
+;     sudo setsebool -P container_input_devices off    # after
+;
+; Workloads that need input devices and DO have their own type must not use
+; this — they state the same grant in their own policy.cil, scoped to
+; themselves. sunshine-streaming and wolf-game-streaming already do.
+;
+; Replaces the input half of `setsebool -P container_use_devices on`, which
+; granted every container read/write on all ~200 device_node types to get this.
+;
+(boolean container_input_devices false)
+(booleanif container_input_devices
+    (true
+        (allow container_t event_device_t (chr_file (open read write ioctl getattr)))
+        (allow container_t event_device_t (dir (open read search getattr)))))

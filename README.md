@@ -240,7 +240,7 @@ Weekly automated builds via GitHub Actions: `fedora-bootc-minimal` on Saturdays,
 - **Rootless containers via dedicated users** — Each workload gets a unique `_wl-{name}` user with its own UID namespace. No privileged containers.
 - **systemd-native** — Generators for boot-time provisioning, credentials for secrets, cgroup v2 for resource limits, journal for logging.
 - **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to images.
-- **Explicit hardware opt-in** — No device access by default; convenience flags (`--gpu`, `--audio`, `--input`, `--virtualization`) for common scenarios.
+- **Explicit hardware opt-in** — No device access is granted host-wide; convenience flags (`--gpu`, `--audio`, `--input`, `--virtualization`) for common scenarios. Podman passing a device in is only the first of three gates — DAC and SELinux both still apply. The base image sets no blanket SELinux device boolean: DRI and ROCm need none, NVIDIA access (`container_use_xserver_devices`) is on in the `hypervisor-nvidia-*` variants only, and `/dev/input` for KMS desktops is behind `container_input_devices`, shipped off.
 
 ## Documentation
 

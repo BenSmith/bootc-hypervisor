@@ -10,6 +10,11 @@
 # first) only when the runner VM is re-provisioned — the credentials are
 # sealed to the VM's /var/lib/systemd/credential.secret host key and don't
 # survive a rebuild. See docs/ci-image-signing.md.
+#
+# Re-running is safe: the previous blobs are copied to
+# /etc/forgejo-runner/creds/backup-<UTC timestamp>/ first, the new ones are
+# written to .new and must survive a decrypt round-trip before they replace
+# anything, and nothing is touched if that fails.
 name: seal-signing-key
 
 on:
@@ -32,11 +37,60 @@ jobs:
             echo "COSIGN_SECRET is not set in Forgejo secrets — nothing to seal."
             exit 1
           fi
-          sudo install -d -m 0700 /etc/forgejo-runner/creds
+          CREDS=/etc/forgejo-runner/creds
+          sudo install -d -m 0700 "${CREDS}"
+
+          # Back up whatever is sealed now BEFORE overwriting it. These blobs
+          # are bound to this VM's host key and cannot be regenerated from
+          # anywhere else, and the documented flow deletes COSIGN_SECRET from
+          # Forgejo after the first successful seal — so a re-run with a
+          # mangled or truncated secret would otherwise destroy the only live
+          # copy of the signing key with no way back. Backups are kept, not
+          # rotated: they are a few hundred bytes each and the workflow is
+          # hand-triggered.
+          if sudo test -e "${CREDS}/cosign-key.cred"; then
+            BACKUP="${CREDS}/backup-$(date -u +%Y%m%dT%H%M%SZ)"
+            sudo install -d -m 0700 "${BACKUP}"
+            # The copy runs inside a root shell so the glob is expanded by
+            # root: ${CREDS} is 0700 root-owned, and this job's shell is not
+            # root, so expanding *.cred out here yields the literal pattern
+            # and cp fails.
+            sudo sh -c 'cp -a "$1"/*.cred "$2"/' _ "${CREDS}" "${BACKUP}"
+            echo "Backed up existing sealed credentials to ${BACKUP}"
+          else
+            echo "No existing sealed credentials; nothing to back up."
+          fi
+
+          # Seal to .new first, so a failure anywhere below leaves the live
+          # credentials untouched.
+          trap 'sudo sh -c '"'"'rm -f "$1"/*.cred.new'"'"' _ "${CREDS}"' EXIT
           printf '%s' "${COSIGN_PRIVATE_KEY}" | sudo systemd-creds encrypt \
-            --with-key=host --name=cosign-key - /etc/forgejo-runner/creds/cosign-key.cred
+            --with-key=host --name=cosign-key - "${CREDS}/cosign-key.cred.new"
           printf '%s' "${COSIGN_PASSWORD:-}" | sudo systemd-creds encrypt \
-            --with-key=host --name=cosign-pass - /etc/forgejo-runner/creds/cosign-pass.cred
+            --with-key=host --name=cosign-pass - "${CREDS}/cosign-pass.cred.new"
+
+          # Round-trip each blob before trusting it. systemd-creds encrypt
+          # succeeding proves only that it wrote a file; this proves the
+          # runner will get the same bytes back out. Compared by digest so
+          # neither the key nor the passphrase can reach the job log.
+          verify() {
+            local name="$1" file="$2" want got
+            want=$(printf '%s' "$3" | sha256sum | cut -d' ' -f1)
+            got=$(sudo systemd-creds decrypt --name="${name}" "${file}" - \
+                  | sha256sum | cut -d' ' -f1)
+            if [ "${want}" != "${got}" ]; then
+              echo "FATAL: ${name} does not survive a decrypt round-trip." >&2
+              echo "Live credentials left untouched; nothing was changed." >&2
+              return 1
+            fi
+            echo "Verified round-trip: ${name}"
+          }
+          verify cosign-key  "${CREDS}/cosign-key.cred.new"  "${COSIGN_PRIVATE_KEY}"
+          verify cosign-pass "${CREDS}/cosign-pass.cred.new" "${COSIGN_PASSWORD:-}"
+
+          sudo mv "${CREDS}/cosign-key.cred.new"  "${CREDS}/cosign-key.cred"
+          sudo mv "${CREDS}/cosign-pass.cred.new" "${CREDS}/cosign-pass.cred"
+          trap - EXIT
 
           sudo install -d /etc/systemd/system/forgejo-runner.service.d
           {

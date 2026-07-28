@@ -62,6 +62,12 @@
 
     ; Sway launches Xwayland on demand for X11 clients.
     (allow process xserver_exec_t (file (execute execute_no_trans getattr map open read)))
-    (allow process xserver_misc_device_t (chr_file (setattr)))
+    ; The X DRI node Xwayland setattr's, plus the NVIDIA device nodes
+    ; (/dev/nvidia*, nvidiactl, nvidia-uvm*, nvidia-caps/*) on a GPU host — all
+    ; xserver_misc_device_t. Stated here rather than inherited: the NVIDIA
+    ; images set container_use_xserver_devices, but that boolean is written
+    ; against container_t, not the container_domain attribute this type is in.
+    (allow process xserver_misc_device_t
+        (chr_file (append getattr ioctl lock map open read setattr write)))
     (allow process xserver_t (unix_stream_socket (connectto)))
     (allow process var_run_t (sock_file (getattr write))))

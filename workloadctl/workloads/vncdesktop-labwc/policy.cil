@@ -41,4 +41,13 @@
     (allow process tmpfs_t (lnk_file (create)))
     (allow process container_file_t (filesystem (unmount)))
     ; ioctl on a /proc file.
-    (allow process proc_t (file (ioctl))))
+    (allow process proc_t (file (ioctl)))
+
+    ; NVIDIA device nodes (/dev/nvidia*, nvidiactl, nvidia-uvm*, nvidia-caps/*)
+    ; on a GPU host — xserver_misc_device_t. Stated here rather than inherited:
+    ; the NVIDIA images set container_use_xserver_devices, but that boolean is
+    ; written against container_t, not the container_domain attribute this type
+    ; belongs to. DRI (dri_device_t) needs nothing — the base policy grants it
+    ; to container_domain unconditionally.
+    (allow process xserver_misc_device_t
+        (chr_file (append getattr ioctl lock map open read setattr write))))

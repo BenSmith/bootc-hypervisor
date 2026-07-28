@@ -9,7 +9,7 @@ access. Managed by cosy, not the workload system.
 
 1. **Build the container:**
    ```bash
-   cd containers/desktop-labwc-kms
+   cd desktop-containers/desktop-labwc-kms
    ./build.sh
    ```
 
@@ -24,7 +24,21 @@ access. Managed by cosy, not the workload system.
    ```
    Log out and back in for group changes to take effect.
 
-4. **Create and start the container:**
+4. **Turn on the two SELinux booleans a KMS desktop needs:**
+   ```bash
+   sudo setsebool -P seatd_container_connect on
+   sudo setsebool -P container_input_devices on
+   ```
+   These gate container access to the host seatd socket and to
+   `/dev/input`/`/dev/uinput`. Both ship **off** — the image grants no device
+   access host-wide — and both are host-wide `container_t` grants while on, so
+   turn them back off when you're done:
+   ```bash
+   sudo setsebool -P seatd_container_connect off
+   sudo setsebool -P container_input_devices off
+   ```
+
+5. **Create and start the container:**
    ```bash
    cosy create --kms --audio --sudo --image localhost/desktop-labwc-kms:latest my-desktop
    ```
