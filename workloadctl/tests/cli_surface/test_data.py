@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from fixtures import poll_vm_reachable
 from target import Target
 
 
@@ -197,6 +198,91 @@ class TestRestore:
         finally:
             target.wl(f"disable --purge {name}", check=False, timeout=60)
             target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
+            if archive_path:
+                target.run(["rm", "-f", archive_path], sudo=True, check=False)
+
+    @pytest.mark.vm
+    @pytest.mark.mutating
+    @pytest.mark.destructive
+    @pytest.mark.slow
+    def test_restore_vm_round_trip(self, target, vm_with_data_disk, record_property):
+        """backup → sentinel → purge → restore: the guest's data disk comes back.
+
+        `restore` is the verb that decides whether "we have backups" is true, and
+        its failure mode is unrecoverable — you find out at the moment the
+        original is already gone. cmd_restore has no is_vm branch; it extracts and
+        places the tree generically. This test is what says whether that is
+        correct for a VM.
+
+        The sentinel lives on the *data* disk, not in the guest's root
+        filesystem: backup captures the data/ subtree only (system.qcow2 and its
+        gen-N snapshots are state/, deliberately out of scope as reconstructible),
+        so a sentinel anywhere else would be expected to vanish and would prove
+        nothing either way. A sentinel is what separates a real restore from a
+        re-provision that merely yields *a* working VM.
+        """
+        record_property("cell", "restore/vm")
+        name = vm_with_data_disk
+        token = f"clitest-sentinel-{int(time.time())}"
+        cfg_dir = f"/etc/workloads.d/{name}"
+        archive_path = None
+
+        try:
+            # Precondition: the data disk reached the guest and the seed's
+            # first-boot runcmd formatted and mounted it at /data. Without that
+            # the round-trip below would pass by restoring nothing.
+            probe = target.wl_exec(name, "findmnt -no SOURCE /data",
+                                   check=False, timeout=60)
+            assert probe.rc == 0 and "vdb" in probe.stdout, (
+                f"/data is not the data disk in the guest (findmnt said "
+                f"{probe.stdout.strip()!r}) — this test cannot distinguish a "
+                f"restore from a re-provision"
+            )
+
+            # The token is a filename, so every guest command stays flat argv.
+            target.wl_exec(name, f"sudo touch /data/{token}", check=True, timeout=60)
+            target.wl_exec(name, "sudo sync", check=True, timeout=60)
+
+            # VMs back up stopped (the archive must not catch a live disk).
+            target.wl(f"stop {name}", check=False, timeout=60)
+            time.sleep(5)
+            r = target.wl(f"backup --json {name}", check=True, timeout=300)
+            archive_path = json.loads(r.stdout)["backups"][0]["archive"]
+            assert _archive_exists(target, archive_path)
+
+            target.wl(f"disable --purge {name}", check=True, timeout=180)
+            target.run(["rm", "-rf", cfg_dir], sudo=True, check=False)
+            assert not target.remote_path_exists(f"/var/lib/workloads/{name}"), (
+                "purge left the workload tree behind; the restore below would be "
+                "reading the original, not the archive"
+            )
+
+            r = target.wl(f"restore --enable --force {archive_path}",
+                          check=True, timeout=600)
+            assert "Traceback" not in r.stderr
+
+            reachable = poll_vm_reachable(target, name, timeout=600)
+            assert reachable is not None and reachable.rc == 0, (
+                f"{name!r} not reachable after restore: "
+                f"{'' if reachable is None else reachable.stdout + reachable.stderr}"
+            )
+
+            # The restored disk already carries a filesystem, so the seed's
+            # blkid guard must leave it alone and fstab must mount it — the
+            # round-trip covers that guard as well as the archive contents.
+            mount = target.wl_exec(name, "findmnt -no SOURCE /data",
+                                   check=False, timeout=60)
+            assert mount.rc == 0 and "vdb" in mount.stdout, (
+                f"the restored data disk is not mounted at /data (findmnt said "
+                f"{mount.stdout.strip()!r}) — first boot may have reformatted it"
+            )
+            read = target.wl_exec(name, "ls /data", check=False, timeout=60)
+            assert read.rc == 0, f"cannot read /data after restore: {read.stderr}"
+            assert token in read.stdout, (
+                f"sentinel missing from the restored data disk — /data holds "
+                f"{read.stdout.split()!r}, expected {token!r}"
+            )
+        finally:
             if archive_path:
                 target.run(["rm", "-f", archive_path], sudo=True, check=False)
 

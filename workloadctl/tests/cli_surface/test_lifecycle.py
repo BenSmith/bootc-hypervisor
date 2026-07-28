@@ -21,8 +21,17 @@ import time
 
 import pytest
 
-from fixtures import unit_state
+from fixtures import poll_vm_reachable, unit_state
 from target import Target
+
+# The shared VM bridge and the unit that owns it. Mirrors VM_BRIDGE_NAME in
+# lib/workload_lib.py — spelled out here rather than imported because the
+# harness talks to the target only through the CLI and the host's own files.
+MANAGED_BRIDGE = "_workload-br"
+BRIDGE_UNIT = "workload-bridge.service"
+# Substring of the teardown-plan line VMSubstrate.teardown_plan emits when the
+# workload being disabled is the last one holding the bridge up.
+BRIDGE_STOP_PLAN = "stop shared VM bridge"
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +76,50 @@ def _wait_inactive(target: Target, name: str, timeout: int = 30) -> bool:
             return True
         time.sleep(1)
     return False
+
+
+def _managed_bridge_vms(target: Target, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    """Enabled VM workloads attached to the shared bridge, read from host config.
+
+    Deliberately derived from `list --json` plus the TOMLs on disk, never from
+    workloadctl's own teardown plan: that plan *is* the predicate under test
+    (`VMSubstrate._last_managed_bridge_vm`), so computing the expectation from it
+    would assert only that the predicate agrees with itself.
+
+    The bridge defaults to MANAGED_BRIDGE when `[vm.network] bridge` is absent,
+    matching WorkloadConfig.vm_bridge. A flat scan for a `bridge =` key is safe
+    for VM TOMLs, where that key exists in one section only.
+    """
+    data = json.loads(target.wl("list --json", check=True).stdout)
+    names = []
+    for w in data["workloads"]:
+        if w["kind"] != "vm" or not w["enabled"] or w["name"] in exclude:
+            continue
+        bridge = MANAGED_BRIDGE
+        toml = target.read(f"/etc/workloads.d/{w['name']}/workload.toml")
+        for line in toml.splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "bridge":
+                bridge = value.strip().strip("\"'")
+        if bridge == MANAGED_BRIDGE:
+            names.append(w["name"])
+    return names
+
+
+def _purge_plan(target: Target, name: str) -> list[str]:
+    """The lines `disable --purge` says it would perform, without performing them."""
+    r = target.wl(f"disable --purge --dry-run --json {name}", check=True, timeout=60)
+    return json.loads(r.stdout)["workloads"][0]["plan"]
+
+
+def _wait_unit_state(target: Target, unit: str, want: str, timeout: int = 30) -> str:
+    """Poll until `unit` reaches state `want`; return whatever state it ended in."""
+    deadline = time.monotonic() + timeout
+    state = unit_state(target, unit)
+    while state != want and time.monotonic() < deadline:
+        time.sleep(1)
+        state = unit_state(target, unit)
+    return state
 
 
 def _vm_lifecycle_baseline(target: Target, name: str, timeout: int = 120):
@@ -274,6 +327,94 @@ class TestEnableDisable:
         for db in ("/etc/subuid", "/etc/subgid"):
             r = target.run(["grep", "-c", f"^_wl-{name}:", db], sudo=True, check=False)
             assert r.rc != 0, f"_wl-{name} still has entries in {db} after purge"
+
+
+# ---------------------------------------------------------------------------
+# shared VM bridge
+# ---------------------------------------------------------------------------
+
+class TestSharedVMBridge:
+    """The shared bridge must outlive a purge that isn't the last VM's.
+
+    `VMSubstrate.teardown` stops workload-bridge.service only when no other
+    enabled VM on MANAGED_BRIDGE remains. Getting that wrong pulls the network
+    out from under a *running* guest, which is why this is worth two VM boots:
+    the unit tests in tests/test_disable_bridge.py drive the predicate with
+    mocked configs, so they pin the logic but cannot show that
+    `get_all_configs(enabled_only=True)` reflects the host.
+
+    Both directions live in one test on purpose: "the bridge stayed up" is also
+    what a teardown that never stops the bridge would produce, so the second
+    half is what gives the first one meaning — and running them as one sequence
+    costs two VM boots instead of three, with no ordering assumption between
+    them.
+    """
+
+    @pytest.mark.vm
+    @pytest.mark.mutating
+    @pytest.mark.destructive
+    @pytest.mark.slow
+    def test_purge_keeps_bridge_while_another_vm_uses_it(
+        self, target, vm_bridge_peer, fresh_vm, record_property,
+    ):
+        """Purge one of two bridged VMs: bridge stays and the survivor still
+        answers. Then purge the survivor: the bridge goes down with it."""
+        record_property("cell", "disable_purge/vm")
+        peer, doomed = vm_bridge_peer, fresh_vm
+
+        assert unit_state(target, BRIDGE_UNIT) == "active", (
+            f"{BRIDGE_UNIT} is not active with two VMs up — the rest of this "
+            f"test would be measuring nothing"
+        )
+
+        # Plan first: it is the one assertion that holds no matter what else is
+        # enabled on this host, since `peer` alone already disqualifies `doomed`
+        # from being last.
+        plan = _purge_plan(target, doomed)
+        assert not any(BRIDGE_STOP_PLAN in line for line in plan), (
+            f"purge of {doomed!r} plans to stop the bridge while {peer!r} still "
+            f"uses it; plan was {plan}"
+        )
+
+        target.wl(f"disable --purge {doomed}", check=True, timeout=180)
+
+        assert unit_state(target, BRIDGE_UNIT) == "active", (
+            f"{BRIDGE_UNIT} went down when {doomed!r} was purged, with {peer!r} "
+            f"still on it"
+        )
+        # Unit state is not connectivity: assert the survivor still answers over
+        # its own network path, which is the failure this test exists to catch.
+        r = poll_vm_reachable(target, peer, timeout=120)
+        assert r is not None and r.rc == 0, (
+            f"{peer!r} unreachable after {doomed!r} was purged: "
+            f"rc={None if r is None else r.rc} "
+            f"{'' if r is None else r.stdout + r.stderr}"
+        )
+
+        # --- complementary half: purge the survivor too -------------------
+        # Order-dependent by nature: another VM fixture alive in this session
+        # legitimately keeps the bridge up. So the expectation is computed from
+        # the host's own config rather than assumed, and when the peer is not
+        # genuinely last the *other* branch is asserted instead of skipping —
+        # both directions of the predicate are real behavior.
+        others = _managed_bridge_vms(target, exclude=(peer,))
+
+        plan = _purge_plan(target, peer)
+        plans_stop = any(BRIDGE_STOP_PLAN in line for line in plan)
+        assert plans_stop == (not others), (
+            f"purge plan for {peer!r} {'includes' if plans_stop else 'omits'} the "
+            f"bridge stop, but other bridged VMs are {others or 'absent'}; "
+            f"plan was {plan}"
+        )
+
+        target.wl(f"disable --purge {peer}", check=True, timeout=180)
+
+        want = "inactive" if not others else "active"
+        got = _wait_unit_state(target, BRIDGE_UNIT, want, timeout=30)
+        assert got == want, (
+            f"{BRIDGE_UNIT} is {got!r} after purging {peer!r} "
+            f"(other bridged VMs: {others or 'none'}); expected {want!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

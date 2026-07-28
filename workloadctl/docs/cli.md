@@ -702,6 +702,12 @@ workloadctl exec <workload>[/<container>] <command> [args...]
 
 **VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/.ssh/id_ed25519`. The guest IP is resolved from the DHCP lease file. The guest user defaults to `vm.user` from the workload config (or `root`).
 
+Both substrates pass the command as argv, not as a shell line: the arguments you write are the arguments the process receives, with no second round of word-splitting inside the guest. Shell syntax therefore needs an explicit shell, exactly as it does for a container:
+
+```bash
+workloadctl exec fedora-vm -- sh -c 'dnf list --installed | wc -l'
+```
+
 **Examples:**
 ```bash
 workloadctl exec webserver nginx -t

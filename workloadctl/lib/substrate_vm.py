@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,7 +84,15 @@ def _vm_ssh_command(
         cmd += ["-o", f"ConnectTimeout={connect_timeout}"]
     cmd.append(f"{guest_user}@{guest_ip}")
     if exec_args:
-        cmd += ["--", *exec_args]
+        # One pre-quoted word, not the argv spread out. ssh concatenates its
+        # trailing arguments with spaces and hands the result to the guest's
+        # login shell, so passing them raw silently drops a level of quoting:
+        # `exec <vm> -- sh -c 'mkfs -F /dev/vdb && …'` reached the guest as
+        # `sh -c mkfs -F /dev/vdb && …`, and mkfs ran with no arguments at all.
+        # The container substrate execs argv directly (podman exec), so without
+        # this the same command line means two different things depending on the
+        # substrate. Quoting here makes the VM path argv-faithful too.
+        cmd += ["--", " ".join(shlex.quote(a) for a in exec_args)]
     return cmd
 
 

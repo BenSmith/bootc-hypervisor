@@ -201,6 +201,16 @@ stats          PASS        PASS (exit 0, N/A message)
 Cells marked `FAIL` are likely workloadctl bugs (e.g. an unguarded verb
 crashing on the wrong substrate). A findings section lists them.
 
+An empty cell means *nobody declared it*, not "untested" — the matrix is
+hand-declared, and which cells actually run depends on the host and the marker
+filter. What is not optional is the declaration: `matrix_cells.py` lists every
+cell this harness must declare, and `tests/test_cli_surface_matrix.py` (rung 1,
+so it runs in the normal `just test` with no target and no KVM) fails if the
+declarations drift from it in either direction. Adding coverage is two lines —
+the test, and its cell in `matrix_cells.py`; removing coverage cannot be silent.
+Cells built at runtime (f-strings, e.g. the parametrized topology test) are
+invisible to that scan, so they are registered in `DYNAMIC_CELLS` instead.
+
 ## Fixture TOMLs
 
 All test workloads are named `clitest-<topology>` and live in `workloads/`.

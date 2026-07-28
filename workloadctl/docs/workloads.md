@@ -969,15 +969,19 @@ Each VM workload keeps its disks in `/var/lib/workloads/<name>/`:
 
 ```
 /var/lib/workloads/fedora-vm/
-  system.qcow2          ← active system disk (cloud image + cloud-init)
-  data.qcow2            ← secondary data disk (created if data_disk_size is set)
-  system.qcow2.gen-1    ← previous generation (created by `update`)
-  nvram.fd              ← per-workload UEFI NVRAM (copy of OVMF_VARS.fd)
-  .ssh/id_ed25519       ← workload SSH keypair (injected via cloud-init)
-  .image-cache/         ← downloaded image cache (cloud_image_url source)
+  state/                ← reconstructible; skipped by `backup`
+    system.qcow2        ← active system disk (cloud image + cloud-init)
+    system.qcow2.gen-1  ← previous generation (created by `update`)
+    nvram.fd            ← per-workload UEFI NVRAM (copy of OVMF_VARS.fd)
+    .ssh/id_ed25519     ← workload SSH keypair (injected via cloud-init)
+    .image-cache/       ← downloaded image cache (cloud_image_url source)
+  data/                 ← precious; captured by `backup`
+    data.qcow2          ← secondary data disk (created if data_disk_size is set)
 ```
 
-The data disk is formatted on first boot by cloud-init (checks `blkid` before formatting, so it is safe across reboots).
+The split is what makes a backup small: everything under `state/` can be rebuilt from the image source, so only `data/` is archived — which is also why anything a VM must keep belongs on the data disk rather than in the guest's root filesystem.
+
+Cloud-init mounts the data disk at `/data` in the guest on first boot, formatting it only when it has no filesystem yet (`blkid` guard). The format, the `/etc/fstab` entry and the mount are guarded separately, so a data disk that arrives already formatted — from a `restore`, whose archive holds `data/` but not the `state/` that carried the old fstab — is mounted rather than left attached and empty.
 
 ### Networking
 

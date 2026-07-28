@@ -609,6 +609,50 @@ def clitest_vm_lifecycle(target: Target):
 
 
 @pytest.fixture()
+def vm_bridge_peer(target: Target):
+    """A second VM on the managed bridge, for the shared-bridge teardown test.
+
+    Deliberately not one of the fixtures above: that test purges its peer as the
+    last step, which a session- or module-scoped fixture could not survive. Pair
+    it with fresh_vm to get two VMs on _workload-br that the test fully owns.
+
+    Teardown re-purges, which is a no-op when the test already did it —
+    _purge_workload is best-effort by design.
+    """
+    skip_if_no_kvm(target)
+    name = _install_toml(target, "clitest-vm-peer.toml")
+    try:
+        _enable_workload(target, name, timeout=600, expect_container=False)
+        time.sleep(30)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+@pytest.fixture()
+def vm_with_data_disk(target: Target):
+    """A VM carrying a data disk, for the backup→restore round-trip.
+
+    Separate from fresh_vm because it needs `data_disk_size`: backup captures
+    the data/ subtree only, so the data disk is the *only* guest-visible thing a
+    VM restore can be shown to bring back. The test purges and restores this
+    workload itself; teardown re-purges, which is a no-op if it already went.
+    """
+    skip_if_no_kvm(target)
+    name = _install_toml(target, "clitest-vm-restore.toml")
+    try:
+        _enable_workload(target, name, timeout=600, expect_container=False)
+        time.sleep(30)
+    except Exception:
+        _purge_workload(target, name)
+        raise
+    yield name
+    _purge_workload(target, name)
+
+
+@pytest.fixture()
 def clitest_vm_bridged(target: Target):
     """VM workload on br0 (real LAN bridge).
 

@@ -3,6 +3,7 @@
 
 import io
 import json
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -113,6 +114,23 @@ class TestVmSshCommandPinning(unittest.TestCase):
         # No trust-on-first-use / throwaway known_hosts remain.
         self.assertNotIn("StrictHostKeyChecking=no", joined)
         self.assertNotIn("/dev/null", joined)
+
+    def test_exec_args_survive_the_guest_login_shell(self):
+        """argv reaches the guest intact, as it does through podman exec.
+
+        ssh joins its trailing arguments with spaces and feeds them to the
+        guest's login shell, so an argv passed through raw loses a level of
+        quoting: `sh -c 'mkfs -F /dev/vdb'` arrived as `sh -c mkfs -F /dev/vdb`
+        and mkfs ran argument-less. Found by the rung-3 VM restore test, whose
+        sentinel write failed with a usage message.
+        """
+        config = _make_vm_config()
+        script = "mkfs.ext4 -qF /dev/vdb && echo done > /mnt/d/sentinel"
+        cmd = _vm_ssh_command(config, "192.168.200.5",
+                              exec_args=["sudo", "sh", "-c", script])
+        # ssh's remote command is the single trailing word; unquoting it must
+        # give back exactly the argv we asked for.
+        self.assertEqual(shlex.split(cmd[-1]), ["sudo", "sh", "-c", script])
 
 
 # ── VMSubstrate.liveness() ───────────────────────────────────────────────────

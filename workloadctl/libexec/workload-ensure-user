@@ -784,16 +784,23 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                 f"  - [{tag!r}, {mp!r}, {fstype!r}, {opts!r}, '0', '0']"
             )
     if has_data_disk:
-        # Format + mount /dev/vdb on first boot if it has no filesystem yet.
-        # The blkid guard makes this safe across reboots.
+        # Mount /dev/vdb at /data on first boot, formatting it only if it has no
+        # filesystem yet. Formatting and mounting are separate steps on purpose:
+        # /etc/fstab lives on the *system* disk, which is reconstructible and is
+        # rebuilt by a restore or a re-provision, while data.qcow2 comes back
+        # from the archive already formatted. Gating the fstab line on the mkfs
+        # (as this once did) meant a restored data disk was attached and never
+        # mounted — the disk was there, /data was empty, and nothing said why.
+        # Each step is guarded independently so the whole block is idempotent.
         lines += [
             "runcmd:",
             "  - |",
-            "    if [ -b /dev/vdb ] && ! blkid /dev/vdb | grep -q TYPE; then",
-            "      mkfs.ext4 -L workload-data /dev/vdb",
+            "    if [ -b /dev/vdb ]; then",
+            "      blkid /dev/vdb | grep -q TYPE || mkfs.ext4 -L workload-data /dev/vdb",
             "      mkdir -p /data",
-            "      echo 'LABEL=workload-data /data ext4 defaults 0 2' >> /etc/fstab",
-            "      mount /data",
+            "      grep -q '^LABEL=workload-data ' /etc/fstab ||"
+            " echo 'LABEL=workload-data /data ext4 defaults 0 2' >> /etc/fstab",
+            "      mountpoint -q /data || mount /data",
             "    fi",
         ]
     lines += [

@@ -101,6 +101,26 @@ class TestRenderDefaultUserData(unittest.TestCase):
         # Guarded against re-format on subsequent boots.
         self.assertIn("blkid /dev/vdb", out)
 
+    def test_data_disk_is_mounted_even_when_already_formatted(self):
+        """The fstab line and the mount must not hang off the mkfs branch.
+
+        /etc/fstab lives on the reconstructible system disk; data.qcow2 comes
+        back from a backup already formatted. When the two were in one branch, a
+        restored VM had its data disk attached and never mounted — /data was
+        simply empty. Found by tests/cli_surface test_restore_vm_round_trip.
+        """
+        out = self.mod._render_default_user_data(
+            name="myvm", guest_user="fedora",
+            pubkey="ssh-ed25519 X",
+            mounts=[], has_data_disk=True,
+        )
+        runcmd = out[out.index("runcmd:"):]
+        # mkfs is conditional; the fstab entry and the mount are not.
+        self.assertIn("blkid /dev/vdb | grep -q TYPE || mkfs.ext4", runcmd)
+        self.assertIn("mountpoint -q /data || mount /data", runcmd)
+        # Both are themselves idempotent, since runcmd reruns per instance.
+        self.assertIn("grep -q '^LABEL=workload-data ' /etc/fstab ||", runcmd)
+
     def test_with_mounts_and_data_disk(self):
         out = self.mod._render_default_user_data(
             name="myvm", guest_user="fedora",
