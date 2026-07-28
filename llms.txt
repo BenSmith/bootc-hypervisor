@@ -1,6 +1,6 @@
 # Bootc Hypervisor
 
-> Homelab virtualization platform delivered as immutable Fedora bootc images with rootless container workloads, KVM/QEMU VMs, and Incus system containers.
+> Homelab virtualization platform delivered as immutable Fedora bootc images with rootless container workloads and KVM/QEMU VMs.
 
 A complete virtualization and containerization platform built on Fedora bootc (atomic OS updates with rollback). Declarative workload management via TOML configs, GPU passthrough (AMD/NVIDIA), and TPM2-backed secrets. Designed for homelabs, edge deployments, and GPU compute — no cloud dependencies.
 
@@ -12,13 +12,13 @@ Run local services (Pi-hole, VPN proxies, game streaming, AI workloads) on an im
 
 ```
 fedora-bootc-minimal              Minimal Fedora bootc (kernel, systemd, bootc)
-  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Incus, Podman 5
+  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Podman 5, workloadctl
       ├── hypervisor-nvidia:rpmfusion   NVIDIA via RPMFusion (akmod-nvidia, CUDA)
       ├── hypervisor-nvidia:negativo17  NVIDIA via negativo17 (nvidia-driver-cuda)
       └── hypervisor-amd                AMD ROCm + Mesa
 ```
 
-All images published to `ghcr.io/bensmith/` with datetime tags, signed with cosign (keyless OIDC).
+All images published to `ghcr.io/bensmith/` with datetime tags, signed with a cosign **key** (not keyless OIDC) and verified against the tracked `cosign.pub`. GitHub signs with `cosign sign --key`; Forgejo signs at push with `podman push --sign-by-sigstore-private-key`. Both produce the same sigstore attachment — see [docs/ci-image-signing.md](docs/ci-image-signing.md).
 
 Each image carries per-version floating tags using bare Fedora version numbers (e.g. `:43`, `:44`). The `:latest` tag (and `:rpmfusion` / `:negativo17` for nvidia variants) always points at the current stable Fedora version. Supported versions and the current stable are defined in `fedora-versions.yml` at the repo root.
 
@@ -26,9 +26,8 @@ Each image carries per-version floating tags using bare Fedora version numbers (
 
 The base hypervisor image (`hypervisor.Containerfile`) is headless and includes:
 
-- **Virtualization**: libvirt, QEMU/KVM, virt-install
-- **System containers**: Incus (LXC)
-- **Application containers**: Podman 5, podman-compose, crun, skopeo
+- **Virtualization**: libvirt, QEMU/KVM, virt-install, virtiofsd, edk2-ovmf, libtpms
+- **Application containers**: Podman 5, podman-compose, crun, skopeo, distrobox
 - **Workload management**: workloadctl (installed from RPM, built in a multi-stage Containerfile)
 - **Networking**: firewalld, NetworkManager, bridge-utils, wireguard-tools, dnsmasq
 - **Storage**: btrfs-progs, xfsprogs, lvm2, mdadm, cifs-utils, NVMe tools
@@ -36,7 +35,7 @@ The base hypervisor image (`hypervisor.Containerfile`) is headless and includes:
 - **Security**: fail2ban, SELinux policy, audit, seatd
 - **Utilities**: tmux, neovim, just, jq, distrobox, fwupd
 
-Enabled services: firewalld, libvirtd, incus.socket, seatd, sshd, tuned.
+Enabled services: avahi-daemon, fail2ban, firewalld, libvirtd, seatd, sshd, tuned — plus the workloadctl exporter timers (RPM preset) and, in the NVIDIA variants, nvidia-persistenced and nvidia-cdi-generator.
 
 ### GPU Variants
 
@@ -87,23 +86,45 @@ policy-hypervisor.json.template           Policy template: reject-by-default; si
 policy-minimal.json.template              Same shape, narrower: ghcr.io/<ns> signed; ghcr.io + registry.local open
 
 security/
-  seatd_container.cil                     SELinux module (CIL): allow containers to use seatd socket
+  seatd_container.cil                     SELinux module (CIL): container_t -> host seatd socket, behind a
+                                          seatd_container_connect boolean shipped OFF
+  pasta_sandbox.cil                       SELinux module (CIL): pasta_t sandbox-setup perms missing from
+                                          container-selinux on F44; remove once fixed upstream
   pwquality-no-dictionary.conf            Disable dictionary check for password quality
 
 systemd/
   emergency-access.conf                   Emergency shell drop-in
   nvidia-cdi-generator.service            NVIDIA CDI device list generator
 
+containers.conf.d/10-pasta-no-splice.conf Disable pasta's loopback splice() fast path (throughput regression)
+registries.conf.d/mirrors.conf            Route public-registry pulls through the registry.local pull-through cache.
+                                          Installed ONLY when a homelab CA is injected (internal Forgejo builds), never
+                                          in the public ghcr image — registry.local is an mDNS name, so TLS against
+                                          that CA is what proves the responder is the real cache
+registries.d/*.yaml                       use-sigstore-attachments for ghcr.io and registry.local
+tmpfiles.d/fail2ban-statedir.conf         Recreate /var/lib/fail2ban at boot (bootc ships /var empty)
+ca-trust-inject/                          Empty in git; CI drops the homelab root CA here to bake it into
+                                          internal images' trust store (README explains the scheme)
+desktop-containers/                       Four cosy build contexts (labwc/wayfire x kms/nested), COPY'd to
+                                          /usr/share/cosy/. Operator-run, deliberately not built by CI.
+.githooks/pre-push                        Refuse to push `internal` (or anything descending from it) to GitHub
+
 docs/
   emergency-recovery.md                   Boot recovery procedures
   TROUBLESHOOTING.md                      Common issues and fixes
+  ci-image-signing.md                     How each forge gets the signing key; the Forgejo sealed-credential scheme
+  cosign-local-redirect-loop.md           Why CI signs via containers/image instead of the cosign CLI
+  ideas.md                                Scratch list, not a plan of record
 
-.github/workflows/
-  build-minimal-bootc.yml                 Weekly build: fedora-bootc-minimal (Sat 2am UTC)
-  build-hypervisor.yml                    Weekly build: all hypervisor variants (Sun 3am UTC)
+.github/workflows/                        build-minimal-bootc.yml (weekly Sat), build-hypervisor.yml (weekly Sun),
+                                          workloadctl-test.yml (PR gate), workloadctl-runtime.yml (weekly Mon)
+.forgejo/workflows/                       Mirrors of the above (minimal Sun, hypervisor Mon, runtime Tue) plus three
+                                          Forgejo-only: seal-signing-key.yml, build-workload-images.yml,
+                                          build-hypervisor-f44-quick.yml. No drift check between the forges.
+.forgejo/scripts/ci-workload-images.py    Builds workload images from the checked-out tree via workloadctl's own
+                                          lib/imagebuild.py; `list` feeds the CI matrix
 
 justfile                                  Build automation (see Build System below)
-tests/                                    VM integration tests
 ```
 
 ## Build System (justfile)
@@ -123,9 +144,9 @@ All builds use [just](https://github.com/casey/just). Key targets:
 
 **Development:**
 - `just aio-local` — Build image, create QCOW2, deploy to libvirt VM (all-in-one)
-- `just test` — Run workloadctl unit tests
-- `just test-vm-build` — Build VM integration test image
-- `just test-vm` — Boot test VM with SWTPM, run tests via SSH, tear down
+- `just test` / `just test-unit` / `just test-integration` — workloadctl tests (delegate into `workloadctl/`)
+- `just test-cli <target>` — workloadctl rung-3 CLI-surface tests
+- `just test-all-runtime [target]` / `just test-all-runtime-remote <host>` — the runtime rung, locally or over SSH
 - `just push-all` — Tag and push all images to local registry
 
 ## Installation
@@ -168,7 +189,7 @@ sudo bootc switch ghcr.io/bensmith/hypervisor-amd:44
 4. **TPM2-backed secrets** — Hardware encryption, machine-specific, safe to commit encrypted blobs to git/images.
 5. **Explicit hardware opt-in** — No device access by default; convenience flags for GPU, audio, input, KVM.
 6. **fuse-overlayfs hardlink workaround** — Containerfiles break ostree rpmdb hardlinks before `dnf install` to avoid database corruption (see hypervisor.Containerfile).
-7. **Image trust is scoped signing over a registry allowlist** — The shipped `policy.json` (from `policy-hypervisor.json.template`) is **reject-by-default, and the default is live**: there is deliberately no `""` scope under the `docker` transport, so a ref on any registry not named in the file is refused before a layer moves. Two tiers sit above that default. *Signature required:* `ghcr.io/__REGISTRY_NAMESPACE__` (the bootc images) and `registry.local` (CI-built workload images) are `sigstoreSigned` with `/etc/pki/containers/cosign.pub`, signatures fetched from the registries themselves (`registries.d/*.yaml` `use-sigstore-attachments`). *Allowlisted but unverified:* `docker.io`, `ghcr.io`, `quay.io`, `codeberg.org`, `mcr.microsoft.com`, `registry.fedoraproject.org` — the registries the shipped workloads and the build recipes actually pull from. Third-party images stay consciously unsigned, because the signature asserts "bytes CI pushed" and never provenance about upstream; what the allowlist adds is that a *typo'd or injected* ref pointing somewhere else fails closed instead of silently resolving. The cost is real and worth knowing: **adopting a workload from a new registry means adding it here**, or the pull fails with "Source image rejected". More-specific scopes win, which is why `ghcr.io/__REGISTRY_NAMESPACE__` stays signature-gated despite `ghcr.io` being open. The root→user local-override transfer (`containers-storage` transport) is policy-exempt by construction.
+7. **Image trust is scoped signing over a registry allowlist** — The shipped `policy.json` (from `policy-hypervisor.json.template`) is **reject-by-default, and the default is live**: there is deliberately no `""` scope under the `docker` transport, so a ref on any registry not named in the file is refused before a layer moves. Two tiers sit above that default. *Signature required:* `ghcr.io/__REGISTRY_NAMESPACE__` (the bootc images) and `registry.local` (CI-built workload images) are `sigstoreSigned` with `/etc/pki/containers/cosign.pub`, signatures fetched from the registries themselves (`registries.d/*.yaml` `use-sigstore-attachments`). *Allowlisted but unverified:* `docker.io`, `ghcr.io`, `quay.io`, `codeberg.org`, `mcr.microsoft.com`, `registry.fedoraproject.org` — the registries the shipped workloads and the build recipes actually pull from. Third-party images stay consciously unsigned, because the signature asserts "bytes CI pushed" and never provenance about upstream; what the allowlist adds is that a *typo'd or injected* ref pointing somewhere else fails closed instead of silently resolving. The cost is real and worth knowing: **adopting a workload from a new registry means adding it here**, or the pull fails with "Source image rejected". More-specific scopes win, which is why `ghcr.io/__REGISTRY_NAMESPACE__` stays signature-gated despite `ghcr.io` being open. The root→user local-override transfer (`containers-storage` transport) is policy-exempt by construction. **One thing this policy cannot see is which host actually served the bytes** — it is keyed on the ref the caller wrote. That is why `registries.conf.d/mirrors.conf`, which redirects five of those scopes to `registry.local`, ships only in images carrying the homelab CA and never sets `insecure`: for the allowlisted-unverified scopes, TLS to the mirror is the only remaining check.
 
 ## Documentation
 

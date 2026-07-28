@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two coupled projects in one repo:
 
-1. **Bootc hypervisor images** (repo root) — immutable Fedora bootc OS images for a homelab virtualization host. Built as a layered chain of Containerfiles, published to `ghcr.io/bensmith/`, signed with cosign (keyless OIDC). Atomic upgrades + instant rollback via `bootc`.
+1. **Bootc hypervisor images** (repo root) — immutable Fedora bootc OS images for a homelab virtualization host. Built as a layered chain of Containerfiles, published to `ghcr.io/bensmith/`, signed with a cosign key (not keyless OIDC) and verified against the tracked `cosign.pub` — see `docs/ci-image-signing.md`. Atomic upgrades + instant rollback via `bootc`.
 2. **workloadctl** (`workloadctl/`) — a standalone, RPM-packaged Python tool (no bootc dependency) that turns `/etc/workloads.d/<name>/workload.toml` bundles into isolated rootless-podman container workloads *and* KVM/QEMU VMs. It ships inside the hypervisor image but is developed and tested independently.
 
 The image is the *delivery vehicle*; workloadctl is where almost all application logic lives.

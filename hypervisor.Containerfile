@@ -21,11 +21,13 @@ COPY policy.json /etc/containers/policy.json
 COPY cosign.pub /etc/pki/containers/cosign.pub
 COPY registries.d/ghcr.io.yaml /etc/containers/registries.d/ghcr.io.yaml
 COPY registries.d/registry-local.yaml /etc/containers/registries.d/registry-local.yaml
-COPY registries.conf.d/mirrors.conf /etc/containers/registries.conf.d/mirrors.conf
 COPY security/pwquality-no-dictionary.conf /etc/security/pwquality.conf.d/no-dictionary.conf
 # Work around pasta's loopback splice() throughput regression (see the file's
 # header) — without this, large pulls through the Caddy->zot reverse proxy hang.
 COPY containers.conf.d/10-pasta-no-splice.conf /etc/containers/containers.conf.d/10-pasta-no-splice.conf
+# NOTE: registries.conf.d/mirrors.conf is deliberately NOT copied here. It is
+# installed further down, only when a homelab CA is being injected — see the
+# ca-trust-inject block.
 # fail2ban's /var/lib/fail2ban state dir is emptied with the rest of /var during
 # the build; recreate it at boot so fail2ban-server can open its sqlite db.
 COPY tmpfiles.d/fail2ban-statedir.conf /usr/lib/tmpfiles.d/fail2ban-statedir.conf
@@ -45,17 +47,35 @@ RUN printf 'uinput\n' > /usr/lib/modules-load.d/uinput.conf && \
     printf 'KERNEL=="uinput", GROUP="input", MODE="0660"\n' \
         >> /usr/lib/udev/rules.d/72-uinput-input.rules
 
-# CI-injectable trust anchors. The Forgejo pipeline drops the homelab root CA
-# (public cert) into ca-trust-inject/ from the HOMELAB_ROOT_CA secret before
-# building, so internal images trust the shared homelab CA. The dir is empty in
-# git and on the public GitHub pipeline, so this is a no-op there. Only *.crt
-# are installed; the README is ignored.
+# CI-injectable trust anchors, and the registry mirror that depends on them.
+#
+# The Forgejo pipeline drops the homelab root CA (public cert) into
+# ca-trust-inject/ from the HOMELAB_ROOT_CA secret before building, so internal
+# images trust the shared homelab CA. The dir is empty in git and on the public
+# GitHub pipeline, so this is a no-op there. Only *.crt are installed; the
+# README is ignored.
+#
+# The registry.local pull-through mirror is gated on the same signal, and the
+# gate is the point. registry.local resolves over mDNS (this image enables
+# avahi and puts mdns4_minimal ahead of dns in nsswitch, and .local is mDNS's
+# own domain), so the name is claimable by anything on the link. In an image
+# that carries the homelab CA that is fine — TLS verification against the CA
+# is what proves the responder is the real cache. In the public ghcr image it
+# is not: there is no CA to verify against, registry.local means nothing on a
+# stranger's network, and a mirror entry there is at best inert and at worst a
+# hijack of every docker.io/ghcr.io/quay.io pull. So the mirror ships only
+# where the anchor that secures it also ships.
 COPY ca-trust-inject/ /tmp/ca-trust-inject/
+COPY registries.conf.d/mirrors.conf /tmp/mirrors.conf
 RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
         cp /tmp/ca-trust-inject/*.crt /etc/pki/ca-trust/source/anchors/ && \
         update-ca-trust && \
-        echo "Installed CI-injected trust anchors"; \
-    fi && rm -rf /tmp/ca-trust-inject
+        install -Dpm 0644 /tmp/mirrors.conf \
+            /etc/containers/registries.conf.d/mirrors.conf && \
+        echo "Installed CI-injected trust anchors + registry.local mirror"; \
+    else \
+        echo "No CI-injected trust anchors; skipping the registry.local mirror"; \
+    fi && rm -rf /tmp/ca-trust-inject /tmp/mirrors.conf
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and

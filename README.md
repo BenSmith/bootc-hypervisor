@@ -1,7 +1,7 @@
 # Bootc Hypervisor
 
 Homelab virtualization platform delivered as immutable [Fedora bootc](https://bootc-dev.github.io/) images with rootless
-container workloads, KVM/QEMU VMs, and Incus system containers.
+container workloads and KVM/QEMU VMs.
 
 Atomic OS upgrades with instant rollback, declarative workload management via TOML configs, GPU passthrough 
 (AMD/NVIDIA), and TPM2-backed secrets. No cloud dependencies.
@@ -45,21 +45,21 @@ curl http://localhost:8080
 
 ```
 fedora-bootc-minimal              Minimal Fedora bootc (kernel, systemd, bootc) - built from Fedora's bootc project
-  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Incus, Podman 5
+  └── hypervisor-bootc             Full stack: libvirt, QEMU/KVM, Podman 5, workloadctl
       ├── hypervisor-nvidia:rpmfusion   NVIDIA via RPMFusion (akmod-nvidia, CUDA)
       ├── hypervisor-nvidia:negativo17  NVIDIA via negativo17 (nvidia-driver-cuda)
       └── hypervisor-amd                AMD ROCm + Mesa
 ```
 
-All images published to `ghcr.io/bensmith/` with datetime tags, signed with cosign (keyless OIDC).
+All images published to `ghcr.io/bensmith/` with datetime tags, signed with a cosign **key** (not keyless OIDC) and
+verified against the tracked `cosign.pub` — see [docs/ci-image-signing.md](docs/ci-image-signing.md).
 
 ### What's in hypervisor-bootc
 
 The base image is headless and includes:
 
-- **Virtualization**: libvirt, QEMU/KVM, virt-install
-- **System containers**: Incus (LXC)
-- **Application containers**: Podman 5, podman-compose, crun, skopeo
+- **Virtualization**: libvirt, QEMU/KVM, virt-install, virtiofsd, edk2-ovmf, libtpms
+- **Application containers**: Podman 5, podman-compose, crun, skopeo, distrobox
 - **Workload management**: [workloadctl](#workload-system-workloadctl)
 - **Networking**: firewalld, NetworkManager, bridge-utils, wireguard-tools, dnsmasq
 - **Storage**: btrfs-progs, xfsprogs, lvm2, mdadm, cifs-utils, NVMe tools
