@@ -10,11 +10,9 @@ import argparse
 import sys
 import traceback
 
-# Import version with a fallback for source checkouts where _version.py is absent.
-try:
-    from _version import __version__
-except ImportError:
-    __version__ = "0-dev"
+# Build identity, with the source-checkout fallback. Sourced from workload_lib so
+# `--version` and the version stamped into generated units are the same string.
+from workload_lib import WORKLOADCTL_VERSION as __version__
 
 import cli_log
 from cmd_create import cmd_create

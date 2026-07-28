@@ -33,6 +33,7 @@ from pathlib import Path
 from covhelper import python_cmd
 
 from tests import script_env
+from workload_lib import GENERATED_BY_RE
 
 
 GENERATOR = os.path.join(os.path.dirname(__file__), '..', 'generators', 'workload-generate')
@@ -489,6 +490,27 @@ class TestRenderMatrixSnapshot(unittest.TestCase):
                 _UNIT_HEADER_RE.search(text),
                 f"{filename} doesn't look like a unit file (no [Unit]/[Service]/"
                 f"[Install] header):\n{text}",
+            )
+
+    def test_every_unit_carries_a_versioned_provenance_stamp(self):
+        """Every emitted unit records which build wrote it.
+
+        The stamp is the only thing that distinguishes units written by an older
+        workloadctl: they live in /run, are rewritten only at boot or by
+        `enable`, and an RPM upgrade moves neither their mtime nor the TOML's, so
+        units_outdated() stays quiet. A new emitter that forgets
+        unit.comment(GENERATED_BY) would be invisible without this.
+        """
+        matrix = render_matrix()
+        for filename, text in matrix.items():
+            match = GENERATED_BY_RE.search(text)
+            self.assertIsNotNone(
+                match, f"{filename} carries no provenance stamp"
+            )
+            self.assertTrue(
+                match.group(1),
+                f"{filename} carries the provenance comment without a version: "
+                f"{match.group(0)!r}",
             )
 
     def test_every_fixture_emits_at_least_one_unit(self):

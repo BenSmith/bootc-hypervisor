@@ -580,6 +580,10 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.home))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
         self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
+        # Pinned for the same reason: the real reader stats
+        # /run/systemd/system and would vary with the host.
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "units_from_other_build", lambda name: None))
 
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
@@ -757,6 +761,26 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         check = next(c for c in data["checks"] if c["check"] == "config_current")
         self.assertFalse(check["passed"])
         self.assertIn("stale", check["message"])
+
+    def test_units_current_reports_an_older_build(self):
+        # Distinct from config_current: that one is "the TOML moved", this is
+        # "workloadctl moved". An RPM upgrade changes neither file's mtime, so
+        # config_current stays green while the units are last release's shape.
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "units_from_other_build",
+            lambda name: "0.1.0-1.20250101000000"))
+        code, out = self._run(json_mode=True)
+        data = json.loads(out)
+        check = next(c for c in data["checks"] if c["check"] == "units_current")
+        self.assertFalse(check["passed"])
+        self.assertIn("0.1.0-1.20250101000000", check["message"])
+        self.assertIn("workloadctl enable app", check["fix"])
+        self.assertTrue(
+            next(c for c in data["checks"]
+                 if c["check"] == "config_current")["passed"],
+            "config_current must stay green — the mtime check cannot see a "
+            "build change, which is the whole reason units_current exists",
+        )
 
     def test_service_not_active_disabled_workload(self):
         # config.enabled is False (no marker); service_active failure fix
@@ -1410,6 +1434,10 @@ class DiagnoseMultiContainerTest(unittest.TestCase):
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.tmp / "h"))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
         self.enterContext(mock.patch.object(cmd_diagnose, "units_outdated", lambda name: False))
+        # Pinned for the same reason: the real reader stats
+        # /run/systemd/system and would vary with the host.
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "units_from_other_build", lambda name: None))
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
         self.pod = mock.Mock()
