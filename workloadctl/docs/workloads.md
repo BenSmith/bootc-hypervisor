@@ -789,7 +789,7 @@ sudo workloadctl secret create my-secret --key-type host+tpm2
 
 For comprehensive secrets management documentation, see:
 - [docs/secrets.md](secrets.md) - Complete guide
-- [workloads.d/example-with-secrets.toml](../workloads.d/example-with-secrets.toml) - Working example
+- [examples/example-with-secrets.toml](examples/example-with-secrets.toml) - Working example
 - [schema-reference.toml](schema-reference.toml) - Full schema with secrets
 
 ---
@@ -888,13 +888,14 @@ containers. Lifecycle commands (`enable`, `disable`, `start`, `stop`, `update`,
 `rollback`) always operate on the whole workload: `update` pulls every
 container's image and `rollback` reverts them all.
 
-Two example workloads ship in `workloads.d/` (both disabled by default):
+Two example workloads ship as bundles under `workloads/` (both disabled by
+default):
 
-- [`webproxy-demo.toml`](../workloads.d/webproxy-demo.toml) — bridge mode,
+- [`webproxy-demo`](../workloads/webproxy-demo/workload.toml) — bridge mode,
   Caddy reverse proxy + a `whoami` backend. No setup required; pulls only
   public images. The smallest end-to-end demonstration of sibling DNS and a
   single published front-end port.
-- [`example-multi-container.toml`](../workloads.d/example-multi-container.toml)
+- [`example-multi-container`](../workloads/example-multi-container/workload.toml)
   — bridge mode, Forgejo + PostgreSQL. Closer to a real stack: needs an
   encrypted DB password and may need a registry-policy entry for the Forgejo
   image. Use this as the template for production-shaped workloads.
