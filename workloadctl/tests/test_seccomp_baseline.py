@@ -95,6 +95,28 @@ class TestSeccompBaseline(unittest.TestCase):
         for s in gated:
             self.assertTrue(s.get("includes") or s.get("excludes"))
 
+    def test_cap_sys_admin_gate_covers_the_same_names_both_ways(self):
+        """The CAP_SYS_ADMIN gate is a *pair* of entries — allow-when-included,
+        ERRNO-when-excluded — and the two name lists must match exactly.
+
+        A name only in the excludes half is denied unconditionally, which is
+        stricter than the gate reads and silently diverges from the upstream
+        profile we vendored. `perf_event_open` was missing from the allow half
+        for exactly that reason: harmless in effect, but it dated our copy and
+        made the pair look like two unrelated entries rather than one gate.
+        """
+        halves = {}
+        for s in self.profile["syscalls"]:
+            caps = (s.get("includes", {}).get("caps")
+                    or s.get("excludes", {}).get("caps") or [])
+            if caps != ["CAP_SYS_ADMIN"]:
+                continue
+            side = "includes" if s.get("includes", {}).get("caps") else "excludes"
+            halves.setdefault(side, set()).update(s["names"])
+        self.assertEqual(sorted(halves), ["excludes", "includes"],
+                         "expected both halves of the CAP_SYS_ADMIN gate")
+        self.assertEqual(halves["includes"], halves["excludes"])
+
     def test_futex2_family_is_allowed(self):
         """Denying futex2 while allowing `futex` gains nothing — the same
         synchronisation capability is already reachable — and diverges from

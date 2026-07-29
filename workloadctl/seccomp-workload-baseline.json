@@ -687,6 +687,7 @@
     {
       "names": [
         "lookup_dcookie",
+        "perf_event_open",
         "quotactl",
         "quotactl_fd",
         "setdomainname",
