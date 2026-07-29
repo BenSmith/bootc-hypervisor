@@ -483,6 +483,38 @@ class ShippedSetupScriptsTest(unittest.TestCase):
             (REPO_ROOT / "workloads").glob("*/setup.sh"))
         if not cls.scripts:
             raise unittest.SkipTest("no shipped setup.sh found")
+        cls._instances = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._instances.cleanup)
+        cls._instance_dirs = {}
+
+    @classmethod
+    def _instance_dir(cls, bundle: str, name: str) -> Path:
+        """A stand-in for /etc/workloads.d/<name>/, built the way `init` builds it.
+
+        `cmd_init` copies **only** workload.toml out of the bundle, under the
+        *instance* name, and leaves every other control file to resolve back to
+        the bundle via resolve_control_file(). Reproducing that shape matters
+        here for one reason: pointing WORKLOAD_INSTANCE_DIR at the bundle dir
+        instead — which is one directory away and reads as a harmless
+        simplification — makes every instance-keyed path a script derives from
+        it contain the bundle name, so the assertion below fires on correct
+        scripts (gamedev-sway's ${WORKLOAD_INSTANCE_DIR}/seccomp.json) and can
+        never fire on the hardcoded ones it exists to catch.
+        """
+        # The parent is random rather than the bundle name: every path a script
+        # derives from this one is checked against the bundle name below, so a
+        # tidy `<tmp>/<bundle>/<name>` layout would reintroduce the same false
+        # positive one level up.
+        key = (bundle, name)
+        path = cls._instance_dirs.get(key)
+        if path is None:
+            path = Path(tempfile.mkdtemp(dir=cls._instances.name)) / name
+            path.mkdir()
+            toml = REPO_ROOT / "workloads" / bundle / "workload.toml"
+            if toml.exists():
+                shutil.copy(toml, path / "workload.toml")
+            cls._instance_dirs[key] = path
+        return path
 
     def test_every_shipped_script_answers_the_action(self):
         for script in self.scripts:
@@ -535,8 +567,8 @@ class ShippedSetupScriptsTest(unittest.TestCase):
                 or f"/{bundle}/" in ref
                 or ref.endswith(f"/{bundle}"))
 
-    @staticmethod
-    def _env(bundle: str, name: str = "zzinstance") -> dict:
+    @classmethod
+    def _env(cls, bundle: str, name: str = "zzinstance") -> dict:
         bundle_dir = REPO_ROOT / "workloads" / bundle
         return {
             "PATH": "/usr/bin:/bin",
@@ -544,10 +576,10 @@ class ShippedSetupScriptsTest(unittest.TestCase):
             "WORKLOAD_BUNDLE": bundle,
             "WORKLOAD_BUNDLE_DIR": str(bundle_dir),
             "WORKLOAD_USER": f"_wl-{name}",
-            # The instance dir is the bundle's here: sunshine's script reads a
-            # port out of ${WORKLOAD_INSTANCE_DIR}/workload.toml before it
-            # dispatches, and the bundle's own TOML is the honest stand-in.
-            "WORKLOAD_INSTANCE_DIR": str(bundle_dir),
+            # A real per-instance dir carrying the bundle's workload.toml, so
+            # sunshine's script can read its port out of it before dispatching
+            # and nothing derived from it inherits the bundle name.
+            "WORKLOAD_INSTANCE_DIR": str(cls._instance_dir(bundle, name)),
             "WORKLOAD_ROOT_DIR": f"/var/lib/workloads/{name}",
             "WORKLOAD_STATE_DIR": f"/var/lib/workloads/{name}/state",
             "WORKLOAD_DATA_DIR": f"/var/lib/workloads/{name}/data",
