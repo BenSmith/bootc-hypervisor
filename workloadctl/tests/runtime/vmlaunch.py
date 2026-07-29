@@ -687,37 +687,76 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
         raise
 
 
-def _cleanup_run_dir(run_dir: Path) -> None:
+def _is_run_dir(path: Path) -> bool:
+    """Whether `path` is one of our own run dirs — the guard on `sudo rm -rf`.
+
+    Checked against the *resolved* path so a symlink cannot aim the removal
+    somewhere else: the parent must be exactly RUN_ROOT or /tmp, and the name must
+    carry RUN_PREFIX. Nothing else is ever eligible for privileged removal.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return (resolved.name.startswith(RUN_PREFIX)
+            and resolved.parent in {RUN_ROOT.resolve(), Path("/tmp")})
+
+
+def _cleanup_run_dir(run_dir: Path) -> bool:
+    """Kill the run's VM and remove its dir. True if the dir is actually gone.
+
+    Gate mode leaves root-owned content behind: BIB runs under
+    `sudo podman run --privileged` with `bib/store` and `bib/rpmmd` bind-mounted,
+    and only `/output` gets `--chown`. So an unprivileged `rmtree` cannot empty a
+    gate run's dir, and with `ignore_errors=True` it does not say so. Escalate for
+    exactly that case — the harness created that content via sudo itself — using
+    `sudo -n` so a dev box with no cached credentials fails fast instead of
+    blocking on a prompt.
+    """
     for pid_file in (run_dir / "vm.pid", run_dir / "swtpm.pid"):
         try:
             os.kill(int(pid_file.read_text().strip()), 15)
         except (OSError, ValueError):
             pass
     shutil.rmtree(run_dir, ignore_errors=True)
+    if not run_dir.exists():
+        return True
+    if not _is_run_dir(run_dir):
+        return False
+    subprocess.run(["sudo", "-n", "rm", "-rf", "--", str(run_dir)],
+                   capture_output=True)
+    return not run_dir.exists()
 
 
-def reap_stale_runs() -> list[Path]:
-    """Kill any leftover harness VM and drop its run dir; return what was reaped.
+def reap_stale_runs() -> tuple[list[Path], list[Path]]:
+    """Kill leftover harness VMs and drop their run dirs.
+
+    Returns `(reaped, stuck)` — dirs that are now gone, and dirs that survived.
+    Only a dir that is *verifiably* gone counts as reaped: `shutil.rmtree` runs
+    with `ignore_errors=True`, so for a long time this reported success for gate
+    run dirs it had not removed (their root-owned `bib/` content defeats an
+    unprivileged rmtree). A sweep that prints success while doing nothing is worse
+    than one that fails, because the disk starvation it exists to prevent then
+    arrives with no warning attached.
 
     A run that is cancelled or killed never reaches its own cleanup, so its QEMU
     keeps running and keeps writing into a dir nothing will ever remove. On a
     long-lived CI runner those accumulate until a gate build has no room left, so
-    the runtime job sweeps first. Best-effort by design: a dir owned by another
-    user is skipped rather than raising.
+    the runtime job sweeps first.
 
     `/tmp` is swept alongside RUN_ROOT because that is where runs from before the
     disk-backed RUN_ROOT landed, and a leaked one there is exactly what starves
     the tmpfs. Assumes no other harness VM is meant to be alive — true of the
     runtime job, which runs its fidelities sequentially in one job.
     """
-    reaped = []
+    reaped: list[Path] = []
+    stuck: list[Path] = []
     for root in {RUN_ROOT, Path("/tmp")}:
         for run_dir in sorted(root.glob(f"{RUN_PREFIX}*")):
             if not run_dir.is_dir():
                 continue
-            _cleanup_run_dir(run_dir)
-            reaped.append(run_dir)
-    return reaped
+            (reaped if _cleanup_run_dir(run_dir) else stuck).append(run_dir)
+    return reaped, stuck
 
 
 if __name__ == "__main__":
@@ -725,7 +764,17 @@ if __name__ == "__main__":
     # a dev box after a Ctrl-C) can reuse the teardown above instead of open-coding
     # pidfile handling in shell.
     if sys.argv[1:2] == ["reap"]:
-        for _d in reap_stale_runs():
+        _reaped, _stuck = reap_stale_runs()
+        for _d in _reaped:
             print(f"reaped stale run dir: {_d}")
+        for _d in _stuck:
+            print(f"WARNING: could not remove stale run dir: {_d}", file=sys.stderr)
+        if _stuck:
+            # Deliberately still exit 0: this is a best-effort pre-flight sweep,
+            # and aborting the runtime rung over a leftover dir is worse than
+            # running with less disk. The warning above is the signal — what was
+            # unacceptable was reporting these as reaped.
+            print(f"WARNING: {len(_stuck)} stale run dir(s) remain; "
+                  f"remove by hand (sudo rm -rf) if disk is tight", file=sys.stderr)
     else:
         sys.exit(f"usage: {sys.argv[0]} reap")
