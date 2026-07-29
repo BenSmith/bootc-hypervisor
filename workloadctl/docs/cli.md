@@ -818,7 +818,9 @@ deployment — not swept"** and left alone; boot that deployment and
 `disable --purge` there to remove it for good. State stamped with the booted
 deployment, with a deployment that has since been pruned, or with no stamp at
 all (anything predating this, and any non-bootc host) is treated exactly as
-before.
+before. See [ADR 005](adr/005-var-state-deployment-provenance.md) for why the
+marker records *last provisioned* rather than *created*, and what is deliberately
+left out of it.
 
 [↑ top](#workloadctl-command-reference)
 

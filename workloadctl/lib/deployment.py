@@ -35,7 +35,12 @@ leaves the caller with exactly the behavior it had before this module existed.
 
 Deliberately NOT in the marker: the workload's UID and subordinate range. Those
 are derivable (the owning UID of `<root>/data` *is* the answer, one stat away)
-and a copy in a file could only go stale and compete with `/etc/subuid`.
+and a copy in a file could only go stale and compete with `/etc/subuid`. The
+rollback hazard they would have covered is handled at allocation time instead, by
+`claim_uid()` adopting the existing owner.
+
+Full rationale, including the four ways deployment identity can be got wrong:
+docs/adr/005-var-state-deployment-provenance.md.
 """
 
 import json
