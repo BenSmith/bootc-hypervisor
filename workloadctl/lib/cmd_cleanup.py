@@ -5,6 +5,12 @@ An orphan is state whose workload no longer has a config at all: a _wl-* user, a
 /var/lib/workloads/<name> dir, or a loaded wl_* SELinux module that no TOML
 declares. Keyed on declaration rather than enabled state, so a merely-disabled
 workload is never swept. Defaults to a dry run; --apply removes.
+
+"No config at all" is a per-deployment statement on an ostree host, where /etc is
+per-deployment and /var is shared — so a `bootc rollback` manufactures orphans
+out of state that another deployment still owns. State carrying a provenance
+marker for a deployment that exists but isn't booted is reported separately and
+never swept; see lib/deployment.py for the full rule.
 """
 
 import json
@@ -15,6 +21,7 @@ import subprocess
 import sys
 import tomllib
 
+import deployment
 from workload_lib import (
     iter_workloads,
     remove_subid_entries,
@@ -65,6 +72,29 @@ def cmd_cleanup(args, manager: WorkloadManager):
                       if ln.strip().startswith("wl_")}
             orphaned_modules = sorted(loaded - expected_modules)
 
+    workloads_base = WORKLOADS_BASE
+
+    # Rollback guard. Everything below decides "orphan" from the booted
+    # deployment's /etc, which a `bootc rollback` rewrites wholesale while /var
+    # stays put. Ask the state itself who it belongs to first: a marker naming a
+    # deployment that still exists but isn't booted means these were never
+    # orphans, only invisible from here. Memoized per workload name — a rolled
+    # back workload reaches this from both the user scan and the dir scan, and
+    # the report should name it once.
+    #
+    # Derived from `workloads_base`, not workload_root_dir(), for the same
+    # reason the root-claiming loop below is: one base path for the whole sweep.
+    skipped_other_deployment = {}   # name -> deployment id
+    _judged = {}
+
+    def _belongs_elsewhere(name):
+        if name not in _judged:
+            dep = deployment.other_deployments_state(workloads_base / name, name)
+            _judged[name] = dep
+            if dep:
+                skipped_other_deployment[name] = dep
+        return _judged[name]
+
     # Find all _wl-* system users
     all_users = pwd.getpwall()
     orphaned_users = []
@@ -72,11 +102,10 @@ def cmd_cleanup(args, manager: WorkloadManager):
         if not entry.pw_name.startswith(USERNAME_PREFIX):
             continue
         name = entry.pw_name[len(USERNAME_PREFIX):]
-        if name not in configured_names:
+        if name not in configured_names and not _belongs_elsewhere(name):
             orphaned_users.append(entry)
 
     # Find workload dirs with no corresponding system user
-    workloads_base = WORKLOADS_BASE
     orphaned_dirs = []
     if workloads_base.exists():
         existing_users = {e.pw_name for e in all_users}
@@ -93,7 +122,9 @@ def cmd_cleanup(args, manager: WorkloadManager):
             # rmtree'ing it would destroy operator-staged data. Mirror the
             # configured_names guard used for orphan users above.
             expected_user = workload_username(d.name)
-            if expected_user not in existing_users and d.name not in configured_names:
+            if (expected_user not in existing_users
+                    and d.name not in configured_names
+                    and not _belongs_elsewhere(d.name)):
                 orphaned_dirs.append(d)
 
     # The scan above skips a dir whose user still exists — which is every dir
@@ -108,12 +139,39 @@ def cmd_cleanup(args, manager: WorkloadManager):
         if root.exists() and root not in orphaned_dirs:
             orphaned_dirs.append(root)
 
+    # Reported in every JSON document, dry-run or not, and always empty off
+    # ostree. A consumer that never sees a non-empty list still knows the key.
+    skipped_json = [
+        {"name": n, "path": str(workloads_base / n), "deployment": dep}
+        for n, dep in sorted(skipped_other_deployment.items())
+    ]
+
+    def _print_skipped():
+        """Name what was spared and why.
+
+        Not optional: an operator staring at unexplained _wl-* state after a
+        rollback, told only that there is "nothing to clean up", is left with
+        the same silence that made the original failure mode a trap.
+        """
+        if not skipped_other_deployment:
+            return
+        print(f"\nState from another deployment ({len(skipped_other_deployment)}) "
+              f"— not swept:")
+        for n, dep in sorted(skipped_other_deployment.items()):
+            print(f"  {workloads_base / n}  (last provisioned under "
+                  f"deployment {dep[:12]}…)")
+        print("  These have no config on the *booted* deployment, which is what a")
+        print("  `bootc rollback` looks like — the deployment that owns them still")
+        print("  exists. Boot it and run 'workloadctl disable --purge <name>' there")
+        print("  to remove them for good.")
+
     if args.json and not apply:
         print(json.dumps({
             "dry_run": True,
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
             "orphan_modules": orphaned_modules,
+            "skipped_other_deployment": skipped_json,
             "removed_users": [],
             "removed_dirs": [],
             "removed_modules": []
@@ -127,12 +185,14 @@ def cmd_cleanup(args, manager: WorkloadManager):
                 "orphan_users": [],
                 "orphan_dirs": [],
                 "orphan_modules": [],
+                "skipped_other_deployment": skipped_json,
                 "removed_users": [],
                 "removed_dirs": [],
                 "removed_modules": []
             }, indent=2))
         else:
             print("Nothing to clean up.")
+            _print_skipped()
         return
 
     if not args.json:
@@ -159,9 +219,14 @@ def cmd_cleanup(args, manager: WorkloadManager):
             for m in orphaned_modules:
                 print(f"  {m}  (no workload declares selinux_policy)")
 
+        # After the --apply hint, never between the orphan lists and it: "the
+        # above" has to mean the orphans, not the state deliberately spared.
         if not apply:
             print("\nRun with --apply to remove the above.")
+            _print_skipped()
             return
+
+        _print_skipped()
 
     removed_users = []
     removed_dirs = []
@@ -216,6 +281,7 @@ def cmd_cleanup(args, manager: WorkloadManager):
             "orphan_users": [e.pw_name for e in orphaned_users],
             "orphan_dirs": [str(d) for d in orphaned_dirs],
             "orphan_modules": orphaned_modules,
+            "skipped_other_deployment": skipped_json,
             "removed_users": removed_users,
             "removed_dirs": removed_dirs,
             "removed_modules": removed_modules

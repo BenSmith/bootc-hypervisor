@@ -23,6 +23,7 @@ import tomllib
 import uuid
 from pathlib import Path
 
+import deployment
 import service_runtime
 from workload_lib import (
     UID_MIN, UID_MAX,
@@ -235,6 +236,27 @@ def setup_home_directory(pw, name):
         data_path.mkdir(parents=True, exist_ok=True)
     os.chown(data_path, pw.pw_uid, pw.pw_gid)
     os.chmod(data_path, 0o700)
+
+
+def record_deployment_provenance(name):
+    """Stamp the workload's /var root with the deployment provisioning it now.
+
+    /etc is per-deployment on ostree and /var is shared, so `bootc rollback`
+    takes a workload's config and passwd line away while its state stays behind
+    — and `cleanup`'s definition of an orphan ("state with no config") is then
+    satisfied by state another deployment still owns. The stamp is how cleanup
+    tells the two apart; see lib/deployment.py for the rule it feeds.
+
+    Runs after setup_home_directory, which creates the root. Best-effort by
+    design: a missing stamp costs exactly the pre-marker behavior, so warning
+    and continuing is strictly better than failing a service start over it.
+    """
+    root = workload_root_dir(name)
+    try:
+        if deployment.write_marker(root, name):
+            log(f"  Recorded deployment provenance in {deployment.marker_path(root)}")
+    except Exception as e:
+        log(f"  WARNING: Failed to record deployment provenance for {name}: {e}")
 
 
 def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
@@ -1257,6 +1279,8 @@ def _ensure_user(name: str) -> int:
         setup_home_directory(pw, name)
     except Exception as e:
         log(f"  WARNING: Failed to set up home directory for {username}: {e}")
+
+    record_deployment_provenance(name)
 
     if kind == "vm":
         # VM workloads: bridge config, NVRAM, socket dir, SSH key, cloud-init

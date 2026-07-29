@@ -1010,6 +1010,38 @@ class TestSetupHomeDirectory(unittest.TestCase):
             self.assertTrue(data.is_dir())
 
 
+class TestRecordDeploymentProvenance(unittest.TestCase):
+    """The /var provenance stamp (Q1 Gap 1). The rule it feeds is tested in
+    tests/test_deployment.py; what matters here is that ensure-user writes it
+    and that failing to write it can never fail a service start."""
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def test_writes_the_marker_into_the_workload_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+                 mock.patch.object(self.mod.deployment, "booted_deployment_id",
+                                   return_value=None):
+                self.mod.record_deployment_provenance("myapp")
+            self.assertEqual(
+                self.mod.deployment.read_marker(root),
+                {"name": "myapp", "deployment": None})
+
+    def test_a_failed_write_only_warns(self):
+        # The root not existing (setup_home_directory failed earlier) is the
+        # realistic case. An ExecStartPre that raises here would take the
+        # workload down over a bookkeeping file.
+        msgs = []
+        missing = Path(tempfile.gettempdir()) / "wl-does-not-exist-9d1f" / "myapp"
+        with mock.patch.object(self.mod, "workload_root_dir", lambda n: missing), \
+             mock.patch.object(self.mod, "log", side_effect=msgs.append):
+            self.mod.record_deployment_provenance("myapp")  # must not raise
+        self.assertTrue(any("Failed to record deployment provenance" in m
+                            for m in msgs))
+
+
 class TestRestoreSelinuxLabels(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()

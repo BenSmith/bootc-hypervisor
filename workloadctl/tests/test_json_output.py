@@ -763,6 +763,7 @@ class TestCleanupJson(unittest.TestCase):
                     with patch.object(cmd_cleanup, 'WORKLOADS_BASE', Path(tmp) / 'none'):
                         data = _capture_json(lambda: cmd_cleanup.cmd_cleanup(args, WorkloadManager()))
         for key in ('dry_run', 'orphan_users', 'orphan_dirs', 'orphan_modules',
+                    'skipped_other_deployment',
                     'removed_users', 'removed_dirs', 'removed_modules'):
             self.assertIn(key, data, f'missing key: {key}')
 

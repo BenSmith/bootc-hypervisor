@@ -1289,6 +1289,8 @@ sudo workloadctl cleanup --apply
 
 Finds and removes workload users that no longer have a corresponding *enabled* config, and any directories under `/var/lib/workloads/` with no corresponding user. Useful after disabling workloads, renaming them, or upgrading from an older version. The dry run (default) shows exactly what would be removed including whether each user has a home directory and subuid/subgid entries.
 
+On a bootc host it also declines to sweep state belonging to *another deployment*. `/etc` is per-deployment and `/var` is shared, so a `bootc rollback` removes a workload's config and user while leaving its data behind — which looks exactly like an orphan. Each workload root carries a `provenance.json` recording the deployment that last provisioned it; state whose deployment still exists but isn't the one you booted is reported under "State from another deployment — not swept" and left alone. To remove it, boot that deployment and run `disable --purge` there. See [`cli.md`](cli.md#cleanup).
+
 #### What `enable` does automatically vs. what you must provide
 
 When you run `workloadctl enable`, it performs pre-flight checks and setup before starting the workload:

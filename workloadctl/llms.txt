@@ -158,6 +158,28 @@ gone. Dry-runs and reports record nothing. Writes are best-effort — a missing
 directory warns once on stderr and the command carries on. No rotation (a few KB
 a year).
 
+The workload root's other bookkeeping file, `provenance.json`, sits there for the
+same reasons and answers a different question: **which ostree deployment this
+`/var` state belongs to.** `/etc` is per-deployment and `/var` is shared, so
+every piece of workload *identity* (the TOML, the `_wl-*` passwd line, the
+`subuid` range) is per-deployment while its *state* is not — and `bootc rollback`,
+which deletes nothing, therefore manufactures orphans: state whose workload has
+no config here, which is precisely `cleanup`'s definition. `workload-ensure-user`
+stamps the root with the booted deployment's `<csum>.<serial>` on every run (last
+*provisioned* under, not created under — create-only stamping would make cleanup
+skip the ordinary "operator deleted a TOML" sweep), and `cleanup` spares state
+whose stamp names a deployment that still exists but isn't booted, reporting it
+under "State from another deployment — not swept". Every uncertainty — no
+`/ostree`, no stamp, a corrupt stamp, a pruned deployment — falls back to the
+pre-stamp behavior, because nothing in this mechanism may ever *cause* a
+deletion. The deployment id comes from resolving the cmdline's `ostree=` symlink
+(its own csum is the **boot** checksum, not the deployment's) and existence is a
+`glob('/ostree/deploy/*/deploy/<id>')` — the stateroot is a variable, and `/var`
+may be a separate filesystem shared by all of them. `lib/deployment.py` carries
+the full table. The UID and subid range are deliberately **not** stamped: the
+owning UID of `<root>/data` is one `stat` away, and a copy could only go stale
+and compete with `/etc/subuid`.
+
 ### Multi-Container Workloads
 
 A workload may run more than one container under the same `_wl-<name>` user, sharing home directory and lifecycle. `workload.mode` selects the topology:

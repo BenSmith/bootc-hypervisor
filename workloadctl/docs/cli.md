@@ -806,6 +806,20 @@ sudo workloadctl cleanup [--apply] [--json]
 | `--apply` | Actually remove orphans (default is dry-run) |
 | `--json` | Output orphan lists and removal results as JSON |
 
+**Rollback safety.** On a bootc host `/etc` is per-deployment and `/var` is shared,
+so `bootc rollback` takes a workload's config, `_wl-*` user and subuid range away
+while its `/var/lib/workloads/<name>` tree stays behind — which fits this
+command's definition of an orphan exactly, without the state being orphaned at
+all. Each workload root therefore carries a `provenance.json` naming the
+deployment that last provisioned it (written by `workload-ensure-user`, so it
+appears on the workload's first start). State stamped with a deployment that
+still exists but is not the booted one is listed under **"State from another
+deployment — not swept"** and left alone; boot that deployment and
+`disable --purge` there to remove it for good. State stamped with the booted
+deployment, with a deployment that has since been pruned, or with no stamp at
+all (anything predating this, and any non-bootc host) is treated exactly as
+before.
+
 [↑ top](#workloadctl-command-reference)
 
 ---

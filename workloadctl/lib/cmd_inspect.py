@@ -8,12 +8,14 @@ workload is named.
 import json
 import subprocess
 
+import deployment
 from workload_lib import (
     HOST_USERNS_OPT_IN,
     units_outdated,
     units_from_other_build,
     WORKLOADCTL_VERSION,
     workload_config_dir,
+    workload_root_dir,
     workload_service_units,
 )
 from validation import uses_host_userns
@@ -207,6 +209,13 @@ def cmd_status(args, manager: WorkloadManager):
             "units_generated_by": units_from_other_build(config.name)
                                   or WORKLOADCTL_VERSION,
             "host_userns": uses_host_userns(config.config),
+            # Which ostree deployment last provisioned this workload's /var.
+            # Null off ostree and before the workload's first start. Distinct
+            # from units_generated_by: that names the workloadctl build, this
+            # names the OS deployment whose /etc the state was created under —
+            # the axis `cleanup` uses to tell a deleted TOML from a rollback.
+            "state_deployment": (deployment.read_marker(workload_root_dir(config.name))
+                                 or {}).get("deployment"),
         }
         if config.is_multi:
             out["mode"] = config.mode
