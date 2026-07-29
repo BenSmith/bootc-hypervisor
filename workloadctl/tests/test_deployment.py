@@ -267,6 +267,44 @@ class TestOtherDeploymentsState(_Host):
         deployment.marker_path(self.wl_root).write_text("{")
         self.assertIsNone(deployment.other_deployments_state(self.wl_root, "demo"))
 
+    def test_a_redeployed_pruned_commit_revives_its_marker(self):
+        """Confirmed against ostree's allocator, not assumed.
+
+        `allocate_deployserial` (ostree-sysroot-deploy.c) starts at 0 and bumps
+        only past serials of deploy dirs that *currently exist* for that csum —
+        it consults the directory listing, never any history. So pruning frees a
+        serial, and redeploying the same commit reuses `<csum>.0`, reviving a
+        marker that pointed at the pruned deployment.
+
+        The effect is a skip of state that could have been swept, i.e. it errs
+        toward never deleting. Pinned so it stays a known, deliberate residual
+        rather than being rediscovered as a surprise.
+        """
+        # PRUNED is stamped while absent from the deploy tree: swept.
+        self.make_host()
+        self.stamp(PRUNED)
+        self.assertIsNone(deployment.other_deployments_state(self.wl_root, "demo"))
+        # Redeploy that same commit; ostree hands back the same dir name.
+        self.make_host(deployments=(BOOTED, ROLLBACK, PRUNED))
+        self.assertEqual(
+            deployment.other_deployments_state(self.wl_root, "demo"), PRUNED)
+
+    def test_an_id_from_another_stateroot_also_spares_state(self):
+        """Same-direction corollary of the above, from the same allocator: the
+        serial scan is per-osname, so two stateroots can hold the same
+        `<csum>.<serial>`. `deployment_exists` globs `*/deploy/<id>` across
+        stateroots on purpose — /var may be shared between them — so a marker
+        written under one stateroot is honored by the other. Errs toward sparing,
+        which is the direction this module always chooses when it can't be sure.
+        """
+        self.make_host(deployments=(BOOTED,))
+        self.make_host(deployments=(ROLLBACK,), booted=None, stateroot="other")
+        # Re-point the cmdline at the default stateroot's booted deployment.
+        self.make_host(deployments=(BOOTED,))
+        self.stamp(ROLLBACK)
+        self.assertEqual(
+            deployment.other_deployments_state(self.wl_root, "demo"), ROLLBACK)
+
 
 # --------------------------------------------------------------------------- #
 # 4. cleanup, which is the only caller that can destroy anything

@@ -127,8 +127,18 @@ allocation time.
   exists to leave untouched. `drift` also has nothing to diff it against, being
   runtime-written and host-specific. `status --json`'s `state_deployment` key is
   how it stays discoverable instead.
-- **Known residual, unverified.** If a pruned commit is deployed again, the same
-  `<csum>.<serial>` directory name is expected to reappear and revive a marker
-  that pointed at the pruned deployment. The effect is a *skip* of state that
-  could have been swept — it errs toward never deleting, which is the safe
-  direction. Confirming it needs two deployments of one commit on a real host.
+- **Two known residuals**, both confirmed against ostree's own
+  `allocate_deployserial` (`src/libostree/ostree-sysroot-deploy.c`), which starts
+  at serial 0 and bumps only past serials of deploy directories that *currently
+  exist* for that csum — it reads the directory listing, never any history:
+  - **Pruning frees a serial.** Redeploy a pruned commit and it comes back as
+    `<csum>.0`, reviving a marker that pointed at the pruned deployment.
+  - **The scan is per-stateroot.** Two stateroots can therefore hold the same
+    `<csum>.<serial>`, and `deployment_exists` globs across stateroots
+    deliberately (see above) — so a marker written under one is honored by the
+    other.
+
+  Both *spare* state that could have been swept, so both err toward never
+  deleting — the direction every uncertainty here resolves to. Pinned in
+  `tests/test_deployment.py` so they stay deliberate residuals rather than
+  latent surprises.

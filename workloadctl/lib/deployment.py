@@ -186,11 +186,19 @@ def other_deployments_state(root: Path, name: str) -> str | None:
     deployment that no longer exists — returns None and leaves the caller's
     existing orphan logic untouched.
 
-    Known residual: if a pruned commit is deployed again, the same
-    `<csum>.<serial>` directory name is expected to reappear and revive a marker
-    that pointed at the pruned deployment. Effect is a skip of state that could
-    have been swept — it errs toward never deleting. Not verified; it needs two
-    deployments of one commit on a real host.
+    Two known residuals, both confirmed against ostree's `allocate_deployserial`
+    (ostree-sysroot-deploy.c): it starts at serial 0 and bumps only past serials
+    of deploy dirs that *currently exist* for that csum, consulting the directory
+    listing and never any history.
+
+      - Pruning frees a serial, so redeploying a pruned commit reuses
+        `<csum>.0` and revives a marker that pointed at the pruned deployment.
+      - The scan is per-osname, so two stateroots can hold the same
+        `<csum>.<serial>` — and `deployment_exists` globs across stateroots on
+        purpose, because /var may be shared between them.
+
+    Both spare state that could have been swept, i.e. both err toward never
+    deleting, which is the direction every uncertainty here resolves to.
     """
     if not deployments_readable():
         return None
