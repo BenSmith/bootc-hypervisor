@@ -32,6 +32,12 @@ What the transition must and must not do, which is the whole point of pinning it
   - a plain `enable` afterwards clears the skew.
 
 Marked `runtime`: only runs under `--target=vm:<mode>` (i.e. `just test-runtime`).
+
+Verified end to end on tp 2026-07-29, `WLRT_MODE=dev`, all six assertions:
+`0.1.0-1.20260729220333` -> `0.1.0-1.20260729220349`, 16 seconds of build serial
+apart, and dnf logged the `Upgrading` + `Removing` pair that only the `$1 == 2`
+path produces. So the premise really does hold: two builds of one tree are a
+genuine upgrade transaction.
 """
 
 import json
