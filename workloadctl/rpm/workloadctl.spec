@@ -85,8 +85,10 @@ for _f in %{_sourcedir}/lib/*.py; do
     install -pm 0644 "$_f" %{buildroot}%{_libexecdir}/workloadctl/
 done
 
-# Generate version module with the full package version-release (buildserial
-# lives in Release), so workloadctl --version matches the RPM NEVR.
+# Generate version module with the package Version-Release (buildserial lives
+# in Release), so workloadctl --version matches the RPM's V-R. Name and Epoch
+# are deliberately not in it: Name is constant and no Epoch is defined, so V-R
+# alone identifies a build.
 cat > %{buildroot}%{_libexecdir}/workloadctl/_version.py << 'EOF'
 __version__ = "%{version}-%{release}"
 EOF

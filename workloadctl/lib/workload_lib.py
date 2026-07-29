@@ -19,8 +19,12 @@ from pathlib import Path
 # --- Constants ---
 
 # Build identity. The RPM's %install writes a _version.py sibling of these
-# modules (see rpm/workloadctl.spec) carrying the full NEVR; Release is a
-# monotonic build serial, so the string is comparable between any two builds.
+# modules (see rpm/workloadctl.spec) carrying %{version}-%{release} — Version
+# and Release only, not a full NEVR: no Name, and the spec defines no Epoch.
+# Release is 1.<build timestamp>, so each build gets a distinct string; the
+# checks that read it compare for *equality* ("same build or not"), never for
+# order — the timestamp orders builds by when they were produced, which is not
+# the same as which code they contain.
 # Absent from a source checkout and from the test tree, where "0-dev" stands in.
 #
 # Defined here rather than in bin/workloadctl because three things have to agree
