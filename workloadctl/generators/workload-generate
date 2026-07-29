@@ -68,7 +68,7 @@ try:
         expand_volume_path, expand_workload_tokens, dq, uq,
         normalize_containers, infer_workload_mode,
         infer_workload_kind,
-        get_next_uid, subid_lock,
+        claim_uid, subid_lock,
         virtiofs_tags, parse_volume_spec,
         selinux_type_name, render_sysusers_config,
         RUN_SYSTEMD_SYSTEM, workload_run_files,
@@ -2220,22 +2220,39 @@ def main():
             log_msg(f"  Processing {kind} workload {name}")
 
             # Look up existing user to pin UID; if user doesn't exist yet,
-            # allocate the next free UID in the workload range.
+            # allocate — adopting the owner of any state left behind by an
+            # earlier deployment (claim_uid explains why).
             try:
                 uid = pwd.getpwnam(user_name).pw_uid
                 log_msg(f"  User {user_name} exists with UID {uid}")
             except KeyError:
                 # Allocate and durably pin the UID under a single lock hold:
-                # get_next_uid() scans pending sysusers configs, so writing this
+                # allocation scans pending sysusers configs, so writing this
                 # workload's .conf before releasing the lock stops a concurrent
                 # enable from handing out the same slot in the window before
                 # systemd-sysusers creates the user.
                 with subid_lock():
-                    uid = get_next_uid()
+                    uid, why = claim_uid(name)
                     pin_allocated_uid(
                         config, user_name, uid, is_vm=(kind == "vm")
                     )
-                log_msg(f"  User {user_name} not found; allocated UID {uid}")
+                if why == "adopted":
+                    log_msg(
+                        f"  User {user_name} not found but its state dir exists; "
+                        f"adopted owning UID {uid}"
+                    )
+                elif why == "collision":
+                    # The old UID now belongs to something else, so the derived
+                    # subid range cannot be recovered. Fail loud rather than
+                    # start a workload that silently cannot read its own data.
+                    log_msg(
+                        f"  WARNING: {name}: existing state dir is owned by a UID "
+                        f"that is already in use; allocated {uid} instead. The "
+                        f"workload may be unable to read /var/lib/workloads/{name}",
+                        level="warning",
+                    )
+                else:
+                    log_msg(f"  User {user_name} not found; allocated UID {uid}")
 
             if kind == "vm":
                 generate_vm_workload(config, user_name, uid)

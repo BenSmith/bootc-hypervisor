@@ -512,31 +512,105 @@ def _reserved_uids_in_pending_sysusers() -> set[int]:
     return reserved
 
 
+def _used_uids() -> set[int]:
+    """Every workload-range UID that is spoken for right now.
+
+    The live /etc/passwd snapshot, plus UIDs already allocated in this process
+    invocation, plus UIDs pinned in pending sysusers configs (see
+    _reserved_uids_in_pending_sysusers — slots handed out but not yet created).
+    Callers must hold SUBID_LOCK: the set is only meaningful for as long as no
+    other allocator can move.
+    """
+    used = set(_allocated_uids)
+    used |= _reserved_uids_in_pending_sysusers()
+    try:
+        for pw in pwd.getpwall():
+            if UID_MIN <= pw.pw_uid <= UID_MAX:
+                used.add(pw.pw_uid)
+    except Exception:
+        pass
+    return used
+
+
 def get_next_uid() -> int:
     """Return the next free UID in the workload range [UID_MIN, UID_MAX].
 
-    Combines the live /etc/passwd snapshot with UIDs already allocated in this
-    process invocation and UIDs pinned in pending sysusers configs (see
-    _reserved_uids_in_pending_sysusers — covers slots handed out but not yet
-    created). Takes SUBID_LOCK itself so every caller — including the boot
-    generator, which used to allocate unlocked — is mutexed against a concurrent
-    allocator picking the same free slot. Reentrant, so the enable path can keep
-    the lock held across the subsequent sysusers write.
+    Takes SUBID_LOCK itself so every caller — including the boot generator,
+    which used to allocate unlocked — is mutexed against a concurrent allocator
+    picking the same free slot. Reentrant, so the enable path can keep the lock
+    held across the subsequent sysusers write.
     """
     with subid_lock():
-        used = set(_allocated_uids)
-        used |= _reserved_uids_in_pending_sysusers()
-        try:
-            for pw in pwd.getpwall():
-                if UID_MIN <= pw.pw_uid <= UID_MAX:
-                    used.add(pw.pw_uid)
-        except Exception:
-            pass
+        used = _used_uids()
         for uid in range(UID_MIN, UID_MAX + 1):
             if uid not in used:
                 _allocated_uids.add(uid)
                 return uid
         raise RuntimeError(f"No free UIDs in range {UID_MIN}-{UID_MAX}")
+
+
+def state_owner_uid(name: str) -> int | None:
+    """The workload-range UID owning `name`'s existing /var tree, if any.
+
+    Reads data/ then state/ — the two directories workload-ensure-user chowns.
+    The root above them can legitimately stay root-owned, so it is not consulted.
+    Returns None when nothing is there, when the owner is outside the workload
+    range (root-owned, or a stray non-workload UID), or when /var is unreadable.
+
+    Read-only by design: the boot generator calls this, and the generate step is
+    read-only with respect to /var.
+    """
+    for d in (workload_data_dir(name), workload_state_dir(name)):
+        try:
+            uid = d.stat().st_uid
+        except OSError:
+            continue
+        if UID_MIN <= uid <= UID_MAX:
+            return uid
+    return None
+
+
+def claim_uid(name: str) -> tuple[int, str]:
+    """Allocate `name`'s UID, adopting the owner of pre-existing state.
+
+    Returns (uid, reason) where reason is one of:
+
+      "fresh"     — no adoptable /var tree; next free UID.
+      "adopted"   — /var already belongs to a workload UID; reused it.
+      "collision" — /var belongs to a UID that is now someone else's; fell back
+                    to a fresh one, leaving the old tree stranded. Callers must
+                    surface this: it is the one case nothing here can repair.
+
+    Why adopt at all. `workload-ensure-user` already grandfathers the subid
+    range whenever the user has an /etc/subuid entry, because shifting a UID
+    mapping under a running container corrupts its namespace. That covers every
+    case except passwd-absent-but-/var-present, which is the rollback case: boot
+    an older deployment, and _wl-<name> is gone from /etc/passwd while
+    /var/lib/workloads/<name> survives. Allocating a fresh UID there re-points a
+    *derived* subordinate range (600100000 + (uid - UID_MIN) * 65536) onto a tree
+    still owned by the old one, and ensure-user only chowns the tops of state/
+    and data/, not their contents — so the workload comes up unable to read its
+    own data.
+
+    Adopting the UID rather than repairing ownership is the point: files written
+    from inside the container are owned out of the subordinate range, and
+    recovering the same UID recovers the same range, so every one of them is
+    correct again with no traversal. No chown could achieve that.
+
+    Deliberately derived rather than recorded. The owning UID *is* the answer and
+    is one stat away, so putting it in the deployment marker would add a second
+    source of truth competing with /etc/subuid — one that can go stale.
+    """
+    with subid_lock():                      # reentrant; get_next_uid re-takes it
+        adopted = state_owner_uid(name)
+        if adopted is None:
+            return get_next_uid(), "fresh"
+        if adopted in _used_uids():
+            return get_next_uid(), "collision"
+        # Record it so a later allocation in this same run cannot hand out the
+        # slot we just took out of sequence.
+        _allocated_uids.add(adopted)
+        return adopted, "adopted"
 
 
 def workload_service_name(name: str) -> str:

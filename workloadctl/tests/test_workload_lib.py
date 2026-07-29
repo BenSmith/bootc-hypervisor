@@ -1343,6 +1343,108 @@ class TestGetNextUid(unittest.TestCase):
         self.assertIn("No free UIDs", str(ctx.exception))
 
 
+class TestClaimUid(unittest.TestCase):
+    """claim_uid() adopts the UID that owns a workload's pre-existing /var tree.
+
+    The case this exists for: boot an older bootc deployment and _wl-<name> is
+    gone from /etc/passwd while /var/lib/workloads/<name> survives, owned by the
+    old UID. Because the subordinate range is *derived* from the UID, a fresh
+    allocation re-points it onto a tree owned by the old one — and ensure-user
+    chowns only the tops of state/ and data/, so the workload comes up unable to
+    read its own data. Silent at enable time, which is what makes it worth a
+    dedicated allocator rather than a doctor check.
+    """
+
+    def setUp(self):
+        self.enterContext(
+            patch.object(workload_lib, "subid_lock", contextlib.nullcontext)
+        )
+        self.enterContext(
+            patch.object(
+                workload_lib, "_reserved_uids_in_pending_sysusers",
+                return_value=set(),
+            )
+        )
+        self.enterContext(patch.object(workload_lib, "_allocated_uids", set()))
+        self.enterContext(
+            patch.object(workload_lib.pwd, "getpwall", return_value=[])
+        )
+        self.base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(
+            patch.object(workload_lib, "WORKLOADS_BASE", self.base)
+        )
+
+    def _pw(self, uid):
+        import types
+        return types.SimpleNamespace(pw_uid=uid)
+
+    def _make_state(self, name, uid, subdir="data"):
+        """Create <base>/<name>/<subdir> reporting `uid` as its owner.
+
+        st_uid is faked rather than chowned: these run unprivileged, and the only
+        thing under test is what claim_uid does with the number.
+        """
+        d = self.base / name / subdir
+        d.mkdir(parents=True)
+        real_stat = Path.stat
+
+        def fake_stat(self, *a, **kw):
+            st = real_stat(self, *a, **kw)
+            if self == d:
+                return os.stat_result(
+                    (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, uid,
+                     st.st_gid, st.st_size, int(st.st_atime), int(st.st_mtime),
+                     int(st.st_ctime)))
+            return st
+
+        self.enterContext(patch.object(Path, "stat", fake_stat))
+
+    def test_no_state_dir_allocates_fresh(self):
+        uid, why = workload_lib.claim_uid("newbie")
+        self.assertEqual((uid, why), (workload_lib.UID_MIN, "fresh"))
+
+    def test_adopts_the_uid_owning_an_existing_data_dir(self):
+        # The whole point: not UID_MIN, which is what a fresh allocation gives.
+        self._make_state("rolled-back", workload_lib.UID_MIN + 5)
+        uid, why = workload_lib.claim_uid("rolled-back")
+        self.assertEqual((uid, why), (workload_lib.UID_MIN + 5, "adopted"))
+
+    def test_adopts_from_state_dir_when_data_dir_is_absent(self):
+        self._make_state("vmish", workload_lib.UID_MIN + 7, subdir="state")
+        uid, why = workload_lib.claim_uid("vmish")
+        self.assertEqual((uid, why), (workload_lib.UID_MIN + 7, "adopted"))
+
+    def test_root_owned_state_is_not_adoptable(self):
+        # The root above data/ and state/ may legitimately stay root-owned, and
+        # a root-owned data/ is not a workload's UID to adopt.
+        self._make_state("freshly-made", 0)
+        uid, why = workload_lib.claim_uid("freshly-made")
+        self.assertEqual((uid, why), (workload_lib.UID_MIN, "fresh"))
+
+    def test_reports_collision_when_the_old_uid_now_belongs_to_someone_else(self):
+        """The one case nothing here can repair: the derived range is gone, so
+        the tree is stranded and the caller has to say so out loud."""
+        taken = workload_lib.UID_MIN + 3
+        self._make_state("stranded", taken)
+        with patch.object(workload_lib.pwd, "getpwall",
+                          return_value=[self._pw(taken)]):
+            uid, why = workload_lib.claim_uid("stranded")
+        self.assertEqual(why, "collision")
+        self.assertNotEqual(uid, taken)
+
+    def test_an_adopted_uid_is_not_handed_out_again_in_the_same_run(self):
+        """An out-of-sequence adoption has to enter the allocated set, or the
+        next workload in the same generator pass gets the same slot."""
+        self._make_state("adopter", workload_lib.UID_MIN)
+        adopted, why = workload_lib.claim_uid("adopter")
+        self.assertEqual(why, "adopted")
+        self.assertNotEqual(workload_lib.claim_uid("other")[0], adopted)
+
+    def test_unreadable_var_is_treated_as_absent(self):
+        with patch.object(Path, "stat", side_effect=PermissionError("nope")):
+            self.assertIsNone(workload_lib.state_owner_uid("whatever"))
+
+
 class TestReservedUidsInPendingSysusers(unittest.TestCase):
     """Pending sysusers configs are the only record of a UID that's been handed
     out but not yet written to /etc/passwd (generator defers user creation to
