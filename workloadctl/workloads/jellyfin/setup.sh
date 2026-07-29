@@ -2,8 +2,9 @@
 # Host setup for the jellyfin workload.
 #
 # Usage:
-#   setup.sh enable   — configure host prerequisites
-#   setup.sh disable  — remove host prerequisites
+#   setup.sh enable    — configure host prerequisites
+#   setup.sh disable   — remove host prerequisites
+#   setup.sh artifacts — print what enable() installs on the host (read-only)
 #
 # Idempotent in both directions. Called by workloadctl enable/disable.
 set -euo pipefail
@@ -34,11 +35,21 @@ disable() {
     echo "  [host] Leaving SELinux boolean ${SEBOOL} unchanged (shared by other GPU workloads)"
 }
 
+artifacts() {
+    # Nothing. This workload's only host effect is the system-wide SELinux
+    # boolean above, which it deliberately does not own — disable() leaves it on
+    # precisely because other GPU workloads depend on it. A shared boolean is
+    # not this workload's artifact, and checking it here would report a healthy
+    # host as broken the moment someone else legitimately relies on it.
+    return 0
+}
+
 case "${1:-}" in
-    enable)  enable ;;
-    disable) disable ;;
+    enable)    enable ;;
+    disable)   disable ;;
+    artifacts) artifacts ;;
     *)
-        echo "Usage: $0 {enable|disable}" >&2
+        echo "Usage: $0 {enable|disable|artifacts}" >&2
         exit 1
         ;;
 esac

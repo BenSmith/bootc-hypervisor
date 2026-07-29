@@ -2,8 +2,9 @@
 # Host setup for the sunshine-streaming workload.
 #
 # Usage:
-#   setup.sh enable   — configure host prerequisites
-#   setup.sh disable  — remove host prerequisites
+#   setup.sh enable    — configure host prerequisites
+#   setup.sh disable   — remove host prerequisites
+#   setup.sh artifacts — print what enable() installs on the host (read-only)
 #
 # Idempotent in both directions. Called by workloadctl enable/disable.
 set -euo pipefail
@@ -226,11 +227,38 @@ disable() {
     echo "  [host] Host teardown complete"
 }
 
+artifacts() {
+    # What enable() installs on the *host* — outside /run/systemd/system, so
+    # invisible to workloadctl's generator-derived view of this workload. One
+    # `<kind> <ref>` per line, nothing else on stdout, and no mutation: this is
+    # run by `doctor`/`diagnose`, which are read verbs.
+    #
+    # Conditional on the same host facts enable() branches on. Both of the
+    # optional artifacts below are *correctly* absent on a host that doesn't
+    # meet their precondition, and declaring them unconditionally would report
+    # a documented skip as a fault.
+    echo "unit ${RELAY_SERVICE}"
+
+    if [ -d "$AVAHI_SERVICE_DIR" ]; then
+        echo "file ${AVAHI_SERVICE}"
+    fi
+
+    if [ -r "$CA_CERT" ] && [ -r "$CA_KEY" ]; then
+        echo "file ${TLS_DIR}/cert.pem"
+        echo "file ${TLS_DIR}/pkey.pem"
+    fi
+
+    # The uinput module and its udev rule are image-owned and shared with every
+    # other streaming workload (see enable/disable) — not ours to declare.
+    return 0
+}
+
 case "${1:-}" in
-    enable)  enable ;;
-    disable) disable ;;
+    enable)    enable ;;
+    disable)   disable ;;
+    artifacts) artifacts ;;
     *)
-        echo "Usage: $0 {enable|disable}" >&2
+        echo "Usage: $0 {enable|disable|artifacts}" >&2
         exit 1
         ;;
 esac

@@ -8,6 +8,13 @@ hook and the per-workload SELinux type. The hook and the SELinux module take an
 `action` because they run in both directions — a teardown is the same step with
 the sign flipped, and keeping the pair in one place is what stops enable and
 disable from drifting apart.
+
+The hook has a third, read-only action: `host_setup_artifacts()` asks the script
+what it installed, so the diagnostics can check host-global sidecars they cannot
+otherwise see (`workload_run_files()` covers only generator output, by its own
+docstring). It lives here rather than in a cmd_* module because it is the same
+hook and the same instance context — the read and the two writes have to agree
+about which script and which name, or the check inspects the wrong host.
 """
 
 import difflib
@@ -16,6 +23,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from typing import NamedTuple
 
 from cli_log import error, info, warn
 from workload_lib import (
@@ -508,6 +516,120 @@ def host_setup_env(config: WorkloadConfig) -> dict:
         "WORKLOAD_STATE_DIR": str(workload_state_dir(name)),
         "WORKLOAD_DATA_DIR": str(workload_data_dir(name)),
     }
+
+
+# The read-only third action. A setup script that implements it prints one
+# artifact per line and exits 0; one that doesn't falls through its own dispatch
+# `*)` arm and exits nonzero, which is how "unimplemented" stays distinguishable
+# from "implemented, declares nothing" without a version handshake.
+#
+# Not spelled `declare`: that is a bash builtin, and a script defining
+# `declare() { ... }` to match the action breaks every `local`/`declare` inside
+# itself. `list` collides with the CLI's own list verbs.
+HOST_SETUP_ARTIFACTS_ACTION = "artifacts"
+
+# Kinds map to checks the diagnostics already know how to run. Deliberately
+# short: anything richer (mode, owner, content) belongs to the script, which is
+# the thing that created the artifact and the only thing that can say what
+# correct looks like.
+HOST_ARTIFACT_KINDS = ("unit", "file")
+
+# Sunshine's script shells out to python3 to read a port out of the instance
+# TOML before it dispatches, so this is not instant; it is still a read run by
+# `doctor`, and a hung script must not hang the report.
+HOST_SETUP_ARTIFACTS_TIMEOUT = 15
+
+
+class HostArtifact(NamedTuple):
+    kind: str   # one of HOST_ARTIFACT_KINDS
+    ref: str    # a unit name for "unit", an absolute path for "file"
+
+
+class HostArtifacts(NamedTuple):
+    """What a workload's setup script says it installed on the host.
+
+    Three distinct states, none of which is a failure by itself:
+
+    - `supported=False, error=None` — the script does not implement the action
+      (an older bundle, or an operator's own override under /etc). The answer
+      is *unknown*, and unknown must never render as "nothing".
+    - `supported=True, artifacts=[]` — the script implements it and installs
+      nothing host-global. jellyfin is the real example: it flips a system-wide
+      SELinux boolean it deliberately does not own.
+    - `supported=True, artifacts=[...]` — the checkable set.
+
+    `error` is set when the script could not be asked at all (timeout, not
+    executable). That one *is* a finding.
+    """
+    supported: bool
+    artifacts: list[HostArtifact]
+    unparsed: list[str]
+    error: str | None
+
+
+def _parse_host_artifacts(text: str) -> tuple[list[HostArtifact], list[str]]:
+    """Split declaration output into (artifacts, unparsed lines).
+
+    Unparsed lines are returned rather than dropped. A script that prints
+    progress chatter on this action has a bug the operator needs told about —
+    silently ignoring it would let a typo'd kind erase an artifact from the
+    checked set, which is the same invisibility this whole mechanism exists to
+    end.
+    """
+    artifacts: list[HostArtifact] = []
+    unparsed: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2 or parts[0] not in HOST_ARTIFACT_KINDS or not parts[1].strip():
+            unparsed.append(line)
+            continue
+        artifacts.append(HostArtifact(parts[0], parts[1].strip()))
+    return artifacts, unparsed
+
+
+def host_setup_artifacts(config: WorkloadConfig) -> HostArtifacts | None:
+    """Ask a workload's setup script what it installed on the host.
+
+    Returns None when there is nothing to ask — no `[host] setup` configured, or
+    the configured script is not on disk. (A missing script is already reported
+    by the enable path; re-reporting it here would double-count one fault.)
+
+    Read-only by contract: this runs from `doctor` and `diagnose`, so the script
+    must not mutate anything on this action, and a nonzero exit is an answer
+    ("I don't implement that") rather than an error — nothing here raises
+    LifecycleError the way the enable path does.
+    """
+    setup_script = config.config.get("host", {}).get("setup", "")
+    if not setup_script:
+        return None
+
+    script_path = config.resolve_control_file(setup_script)
+    if not script_path.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            [str(script_path), HOST_SETUP_ARTIFACTS_ACTION],
+            capture_output=True, text=True,
+            timeout=HOST_SETUP_ARTIFACTS_TIMEOUT,
+            env={**os.environ, **host_setup_env(config)},
+        )
+    except subprocess.TimeoutExpired:
+        return HostArtifacts(False, [], [], (
+            f"setup script did not answer '{HOST_SETUP_ARTIFACTS_ACTION}' within "
+            f"{HOST_SETUP_ARTIFACTS_TIMEOUT}s: {script_path}"))
+    except OSError as e:
+        return HostArtifacts(False, [], [], f"cannot run {script_path}: {e}")
+
+    if result.returncode != 0:
+        # The `*)` usage arm every shipped script already has. Not a finding.
+        return HostArtifacts(False, [], [], None)
+
+    artifacts, unparsed = _parse_host_artifacts(result.stdout)
+    return HostArtifacts(True, artifacts, unparsed, None)
 
 
 def run_host_setup(config: WorkloadConfig, action: str):

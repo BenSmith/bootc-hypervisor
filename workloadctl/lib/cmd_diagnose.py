@@ -28,7 +28,13 @@ from workload_lib import (
     WORKLOADCTL_VERSION,
     WORKLOADS_BASE,
 )
+from provisioning import (
+    HOST_ARTIFACT_KINDS,
+    HOST_SETUP_ARTIFACTS_ACTION,
+    host_setup_artifacts,
+)
 from validation import uses_host_userns
+from vm import VM_BRIDGE_NAME
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
@@ -182,6 +188,156 @@ def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
                    "/dev/nvidia* (xserver_misc_device_t) — expect permission "
                    "denied from the CUDA runtime",
             "sudo setsebool -P container_use_xserver_devices on")
+
+
+def _unit_props(unit: str) -> dict | None:
+    """systemd properties for a host-global unit, or None if it has no unit file.
+
+    `systemctl show` invents a stub for a nonexistent unit (LoadState=not-found)
+    rather than failing, so absence is read off LoadState, not the exit code.
+    """
+    result = subprocess.run(
+        ["systemctl", "show", unit,
+         "-p", "LoadState,ActiveState,SubState,Result,NRestarts"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    props = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    if props.get("LoadState") in ("not-found", "masked", "bad-setting", "error"):
+        return None
+    return props
+
+
+def host_artifact_check(artifact, state, name: str) -> tuple[bool, str, str | None]:
+    """Verdict for one declared host artifact.
+
+    `state` is whatever the probe for this kind produced: the `systemctl show`
+    property dict for a unit (None when the unit file is absent), a bool for a
+    file. Pure, so the verdicts are testable without a host — same split as
+    selinux_label_check().
+
+    NRestarts > 0 is a failure in its own right and is the reason this check
+    exists: `<name>-udev-relay.service` restart-looped 2012 times over seven
+    days on onepiece while `systemctl list-units --failed` stayed clean, because
+    a unit that keeps being restarted never settles into `failed`.
+    """
+    fix = f"sudo workloadctl enable {name}  (re-runs the workload's setup.sh)"
+    if artifact.kind == "unit":
+        if state is None:
+            return (False,
+                    f"Declared host unit is not installed: {artifact.ref}", fix)
+        active = state.get("ActiveState", "unknown")
+        try:
+            n_restarts = int(state.get("NRestarts") or 0)
+        except ValueError:
+            n_restarts = 0
+        if n_restarts > 0:
+            return (False,
+                    f"Declared host unit is restart-looping: {artifact.ref} "
+                    f"(NRestarts={n_restarts}, currently {active}) — it never "
+                    f"reaches 'failed', so --failed will not show it",
+                    f"journalctl -u {artifact.ref} -n 50")
+        if active in ("failed", "activating"):
+            result = state.get("Result", "")
+            detail = f"{active}" + (f", Result={result}" if result else "")
+            return (False,
+                    f"Declared host unit is not running: {artifact.ref} ({detail})",
+                    f"journalctl -u {artifact.ref} -n 50")
+        return (True,
+                f"Host unit active: {artifact.ref} "
+                f"({active}/{state.get('SubState', '')})", None)
+
+    if state:
+        return (True, f"Host file present: {artifact.ref}", None)
+    return (False, f"Declared host file is missing: {artifact.ref}", fix)
+
+
+def collect_host_artifact_checks(config, _check) -> None:
+    """Check the host-global artifacts a workload's setup.sh declares.
+
+    Fills the gap `workload_run_files()` names in its own docstring — it covers
+    generator output only, so a `setup.sh` sidecar is invisible to every verb
+    built on it. The set is read from the script rather than inferred, because
+    the script is the only thing that knows: half of these are installed
+    conditionally (sunshine mints a TLS leaf only where the homelab CA is
+    readable, publishes mDNS only where avahi's service dir exists), and a
+    declaration made anywhere else would report those correct absences as
+    faults.
+
+    Gated on `enabled`: disable() removes these, so a disabled workload is
+    *supposed* to be missing them.
+    """
+    if not config.enabled:
+        return
+    declared = host_setup_artifacts(config)
+    if declared is None:
+        return  # no [host] setup, or the script is gone (enable reports that)
+
+    if declared.error:
+        _check("host_artifacts", False,
+               f"Could not read host artifact declaration: {declared.error}")
+        return
+
+    if not declared.supported:
+        # Unknown, not empty. Reported as a pass because an un-updated bundle is
+        # not a fault of the host being diagnosed — but reported at all, so the
+        # operator knows this workload's sidecars are outside the check.
+        _check("host_artifacts", True,
+               f"Host artifacts undeclared — setup.sh does not implement "
+               f"'{HOST_SETUP_ARTIFACTS_ACTION}', so any sidecars it installs "
+               f"are not checked here")
+        return
+
+    for line in declared.unparsed:
+        _check("host_artifacts", False,
+               f"setup.sh {HOST_SETUP_ARTIFACTS_ACTION} printed a line that is "
+               f"not a declaration: {line!r}",
+               fix=f"expected '<{'|'.join(HOST_ARTIFACT_KINDS)}> <ref>' per line, "
+                   f"nothing else on stdout")
+
+    if not declared.artifacts:
+        _check("host_artifacts", True,
+               "setup.sh declares no host-global artifacts")
+        return
+
+    for artifact in declared.artifacts:
+        state = (_unit_props(artifact.ref) if artifact.kind == "unit"
+                 else Path(artifact.ref).exists())
+        passed, message, fix = host_artifact_check(artifact, state, config.name)
+        _check(f"host_artifact[{artifact.ref}]", passed, message, fix=fix)
+
+
+def shared_bridge_check(state, name: str) -> tuple[bool, str, str | None]:
+    """Verdict for the shared VM bridge unit. `state` as in _unit_props().
+
+    The other half of the same blind spot: `workload_run_files()` excludes
+    shared infra by design ("never includes ... workload-bridge.service"), and
+    for a VM on the managed bridge that unit is the entire network path — it
+    creates `_workload-br` and runs the dnsmasq the guest gets its lease from.
+    tp had it fail five times with nothing in any verb saying so.
+
+    Not part of the setup.sh declaration mechanism: no script installs this,
+    it is one fixed unit, and it is shared, so it is checked by name here
+    rather than declared by a workload that does not own it.
+    """
+    unit = "workload-bridge.service"
+    if state is None:
+        return (False,
+                f"Shared VM bridge unit is not installed: {unit} — this VM is on "
+                f"the managed bridge {VM_BRIDGE_NAME} and has no network without it",
+                f"sudo workloadctl enable {name}  (the generator emits it)")
+    active = state.get("ActiveState", "unknown")
+    if active == "active":
+        return (True, f"Shared VM bridge active: {unit} ({VM_BRIDGE_NAME})", None)
+    result = state.get("Result", "")
+    detail = active + (f", Result={result}" if result else "")
+    return (False,
+            f"Shared VM bridge is not running: {unit} ({detail}) — "
+            f"{VM_BRIDGE_NAME} and its dnsmasq are this VM's whole network path",
+            f"sudo systemctl status {unit}; journalctl -u {unit} -n 50")
 
 
 def collect_diagnose_checks(config, manager: WorkloadManager):
@@ -418,6 +574,23 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         else:
             _check("units_current", True,
                    f"Units generated by the running build ({WORKLOADCTL_VERSION})")
+
+    # Check 7d: Host-global artifacts the workload's setup.sh installed. Not in
+    # workload_run_files(), so nothing above this line can see them.
+    collect_host_artifact_checks(config, _check)
+
+    # Check 7e: the shared VM bridge, for VMs that use it. Also outside
+    # workload_run_files() — and unlike 7d, nobody declares it: it is one fixed
+    # unit shared by every managed-bridge VM. Skipped for a VM bridged onto a
+    # user-provided interface (br0 onto the LAN), which the generator
+    # deliberately does not emit it for.
+    if config.is_vm and config.enabled:
+        bridge = config.config.get("vm", {}).get("network", {}).get(
+            "bridge", VM_BRIDGE_NAME)
+        if bridge == VM_BRIDGE_NAME:
+            passed, message, fix = shared_bridge_check(
+                _unit_props("workload-bridge.service"), config.name)
+            _check("shared_bridge", passed, message, fix=fix)
 
     # Check 8: Service enabled
     result = subprocess.run(

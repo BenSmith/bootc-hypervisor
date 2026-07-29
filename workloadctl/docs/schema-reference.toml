@@ -1030,6 +1030,28 @@ ports = ["8080:80", "8443:443"]
 # Read them as required: WORKLOAD_NAME="${WORKLOAD_NAME:?}". Any host-global
 # object the script creates (a unit file, a udev rule) should be keyed to
 # WORKLOAD_NAME too, or two instances of one bundle will collide.
+#
+# THIRD ACTION — `artifacts`. Anything the script installs outside
+# /run/systemd/system is invisible to `doctor`/`diagnose`/`drift`/`health`,
+# which model a workload from generator output alone. So the script declares it:
+# on `artifacts` it prints one `<kind> <ref>` per line to stdout and exits 0,
+# where kind is `unit` (a systemd unit name) or `file` (an absolute path).
+#
+#   unit  games-udev-relay.service
+#   file  /etc/avahi/services/games-sunshine.service
+#
+# It must be read-only — this runs from report verbs — and print nothing else on
+# stdout. Declare conditionally where enable() is conditional: an artifact that
+# is deliberately not installed on this host (a cert skipped for want of a CA)
+# must not be declared, or a documented skip is reported as a fault. Do NOT
+# declare shared resources you don't own (a system-wide SELinux boolean, an
+# image-shipped udev rule) — two workloads would each report the other's
+# teardown as their own breakage.
+#
+# Omitting the action is supported: an older bundle falls through its own
+# dispatch to a nonzero exit, which reads as "undeclared" (unknown, not a
+# failure) rather than "installs nothing". Only an exit-0 empty answer means
+# nothing to check.
 # setup = "setup.sh"
 
 [build]

@@ -2,8 +2,9 @@
 # Host setup for the caddy workload.
 #
 # Usage:
-#   setup.sh enable   — generate the Caddy PKI snippet for this host
-#   setup.sh disable  — no-op (nothing host-global to remove)
+#   setup.sh enable    — generate the Caddy PKI snippet for this host
+#   setup.sh disable   — no-op (nothing host-global to remove)
+#   setup.sh artifacts — print what enable() installs on the host (read-only)
 #
 # The Caddyfile imports /etc/caddy/pki/*.caddyfile. This script writes that
 # snippet based on whether the shared Homelab CA *private key* has been placed
@@ -82,11 +83,22 @@ disable() {
     :
 }
 
+artifacts() {
+    # Read-only declaration of what enable() writes on the host, for
+    # `workloadctl doctor`. The snippet is written on every enable in both
+    # branches (shared-root or self-signed fallback), so it is unconditional.
+    # ${CA_KEY} is deliberately not declared: on the keyless path this script
+    # only touches it to keep the bind-mount source a regular file, and the key
+    # itself is the operator's to place, not ours to install.
+    echo "file ${SNIPPET}"
+}
+
 case "${1:-}" in
-    enable)  enable ;;
-    disable) disable ;;
+    enable)    enable ;;
+    disable)   disable ;;
+    artifacts) artifacts ;;
     *)
-        echo "Usage: $0 {enable|disable}" >&2
+        echo "Usage: $0 {enable|disable|artifacts}" >&2
         exit 1
         ;;
 esac

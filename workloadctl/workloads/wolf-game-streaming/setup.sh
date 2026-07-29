@@ -2,8 +2,9 @@
 # Host setup for the wolf-game-streaming workload.
 #
 # Usage:
-#   setup.sh enable   — configure host prerequisites
-#   setup.sh disable  — remove host prerequisites
+#   setup.sh enable    — configure host prerequisites
+#   setup.sh disable   — remove host prerequisites
+#   setup.sh artifacts — print what enable() installs on the host (read-only)
 #
 # Idempotent in both directions. Called by workloadctl enable/disable.
 #
@@ -37,11 +38,25 @@ disable() {
     echo "  [host] Host teardown complete"
 }
 
+artifacts() {
+    # Nothing. Every host prerequisite this workload relies on is image-owned
+    # and shared with the other streaming workloads (the uinput module autoload
+    # and its udev rule); the SELinux type comes from [security].selinux_policy,
+    # which workloadctl installs and checks itself. Declaring a shared resource
+    # would make two workloads each report the other's teardown as their own
+    # fault.
+    #
+    # Silence with a zero exit means "installs nothing", which workloadctl reads
+    # differently from an older bundle's nonzero "does not implement this".
+    return 0
+}
+
 case "${1:-}" in
-    enable)  enable ;;
-    disable) disable ;;
+    enable)    enable ;;
+    disable)   disable ;;
+    artifacts) artifacts ;;
     *)
-        echo "Usage: $0 {enable|disable}" >&2
+        echo "Usage: $0 {enable|disable|artifacts}" >&2
         exit 1
         ;;
 esac

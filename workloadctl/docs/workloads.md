@@ -405,8 +405,38 @@ setup = "setup.sh"  # relative to /usr/share/workloadctl/workloads/{name}/
 
 - `workloadctl enable` runs `setup.sh enable`
 - `workloadctl disable` runs `setup.sh disable`
+- `workloadctl doctor` / `diagnose` run `setup.sh artifacts` — see below
 - The script runs as root and should be idempotent in both directions
 - Absolute paths are supported: `setup = "/home/myuser/my-setup.sh"`
+
+**Declaring what you install (`artifacts`).** Anything the script puts on the
+host outside `/run/systemd/system` — a unit file, an avahi service, a minted
+cert — is invisible to `doctor`, `diagnose`, `drift` and `health`, which model a
+workload from the generator's output alone. A sidecar can restart-loop for a
+week behind a clean report. So the script declares its own artifacts: on
+`artifacts` it prints one `<kind> <ref>` per line and exits 0, where kind is
+`unit` (a systemd unit name) or `file` (an absolute path).
+
+```
+unit  games-udev-relay.service
+file  /etc/avahi/services/games-sunshine.service
+```
+
+Rules that matter:
+
+- **Read-only.** This runs from report verbs. Don't mutate anything, and print
+  nothing else on stdout.
+- **Key refs to `${WORKLOAD_NAME}`, not the bundle** — the same rule as the rest
+  of the script, since `init --as` makes those different names.
+- **Declare conditionally where `enable()` is conditional.** An artifact you
+  deliberately skip on this host (a cert you can't mint for want of a CA) must
+  not be declared, or a documented skip is reported as a fault.
+- **Don't declare what you don't own.** A system-wide SELinux boolean or an
+  image-shipped udev rule is shared; two workloads declaring it would each
+  report the other's teardown as their own breakage.
+- **Omitting the action is fine.** A script without it falls through its own
+  dispatch to a nonzero exit, which reads as *undeclared* — unknown, reported,
+  not a failure. Only an exit-0 empty answer means "installs nothing".
 
 #### Customizing control files (Containerfile, setup.sh, policy.cil)
 
@@ -433,6 +463,9 @@ Example setup script pattern:
 #!/bin/bash
 set -euo pipefail
 
+WORKLOAD_NAME="${WORKLOAD_NAME:?run via workloadctl enable/disable}"
+RELAY_UNIT="${WORKLOAD_NAME}-udev-relay.service"
+
 enable() {
     # Load kernel module, add udev rules, install SELinux policy...
 }
@@ -441,10 +474,17 @@ disable() {
     # Reverse the above
 }
 
+artifacts() {
+    # Read-only: what enable() installs on the host, for `workloadctl doctor`.
+    echo "unit ${RELAY_UNIT}"
+    return 0
+}
+
 case "${1:-}" in
-    enable)  enable ;;
-    disable) disable ;;
-    *)       echo "Usage: $0 {enable|disable}" >&2; exit 1 ;;
+    enable)    enable ;;
+    disable)   disable ;;
+    artifacts) artifacts ;;
+    *)         echo "Usage: $0 {enable|disable|artifacts}" >&2; exit 1 ;;
 esac
 ```
 
