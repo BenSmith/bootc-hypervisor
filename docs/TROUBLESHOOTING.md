@@ -8,8 +8,11 @@ This guide covers common issues when working with the workload system and how to
 
 ### Check workload health
 ```bash
-# Verify all aspects of workload setup
-sudo workloadctl verify <workload>
+# Everything at once: generator log, unit states, setup checks, drift, health
+sudo workloadctl doctor <workload>
+
+# Just the runtime setup checks (user, subids, linger, SELinux)
+sudo workloadctl diagnose <workload>
 
 # Check service status
 sudo workloadctl status <workload>
@@ -24,7 +27,7 @@ When a workload fails to start, you'll typically see:
 - Container exits immediately with code 125 or 126
 - Logs show cryptic error messages
 
-Run `workloadctl verify` to diagnose the root cause.
+Run `workloadctl doctor` to diagnose the root cause.
 
 ## Common Issues
 
@@ -43,7 +46,7 @@ Run `workloadctl verify` to diagnose the root cause.
 **Fix:**
 ```bash
 # Check if subuid/subgid configured
-sudo workloadctl verify <workload>
+sudo workloadctl diagnose <workload>
 
 # If missing, re-run user setup
 sudo /usr/libexec/workloadctl/workload-ensure-user <name>
@@ -71,7 +74,7 @@ sudo workloadctl recreate <workload>
 **Fix:**
 ```bash
 # Check volume paths exist
-sudo workloadctl verify <workload>
+sudo workloadctl diagnose <workload>
 
 # Create missing directories
 sudo mkdir -p /var/lib/workloads/<name>/<subdir>
@@ -311,6 +314,97 @@ sudo -u _wl-<name> \
 # - Add required volumes or devices
 ```
 
+### 11. Rootless runtime torn down (`pause.pid`, `/run/user/<uid>` missing)
+
+**Symptoms:**
+- `Error: ... unable to create a new pause process: open /run/user/10000/libpod/tmp/pause.pid: no such file or directory. Try running "/usr/bin/podman system migrate" ...`
+- `error creating temporary file: No such file or directory`
+- `Failed to obtain podman configuration: lstat /run/user/10000: no such file or directory`
+- `Failed to add pause process to systemd sandbox cgroup: dial unix /run/user/10000/bus: connection refused`
+- Service fails with `226/NAMESPACE`
+
+**Cause:**
+The workload user's runtime directory (`/run/user/<uid>`) or its user manager
+(`user@<uid>.service`) is gone. Rootless podman needs both: the runtime dir holds
+the pause process and libpod's temp state, and the user D-Bus on that socket is
+what crun's cgroup manager talks to. Linger is what keeps them alive between
+logins, so this shows up either when linger was never enabled, or — far more
+often — after something tore the session down while linger was still on.
+
+The usual cause of the second case is `loginctl terminate-user`, which removes
+`/run/user/<uid>` along with the session. It is the natural-looking command and
+it is the wrong one.
+
+**Fix:**
+```bash
+# diagnose already knows this one — it reports it as runtime_dir / user_session
+# and prints the correct command for your case
+sudo workloadctl diagnose <workload>
+
+# Session died but linger is on — restart the manager, which recreates /run/user/<uid>
+sudo systemctl restart user@<uid>.service
+
+# Linger was never enabled — this both enables it and creates the runtime dir
+sudo loginctl enable-linger <uid>
+
+# If podman still complains about stale subid mappings after the above
+sudo -u _wl-<name> -E XDG_RUNTIME_DIR=/run/user/<uid> podman system migrate
+```
+
+> **Do NOT run `loginctl terminate-user`** on a workload user. It removes
+> `/run/user/<uid>`, and every workload owned by that user then fails with
+> `226/NAMESPACE` until the manager is restarted. `systemctl restart
+> user@<uid>.service` is the operation you want in every case where you were
+> reaching for it.
+
+### 12. SELinux labels silently not applied (`semanage` lock contention)
+
+**Symptoms:**
+- Permission denied writing to the workload's own directories, with no obvious cause and nothing wrong in the config
+- `workloadctl diagnose` reports `selinux_labels` failing, naming a type other than `container_file_t` (usually `var_lib_t`)
+- Earlier — often at a boot days or weeks before — the journal contains:
+```
+workload-ensure-user: WARNING: semanage fcontext -l failed: Could not get direct read lock
+    at /var/lib/selinux/targeted/semanage.read.LOCK. (Resource temporarily unavailable)
+workload-ensure-user: BlockingIOError: Resource temporarily unavailable
+```
+
+**Cause:**
+`workload-ensure-user` registers a persistent fcontext rule mapping
+`/var/lib/workloads(/.*)?` to `container_file_t`, then runs `restorecon` over the
+workload's tree. The registration takes the semanage read lock, which is
+contended when several workloads enable at once or start together at boot. That
+step is best-effort by design — it logs the warning above and returns rather than
+failing the workload — but the `restorecon` immediately after it then runs
+against a policy with no rule for that path, and applies the *default* type. The
+container is subsequently denied access to its own home.
+
+Nothing re-raises it: the warning scrolls out of the journal, and the denial
+appears much later with no visible connection to the boot where the labeling was
+skipped. This is why `diagnose` checks the labels themselves rather than relying
+on anyone seeing the warning.
+
+**Fix:**
+```bash
+# Confirm: does the rule exist, and what is the tree actually labeled?
+sudo semanage fcontext -l | grep /var/lib/workloads
+ls -Zd /var/lib/workloads/<name>
+
+# Re-run the provisioning step — idempotent, and registers the rule if missing
+sudo /usr/libexec/workloadctl/workload-ensure-user <name>
+
+# Or do the two halves by hand
+sudo semanage fcontext -a -t container_file_t '/var/lib/workloads(/.*)?'
+sudo restorecon -R /var/lib/workloads
+
+sudo workloadctl restart <workload>
+```
+
+Note the case where the tree is labeled correctly but the rule was never
+registered: everything works until the next relabel, which resets the tree to the
+default type. `diagnose` fails on this deliberately — the fix is the same
+`semanage fcontext -a` above.
+
 ## Viewing Logs
 
 Container stdout/stderr go straight into the systemd journal via podman's passthrough log driver — each line is stored exactly once, tagged with the container name as the syslog identifier (`SyslogIdentifier=workload-<name>`, or `workload-<wl>-<ctr>` for pod/bridge member containers). Log lines read `workload-<name>[pid]: message`.
@@ -425,13 +519,13 @@ When enabling a new workload, expect this sequence:
    - Runs workload-ensure-user to configure subuid/subgid
    - Enables linger
    - Starts service
-4. **Verify** - `workloadctl verify <workload>`
+4. **Verify** - `workloadctl diagnose <workload>`
 5. **Monitor** - `workloadctl logs -f <workload>`
 
 If it fails:
 1. **Check logs** - `journalctl -u workload-<name>.service -n 50`
-2. **Verify setup** - `workloadctl verify <workload>`
-3. **Fix issues** - Follow suggestions from verify command
+2. **Verify setup** - `workloadctl diagnose <workload>`
+3. **Fix issues** - Follow the fix suggestions printed by diagnose
 4. **Restart** - `workloadctl recreate <workload>` (or disable/enable if needed)
 
 ## Reference

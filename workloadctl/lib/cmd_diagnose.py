@@ -7,6 +7,7 @@ Where validate asks "is this config fit to enable", diagnose asks "this is
 enabled and unhappy — what is wrong with it right now".
 """
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,7 +24,9 @@ from workload_lib import (
     subuid_file,
     units_outdated,
     units_from_other_build,
+    workload_root_dir,
     WORKLOADCTL_VERSION,
+    WORKLOADS_BASE,
 )
 from validation import uses_host_userns
 from workloadctl_core import WorkloadManager, require_root
@@ -63,6 +66,82 @@ def _getsebool(name: str) -> bool | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip().endswith("on")
+
+
+def _fcontext_rule_present() -> bool | None:
+    """Is the persistent fcontext rule for /var/lib/workloads registered?
+
+    None when it can't be determined — no semanage binary, SELinux disabled,
+    or the read lock is contended right now (the same contention this check
+    exists to detect the aftermath of). None must never read as "missing".
+    """
+    if not shutil.which("semanage"):
+        return None
+    result = subprocess.run(
+        ["semanage", "fcontext", "-l"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return f"{WORKLOADS_BASE}(/.*)?" in result.stdout
+
+
+def _selinux_type(path: Path) -> str | None:
+    """Type field of a path's SELinux label, or None if it has none.
+
+    Read straight off the xattr rather than shelling out to ls -Z: no
+    parsing of locale-dependent output, and a missing xattr (SELinux
+    disabled, or a filesystem without labels) raises OSError and reads as
+    unknown.
+    """
+    try:
+        raw = os.getxattr(str(path), "security.selinux")
+    except OSError:
+        return None
+    parts = raw.decode(errors="replace").rstrip("\x00").split(":")
+    return parts[2] if len(parts) > 2 else None
+
+
+def selinux_label_check(rule_present: bool | None, label: str | None,
+                        name: str) -> tuple[bool, str, str | None]:
+    """Verdict for the workload tree's SELinux labeling: (passed, message, fix).
+
+    Two independent facts, because they fail independently and one of them
+    fails silently. `workload-ensure-user` registers the fcontext rule for
+    /var/lib/workloads and then restorecons the workload's tree — but the
+    semanage read lock is contended when several workloads enable at once or
+    at boot, and the registration is best-effort: it logs
+
+        WARNING: semanage fcontext -l failed: Could not get direct read lock
+        at /var/lib/selinux/targeted/semanage.read.LOCK
+
+    once, returns, and never retries. The restorecon then runs against a
+    policy with no rule for this path and applies the *default* label
+    (var_lib_t), so the container is denied writes to its own home. The
+    warning has long since scrolled out of the journal by the time anyone
+    connects it to the denial — which is the whole reason this is a check
+    and not just a log line. Gap 3 of Q6, 2026-07-28.
+
+    A tree that is correctly labeled today but has no registered rule still
+    fails: it is one `restorecon -R /var` or policy relabel away from the
+    same denial, and the fix is one command either way.
+    """
+    if rule_present is None and label is None:
+        return (True, "SELinux labeling state unknown "
+                      "(semanage unavailable or SELinux disabled)", None)
+    if label is not None and label != "container_file_t":
+        return (False, f"Workload tree is labeled {label}, not container_file_t "
+                       f"— rootless podman will be denied access to it"
+                       + ("" if rule_present else " (and no fcontext rule is "
+                          "registered for it, so a relabel will not fix it)"),
+                f"sudo /usr/libexec/workloadctl/workload-ensure-user {name}")
+    if rule_present is False:
+        return (False, f"No fcontext rule registered for {WORKLOADS_BASE} — the "
+                       f"tree is labeled correctly now but a relabel will reset "
+                       f"it to the default type (semanage lock contention at "
+                       f"enable time skips this registration silently)",
+                f"sudo semanage fcontext -a -t container_file_t "
+                f"'{WORKLOADS_BASE}(/.*)?' && sudo restorecon -R {WORKLOADS_BASE}")
+    return (True, "SELinux labeling correct (container_file_t, "
+                  "fcontext rule registered)", None)
 
 
 def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
@@ -246,6 +325,16 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         else:
             _check("home_dir", False, f"Home directory missing: {home_dir}",
                    fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+    # Check 5b: the workload tree carries the label rootless podman needs, and
+    # the rule that keeps it across relabels is registered. See
+    # selinux_label_check for why a silent skip at enable time surfaces as an
+    # unexplained permission denial much later.
+    root_dir = workload_root_dir(config.name)
+    if root_dir.exists():
+        passed, message, fix = selinux_label_check(
+            _fcontext_rule_present(), _selinux_type(root_dir), config.name)
+        _check("selinux_labels", passed, message, fix=fix)
 
     # Check 6: Image(s) exist locally
     if user_exists:
