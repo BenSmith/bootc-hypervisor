@@ -432,12 +432,23 @@ class SharedBridgeWiringTest(unittest.TestCase):
     """The gate: which workloads get the check at all."""
 
     def _checks(self, toml, enabled=True):
+        # The battery runs end to end, so the checks past the one under test
+        # still shell out to systemctl — which does not exist in the RPM build
+        # container the test suite also runs in. Stub the two doors to it: a
+        # non-zero `subprocess.run` and an inactive `service_active` are both
+        # answers this test discards, and neither can make a shared_bridge
+        # check appear or vanish.
+        completed = subprocess.CompletedProcess([], 1, stdout="", stderr="")
         with _Bundle(None, name="forgejo", toml=toml, enabled=enabled) as cfg:
             with patch.object(cmd_diagnose, "_unit_props",
-                              return_value={"ActiveState": "active"}):
-                with patch.object(cmd_diagnose, "collect_host_artifact_checks"):
-                    checks, _ = cmd_diagnose.collect_diagnose_checks(
-                        cfg, _StubManager())
+                              return_value={"ActiveState": "active"}), \
+                 patch.object(cmd_diagnose, "collect_host_artifact_checks"), \
+                 patch.object(cmd_diagnose, "service_active",
+                              return_value=(False, "inactive")), \
+                 patch.object(cmd_diagnose.subprocess, "run",
+                              return_value=completed):
+                checks, _ = cmd_diagnose.collect_diagnose_checks(
+                    cfg, _StubManager())
         return [c for c in checks if c["check"] == "shared_bridge"]
 
     def test_managed_bridge_vm_is_checked(self):
