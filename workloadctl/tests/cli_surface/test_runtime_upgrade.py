@@ -22,7 +22,9 @@ What the transition must and must not do, which is the whole point of pinning it
     a plain-RPM host that window stays open indefinitely and silently. (On a
     bootc host it cannot open — new code is only live after a reboot, which
     regenerates.)
-  - `inspect` reports the skew via `units_generated_by`, and
+  - `status --json` reports the skew via `units_generated_by`. That field is
+    never null — it coalesces "stamps agree" to the running version — so the
+    signal is the field compared against the *installed* NEVR, not against None.
   - `drift` stays **clean**, because it normalizes the provenance stamp out. If
     it did not, every workload would read as drifted after every upgrade
     including the byte-identical ones, which is how a signal stops being read.
@@ -54,12 +56,21 @@ def _nevr(target) -> str:
         sudo=False, check=True).stdout.strip()
 
 
-def _inspect(target, name) -> dict:
-    r = target.wl(f"inspect --json {name}", sudo=True, check=False)
+def _generated_by(target, name) -> str:
+    """The build stamped on the live units, per `status --json`.
+
+    Never null: the JSON coalesces `units_from_other_build()`'s None (stamps
+    agree) to the running version, so the field always names *a* build. The skew
+    signal is therefore this value compared against the *installed* NEVR — equal
+    means the units are this build's, unequal means they are the previous
+    build's.
+    """
+    r = target.wl(f"status --json {name}", sudo=True, check=False)
     try:
-        return json.loads(r.stdout)
-    except json.JSONDecodeError:
-        pytest.fail(f"non-JSON inspect output (rc={r.rc}):\n{r.stdout}\n{r.stderr}")
+        return json.loads(r.stdout)["units_generated_by"]
+    except (json.JSONDecodeError, KeyError):
+        pytest.fail(f"unusable status --json output (rc={r.rc}):"
+                    f"\n{r.stdout}\n{r.stderr}")
 
 
 def _reinstall(target):
@@ -92,8 +103,8 @@ def test_upgrade_under_a_running_workload(target):
                    sudo=False, check=True)
 
         before = _nevr(target)
-        assert _inspect(target, WORKLOAD).get("units_generated_by") is None, \
-            "units should match the installed build before any upgrade"
+        assert _generated_by(target, WORKLOAD) == before, \
+            "units should be stamped with the installed build before any upgrade"
 
         output = _reinstall(target)
         after = _nevr(target)
@@ -118,8 +129,15 @@ def test_upgrade_under_a_running_workload(target):
             "the %post upgrade warning did not fire with a live workload "
             f"present. Output was:\n{output[-3000:]}")
 
-        # 3. inspect names the build that actually wrote the live units.
-        assert _inspect(target, WORKLOAD).get("units_generated_by") == before
+        # 3. status names the build that actually wrote the live units — the
+        #    previous one, which is now different from what is installed. Both
+        #    halves matter: `== before` alone also holds *before* the upgrade,
+        #    so it is `!= after` that makes this the skew and not a tautology.
+        stamped = _generated_by(target, WORKLOAD)
+        assert stamped == before, (
+            f"live units should still name the build that wrote them "
+            f"({before}), got {stamped}")
+        assert stamped != after
 
         # 4. ...and drift is still clean, because the stamp is normalized out.
         d = target.wl(f"drift {WORKLOAD}", sudo=True, check=False)
@@ -137,7 +155,8 @@ def test_upgrade_under_a_running_workload(target):
         except Exception:
             dump_journal(target, WORKLOAD)
             raise
-        assert _inspect(target, WORKLOAD).get("units_generated_by") is None
+        assert _generated_by(target, WORKLOAD) == after, \
+            "re-enabling should restamp the units with the installed build"
         assert target.wl(f"drift {WORKLOAD}", sudo=True, check=False).rc == 0
     finally:
         _purge_workload(target, WORKLOAD)
