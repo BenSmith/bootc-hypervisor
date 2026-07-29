@@ -118,6 +118,30 @@ class GpuSelinuxCheckTest(unittest.TestCase):
         self.assertIn("wl_app", message)
         self.assertIsNone(fix)
 
+    def test_own_module_wins_over_the_boolean(self):
+        """A workload with its own type is not covered by the boolean.
+
+        container_use_xserver_devices is written against container_t, so on a
+        host with it on, a wl_<name>.process workload still gets its access
+        from its own module. Naming the boolean here would report a path that
+        does not apply, and would read as "allowed" even if the bundle's own
+        grant went missing. Regression from onepiece, 2026-07-29.
+        """
+        for blanket in (True, False, None):
+            with self.subTest(blanket=blanket):
+                passed, message, fix = cmd_diagnose.gpu_selinux_check(
+                    xserver=True, blanket=blanket, module="wl_app")
+                self.assertTrue(passed)
+                self.assertIn("wl_app", message)
+                self.assertNotIn("container_use_xserver_devices on", message)
+                self.assertIsNone(fix)
+
+    def test_own_module_named_even_when_boolean_state_is_unknown(self):
+        _, message, _ = cmd_diagnose.gpu_selinux_check(
+            xserver=None, blanket=None, module="wl_app")
+        self.assertIn("wl_app", message)
+        self.assertNotIn("unknown", message)
+
     def test_no_path_at_all_fails_with_a_fix(self):
         passed, message, fix = cmd_diagnose.gpu_selinux_check(
             xserver=False, blanket=False, module=None)

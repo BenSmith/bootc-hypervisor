@@ -69,11 +69,25 @@ def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
                       module: str | None) -> tuple[bool, str, str | None]:
     """Verdict for NVIDIA device access under SELinux: (passed, message, fix).
 
-    Split out from the collector so the four outcomes are testable without
+    Split out from the collector so the outcomes are testable without
     standing up a workload. `module` is the workload's own SELinux module
     name, or None if it ships no policy.cil. See the caller for why only the
     no-path-at-all case fails.
+
+    `module` is decided first, and deliberately: a workload with its own type
+    runs as `wl_<name>.process`, and `container_use_xserver_devices` is
+    written against `container_t` alone, so the boolean grants that workload
+    nothing. Reporting the boolean for a module-bearing workload names a path
+    that does not apply to it, and would read as "allowed" on a host where
+    the boolean is on but the bundle's own grant is missing — the exact
+    regression ShippedBundleGrantsTest exists to catch. Observed on onepiece
+    2026-07-29: vnc-sway (wl_vnc_sway.process) was reported as covered by the
+    boolean while its access in fact came from its own module.
     """
+    if module:
+        return (True, f"NVIDIA device access granted by the workload's own "
+                      f"policy module {module} (host booleans are written "
+                      f"against container_t and do not cover its type)", None)
     if xserver is None and blanket is None:
         return (True, "NVIDIA GPU requested; SELinux boolean state unknown "
                       "(getsebool unavailable or SELinux disabled)", None)
@@ -85,10 +99,6 @@ def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
                       "container_use_devices — narrow it: setsebool -P "
                       "container_use_xserver_devices on, then setsebool -P "
                       "container_use_devices off", None)
-    if module:
-        return (True, f"NVIDIA GPU requested; no host boolean grants "
-                      f"xserver_misc_device_t, so access must come from "
-                      f"{module}", None)
     return (False, "NVIDIA GPU requested but nothing grants access to "
                    "/dev/nvidia* (xserver_misc_device_t) — expect permission "
                    "denied from the CUDA runtime",
