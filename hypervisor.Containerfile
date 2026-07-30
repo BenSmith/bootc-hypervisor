@@ -86,15 +86,30 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
 #
 # Symptom is silent and looks unrelated: the anchor is plainly present in
 # source/anchors/ while every registry.local pull fails with "unable to get
-# local issuer certificate", because the bundle predates it. Observed on zamd
-# 2026-07-30 — anchor dated that morning, bundle dated 2026-05-21, homelab root
-# absent from the bundle (confirmed by fingerprint). Fixed there by hand with
-# `sudo update-ca-trust`; expect it to recur on the next anchor change.
+# local issuer certificate", because the bundle predates it. Observed on a
+# deployed host 2026-07-30 — anchor dated that morning, bundle dated 2026-05-21,
+# homelab root absent from the bundle (confirmed by fingerprint). Fixed there by
+# hand with `sudo update-ca-trust`; expect it to recur on the next anchor change.
 #
-# Candidate fixes, neither chosen yet: a boot-time oneshot that runs
-# `update-ca-trust` (idempotent, self-heals on the next reboot), or a doctor
-# check comparing source/anchors/ fingerprints against the extracted bundle
-# (catches it without a reboot but does not fix it).
+# It bites only a host that already has a local edit under extracted/, which is
+# why it shows up on some hosts and not others. Confirmed 2026-07-30 by
+# comparing two deployed hosts with `ostree admin config-diff`: the affected one
+# reported M on every extracted/ file plus an A for a hand-added anchor under
+# source/anchors/, while an unaffected host reported no pki/ca-trust entries at
+# all — its merge still tracks the image, so the homelab root was present in the
+# bundle and handshake/curl/skopeo all verified. The trigger is therefore a
+# hand-added anchor plus the `update-ca-trust` that follows it: that single
+# action converts extracted/ to locally-modified permanently, and every later
+# image extraction is silently discarded. A host that never had one keeps
+# self-healing.
+#
+# Candidate fixes, none chosen yet: a boot-time oneshot that runs
+# `update-ca-trust` (idempotent, self-heals on the next reboot, works regardless
+# of local edits); a doctor check comparing source/anchors/ fingerprints against
+# the extracted bundle (catches it without a reboot but does not fix it); or,
+# per-host, restoring extracted/ to the image's content so config-diff comes
+# back clean and the merge resumes tracking the image (fixes one host for good,
+# does nothing for the next).
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
