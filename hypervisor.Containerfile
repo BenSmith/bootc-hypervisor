@@ -76,11 +76,12 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
     else \
         echo "No CI-injected trust anchors; skipping the registry.local mirror"; \
     fi && rm -rf /tmp/ca-trust-inject /tmp/mirrors.conf
-# KNOWN GAP, unfixed: the `update-ca-trust` above does NOT take effect on a host
-# that already exists. It writes the extracted bundle into
-# /etc/pki/ca-trust/extracted/, and `update-ca-trust` run on the host at any
-# point in the past marks that path locally modified — so ostree's /etc 3-way
-# merge keeps the host's copy forever and the image's extraction is discarded.
+# KNOWN GAP, no image-side fix: the `update-ca-trust` above does not reach an
+# existing host whose trust store was ever edited by hand. It writes the
+# extracted bundle into /etc/pki/ca-trust/extracted/, and `update-ca-trust` run
+# on the host at any point in the past marks that path locally modified — so
+# ostree's /etc 3-way merge keeps the host's copy forever and the image's
+# extraction is discarded. An untouched host merges it normally.
 # Same mechanism as the SELinux NOTE below (policy store in /etc): a *new*
 # anchor file under source/anchors/ does land, but nothing extracts it.
 #
@@ -88,8 +89,7 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
 # source/anchors/ while every registry.local pull fails with "unable to get
 # local issuer certificate", because the bundle predates it. Observed on a
 # deployed host 2026-07-30 — anchor dated that morning, bundle dated 2026-05-21,
-# homelab root absent from the bundle (confirmed by fingerprint). Fixed there by
-# hand with `sudo update-ca-trust`; expect it to recur on the next anchor change.
+# homelab root absent from the bundle (confirmed by fingerprint).
 #
 # It bites only a host that already has a local edit under extracted/, which is
 # why it shows up on some hosts and not others. Confirmed 2026-07-30 by
@@ -97,19 +97,33 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
 # reported M on every extracted/ file plus an A for a hand-added anchor under
 # source/anchors/, while an unaffected host reported no pki/ca-trust entries at
 # all — its merge still tracks the image, so the homelab root was present in the
-# bundle and handshake/curl/skopeo all verified. The trigger is therefore a
-# hand-added anchor plus the `update-ca-trust` that follows it: that single
-# action converts extracted/ to locally-modified permanently, and every later
-# image extraction is silently discarded. A host that never had one keeps
-# self-healing.
+# bundle and handshake/curl/skopeo all verified. The trigger is a hand-added
+# anchor plus the `update-ca-trust` that follows it: that single action converts
+# extracted/ to locally-modified permanently, and every later image extraction is
+# silently discarded.
 #
-# Candidate fixes, none chosen yet: a boot-time oneshot that runs
-# `update-ca-trust` (idempotent, self-heals on the next reboot, works regardless
-# of local edits); a doctor check comparing source/anchors/ fingerprints against
-# the extracted bundle (catches it without a reboot but does not fix it); or,
-# per-host, restoring extracted/ to the image's content so config-diff comes
-# back clean and the merge resumes tracking the image (fixes one host for good,
-# does nothing for the next).
+# So the exposed population is precisely the hosts provisioned *before* the
+# shared homelab root was injected here — their Caddy trust was set up by hand,
+# which is the local edit. A host installed after that arrives with the anchor
+# already in the image and keeps self-healing. That means this is a one-time
+# migration for old hosts, not a recurring failure for new ones, and as of
+# 2026-07-30 no host is in the broken state: the affected one was migrated by
+# restoring extracted/ from /usr/etc (see the third fix below), verified with
+# `diff -r /usr/etc/pki/ca-trust /etc/pki/ca-trust` and a clean config-diff.
+#
+# Watch out for /etc/pki/tls/certs when doing that migration: it is an openssl
+# CApath, so a hash link there can grant trust independently of the bundle. The
+# hand-run `update-ca-trust` had left two pointing at the superseded root (both
+# dangling by then, so no trust leaked). `find /etc/pki -xtype l -delete`.
+#
+# Candidate fixes for the general case, none chosen yet — and the priority is now
+# low, since the remaining trigger is a *future* hand-edit rather than any
+# current host: a boot-time oneshot that runs `update-ca-trust` (idempotent,
+# self-heals on the next reboot, works regardless of local edits); a doctor check
+# comparing source/anchors/ fingerprints against the extracted bundle (catches it
+# without a reboot but does not fix it); or, per-host, restoring extracted/ to
+# the image's content so config-diff comes back clean and the merge resumes
+# tracking the image (fixes one host for good, does nothing for the next).
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
