@@ -14,7 +14,7 @@ Two gates, both default-safe skips:
     Forgejo container runner), so this skips cleanly and passes.
   - the VM toolchain (qemu/OVMF/socat) — baked into the *hypervisor image*, not
     the workloadctl RPM. So this really runs under **gate mode** (the booted
-    bootc image, e.g. on tp); under the bare dev cloud image it skips.
+    bootc image, e.g. on the dev host); under the bare dev cloud image it skips.
 
 Marked `runtime` + `slow`: only under `--target=vm:<mode>` (`just test-runtime`),
 and it's the heaviest single check (nested boot + first-run cloud-image fetch).

@@ -927,7 +927,7 @@ def _cgroup_args(container, name, mode):
     # Per-container cgroup limits via podman flags. Under option 1b (non-split
     # topology) payloads live in a transient libpod scope under the user manager;
     # podman flags write directly to the scope's cgroup files via OCI/crun, so they
-    # bind in all modes (single/bridge/pod) — spike-verified on tp 2026-06-11.
+    # bind in all modes (single/bridge/pod) — spike-verified on the dev host 2026-06-11.
     # Workload-level limits (aggregate cap for the whole user manager) are in the
     # user@<uid>.service.d drop-in; these per-container flags add finer-grained OOM
     # scoping on top.
@@ -1391,7 +1391,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # is not in the unit's cgroup at all). This is a property of the non-split
     # topology, NOT a fundamental rootless+linger limit: under --cgroups=split +
     # Delegate=yes (ADR 001 option 1) conmon lands in workload-<name>.service's own
-    # cgroup and Type=notify reaches active in 0s — proven on tp 2026-07-12 (ADR
+    # cgroup and Type=notify reaches active in 0s — proven on the dev host 2026-07-12 (ADR
     # 001 addendum). Adopting it would revert the split tax 1b was chosen to shed,
     # so exec stays the default. Readiness gating uses --health-cmd + the CLI's
     # health-verified flow. See ADR 001 (item 8 + 2026-07-12 addendum) and llms.txt.

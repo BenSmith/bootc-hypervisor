@@ -66,7 +66,7 @@ host's avahi-daemon and systemd-resolved's mDNS on the publishing host.
 
 ## Setup on a *resolver* host
 
-This is any other LAN host that wants to resolve the names published by `tp`.
+This is any other LAN host that wants to resolve the names published by the publisher host.
 Two options, in order of recommendation:
 
 **Option A — `nss-mdns` (recommended).** Plugs into glibc NSS, works for
@@ -92,7 +92,7 @@ resolvectl query zot.local
 
 ## Verifying
 
-On the publisher (`tp`), the host CLI tools (`avahi-resolve`, `resolvectl
+On the publisher host, the host CLI tools (`avahi-resolve`, `resolvectl
 query .local`) **won't work** — `avahi-resolve` needs a daemon socket on the
 host's `/run/avahi-daemon`, and we deliberately turned off resolved's mDNS.
 What you *can* check:
@@ -147,11 +147,11 @@ Common culprits:
   the only setting that actually closes it.
 - Host-side `avahi-daemon` — step 2 above (mask the host service).
 
-### Resolution works from `tp`'s LAN neighbors but not from `tp` itself
+### Resolution works from the publisher's LAN neighbors but not from the publisher itself
 
-Expected. We turned off `tp`'s mDNS resolver path so avahi could own 5353
-without conflict. Programs on `tp` that need to resolve `.local` either
-install `nss-mdns` *on `tp`* (it doesn't bind 5353, so it coexists with
+Expected. We turned off the publisher's mDNS resolver path so avahi could own 5353
+without conflict. Programs on the publisher that need to resolve `.local` either
+install `nss-mdns` *on the publisher itself* (it doesn't bind 5353, so it coexists with
 the container avahi just fine — it's a pure NSS module) or use a different
 mechanism.
 

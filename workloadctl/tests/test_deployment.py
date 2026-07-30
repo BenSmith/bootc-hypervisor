@@ -31,7 +31,7 @@ import deployment
 from workloadctl_core import WorkloadManager
 
 
-# A realistic pair, taken from onepiece 2026-07-29 (booted / rollback target).
+# A realistic pair, taken from a deployed hypervisor host 2026-07-29 (booted / rollback target).
 BOOTED = "4f46afe780e6d01d4bf9f04a9adbf85ce20d312e3fddf4cc402f0c5afc592a08.0"
 ROLLBACK = "f81edd5a40569e6bc3a367f31b5bc22fc52e9ee89a27a8fc7c2e3640fa3a03e8.0"
 PRUNED = "cf5005ab" + "0" * 56 + ".0"

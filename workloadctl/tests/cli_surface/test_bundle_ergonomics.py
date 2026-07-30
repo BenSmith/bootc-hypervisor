@@ -29,7 +29,7 @@ Covers:
     rejected with a clear error, and diagnose does not crash with a traceback
 
 These last groups port the live checks that previously lived only in the
-ad-hoc tp exercise script, so the bundle command surface stays covered by the
+ad-hoc host exercise script, so the bundle command surface stays covered by the
 standing harness.
 """
 

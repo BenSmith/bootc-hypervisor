@@ -2,7 +2,7 @@
 """Unit tests for the runtime-dir re-pin helper, the `images` VM-skip, and the
 non-interactive `edit` confirmation.
 
-These cover three robustness fixes made after a cli_surface run on tp surfaced:
+These cover three robustness fixes made after a cli_surface run on the dev host surfaced:
   - `workloadctl images` crashing on a VM workload (qcow2 URL fed to
     `podman inspect --type=image`);
   - `update`/`recreate`/`start` restarts failing 226/NAMESPACE because

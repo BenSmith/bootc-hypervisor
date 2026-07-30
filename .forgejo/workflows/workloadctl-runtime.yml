@@ -114,7 +114,7 @@ jobs:
         run: |
           # The launcher caches the Fedora Cloud qcow2 (dev) and the built gate
           # qcow2 + stable gate ssh key (gate) under tests/runtime/.cache/. Point
-          # that at a per-runner persistent dir (the tp-host wlrt-cache pattern)
+          # that at a per-runner persistent dir (the dev-host wlrt-cache pattern)
           # so runs don't re-download ~500MB or re-run BIB on a fresh workspace.
           mkdir -p "$WLRT_CACHE"
           rm -rf workloadctl/tests/runtime/.cache

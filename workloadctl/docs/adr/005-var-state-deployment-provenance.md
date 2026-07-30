@@ -24,7 +24,7 @@ identity away while the state stays behind.
 
 `cleanup`'s definition of an orphan — "state whose workload has no config at all"
 — is then satisfied by state that is not orphaned, merely invisible from where you
-happen to have booted. Observed on onepiece 2026-07-28: two workloads present on
+happen to have booted. Observed on a GPU hypervisor host 2026-07-28: two workloads present on
 the booted deployment and absent from the rollback target, their `/var` trees
 owned by UIDs that would not resolve after a rollback. `cleanup --apply` on the
 older deployment would have swept live data, and the operator's mental model —
@@ -84,20 +84,20 @@ rather than left to be rediscovered:
 | trap | reality |
 |---|---|
 | use the `ostree=` value from `/proc/cmdline` as the id | that is the **boot** checksum. Only the resolved symlink target gives the deployment id |
-| identify the booted deployment by inode against `/` | on onepiece `/` is device 36 and the deployment dir is 64512 |
+| identify the booted deployment by inode against `/` | on that host `/` is device 36 and the deployment dir is 64512 |
 | use `.origin` for identity | both deployments there carry an identical `container-image-reference`; only the csum differs |
 | store bootc's `imageDigest` | a different identifier entirely — don't store one and compare the other |
 
 The id is therefore the resolved deployment directory basename,
 `<commit-checksum>.<serial>`: `ostree=/ostree/boot.1/default/<BOOT-csum>/0` →
-`../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on onepiece
+`../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on a deployed hypervisor host
 2026-07-29.
 
 Existence is checked by globbing `*/deploy/<id>` rather than hardcoding the
 `default` stateroot. The stateroot is a real variable, and hardcoding it is
 correct on a one-stateroot host and quietly wrong on a two-stateroot one. This
 matters *because* `/var` may be shared across stateroots: a separate `/var`
-filesystem is a normal bootc layout (onepiece mounts `/dev/mapper/os-var` at
+filesystem is a normal bootc layout (that host mounts `/dev/mapper/os-var` at
 `/var`), and this repo prescribes neither layout — it ships an empty kickstart so
 partitioning stays an interactive choice. The glob is correct under both.
 

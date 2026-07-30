@@ -111,7 +111,7 @@ on current systemd.
 - ❌ Workloads compete with the human session as siblings under `user.slice`
   (default weights) instead of being collectively deprioritized.
 
-### 1b. `user@<uid>.service` slice redirect — **VERIFIED** (spike passed on tp, 2026-06-11)
+### 1b. `user@<uid>.service` slice redirect — **VERIFIED** (spike passed on the dev host, 2026-06-11)
 
 Keep system units as lifecycle drivers and keep native user-manager placement
 (no split, no `Delegate=yes`), but move each workload user manager under
@@ -160,7 +160,7 @@ If it works, the cgroup tree looks like:
   — but needs real non-split generated units to verify; do so during
   implementation)
 
-**Spike results (tp, Fedora 44, systemd 259, workload `alloy`/UID 10008,
+**Spike results (dev host, Fedora 44, systemd 259, workload `alloy`/UID 10008,
 2026-06-11)** — every gate passed; per the criterion below, 1b supersedes
 options 1 and 2:
 
@@ -276,8 +276,8 @@ Implementation checklist — Stage 1 complete, follow-ups verified 2026-06-12:
 - ✅ `ExecStopPost=-podman rm -f -t0` added to generated container units
 - ✅ `cgroup_exec.py` + healthcheck-shim stack deleted
 - ✅ `MemorySwapMax=90%` set on `workloads.slice`
-- ✅ `ProtectSystem`/`RestrictAddressFamilies` confirmed on tp (see spike item 5)
-- ✅ Health-verified update + rollback cycle confirmed on tp (see below)
+- ✅ `ProtectSystem`/`RestrictAddressFamilies` confirmed on the dev host (see spike item 5)
+- ✅ Health-verified update + rollback cycle confirmed on the dev host (see below)
 
 Still open (subsequent stages):
 - ✅ `systemctl status` / exporter measurement — see spike item 6 below
@@ -309,7 +309,7 @@ Still open (subsequent stages):
   (This path applies to pod cgroups; per-container limits go through the OCI
   spec into crun's cgroupfs writes, where `--pids-limit` does work.)
 
-## Re-evaluation spike (status after the 2026-06-11 run on tp)
+## Re-evaluation spike (status after the 2026-06-11 run on the dev host)
 
 1. ~~`podman run --memory 256m --pids-limit 64 --cpus 0.5` rootless, *without*
    `--cgroups=split`, under a linger user manager~~ **Confirmed 2026-06-11:**
@@ -332,7 +332,7 @@ Still open (subsequent stages):
    health check and confirmed healthy after restart; `workloadctl rollback`
    also confirmed functional.
 5. ~~Confirm the unit's `ProtectSystem`/`RestrictAddressFamilies` still
-   constrain the migrated payload~~ **Confirmed 2026-06-12 on tp (alloy,
+   constrain the migrated payload~~ **Confirmed 2026-06-12 on the dev host (alloy,
    UID 10008, Fedora 44/systemd 259, non-split generated units):**
    `ProtectSystem=strict` and `RestrictAddressFamilies=~AF_ALG AF_PACKET`
    apply to the `workload-alloy.service` system unit process (the podman
@@ -349,7 +349,7 @@ Still open (subsequent stages):
    podman client from host filesystem writes and disallowed address families,
    and is unchanged under 1b.
 6. ~~Measure what `systemctl status workload-X` / `workloadctl status` lose
-   and what the exporter's cgroup paths become~~ **Measured 2026-06-12 on tp
+   and what the exporter's cgroup paths become~~ **Measured 2026-06-12 on the dev host
    (alloy, UID 10008):**
    - `systemctl status workload-alloy.service` shows only the podman client
      (202838) and catatonit (202855) under its CGroup entry. Memory/tasks
@@ -376,7 +376,7 @@ Still open (subsequent stages):
    `MemorySwapMax` unset, zram absorbs overflow and no OOM fires — see the
    swap caveat in the 1b spike results.
 8. ~~Re-test `Type=notify` under 1b (the topology changed, result was unknown)~~
-   **Resolved 2026-06-21 on tp (Fedora 44 / systemd 259)** — *framing refined
+   **Resolved 2026-06-21 on the dev host (Fedora 44 / systemd 259)** — *framing refined
    2026-07-12, see the addendum below: this result holds for 1b's non-split
    placement; `Type=notify` **does** work under `--cgroups=split` (option 1). The
    "structurally incompatible with rootless+linger" wording overstates it — the
@@ -407,7 +407,7 @@ Still open (subsequent stages):
 ## Addendum (2026-07-12): `Type=notify` works under split — item 8 refined
 
 Item 8's "structurally incompatible with the rootless+linger design" is
-imprecise. A controlled spike on tp (Fedora 44, systemd 259, podman 5.8.3)
+imprecise. A controlled spike on the dev host (Fedora 44, systemd 259, podman 5.8.3)
 shows the failure is a property of 1b's **non-split** placement, not of
 rootless+linger per se: restoring `--cgroups=split` + `Delegate=yes` — i.e.
 option 1's topology — makes `Type=notify` + `--sdnotify=conmon` reach `active`.

@@ -589,7 +589,7 @@ test-cli-deploy target:
 test-all-runtime target="local":
   cd workloadctl && just test-all-runtime {{target}}
 
-# As above, driven from your laptop against a REMOTE prepared KVM host (e.g. tp):
+# As above, driven from your laptop against a REMOTE prepared KVM host (e.g. your dev host):
 # rsync the tree over, run the sweep there, stream output back.
 test-all-runtime-remote host target="local":
   cd workloadctl && just test-all-runtime-remote {{host}} {{target}}

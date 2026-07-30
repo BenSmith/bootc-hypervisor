@@ -8,7 +8,7 @@ of *precious state* lives in `/var`. So `bootc rollback` — which deletes nothi
 takes a workload's identity away while its state stays behind, and `cleanup`'s
 definition of an orphan ("state whose workload has no config at all") is then
 satisfied by state that is not orphaned, merely invisible from where you booted.
-Observed on onepiece 2026-07-28: two workloads present on the booted deployment
+Observed on a GPU hypervisor host 2026-07-28: two workloads present on the booted deployment
 and absent from the rollback target, with their `/var` trees owned by UIDs that
 would not resolve after a rollback.
 
@@ -71,7 +71,7 @@ def booted_deployment_id() -> str | None:
 
     Resolved from the kernel cmdline's `ostree=` value, which is a symlink into
     the deployment tree — `/ostree/boot.1/default/<BOOT-csum>/0` ->
-    `../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on onepiece
+    `../../../deploy/default/deploy/<DEPLOY-csum>.0`. Verified on a deployed hypervisor host
     2026-07-29.
 
     Three near-misses, each of which yields code that looks right:
@@ -79,7 +79,7 @@ def booted_deployment_id() -> str | None:
       - the `ostree=` value's own csum is the **boot** checksum, not the
         deployment checksum. Only the resolved link gives the deployment id.
       - identifying the booted deployment by inode against `/` does not work:
-        on onepiece `/` is device 36 and the deployment dir is on 64512.
+        on that host `/` is device 36 and the deployment dir is on 64512.
       - `.origin` is not an identity — both deployments there carry the same
         `container-image-reference`; only the csum differs. Nor is bootc's
         `imageDigest`, which is a different identifier entirely.
@@ -122,7 +122,7 @@ def deployment_exists(deployment_id: str) -> bool:
     `default`: hardcoding it is correct on a one-stateroot host and quietly
     wrong on a two-stateroot one. That matters here because `/var` may be shared
     across stateroots — a separate `/var` filesystem is a normal bootc layout
-    (onepiece mounts /dev/mapper/os-var at /var) and this repo prescribes
+    (that host mounts /dev/mapper/os-var at /var) and this repo prescribes
     neither layout, shipping an empty kickstart so partitioning stays an
     interactive choice.
     """

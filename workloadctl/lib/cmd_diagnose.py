@@ -165,7 +165,7 @@ def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
     nothing. Reporting the boolean for a module-bearing workload names a path
     that does not apply to it, and would read as "allowed" on a host where
     the boolean is on but the bundle's own grant is missing — the exact
-    regression ShippedBundleGrantsTest exists to catch. Observed on onepiece
+    regression ShippedBundleGrantsTest exists to catch. Observed on a GPU hypervisor host
     2026-07-29: vnc-sway (wl_vnc_sway.process) was reported as covered by the
     boolean while its access in fact came from its own module.
     """
@@ -221,7 +221,7 @@ def host_artifact_check(artifact, state, name: str) -> tuple[bool, str, str | No
 
     NRestarts > 0 is a failure in its own right and is the reason this check
     exists: `<name>-udev-relay.service` restart-looped 2012 times over seven
-    days on onepiece while `systemctl list-units --failed` stayed clean, because
+    days on a deployed host while `systemctl list-units --failed` stayed clean, because
     a unit that keeps being restarted never settles into `failed`.
     """
     fix = f"sudo workloadctl enable {name}  (re-runs the workload's setup.sh)"
@@ -317,7 +317,7 @@ def shared_bridge_check(state, name: str) -> tuple[bool, str, str | None]:
     shared infra by design ("never includes ... workload-bridge.service"), and
     for a VM on the managed bridge that unit is the entire network path — it
     creates `_workload-br` and runs the dnsmasq the guest gets its lease from.
-    tp had it fail five times with nothing in any verb saying so.
+    The dev host had it fail five times with nothing in any verb saying so.
 
     Not part of the setup.sh declaration mechanism: no script installs this,
     it is one fixed unit, and it is shared, so it is checked by name here

@@ -99,7 +99,7 @@ like UID recycling). Two fidelity modes, selected by `--target=vm:<mode>`:
 just test-runtime                 # WLRT_MODE=dev (default)
 WLRT_MODE=gate just test-runtime  # gate
 just test-all-runtime [target]    # CLI surface + runtime rung (dev + gate), on a KVM host
-just test-all-runtime-remote HOST # same, driven from your laptop against a prepared host (e.g. tp)
+just test-all-runtime-remote HOST # same, driven from your laptop against a prepared host (e.g. your dev host)
 ```
 
 Both skip cleanly on a box without `/dev/kvm` + QEMU (and gate additionally

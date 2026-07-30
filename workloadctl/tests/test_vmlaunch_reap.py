@@ -7,7 +7,7 @@ For a long time it appended every candidate to its reaped list regardless of
 whether the removal worked — so a gate run's dir, whose root-owned `bib/` content
 (BIB runs under `sudo podman run --privileged`; only `/output` gets `--chown`)
 defeats an unprivileged rmtree, was reported as reaped and left on disk. Observed
-on tp: two dirs that `just reap-stale-runs` claimed for days without removing.
+on the dev host: two dirs that `just reap-stale-runs` claimed for days without removing.
 
 A sweep that prints success while doing nothing is worse than one that fails,
 because the starvation it exists to prevent then arrives with no warning. These

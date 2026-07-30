@@ -3,7 +3,7 @@
 
 `workload_run_files()` says in its own docstring that it never includes shared
 infra or anything outside the generator's output, and every diagnostic verb is
-built on it. So a `setup.sh` sidecar is invisible: on onepiece,
+built on it. So a `setup.sh` sidecar is invisible: on a deployed host,
 `games-udev-relay.service` restart-looped 2012 times in seven days while
 `systemctl list-units --failed` stayed clean and `doctor` reported the workload
 healthy.
@@ -251,7 +251,7 @@ class HostArtifactCheckTest(unittest.TestCase):
         self.assertIsNone(fix)
 
     def test_restart_looping_unit_fails_even_while_active(self):
-        """The onepiece case. The unit was `active` at every sampling — a unit
+        """The field case. The unit was `active` at every sampling — a unit
         that is restarted on failure never settles into `failed`, which is why
         `list-units --failed` was clean for seven days."""
         passed, message, fix = host_artifact_check(
@@ -411,7 +411,7 @@ class SharedBridgeCheckTest(unittest.TestCase):
         self.assertIsNone(fix)
 
     def test_failed_bridge_fails_and_says_why_it_matters(self):
-        """tp's actual symptom: five failed starts, and no verb mentioned it.
+        """The dev host's actual symptom: five failed starts, and no verb mentioned it.
         The message has to connect the unit to the consequence, or an operator
         looking at a VM with no network won't recognise this line as the cause."""
         passed, message, fix = cmd_diagnose.shared_bridge_check(

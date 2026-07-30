@@ -125,7 +125,7 @@ class GpuSelinuxCheckTest(unittest.TestCase):
         host with it on, a wl_<name>.process workload still gets its access
         from its own module. Naming the boolean here would report a path that
         does not apply, and would read as "allowed" even if the bundle's own
-        grant went missing. Regression from onepiece, 2026-07-29.
+        grant went missing. Regression from a GPU hypervisor host, 2026-07-29.
         """
         for blanket in (True, False, None):
             with self.subTest(blanket=blanket):
