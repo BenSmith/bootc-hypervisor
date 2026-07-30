@@ -76,6 +76,25 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
     else \
         echo "No CI-injected trust anchors; skipping the registry.local mirror"; \
     fi && rm -rf /tmp/ca-trust-inject /tmp/mirrors.conf
+# KNOWN GAP, unfixed: the `update-ca-trust` above does NOT take effect on a host
+# that already exists. It writes the extracted bundle into
+# /etc/pki/ca-trust/extracted/, and `update-ca-trust` run on the host at any
+# point in the past marks that path locally modified — so ostree's /etc 3-way
+# merge keeps the host's copy forever and the image's extraction is discarded.
+# Same mechanism as the SELinux NOTE below (policy store in /etc): a *new*
+# anchor file under source/anchors/ does land, but nothing extracts it.
+#
+# Symptom is silent and looks unrelated: the anchor is plainly present in
+# source/anchors/ while every registry.local pull fails with "unable to get
+# local issuer certificate", because the bundle predates it. Observed on zamd
+# 2026-07-30 — anchor dated that morning, bundle dated 2026-05-21, homelab root
+# absent from the bundle (confirmed by fingerprint). Fixed there by hand with
+# `sudo update-ca-trust`; expect it to recur on the next anchor change.
+#
+# Candidate fixes, neither chosen yet: a boot-time oneshot that runs
+# `update-ca-trust` (idempotent, self-heals on the next reboot), or a doctor
+# check comparing source/anchors/ fingerprints against the extracted bundle
+# (catches it without a reboot but does not fix it).
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and
