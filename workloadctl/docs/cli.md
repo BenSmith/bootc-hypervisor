@@ -793,20 +793,22 @@ Useful for diagnosing a workload that fails to start.
 
 **Subid range checks.** Beyond "subuid/subgid configured", two checks assert the
 range is the *right* one. `subid_derived` compares it against the derived range
-for the workload's UID; `subid_overlap` fails if it starts below `SUB_UID_MAX`
-from `/etc/login.defs`, i.e. inside the window `useradd` allocates from — where
-the next `useradd` could hand a human user subordinate IDs the workload already
-maps, putting each inside the other's user namespace. Neither can self-heal:
-`workload-ensure-user` grandfathers an existing entry on purpose, because
-shifting a UID mapping under a running container corrupts its namespace. Remap
-by hand with the workload stopped, and `chown` only `state/` — `data/` is owned
-by the workload UID itself, not out of the subordinate range.
+for the workload's UID. `subid_overlap` fails if it starts below `SUB_UID_MAX`
+from `/etc/login.defs`, i.e. inside the window `useradd` allocates from; it is
+omitted entirely — not passed — when `/etc/login.defs` cannot be read.
 
-A third check, `subid_window_reserved`, is host-level rather than per-workload:
-`SUB_UID_MAX` is inclusive, and Fedora ships it equal to the workload base, so
-the two windows share exactly one id. Fix by setting `SUB_UID_MAX` and
-`SUB_GID_MAX` to `600099999`; no workload needs remapping. Both window-dependent
-checks are omitted entirely — not passed — when `/etc/login.defs` cannot be read.
+`useradd` reads `/etc/subuid` and skips ranges already listed there, so a range
+inside the window is not an imminent collision. The exposure runs the other way:
+nothing stops *workloadctl* writing over a range a human user already holds, so
+what keeps the two apart is the derivation placing workload ranges above the
+window at all. That makes `subid_derived` the load-bearing check, and the
+residual `subid_overlap` covers is ordering — a workload provisioned after a
+colliding range, or a rollback booting an `/etc/subuid` that never listed it.
+
+Neither can self-heal: `workload-ensure-user` grandfathers an existing entry on
+purpose, because shifting a UID mapping under a running container corrupts its
+namespace. Remap by hand with the workload stopped, and `chown` only `state/` —
+`data/` is owned by the workload UID itself, not out of the subordinate range.
 
 [↑ top](#workloadctl-command-reference)
 

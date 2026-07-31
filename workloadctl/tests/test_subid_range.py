@@ -8,9 +8,18 @@ drifted off that formula, though: `configure_subuid_subgid` grandfathers any
 existing entry — deliberately, since shifting a mapping under a running
 container corrupts its namespace — which makes drift permanent *and* silent.
 Three of six workload users on a lab host sat on pre-derivation ranges for
-months, two of them inside the window Fedora's `useradd` allocates from, one
-`useradd` away from sharing 55,360 subordinate ids between a human user and a
-workload container.
+months, two of them inside the window Fedora's `useradd` allocates from.
+
+**What that drift was and wasn't.** It was originally recorded as one `useradd`
+away from sharing 55,360 subordinate ids with a human user. That is wrong, and
+the correction is the reason these checks are scoped the way they are: measured
+on Fedora 44, `useradd` reads /etc/subuid and *skips* ranges already listed
+there (park one at 589824 and successive useradds take 524288, then 655360), and
+refuses outright rather than straddle one. The exposure runs the other way —
+`append_subid_entries` writes the derived range without consulting anything, so
+what keeps a workload off a human user's ids is the derivation putting it above
+`useradd`'s territory in the first place. Hence `subid_derived` is load-bearing
+and `subid_overlap` corroborates it.
 
 Pinned here:
 - The derivation itself, and that `workload-ensure-user` no longer carries a
@@ -19,7 +28,8 @@ Pinned here:
 - login_defs_subid_window returns None — never a guessed default — for every
   can't-tell case, so "clear of the window" is never claimed on a guess.
 - Both check verdicts, including the boundary case that must NOT fire: the
-  first workload UID's derived range starts exactly at Fedora's SUB_UID_MAX.
+  first workload UID's derived range starts exactly at Fedora's SUB_UID_MAX,
+  which `useradd` cannot take while the entry is listed.
 """
 
 import unittest
@@ -164,93 +174,28 @@ class OverlapCheckTests(unittest.TestCase):
         self.assertTrue(passed)
         self.assertIsNone(fix)
 
-    def test_boundary_is_not_this_checks_verdict(self):
+    def test_boundary_id_does_not_fire(self):
         """UID_MIN's range starts exactly on Fedora's inclusive SUB_UID_MAX.
 
-        That one shared id is real, but no workload is at fault for it — it is
-        the host's window reaching the base. subid_window_reserved_check owns
-        it, so this check must stay quiet or the same id gets reported twice
-        with two different fixes.
+        `useradd` cannot take that id while the entry is listed — measured: with
+        the window filled so the only candidate would straddle a listed range,
+        it fails with "Can't get unique subordinate UID range" rather than
+        overlapping. So there is nothing here to report.
         """
         entries = [(SUBUID, derived_subid_range(UID_MIN))]
         passed, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
         self.assertTrue(passed)
 
-
-class WindowReservedCheckTests(unittest.TestCase):
-    """The boundary the two bounds were meant to have between them.
-
-    SUB_UID_MAX is inclusive — verified against shadow-utils on Fedora 44, not
-    read off a man page: a window sized exactly [min, min+count-1] allocates
-    one range, and one id narrower `useradd` refuses with "Invalid
-    configuration". So the highest id `useradd` can ever issue is SUB_UID_MAX
-    itself, and Fedora ships that equal to SUBID_BASE.
-    """
-
-    def test_stock_fedora_window_fails(self):
-        passed, message, fix = cmd_diagnose.subid_window_reserved_check(
-            FEDORA_WINDOW)
-        self.assertFalse(passed)
-        self.assertIn(str(SUBID_BASE), message)
-        self.assertIn("inclusive", message)
-
-    def test_fix_reserves_the_id_rather_than_moving_the_base(self):
-        """Moving SUBID_BASE would re-derive every range on every host — every
-        existing workload would read as drifted and need a stopped-workload
-        remap, to close a one-id gap. The cheap side to give way is useradd's.
+    def test_message_does_not_claim_the_next_useradd_will_collide(self):
+        """Guards the corrected framing: `useradd` skips listed ranges, so a
+        message promising an imminent collision would be false, and a fix
+        marked urgent would spend an operator's attention on the wrong thing.
         """
-        _, _, fix = cmd_diagnose.subid_window_reserved_check(FEDORA_WINDOW)
-        self.assertIn(str(SUBID_BASE - 1), fix)
-        self.assertIn("SUB_GID_MAX", fix)
-        self.assertIn("no workload needs remapping", fix)
-
-    def test_reserved_window_passes(self):
-        passed, _, fix = cmd_diagnose.subid_window_reserved_check(
-            (524288, SUBID_BASE - 1))
-        self.assertTrue(passed)
-        self.assertIsNone(fix)
-
-    def test_window_above_the_base_fails(self):
-        """A host that widened SUB_UID_MAX past the base is worse, not fine:
-        useradd can then allocate whole ranges on top of workload ranges."""
-        passed, _, _ = cmd_diagnose.subid_window_reserved_check(
-            (524288, SUBID_BASE + 1000000))
-        self.assertFalse(passed)
-
-    def test_reserved_window_still_admits_a_full_useradd_range(self):
-        """Reserving one id must not make the window unusable — useradd
-        validates SUB_UID_MAX - SUB_UID_MIN + 1 >= SUB_UID_COUNT up front and
-        refuses outright if it fails."""
-        sub_uid_min, sub_uid_max = 524288, SUBID_BASE - 1
-        self.assertGreaterEqual(sub_uid_max - sub_uid_min + 1, SUBID_COUNT)
-
-    def test_range_inside_the_window_fails(self):
-        """The measured hazard: 600000 sits inside 524288-600100000, and a
-        real user holding 524288-589823 puts the next useradd at 589824 —
-        55,360 ids shared with the workload."""
-        entries = [(SUBUID, (600000, 65536))]
-        passed, message, fix = cmd_diagnose.subid_overlap_check(
-            entries, FEDORA_WINDOW)
-        self.assertFalse(passed)
-        self.assertIn("600000", message)
-        self.assertIn("user namespace", message)
-        self.assertIsNotNone(fix)
-
-    def test_range_far_below_the_window_still_fails(self):
-        """200000 is below SUB_UID_MIN, so no useradd would pick it *today* —
-        but SUB_UID_MIN is host-editable and the range is still off-formula,
-        so the honest verdict is 'inside the territory useradd governs'."""
-        entries = [(SUBUID, (200000, 65536))]
-        passed, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
-        self.assertFalse(passed)
-
-    def test_reports_every_offending_file(self):
-        entries = [(SUBUID, (200000, 65536)), (SUBGID, (700000, 65536))]
-        passed, message, _ = cmd_diagnose.subid_overlap_check(
-            entries, FEDORA_WINDOW)
-        self.assertFalse(passed)
-        self.assertIn(SUBUID, message)
-        self.assertIn(SUBGID, message)
+        _, message, fix = cmd_diagnose.subid_overlap_check(
+            [(SUBUID, (600000, 65536))], FEDORA_WINDOW)
+        self.assertIn("skips ranges", message)
+        self.assertIn("rollback", message)
+        self.assertIn("Not urgent", fix)
 
 
 if __name__ == "__main__":

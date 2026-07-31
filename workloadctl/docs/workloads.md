@@ -2187,31 +2187,43 @@ Each workload needs a unique subordinate UID/GID range for rootless containers.
 - Workload UID 10002: subuid range 600231072:65536
 
 The `600100000` base puts every range above the window Fedora's own `useradd`
-allocates from (`SUB_UID_MIN=524288` in `/etc/login.defs`). A lower base overlaps
-that window at low UIDs, so a workload and a `useradd`-created user could be
-handed the same subordinate IDs — which would let one workload's containers map
-into another's UID space. The formula is authoritative in
-`workload_lib.derived_subid_range()`; nothing else derives it.
+allocates from (`SUB_UID_MIN=524288`, `SUB_UID_MAX=600100000` in
+`/etc/login.defs`). A lower base overlaps that window at low UIDs, so a workload
+and a `useradd`-created user could be handed the same subordinate IDs — which
+would let one workload's containers map into another's UID space. The formula is
+authoritative in `workload_lib.derived_subid_range()`; nothing else derives it.
+
+**Which side the protection is on.** `useradd` reads `/etc/subuid` and refuses
+to allocate over an entry already listed there — measured on Fedora 44: park a
+range at 589824 and successive `useradd`s take 524288, then *655360*; leave it
+no non-overlapping candidate and it fails with "Can't get unique subordinate UID
+range" rather than sharing. `append_subid_entries` extends no such courtesy in
+the other direction: it writes the derived range without consulting existing
+entries. So the base is what makes collisions impossible, not a runtime check —
+a workload provisioned onto a range a human user already holds would simply
+take it.
 
 `workload-ensure-user` **grandfathers** an existing entry rather than correcting
 it — shifting a UID mapping under a running container corrupts its namespace —
 so a range that predates the formula survives every `enable` and every upgrade,
 silently. Two `diagnose`/`doctor` checks catch that:
 
-- `subid_derived` — the entry does not equal the derived range.
+- `subid_derived` — the entry does not equal the derived range. The
+  load-bearing one, per the paragraph above: off the formula is off the only
+  guarantee.
 - `subid_overlap` — the entry starts below `SUB_UID_MAX`, i.e. inside the
-  window `useradd` allocates from. This is the one that matters: it is the
-  actual hazard, and it depends on host state (`/etc/login.defs` plus whatever
-  ranges have already been issued), so no test in this repo can cover it.
-- `subid_window_reserved` — a host-level check, not a per-workload one.
-  `SUB_UID_MAX` is **inclusive**, so the highest id `useradd` can ever issue is
-  that value itself; Fedora ships `600100000`, which *is* the base. The two are
-  off by one id, shared between a `useradd` range ending there and workload UID
-  10000's range. Fix: `SUB_UID_MAX`/`SUB_GID_MAX` `600099999` in
-  `/etc/login.defs` — reserving the id costs a window that would need ~1.1M
-  users to exhaust, and touches no range already issued, whereas moving the
-  base would re-derive every range on every host. The hypervisor image applies
-  this itself; the check covers hosts it doesn't reach.
+  window `useradd` allocates from. Corroboration rather than an alarm, since
+  `useradd` skips what it can see. What it covers is ordering: a workload
+  provisioned after a colliding range, and the rollback case — `/etc` is
+  per-deployment while `/etc/subuid` entries accrue at runtime, so an older
+  deployment's file may not list a workload enabled later, and a `useradd`
+  there can take its range legitimately. Host-state-dependent, so no test in
+  this repo can cover it; omitted (not passed) if `/etc/login.defs` is
+  unreadable.
+
+Note that UID 10000's derived range starts exactly at `SUB_UID_MAX`, which
+shadow treats as inclusive. Not a gap: `useradd` cannot take that id while the
+entry is listed, per the refusal measured above.
 
 Remapping is manual and must be done with the workload **stopped**: rewrite both
 files, then `chown` only `state/`. Every file in `data/` is owned by the workload

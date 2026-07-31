@@ -598,13 +598,11 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         derived = workload_lib.derived_subid_range(10005)[0]
         self._subuid = f"_wl-app:{derived}:65536\n"
         self._subgid = f"_wl-app:{derived}:65536\n"
-        # Pinned so the window checks assert against a known window instead of
-        # whatever /etc/login.defs the test host happens to ship. SUB_UID_MAX is
-        # the *reserved* value (SUBID_BASE - 1), not Fedora's stock 600100000 —
-        # the stock value leaves useradd's inclusive upper bound sitting on the
-        # first workload range's first id, which subid_window_reserved reports.
-        self._login_defs = (
-            f"SUB_UID_MIN 524288\nSUB_UID_MAX {workload_lib.SUBID_BASE - 1}\n")
+        # Pinned so the overlap check asserts against a known window instead of
+        # whatever /etc/login.defs the test host happens to ship. Fedora's stock
+        # values — the derived ranges clear them, so the healthy fixture is
+        # healthy on the window a real host actually has.
+        self._login_defs = "SUB_UID_MIN 524288\nSUB_UID_MAX 600100000\n"
         self._proc_map = {}  # argv tuple -> Mock(returncode, stdout)
 
     def _exists_patch(self, false_substrings=()):
@@ -1515,33 +1513,10 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
         by_name = {c["check"]: c for c in data["checks"]}
         self.assertTrue(by_name["subid_configured"]["passed"])
         self.assertFalse(by_name["subid_derived"]["passed"])
-        # 600000 is inside 524288-600100000 — the hazard, not just the drift.
+        # 600000 is inside 524288-600100000, so it also leaves the territory
+        # the derivation exists to keep workloads out of.
         self.assertFalse(by_name["subid_overlap"]["passed"])
-        self.assertIn("user namespace", by_name["subid_overlap"]["message"])
-
-    def test_stock_fedora_window_reaches_the_workload_base(self):
-        """Fedora ships SUB_UID_MAX == SUBID_BASE, and the bound is inclusive.
-
-        Reported per-host, not per-workload: the range checks stay green
-        because no workload is at fault for it.
-        """
-        self._login_defs = "SUB_UID_MIN 524288\nSUB_UID_MAX 600100000\n"
-        code, out = self._run(json_mode=True)
-        by_name = {c["check"]: c for c in json.loads(out)["checks"]}
-        self.assertFalse(by_name["subid_window_reserved"]["passed"])
-        self.assertIn("600099999", by_name["subid_window_reserved"]["fix"])
-        self.assertTrue(by_name["subid_derived"]["passed"])
-        self.assertTrue(by_name["subid_overlap"]["passed"])
-
-    def test_window_check_runs_without_any_subid_entry(self):
-        """Host-level: the boundary is shared or not, regardless of who holds
-        what — so it must not wait on this workload having been provisioned."""
-        self._subuid = None
-        self._subgid = None
-        code, out = self._run(json_mode=True)
-        names = {c["check"] for c in json.loads(out)["checks"]}
-        self.assertIn("subid_window_reserved", names)
-        self.assertNotIn("subid_derived", names)
+        self.assertIn("skips ranges", by_name["subid_overlap"]["message"])
 
     def test_overlap_check_omitted_when_login_defs_is_unreadable(self):
         """Omitted, never passed: claiming a range is clear of a window whose
@@ -1551,7 +1526,6 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
         names = {c["check"] for c in json.loads(out)["checks"]}
         self.assertIn("subid_derived", names)
         self.assertNotIn("subid_overlap", names)
-        self.assertNotIn("subid_window_reserved", names)
 
     def test_subid_files_absent(self):
         self._subuid = None  # /etc/subuid raises FileNotFoundError
