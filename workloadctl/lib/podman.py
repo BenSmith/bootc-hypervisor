@@ -8,6 +8,8 @@ pattern is preserved; only parsing/typing changes.
 from __future__ import annotations
 
 import json
+import os
+import pwd
 import re
 import subprocess
 from pathlib import Path
@@ -37,6 +39,14 @@ _NOT_FOUND_PHRASES = (
     "no such network",
     "unable to find",
 )
+
+
+class _Unset:
+    """Sentinel: the drop-privs decision has not been made yet (None is an
+    answer — 'use sudo' — so it can't double as 'not computed')."""
+
+
+_UNSET = _Unset()
 
 
 class PodmanError(Exception):
@@ -69,6 +79,7 @@ class Podman:
         self._uid = uid
         self._home_dir = str(home_dir) if home_dir is not None else None
         self._timeout = timeout
+        self._privs: dict | None | _Unset = _UNSET
 
     @classmethod
     def for_root(cls, timeout: float | None = None) -> "Podman":
@@ -83,33 +94,105 @@ class Podman:
         home_dir: str | Path,
         timeout: float | None = None,
     ) -> "Podman":
-        """Talk to a workload user's rootless podman via sudo -n -u."""
+        """Talk to a workload user's rootless podman as that user.
+
+        How it becomes them depends on who we already are: a root caller
+        setuids in the child (see `_compute_drop_privs`), anyone else goes
+        through `sudo -n -u`. Both land on the same identity and env.
+        """
         return cls(
             username=username, uid=uid, home_dir=home_dir, timeout=timeout
         )
 
     # ---------------- internal -----------------
 
+    def _identity_env(self) -> dict[str, str]:
+        """The env every workload-user invocation needs, sudo or not."""
+        return {
+            "XDG_RUNTIME_DIR": f"/run/user/{self._uid}",
+            "HOME": str(self._home_dir),
+            # Point podman at the workload user's own session bus so it
+            # drives cgroup placement through that user's systemd manager
+            # (user@<uid>.service, which owns the delegated workloads.slice
+            # subtree). Without it, rootless crun writes the container's
+            # cgroup.procs directly; when the caller is in a foreign
+            # session cgroup (e.g. an admin's login), the two cgroups' only
+            # common ancestor is the root cgroup, which the unprivileged
+            # workload user cannot write -> `podman exec` fails with
+            # "write to .../cgroup.procs: Permission denied". The bulk of
+            # calls (ps/inspect/pull) don't migrate cgroups and never hit
+            # this, which is why only exec/shell surfaced it.
+            "DBUS_SESSION_BUS_ADDRESS":
+                f"unix:path=/run/user/{self._uid}/bus",
+        }
+
+    def _drop_privs_kwargs(self) -> dict | None:
+        """Cached `_compute_drop_privs()` — one pwd/group lookup per instance.
+
+        Cached rather than recomputed because `_build_cmd()` also consults it
+        (to decide whether to prefix sudo at all), so a single podman call
+        asks twice, and callers like the exporter make one instance per
+        workload per tick.
+        """
+        if isinstance(self._privs, _Unset):
+            self._privs = self._compute_drop_privs()
+        return self._privs
+
+    def _compute_drop_privs(self) -> dict | None:
+        """subprocess kwargs that become the workload user *without* sudo.
+
+        Returns None when sudo is still the right tool — i.e. whenever we are
+        not already root, since then becoming another user is a privilege
+        *escalation* and only sudo can grant it.
+
+        Why this exists (Q6-X): sudo emits ~6 audit records per invocation
+        (measured: 10 calls -> 60 lines in audit.log; the same loop through
+        this path -> 0). `workload-exporter` runs one call per health-checked
+        workload every 30s as root, which put three workloads at ~21,500
+        audit records apiece at the top of a host's journal and drowned real
+        failures — the reason a journal survey had to abandon ranking by
+        frequency. Nothing about sudo was load-bearing here: the caller is
+        already root, so this is a plain setuid, and PAM/logind do not create
+        the runtime dir for a sudo -u call either (verified: with linger off
+        and /run/user/<uid> absent, both paths fail with the identical
+        `lstat /run/user/<uid>: no such file` that _ensure_runtime_dir
+        already retries on).
+
+        Groups are set explicitly. `user=` alone would leave the child
+        carrying *root's* gid and supplementary groups; getgrouplist()
+        reproduces what sudo's initgroups() would have set, which matters for
+        workload users that hold `video`/`render` for GPU access.
+        """
+        if self._username is None or os.geteuid() != 0:
+            return None
+        try:
+            pw = pwd.getpwnam(self._username)
+            groups = os.getgrouplist(self._username, pw.pw_gid)
+        except (KeyError, OSError):
+            return None  # unknown user: let sudo produce the error
+        return {
+            "user": pw.pw_uid,
+            "group": pw.pw_gid,
+            "extra_groups": groups,
+            "env": {
+                **os.environ,
+                **self._identity_env(),
+                # sudo would have set these from the target passwd entry.
+                "USER": self._username,
+                "LOGNAME": self._username,
+            },
+        }
+
     def _build_cmd(self, *args: str) -> list[str]:
         cmd: list[str] = []
-        if self._username is not None:
+        if self._username is not None and self._drop_privs_kwargs() is None:
+            env = self._identity_env()
             cmd += [
                 "sudo", "-n",
                 "-u", self._username,
-                "-E", f"XDG_RUNTIME_DIR=/run/user/{self._uid}",
-                "-E", f"HOME={self._home_dir}",
-                # Point podman at the workload user's own session bus so it
-                # drives cgroup placement through that user's systemd manager
-                # (user@<uid>.service, which owns the delegated workloads.slice
-                # subtree). Without it, rootless crun writes the container's
-                # cgroup.procs directly; when the caller is in a foreign
-                # session cgroup (e.g. an admin's login), the two cgroups' only
-                # common ancestor is the root cgroup, which the unprivileged
-                # workload user cannot write -> `podman exec` fails with
-                # "write to .../cgroup.procs: Permission denied". The bulk of
-                # calls (ps/inspect/pull) don't migrate cgroups and never hit
-                # this, which is why only exec/shell surfaced it.
-                "-E", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{self._uid}/bus",
+                "-E", f"XDG_RUNTIME_DIR={env['XDG_RUNTIME_DIR']}",
+                "-E", f"HOME={env['HOME']}",
+                "-E", f"DBUS_SESSION_BUS_ADDRESS={env['DBUS_SESSION_BUS_ADDRESS']}",
             ]
         cmd += ["podman", "--log-level=error", *args]
         return cmd
@@ -139,6 +222,25 @@ class Podman:
             return
         ensure_runtime_dir(self._uid, timeout=5.0)
 
+    def _spawn(self, args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:
+        """The single place a podman child process is created.
+
+        Falls back to sudo if the setuid spawn is refused — a caller running
+        as root but without CAP_SETUID/CAP_SETGID (a unit with a narrowed
+        CapabilityBoundingSet) can't become the workload user itself, and
+        subprocess reports that as a PermissionError raised in the parent.
+        The fallback is sticky so it costs one failed spawn per instance.
+        """
+        args = tuple(args)
+        privs = self._drop_privs_kwargs()
+        try:
+            return subprocess.run(self._build_cmd(*args), **kwargs, **(privs or {}))
+        except PermissionError:
+            if privs is None:
+                raise
+            self._privs = None
+            return subprocess.run(self._build_cmd(*args), **kwargs)
+
     def _run(
         self,
         *args: str,
@@ -147,8 +249,8 @@ class Podman:
         check: bool = True,
     ):
         def _exec() -> subprocess.CompletedProcess:
-            return subprocess.run(
-                self._build_cmd(*args),
+            return self._spawn(
+                args,
                 capture_output=True, text=True, cwd="/tmp",
                 timeout=self._timeout,
             )
@@ -301,8 +403,8 @@ class Podman:
 
         This is the deliberate escape hatch for verbs that don't warrant a
         typed structured-read/write method above. It still carries every
-        caller through the same sudo -u / XDG_RUNTIME_DIR / HOME identity as
-        the typed methods (via `_build_cmd`), so it's a thin convenience, not
+        caller through the same user / XDG_RUNTIME_DIR / HOME identity as
+        the typed methods (via `_spawn`), so it's a thin convenience, not
         a raw subprocess call. Boundary note (B13): a couple of call sites
         legitimately bypass even this — `provisioning.transfer_one_image`
         needs a `TMPDIR` override this class doesn't expose (podman load's
@@ -312,8 +414,8 @@ class Podman:
         this class. Both are documented at their call sites rather than
         grown into this API, which isn't worth complicating for two sites.
         """
-        return subprocess.run(
-            self._build_cmd(*args),
+        return self._spawn(
+            args,
             capture_output=capture_output, text=True, check=check,
             input=input, cwd=cwd,
         )

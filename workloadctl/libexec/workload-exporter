@@ -192,8 +192,10 @@ def get_container_healths(name, container_names):
     # than a WorkloadConfig/WorkloadManager (the exporter is a standalone
     # scrape loop with no manager instance) — but this still goes through
     # the typed Podman.for_user() constructor, not a hand-built subprocess
-    # call, so the identity plumbing (sudo -u / XDG_RUNTIME_DIR / HOME) is
-    # the same as every other caller.
+    # call, so the identity plumbing (user / XDG_RUNTIME_DIR / HOME) is the
+    # same as every other caller — including the setuid-instead-of-sudo spawn
+    # that keeps this loop from filling the audit log (see
+    # Podman._compute_drop_privs; this timer is what motivated it).
     try:
         return Podman.for_user(
             username, uid, pw.pw_dir, timeout=5

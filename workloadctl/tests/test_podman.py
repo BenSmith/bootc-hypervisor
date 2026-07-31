@@ -97,16 +97,22 @@ class PodmanWrapperTests(unittest.TestCase):
         self.assertEqual(cmd[0], "podman")
         self.assertNotIn("sudo", cmd)
 
+    # These two pin the sudo path specifically, so they fix the caller's euid
+    # rather than inheriting the test runner's (as root the wrapper setuids
+    # instead — RootDropsPrivsWithoutSudoTests).
+    @patch("podman.os.geteuid", return_value=1000)
     @patch("subprocess.run")
-    def test_for_user_has_sudo_prefix(self, mock_run):
+    def test_for_user_has_sudo_prefix(self, mock_run, _euid):
         mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
         self.p.image_id("ref")
         cmd = mock_run.call_args.args[0]
         self.assertEqual(cmd[0], "sudo")
         self.assertIn("_wl-test", cmd)
 
+    @patch("podman.os.geteuid", return_value=1000)
     @patch("subprocess.run")
-    def test_for_user_passes_session_bus_for_cgroup_placement(self, mock_run):
+    def test_for_user_passes_session_bus_for_cgroup_placement(
+            self, mock_run, _euid):
         # Without DBUS_SESSION_BUS_ADDRESS pointing at the workload user's own
         # bus, rootless crun writes the container cgroup.procs directly and
         # `podman exec` from a foreign session cgroup fails with EPERM. The
@@ -385,6 +391,134 @@ class PodmanUncoveredMethodTests(unittest.TestCase):
         mock_run.return_value = _fail("some transient error", code=2)
         proc = self.p.network_exists("net1")
         self.assertFalse(proc)
+
+
+class _FakePw:
+    def __init__(self, uid=5001, gid=5001, name="_wl-test"):
+        self.pw_uid, self.pw_gid, self.pw_name = uid, gid, name
+        self.pw_dir = "/var/lib/workloads/test"
+
+
+def _as_root(euid=0):
+    """Patch the two lookups `_compute_drop_privs` consults."""
+    return (
+        patch("podman.os.geteuid", return_value=euid),
+        patch("podman.pwd.getpwnam", return_value=_FakePw()),
+        patch("podman.os.getgrouplist", return_value=[5001, 39]),
+    )
+
+
+class RootDropsPrivsWithoutSudoTests(unittest.TestCase):
+    """A root caller becomes the workload user by setuid, not by sudo (Q6-X).
+
+    sudo emits ~6 audit records per invocation and `workload-exporter` makes
+    one call per health-checked workload every 30s, which is what buried real
+    failures under ~21,500 records per workload in a host's journal. The
+    identity the child ends up with must be unchanged — same uid, same env —
+    so these assert the *equivalence*, not just the absence of sudo.
+    """
+
+    def setUp(self):
+        self.p = Podman.for_user("_wl-test", 5001, "/var/lib/workloads/test")
+        self.patches = _as_root()
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    @patch("subprocess.run")
+    def test_no_sudo_in_argv(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        self.p.image_id("ref")
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[0], "podman")
+        self.assertNotIn("sudo", cmd)
+
+    @patch("subprocess.run")
+    def test_child_setuids_to_the_workload_user_with_its_groups(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        self.p.image_id("ref")
+        kw = mock_run.call_args.kwargs
+        self.assertEqual(kw["user"], 5001)
+        # group/extra_groups must be set explicitly: `user=` alone leaves the
+        # child holding root's gid and supplementary groups.
+        self.assertEqual(kw["group"], 5001)
+        self.assertEqual(kw["extra_groups"], [5001, 39])
+
+    @patch("subprocess.run")
+    def test_env_matches_what_sudo_would_have_set(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        self.p.image_id("ref")
+        env = mock_run.call_args.kwargs["env"]
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/5001")
+        self.assertEqual(env["HOME"], "/var/lib/workloads/test")
+        self.assertEqual(
+            env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/5001/bus")
+        self.assertEqual(env["USER"], "_wl-test")
+        self.assertEqual(env["LOGNAME"], "_wl-test")
+
+    @patch("subprocess.run")
+    def test_identity_env_is_the_same_on_both_paths(self, mock_run):
+        """The sudo `-E VAR=value` args and the setuid env carry one source."""
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        self.p.image_id("ref")
+        env = mock_run.call_args.kwargs["env"]
+
+        with patch("podman.os.geteuid", return_value=1000):
+            sudo = Podman.for_user(
+                "_wl-test", 5001, "/var/lib/workloads/test")._build_cmd("info")
+        for key in ("XDG_RUNTIME_DIR", "HOME", "DBUS_SESSION_BUS_ADDRESS"):
+            self.assertIn(f"{key}={env[key]}", sudo)
+
+    @patch("subprocess.run")
+    def test_root_podman_never_setuids(self, mock_run):
+        """for_root() has no user to become — no user= kwarg at all."""
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        Podman.for_root().image_id("ref")
+        self.assertNotIn("user", mock_run.call_args.kwargs)
+
+    @patch("subprocess.run")
+    def test_unknown_user_falls_back_to_sudo(self, mock_run):
+        """No passwd entry: let sudo produce the error, don't invent a uid."""
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        with patch("podman.pwd.getpwnam", side_effect=KeyError("_wl-test")):
+            Podman.for_user(
+                "_wl-test", 5001, "/var/lib/workloads/test").image_id("ref")
+        self.assertEqual(mock_run.call_args.args[0][0], "sudo")
+        self.assertNotIn("user", mock_run.call_args.kwargs)
+
+    @patch("subprocess.run")
+    def test_setuid_refused_falls_back_to_sudo_and_sticks(self, mock_run):
+        """Root without CAP_SETUID (a narrowed CapabilityBoundingSet) still works.
+
+        subprocess reports the child's failed setuid as a PermissionError in
+        the parent; one failed spawn per instance, then sudo from then on.
+        """
+        ok = _ok(stdout=json.dumps([{"Id": "x"}]))
+        mock_run.side_effect = [PermissionError(1, "Operation not permitted"),
+                                ok, ok]
+        p = Podman.for_user("_wl-test", 5001, "/var/lib/workloads/test")
+        self.assertEqual(p.image_id("ref"), "x")
+        self.assertEqual(mock_run.call_args.args[0][0], "sudo")
+
+        p.image_id("ref")  # second call must not re-attempt the setuid spawn
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(mock_run.call_args.args[0][0], "sudo")
+
+
+class NonRootStillUsesSudoTests(unittest.TestCase):
+    """Becoming another user from an unprivileged caller is an escalation —
+    only sudo can grant it, so the audit records there are the point."""
+
+    @patch("subprocess.run")
+    def test_unprivileged_caller_keeps_sudo(self, mock_run):
+        mock_run.return_value = _ok(stdout=json.dumps([{"Id": "x"}]))
+        with patch("podman.os.geteuid", return_value=1000):
+            Podman.for_user(
+                "_wl-test", 5001, "/var/lib/workloads/test").image_id("ref")
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[0], "sudo")
+        self.assertIn("_wl-test", cmd)
+        self.assertNotIn("user", mock_run.call_args.kwargs)
 
 
 if __name__ == "__main__":
