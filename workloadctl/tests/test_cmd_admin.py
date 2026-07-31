@@ -591,9 +591,16 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         self.manager.podman.return_value = self.pod
         self.manager.get_image_id.return_value = "deadbeef1234"
 
-        # Default: subuid/subgid present, everything "yes"/active.
-        self._subuid = "_wl-app:100000:65536\n"
-        self._subgid = "_wl-app:100000:65536\n"
+        # Default: subuid/subgid present, everything "yes"/active. The range is
+        # the *derived* one for UID 10005 (600100000 + 5 * 65536) — the healthy
+        # fixture has to satisfy subid_derived/subid_overlap, which is the whole
+        # point of those checks.
+        derived = workload_lib.derived_subid_range(10005)[0]
+        self._subuid = f"_wl-app:{derived}:65536\n"
+        self._subgid = f"_wl-app:{derived}:65536\n"
+        # Pinned so the overlap check asserts against a known window instead of
+        # whatever /etc/login.defs the test host happens to ship.
+        self._login_defs = "SUB_UID_MIN 524288\nSUB_UID_MAX 600100000\n"
         self._proc_map = {}  # argv tuple -> Mock(returncode, stdout)
 
     def _exists_patch(self, false_substrings=()):
@@ -642,6 +649,7 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         opener = _open_router({
             "/etc/subuid": self._subuid,
             "/etc/subgid": self._subgid,
+            "/etc/login.defs": self._login_defs,
         })
 
         def _run_side_effect(argv, **kw):
@@ -823,7 +831,8 @@ class DiagnoseUserExistsTest(unittest.TestCase):
         data = json.loads(out)
         check = next(c for c in data["checks"] if c["check"] == "uid_mapping")
         self.assertTrue(check["passed"])
-        self.assertIn("host UIDs 100000-165535", check["message"])
+        start = workload_lib.derived_subid_range(10005)[0]
+        self.assertIn(f"host UIDs {start}-{start + 65535}", check["message"])
 
     def test_uid_mapping_host_mode_no_subuid_entry(self):
         (self.tmp / "app" / "workload.toml").write_text(
@@ -1489,6 +1498,31 @@ class DiagnoseEdgeBranchesTest(DiagnoseUserExistsTest):
     """Extra single-container diagnose branches: subid file absent, SELinux
     module loaded, home dir missing, pull=never malformed bundle, uid-mapping
     parse error."""
+
+    def test_subid_range_drifted_off_the_derivation(self):
+        """The whole battery, not just the pure function: a pre-derivation
+        range reads as *configured* (Check 2 passes) and only the two range
+        checks catch it. That gap is why three workload users on a lab host
+        carried one for months."""
+        self._subuid = "_wl-app:600000:65536\n"
+        self._subgid = "_wl-app:600000:65536\n"
+        code, out = self._run(json_mode=True)
+        data = json.loads(out)
+        by_name = {c["check"]: c for c in data["checks"]}
+        self.assertTrue(by_name["subid_configured"]["passed"])
+        self.assertFalse(by_name["subid_derived"]["passed"])
+        # 600000 is inside 524288-600100000 — the hazard, not just the drift.
+        self.assertFalse(by_name["subid_overlap"]["passed"])
+        self.assertIn("user namespace", by_name["subid_overlap"]["message"])
+
+    def test_overlap_check_omitted_when_login_defs_is_unreadable(self):
+        """Omitted, never passed: claiming a range is clear of a window whose
+        bounds we could not read would be an assertion about a guess."""
+        self._login_defs = None  # open() raises FileNotFoundError
+        code, out = self._run(json_mode=True)
+        names = {c["check"] for c in json.loads(out)["checks"]}
+        self.assertIn("subid_derived", names)
+        self.assertNotIn("subid_overlap", names)
 
     def test_subid_files_absent(self):
         self._subuid = None  # /etc/subuid raises FileNotFoundError

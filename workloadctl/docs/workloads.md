@@ -2191,7 +2191,23 @@ allocates from (`SUB_UID_MIN=524288` in `/etc/login.defs`). A lower base overlap
 that window at low UIDs, so a workload and a `useradd`-created user could be
 handed the same subordinate IDs — which would let one workload's containers map
 into another's UID space. The formula is authoritative in
-`libexec/workload-ensure-user`; nothing else derives it.
+`workload_lib.derived_subid_range()`; nothing else derives it.
+
+`workload-ensure-user` **grandfathers** an existing entry rather than correcting
+it — shifting a UID mapping under a running container corrupts its namespace —
+so a range that predates the formula survives every `enable` and every upgrade,
+silently. Two `diagnose`/`doctor` checks catch that:
+
+- `subid_derived` — the entry does not equal the derived range.
+- `subid_overlap` — the entry starts below `SUB_UID_MAX`, i.e. inside the
+  window `useradd` allocates from. This is the one that matters: it is the
+  actual hazard, and it depends on host state (`/etc/login.defs` plus whatever
+  ranges have already been issued), so no test in this repo can cover it.
+
+Remapping is manual and must be done with the workload **stopped**: rewrite both
+files, then `chown` only `state/`. Every file in `data/` is owned by the workload
+UID itself rather than out of the subordinate range, so scoping the remap to the
+reconstructible graphroot leaves durable data untouched by construction.
 
 **Impact:**
 - UIDs are capped at 52948, supporting up to **42,949 workloads** per host. That

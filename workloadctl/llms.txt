@@ -61,8 +61,12 @@ only after a reboot, and that boot regenerates.
 - Subuid formula: `600100000 + (uid_offset * 65536)`, count=65536, where
   `uid_offset = uid - UID_MIN`. The base clears Fedora `useradd`'s own subid
   window (`SUB_UID_MIN=524288`), which a lower base overlaps at low UIDs.
-  Authoritative in `libexec/workload-ensure-user`; the ranges are written by
-  `workload_lib.append_subid_entries()`
+  Authoritative in `workload_lib.derived_subid_range()`; the ranges are written
+  by `workload_lib.append_subid_entries()`. `workload-ensure-user` grandfathers
+  an existing entry rather than correcting it (shifting a mapping under a
+  running container corrupts its namespace), so drift off the formula is
+  permanent and silent — `diagnose`/`doctor`'s `subid_derived` and
+  `subid_overlap` checks are the only thing that reports it
 - Home directory: `/var/lib/workloads/{name}`
 - Shell: `/usr/sbin/nologin`
 

@@ -791,6 +791,18 @@ workloadctl diagnose [--json] <workload>
 
 Useful for diagnosing a workload that fails to start.
 
+**Subid range checks.** Beyond "subuid/subgid configured", two checks assert the
+range is the *right* one. `subid_derived` compares it against the derived range
+for the workload's UID; `subid_overlap` fails if it starts below `SUB_UID_MAX`
+from `/etc/login.defs`, i.e. inside the window `useradd` allocates from — where
+the next `useradd` could hand a human user subordinate IDs the workload already
+maps, putting each inside the other's user namespace. Neither can self-heal:
+`workload-ensure-user` grandfathers an existing entry on purpose, because
+shifting a UID mapping under a running container corrupts its namespace. Remap
+by hand with the workload stopped, and `chown` only `state/` — `data/` is owned
+by the workload UID itself, not out of the subordinate range. `subid_overlap` is
+omitted entirely (not passed) when `/etc/login.defs` cannot be read.
+
 [↑ top](#workloadctl-command-reference)
 
 ### `cleanup`

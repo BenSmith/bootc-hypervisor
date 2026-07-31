@@ -26,7 +26,7 @@ from pathlib import Path
 import deployment
 import service_runtime
 from workload_lib import (
-    UID_MIN, UID_MAX,
+    UID_MIN, UID_MAX, derived_subid_range,
     WORKLOAD_CONFIG_DIR, WORKLOADS_BASE, workload_config_path, workload_username, expand_volume_path,
     infer_workload_kind,
     virtiofs_tags, parse_volume_spec, normalize_containers,
@@ -100,23 +100,11 @@ def configure_subuid_subgid(pw, config):
     uid = pw.pw_uid
     username = pw.pw_name
 
-    if uid < UID_MIN:
-        raise ValueError(f"UID {uid} is below minimum workload UID {UID_MIN}")
-    uid_offset = uid - UID_MIN
-    # The base places every range above the window Fedora's own useradd allocates
-    # subids from (SUB_UID_MIN=524288 in /etc/login.defs). A lower base overlaps it
-    # at low UIDs, which would let a useradd-created user share subordinate IDs
-    # with a workload. Documented in docs/workloads.md; this is the only source.
-    subid_start = 600100000 + (uid_offset * 65536)
-    count = 65536
-
-    # Verify ranges fit within uint32 (max 4,294,967,295)
-    if subid_start + count - 1 > 4294967295:
-        raise ValueError(
-            f"Subuid range for UID {uid} would overflow uint32 "
-            f"({subid_start}+{count}-1 > 4294967295). "
-            f"UID must be in range {UID_MIN}-{UID_MAX}."
-        )
+    # Derivation (and its UID-range / uint32 guards) lives in workload_lib so
+    # this writer and diagnose's subid checks assert against one formula — a
+    # range that drifts off it is invisible otherwise, since the grandfather
+    # below deliberately never corrects an existing entry.
+    subid_start, count = derived_subid_range(uid)
 
     main_entry = f"{username}:{subid_start}:{count}"
     # subuid only needs the main range; group GIDs belong in subgid, not subuid

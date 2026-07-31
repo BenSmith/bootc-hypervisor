@@ -99,6 +99,15 @@ HOST_USERNS_OPT_IN = "unsafe_host_userns"
 UID_MIN = 10000
 UID_MAX = 52948
 
+# Subordinate-id range derivation. The base places every workload range above
+# the window Fedora's own `useradd` allocates subids from (SUB_UID_MAX=600100000
+# in /etc/login.defs). A lower base overlaps that window at low UIDs, which
+# would let a useradd-created *human* user share subordinate ids with a workload
+# container — each inside the other's user namespace. Documented in
+# docs/workloads.md.
+SUBID_BASE = 600100000
+SUBID_COUNT = 65536
+
 # Maximum workload name length (32-char Linux username limit - 4-char prefix - 1)
 MAX_NAME_LENGTH = 27
 
@@ -308,6 +317,60 @@ def subid_lock():
 # `username:start:count` format.
 SUBUID_FILE = Path("/etc/subuid")
 SUBGID_FILE = Path("/etc/subgid")
+
+
+def derived_subid_range(uid: int) -> tuple[int, int]:
+    """The (start, count) subordinate range a workload UID must map to.
+
+    The single implementation of the derivation: `workload-ensure-user` writes
+    it, `doctor`/`diagnose` assert against it. Deriving rather than recording it
+    is deliberate (see claim_uid) — recovering a UID recovers the range, so a
+    second copy in a file could only ever go stale.
+
+    Raises ValueError for a UID outside the workload range, or one whose range
+    would not fit in uint32.
+    """
+    if uid < UID_MIN:
+        raise ValueError(f"UID {uid} is below minimum workload UID {UID_MIN}")
+    start = SUBID_BASE + (uid - UID_MIN) * SUBID_COUNT
+    if start + SUBID_COUNT - 1 > 4294967295:
+        raise ValueError(
+            f"Subuid range for UID {uid} would overflow uint32 "
+            f"({start}+{SUBID_COUNT}-1 > 4294967295). "
+            f"UID must be in range {UID_MIN}-{UID_MAX}."
+        )
+    return start, SUBID_COUNT
+
+
+def login_defs_subid_window(
+    path: Path | str = "/etc/login.defs",
+) -> tuple[int, int] | None:
+    """(SUB_UID_MIN, SUB_UID_MAX) from login.defs — where `useradd` allocates.
+
+    Returns None if the file is unreadable or either key is absent, so a caller
+    can tell "no overlap" apart from "could not check". No default is invented:
+    the whole point of reading it is that the host's value is what a future
+    `useradd` will honour, and a guess would assert against a window that may
+    not be the one in force.
+    """
+    values: dict[str, int] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[0] in ("SUB_UID_MIN", "SUB_UID_MAX"):
+                    try:
+                        values[parts[0]] = int(parts[1])
+                    except ValueError:
+                        return None
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    if "SUB_UID_MIN" not in values or "SUB_UID_MAX" not in values:
+        return None
+    return values["SUB_UID_MIN"], values["SUB_UID_MAX"]
 
 
 def subuid_file() -> Path:

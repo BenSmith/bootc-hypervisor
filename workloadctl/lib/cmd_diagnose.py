@@ -14,8 +14,10 @@ import subprocess
 import sys
 
 from workload_lib import (
+    derived_subid_range,
     expand_volume_path,
     HOST_USERNS_OPT_IN,
+    login_defs_subid_window,
     read_subid_entry,
     selinux_module_name,
     selinux_type_name,
@@ -340,6 +342,86 @@ def shared_bridge_check(state, name: str) -> tuple[bool, str, str | None]:
             f"sudo systemctl status {unit}; journalctl -u {unit} -n 50")
 
 
+def subid_derived_check(
+    entries: list[tuple[str, tuple[int, int] | None]],
+    expected: tuple[int, int],
+    uid: int,
+) -> tuple[bool, str, str | None]:
+    """Verdict: does each subid file's main range equal the derived one?
+
+    `entries` is [(file, (start, count) | None), …]; a None (no entry at all) is
+    Check 2's business, not this one.
+
+    Why this can't self-heal: `configure_subuid_subgid` grandfathers any
+    existing entry — deliberately, because shifting a UID mapping under a
+    running container corrupts its namespace. Correct behaviour, but it makes
+    drift permanent *and* invisible: every later enable leaves the old range
+    alone and reports success. Nothing else in the tree compares the two, which
+    is why three of six workload users on a lab host sat on pre-derivation
+    ranges for months.
+
+    This is the milder of the pair on its own — a range that is merely
+    off-formula still works. It matters because of what it predicts: the
+    overlap check below, and (per claim_uid) a re-created workload adopting the
+    old UID and grandfathering the wrong range straight back in.
+    """
+    off = [(f, e) for f, e in entries if e is not None and e != expected]
+    if not off:
+        return (True,
+                f"Subid ranges match the derived range "
+                f"({expected[0]}:{expected[1]})", None)
+    detail = ", ".join(f"{f} has {s}:{c}" for f, (s, c) in off)
+    return (False,
+            f"Subid range is not the derived range for UID {uid}: expected "
+            f"{expected[0]}:{expected[1]}, {detail}",
+            "Remapping is manual and must be done with the workload stopped: "
+            "rewrite the entry in /etc/subuid and /etc/subgid, then chown "
+            "state/ from the old range to the new one. Scope the chown to "
+            "state/ — every file in data/ is owned by the workload UID itself, "
+            "so only the reconstructible graphroot needs remapping")
+
+
+def subid_overlap_check(
+    entries: list[tuple[str, tuple[int, int] | None]],
+    window: tuple[int, int],
+) -> tuple[bool, str, str | None]:
+    """Verdict: does any main range sit inside `useradd`'s allocation window?
+
+    This is the one that matters, and it is host-state-dependent — no test in
+    this repo can cover it, because the hazard is the interaction between
+    /etc/subuid and a login.defs the host owns.
+
+    The failure it prevents: a range below SUB_UID_MAX shares subordinate ids
+    with whatever the *next* `useradd` hands a human user, putting a real user
+    and a workload container inside one another's namespace. Measured once at
+    55,360 shared ids between a lab user and a workload, one `useradd` away
+    from being live.
+
+    The assertion is `start >= SUB_UID_MAX` rather than a strict interval
+    intersection: SUB_UID_MAX is inclusive in shadow-utils, so a derived range
+    starting exactly at it (UID_MIN's, since SUBID_BASE == Fedora's
+    SUB_UID_MAX) technically overlaps by a single id that `useradd` would only
+    reach after allocating ~1.1M ranges. Flagging every first workload on every
+    host for that would be noise; "at or above the window" is both the property
+    SUBID_BASE was chosen for and the one worth alerting on.
+    """
+    sub_uid_min, sub_uid_max = window
+    inside = [(f, e) for f, e in entries if e is not None and e[0] < sub_uid_max]
+    if not inside:
+        return (True,
+                f"Subid ranges are clear of useradd's window "
+                f"({sub_uid_min}-{sub_uid_max})", None)
+    detail = ", ".join(f"{f} at {s}:{c}" for f, (s, c) in inside)
+    return (False,
+            f"Subid range overlaps the window useradd allocates from "
+            f"({sub_uid_min}-{sub_uid_max}): {detail} — the next `useradd` can "
+            f"hand a human user subordinate ids this workload already maps, "
+            f"putting each inside the other's user namespace",
+            "Remap this workload off the shared window before creating any new "
+            "user; `getent passwd` + /etc/subuid will show whether a range has "
+            "already been issued that overlaps it")
+
+
 def collect_diagnose_checks(config, manager: WorkloadManager):
     """Run the diagnose check battery and return (checks, passed).
 
@@ -375,6 +457,29 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         else:
             _check("subid_configured", False, "Subuid/subgid not configured",
                    fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
+
+        # Checks 2b/2c: is the configured range the *right* range? Presence
+        # (above) is not enough — the grandfather in configure_subuid_subgid
+        # never corrects an existing entry, so a range predating the derivation
+        # survives every enable and every upgrade, silently.
+        entries = [
+            (str(path), read_subid_entry(config.username, path))
+            for path in (subuid_file(), subgid_file())
+        ]
+        if any(e is not None for _, e in entries):
+            try:
+                expected = derived_subid_range(config.uid)
+            except ValueError:
+                expected = None  # UID out of range: user_exists/enable's problem
+            if expected:
+                _check("subid_derived",
+                       *subid_derived_check(entries, expected, config.uid))
+            window = login_defs_subid_window()
+            # No window means login.defs was unreadable or silent on the keys —
+            # omit rather than pass, so "clear of the window" is never claimed
+            # on the strength of a guess about where the window is.
+            if window:
+                _check("subid_overlap", *subid_overlap_check(entries, window))
 
     # Check 3: Linger enabled
     if user_exists:
