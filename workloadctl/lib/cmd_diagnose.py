@@ -23,7 +23,9 @@ from workload_lib import (
     selinux_type_name,
     subgid_file,
     subid_files_with_entries,
+    SUBID_BASE,
     subuid_file,
+    UID_MIN,
     units_outdated,
     units_from_other_build,
     workload_root_dir,
@@ -397,13 +399,12 @@ def subid_overlap_check(
     55,360 shared ids between a lab user and a workload, one `useradd` away
     from being live.
 
-    The assertion is `start >= SUB_UID_MAX` rather than a strict interval
-    intersection: SUB_UID_MAX is inclusive in shadow-utils, so a derived range
-    starting exactly at it (UID_MIN's, since SUBID_BASE == Fedora's
-    SUB_UID_MAX) technically overlaps by a single id that `useradd` would only
-    reach after allocating ~1.1M ranges. Flagging every first workload on every
-    host for that would be noise; "at or above the window" is both the property
-    SUBID_BASE was chosen for and the one worth alerting on.
+    Scope: ranges starting *strictly below* SUB_UID_MAX, which can only ever be
+    a per-workload fault. The boundary id — SUB_UID_MAX itself, which on a
+    stock Fedora host is also SUBID_BASE — is a host-configuration fault no
+    workload can be blamed for, and belongs to subid_window_reserved_check().
+    Splitting them keeps each verdict attributable to one cause with one fix,
+    instead of one check that fires for two unrelated reasons.
     """
     sub_uid_min, sub_uid_max = window
     inside = [(f, e) for f, e in entries if e is not None and e[0] < sub_uid_max]
@@ -420,6 +421,47 @@ def subid_overlap_check(
             "Remap this workload off the shared window before creating any new "
             "user; `getent passwd` + /etc/subuid will show whether a range has "
             "already been issued that overlaps it")
+
+
+def subid_window_reserved_check(
+    window: tuple[int, int],
+) -> tuple[bool, str, str | None]:
+    """Verdict: does `useradd`'s window stop below the workload base?
+
+    SUB_UID_MAX is **inclusive** — verified against shadow-utils on Fedora 44
+    rather than read off the man page: a window sized exactly
+    [min, min+count-1] allocates one range, and one id narrower `useradd`
+    refuses outright with "Invalid configuration". So the highest subordinate
+    id `useradd` can ever hand out is SUB_UID_MAX itself.
+
+    Fedora ships SUB_UID_MAX=600100000, and SUBID_BASE *is* 600100000. The two
+    were meant to be disjoint and are off by exactly one id: a `useradd` range
+    ending at 600100000 shares that id with workload UID_MIN's range. It takes
+    ~1.1M prior allocations to reach, so this has never bitten anyone — but
+    "never observed" and "cannot happen" are different claims, and only the
+    second is worth asserting.
+
+    The fix reserves the id from the `useradd` side rather than moving
+    SUBID_BASE. Moving the base would re-derive every range on every host, so
+    every existing workload would read as drifted and need a stopped-workload
+    remap — a fleet migration to close a one-id gap. Lowering SUB_UID_MAX by
+    one costs a window that would need ~1.1M users to exhaust.
+    """
+    _, sub_uid_max = window
+    if sub_uid_max < SUBID_BASE:
+        return (True,
+                f"useradd's subid window stops below the workload base "
+                f"({sub_uid_max} < {SUBID_BASE})", None)
+    return (False,
+            f"useradd's subid window reaches the workload base: SUB_UID_MAX is "
+            f"{sub_uid_max} and workload ranges start at {SUBID_BASE}. "
+            f"SUB_UID_MAX is inclusive, so a useradd-allocated range ending at "
+            f"{sub_uid_max} would share that id with workload UID "
+            f"{UID_MIN}'s range",
+            f"Set SUB_UID_MAX and SUB_GID_MAX to {SUBID_BASE - 1} in "
+            f"/etc/login.defs. This only reserves the boundary id — reaching "
+            f"it needs ~1.1M subid allocations — and it does not touch any "
+            f"range already issued, so no workload needs remapping")
 
 
 def collect_diagnose_checks(config, manager: WorkloadManager):
@@ -466,6 +508,15 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             (str(path), read_subid_entry(config.username, path))
             for path in (subuid_file(), subgid_file())
         ]
+        # No window means login.defs was unreadable or silent on the keys — omit
+        # the window-dependent checks rather than pass them, so "clear of the
+        # window" is never claimed on a guess about where the window is.
+        window = login_defs_subid_window()
+        if window:
+            # Host-level, so it does not wait on this workload having entries:
+            # the boundary id is shared or it isn't, independently of who has
+            # been allocated what.
+            _check("subid_window_reserved", *subid_window_reserved_check(window))
         if any(e is not None for _, e in entries):
             try:
                 expected = derived_subid_range(config.uid)
@@ -474,10 +525,6 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             if expected:
                 _check("subid_derived",
                        *subid_derived_check(entries, expected, config.uid))
-            window = login_defs_subid_window()
-            # No window means login.defs was unreadable or silent on the keys —
-            # omit rather than pass, so "clear of the window" is never claimed
-            # on the strength of a guess about where the window is.
             if window:
                 _check("subid_overlap", *subid_overlap_check(entries, window))
 

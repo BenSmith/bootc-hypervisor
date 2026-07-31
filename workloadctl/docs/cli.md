@@ -800,8 +800,13 @@ maps, putting each inside the other's user namespace. Neither can self-heal:
 `workload-ensure-user` grandfathers an existing entry on purpose, because
 shifting a UID mapping under a running container corrupts its namespace. Remap
 by hand with the workload stopped, and `chown` only `state/` — `data/` is owned
-by the workload UID itself, not out of the subordinate range. `subid_overlap` is
-omitted entirely (not passed) when `/etc/login.defs` cannot be read.
+by the workload UID itself, not out of the subordinate range.
+
+A third check, `subid_window_reserved`, is host-level rather than per-workload:
+`SUB_UID_MAX` is inclusive, and Fedora ships it equal to the workload base, so
+the two windows share exactly one id. Fix by setting `SUB_UID_MAX` and
+`SUB_GID_MAX` to `600099999`; no workload needs remapping. Both window-dependent
+checks are omitted entirely — not passed — when `/etc/login.defs` cannot be read.
 
 [↑ top](#workloadctl-command-reference)
 

@@ -164,14 +164,65 @@ class OverlapCheckTests(unittest.TestCase):
         self.assertTrue(passed)
         self.assertIsNone(fix)
 
-    def test_first_workload_uid_at_the_boundary_does_not_fire(self):
-        """SUBID_BASE == Fedora's SUB_UID_MAX, so UID_MIN's range starts
-        exactly at the window's inclusive upper bound. `useradd` would have to
-        allocate ~1.1M ranges to reach that single id; flagging every host's
-        first workload for it would be noise, not a finding."""
+    def test_boundary_is_not_this_checks_verdict(self):
+        """UID_MIN's range starts exactly on Fedora's inclusive SUB_UID_MAX.
+
+        That one shared id is real, but no workload is at fault for it — it is
+        the host's window reaching the base. subid_window_reserved_check owns
+        it, so this check must stay quiet or the same id gets reported twice
+        with two different fixes.
+        """
         entries = [(SUBUID, derived_subid_range(UID_MIN))]
         passed, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
         self.assertTrue(passed)
+
+
+class WindowReservedCheckTests(unittest.TestCase):
+    """The boundary the two bounds were meant to have between them.
+
+    SUB_UID_MAX is inclusive — verified against shadow-utils on Fedora 44, not
+    read off a man page: a window sized exactly [min, min+count-1] allocates
+    one range, and one id narrower `useradd` refuses with "Invalid
+    configuration". So the highest id `useradd` can ever issue is SUB_UID_MAX
+    itself, and Fedora ships that equal to SUBID_BASE.
+    """
+
+    def test_stock_fedora_window_fails(self):
+        passed, message, fix = cmd_diagnose.subid_window_reserved_check(
+            FEDORA_WINDOW)
+        self.assertFalse(passed)
+        self.assertIn(str(SUBID_BASE), message)
+        self.assertIn("inclusive", message)
+
+    def test_fix_reserves_the_id_rather_than_moving_the_base(self):
+        """Moving SUBID_BASE would re-derive every range on every host — every
+        existing workload would read as drifted and need a stopped-workload
+        remap, to close a one-id gap. The cheap side to give way is useradd's.
+        """
+        _, _, fix = cmd_diagnose.subid_window_reserved_check(FEDORA_WINDOW)
+        self.assertIn(str(SUBID_BASE - 1), fix)
+        self.assertIn("SUB_GID_MAX", fix)
+        self.assertIn("no workload needs remapping", fix)
+
+    def test_reserved_window_passes(self):
+        passed, _, fix = cmd_diagnose.subid_window_reserved_check(
+            (524288, SUBID_BASE - 1))
+        self.assertTrue(passed)
+        self.assertIsNone(fix)
+
+    def test_window_above_the_base_fails(self):
+        """A host that widened SUB_UID_MAX past the base is worse, not fine:
+        useradd can then allocate whole ranges on top of workload ranges."""
+        passed, _, _ = cmd_diagnose.subid_window_reserved_check(
+            (524288, SUBID_BASE + 1000000))
+        self.assertFalse(passed)
+
+    def test_reserved_window_still_admits_a_full_useradd_range(self):
+        """Reserving one id must not make the window unusable — useradd
+        validates SUB_UID_MAX - SUB_UID_MIN + 1 >= SUB_UID_COUNT up front and
+        refuses outright if it fails."""
+        sub_uid_min, sub_uid_max = 524288, SUBID_BASE - 1
+        self.assertGreaterEqual(sub_uid_max - sub_uid_min + 1, SUBID_COUNT)
 
     def test_range_inside_the_window_fails(self):
         """The measured hazard: 600000 sits inside 524288-600100000, and a

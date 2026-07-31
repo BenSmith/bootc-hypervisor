@@ -296,6 +296,38 @@ RUN printf 'g seat - -\n' >> /usr/lib/sysusers.d/hypervisor-groups.conf && \
     mkdir -p /etc/systemd/resolved.conf.d && \
     printf '[Resolve]\nMulticastDNS=resolve\n' > /etc/systemd/resolved.conf.d/10-mdns.conf
 
+# Reserve the boundary subordinate id between useradd's window and workloadctl's.
+#
+# workloadctl derives every workload's subordinate range from its UID, based at
+# 600100000 — chosen to sit above the window Fedora's own `useradd` allocates
+# from, so a human user and a workload container can never land inside one
+# another's user namespace. Fedora ships SUB_UID_MAX=600100000, and that bound
+# is INCLUSIVE (verified on F44: a window sized exactly [min, min+count-1]
+# allocates one range; one id narrower, useradd refuses with "Invalid
+# configuration"). So the two are off by exactly one id: a useradd range ending
+# at 600100000 shares it with workload UID 10000's range.
+#
+# Reaching it takes ~1.1M prior allocations, so this has never bitten anyone —
+# it is fixed here because the alternative fix is worse. Moving workloadctl's
+# base would re-derive every range on every host, and `workload-ensure-user`
+# grandfathers existing entries by design (shifting a mapping under a running
+# container corrupts its namespace), so every workload would need a manual
+# stopped-workload remap. Giving up one id at the top of a window that would
+# need ~1.1M users to exhaust costs nothing and touches no range already issued.
+#
+# `workloadctl diagnose`'s subid_window_reserved check reports the same thing on
+# hosts this image does not reach (it is also the reason the check exists: the
+# image cannot be the only place this is true, since workloadctl is standalone).
+#
+# The sed matches Fedora's shipped value exactly and the greps assert the result,
+# so if a future Fedora changes the default the build FAILS rather than silently
+# leaving the reservation unapplied — which is the whole failure mode a one-line
+# sed invites. Verified against quay.io/fedora/fedora:44, including that useradd
+# still allocates normally afterwards (524288, then 589824).
+RUN sed -i -E 's/^(SUB_[UG]ID_MAX\s+)600100000$/\1600099999/' /etc/login.defs && \
+    grep -qE '^SUB_UID_MAX\s+600099999$' /etc/login.defs && \
+    grep -qE '^SUB_GID_MAX\s+600099999$' /etc/login.defs
+
 # force lvm into initramfs so it will activate the lv during boot
 RUN printf 'add_dracutmodules+=" lvm dm "\n' \
       > /usr/lib/dracut/dracut.conf.d/50-lvm.conf; \

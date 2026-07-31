@@ -2203,6 +2203,15 @@ silently. Two `diagnose`/`doctor` checks catch that:
   window `useradd` allocates from. This is the one that matters: it is the
   actual hazard, and it depends on host state (`/etc/login.defs` plus whatever
   ranges have already been issued), so no test in this repo can cover it.
+- `subid_window_reserved` — a host-level check, not a per-workload one.
+  `SUB_UID_MAX` is **inclusive**, so the highest id `useradd` can ever issue is
+  that value itself; Fedora ships `600100000`, which *is* the base. The two are
+  off by one id, shared between a `useradd` range ending there and workload UID
+  10000's range. Fix: `SUB_UID_MAX`/`SUB_GID_MAX` `600099999` in
+  `/etc/login.defs` — reserving the id costs a window that would need ~1.1M
+  users to exhaust, and touches no range already issued, whereas moving the
+  base would re-derive every range on every host. The hypervisor image applies
+  this itself; the check covers hosts it doesn't reach.
 
 Remapping is manual and must be done with the workload **stopped**: rewrite both
 files, then `chown` only `state/`. Every file in `data/` is owned by the workload
