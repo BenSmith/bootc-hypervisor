@@ -671,6 +671,28 @@ class ReadSecretValueTest(SecretTestBase):
                 cmd_secret._read_secret_value("api", action="Enter")
         self.assertEqual(cm.exception.code, 1)
 
+    def test_piped_trailing_newline_warns_but_is_not_altered(self):
+        # `echo` without -n. Warn (stderr), never strip: silently changing a
+        # credential is worse than a noisy one.
+        self._piped(b"oops\n")
+        with redirect_stderr(io.StringIO()) as err:
+            value = cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(value, b"oops\n")
+        self.assertIn("ends with a newline", err.getvalue())
+
+    def test_piped_without_trailing_newline_is_silent(self):
+        self._piped(b"clean")
+        with redirect_stderr(io.StringIO()) as err:
+            cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_interactive_never_warns(self):
+        # getpass strips the terminator, so the warning can't fire here.
+        self._tty("hunter2", "hunter2")
+        with redirect_stderr(io.StringIO()) as err:
+            cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(err.getvalue(), "")
+
     def test_piped_is_verbatim(self):
         # No strip, no decode: `echo -n` idioms and binary payloads are
         # byte-preserved, including a value that legitimately ends in a newline.

@@ -156,7 +156,20 @@ def _read_secret_value(name: str, *, action: str) -> bytes:
     typed line with no terminator, so both go away together.
     """
     if not sys.stdin.isatty():
-        return sys.stdin.buffer.read()
+        value = sys.stdin.buffer.read()
+        # A trailing newline is almost always `echo` without -n, and it is the
+        # same defect the interactive path used to produce: it survives into the
+        # credential and only fails later, at unit start, where the error names
+        # newlines but not the command that introduced them. Warn rather than
+        # strip — a binary payload or a value that deliberately ends in \n is
+        # legitimate, and silently altering a credential is worse than a noisy
+        # one. stderr so it can't land in a value being captured downstream.
+        if value.endswith(b"\n"):
+            print("Warning: secret value ends with a newline — if that wasn't "
+                  "intended use `printf` or `echo -n`, and re-create with "
+                  "--force. Workloads that inject this as an env var will fail "
+                  "to start.", file=sys.stderr)
+        return value
 
     value = getpass.getpass(f"{action} secret value for '{name}': ")
     if value != getpass.getpass("Confirm: "):
