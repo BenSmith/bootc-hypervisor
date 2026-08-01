@@ -138,6 +138,36 @@ def _read_passphrase(args, *, prompt: str, confirm: bool) -> str:
     return passphrase
 
 
+def _read_secret_value(name: str, *, action: str) -> bytes:
+    """Read a secret value to hand to `systemd-creds encrypt` on stdin.
+
+    Piped/redirected stdin is passed through VERBATIM — no strip, no decode —
+    so `echo -n pw | workloadctl secret create ...` and binary payloads keep
+    working byte-for-byte.
+
+    On a TTY we prompt with echo OFF (getpass) and confirm. The old path just
+    printed "press Ctrl+D when done" and let systemd-creds read the inherited
+    terminal, which displayed every character of the credential as it was
+    typed — it stayed in scrollback and in anyone's line of sight. It also made
+    a trailing newline nearly unavoidable (Enter, then Ctrl+D), and a secret
+    with a newline in it fails later at a much less obvious place: the unit
+    generator rejects newlines in env-injected values, so three services fail
+    to start with no hint that the password is the problem. getpass returns the
+    typed line with no terminator, so both go away together.
+    """
+    if not sys.stdin.isatty():
+        return sys.stdin.buffer.read()
+
+    value = getpass.getpass(f"{action} secret value for '{name}': ")
+    if value != getpass.getpass("Confirm: "):
+        print("Error: Values do not match", file=sys.stderr)
+        sys.exit(1)
+    if not value:
+        print("Error: Secret value cannot be empty", file=sys.stderr)
+        sys.exit(1)
+    return value.encode()
+
+
 def _strip_trailing_newline(text: str) -> str:
     """Strip exactly one trailing newline (LF or CRLF), nothing more."""
     if text.endswith("\r\n"):
@@ -177,6 +207,7 @@ def cmd_secret(args, manager: WorkloadManager):
         key_type = args.key_type or "tpm2"
 
         # Read secret from stdin or file
+        secret_value = None
         if args.file:
             # Encrypt from file
             cmd = [
@@ -187,8 +218,9 @@ def cmd_secret(args, manager: WorkloadManager):
                 str(cred_file)
             ]
         else:
-            # Encrypt from stdin
-            print(f"Enter secret value for '{name}' (press Ctrl+D when done):")
+            # Encrypt from stdin — read it ourselves so an interactive value is
+            # never echoed to the terminal (see _read_secret_value).
+            secret_value = _read_secret_value(name, action="Enter")
             cmd = [
                 "systemd-creds", "encrypt",
                 f"--with-key={key_type}",
@@ -197,7 +229,7 @@ def cmd_secret(args, manager: WorkloadManager):
             ]
 
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, input=secret_value, check=True)
             os.chmod(cred_file, 0o600)
             print(f"✓ Created encrypted credential: {cred_file}")
             print(f"  Encryption: {key_type}")
@@ -311,8 +343,8 @@ def cmd_secret(args, manager: WorkloadManager):
                 print(f"  - {wl}")
             print()
 
-        # Prompt for new value
-        print(f"Enter new secret value for '{name}' (press Ctrl+D when done):")
+        # Prompt for the new value (echo off on a TTY — see _read_secret_value)
+        secret_value = _read_secret_value(name, action="Enter new")
         key_type = args.key_type or "tpm2"
 
         cmd = [
@@ -323,7 +355,7 @@ def cmd_secret(args, manager: WorkloadManager):
         ]
 
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, input=secret_value, check=True)
             os.chmod(cred_file, 0o600)
             print(f"✓ Rotated credential: {name}")
 

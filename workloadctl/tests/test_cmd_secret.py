@@ -621,5 +621,115 @@ class SecretExportCryptoTest(unittest.TestCase):
         self.assertGreaterEqual(cmd_secret._SECRET_PBKDF2_ITERS, 600000)
 
 
+class ReadSecretValueTest(SecretTestBase):
+    """The interactive prompt must not echo, and must not append a newline.
+
+    Regression: `create`/`rotate` used to print a prompt and let systemd-creds
+    read the inherited TTY directly. That displayed the credential as it was
+    typed, and the Enter-then-Ctrl+D needed to end the input embedded a
+    trailing newline — which only surfaced much later, as three workload units
+    failing to start because env injection rejects newlines in a secret.
+    """
+
+    def _tty(self, *values):
+        """Interactive stdin: getpass returns `values` in order."""
+        self.enterContext(mock.patch.object(
+            cmd_secret.sys, "stdin", mock.Mock(isatty=lambda: True)))
+        return self.enterContext(mock.patch.object(
+            cmd_secret.getpass, "getpass", mock.Mock(side_effect=list(values))))
+
+    def _piped(self, data: bytes):
+        """Non-interactive stdin carrying `data`."""
+        stdin = mock.Mock(isatty=lambda: False)
+        stdin.buffer.read.return_value = data
+        self.enterContext(mock.patch.object(cmd_secret.sys, "stdin", stdin))
+
+    def test_interactive_never_reaches_the_terminal(self):
+        prompts = self._tty("hunter2", "hunter2")
+        self.assertEqual(cmd_secret._read_secret_value("api", action="Enter"),
+                         b"hunter2")
+        # Read via getpass (echo off), not print()+inherited stdin.
+        self.assertEqual(prompts.call_count, 2)
+
+    def test_interactive_value_has_no_trailing_newline(self):
+        self._tty("hunter2", "hunter2")
+        self.assertEqual(cmd_secret._read_secret_value("api", action="Enter"),
+                         b"hunter2")
+
+    def test_interactive_mismatch_aborts(self):
+        self._tty("hunter2", "typo")
+        with self.assertRaises(SystemExit) as cm:
+            with redirect_stderr(io.StringIO()) as err:
+                cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("do not match", err.getvalue())
+
+    def test_interactive_empty_rejected(self):
+        self._tty("", "")
+        with self.assertRaises(SystemExit) as cm:
+            with redirect_stderr(io.StringIO()):
+                cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_piped_is_verbatim(self):
+        # No strip, no decode: `echo -n` idioms and binary payloads are
+        # byte-preserved, including a value that legitimately ends in a newline.
+        for payload in (b"p@ss$$w0rd", bytes(range(256)), b"trailing\n"):
+            with self.subTest(payload=payload[:12]):
+                with mock.patch.object(cmd_secret.sys, "stdin",
+                                       mock.Mock(isatty=lambda: False)) as si:
+                    si.buffer.read.return_value = payload
+                    self.assertEqual(
+                        cmd_secret._read_secret_value("api", action="Enter"),
+                        payload)
+
+    def test_create_pipes_value_to_systemd_creds(self):
+        self._piped(b"s3cret")
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"], captured["input"] = cmd, kw.get("input")
+            _REAL_PATH(cmd[-1]).write_bytes(b"x")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            _, _, code = _run(_ns(subcommand="create", name="api", force=False,
+                                  key_type=None, file=None))
+        self.assertIsNone(code)
+        self.assertEqual(captured["input"], b"s3cret")
+        self.assertIn("-", captured["cmd"])
+
+    def test_create_from_file_passes_no_stdin(self):
+        # --file still hands systemd-creds the path; nothing is read from stdin.
+        secret_file = self.tmp / "plain.txt"
+        secret_file.write_text("hunter2")
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["input"] = kw.get("input")
+            _REAL_PATH(cmd[-1]).write_bytes(b"x")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            _, _, code = _run(_ns(subcommand="create", name="api", force=False,
+                                  key_type="host", file=str(secret_file)))
+        self.assertIsNone(code)
+        self.assertIsNone(captured["input"])
+
+    def test_rotate_pipes_value_to_systemd_creds(self):
+        self._seed_cred("api")
+        self._piped(b"rotated")
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["input"] = kw.get("input")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(cmd_secret.subprocess, "run", fake_run):
+            _, _, code = _run(_ns(subcommand="rotate", name="api", key_type=None))
+        self.assertIsNone(code)
+        self.assertEqual(captured["input"], b"rotated")
+
+
 if __name__ == "__main__":
     unittest.main()

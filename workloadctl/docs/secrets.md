@@ -346,8 +346,12 @@ Most workloads should use `mode = "ro"` (the default).
 #### Create Encrypted Credential
 
 ```bash
-# Interactive (prompts for secret, press Ctrl+D when done)
-sudo systemd-creds encrypt --with-key=tpm2 --name=jellyfin-api-key - /etc/credstore.encrypted/jellyfin-api-key
+# Interactive — prefer workloadctl over raw systemd-creds here: it prompts with
+# echo OFF and asks for confirmation. Typing the value straight into
+# `systemd-creds encrypt -` displays every character and leaves it in scrollback,
+# and the Enter-then-Ctrl+D that ends the input embeds a trailing newline in the
+# credential (which later fails unit startup — env injection rejects newlines).
+sudo workloadctl secret create jellyfin-api-key
 
 # From stdin (useful for scripting)
 echo -n "my-super-secret-value" | \

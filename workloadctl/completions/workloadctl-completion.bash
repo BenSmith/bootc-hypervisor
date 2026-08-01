@@ -47,11 +47,35 @@ _workload_ctl_completion() {
         COMPREPLY=( $(compgen -P "${wl}/" -W "$containers" -- "$ctr_prefix") )
     }
 
-    # Get list of credential names (without path)
+    # Credential names, from two sources unioned.
+    #
+    # A listing of $credstore_dir is the authoritative set, but it only works in
+    # a root shell: the dir is 0700 root, and completion for `sudo workloadctl
+    # ...` runs as the UNPRIVILEGED user (bash-completion's sudo handler
+    # re-dispatches to this function without elevating). Since every name-taking
+    # secret subcommand requires root, and is therefore nearly always typed
+    # behind sudo, that source alone completed to nothing in normal use.
+    #
+    # So also harvest the names workloads REFERENCE, out of world-readable
+    # (0755/0644) $workload_dir/*/workload.toml: ${SECRET:name} env refs and
+    # `credential = "name"` in [secrets].files entries — the same two shapes
+    # auto_detect_credentials() scans. Those are the names you actually type,
+    # and it's the only source that can offer a name to `secret create`, which
+    # by definition doesn't exist in the credstore yet.
+    #
+    # Deliberately approximate: an escaped `$${SECRET:name}` ref is inert but
+    # still harvested, and a credential with no reference anywhere is only
+    # offered when the credstore is readable. Over-offering a name costs a
+    # wrong tab-complete; under-offering costs every tab-complete.
     local credentials=""
-    if [[ -d "$credstore_dir" ]]; then
+    if [[ -r "$credstore_dir" ]]; then
         credentials=$(cd "$credstore_dir" 2>/dev/null && ls -1 2>/dev/null)
     fi
+    credentials+=$'\n'$(grep -rhoE \
+        '\$\{SECRET:[a-zA-Z0-9_-]+\}|credential[[:space:]]*=[[:space:]]*"[a-zA-Z0-9_-]+"' \
+        "$workload_dir"/*/workload.toml 2>/dev/null \
+        | sed -E 's/^\$\{SECRET:(.*)\}$/\1/; s/^credential[[:space:]]*=[[:space:]]*"(.*)"$/\1/')
+    credentials=$(printf '%s\n' $credentials | sort -u)
 
     # First argument: complete commands
     if [[ $cword -eq 1 ]]; then
@@ -288,13 +312,19 @@ _workload_ctl_completion() {
             elif [[ $cword -ge 3 ]]; then
                 case "${words[2]}" in
                     create)
-                        # Complete with flags or credential name
+                        # Complete with flags or credential name. The name pool
+                        # here is the referenced-by-a-workload set: creating a
+                        # credential is almost always satisfying a ${SECRET:...}
+                        # a bundle already demands, and getting it letter-exact
+                        # is the whole point (a typo'd name fails at unit start).
                         if [[ "$cur" == -* ]]; then
                             COMPREPLY=( $(compgen -W "--file --force --key-type" -- "$cur") )
                         elif [[ "$prev" == "--file" ]]; then
                             _filedir
                         elif [[ "$prev" == "--key-type" ]]; then
                             COMPREPLY=( $(compgen -W "tpm2 host host+tpm2" -- "$cur") )
+                        else
+                            COMPREPLY=( $(compgen -W "$credentials" -- "$cur") )
                         fi
                         ;;
                     delete)
@@ -344,6 +374,9 @@ _workload_ctl_completion() {
                             _filedir
                         elif [[ $cword -eq 4 ]]; then
                             _filedir secret
+                        else
+                            # cword 3: the credential name to import AS
+                            COMPREPLY=( $(compgen -W "$credentials" -- "$cur") )
                         fi
                         ;;
                 esac
