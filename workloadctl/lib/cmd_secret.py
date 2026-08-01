@@ -155,6 +155,13 @@ def _read_secret_value(name: str, *, action: str) -> bytes:
     to start with no hint that the password is the problem. getpass returns the
     typed line with no terminator, so both go away together.
     """
+    if sys.stdin is None:
+        # `workloadctl secret create x 0<&-`. Nothing to read and no terminal to
+        # prompt on; say so instead of an AttributeError traceback.
+        print("Error: No stdin to read the secret value from — pipe a value, "
+              "use --file, or run from a terminal", file=sys.stderr)
+        sys.exit(1)
+
     if not sys.stdin.isatty():
         value = sys.stdin.buffer.read()
         # A trailing newline is almost always `echo` without -n, and it is the

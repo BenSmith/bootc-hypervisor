@@ -58,6 +58,16 @@ class SecretTestBase(unittest.TestCase):
             return _REAL_PATH(p, *a)
 
         self.enterContext(mock.patch.object(cmd_secret, "Path", _fake_path))
+
+        # Never let a test touch the real stdin. `create`/`rotate` read it
+        # in-process now, so an unmocked test inherits whatever the runner
+        # gives us: a TTY makes getpass prompt, and a pipe that never sees EOF
+        # (GitHub Actions) makes buffer.read() block forever — the suite hangs
+        # with no failing test to point at. Default to an empty non-TTY pipe;
+        # tests that care override it (see _tty/_piped).
+        stdin = mock.Mock(isatty=lambda: False)
+        stdin.buffer.read.return_value = b""
+        self.enterContext(mock.patch.object(cmd_secret.sys, "stdin", stdin))
         self.enterContext(mock.patch.object(cmd_secret, "require_root", lambda: None))
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.wl_dir))
 
@@ -692,6 +702,15 @@ class ReadSecretValueTest(SecretTestBase):
         with redirect_stderr(io.StringIO()) as err:
             cmd_secret._read_secret_value("api", action="Enter")
         self.assertEqual(err.getvalue(), "")
+
+    def test_closed_stdin_errors_instead_of_traceback(self):
+        # `... secret create x 0<&-` leaves sys.stdin as None.
+        self.enterContext(mock.patch.object(cmd_secret.sys, "stdin", None))
+        with self.assertRaises(SystemExit) as cm:
+            with redirect_stderr(io.StringIO()) as err:
+                cmd_secret._read_secret_value("api", action="Enter")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("No stdin", err.getvalue())
 
     def test_piped_is_verbatim(self):
         # No strip, no decode: `echo -n` idioms and binary payloads are
