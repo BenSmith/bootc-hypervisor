@@ -159,6 +159,30 @@ install -dm 0755 %{buildroot}%{_datadir}/workloadctl
 cp -a %{_sourcedir}/workloads %{buildroot}%{_datadir}/workloadctl/workloads
 find %{buildroot}%{_datadir}/workloadctl/workloads -name '*.sh' -exec chmod 0755 {} \;
 
+# `cp -a` copies whatever the build tree holds, tracked or not, so a dirty
+# checkout leaks into the package. Two ways it shows up, both fixed here:
+#
+#   1. Ignored build droppings inside an otherwise-valid bundle. A __pycache__/
+#      beside a bundle's sources is the common one; it is noise in the payload
+#      and its .pyc files are stale the moment python changes.
+#   2. Whole bundle dirs with no workload.toml. A branch switch deletes the
+#      tracked files but leaves any directory that still holds an ignored one,
+#      so the package ships a "bundle" that is nothing but empty directories.
+#
+# Pruning makes the package honest regardless of the builder's tree; the
+# warning tells them the tree is dirty.
+find %{buildroot}%{_datadir}/workloadctl/workloads \
+    -name __pycache__ -type d -prune -exec rm -rf {} +
+for bundle in %{buildroot}%{_datadir}/workloadctl/workloads/*/; do
+    # Guard the unmatched-glob case: with no bundles at all the loop would
+    # otherwise run once on the literal pattern and warn about a bundle named '*'.
+    [ -d "$bundle" ] || continue
+    if [ ! -f "${bundle}workload.toml" ]; then
+        echo "WARNING: dropping bundle with no workload.toml: $(basename "$bundle")" >&2
+        rm -rf "$bundle"
+    fi
+done
+
 install -Dpm 0644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/workloadctl/LICENSE
 
 
