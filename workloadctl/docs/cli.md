@@ -810,6 +810,27 @@ purpose, because shifting a UID mapping under a running container corrupts its
 namespace. Remap by hand with the workload stopped, and `chown` only `state/` —
 `data/` is owned by the workload UID itself, not out of the subordinate range.
 
+**Trust anchor check.** `ca_trust_anchors` fails when a certificate in
+`/etc/pki/ca-trust/source/anchors` is absent from the extracted TLS bundle —
+the anchor is installed but grants no trust, so pulls from a registry it signs
+fail `unable to get local issuer certificate` while the trust store looks
+correct. Run for container workloads only, and omitted rather than passed when
+the store cannot be read.
+
+On a bootc host the usual cause is the ostree `/etc` merge: `update-ca-trust`
+writes into `/etc/pki/ca-trust/extracted/`, so a host that has ever run it by
+hand has that path marked locally modified and keeps its own copy forever,
+discarding the image's extraction. New anchor *files* still land; nothing
+extracts them.
+
+The fix depends on whether any anchor is locally added. When they all come from
+the image, restoring `extracted/` from `/usr/etc` is preferred over
+`update-ca-trust` — it brings `ostree admin config-diff` clean, so the merge
+tracks the image again and later anchor rotations apply by themselves. When the
+host carries a hand-added anchor, the check names `update-ca-trust` instead:
+restoring would drop that anchor from the bundle and revoke trust the operator
+installed deliberately.
+
 [↑ top](#workloadctl-command-reference)
 
 ### `cleanup`
