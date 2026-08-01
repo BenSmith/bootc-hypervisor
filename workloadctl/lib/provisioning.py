@@ -161,12 +161,20 @@ def preflight_checks(config: WorkloadConfig) -> bool:
         # state/ subdir, but `./`-anchored required_files resolve to the data/
         # sibling — checking against home_dir (state/) would reject every
         # data/ destination and silently skip the copy.
+        # A hint is only a source path when it is absolute; bundles also use the
+        # field for prose ("WireGuard client config from your VPN provider"). A
+        # bare `Path(hint).exists()` would resolve a non-absolute hint against
+        # the operator's cwd, so running enable from the wrong directory could
+        # copy an unrelated same-named file into the workload's data dir. Same
+        # test the instruction printer below uses, so the two branches agree on
+        # what a hint is.
         root_resolved = workload_root_dir(config.name).resolve()
         still_missing = []
         for entry in missing_required_files:
             dest = Path(entry["path"])
             hint = entry.get("hint")
-            if hint and Path(hint).exists() and dest.resolve().is_relative_to(root_resolved):
+            if (hint and Path(hint).is_absolute() and Path(hint).exists()
+                    and dest.resolve().is_relative_to(root_resolved)):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(hint, dest)
                 info(f"  ✓ Copied config template: {dest}")
@@ -180,9 +188,13 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             info()
             info("  Create these files before enabling:")
             for entry in still_missing:
-                if entry["hint"]:
-                    info(f"    sudo cp {entry['hint']} \\")
+                hint = entry["hint"]
+                if hint and Path(hint).is_absolute():
+                    info(f"    sudo cp {hint} \\")
                     info(f"             {entry['path']}")
+                elif hint:
+                    info(f"    # {entry['path']}")
+                    info(f"    #   needs: {hint}")
                 else:
                     info(f"    # Create {entry['path']}")
             failed = True

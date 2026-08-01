@@ -97,7 +97,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                         "passed": False,
                         "severity": "error",
                         "message": f"Missing credential: {name}",
-                        "fix": f"sudo workloadctl secret set {name}"
+                        "fix": f"sudo workloadctl secret create {name}"
                     })
                     errors += 1
             else:

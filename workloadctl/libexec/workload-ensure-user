@@ -17,6 +17,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -311,6 +312,104 @@ def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
         return True
     finally:
         os.close(dir_fd)
+
+
+def _chown_file_secure(root_dir, host_path, uid, gid):
+    """Chown an existing regular file under `root_dir` to the workload user
+    without ever following a symlink — the file counterpart of
+    `_provision_dir_secure`, and racy in exactly the same way if done naively.
+
+    Never creates anything: a required file is the operator's to supply, and a
+    missing one is preflight's error to report. Never chmods either — the
+    operator's mode is deliberate (0600 is correct for a file holding a private
+    key), and only the owner is wrong.
+
+    Returns True if the file is now workload-owned, False if it was absent or a
+    component was unsafe.
+    """
+    try:
+        parts = host_path.relative_to(root_dir).parts
+    except ValueError:
+        return False
+    if not parts or ".." in parts:
+        return False
+    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=dir_fd)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                log(f"  WARNING: refusing to chown {host_path}: unsafe path "
+                    f"component {part!r} ({exc.strerror})")
+                return False
+            os.close(dir_fd)
+            dir_fd = child_fd
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW,
+                              dir_fd=dir_fd)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log(f"  WARNING: refusing to chown {host_path}: unsafe final "
+                f"component ({exc.strerror})")
+            return False
+        try:
+            st = os.fstat(file_fd)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            # A hardlink to a file elsewhere on the same filesystem would make
+            # this chown reach outside the tree. fs.protected_hardlinks (on by
+            # default) already stops the workload user creating one to a file
+            # it does not own, but the fd is in hand, so check rather than
+            # lean on a tunable.
+            if st.st_nlink != 1:
+                log(f"  WARNING: refusing to chown {host_path}: "
+                    f"{st.st_nlink} hardlinks")
+                return False
+            if st.st_uid == uid and st.st_gid == gid:
+                return True
+            os.fchown(file_fd, uid, gid)
+            return True
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def setup_required_file_ownership(pw, config):
+    """Give the workload user ownership of the required files it must read.
+
+    `setup_volume_directories` chowns the volume *dirs*, but a required file is
+    placed by the operator afterward -- the documented step is a plain
+    `sudo cp` -- which leaves it root-owned. The container runs as the workload
+    user, so at mode 0600 (right for a WireGuard key) it cannot read its own
+    config, and the failure surfaces inside the container as whatever that
+    config's parser says about an empty read, not as a permission error. This
+    closes the gap between "the file exists", which preflight checks, and "the
+    workload can read it", which is what actually matters.
+    """
+    name = config["workload"]["name"]
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
+
+    for entry in config.get("setup", {}).get("required_files", []):
+        raw = entry.get("path", "")
+        if not raw:
+            continue
+        host_path_str = expand_volume_path(raw, str(state_dir)).split(":", 2)[0]
+        if not host_path_str:
+            continue
+        host_path = Path(host_path_str)
+        try:
+            host_path.relative_to(root_dir)
+        except ValueError:
+            continue  # Outside the workload tree — not ours to chown.
+        if _chown_file_secure(root_dir, host_path, pw.pw_uid, pw.pw_gid):
+            log(f"  Required file {host_path} owned by {pw.pw_name}")
 
 
 def setup_volume_directories(pw, config):
@@ -1350,6 +1449,14 @@ def _ensure_user(name: str) -> int:
             setup_volume_directories(pw, config)
         except Exception as e:
             log(f"  ERROR: Failed to create volume directories for {username}: {e}")
+            return 1
+
+        # After the volume dirs: a required file lands inside one of them, and
+        # only the operator's copy step decides its owner.
+        try:
+            setup_required_file_ownership(pw, config)
+        except Exception as e:
+            log(f"  ERROR: Failed to fix required-file ownership for {username}: {e}")
             return 1
 
         try:

@@ -12,7 +12,11 @@ import subprocess
 import sys
 
 from cli_log import emit_result, error, info
-from workload_lib import workload_config_path, workload_enabled_marker
+from workload_lib import (
+    workload_config_path,
+    workload_enabled_marker,
+    workload_root_dir,
+)
 from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
 from provisioning import (
@@ -54,7 +58,8 @@ def cmd_enable(args, manager: WorkloadManager):
     if not preflight_checks(config):
         info()
         info("Pre-flight checks failed. Fix the issues above, then re-run enable.")
-        info(f"  Directories have been set up at {config.home_dir} — copy any required files there.")
+        info(f"  Directories have been set up under {workload_root_dir(config.name)}; "
+             "use the full paths listed above.")
         info(f"  Workload left disabled; re-run 'sudo workloadctl enable {args.workload}' when ready.")
         # Nothing was started, so revert to disabled by removing the marker.
         workload_enabled_marker(args.workload).unlink(missing_ok=True)

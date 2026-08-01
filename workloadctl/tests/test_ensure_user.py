@@ -761,6 +761,139 @@ class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
             self.assertTrue((root / "data" / "web-data").is_dir())
 
 
+class TestSetupRequiredFileOwnership(unittest.TestCase):
+    """A required file the operator supplies must end up workload-readable.
+
+    The documented setup step is a plain `sudo cp` into the workload's data
+    dir, which leaves the file root-owned. The volume-dir pass deliberately
+    skips required_files (mkdir would break the bind mount), so nothing used to
+    correct the owner -- and at mode 0600, right for a file holding a private
+    key, the container silently could not read its own config. Measured on a
+    lab host: the vpn container crash-looped reporting a parse error, never a
+    permission error.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+
+    def _run(self, root, config, pw, chown):
+        with mock.patch.object(self.mod, "workload_state_dir",
+                               lambda n: root / "state"), \
+             mock.patch.object(self.mod, "workload_root_dir", lambda n: root), \
+             mock.patch("os.fchown", chown):
+            self.mod.setup_required_file_ownership(pw, config)
+
+    @staticmethod
+    def _config():
+        return {
+            "workload": {"name": "myapp"},
+            "setup": {"required_files": [{"path": "./wg0.conf"}]},
+            "containers": [{"name": "vpn", "container": {"image": "x"},
+                            "storage": {"volumes": ["./wg0.conf:/etc/wg0.conf:ro"]}}],
+        }
+
+    def _tree(self, tmp):
+        root = Path(tmp)
+        (root / "state").mkdir()
+        (root / "data").mkdir()
+        return root
+
+    def test_root_owned_required_file_is_chowned_to_the_workload_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            conf = root / "data" / "wg0.conf"
+            conf.write_text("[Interface]\n")
+            conf.chmod(0o600)
+            calls = []
+            self._run(root, self._config(), _fake_pw(root / "state"),
+                      lambda fd, uid, gid: calls.append((uid, gid)))
+            self.assertEqual(calls, [(9999, 9999)])
+
+    def test_mode_is_left_alone(self):
+        """0600 is correct for a key file; only the owner was ever wrong."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            conf = root / "data" / "wg0.conf"
+            conf.write_text("x")
+            conf.chmod(0o600)
+            with mock.patch("os.fchmod") as fchmod:
+                self._run(root, self._config(), _fake_pw(root / "state"),
+                          mock.Mock())
+            fchmod.assert_not_called()
+            self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_file_is_not_created(self):
+        """Absence is preflight's error to report, not this pass's to paper over."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            chown = mock.Mock()
+            self._run(root, self._config(), _fake_pw(root / "state"), chown)
+            chown.assert_not_called()
+            self.assertFalse((root / "data" / "wg0.conf").exists())
+
+    def test_symlink_out_of_the_tree_is_refused(self):
+        """The workload user owns data/ and could swap the file for a symlink.
+
+        This runs as root, so following one would chown an arbitrary host file.
+        """
+        with tempfile.TemporaryDirectory() as tmp, \
+             tempfile.NamedTemporaryFile() as outside:
+            root = self._tree(tmp)
+            (root / "data" / "wg0.conf").symlink_to(outside.name)
+            chown = mock.Mock()
+            self._run(root, self._config(), _fake_pw(root / "state"), chown)
+            chown.assert_not_called()
+
+    def test_symlinked_parent_directory_is_refused(self):
+        """A required file may nest (`./conf.d/x.conf`), so the walk over the
+        intermediate components has to refuse a swapped-out directory too — not
+        just a swapped-out final component."""
+        with tempfile.TemporaryDirectory() as tmp, \
+             tempfile.TemporaryDirectory() as other:
+            root = self._tree(tmp)
+            outside = Path(other)
+            (outside / "wg0.conf").write_text("x")
+            (root / "data" / "conf.d").symlink_to(outside)
+            config = self._config()
+            config["setup"]["required_files"] = [{"path": "./conf.d/wg0.conf"}]
+            chown = mock.Mock()
+            self._run(root, config, _fake_pw(root / "state"), chown)
+            chown.assert_not_called()
+
+    def test_hardlinked_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            target = root / "elsewhere"
+            target.write_text("x")
+            os.link(target, root / "data" / "wg0.conf")
+            chown = mock.Mock()
+            self._run(root, self._config(), _fake_pw(root / "state"), chown)
+            chown.assert_not_called()
+
+    def test_already_owned_file_is_not_rechowned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            conf = root / "data" / "wg0.conf"
+            conf.write_text("x")
+            st = conf.stat()
+            chown = mock.Mock()
+            self._run(root, self._config(),
+                      _fake_pw(root / "state", st.st_uid, st.st_gid), chown)
+            chown.assert_not_called()
+
+    def test_path_outside_the_workload_tree_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             tempfile.TemporaryDirectory() as other:
+            root = self._tree(tmp)
+            outside = Path(other) / "wg0.conf"
+            outside.write_text("x")
+            config = self._config()
+            config["setup"]["required_files"] = [{"path": str(outside)}]
+            chown = mock.Mock()
+            self._run(root, config, _fake_pw(root / "state"), chown)
+            chown.assert_not_called()
+
+
 class TestConfigureSubuidSubgid(unittest.TestCase):
     """Tests for configure_subuid_subgid — formula and grandfathering logic."""
 
