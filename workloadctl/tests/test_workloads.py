@@ -777,6 +777,14 @@ def _toml_value(value):
         else:
             parts = [_toml_value(v) for v in value]
             return "[\n    " + ",\n    ".join(parts) + ",\n]"
+    elif isinstance(value, dict):
+        # Inline table, e.g. `[[build.variants]]`'s `args`. Without this the
+        # dict fell through to `str(value)` and emitted a Python repr —
+        # single-quoted keys, which is not TOML. The bundle then failed to
+        # parse and the generator skipped that workload *silently*, so the
+        # symptom was a missing service file rather than an error.
+        fields = ", ".join(f"{k} = {_toml_value(v)}" for k, v in value.items())
+        return "{ " + fields + " }"
     return str(value)
 
 
