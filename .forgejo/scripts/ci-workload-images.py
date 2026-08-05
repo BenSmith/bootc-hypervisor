@@ -22,11 +22,21 @@ Subcommands:
                           the registry, and append the registry refs to the file
                           named by REFS_OUT (one per line) for the push step.
 
+Variants (`[[build.variants]]`) let one bundle publish more than one image from
+the same context — e.g. a vulkan default plus a cuda build. This is a
+*publishing* concern, not a build-machinery one: a host builds only the variant
+it needs, using the same `[build].arg_env` override a human would type, so
+`workloadctl build` deliberately stays single-image and is unaffected. CI is the
+only consumer that needs all of them at once, which is why this lives here and
+not in lib/.
+
 `build` must run as root (podman build into the root store, matching the
 hypervisor image pipeline); the workflow invokes it under sudo.
 """
+import contextlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,6 +103,97 @@ def _registry_ref(image: str) -> str:
     return f"{REGISTRY}/workloads/{ref}"
 
 
+def _split_ref(ref: str) -> tuple[str, str]:
+    """Split an image ref into (repo, tag).
+
+    A plain `rsplit(":")` is wrong: `registry.local:5000/workloads/x` has a
+    port and no tag. Only a colon *after* the last slash separates a tag.
+    """
+    slash = ref.rfind("/")
+    colon = ref.rfind(":")
+    if colon > slash:
+        return ref[:colon], ref[colon + 1:]
+    return ref, ""
+
+
+def _variant_ref(ref: str, suffix: str) -> str:
+    """`registry.local/workloads/x:latest` + `cuda` -> `.../x:cuda`."""
+    repo, _tag = _split_ref(ref)
+    return f"{repo}:{suffix}"
+
+
+def _variants(cfg) -> list[dict]:
+    """`[[build.variants]]` entries — extra images built from the same context.
+
+    Each is `{suffix, args}`. The default build (Containerfile ARG defaults,
+    tagged as `[container].image`) is always produced; variants are additional
+    tags built with different `--build-arg` values.
+    """
+    return list((cfg.build_config or {}).get("variants") or [])
+
+
+def _validate_variants(cfg, variants: list[dict]) -> str | None:
+    """Error message for a malformed variants table, else None.
+
+    The arg_env check is the load-bearing one. Variant args are applied by
+    exporting them and letting `assemble_build_args` pick them up, and it only
+    consults the environment for names listed in `[build].arg_env`. An arg
+    outside that list is silently dropped — which would not fail the build, it
+    would publish a variant tag holding a byte-identical copy of the default.
+    A tag that lies about its contents is worse than a broken build, so this
+    refuses up front.
+    """
+    declared = set(cfg.build_arg_env)
+    seen: set[str] = set()
+    for i, v in enumerate(variants):
+        if not isinstance(v, dict):
+            return f"variant #{i} is not a table"
+        suffix = str(v.get("suffix") or "").strip()
+        if not suffix:
+            return f"variant #{i} has no 'suffix'"
+        if "/" in suffix or ":" in suffix:
+            return f"variant suffix {suffix!r} may not contain '/' or ':'"
+        if suffix == "latest":
+            return "variant suffix 'latest' collides with the default build"
+        if suffix in seen:
+            return f"duplicate variant suffix {suffix!r}"
+        seen.add(suffix)
+        args = v.get("args") or {}
+        if not args:
+            return f"variant {suffix!r} sets no 'args' — it would copy the default"
+        undeclared = sorted(set(args) - declared)
+        if undeclared:
+            return (
+                f"variant {suffix!r} sets {undeclared}, which "
+                f"[build].arg_env does not declare — those args would be "
+                f"ignored and the variant would be a copy of the default"
+            )
+    return None
+
+
+@contextlib.contextmanager
+def _env_overrides(values: dict):
+    """Temporarily export `values`, restoring the prior environment on exit."""
+    prior = {k: os.environ.get(k) for k in values}
+    os.environ.update({k: str(v) for k, v in values.items()})
+    try:
+        yield
+    finally:
+        for k, old in prior.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
+
+def _tag(image: str, ref: str) -> int:
+    """`podman tag`, skipping the no-op when the build already produced `ref`
+    (a bundle whose [container].image names the registry directly)."""
+    if image == ref:
+        return 0
+    return subprocess.run(["podman", "tag", image, ref]).returncode
+
+
 def cmd_list() -> int:
     buildable = _all_buildable()
 
@@ -124,19 +225,44 @@ def cmd_build(name: str) -> int:
         print(f"Error: '{name}' has no buildable image", file=sys.stderr)
         return 1
 
+    variants = _variants(cfg)
+    err = _validate_variants(cfg, variants)
+    if err is not None:
+        print(f"Error: {name}: {err}", file=sys.stderr)
+        return 1
+
+    refs: list[str] = []
+
+    # Variants BEFORE the default, and the ordering is load-bearing. Every
+    # build tags its result as [container].image, so whichever runs last owns
+    # that tag — and it must be the default, since that is what hosts consume
+    # as :latest. Each variant's own tag keeps its image alive after the
+    # default build moves :latest off it.
+    for v in variants:
+        suffix = v["suffix"]
+        with _env_overrides(v.get("args") or {}):
+            rc = imagebuild.build_image(cfg)
+        if rc != 0:
+            print(f"Error: {name}: variant {suffix!r} failed to build", file=sys.stderr)
+            return rc
+        for image in cfg.build_images():
+            ref = _variant_ref(_registry_ref(image), suffix)
+            rc = _tag(image, ref)
+            if rc != 0:
+                return rc
+            refs.append(ref)
+
     # Full parity with `workloadctl build`: builds each pull=never image and
     # tags it exactly as [container].image (localhost/<name>:latest).
     rc = imagebuild.build_image(cfg)
     if rc != 0:
         return rc
 
-    refs = []
     for image in cfg.build_images():
         ref = _registry_ref(image)
-        import subprocess
-        r = subprocess.run(["podman", "tag", image, ref])
-        if r.returncode != 0:
-            return r.returncode
+        rc = _tag(image, ref)
+        if rc != 0:
+            return rc
         refs.append(ref)
 
     refs_out = os.environ.get("REFS_OUT")

@@ -50,6 +50,14 @@ jobs:
           # silently to building *every* bundle. Repo is small; depth 0 is cheap.
           fetch-depth: 0
 
+      - name: Test the CI helper
+        # Pure-function coverage for ci-workload-images.py (ref rewriting, the
+        # [[build.variants]] arg_env cross-check). Milliseconds, no podman, no
+        # registry — and it guards the step immediately below. Deliberately not
+        # part of `just test`: importing the helper exports WORKLOAD_*_DIR at
+        # module scope and would poison workloadctl's shared-process suite.
+        run: python3 .forgejo/scripts/test_ci_workload_images.py
+
       - name: Compute build matrix
         id: r
         env:
@@ -135,7 +143,19 @@ jobs:
 
           while IFS= read -r ref; do
             [ -n "$ref" ] || continue
-            repo="${ref%:*}"   # strip :latest
+            repo="${ref%:*}"     # strip the tag
+            reftag="${ref##*:}"  # latest, or a [[build.variants]] suffix
+            # Qualify the dated tag per variant. A bundle with variants emits
+            # several refs on the SAME repo (:latest, :cuda, ...); an unqualified
+            # dated tag would be written once per ref and the last push through
+            # this loop would silently win, leaving a rollback ref that points at
+            # whichever variant happened to be last. :latest keeps the bare dated
+            # tag so existing single-image bundles are unaffected.
+            if [ "$reftag" = "latest" ]; then
+              dated="${TAG}"
+            else
+              dated="${reftag}-${TAG}"
+            fi
             sudo podman push "${SIGN_ARGS[@]}" --digestfile /tmp/digest.txt "$ref"
             DIGEST=$(cat /tmp/digest.txt)
             # A push can succeed without attaching a signature; the shipped policy.json
@@ -150,10 +170,10 @@ jobs:
             echo "signature verified: ${repo}@${DIGEST}"
             # Dated tag = pinned rollback ref; digest copy is already covered by
             # the digest-addressed signature.
-            sudo skopeo copy "docker://${repo}@${DIGEST}" "docker://${repo}:${TAG}"
+            sudo skopeo copy "docker://${repo}@${DIGEST}" "docker://${repo}:${dated}"
             {
               echo "- \`${ref}\`"
-              echo "- \`${repo}:${TAG}\`"
+              echo "- \`${repo}:${dated}\`"
             } >> "$GITHUB_STEP_SUMMARY"
           done < "$REFS_OUT"
 
