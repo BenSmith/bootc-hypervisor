@@ -91,8 +91,11 @@ on_failure = "kill"
 #   sudo groupadd --system wl-media
 #   sudo mkdir -p /var/mnt/media
 #   sudo chgrp wl-media /var/mnt/media && sudo chmod 2775 /var/mnt/media
-#   sudo semanage fcontext -a -t container_file_t '/var/mnt/media(/.*)?'
+#   sudo semanage fcontext -a -t container_file_t '/mnt/media(/.*)?'
 #   sudo restorecon -Rv /var/mnt/media
+# The fcontext spec says /mnt while restorecon says /var/mnt: the policy ships a
+# '/var/mnt = /mnt' equivalency, and semanage rejects a spec written against the
+# equivalent side ("File spec ... conflicts with equivalency rule").
 # then add "wl-media" to extra_groups here and in the other workload, and
 # recreate both. Create the group *first* — the generator resolves
 # extra_groups to GIDs when it writes the units.

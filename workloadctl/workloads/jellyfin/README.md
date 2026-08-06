@@ -33,7 +33,7 @@ own directory, `/var/lib/workloads/jellyfin/data/media`, mounted read-only at
 `/media` in the container.
 
 For deployment you can point it elsewhere by editing the last `[storage]`
-volume in `jellyfin.toml` — but use an absolute host path outside every
+volume in `workload.toml` — but use an absolute host path outside every
 workload's own tree, e.g. `/var/mnt/media:/media:ro`.
 
 Do **not** point it inside another workload's directory (the `smb-server`
