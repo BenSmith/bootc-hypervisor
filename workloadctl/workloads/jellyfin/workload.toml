@@ -24,8 +24,9 @@
 #      mounted read-only at /media inside the container:
 #        /var/lib/workloads/jellyfin/data/media
 #      Drop video files there (created automatically on enable). To serve
-#      media from elsewhere instead — e.g. the smb-server share so files can
-#      be added over SMB — see the [storage] section below.
+#      media from a shared host path instead — e.g. one that smb-server also
+#      mounts, so files can be added over SMB — see the [storage] section
+#      below.
 #
 #   3. Configure the firewall (LAN-only — recommended):
 #        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" port port="8096" protocol="tcp" accept'
@@ -74,9 +75,27 @@ on_failure = "kill"
 #   Default media path: /var/lib/workloads/jellyfin/data/media
 #
 # Deployment tweak — to serve media from another location, replace the last
-# entry with an absolute host path, e.g. to share the smb-server library:
-#   "/var/lib/workloads/smb-server/data/exports/media:/media:ro"
-# (the workload user only needs read access to whatever path you choose).
+# entry with an absolute host path outside every workload's own tree:
+#   "/var/mnt/media:/media:ro"
+#
+# Do NOT point it inside another workload's directory. Every workload's
+# /var/lib/workloads/<name>/data is chowned to that workload's user and
+# chmod 0700 on *every* service start (setup_home_directory in
+# libexec/workload-ensure-user), so _wl-jellyfin cannot traverse into it
+# however permissive the leaf directory is — and a hand-applied chmod is
+# undone at the next ExecStartPre.
+#
+# Sharing one tree between two workloads is host setup, not a workload
+# change: nothing outside /var/lib/workloads/<name> is created or chowned for
+# you. The admin makes the path and a group both workload users join:
+#   sudo groupadd --system wl-media
+#   sudo mkdir -p /var/mnt/media
+#   sudo chgrp wl-media /var/mnt/media && sudo chmod 2775 /var/mnt/media
+#   sudo semanage fcontext -a -t container_file_t '/var/mnt/media(/.*)?'
+#   sudo restorecon -Rv /var/mnt/media
+# then add "wl-media" to extra_groups here and in the other workload, and
+# recreate both. Create the group *first* — the generator resolves
+# extra_groups to GIDs when it writes the units.
 volumes = [
     "./config:/config",
     "./cache:/cache",

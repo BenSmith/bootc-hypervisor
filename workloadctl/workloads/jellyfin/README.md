@@ -29,10 +29,21 @@ NVENC in the UI instead.
 ## Media
 
 By default jellyfin is a **fully independent workload**: the library is its
-own directory, `/var/lib/workloads/jellyfin/media`, mounted read-only at
+own directory, `/var/lib/workloads/jellyfin/data/media`, mounted read-only at
 `/media` in the container.
 
 For deployment you can point it elsewhere by editing the last `[storage]`
-volume in `jellyfin.toml` — e.g. at the `smb-server` share
-(`/var/lib/workloads/smb-server/exports/media`) so media can be added over
-SMB. The workload user only needs read access to whatever path you choose.
+volume in `jellyfin.toml` — but use an absolute host path outside every
+workload's own tree, e.g. `/var/mnt/media:/media:ro`.
+
+Do **not** point it inside another workload's directory (the `smb-server`
+exports, say). `/var/lib/workloads/<name>/data` is chowned to that workload's
+user and chmod `0700` on every service start, so `_wl-jellyfin` cannot
+traverse into it however permissive the leaf directory is, and a hand-applied
+`chmod` is undone at the next start.
+
+To share one tree with another workload — so media can be added over SMB, for
+instance — the admin creates the path and a group both workload users join;
+`workload-ensure-user` creates and chowns nothing outside
+`/var/lib/workloads/<name>`. See the `[storage]` comments in `workload.toml`
+for the exact commands.
