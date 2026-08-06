@@ -19,6 +19,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     dbus-daemon \
     drm_info \
     eglinfo \
+    ffmpegthumbnailer \
     fira-code-fonts \
     firefox \
     foot \
@@ -26,6 +27,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     google-noto-color-emoji-fonts \
     google-noto-sans-fonts \
     grim \
+    gvfs \
     hostname \
     htop \
     imv \
@@ -37,6 +39,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    mpv \
     nano \
     neovim \
     procps-ng \
@@ -47,6 +50,8 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     swaybg \
     systemd \
     systemd-udev \
+    Thunar \
+    tumbler \
     util-linux \
     vainfo \
     vulkan-tools \
@@ -61,6 +66,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wlr-randr \
     wlrctl \
     wofi \
+    xdg-desktop-portal-gtk \
     xdg-utils \
     xorg-x11-server-Xwayland \
     && dnf clean all \
@@ -231,6 +237,61 @@ bright5=a080e8
 bright6=00e8f0
 bright7=c8dde8
 INI
+
+# --- MIME defaults ---
+# Fedora's stock /usr/share/applications/mimeapps.list is a vendor list naming
+# apps this image does not ship (gimp, evolution, libreoffice), but that is not
+# what most types resolve through: GIO falls back to mimeinfo.cache, built from
+# each installed app's own MimeType= line. Directories, text, HTML and video all
+# land correctly from that alone.
+#
+# The one type that does NOT is images. imv ships two entries and only
+# imv-dir.desktop declares any MimeType, so every image resolves to it — and
+# imv-dir opens the whole *containing directory* as a playlist rather than the
+# file that was clicked. Pin imv.desktop so a double-click opens what you
+# double-clicked. (Swap these to imv-dir.desktop if you would rather arrow
+# through the folder; both are NoDisplay=true, valid as defaults but hidden from
+# the launcher.)
+#
+# The rest are pinned rather than left to cache order, so a package added later
+# that also claims these types cannot silently take them over. /etc/xdg wins
+# over /usr/share; a user's ~/.config copy still wins over this.
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/mimeapps.list <<'INI'
+[Default Applications]
+inode/directory=thunar.desktop
+image/png=imv.desktop
+image/jpeg=imv.desktop
+image/gif=imv.desktop
+image/webp=imv.desktop
+image/bmp=imv.desktop
+image/tiff=imv.desktop
+image/avif=imv.desktop
+image/svg+xml=imv.desktop
+text/plain=nvim.desktop
+text/html=org.mozilla.firefox.desktop
+application/xhtml+xml=org.mozilla.firefox.desktop
+x-scheme-handler/http=org.mozilla.firefox.desktop
+x-scheme-handler/https=org.mozilla.firefox.desktop
+video/mp4=mpv.desktop
+video/x-matroska=mpv.desktop
+video/webm=mpv.desktop
+video/quicktime=mpv.desktop
+video/x-msvideo=mpv.desktop
+audio/mpeg=mpv.desktop
+audio/flac=mpv.desktop
+audio/ogg=mpv.desktop
+audio/x-wav=mpv.desktop
+INI
+
+# GLib launches a Terminal=true entry (nvim.desktop) by searching a hardcoded
+# list — gnome-terminal, konsole, xterm, rxvt … — that foot is not on, so
+# opening a text file dies with "Unable to find terminal required for
+# application". glib 2.88 checks for xdg-terminal-exec first, so a shim is
+# enough; it is the freedesktop-blessed hook rather than a workaround.
+RUN printf '#!/bin/sh\nexec foot "$@"\n' > /usr/bin/xdg-terminal-exec && \
+    chmod +x /usr/bin/xdg-terminal-exec
 
 # --- Bash prompt (system-wide; sourced by /etc/bashrc) ---
 
