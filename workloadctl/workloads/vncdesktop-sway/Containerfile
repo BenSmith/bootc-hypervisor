@@ -20,6 +20,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     bash-completion \
     btop \
     dbus-daemon \
+    ffmpegthumbnailer \
     firefox \
     foot \
     fuzzel \
@@ -28,6 +29,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     google-noto-color-emoji-fonts \
     google-noto-sans-fonts \
     grim \
+    gvfs \
     hostname \
     htop \
     imv \
@@ -40,6 +42,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     mesa-libGL \
     mesa-libgbm \
     mesa-vulkan-drivers \
+    mpv \
     nano \
     neovim \
     papirus-icon-theme \
@@ -52,8 +55,9 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     swaybg \
     systemd \
     systemd-udev \
-    thunar \
+    Thunar \
     tmux \
+    tumbler \
     util-linux \
     waybar \
     wayvnc \
@@ -62,6 +66,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     wl-clipboard \
     wlr-randr \
     wlrctl \
+    xdg-desktop-portal-gtk \
     xdg-user-dirs \
     xdg-utils \
     xorg-x11-server-Xwayland \
@@ -137,10 +142,59 @@ RUN cat > /usr/local/share/applications/thunar.desktop <<'DESK'
 Type=Application
 Name=Thunar File Manager
 Icon=org.xfce.thunar
-Exec=thunar
+Exec=thunar %U
 Categories=Utility;FileManager;
 MimeType=inode/directory;
 DESK
+
+# --- MIME defaults ---
+# Most types resolve without help: GIO falls back to mimeinfo.cache, built from
+# each installed app's own MimeType= line, so directories, text, HTML, video and
+# audio all land somewhere sane on their own.
+#
+# Images are the exception. imv ships two entries and only imv-dir.desktop
+# declares any MimeType, so every image resolves to it — and imv-dir opens the
+# whole *containing directory* as a playlist rather than the file that was
+# clicked. Pin imv.desktop so a double-click opens what was double-clicked.
+# (Swap to imv-dir.desktop to arrow through the folder instead; both are
+# NoDisplay=true, valid as defaults but hidden from the launcher.)
+#
+# text/html is the other one worth pinning: geany claims it alongside
+# text/plain, and an editor is the wrong default for a machine that has a
+# browser. The rest is pinned so a package added later cannot silently take a
+# type over. /etc/xdg wins over /usr/share; a user's ~/.config still wins over
+# this.
+#
+# No xdg-terminal-exec shim is needed here, unlike vncdesktop-wayfire: geany is
+# a GUI editor, so text/plain never takes GLib's Terminal=true path.
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/mimeapps.list <<'INI'
+[Default Applications]
+inode/directory=thunar.desktop
+image/png=imv.desktop
+image/jpeg=imv.desktop
+image/gif=imv.desktop
+image/webp=imv.desktop
+image/bmp=imv.desktop
+image/tiff=imv.desktop
+image/avif=imv.desktop
+image/svg+xml=imv.desktop
+text/plain=geany.desktop
+text/html=org.mozilla.firefox.desktop
+application/xhtml+xml=org.mozilla.firefox.desktop
+x-scheme-handler/http=org.mozilla.firefox.desktop
+x-scheme-handler/https=org.mozilla.firefox.desktop
+video/mp4=mpv.desktop
+video/x-matroska=mpv.desktop
+video/webm=mpv.desktop
+video/quicktime=mpv.desktop
+video/x-msvideo=mpv.desktop
+audio/mpeg=mpv.desktop
+audio/flac=mpv.desktop
+audio/ogg=mpv.desktop
+audio/x-wav=mpv.desktop
+INI
 
 # --- Sway config ---
 # Ctrl+Alt is the primary modifier — chosen because Super is typically

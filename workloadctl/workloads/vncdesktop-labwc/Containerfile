@@ -19,9 +19,12 @@ FROM registry.fedoraproject.org/fedora:44
 #   btop                  - system monitor
 #   cliphist              - clipboard history; pairs with wl-paste and fuzzel (Ctrl+Alt+V)
 #   dbus-daemon           - per-session D-Bus (waybar, mako, clipboard need it)
+#   ffmpegthumbnailer     - video thumbnails for tumbler
 #   foot                  - terminal emulator (native Wayland, lightweight)
 #   fuzzel                - app launcher (native Wayland, keyboard-driven)
 #   geany                 - lightweight GUI text editor
+#   gvfs                  - trash, mounts and network browsing for Thunar;
+#                           without it Thunar has no trash at all
 #   imv                   - image viewer (Wayland native)
 #   jetbrains-mono-fonts  - monospace font for the terminal
 #   labwc                 - Wayland compositor (wlroots-based)
@@ -30,18 +33,24 @@ FROM registry.fedoraproject.org/fedora:44
 #   mako                  - notification daemon (native Wayland)
 #   mesa-dri-drivers      - GBM / DRI for hardware-accelerated render node
 #   mesa-libEGL           - EGL for wlroots / wayvnc
+#   mpv                   - video / audio player
 #   papirus-icon-theme    - icon set (replaces minimal Adwaita default)
 #   procps-ng             - pkill, used by labwc autostart for housekeeping
 #   sudo                  - passwordless sudo for the desktop user
 #   swaybg                - wallpaper setter
-#   thunar                - file manager
+#   Thunar                - file manager (capital T is the real package name;
+#                           `thunar` only resolves via dnf's case-insensitive match)
 #   tini                  - minimal init / subreaper for zombie reaping
 #   tmux                  - terminal multiplexer
+#   tumbler               - thumbnail service Thunar calls out to
 #   waybar                - status bar
 #   wayvnc                - VNC server attaching to the labwc compositor
 #   wl-clipboard          - wl-copy / wl-paste for clipboard support
 #   wlr-randr             - sets the headless output resolution at runtime
+#   xdg-desktop-portal-gtk - GTK file chooser for portal-using apps (labwc pulls
+#                           in xdg-desktop-portal-wlr, which does screencast only)
 #   xdg-user-dirs         - creates ~/Documents, ~/Downloads etc. on first login
+#   xdg-utils             - xdg-open / xdg-mime
 #   xorg-x11-server-Xwayland - X11 compatibility; labwc aborts at startup
 #                              if its built-in xwayland support can't find
 #                              /usr/bin/Xwayland
@@ -51,10 +60,12 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     btop \
     cliphist \
     dbus-daemon \
+    ffmpegthumbnailer \
     foot \
     fuzzel \
     geany \
     git-core \
+    gvfs \
     imv \
     jetbrains-mono-fonts \
     labwc \
@@ -62,19 +73,23 @@ RUN dnf install -y --nodocs --setopt=install_weak_deps=False \
     mako \
     mesa-dri-drivers \
     mesa-libEGL \
+    mpv \
     papirus-icon-theme \
     procps-ng \
     rsync \
     sudo \
     swaybg \
-    thunar \
+    Thunar \
     tini \
     tmux \
+    tumbler \
     waybar \
     wayvnc \
     wl-clipboard \
     wlr-randr \
+    xdg-desktop-portal-gtk \
     xdg-user-dirs \
+    xdg-utils \
     xorg-x11-server-Xwayland \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -265,7 +280,7 @@ RUN cat > /usr/local/share/applications/thunar.desktop <<'EOF'
 Type=Application
 Name=Thunar File Manager
 Icon=org.xfce.thunar
-Exec=thunar
+Exec=thunar %U
 Categories=Utility;FileManager;
 MimeType=inode/directory;
 EOF
@@ -275,6 +290,50 @@ EOF
 # session start. Users who install extra apps and want them in the menu
 # can drop their own ~/.config/labwc/menu.xml.
 RUN labwc-menu-generator > /etc/xdg/labwc/menu.xml
+
+# --- MIME defaults ---
+# Most types resolve without help: GIO falls back to mimeinfo.cache, built from
+# each installed app's own MimeType= line.
+#
+# Images are the exception. imv ships two entries and only imv-dir.desktop
+# declares any MimeType, so every image resolves to it — and imv-dir opens the
+# whole *containing directory* as a playlist rather than the file that was
+# clicked. Pin imv.desktop so a double-click opens what was double-clicked.
+# (Swap to imv-dir.desktop to arrow through the folder instead; both are
+# NoDisplay=true, valid as defaults but hidden from the launcher.)
+#
+# This image ships no web browser, so text/html goes to geany — the editor is
+# the only thing that can open it — and there is deliberately no
+# x-scheme-handler/http(s) line, because nothing here could honour it. Adding a
+# browser means revisiting all three.
+#
+# No xdg-terminal-exec shim is needed here, unlike vncdesktop-wayfire: geany is
+# a GUI editor, so text/plain never takes GLib's Terminal=true path.
+
+RUN mkdir -p /etc/xdg && \
+    cat > /etc/xdg/mimeapps.list <<'EOF'
+[Default Applications]
+inode/directory=thunar.desktop
+image/png=imv.desktop
+image/jpeg=imv.desktop
+image/gif=imv.desktop
+image/webp=imv.desktop
+image/bmp=imv.desktop
+image/tiff=imv.desktop
+image/avif=imv.desktop
+image/svg+xml=imv.desktop
+text/plain=geany.desktop
+text/html=geany.desktop
+video/mp4=mpv.desktop
+video/x-matroska=mpv.desktop
+video/webm=mpv.desktop
+video/quicktime=mpv.desktop
+video/x-msvideo=mpv.desktop
+audio/mpeg=mpv.desktop
+audio/flac=mpv.desktop
+audio/ogg=mpv.desktop
+audio/x-wav=mpv.desktop
+EOF
 
 # --- App tool configs in /etc/xdg (XDG fallback path) ---
 # Minimal waybar config — avoids modules that crash in a container environment
