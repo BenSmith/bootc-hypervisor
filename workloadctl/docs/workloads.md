@@ -1070,7 +1070,17 @@ workloadctl exec fedora-vm -- bash
 workloadctl exec fedora-vm -- dnf upgrade -y
 ```
 
-The SSH key is injected via cloud-init on first boot. `exec` resolves the guest IP from the DHCP lease file automatically.
+The SSH key is injected via cloud-init on first boot, and `exec`/`shell` resolve the guest's address automatically — see [Address resolution](#address-resolution) for the sources and their order.
+
+#### Address resolution
+
+Every VM is wired with a `qemu-guest-agent` channel (a virtio-serial port named `org.qemu.guest_agent.0`), and that agent is the **first** source consulted for the guest's address. It is the only one that asks the guest itself, so it is equally correct on the managed bridge and on a custom LAN bridge, and it cannot go stale. Install and enable `qemu-guest-agent` in the guest to benefit — the shipped `virtual-forgejo` bundle's cloud-init does.
+
+Only the interface bearing the VM's derived MAC is trusted from the agent's reply. A guest reports every interface it has — podman/docker bridges, VPN tunnels, a nested VM's bridge — and none of those is reachable from the host; handing one back would be worse than returning nothing, since a non-empty answer stops the fallback chain. A guest that re-homes its NIC's address behind a MAC of its own (a bond, a macvlan) therefore falls through to the sources below, which key off the same MAC and would not have found it either.
+
+When the agent doesn't answer (not installed, not started, guest still booting) the lookup falls back to, in order: the **DHCP lease file** — managed bridge only, since a VM on a custom bridge leases from that network's own DHCP server; the **host neighbour table**, matched on the VM's derived MAC; and **mDNS** (`<name>.local`).
+
+The neighbour-table source is passive: it can only report a guest the host has spoken to recently, so a healthy but long-idle VM on a custom bridge falls out of it. That is precisely the gap the guest agent closes — without it, `exec` on such a VM can fail to find an address while the VM is up and serving traffic. The serial console works regardless.
 
 ### virtiofs Volumes
 

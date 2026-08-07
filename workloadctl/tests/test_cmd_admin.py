@@ -442,6 +442,80 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIn("workloadctl enable app", out)
 
 
+class DiagnoseVmScopeTest(unittest.TestCase):
+    """A VM workload must not be measured against the container substrate.
+
+    `workload-ensure-user` deliberately skips subuid/subgid and linger for
+    kind == "vm" (QEMU uses no user namespaces; the VM runs as a system service,
+    not a user session), and a VM has no container to inspect. Running those
+    checks anyway reported a healthy VM as UNHEALTHY and printed a fix
+    (`workload-ensure-user <name>`) that was itself the code that had chosen to
+    skip the step — so following it changed nothing.
+    """
+
+    SESSION_CHECKS = {
+        "subid_configured", "subid_derived", "subid_overlap",
+        "linger_enabled", "user_session", "runtime_dir",
+    }
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / "app").mkdir()
+        (self.tmp / "app" / "workload.toml").write_text(
+            '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
+        )
+        (self.tmp / "guest").mkdir()
+        (self.tmp / "guest" / "workload.toml").write_text(
+            '[workload]\nname = "guest"\n\n[vm]\nmemory = "2G"\nvcpus = 2\n'
+            'image = "example.com/guest:latest"\n\n'
+            '[vm.network]\nbridge = "br0"\n'
+        )
+        self.manager = mock.Mock()
+        self.manager.user_exists.return_value = True
+        self.manager.get_image_id.return_value = "sha256:0123456789ab"
+        # The point of this suite is what happens once the user *does* exist, so
+        # the real pwd lookup behind config.uid has to be answered; the value is
+        # never asserted on.
+        self.enterContext(mock.patch.object(
+            WorkloadConfig, "uid", new_callable=mock.PropertyMock,
+            return_value=10099))
+        # The battery runs end to end and the checks past the ones under test
+        # still shell out. Both doors get an answer this suite discards, and
+        # neither can make a check appear or vanish.
+        self.enterContext(mock.patch.object(
+            cmd_diagnose.subprocess, "run",
+            return_value=mock.Mock(returncode=1, stdout="", stderr="")))
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "service_active", return_value=(False, "inactive")))
+
+    def _check_names(self, name):
+        checks, _ = cmd_diagnose.collect_diagnose_checks(
+            WorkloadConfig(name), self.manager)
+        return {c["check"] for c in checks}
+
+    def test_vm_skips_rootless_session_checks(self):
+        names = self._check_names("guest")
+        self.assertEqual(names & self.SESSION_CHECKS, set())
+
+    def test_vm_skips_container_running(self):
+        self.assertNotIn("container_running", self._check_names("guest"))
+
+    def test_vm_still_gets_the_substrate_agnostic_checks(self):
+        """Gating is scoped to the container substrate, not a blanket opt-out —
+        a VM is still diagnosed on identity, units and service state."""
+        names = self._check_names("guest")
+        for expected in ("user_exists", "home_dir", "service_file",
+                         "service_enabled", "service_active"):
+            self.assertIn(expected, names)
+
+    def test_container_still_gets_them_all(self):
+        names = self._check_names("app")
+        self.assertIn("subid_configured", names)
+        self.assertIn("linger_enabled", names)
+        self.assertIn("container_running", names)
+
+
 class AskYesNoTest(unittest.TestCase):
     def test_yes_variants_true(self):
         for ans in ("y", "Y", "yes", "YES", " yes "):

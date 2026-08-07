@@ -23,6 +23,12 @@ from workload_lib import parse_volume_spec
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
 VM_SOCKET_DIR = Path("/run/workload-vm")
 
+# virtio-serial port name qemu-guest-agent binds to inside the guest. Fixed by
+# the agent, not by us — qemu-ga only attaches to a virtserialport with exactly
+# this name, so both the generator's -device line and any host-side client have
+# to agree on it.
+VM_GUEST_AGENT_PORT = "org.qemu.guest_agent.0"
+
 # UID/GID of the guest's primary interactive user. Cloud images assign the
 # first user (cloud-init's default user) uid/gid 1000, and our default
 # cloud-config pins it there explicitly. virtiofsd internally translates this
@@ -118,6 +124,17 @@ OVMF_VARS_CANDIDATES = [
 
 
 # --- VM helpers ---
+
+def vm_guest_agent_socket(name: str) -> Path:
+    """Host-side unix socket for this VM's qemu-guest-agent channel.
+
+    Separate from the QMP monitors: this carries the *guest agent* protocol
+    (qemu-ga inside the guest), not QEMU's own monitor protocol, so it can never
+    contend with qmp.sock's ExecStop system_powerdown or the exporter's
+    qmp-metrics.sock.
+    """
+    return VM_SOCKET_DIR / name / "ga.sock"
+
 
 def vm_mac_address(name: str) -> str:
     """Derive a stable, locally-administered unicast MAC from the workload name."""

@@ -492,7 +492,7 @@ class TestCmdInfo(unittest.TestCase):
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), \
                  patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
-                 patch('substrate_vm._vm_guest_ip', return_value=None), \
+                 patch('substrate_vm._vm_guest_addresses', return_value=[]), \
                  patch('sys.stdout', buf):
                 cmd_info.cmd_info(_args(json=True, workload='test-vm'), manager)
             data = json.loads(buf.getvalue())
@@ -543,7 +543,7 @@ class TestCmdInfo(unittest.TestCase):
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=self._base_run()), \
                  patch.object(cmd_info, '_vm_qmp_status', return_value='running'), \
-                 patch('substrate_vm._vm_guest_ip', return_value='192.168.1.5'), \
+                 patch('substrate_vm._vm_guest_addresses', return_value=['192.168.1.5']), \
                  patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                               return_value=10010), \
                  patch.object(WorkloadConfig, 'home_dir', new_callable=PropertyMock,
@@ -1051,7 +1051,7 @@ class TestCmdInfoMore(unittest.TestCase):
             buf = io.StringIO()
             with patch('subprocess.run', side_effect=fake_run), \
                  patch.object(cmd_info, '_vm_qmp_status', return_value=None), \
-                 patch('substrate_vm._vm_guest_ip', return_value=None), \
+                 patch('substrate_vm._vm_guest_addresses', return_value=[]), \
                  patch.object(WorkloadConfig, 'uid', new_callable=PropertyMock,
                               return_value=10030), \
                  patch.object(WorkloadConfig, 'home_dir', new_callable=PropertyMock,

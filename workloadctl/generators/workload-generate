@@ -76,7 +76,7 @@ try:
     from vm import (
         VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
         VM_BRIDGE_FIREWALLD_ZONE, VM_REBOOT_EXIT_CODE,
-        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID,
+        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID, VM_GUEST_AGENT_PORT,
         vm_mac_address, find_ovmf_code, parse_memory_mib,
     )
     from validation import valid_userns_mode, validate_workload_config
@@ -1873,6 +1873,23 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # Memory balloon — allows host to reclaim idle guest memory
     if vm_cfg.get("balloon", True):
         qemu_args.append("-device virtio-balloon-pci")
+
+    # qemu-guest-agent channel. The guest agent is the only *authoritative*
+    # source for a guest's addresses: it asks the guest's own kernel, so it works
+    # on a managed bridge and on a pre-existing LAN bridge alike, and needs
+    # neither a dnsmasq lease nor a populated host ARP table nor working mDNS.
+    # Every other source is an inference the host makes from outside — see the
+    # fallback chain in substrate_vm._vm_guest_addresses, which this fronts.
+    #
+    # Always wired, with no [vm] toggle: a guest without qemu-ga installed simply
+    # never opens its end of the port, which costs one idle virtio-serial device
+    # and changes nothing else. Making it conditional would only create a second
+    # way for address lookup to silently lose its best source.
+    qemu_args += [
+        "-device virtio-serial-pci",
+        f"-chardev socket,id=chr-qga,path={socket_dir}/ga.sock,server=on,wait=off",
+        f"-device virtserialport,chardev=chr-qga,name={VM_GUEST_AGENT_PORT}",
+    ]
 
     # Console + QMP + display.
     # Two QMP monitors: qmp.sock is the control channel (notify/info/ExecStop

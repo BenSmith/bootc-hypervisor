@@ -1276,12 +1276,20 @@ class TestCapabilityMatrix(unittest.TestCase):
     # must not be conflated with the NotApplicable below.
     def test_vm_addresses_returns_guest_ip(self):
         substrate = VMSubstrate(self._vm_config(), None)
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'):
+        with patch.object(_vm_mod, '_vm_guest_addresses', return_value=['10.0.0.5']):
             self.assertEqual(substrate.addresses(), ['10.0.0.5'])
+
+    def test_vm_addresses_passes_through_multiple(self):
+        """The guest agent can report several; addresses() must not truncate to
+        one — that is _guest_ip's job, not this primitive's."""
+        substrate = VMSubstrate(self._vm_config(), None)
+        with patch.object(_vm_mod, '_vm_guest_addresses',
+                          return_value=['10.0.0.5', 'fd00::5']):
+            self.assertEqual(substrate.addresses(), ['10.0.0.5', 'fd00::5'])
 
     def test_vm_addresses_empty_when_unresolvable(self):
         substrate = VMSubstrate(self._vm_config(), None)
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None):
+        with patch.object(_vm_mod, '_vm_guest_addresses', return_value=[]):
             self.assertEqual(substrate.addresses(), [])
 
     # ContainerSubstrate: addresses absent → NotApplicable (a rootless container
@@ -2920,7 +2928,13 @@ class TestVmGuestIp(unittest.TestCase):
             try:
                 mock_lease.exists.return_value = True
                 mock_lease.read_text.return_value = lease_path.read_text()
-                with patch('pathlib.Path.exists', return_value=True):
+                # Blanket-patching Path.exists also makes the guest agent socket
+                # look present, so stub the agent out: this case is about the
+                # lease branch, and without it the lookup spends the agent
+                # timeout connecting to a socket that isn't really there.
+                with patch('pathlib.Path.exists', return_value=True), \
+                     patch.object(_vm_mod, '_vm_guest_agent_addresses',
+                                  return_value=[]):
                     ip = _vm_mod._vm_guest_ip('myvm')
             finally:
                 lease_path.unlink()

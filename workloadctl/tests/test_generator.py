@@ -1781,6 +1781,33 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn("-m 2048", svc)
         self.assertNotIn("-m 2048M", svc)
 
+    def test_guest_agent_channel_is_wired(self):
+        # qemu-guest-agent only attaches to a virtserialport named exactly
+        # org.qemu.guest_agent.0. It is the one address source that asks the
+        # guest instead of inferring from host state, so `exec`/`shell` on a VM
+        # bridged onto a pre-existing LAN (no workloadctl dnsmasq to lease from,
+        # a host ARP table that forgets an idle guest) depend on this device
+        # being present.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-device virtio-serial-pci", svc)
+        self.assertIn(
+            "-chardev socket,id=chr-qga,"
+            "path=/run/workload-vm/fedora-vm/ga.sock,server=on,wait=off", svc)
+        self.assertIn(
+            "-device virtserialport,chardev=chr-qga,name=org.qemu.guest_agent.0",
+            svc)
+
+    def test_guest_agent_socket_path_matches_the_client(self):
+        # The generator and the lookup client must agree on the path; nothing
+        # but this test connects the two sides.
+        from vm import vm_guest_agent_socket
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn(f"path={vm_guest_agent_socket('fedora-vm')},", svc)
+
     def test_vm_restart_defaults_to_always(self):
         # QEMU runs with -no-reboot, so a guest reboot is a clean exit;
         # the default must be Restart=always or the VM stays down after its

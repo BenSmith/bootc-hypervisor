@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shlex
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ from vm import (
     VM_DHCP_LEASE_FILE,
     VM_SOCKET_DIR,
     parse_memory_mib,
+    vm_guest_agent_socket,
     vm_mac_address,
 )
 from vm_metrics import get_vm_qmp_metrics
@@ -96,16 +98,137 @@ def _vm_ssh_command(
     return cmd
 
 
-def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
-    """Look up the VM's IP by hostname in dnsmasq leases, MAC via ARP, or mDNS.
+# How long to wait for qemu-guest-agent to answer. Every VM is wired with the
+# agent channel (see generate_vm_service), but a guest that hasn't installed or
+# started qemu-ga never opens its end — QEMU still accepts our connection, so a
+# missing agent looks exactly like a slow one and can only be told apart by
+# waiting. `exec` and `shell` sit behind this, so the budget is small: agent
+# present means a local unix-socket round trip (milliseconds), and agent absent
+# costs this once before falling through to the host-side sources.
+GUEST_AGENT_TIMEOUT = 1.5
 
-    The dnsmasq lease file is only authoritative when workload-bridge.service
-    actually manages a bridge it created (signalled by /run/workload-vm/
-    bridge-managed). On a pre-existing LAN bridge (e.g. br0) no dnsmasq runs
-    and any old lease entries are stale, so we go straight to ARP.
 
-    Falls back to mDNS ({name}.local) when avahi/nss-mdns are available.
+def _guest_agent_sync(qga: QMPClient, max_messages: int = 8) -> None:
+    """Handshake that guarantees the next reply we read is the one we asked for.
+
+    The channel is a stream that outlives any single client. If a previous
+    lookup timed out after sending a command but before reading its reply — the
+    GUEST_AGENT_TIMEOUT case, so not hypothetical — that reply is still queued
+    in the port when the next connection opens, and a naive read would take it
+    as the answer to a question it never asked. guest-sync carries a nonce, so
+    anything ahead of the matching reply is provably stale and discarded.
+
+    Raises (like any other agent failure) when the nonce never comes back; the
+    caller treats that as "no agent" and falls through.
     """
+    token = random.randint(1, 2**31)
+    reply = qga.execute("guest-sync", {"id": token})
+    for _ in range(max_messages):
+        if reply.get("return") == token:
+            return
+        message = qga.next_message()
+        if message is None:
+            break
+        reply = message
+    raise ConnectionError("guest agent did not echo the sync token")
+
+
+def _vm_guest_agent_addresses(name: str, mac: str) -> list[str]:
+    """Addresses reported by qemu-guest-agent, best first; [] if unavailable.
+
+    The only source that asks the *guest* rather than inferring from outside, so
+    it is equally correct on the managed bridge and on a pre-existing LAN bridge,
+    and it needs no DHCP lease, no ARP entry and no working mDNS. Best-effort by
+    construction — an absent agent, a guest that hasn't opened the port, and a
+    malformed reply are all ordinary states here, not errors, so every failure
+    returns [] and lets the caller fall through to the host-side sources.
+
+    **Only the NIC carrying the MAC we assigned this workload is trusted.** A
+    guest routinely has interfaces the host cannot reach — a podman/docker
+    bridge, a nested VM's bridge, a VPN tun — and the agent reports all of them.
+    Returning one would be worse than returning nothing: a non-empty answer
+    short-circuits the fallback chain, so `exec` would SSH at an unroutable
+    address instead of trying the ARP source that would have found the real one.
+    Falling through costs nothing by comparison, because the ARP and lease
+    sources key off that same MAC and so cannot resolve a NIC this rejects
+    either.
+
+    Loopback and link-local addresses are dropped as unreachable (link-local
+    needs a scope id the SSH path doesn't carry). IPv4 sorts ahead of IPv6 —
+    both work over SSH, but the v4 address is the one an operator recognises
+    from the lease and ARP paths.
+    """
+    sock_path = vm_guest_agent_socket(name)
+    if not sock_path.exists():
+        return []
+
+    qga = QMPClient()
+    try:
+        qga.connect(sock_path, timeout=GUEST_AGENT_TIMEOUT,
+                    recv_timeout=GUEST_AGENT_TIMEOUT)
+        # No negotiate(): the guest agent protocol shares QMP's newline-JSON
+        # framing but has no greeting and no qmp_capabilities — reading for one
+        # would block until the recv timeout on every call.
+        _guest_agent_sync(qga)
+        reply = qga.execute("guest-network-get-interfaces")
+        interfaces = reply.get("return") or []
+    except Exception:
+        return []
+    finally:
+        qga.close()
+
+    found = []
+    for iface in interfaces:
+        if not isinstance(iface, dict):
+            continue
+        if (iface.get("hardware-address") or "").lower() != mac.lower():
+            continue
+        for addr in iface.get("ip-addresses") or []:
+            ip = addr.get("ip-address")
+            if not ip or ip.startswith(("127.", "169.254.", "fe80:")) or ip == "::1":
+                continue
+            found.append((addr.get("ip-address-type") == "ipv6", ip))
+
+    return [ip for _, ip in sorted(found)]
+
+
+def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
+    """The single best address for this VM, or None if nothing resolves it.
+
+    Thin wrapper over _vm_guest_addresses for the SSH paths, which need exactly
+    one address.
+    """
+    addresses = _vm_guest_addresses(name, bridge)
+    return addresses[0] if addresses else None
+
+
+def _vm_guest_addresses(name: str, bridge: str = VM_BRIDGE_NAME) -> list[str]:
+    """Resolve the VM's addresses, best source first.
+
+    Four sources, in descending order of authority:
+
+    1. **qemu-guest-agent** — the guest's own answer. Correct on any bridge,
+       and the only source that does not depend on host-side state going stale.
+    2. **dnsmasq leases** — authoritative only when workload-bridge.service
+       actually manages a bridge it created (signalled by
+       /run/workload-vm/bridge-managed). On a pre-existing LAN bridge no dnsmasq
+       of ours runs and any lease entries left in that file are stale, so it is
+       skipped entirely rather than trusted.
+    3. **the host neighbour table**, matched on the MAC we assigned the VM.
+       Passive: it can only report a guest the host has recently talked to, so
+       a perfectly healthy long-idle VM drops out of it once the entry is
+       garbage-collected. That gap is exactly what source 1 closes.
+    4. **mDNS** ({name}.local), when avahi/nss-mdns are wired up on the host.
+
+    Returns [] when nothing resolves — a runtime condition (not booted yet, no
+    lease, no agent), not an error.
+    """
+    mac = vm_mac_address(name)
+
+    agent = _vm_guest_agent_addresses(name, mac)
+    if agent:
+        return agent
+
     if Path("/run/workload-vm/bridge-managed").exists():
         lease_file = VM_DHCP_LEASE_FILE
         if lease_file.exists():
@@ -114,12 +237,11 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
                     parts = line.split()
                     # dnsmasq lease format: <timestamp> <mac> <ip> <hostname> <client-id>
                     if len(parts) >= 4 and parts[3] == name:
-                        return parts[2]
+                        return [parts[2]]
             except OSError:
                 pass
 
     # Pre-existing LAN bridge: no lease file.  Look up by the VM's stable MAC.
-    mac = vm_mac_address(name)
     try:
         result = subprocess.run(
             ["ip", "neigh", "show", "dev", bridge],
@@ -135,7 +257,7 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
             if "lladdr" in parts:
                 mac_idx = parts.index("lladdr") + 1
                 if mac_idx < len(parts) and parts[mac_idx].lower() == mac.lower():
-                    return parts[0]
+                    return [parts[0]]
     except OSError:
         pass
 
@@ -148,11 +270,11 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
         if result.returncode == 0:
             parts = result.stdout.split()
             if parts:
-                return parts[0]
+                return [parts[0]]
     except (OSError, subprocess.TimeoutExpired):
         pass
 
-    return None
+    return []
 
 
 class VMSubstrate(Substrate):
@@ -278,10 +400,43 @@ class VMSubstrate(Substrate):
         """The single address the SSH paths need; None if not resolvable yet."""
         return _vm_guest_ip(self.config.name, self.config.vm_bridge)
 
+    def _report_no_guest_ip(self) -> None:
+        """Explain an unresolvable address in terms of the sources we tried.
+
+        The sources differ by bridge, so a single fixed hint was wrong half the
+        time: on a pre-existing LAN bridge there is no dnsmasq of ours and the
+        lease file the old message pointed at holds nothing but stale entries.
+        """
+        name = self.config.name
+        bridge = self.config.vm_bridge
+        error(f"Error: could not determine IP for VM '{name}'")
+        if not vm_guest_agent_socket(name).exists():
+            # Two different states, and guessing between them would be wrong
+            # half the time: a stopped VM has no socket, and so does a running
+            # VM whose unit was generated before the agent channel existed —
+            # which is every VM until it is next regenerated and restarted.
+            error(f"  No guest agent channel. Either the VM is not running, or "
+                  f"its unit predates the channel — 'workloadctl enable {name}' "
+                  f"then restart the VM to add it.")
+        else:
+            error("  qemu-guest-agent did not answer; install and enable it in "
+                  "the guest for address lookup that does not depend on the host.")
+        if bridge == VM_BRIDGE_NAME:
+            error(f"  Checked {VM_DHCP_LEASE_FILE} for a lease.")
+        else:
+            error(f"  On bridge {bridge} (not workloadctl-managed) the guest "
+                  f"leases from that network's own DHCP, so the fallback is the "
+                  f"host neighbour table — which only lists a guest the host has "
+                  f"talked to recently.")
+        error(f"  Console access always works: workloadctl shell {name}")
+
     def addresses(self) -> list[str]:
-        """The guest's addresses on the VM bridge; empty until it has a lease."""
-        ip = self._guest_ip()
-        return [ip] if ip else []
+        """The guest's addresses, best first; empty until one resolves.
+
+        More than one only when qemu-guest-agent answered — the host-side
+        sources each yield a single address by construction.
+        """
+        return _vm_guest_addresses(self.config.name, self.config.vm_bridge)
 
     def exec(
         self,
@@ -291,13 +446,7 @@ class VMSubstrate(Substrate):
     ) -> int:
         guest_ip = self._guest_ip()
         if not guest_ip:
-            error(
-                f"Error: could not determine IP for VM '{self.config.name}'",
-            )
-            error(
-                f"  Check {VM_DHCP_LEASE_FILE} or use "
-                f"'workloadctl shell {self.config.name}' (console).",
-            )
+            self._report_no_guest_ip()
             raise LifecycleError(1)
         ssh_cmd = _vm_ssh_command(self.config, guest_ip, exec_args=argv)
         return subprocess.run(ssh_cmd).returncode
@@ -367,13 +516,7 @@ class VMSubstrate(Substrate):
         elif action == "reboot":
             guest_ip = self._guest_ip()
             if not guest_ip:
-                error(
-                    f"Error: could not determine IP for VM '{self.config.name}'",
-                )
-                error(
-                    f"  Check {VM_DHCP_LEASE_FILE} or use "
-                    f"'workloadctl shell {self.config.name}' (console).",
-                )
+                self._report_no_guest_ip()
                 raise LifecycleError(1)
             # Fire the soft-reboot detached via systemd-run --no-block: a direct
             # `systemctl soft-reboot` tears down sshd mid-command, so the SSH

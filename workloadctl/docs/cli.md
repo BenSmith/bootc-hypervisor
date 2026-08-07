@@ -700,7 +700,16 @@ workloadctl exec <workload>[/<container>] <command> [args...]
 
 **Container workloads:** Runs the command inside the container. For multi-container workloads, the `/<container>` suffix is required.
 
-**VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/.ssh/id_ed25519`. The guest IP is resolved from the DHCP lease file. The guest user defaults to `vm.user` from the workload config (or `root`).
+**VM workloads:** Runs the command over SSH using the per-workload key at `/var/lib/workloads/<name>/.ssh/id_ed25519`. The guest user defaults to `vm.user` from the workload config (or `root`).
+
+The guest address is resolved from four sources, in descending order of authority:
+
+1. **qemu-guest-agent**, over the `org.qemu.guest_agent.0` virtio-serial channel every VM is wired with. The guest's own answer, so it is correct on any bridge and never goes stale — install and enable `qemu-guest-agent` in the guest to get it. Only the interface carrying the MAC workloadctl assigned the VM is trusted; a guest reports its podman/docker bridges and VPN tunnels too, and those are not addresses the host can reach.
+2. **The DHCP lease file** (`/var/lib/dnsmasq/workload-bridge.leases`), only on the workloadctl-managed bridge. A VM bridged onto a pre-existing LAN interface leases from that network's own DHCP server, so this file holds nothing relevant to it and is skipped.
+3. **The host neighbour table**, matched on the VM's derived MAC. Passive — it only lists a guest the host has talked to recently, so a healthy but idle VM can drop out of it.
+4. **mDNS** (`<name>.local`), when the host has avahi/nss-mdns wired up.
+
+If none resolve, `workloadctl shell <name>` still reaches the serial console.
 
 Both substrates pass the command as argv, not as a shell line: the arguments you write are the arguments the process receives, with no second round of word-splitting inside the guest. Shell syntax therefore needs an explicit shell, exactly as it does for a container:
 
@@ -790,6 +799,14 @@ workloadctl diagnose [--json] <workload>
 | `--json` | Output per-check results as JSON; exit non-zero if any check failed |
 
 Useful for diagnosing a workload that fails to start.
+
+**VM workloads get a narrower battery.** The subuid/subgid, linger, user-session,
+`/run/user/<uid>` and container-running checks describe how a *container*
+workload runs; a VM uses no user namespaces and its QEMU is a system service with
+its own runtime directory, so `workload-ensure-user` skips those setup steps for
+`[vm]` bundles and `diagnose`/`doctor` skip the matching checks. What remains —
+identity, home directory, unit files, service state, the shared bridge — applies
+to both substrates.
 
 **Subid range checks.** Beyond "subuid/subgid configured", two checks assert the
 range is the *right* one. `subid_derived` compares it against the derived range

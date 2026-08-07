@@ -599,6 +599,17 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     checks = []
     linger_enabled = False  # set by Check 3; referenced by the session/runtime checks
 
+    # The rootless-podman session checks below (subuid/subgid ranges, linger, the
+    # user@<uid> manager and its /run/user/<uid>) describe how a *container*
+    # workload runs. A VM has none of it: QEMU uses no user namespaces, and the
+    # VM service is a system unit with User=<workload user> and its own
+    # RuntimeDirectory=workload-vm/<name>, so it never needs a user manager to be
+    # up. workload-ensure-user says as much and deliberately skips both steps for
+    # kind == "vm" — which made these checks unfixable as well as wrong: they
+    # failed, and the fix they printed (`workload-ensure-user <name>`) was the
+    # very code path that had decided not to do the thing.
+    session_scoped = not config.is_vm
+
     def _check(name, passed, message, fix=None):
         entry = {"check": name, "passed": passed, "message": message}
         if fix:
@@ -614,7 +625,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                fix="sudo workloadctl enable " + config.name)
 
     # Check 2: Subuid/subgid configured
-    if user_exists:
+    if user_exists and session_scoped:
         with_entries = subid_files_with_entries(config.username)
         subuid_exists = subuid_file() in with_entries
         subgid_exists = subgid_file() in with_entries
@@ -649,7 +660,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                 _check("subid_overlap", *subid_overlap_check(entries, window))
 
     # Check 3: Linger enabled
-    if user_exists:
+    if user_exists and session_scoped:
         linger_result = subprocess.run(
             ["loginctl", "show-user", str(config.uid), "--property=Linger", "--value"],
             capture_output=True, text=True
@@ -731,7 +742,7 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         _check("gpu_selinux", passed, message, fix=fix)
 
     # Check 4: Runtime directory exists
-    if user_exists:
+    if user_exists and session_scoped:
         runtime_dir = Path(f"/run/user/{config.uid}")
         if runtime_dir.exists():
             _check("runtime_dir", True, f"Runtime directory exists: {runtime_dir}")
@@ -896,8 +907,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                if config.enabled else "Workload is disabled in config")
         _check("service_active", False, f"Service not active: {service_state}", fix=fix)
 
-    # Check 10: Container(s) running
-    if user_exists:
+    # Check 10: Container(s) running. A VM workload has no container to inspect —
+    # its liveness is the QEMU service's own state, already covered by Check 9,
+    # and `podman container inspect workload-<name>` under the VM's user would
+    # simply never find anything.
+    if user_exists and not config.is_vm:
         if config.is_multi:
             for cname in config.container_names():
                 pn = config.podman_container_name(cname)

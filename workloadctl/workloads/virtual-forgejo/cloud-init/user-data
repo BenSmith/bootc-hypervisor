@@ -202,10 +202,20 @@ write_files:
       # (enabled below) come up on the patched kernel.
       dnf upgrade --refresh -y
 
-      # qemu-guest-agent is bound to a virtio-serial channel we don't currently
-      # wire into the qemu cmdline; `--now` would block forever waiting for that
-      # device. Enable without starting so a future channel wiring just works.
+      # qemu-guest-agent binds to the org.qemu.guest_agent.0 virtio-serial port,
+      # which the generator wires into every VM's qemu cmdline. That is what
+      # lets `workloadctl exec/shell` find this VM's address on a LAN bridge,
+      # where there is no workloadctl-managed dnsmasq to lease from.
+      #
+      # Start it only once the port is actually present. The seed can be
+      # re-rendered (`update --recreate`) against a VM still running a unit
+      # generated before the channel existed, and there `--now` blocks waiting
+      # for a device that will not appear until the next full restart. Enabling
+      # unconditionally means it starts on that restart either way.
       systemctl enable qemu-guest-agent || true
+      if [ -e /dev/virtio-ports/org.qemu.guest_agent.0 ]; then
+        systemctl start qemu-guest-agent || true
+      fi
       systemctl enable --now systemd-timesyncd || true
 
       # mDNS via systemd-resolved alone — it both publishes this VM's hostname
