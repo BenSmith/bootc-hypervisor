@@ -28,6 +28,7 @@ from workload_lib import (
     subuid_file,
     units_outdated,
     units_from_other_build,
+    workload_data_dir,
     workload_root_dir,
     WORKLOADCTL_VERSION,
     WORKLOADS_BASE,
@@ -589,6 +590,64 @@ def subid_overlap_check(
             "already gone wrong rather than one that might")
 
 
+# An MCS category set on a file under data/ is a fault signature, not a
+# configuration. Ordinary container writes into a bind-mounted volume land at
+# plain `s0` — verified by creating files inside running containers in every
+# volume of two workloads, one with a per-workload SELinux type and one without.
+# So categories there mean something stamped those files with one specific
+# container's level, and MCS grants access only when the file's category set is
+# a SUBSET of the reading process's. Podman draws a fresh random pair per
+# container, so the next start is denied — while mode and owner still read as
+# correct, which is what makes this expensive to diagnose. `ls -l` shows nothing;
+# only `ls -Z` does.
+#
+# state/ is deliberately out of scope. It holds the rootless podman graphroot,
+# where per-container MCS labelling is exactly right and is rewritten as
+# containers come and go; scanning it would fire on every healthy workload.
+#
+# The glob is anchored on the level field on purpose: the obvious `*:c*` also
+# matches the *type* in `...:container_file_t:s0` and reports every file as bad.
+MCS_SCAN_TIMEOUT = 60
+MCS_SAMPLE_PATHS = 3
+
+
+def _check_mcs_labels(config, _check) -> None:
+    """Flag files under data/ carrying SELinux MCS categories.
+
+    Stays silent when the scan cannot run at all (SELinux disabled, findutils
+    built without -context, timeout on a very large tree): an untestable
+    condition must not be recorded as a pass.
+    """
+    data_dir = workload_data_dir(config.name)
+    if not data_dir.is_dir():
+        return
+    try:
+        found = subprocess.run(
+            ["find", str(data_dir), "-context", "*:s0:c*", "-print"],
+            capture_output=True, text=True, timeout=MCS_SCAN_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if found.returncode != 0:
+        return
+
+    paths = [p for p in found.stdout.splitlines() if p]
+    if not paths:
+        _check("mcs_labels", True,
+               f"No MCS-categorised files under {data_dir}")
+        return
+
+    sample = ", ".join(paths[:MCS_SAMPLE_PATHS])
+    if len(paths) > MCS_SAMPLE_PATHS:
+        sample += f", ... (+{len(paths) - MCS_SAMPLE_PATHS} more)"
+    _check("mcs_labels", False,
+           f"{len(paths)} file(s) under {data_dir} carry SELinux MCS "
+           f"categories and may be unreadable to the container despite correct "
+           f"mode and owner: {sample}",
+           fix=f"sudo find {data_dir} -context '*:s0:c*' "
+               f"-exec chcon -l s0 {{}} +")
+
+
 def collect_diagnose_checks(config, manager: WorkloadManager):
     """Run the diagnose check battery and return (checks, passed).
 
@@ -947,6 +1006,8 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             _check("volume_paths", False,
                    f"Missing volume paths: {', '.join(missing_volumes)}",
                    fix="sudo mkdir -p " + " ".join(missing_volumes))
+
+    _check_mcs_labels(config, _check)
 
     # Check 12: UID mapping (for userns=host)
     userns_mode = config.config.get("security", {}).get("userns", "keep-id")

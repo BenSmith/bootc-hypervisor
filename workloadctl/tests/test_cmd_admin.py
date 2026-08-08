@@ -12,6 +12,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import tempfile
 import tomllib
 import types
@@ -1898,6 +1899,96 @@ class CmdEditTomlTest(unittest.TestCase):
         self.assertIn("Changes applied", out)
         self.assertTrue(any("setup" in r for r in restarts),
                         f"setup oneshot not restarted: {restarts}")
+
+
+class DiagnoseMcsLabelTest(unittest.TestCase):
+    """Files under data/ carrying SELinux MCS categories.
+
+    The failure this detects is invisible to every ordinary check: mode and
+    owner are correct, `ls -l` shows nothing, and the container simply gets
+    EPERM on files a previous instance wrote. Found in the field as 5,867
+    unreadable files in one workload and 5 in another, where the latter took
+    down an unrelated package install because pip walks every distribution's
+    metadata and one unreadable PKG-INFO parsed as an empty version.
+
+    An untestable condition (no SELinux, findutils without -context) must stay
+    silent rather than report a pass — a green result has to mean the scan ran.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(
+            workload_lib, "WORKLOADS_BASE", self.tmp))
+        (self.tmp / "app" / "data").mkdir(parents=True)
+        self.config = mock.Mock()
+        self.config.name = "app"
+
+    def _run(self, returncode=0, stdout="", side_effect=None):
+        checks = []
+
+        def _check(name, passed, message, fix=None):
+            entry = {"check": name, "passed": passed, "message": message}
+            if fix:
+                entry["fix"] = fix
+            checks.append(entry)
+
+        kwargs = ({"side_effect": side_effect} if side_effect
+                  else {"return_value": mock.Mock(returncode=returncode,
+                                                  stdout=stdout)})
+        with mock.patch.object(cmd_diagnose.subprocess, "run", **kwargs) as run:
+            cmd_diagnose._check_mcs_labels(self.config, _check)
+        self.run_mock = run
+        return checks
+
+    def test_categorised_files_fail_with_count_and_fix(self):
+        checks = self._run(stdout="/a/one\n/a/two\n")
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(checks[0]["passed"])
+        self.assertIn("2 file(s)", checks[0]["message"])
+        self.assertIn("chcon -l s0", checks[0]["fix"])
+
+    def test_clean_tree_passes(self):
+        checks = self._run(stdout="")
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0]["passed"])
+
+    def test_sample_is_truncated(self):
+        checks = self._run(stdout="".join(f"/a/{i}\n" for i in range(10)))
+        self.assertIn("(+7 more)", checks[0]["message"])
+
+    def test_find_without_context_support_is_silent(self):
+        # findutils built without SELinux exits non-zero on -context. Reporting
+        # that as a pass would assert something never measured.
+        self.assertEqual(self._run(returncode=1), [])
+
+    def test_timeout_is_silent(self):
+        self.assertEqual(
+            self._run(side_effect=subprocess.TimeoutExpired("find", 60)), [])
+
+    def test_missing_find_is_silent(self):
+        self.assertEqual(self._run(side_effect=OSError("no find")), [])
+
+    def test_absent_data_dir_is_silent(self):
+        self.config.name = "nosuch"
+        self.assertEqual(self._run(), [])
+
+    def test_glob_is_anchored_on_the_level_field(self):
+        """`*:c*` also matches the type in `...:container_file_t:s0`, which
+        reports every file on the host as broken. The level anchor is the
+        whole correctness of the predicate."""
+        self._run(stdout="")
+        argv = self.run_mock.call_args.args[0]
+        self.assertIn("*:s0:c*", argv)
+        self.assertNotIn("*:c*", argv)
+
+    def test_scan_is_scoped_to_data_not_state(self):
+        """state/ is the rootless podman graphroot, where per-container MCS
+        labelling is correct and constant. Scanning it fires on every healthy
+        workload."""
+        self._run(stdout="")
+        argv = self.run_mock.call_args.args[0]
+        target = Path(argv[1])
+        self.assertEqual(target, self.tmp / "app" / "data")
 
 
 if __name__ == "__main__":
