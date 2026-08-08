@@ -63,10 +63,28 @@ If you must drive multiple GPUs from the Comfy Workflow tab directly, use
 **MultiGPU → Use All** at the top left, which spreads queued requests across
 backends.
 
-The trade-off is stated in `workload.toml`: SwarmUI assumes it owns every card
-it can see, so do not co-tenant it with a streaming desktop
-(`sunshine-streaming`, `vncdesktop-sway`) without pinning `gpu` to a UUID
-first.
+## Sharing cards with other GPU workloads
+
+Running SwarmUI on a machine that is also driving a display is the normal case.
+The caveat is contention, not exclusivity, and it scales with what the neighbour
+actually holds: an idle compositor (`vncdesktop-sway`) is a few hundred MB and
+co-tenants fine, while a streaming desktop with a game running
+(`sunshine-streaming`, `wolf-game-streaming`) can take 8–14 GB and will not fit
+alongside a diffusion graph on a 16 GB card.
+
+SwarmUI competes harder than a hand-driven ComfyUI because it queues onto every
+registered backend at once. Even so, the symptom is usually a slow or failed
+generation rather than a broken host — ComfyUI adapts to the VRAM it finds, and
+the offload dial is per-backend under **Server → Backends** (see [Tuning](#tuning)).
+
+What makes a server different from a workstation is whose job dies. On your own
+desktop a shortfall fails the generation you started; on a host serving desktop
+sessions the compositor can be what loses its allocation instead. If that
+matters, reserve a card:
+
+```toml
+gpu = "nvidia:GPU-<uuid>"     # nvidia-ctk cdi list
+```
 
 ## Models — where things go
 
