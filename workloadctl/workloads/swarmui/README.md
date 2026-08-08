@@ -79,8 +79,8 @@ container from the outside. That is why `start_period` is 180s.
 
 ## Multi-GPU: one backend per card
 
-This is the reason to prefer SwarmUI on this host, and it is *not* automatic —
-you have to register the backends.
+This is the reason to prefer SwarmUI on a multi-GPU machine, and it is *not*
+automatic — you have to register the backends.
 
 **Server → Backends → Add Backend → ComfyUI Self-Starting.** Add one per card,
 incrementing `GPU_ID` each time (`0`, `1`, …). SwarmUI then routes and queues
@@ -135,21 +135,30 @@ silently invisible rather than producing an error:
 
 **`text_encoders/` vs `clip/`.** Both are seeded and both are scanned, so this is
 easy to get wrong in a way that still works — until it does not. `text_encoders/`
-is the current name and is where SwarmUI's own autodownloader writes: requesting
-Z-Image on a fresh instance pulled its Qwen3-4B encoder to `text_encoders/`, not
-`clip/`. Put new encoders there. `clip/` is the older name, kept for the CLIP-L/G
-encoders of the SDXL era and for backwards compatibility.
+is the current name and where SwarmUI's own autodownloader writes; put new
+encoders there. `clip/` is the older name, kept for the CLIP-L/G encoders of the
+SDXL era and for backwards compatibility.
 
-**GGUF works with no setup.** SwarmUI autoinstalls the ComfyUI-GGUF node the
-first time it sees a GGUF diffusion model, so quantised models can go straight
-into `diffusion_models/`.
+**GGUF costs one click, and it is not durable.** The first time SwarmUI needs to
+load a GGUF it offers to install city96's ComfyUI-GGUF node — a prompt you accept,
+not an automatic step. The node is cloned into
+`src/BuiltinExtensions/ComfyUIBackend/DLNodes/`, which is **inside the image, not
+a volume**, so it does not survive `recreate` or a rebuild and has to be accepted
+again. Its pip step can also fail on its own; `workloadctl logs swarmui` shows
+whether the install completed.
 
-Most modern models autodownload their matching text encoder and VAE on first
-use, so you do not have to supply those by hand unless you want a specific one —
-which, see below, you do.
+Most modern models autodownload their matching text encoder and VAE on first use,
+so those rarely need supplying by hand.
 
-Staging note: `/home/desktop/models-staging` is on the same `hot-default` LV as
-`/var/lib/workloads`, so moving models in is a rename, not a copy.
+Staging note: stage large downloads on the same filesystem as
+`/var/lib/workloads` so moving one in is a rename rather than a multi-GB copy. A
+`mv` keeps the *source's* SELinux label where a `cp` inherits the destination's,
+so relabel afterwards — otherwise the container gets EPERM on files whose mode
+and owner look perfectly correct:
+
+```bash
+sudo chcon -R -t container_file_t /var/lib/workloads/swarmui/data/models
+```
 
 ## Text encoders
 
@@ -161,6 +170,11 @@ advanced, toggleable parameter of subtype `Clip`, so it lists everything in
 checks the parameter before its own built-in default, so nothing silently falls
 back. Each family has its own parameter (`Qwen Model`, `Mistral Model`,
 `Gemma Model`); pick the one matching the architecture.
+
+The Utilities-tab **Model Downloader** cannot fetch an encoder for you: its Model
+Type list is Base Model / LoRA / VAE / Embedding / ControlNet, with no
+text-encoder entry. A hand-picked encoder is a host-side file drop into
+`text_encoders/` followed by a model-list refresh.
 
 **Some encoders must carry the vision tower — a text-only build will not do.**
 This is the trap worth knowing about, because it fails late and the error blames
@@ -288,8 +302,8 @@ Mismatched settings look exactly like a broken install.
 
 **A third-party extension logs `No .NET SDKs were found` and does not load.**
 Expected on the default image, and fixable by rebuilding — see "Extensions"
-below. The server itself is unaffected: verified that it stays up and healthy
-with the failed extension present, so this degrades rather than breaks.
+below. The server is unaffected and stays healthy with the failed extension
+present, so this degrades rather than breaks.
 
 Custom *ComfyUI* nodes are a different thing and always work — those are Python,
 and `build-essential` plus `python3.11-dev` are deliberately kept in the runtime
@@ -325,11 +339,11 @@ Two things to expect on the SDK variant:
   — a one-off minute or so. The result is cached in `src/bin/extensions/<name>/`
   and reused on later starts, so it is not a per-start cost.
 - **Extensions can be version-incompatible and fail to compile.** This is normal
-  and is not an image problem: `SwarmUI-FaceTools` against 0.9.8 dies with
+  and is not an image problem. An extension targeting a different SwarmUI API
+  fails with a real compiler error naming a SwarmUI type it cannot find, e.g.
   `error CS1061: 'WorkflowGenerator' does not contain a definition for
-  'CurrentVae'`, because it targets a different SwarmUI API. Real compiler errors
-  naming SwarmUI types mean the extension does not match this SwarmUI version;
-  pin a matching release or update SwarmUI.
+  'CurrentVae'`. That signature means the extension does not match the SwarmUI
+  version you built; pin a matching extension release or move SwarmUI.
 
 **Reading logs.** Units run `--log-driver=passthrough`, so `podman logs` fails.
 Use `workloadctl logs swarmui`.
