@@ -96,9 +96,17 @@ silently invisible rather than producing an error:
 |---|---|
 | `Stable-Diffusion/` | Full single-file checkpoints — SDXL, Pony, Illustrious, NoobAI |
 | `diffusion_models/` | DiT/unet-only models incl. GGUF — Chroma, FLUX.2/klein, Z-Image, Krea 2, Qwen-Image |
-| `clip/` | Text encoders — T5-XXL, the Qwen LLM encoders |
+| `text_encoders/` | Text encoders — T5-XXL, the Qwen LLM encoders |
+| `clip/` | Legacy name for the same thing; still scanned. Prefer `text_encoders/` |
 | `VAE/` | VAEs — the FLUX `ae`, Wan 2.1, Qwen-Image |
 | `Lora/` | LoRAs |
+
+**`text_encoders/` vs `clip/`.** Both are seeded and both are scanned, so this is
+easy to get wrong in a way that still works — until it does not. `text_encoders/`
+is the current name and is where SwarmUI's own autodownloader writes: requesting
+Z-Image on a fresh instance pulled its Qwen3-4B encoder to `text_encoders/`, not
+`clip/`. Put new encoders there. `clip/` is the older name, kept for the CLIP-L/G
+encoders of the SDXL era and for backwards compatibility.
 
 **GGUF works with no setup.** SwarmUI autoinstalls the ComfyUI-GGUF node the
 first time it sees a GGUF diffusion model, so quantised models can go straight
@@ -120,7 +128,7 @@ conflating them wastes a lot of time:
    LLM* can sanitise or decline a prompt before the diffusion model ever sees it.
    That covers Z-Image (Qwen3-4B), FLUX.2/klein (Qwen3-8B), Qwen-Image
    (Qwen2.5-VL-7B), and Krea 2 (Qwen3-VL-4B). This layer is **fixable** — drop an
-   abliterated/heretic build of the same base into `clip/` and select it.
+   abliterated/heretic build of the same base into `text_encoders/` and select it.
 2. **Training data.** If the diffusion model never saw the content, no encoder
    swap conjures it. This layer is **not** fixable after the fact.
 
@@ -132,8 +140,8 @@ prompt refusal.
 
 **Overriding an autodownloaded encoder:** the Generate tab's advanced parameters
 expose a text-encoder selector for models that use a separate one, so a file
-dropped in `clip/` should be selectable there. *This is the one thing in this
-bundle not verified against a running instance.* If the selector does not appear
+dropped in `text_encoders/` should be selectable there. *This is the one thing in
+this bundle not verified against a running instance.* If the selector does not appear
 for a given architecture, the Comfy Workflow tab is a guaranteed fallback — build
 the graph with an explicit `CLIPLoader` (or ComfyUI-GGUF's `CLIPLoader (GGUF)`
 for a quantised encoder) and it will load whatever you point it at.
