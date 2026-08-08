@@ -151,48 +151,88 @@ which, see below, you do.
 Staging note: `/home/desktop/models-staging` is on the same `hot-default` LV as
 `/var/lib/workloads`, so moving models in is a rename, not a copy.
 
-## Text encoders and uncensored models
+## Text encoders
 
-Two independent layers decide whether a model will produce a given image, and
-conflating them wastes a lot of time:
+Component models keep the text encoder in its own file, and SwarmUI autodownloads
+a known-good one per architecture (SHA-verified). To use a different build,
+enable **Advanced Model Addons → Qwen Model** in the Generate tab — it is an
+advanced, toggleable parameter of subtype `Clip`, so it lists everything in
+`text_encoders/` and `clip/`. The selection wins outright: the workflow generator
+checks the parameter before its own built-in default, so nothing silently falls
+back. Each family has its own parameter (`Qwen Model`, `Mistral Model`,
+`Gemma Model`); pick the one matching the architecture.
 
-1. **Text-encoder refusal.** Models whose prompt encoder is an *aligned instruct
-   LLM* can sanitise or decline a prompt before the diffusion model ever sees it.
-   That covers Z-Image (Qwen3-4B), FLUX.2/klein (Qwen3-8B), Qwen-Image
-   (Qwen2.5-VL-7B), and Krea 2 (Qwen3-VL-4B). This layer is **fixable** — drop an
-   abliterated/heretic build of the same base into `text_encoders/` and select it.
-2. **Training data.** If the diffusion model never saw the content, no encoder
-   swap conjures it. This layer is **not** fixable after the fact.
+**Some encoders must carry the vision tower — a text-only build will not do.**
+This is the trap worth knowing about, because it fails late and the error blames
+the wrong thing. Krea 2 does not condition on the encoder's final hidden state;
+it takes a **12-layer tap across a Qwen3-VL stack**, 12 × 2560 = 30720 features.
+ComfyUI decides a file is a Qwen3-VL by looking for a *vision* tensor:
 
-Models using a **pure text encoder have no layer 1 at all**: T5-XXL (Chroma,
-FLUX.1) and CLIP (the SDXL family) are encoder-only, with no instruction tuning
-and nothing to refuse with. Chroma is the standout here — Apache-2.0, explicitly
-de-distilled and de-filtered from FLUX-schnell, and structurally incapable of
-prompt refusal.
+```
+comfy/sd.py   if "model.visual.deepstack_merger_list.0.norm.weight" in sd:
+                  return TEModel.QWEN3VL_4B if <merger>.shape[0] == 2560 else QWEN3VL_8B
+```
 
-**Overriding an autodownloaded encoder:** the Generate tab's advanced parameters
-expose a text-encoder selector for models that use a separate one, so a file
-dropped in `text_encoders/` should be selectable there. *This is the one thing in
-this bundle not verified against a running instance.* If the selector does not appear
-for a given architecture, the Comfy Workflow tab is a guaranteed fallback — build
-the graph with an explicit `CLIPLoader` (or ComfyUI-GGUF's `CLIPLoader (GGUF)`
-for a quantised encoder) and it will load whatever you point it at.
+Miss that key and detection falls through to plain Qwen3, the multi-layer branch
+never runs, and you get a single hidden state — 2560 features — and a hard
+failure at generation time:
 
-**Sharded encoders need a single file — but rarely a conversion.** Encoders
-shipped in HuggingFace `transformers` layout — a `text_encoder/` directory of
-`model-0000N-of-0000M.safetensors` plus an index, which is how BFL ships klein's
-Qwen3-8B — are not loadable by `CLIPLoader`, which wants one file.
+```
+ValueError: Krea2 expects conditioning with 12x2560=30720 features
+(a 12-layer Qwen3-VL stack) but got 2560.
+```
 
-Merging the shards yourself is the last resort, not the first. Every encoder on
-this roster is a stock LLM (Qwen3-4B, Qwen3-8B, Qwen2.5-VL-7B, Qwen3-VL-4B), and
-a **plain single-file LLM GGUF of that same base loads directly** via
-ComfyUI-GGUF's `CLIPLoader (GGUF)`. The extra tensors an LLM carries and a text
-encoder does not — `lm_head`, the output norm — are ignored on load. So the
-abliterated/heretic GGUF you would want for layer 1 anyway *is* the repack; you
-do not need both.
+The message says to use `CLIPLoader` type `krea2`, which is misleading: the type
+is already correct, and the file is what is wrong.
 
-Check before assuming a file is the wrong kind. A GGUF's header names its
-architecture and shape, and that is what has to match:
+**So GGUF is not usable for these.** A `.gguf` export from llama.cpp carries the
+text tower only — vision weights go to a separate `mmproj` file that
+`CLIPLoader (GGUF)` has no way to consume. The GGUF will be accepted, will load,
+and will produce 2560 features. This does not apply to encoders whose
+conditioning is a plain hidden state (T5-XXL, the CLIP family, plain Qwen3), where
+a single-file LLM GGUF of the same base loads fine via ComfyUI-GGUF and surplus
+tensors like `lm_head` are ignored. The rule is about what the file **lacks**,
+not what it carries.
+
+Note that SwarmUI picks the loader purely on the extension — `LoadClip` swaps
+`CLIPLoader` for `CLIPLoaderGGUF` on a `.gguf` name — so there is no warning at
+selection time.
+
+**One file, not a shard set.** `CLIPLoader` takes a single file, so an encoder
+shipped in HuggingFace `transformers` layout (`model-0000N-of-0000M.safetensors`
+plus an index) has to be merged first. For a vision-carrying encoder that merge
+is the *normal* path, not a last resort — it is the only format that works.
+
+The merge is a plain concatenation; no renaming is needed. ComfyUI remaps the
+transformers prefixes itself when it loads:
+
+```python
+state_dict_prefix_replace(sd, {"model.language_model.": "model.",
+                               "model.visual.": "visual.",
+                               "lm_head.": "model.lm_head."})
+```
+
+```python
+# merge shards -> one file (run with a python that has safetensors + torch)
+from safetensors.torch import load_file, save_file
+sd = {}
+for f in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+    sd.update(load_file(f))
+save_file(sd, "encoder-merged.safetensors")
+```
+
+Tied embeddings are the usual failure here — if a repo stores `lm_head` as a view
+of `embed_tokens`, `save_file` refuses to write aliased storage. Check the index
+for an `lm_head` entry first; when it is absent (the common case, because it is
+tied and therefore omitted) the merge is clean.
+
+Avoid quantisations whose scale tensors are not ComfyUI's. ComfyUI's own
+`fp8_scaled` files carry `weight_scale`; a vLLM/compressed-tensors FP8 build
+carries `weight_scale_inv` and will not load correctly despite being the same
+architecture and size. Plain bf16 is the safe choice when in doubt.
+
+**Verify a file before blaming the config.** A GGUF header names its architecture
+and shape:
 
 ```bash
 pip install --user gguf   # header-only reader, no torch
@@ -205,7 +245,9 @@ print({f.name: str(f.contents()) for f in r.fields.values()
 
 Qwen3-8B is 36 blocks × 4096; Qwen3-4B is 36 × 2560. A mismatch here is the
 difference between "wrong file" and "wrong format", and they need different
-fixes.
+fixes. For safetensors, read the header keys directly — the presence or absence
+of `model.visual.*` tensors is the whole answer for a VL encoder, and a GGUF that
+reports architecture `qwen3vl` can still have none of them.
 
 ## Tuning
 
