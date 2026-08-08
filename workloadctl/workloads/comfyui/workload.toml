@@ -17,9 +17,12 @@
 # PyTorch wheel index; gpu = "auto" below then passes through whatever the host
 # has. Leave that key alone and choose here instead:
 #
-#   sudo workloadctl build comfyui                                   # NVIDIA (cu128, default)
-#   sudo workloadctl build comfyui --build-arg CUDA_INDEX=rocm7.1    # AMD
-#   sudo workloadctl build comfyui --build-arg CUDA_INDEX=cpu        # CPU only (slow)
+#   sudo workloadctl build comfyui                                 # NVIDIA (cu128, default)
+#   sudo env CUDA_INDEX=rocm7.1 workloadctl build comfyui          # AMD
+#   sudo env CUDA_INDEX=cpu workloadctl build comfyui              # CPU only (slow)
+#
+# `workloadctl build` has NO --build-arg flag; the env vars above work because
+# [build] arg_env lists them. See that section at the bottom of this file.
 #
 # Two traps, both documented at length in README.md:
 #   - A vendor mismatch does NOT fail the unit. A CUDA image on a non-NVIDIA
@@ -125,8 +128,8 @@ shm_size = "1g"
 # memory_max = "24G"
 
 [build]
-# Present-but-empty is the whole point: a [build] table — even with no keys —
-# marks this container's image as self-built, which does two things.
+# A [build] table — even with no keys — marks this container's image as
+# self-built, which does two things.
 #
 #   1. `workloadctl build comfyui` owns the image: it runs the default
 #      `podman build` over this bundle (the Containerfile beside this file) and
@@ -141,6 +144,29 @@ shm_size = "1g"
 # buildable: root's image store shadows the registry copy whenever a
 # `workloadctl build` has run, until you `podman rmi` it.
 #
-# No keys are needed here — the defaults (Containerfile in the bundle dir, no
-# target, no args) are exactly right. Vendor selection is a --build-arg at build
-# time, not a stored default, so it deliberately does NOT live here.
+# Vendor selection is a build-time choice, not a stored default, so `args` is
+# deliberately unset — a CUDA_INDEX pinned here would silently override the
+# operator's intent on every rebuild, including CI's.
+#
+# THERE IS NO `--build-arg` FLAG on `workloadctl build`. The TOML is the only
+# route to a build arg: `arg_env` names host environment variables forwarded to
+# `podman build` as `--build-arg` WHEN SET, which is exactly the transient,
+# per-invocation knob vendor selection needs. See lib/imagebuild.py
+# assemble_build_args().
+#
+#   sudo env CUDA_INDEX=rocm7.1 workloadctl build comfyui
+#
+# `sudo env VAR=...` rather than `sudo VAR=...` because the latter needs the
+# sudoers `setenv` permission and is not portable.
+#
+# The three torch pins are listed alongside CUDA_INDEX because they are not
+# independent: only indexes carrying the pinned torch triple as cp314 wheels can
+# be swapped by index alone (cu128, rocm7.1, rocm7.2, cpu). Anything else needs
+# the versions moved in the same invocation — see README.md.
+arg_env = [
+    "CUDA_INDEX",
+    "TORCH_VERSION",
+    "TORCHVISION_VERSION",
+    "TORCHAUDIO_VERSION",
+    "COMFYUI_VERSION",
+]

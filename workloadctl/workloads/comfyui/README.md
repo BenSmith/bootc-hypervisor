@@ -28,8 +28,14 @@ problem (it selects via image tag rather than build arg).
 | Build | Vendor | Image size |
 |-------|--------|------------|
 | `sudo workloadctl build comfyui` | NVIDIA (cu128, default) | 9.23 GB |
-| `sudo workloadctl build comfyui --build-arg CUDA_INDEX=rocm7.1` | AMD | 16.2 GB |
-| `sudo workloadctl build comfyui --build-arg CUDA_INDEX=cpu` | CPU only | smaller |
+| `sudo env CUDA_INDEX=rocm7.1 workloadctl build comfyui` | AMD | 16.2 GB |
+| `sudo env CUDA_INDEX=cpu workloadctl build comfyui` | CPU only | smaller |
+
+`workloadctl build` has **no `--build-arg` flag**. Build args are TOML only:
+`[build] arg_env` forwards a host env var to `podman build` when it is set, and
+this bundle lists `CUDA_INDEX` plus the three torch pins and `COMFYUI_VERSION`.
+Use `sudo env VAR=...`, not `sudo VAR=...` — the bare form needs the sudoers
+`setenv` permission.
 
 No CUDA/ROCm base image is involved — the wheels vendor the GPU userspace, and
 the host driver arrives via CDI. That is why a plain `fedora:44` base works.
@@ -38,8 +44,18 @@ Only indexes carrying the pinned torch triple as **cp314** wheels can be swapped
 in as a one-liner (F44's `python3` is 3.14). Verified working: `cu128`,
 `rocm7.1`, `rocm7.2`, `cpu`. Verified *not* working: `rocm6.2` (no cp314 wheels
 at all), `rocm6.4` and `rocm7.0` (cap at torch 2.9.1), `xpu` (no torch 2.11.0).
-Those need the version pins moved too, not just the index. The Containerfile has
-a one-liner for re-checking any index/version pair.
+Those need the version pins moved too, not just the index — which is why
+`TORCH_VERSION`, `TORCHVISION_VERSION`, and `TORCHAUDIO_VERSION` are in
+`arg_env` alongside `CUDA_INDEX`, so it stays one invocation:
+
+```bash
+sudo env CUDA_INDEX=rocm7.0 TORCH_VERSION=2.9.1 \
+  TORCHVISION_VERSION=0.24.1 TORCHAUDIO_VERSION=2.9.1 \
+  workloadctl build comfyui
+```
+
+The Containerfile has a one-liner for re-checking any index/version pair before
+committing to a build; the versions above are illustrative, not verified.
 
 ### Vendor mismatch does not fail loudly
 

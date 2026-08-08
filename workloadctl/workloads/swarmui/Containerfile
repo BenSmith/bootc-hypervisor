@@ -34,7 +34,11 @@
 # from the other two wins. To keep in-place extension builds:
 #
 #   podman build --build-arg RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim ...
-#   sudo workloadctl build swarmui --build-arg RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
+#   sudo env RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim \
+#       workloadctl build swarmui
+#
+# The second form works because [build] arg_env in workload.toml lists
+# RUNTIME_BASE. `workloadctl build` has no --build-arg flag of its own.
 #
 # That still discards the NuGet cache and the dead RIDs, so it lands near 2 GB
 # rather than the original 3.6 GB. The first extension build then has to restore

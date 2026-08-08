@@ -144,8 +144,8 @@ shm_size = "1g"
 # memory_max = "48G"
 
 [build]
-# Present-but-empty marks this container's image as self-built, which does two
-# things:
+# A [build] section — even an empty one — marks this container's image as
+# self-built, which does two things:
 #
 #   1. `workloadctl build swarmui` owns the image: it runs the default
 #      `podman build` over this bundle (the Containerfile beside this file) and
@@ -154,7 +154,23 @@ shm_size = "1g"
 #      globs workloads/*/workload.toml and selects on has_build_context(), so
 #      there is no matrix to register swarmui in.
 #
-# No keys are needed — the defaults (Containerfile in the bundle dir, no target,
-# no args) are exactly right. To pin a different SwarmUI release, pass it at
-# build time rather than storing it here:
-#   sudo workloadctl build swarmui --build-arg SWARMUI_VERSION=0.9.9-Beta
+# THERE IS NO `--build-arg` FLAG on `workloadctl build`. The TOML is the only
+# route to a build arg: `arg_env` below names host environment variables that
+# get forwarded to `podman build` as `--build-arg` when set, and `args` (unset
+# here) stores durable defaults. See lib/imagebuild.py assemble_build_args().
+#
+# So a one-off build against a different SwarmUI ref or a different runtime base
+# is an env var on the invocation:
+#
+#   sudo env SWARMUI_VERSION=master workloadctl build swarmui
+#   sudo env RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim \
+#       workloadctl build swarmui
+#
+# `sudo env VAR=...` rather than `sudo VAR=...` because the latter needs the
+# sudoers `setenv` permission and is not portable.
+#
+# To pin durably, set it on the DEPLOYED INSTANCE in
+# /etc/workloads.d/<instance>/workload.toml, not here — the bundle default stays
+# a tag so CI's weekly rebuild is reproducible:
+#   args = { SWARMUI_VERSION = "master" }
+arg_env = ["SWARMUI_VERSION", "RUNTIME_BASE"]

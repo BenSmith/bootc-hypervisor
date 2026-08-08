@@ -21,11 +21,43 @@ sudo workloadctl enable swarmui
 # then open http://<host-ip>:7801
 ```
 
-To pin a specific release instead of the bundle default:
+## Version
+
+`SWARMUI_VERSION` defaults to the newest *tag*, and is passed to
+`git clone --branch`, so it accepts a tag or a branch name (not a commit SHA).
+
+There is **no `--build-arg` flag** on `workloadctl build`. Build args are TOML
+only: `[build] arg_env` (this bundle lists `SWARMUI_VERSION` and `RUNTIME_BASE`)
+forwards a host env var, and `[build] args` stores a durable default. So a
+one-off build of a different ref is:
 
 ```bash
-sudo workloadctl build swarmui --build-arg SWARMUI_VERSION=0.9.9-Beta
+sudo env SWARMUI_VERSION=master workloadctl build swarmui
 ```
+
+`sudo env VAR=...`, not `sudo VAR=...` — the bare form needs the sudoers
+`setenv` permission. To pin a ref durably, put it on the deployed instance in
+`/etc/workloads.d/<instance>/workload.toml` (`args = { SWARMUI_VERSION = "master" }`),
+not in the bundle.
+
+**Upstream tags infrequently — the gap between the newest tag and `master` runs
+to hundreds of commits and many months.** SwarmUI's in-app update check compares
+tags, so it reports you are up to date throughout.
+
+That gap matters because architecture support is what moves in it. A model
+SwarmUI has no entry for is not merely unlisted — the Generate tab cannot pair
+its text encoder or VAE, cannot apply its prompt template, and cannot set its
+sampler defaults, so it is unusable there even when the ComfyUI backend
+underneath supports it fully. Before concluding a model file is wrong, compare
+the running build against `master`:
+
+```bash
+workloadctl exec swarmui -- git -C /SwarmUI log -1 --format='%h %ci'
+git ls-remote https://github.com/mcmonkeyprojects/SwarmUI HEAD
+```
+
+The bundle default stays a tag because CI rebuilds this image weekly and a
+moving branch is not reproducible. Pass `master` when you need what is on it.
 
 ## First run — the backend install
 
@@ -237,8 +269,8 @@ image does not ship — dropping it is part of why the image is 1.4 GB rather th
 To get it back, rebuild with the SDK as the runtime base:
 
 ```bash
-sudo workloadctl build swarmui \
-  --build-arg RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
+sudo env RUNTIME_BASE=mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim \
+  workloadctl build swarmui
 ```
 
 That lands at ~2.0 GB instead of 1.4 GB — the other two savings (the NuGet cache
