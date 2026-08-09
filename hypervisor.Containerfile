@@ -212,6 +212,7 @@ RUN dnf install --setopt=install_weak_deps=False --nodocs -y \
     openssh-server \
     openssl \
     parted \
+    passt \
     pciutils \
     perf \
     podman \
