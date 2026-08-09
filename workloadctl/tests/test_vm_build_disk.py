@@ -6,6 +6,7 @@ as a module so we can exercise the disk-rotation logic without running the full
 build (which downloads/copies real qcow2 files).
 """
 
+import email.message
 import hashlib
 import tempfile
 import unittest
@@ -157,14 +158,36 @@ class TestDownloadCloudImage(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp)
 
-    def _fake_response(self, data):
-        resp = mock.MagicMock()
-        resp.getheader.return_value = str(len(data))
-        chunks = [data, b""]
-        resp.read.side_effect = lambda n: chunks.pop(0)
-        resp.__enter__.return_value = resp
-        resp.__exit__.return_value = False
-        return resp
+    def _fake_response(self, data, content_length=...):
+        """A stand-in for urlopen()'s result.
+
+        `headers` is a real email.message.Message, and the mock is spec'd, so a
+        call to an accessor the object does not actually have (notably
+        HTTPResponse.getheader, which addinfourl lacks) fails here instead of
+        being rubber-stamped by MagicMock and only surfacing on a real
+        file:// URL.
+        """
+        headers = email.message.Message()
+        if content_length is ...:
+            content_length = str(len(data))
+        if content_length is not None:
+            headers["Content-Length"] = content_length
+
+        class _Resp:
+            def __init__(self):
+                self.headers = headers
+                self._chunks = [data, b""]
+
+            def read(self, n):
+                return self._chunks.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp()
 
     def test_cached_valid_image_is_reused(self):
         cache = self.home / ".image-cache"
@@ -200,6 +223,72 @@ class TestDownloadCloudImage(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod.download_cloud_image(
                     "http://h/img.qcow2", self.checksum, self.home)
+
+    def test_missing_content_length_still_downloads(self):
+        """No Content-Length just means no progress percentage."""
+        with mock.patch.object(self.mod.urllib.request, "urlopen",
+                               return_value=self._fake_response(
+                                   self.payload, content_length=None)):
+            path = self.mod.download_cloud_image(
+                "http://h/img.qcow2", self.checksum, self.home)
+        self.assertEqual(path.read_bytes(), self.payload)
+
+    def test_malformed_content_length_still_downloads(self):
+        """A junk header must not abort a download that is otherwise fine."""
+        with mock.patch.object(self.mod.urllib.request, "urlopen",
+                               return_value=self._fake_response(
+                                   self.payload, content_length="not-a-number")):
+            path = self.mod.download_cloud_image(
+                "http://h/img.qcow2", self.checksum, self.home)
+        self.assertEqual(path.read_bytes(), self.payload)
+
+
+class TestDownloadCloudImageFileURL(unittest.TestCase):
+    """file:// end to end, with urlopen NOT mocked.
+
+    urlopen returns an addinfourl for file://, not an HTTPResponse, and the two
+    do not share the same header API. Every other test in this file substitutes
+    the response, so only a real fetch pins that difference down; the original
+    bug (resp.getheader -> AttributeError on the wrapped BufferedReader) passed
+    the mocked suite and failed on the first real local URL.
+    """
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp) / "home"
+        self.home.mkdir()
+        self.payload = b"local-cloud-image-bytes"
+        self.checksum = "sha256:" + hashlib.sha256(self.payload).hexdigest()
+        self.src = Path(self.tmp) / "img.qcow2"
+        self.src.write_bytes(self.payload)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_file_url_downloads_and_verifies(self):
+        path = self.mod.download_cloud_image(
+            self.src.as_uri(), self.checksum, self.home)
+        self.assertEqual(path.read_bytes(), self.payload)
+        self.assertEqual(path, self.home / ".image-cache" / "img.qcow2")
+
+    def test_file_url_checksum_mismatch_is_rejected(self):
+        bad = "sha256:" + hashlib.sha256(b"different").hexdigest()
+        with self.assertRaises(ValueError):
+            self.mod.download_cloud_image(self.src.as_uri(), bad, self.home)
+
+    def test_missing_file_url_becomes_runtimeerror(self):
+        missing = (Path(self.tmp) / "absent.qcow2").as_uri()
+        with self.assertRaises(RuntimeError):
+            self.mod.download_cloud_image(missing, self.checksum, self.home)
+
+    def test_no_tempfile_left_behind_after_failure(self):
+        missing = (Path(self.tmp) / "absent.qcow2").as_uri()
+        with self.assertRaises(RuntimeError):
+            self.mod.download_cloud_image(missing, self.checksum, self.home)
+        leftovers = list((self.home / ".image-cache").glob("*.tmp"))
+        self.assertEqual(leftovers, [])
 
 
 class TestBuildFromSources(unittest.TestCase):

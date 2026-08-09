@@ -14,6 +14,10 @@ Image sources (from [vm] TOML section, exactly one required):
   vm.cloud_image_url + vm.cloud_image_checksum   Download + verify qcow2
   vm.local_image                                  Copy/reflink from path
   vm.image                                        bootc image ref (via bootc-image-builder)
+
+cloud_image_url takes any scheme urllib handles, including file://, which is
+checksum-verified and cached like a remote one — that is the difference from
+local_image, which copies the path as-is with neither.
 """
 import hashlib
 import json
@@ -126,7 +130,17 @@ def download_cloud_image(url: str, checksum: str, home_dir: Path) -> Path:
     tmp_path: Path | None = None
     try:
         with urllib.request.urlopen(url, timeout=300) as resp:
-            total = int(resp.getheader("Content-Length", 0))
+            # resp.headers is the one accessor every urlopen result carries.
+            # getheader() belongs to HTTPResponse only: a file:// URL yields an
+            # addinfourl, whose attribute lookup falls through to the wrapped
+            # BufferedReader, so resp.getheader raises AttributeError and takes
+            # the whole build down. Content-Length is set for file:// too.
+            # The value only drives a progress percentage, so a missing or
+            # malformed one degrades to "no percentage" rather than failing.
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
             downloaded = 0
             with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False, suffix=".tmp") as tmp:
                 tmp_path = Path(tmp.name)
