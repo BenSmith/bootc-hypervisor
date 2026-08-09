@@ -1,7 +1,7 @@
 # clitest-vm-peer — second VM on the managed NAT bridge, for the shared-bridge
 # teardown test (test_lifecycle.py::TestSharedVMBridge).
 # Identical to clitest-vm-fresh apart from the name: the point is two VMs alive
-# on _workload-br at once, so purging one can be shown not to disturb the other.
+# at once, so purging one can be shown not to disturb the other.
 # Distinct name → distinct DHCP lease and MAC, so they coexist.
 # Gate: has_kvm.
 
@@ -19,4 +19,4 @@ user = "workload"
 rollback_keep = 1
 
 [vm.network]
-# Default: _workload-br (workloadctl-managed NAT bridge)
+# Default: unset — passt (no bridge; the guest takes the host's address)

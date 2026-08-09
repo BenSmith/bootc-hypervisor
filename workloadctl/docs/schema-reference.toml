@@ -193,15 +193,63 @@ name = "schema-reference"
 # balloon = true
 #
 # [vm.network]
-# Optional: Host bridge the VM's NIC attaches to (qemu-bridge-helper).
+# By default a VM has no bridge at all: it uses passt, which terminates the
+# guest's network stack in userspace and re-originates its traffic as ordinary
+# host sockets owned by the workload's own user (_wl-<name>). That makes the
+# workload uid the VM's network identity — the guest cannot forge it, it is
+# unique per workload with no allocation step, and nftables can match it as
+# `meta skuid`. No bridge, no dnsmasq, no host-global ip_forward, and no
+# setuid-root qemu-bridge-helper. See ADR 006.
+#
+# Two consequences worth knowing before you configure anything here:
+#   - The guest is assigned the HOST's address. A VM under passt has no LAN
+#     identity of its own, so nothing on the LAN can address it directly.
+#   - `workloadctl exec` / `shell` reach the guest on a management address
+#     derived from the workload uid (127.128.x.y port 2222). It is never
+#     routable and never configurable. `workloadctl diagnose <name>` prints the
+#     derived value.
+#
+# Optional: Host bridge to attach to instead of using passt.
 # Type: string, valid Linux interface name (letters/digits/_/-, max 15 chars)
-# Default: "_workload-br"  — the workloadctl-managed bridge with built-in dnsmasq
-#                     DHCP/DNS. workloadctl provisions this on demand.
-# Set to your LAN bridge (e.g. "br0") to put the VM directly on the LAN.
-# When at least one VM uses "_workload-br", workload-bridge.service is generated
-# to bring it up; user-provided bridges are assumed to be managed elsewhere
-# (NetworkManager / systemd-networkd) and skip that service.
-# bridge = "_workload-br"
+# Default: unset — use passt.
+# Setting this is the escape hatch for a VM that needs a REAL LAN IDENTITY (its
+# own address, reachable by other hosts, e.g. one serving TLS on its own name).
+# That is a supported configuration, not a lapse — but such a VM is UNFILTERED:
+# host egress policy cannot reach it, because its traffic never becomes a host
+# socket. You provision the bridge yourself (NetworkManager / systemd-networkd)
+# and add it to /etc/qemu/bridge.conf; workloadctl does neither. No shipped
+# bundle sets this, because a bridge name is site-specific and need not exist
+# on the target host.
+# bridge = "br0"
+#
+# Optional: Ports published from the guest onto the host.
+# Type: array of "[bindaddr:]hostport[:guestport][/proto]" strings
+# Default: [] — nothing but the management address is bound.
+# Same convention as a container's [network].ports. This is new capability:
+# managed-bridge VMs had no port publishing at all. Ignored (and rejected by
+# validate) when .bridge is set, since a bridged guest has its own address.
+# ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
+#
+# Optional: Pin this VM's outbound traffic to one host interface.
+# Type: string, valid Linux interface name
+# Default: unset — the kernel picks by route.
+# Per-VM egress scoping with no firewall rules at all: a VM pinned to the
+# WAN-facing interface is structurally unable to originate on a management
+# VLAN. Applies to both address families. No effect with .bridge set.
+# outbound_if = "eno1"
+#
+# Optional: What resolver the guest is given.
+# Type: string, one of "host" | "none"
+# Default: "host"
+#   "host" — passt advertises a stand-in address, intercepts DNS sent to it,
+#            and forwards to the host's own resolver. The guest never learns a
+#            real resolver address. Note that when the host runs a stub
+#            resolver the query is made BY THE HOST, so guest DNS is invisible
+#            to uid-keyed egress policy; log at the host resolver instead.
+#   "none" — the guest gets no resolver at all. The only setting that closes
+#            DNS tunnelling, and it breaks anything not proxy-aware, including
+#            cloud-init, package installs and NTP. For purpose-built guests.
+# resolver = "host"
 #
 # [vm.cloud_init]
 # Optional: Override the seed ISO's user-data with a custom #cloud-config.
@@ -315,7 +363,7 @@ name = "schema-reference"
 # user = "fedora"
 #
 # [vm.network]
-# bridge = "br0"                    # LAN bridge instead of _workload-br
+# bridge = "br0"                    # a real LAN identity; unfiltered (see above)
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

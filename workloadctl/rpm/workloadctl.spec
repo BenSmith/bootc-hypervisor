@@ -14,16 +14,6 @@ BuildArch:      noarch
 # defined by systemd-rpm-macros. Without it rpmbuild emits the literal
 # "%{_unitdir}/..." and fails with: File must begin with "/".
 BuildRequires:  systemd-rpm-macros
-# firewalld-filesystem owns /usr/lib/firewalld/zones, where our VM-bridge zone
-# lands. It is a dependency-free noarch package of directories and macros; it
-# does NOT pull in firewalld itself, so a container-only host stays
-# firewall-daemon-free and the zone file just sits there unread. Deliberately
-# NOT a BuildRequires: the %%post reload is written out longhand rather than
-# using this package's %%firewalld_reload macro, because an undefined macro
-# expands to nothing — building the RPM from a checkout on a host that happens
-# to lack the package would silently ship a package that never reloads.
-Requires:       firewalld-filesystem
-
 Requires:       python3 >= 3.14
 Requires:       podman >= 5.3
 Requires:       systemd
@@ -41,8 +31,10 @@ Requires:       policycoreutils-python-utils
 # is an authoring-only tool; it is not invoked at runtime.
 Requires:       container-selinux
 Recommends:     udica
-# VM workloads require the bridge networking stack and a hypervisor.
-Requires:       dnsmasq
+# VM workloads need passt for networking (ADR 006) and nftables for the egress
+# policy the uid-keyed output chain is written into. dnsmasq went with the
+# managed bridge: passt serves the guest DHCP and DNS itself.
+Requires:       passt
 Requires:       nftables
 Suggests:       qemu-kvm
 Suggests:       virtiofsd
@@ -107,7 +99,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-build-disk
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
+%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
@@ -132,12 +125,6 @@ install -Dpm 0644 %{_sourcedir}/systemd/workloads-dirs.conf \
 
 install -Dpm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
     %{buildroot}%{_datadir}/containers/seccomp-workload-baseline.json
-
-# firewalld zone for the managed VM bridge. Vendor dir (/usr/lib), not
-# /etc/firewalld/zones: an admin copy in /etc shadows the shipped one forever,
-# so package updates to the zone would silently stop applying.
-install -Dpm 0644 %{_sourcedir}/firewalld/workloadctl.xml \
-    %{buildroot}%{_prefix}/lib/firewalld/zones/workloadctl.xml
 
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
@@ -193,13 +180,6 @@ install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 %post
 %systemd_post workload-exporter.timer workload-exporter-disk.timer
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
-# A running firewalld only learns about a newly installed zone file on reload.
-# Without this, the first VM enabled after an install would find the zone
-# missing and come up with guest DHCP/DNS blocked. This is what
-# firewalld-filesystem's %%firewalld_reload macro expands to; spelled out so a
-# build host without that package can't silently drop it. No-op when firewalld
-# isn't installed or isn't running.
-test -x /usr/bin/firewall-cmd && firewall-cmd --reload --quiet || :
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -234,20 +214,19 @@ fi
 
 %postun
 %systemd_postun_with_restart workload-exporter.timer workload-exporter-disk.timer
-# On full uninstall ($1 == 0, not upgrade) reverse the host-global state that
-# workload-ensure-user accretes but never per-workload teardown can safely
-# remove (it's shared across workloads while the package is installed):
-#   - the semanage fcontext rule for /var/lib/workloads
-#   - the managed VM bridge's allow line in qemu-bridge-helper's allowlist
-# A custom/admin bridge (e.g. allow br0) is intentionally left alone — the admin
-# owns it and may rely on it outside workloadctl.
+# On full uninstall ($1 == 0, not upgrade) reverse the host-global state this
+# package registers, which no per-workload teardown can safely remove (it is
+# shared across workloads while the package is installed): the semanage
+# fcontext rules from %%post.
+#
+# The `allow _workload-br` line in qemu-bridge-helper's allowlist is no longer
+# cleaned up here because it is no longer created: retiring the managed bridge
+# (ADR 006) took the setuid-root helper out of the VM data path entirely. A
+# line left behind by a pre-ADR-006 install names an interface that no longer
+# exists, so it grants nothing; an admin bridge (allow br0) was always left
+# alone and still is, since the admin owns it.
 if [ $1 -eq 0 ]; then
     semanage fcontext -d '/var/lib/workloads(/.*)?' 2>/dev/null || :
-    if [ -f /etc/qemu/bridge.conf ]; then
-        sed -i '/^allow _workload-br$/d' /etc/qemu/bridge.conf 2>/dev/null || :
-    fi
-    # Drop the now-removed zone out of firewalld's runtime state too.
-    test -x /usr/bin/firewall-cmd && firewall-cmd --reload --quiet || :
 fi
 
 %files
@@ -273,7 +252,6 @@ fi
 %{_presetdir}/80-workloadctl.preset
 %{_prefix}/lib/tmpfiles.d/workloads-dirs.conf
 %{_datadir}/containers/seccomp-workload-baseline.json
-%{_prefix}/lib/firewalld/zones/workloadctl.xml
 %{_datadir}/bash-completion/completions/workloadctl
 %{_docdir}/workloadctl/
 %{_datadir}/workloadctl/

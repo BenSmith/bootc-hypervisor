@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+"""
+workload-vm-netdev: derive the host-dependent half of a VM's passt netdev.
+
+Usage: workload-vm-netdev <name>
+
+Writes /run/workload-env/workload-<name>.passt, a systemd EnvironmentFile
+holding one variable:
+
+    WL_PASST_DNS=<comma-separated netdev property fragment>
+
+which the VM unit's ExecStart splices into its `-netdev passt,...` argument as
+`${WL_PASST_DNS}`. Always exits 0 and always writes a usable value: a VM that
+cannot resolve is bad, a VM that will not boot is worse.
+
+WHY THIS IS A SEPARATE STEP AND NOT PART OF THE GENERATOR
+
+The design calls the netdev "host-derived, computed from /etc/resolv.conf at
+generate time". Half of that cannot be done at generate time. The Python
+generator runs from workload-generate.service, ordered
+`After=sysinit.target Before=basic.target` — long before network.target — so:
+
+  - /etc/resolv.conf is readable there (it is static on a systemd-resolved
+    host, and otherwise holds the previous boot's content), but
+  - the default route does NOT exist yet, and `--dns-forward` needs an address
+    the guest will route to passt.
+
+So the derivation moves to the one place that is both late enough to see the
+network and early enough to precede QEMU: an ExecStartPre on the VM unit
+itself. systemd re-reads every EnvironmentFile= once per Exec* command
+(exec_spawn() calls exec_context_load_environment() per invocation), so a file
+written by ExecStartPre is visible to ExecStart in the same unit.
+
+THE PER-FAMILY RULE (design "DNS", ADR 006)
+
+passt's DNS handling is per address family, and half-configuring a family fails
+*open*. `get_dns()` (conf.c:206) computes `dns4_set`/`dns6_set` independently;
+supplying `--dns` for one family suppresses only that family's branch of the
+resolv.conf scan, leaving the other free to advertise the host's real
+nameservers over NDP RDNSS / DHCPv6. So the invariant is:
+
+    for each address family, emit all three of dns-forward, dns and dns-host,
+    or none of them.
+
+Never one or two. A family the host has no resolver for gets nothing at all,
+which is safe: the scan runs, finds nothing, and advertises nothing.
+
+`--search none` suppresses the resolv.conf search list, which is otherwise
+advertised over both DHCP and NDP and leaks internal domain names. It covers
+both families by itself and is emitted by the generator, not here, because it
+depends on nothing about the host.
+"""
+import ipaddress
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+from workload_lib import workload_config_path, workload_env_dir
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
+    tomllib = None
+
+RESOLV_CONF = Path("/etc/resolv.conf")
+
+
+def log(msg):
+    """Print to stdout (captured by systemd journal)."""
+    print(msg, flush=True)
+
+
+def default_gateways() -> dict[int, str]:
+    """The host's default-route gateway per family, as {4: addr, 6: addr}.
+
+    This is the address the guest is told is its resolver and which passt
+    intercepts. It is not required to be the gateway — fwd_nat_from_tap()
+    (fwd.c:906-913) matches DNS flows on dns_match alone — but the gateway is
+    the natural choice: passt answers for it, so the guest reaches it whatever
+    its routing table looks like.
+
+    Families with no default route are simply absent from the result.
+    """
+    gateways: dict[int, str] = {}
+    for family, flag in ((4, "-4"), (6, "-6")):
+        try:
+            result = subprocess.run(
+                ["ip", flag, "route", "show", "default"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"  WARNING: could not read the IPv{family} default route: {e}")
+            continue
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if "via" not in fields:
+                continue
+            candidate = fields[fields.index("via") + 1]
+            try:
+                addr = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            # A link-local IPv6 gateway (fe80::/10) is scoped to an interface,
+            # so it is not a usable dns-forward value — passt would hand the
+            # guest an address it cannot disambiguate.
+            if addr.is_link_local:
+                continue
+            gateways[family] = str(addr)
+            break
+    return gateways
+
+
+def host_resolvers() -> dict[int, str]:
+    """The first nameserver per family from /etc/resolv.conf, as {4:.., 6:..}.
+
+    Loopback included, deliberately: passt resolves host-side, where a stub
+    resolver like 127.0.0.53 is reachable. This value is where passt actually
+    sends the query and is never disclosed to the guest.
+    """
+    resolvers: dict[int, str] = {}
+    try:
+        text = RESOLV_CONF.read_text()
+    except OSError as e:
+        log(f"  WARNING: could not read {RESOLV_CONF}: {e}")
+        return resolvers
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].split(";", 1)[0].strip()
+        match = re.match(r"^nameserver\s+(\S+)$", line)
+        if not match:
+            continue
+        # Strip any zone id: a scoped address is not usable as a dns-host.
+        candidate = match.group(1).split("%", 1)[0]
+        try:
+            addr = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        resolvers.setdefault(4 if addr.version == 4 else 6, str(addr))
+    return resolvers
+
+
+def build_dns_fragment(gateways: dict[int, str],
+                       resolvers: dict[int, str]) -> tuple[str, list[str]]:
+    """Build the netdev fragment. Returns (fragment, human-readable notes).
+
+    The QEMU netdev's dns-forward/dns/dns-host properties are single-valued
+    (qapi/net.json:203-216), so only one family can use them; the second goes
+    through the repeatable `param=` escape hatch, which net/passt.c appends to
+    passt's command line verbatim. passt itself accepts each option once per
+    family — conf.c's case 9 tries inet_pton(AF_INET6) then AF_INET and sets
+    the matching dns_match — so the two spellings compose.
+    """
+    notes: list[str] = []
+    props: list[str] = []
+    params: list[str] = []
+    native_used = False
+
+    for family in (4, 6):
+        gateway = gateways.get(family)
+        resolver = resolvers.get(family)
+        if not gateway or not resolver:
+            # All three or none. Omitting the family entirely is the safe half:
+            # passt's scan finds no nameserver for it and advertises nothing.
+            if resolver and not gateway:
+                notes.append(
+                    f"IPv{family}: host has a resolver but no default route, "
+                    f"so no IPv{family} DNS is offered to the guest")
+            continue
+        if not native_used:
+            props += [f"dns-forward={gateway}",
+                      f"dns={gateway}",
+                      f"dns-host={resolver}"]
+            native_used = True
+        else:
+            params += ["param=--dns-forward", f"param={gateway}",
+                       "param=--dns", f"param={gateway}",
+                       "param=--dns-host", f"param={resolver}"]
+        notes.append(
+            f"IPv{family}: guest is told {gateway}, queries go to {resolver}")
+
+    if not props:
+        # No family is fully configured. Say so explicitly rather than leaving
+        # the fragment empty: an empty expansion would leave a dangling comma
+        # in the netdev argument and QEMU would refuse to start.
+        notes.append("no usable resolver on any family; the guest gets none")
+        return ("dhcp-dns=off", notes)
+
+    return (",".join(props + params), notes)
+
+
+def resolver_mode(name: str) -> str:
+    """[vm.network].resolver for this workload: "host" (default) or "none"."""
+    try:
+        with open(workload_config_path(name), "rb") as f:
+            config = tomllib.load(f)
+    except (OSError, ValueError) as e:
+        log(f"  WARNING: could not read config for {name}: {e}; assuming "
+            f"resolver = \"host\"")
+        return "host"
+    mode = config.get("vm", {}).get("network", {}).get("resolver", "host")
+    return mode if mode in ("host", "none") else "host"
+
+
+def main(argv):
+    if len(argv) != 2:
+        print(f"usage: {argv[0]} <name>", file=sys.stderr)
+        return 2
+    name = argv[1]
+
+    if resolver_mode(name) == "none":
+        # The guest gets no resolver at all; a proxy resolves on its behalf.
+        # This is the only setting that actually closes DNS tunnelling.
+        fragment = "dhcp-dns=off"
+        notes = ['[vm.network].resolver = "none": the guest is given no '
+                 'resolver']
+    else:
+        gateways = default_gateways()
+        resolvers = host_resolvers()
+        fragment, notes = build_dns_fragment(gateways, resolvers)
+
+    for note in notes:
+        log(f"  passt DNS: {note}")
+
+    env_dir = workload_env_dir()
+    env_dir.mkdir(parents=True, exist_ok=True)
+    env_file = env_dir / f"workload-{name}.passt"
+    tmp = env_file.with_suffix(".passt.tmp")
+    # Write-then-rename: ExecStart reads this file microseconds later, and a
+    # torn read would produce a netdev argument QEMU rejects.
+    tmp.write_text(f"WL_PASST_DNS={fragment}\n")
+    os.replace(tmp, env_file)
+    log(f"  Wrote {env_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # noqa: BLE001 - never block a VM from booting
+        print(f"  ERROR: {e}", file=sys.stderr)
+        # Emit a safe fallback so ExecStart still has a defined expansion.
+        try:
+            env_dir = workload_env_dir()
+            env_dir.mkdir(parents=True, exist_ok=True)
+            (env_dir / f"workload-{sys.argv[1]}.passt").write_text(
+                "WL_PASST_DNS=dhcp-dns=off\n")
+        except Exception:
+            pass
+        sys.exit(0)

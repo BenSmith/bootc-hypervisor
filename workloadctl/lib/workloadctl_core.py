@@ -19,7 +19,6 @@ import pwd
 import sys
 import tomllib
 
-from vm import VM_BRIDGE_NAME
 from validation import validate_workload_name
 from workload_lib import (
     expand_volume_path,
@@ -601,8 +600,26 @@ class WorkloadConfig:
         return workload_data_dir(self.name)
 
     @property
-    def vm_bridge(self) -> str:
-        return self.config.get("vm", {}).get("network", {}).get("bridge", VM_BRIDGE_NAME)
+    def vm_bridge(self) -> str | None:
+        """The operator-provided host bridge, or None when this VM uses passt.
+
+        There is no default bridge any more (ADR 006): the presence of this key
+        IS the topology selector. None means passt, which is also the only
+        shape any shipped bundle uses — a bridge name is site-specific and need
+        not exist on the target host.
+        """
+        return self.config.get("vm", {}).get("network", {}).get("bridge")
+
+    @property
+    def vm_is_filterable(self) -> bool:
+        """True when this VM's egress is expressible as host policy.
+
+        False for a VM on an operator-provided bridge, which takes a real LAN
+        identity and is unfiltered by design — a supported configuration, not a
+        lapse. `diagnose` reports it as an informational line rather than a
+        warning.
+        """
+        return self.is_vm and self.vm_bridge is None
 
     def get_network_mode(self) -> str:
         return self.config.get("network", {}).get("mode", "pasta")

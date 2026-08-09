@@ -74,10 +74,10 @@ try:
         RUN_SYSTEMD_SYSTEM, workload_run_files,
     )
     from vm import (
-        VM_BRIDGE_NAME, VM_BRIDGE_SUBNET, VM_BRIDGE_CIDR, VM_BRIDGE_DNS, VM_DHCP_RANGE,
-        VM_BRIDGE_FIREWALLD_ZONE, VM_REBOOT_EXIT_CODE,
-        VM_DHCP_LEASE_FILE, VM_DHCP_PIDFILE, VM_GUEST_UID, VM_GUEST_AGENT_PORT,
-        vm_mac_address, find_ovmf_code, parse_memory_mib,
+        VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
+        VM_GUEST_UID, VM_GUEST_AGENT_PORT,
+        vm_mac_address, vm_management_address, parse_vm_port,
+        find_ovmf_code, parse_memory_mib,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -1601,139 +1601,82 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     return unit.render()
 
 
-def generate_vm_bridge_service() -> str:
-    """Generate the shared workload-bridge.service that provisions the managed
-    VM bridge (VM_BRIDGE_NAME).
+def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
+    """Build the `-netdev passt,...` argument for a VM workload (ADR 006).
 
-    Emitted only for VMs on the default managed bridge; VMs pinned to a
-    user-provided bridge (e.g. br0) skip this service entirely. The managed
-    bridge name is reserved for workloadctl, so it is *always* fully managed
-    here — create-or-adopt the isolated VM_BRIDGE_SUBNET network, set up
-    nftables NAT masquerade, and run dnsmasq for DHCP. Every step is
-    idempotent: a leftover bridge from a failed/previous run is re-adopted
-    (not mistaken for foreign), and a service restart never demotes it.
+    passt terminates the guest's stack in userspace and re-originates its
+    traffic as ordinary host sockets owned by this workload's own uid, which is
+    what makes `meta skuid` per-VM egress policy possible. QEMU 10.2 has a
+    native passt netdev, so there is no separate process to launch and no
+    socket to wire.
 
-    Subnet, gateway CIDR, DHCP range, and DNS are all host-level (ADR 002),
-    derived from WORKLOADCTL_VM_BRIDGE_SUBNET / WORKLOADCTL_VM_BRIDGE_DNS in
-    workload_lib — not per-VM. The DHCP range is derived from the subnet, so a
-    relocated bridge hands guests addresses on its own subnet.
+    The host-derived half — the per-family DNS options — is NOT here. It is
+    `${WL_PASST_DNS}`, written at unit start by libexec/workload-vm-netdev,
+    because this generator runs Before=basic.target where there is no default
+    route to derive an address from. See that script's module docstring.
     """
-    bridge = VM_BRIDGE_NAME
-    bridge_cidr = VM_BRIDGE_CIDR
-    bridge_subnet = VM_BRIDGE_SUBNET
-    # DNS the guests' dnsmasq forwards to. With an explicit override, forward
-    # only to those servers (--no-resolv ignores the host resolv.conf). By
-    # default (empty), inherit the host's own resolver by reading its
-    # /etc/resolv.conf — so guests resolve whatever the host does, `.local`
-    # included, rather than a hardcoded public resolver.
-    if VM_BRIDGE_DNS:
-        dns_args = "--no-resolv " + " ".join(
-            f"--server={s}" for s in VM_BRIDGE_DNS) + " "
-    else:
-        dns_args = ""
+    props = [f"passt,id=net0,mac={mac}"]
 
-    unit = Unit()
-    unit.comment("Shared VM bridge service for workloadctl VM workloads")
-    unit.comment(f"{GENERATED_BY} — identical for all VMs; last write wins.")
+    # Two classes of inbound, and they are genuinely different.
+    #
+    # 1. MANAGEMENT — `workloadctl exec` / `shell`. Bound to this workload's own
+    #    127.128.x.y address at a fixed port, so it is never routable and never
+    #    configurable. Derived from the uid, so there is no registry and no
+    #    collision.
+    # 2. PUBLISHED — declared by the operator, bound where they say, following
+    #    the container convention ports = ["8080:80"]. Managed-bridge VMs had no
+    #    port publishing at all, so this is new capability, not a migration.
+    mgmt_addr = vm_management_address(uid)
+    tcp_ports = [f"{mgmt_addr}/{VM_MGMT_SSH_PORT}:22"]
+    udp_ports = []
+    for spec in net_cfg.get("ports", []):
+        bind_addr, host_port, guest_port, proto = parse_vm_port(spec)
+        # passt's spelling is [addr/]host:guest; ours is [addr:]host:guest.
+        forward = f"{bind_addr}/" if bind_addr else ""
+        forward += f"{host_port}:{guest_port}"
+        (udp_ports if proto == "udp" else tcp_ports).append(forward)
+    # One key per entry, NOT a comma-joined value. tcp-ports/udp-ports are
+    # list-typed netdev properties (qapi/net.json:224-225), and -netdev passt
+    # goes through the traditional QemuOpts path — netdev_is_modern() returns
+    # true only for stream/dgram — where the opts visitor builds a list from
+    # *repeated occurrences of the same key* (qapi/opts-visitor.c:74-77). A
+    # comma-joined value would make QEMU read the second entry as a bare
+    # unknown option and refuse to start.
+    props += [f"tcp-ports={spec}" for spec in tcp_ports]
+    props += [f"udp-ports={spec}" for spec in udp_ports]
 
-    u = unit.section("Unit")
-    u.set("Description", f"workloadctl VM bridge ({bridge})")
-    u.set("After", "network.target")
+    # What the guest can reach on the host. `--map-host-loopback none` closes
+    # the one that bites: passt's default maps the host's loopback onto the
+    # gateway address, and loopback-bound services are exactly the ones that
+    # skip authentication *because* they are not reachable off-box. The host's
+    # default-route address is unreachable structurally — the guest is assigned
+    # that same address, so traffic to it never leaves the guest's own stack —
+    # and --map-guest-addr, which would undo that shadowing, has no default.
+    props.append("map-host-loopback=none")
 
-    svc = unit.section("Service")
-    svc.set("Type", "oneshot")
-    svc.set("RemainAfterExit", "yes")
-    # systemd creates and owns /run/workload-vm; refcounted across services.
-    svc.set("RuntimeDirectory", "workload-vm")
-    svc.set("RuntimeDirectoryPreserve", "yes")
-    svc.set("StateDirectory", "workload-vm")
-    # Create-or-adopt the managed bridge, idempotently. set -e surfaces a
-    # genuine failure (vs the benign "already exists"); `ip addr replace`
-    # and an unconditional `up` make restarts and leftover-bridge re-runs
-    # safe. The marker means "we manage this bridge" and gates the
-    # dnsmasq/NAT steps and teardown below.
-    svc.add("ExecStartPre",
-            "/bin/bash -c 'set -e; "
-            f"ip link show {bridge} &>/dev/null || ip link add {bridge} type bridge; "
-            f"ip addr replace {bridge_cidr} dev {bridge}; "
-            f"ip link set {bridge} up; "
-            "touch /run/workload-vm/bridge-managed'")
-    # Allow VMs to use the bridge via qemu-bridge-helper (always).
-    svc.add("ExecStartPre",
-            "/bin/bash -c '"
-            "install -d /etc/qemu && "
-            f"grep -qxF \"allow {bridge}\" /etc/qemu/bridge.conf 2>/dev/null || "
-            f"echo \"allow {bridge}\" >> /etc/qemu/bridge.conf'")
-    # NAT masquerade — managed bridge only.  We own the workload_nat table
-    # entirely: delete-then-recreate on each start avoids duplicate rules.
-    svc.add("ExecStartPre",
-            "/bin/bash -c '"
-            "[ -f /run/workload-vm/bridge-managed ] || exit 0; "
-            "sysctl -q net.ipv4.ip_forward=1 && "
-            "(nft delete table ip workload_nat 2>/dev/null; true) && "
-            "nft add table ip workload_nat && "
-            "nft add chain ip workload_nat postrouting "
-            "\"{ type nat hook postrouting priority 100; }\" && "
-            "nft add rule ip workload_nat postrouting "
-            f"ip saddr {bridge_subnet} ip daddr != {bridge_subnet} masquerade'")
-    # If firewalld is active, put the bridge in *our* zone (shipped by the RPM
-    # as /usr/lib/firewalld/zones/{zone}.xml) so guests' DHCP/DNS to the host
-    # isn't rejected and their forwarded traffic is accepted. This used to
-    # borrow libvirt's zone, which fails hard on any host without libvirt
-    # installed — workloadctl runs VMs on raw QEMU and doesn't require it.
-    # Best-effort by design: a missing/stale zone must not take the bridge (and
-    # with it every VM workload) down, so the failure path warns with the fix
-    # and exits 0. `--change-interface` is idempotent and succeeds whether or
-    # not the interface is already bound, or even present.
-    zone = VM_BRIDGE_FIREWALLD_ZONE
-    svc.add("ExecStartPre",
-            "/bin/bash -c '"
-            "systemctl is-active --quiet firewalld || exit 0; "
-            f"firewall-cmd -q --zone={zone} --change-interface={bridge} && exit 0; "
-            f"echo \"workload-bridge: firewalld is active but {bridge} could not be "
-            f"placed in the {zone} zone -- guest DHCP/DNS may be blocked. Check that "
-            f"/usr/lib/firewalld/zones/{zone}.xml is installed, then run "
-            "firewall-cmd --reload.\" >&2'")
-    # dnsmasq DHCP — managed bridge only.  Daemonizes and writes its pidfile;
-    # ExecStart exits 0 and RemainAfterExit keeps the service active.
-    # --bind-dynamic (not --bind-interfaces): receives DHCP broadcasts from
-    # 0.0.0.0 on the interface — the same approach libvirt uses.
-    svc.set("ExecStart",
-            "/bin/bash -c '"
-            "[ -f /run/workload-vm/bridge-managed ] || exit 0; "
-            "/usr/sbin/dnsmasq "
-            f"--pid-file={VM_DHCP_PIDFILE} "
-            "--conf-file=/dev/null "
-            f"--interface={bridge} "
-            "--except-interface=lo "
-            "--bind-dynamic "
-            f"--dhcp-range={VM_DHCP_RANGE} "
-            f"--dhcp-leasefile={VM_DHCP_LEASE_FILE} "
-            f"{dns_args}"
-            "--log-dhcp'")
-    # Stop: kill dnsmasq if we started it.
-    svc.add("ExecStop",
-            "/bin/bash -c '"
-            "[ -f /run/workload-vm/bridge-managed ] || exit 0; "
-            f"[ -f {VM_DHCP_PIDFILE} ] && "
-            f"kill $(cat {VM_DHCP_PIDFILE}) 2>/dev/null || true'")
-    # Stop: remove NAT rules if we added them.
-    svc.add("ExecStop",
-            "/bin/bash -c '"
-            "[ -f /run/workload-vm/bridge-managed ] || exit 0; "
-            "nft delete table ip workload_nat 2>/dev/null || true'")
-    # Stop: tear down the bridge we manage.
-    svc.add("ExecStop",
-            "/bin/bash -c '"
-            "[ -f /run/workload-vm/bridge-managed ] || exit 0; "
-            f"ip link set {bridge} down 2>/dev/null; ip link del {bridge} 2>/dev/null || true'")
-    svc.set("StandardOutput", "journal")
-    svc.set("StandardError", "journal")
+    # Suppress the resolv.conf search list, which is otherwise advertised over
+    # both DHCP and NDP and leaks internal domain names. Host-independent, so
+    # unlike the DNS options it belongs here rather than in the prestart. This
+    # is passt-mode-specific: pasta forces no_dhcp_dns_search on, passt does
+    # not, so the container side of this project has never been exposed to it.
+    props.append("search=none")
 
-    install = unit.section("Install")
-    install.set("WantedBy", "multi-user.target")
+    # Pin egress to one host interface, if asked. Per-VM egress scoping with no
+    # nftables at all: a VM can be made structurally unable to originate on a
+    # management VLAN. Composes with the uid-keyed policy rather than replacing
+    # it. Both families, since the key names an interface, not an address.
+    outbound_if = net_cfg.get("outbound_if")
+    if outbound_if:
+        props.append(f"outbound-if4={outbound_if}")
+        props.append(f"outbound-if6={outbound_if}")
 
-    return unit.render()
+    # Host-derived DNS, spliced in at start time. ${VAR} interpolates without
+    # word-splitting, which is what this needs — the whole netdev is one argv
+    # element. The helper always writes a non-empty value, so this never
+    # expands to a dangling comma.
+    props.append("${WL_PASST_DNS}")
+
+    return "-netdev " + ",".join(props)
 
 
 def generate_vm_build_service(config, user_name) -> str:
@@ -1793,20 +1736,17 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     if vfs_tags is None:
         vfs_tags = virtiofs_tags(volumes)
 
-    # Bridge: default to _workload-br (workloadctl-managed via workload-bridge.service).
-    # Any other value names an existing host bridge the user provisions
-    # separately (e.g. br0 onto the LAN) — we don't generate a bridge service
-    # in that case and don't add it as a dependency.
-    bridge_name = vm_cfg.get("network", {}).get("bridge", VM_BRIDGE_NAME)
-    uses_managed_bridge = (bridge_name == VM_BRIDGE_NAME)
+    # Network: passt unless the operator named a host bridge (ADR 006). The
+    # presence of `bridge` IS the topology selector — there is no mode key — so
+    # the contradictory combination is unrepresentable rather than rejected.
+    net_cfg = vm_cfg.get("network", {})
+    bridge_name = net_cfg.get("bridge")
 
     # Service dependencies
     prereqs = [
         f"workload-{name}-setup.service",
         f"workload-{name}-build.service",
     ]
-    if uses_managed_bridge:
-        prereqs.append("workload-bridge.service")
     for tag in vfs_tags:
         prereqs.append(f"workload-{name}-virtiofs-{tag}.service")
     prereqs_str = " ".join(prereqs)
@@ -1856,11 +1796,16 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         f"-drive file={socket_dir}/cloud-init.iso,if=virtio,format=raw,readonly=on,media=cdrom,id=cloudinit"
     )
 
-    # Network (bridge via qemu-bridge-helper)
-    qemu_args += [
-        f"-netdev bridge,id=net0,br={bridge_name}",
-        f"-device virtio-net-pci,netdev=net0,mac={mac}",
-    ]
+    # Network. Two shapes, selected by whether [vm.network].bridge is set.
+    if bridge_name:
+        # The unfiltered escape hatch: a real LAN identity, which passt cannot
+        # provide because the guest takes the *host's* address. Supported and
+        # deliberate, not a lapse — but nothing in the egress design reaches a
+        # VM here, and `diagnose` says so plainly.
+        qemu_args.append(f"-netdev bridge,id=net0,br={bridge_name}")
+    else:
+        qemu_args.append(build_passt_netdev(name, uid, net_cfg, mac))
+    qemu_args.append(f"-device virtio-net-pci,netdev=net0,mac={mac}")
 
     # virtiofs chardev + device per volume
     for tag in vfs_tags:
@@ -1930,7 +1875,17 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     u = unit.section("Unit")
     u.set("Description", f"{name} VM workload")
     u.set("Requires", prereqs_str)
-    u.set("After", prereqs_str)
+    if bridge_name:
+        u.set("After", prereqs_str)
+    else:
+        # passt needs a configured host interface, not merely a network stack:
+        # it takes the guest's address and gateway from the host's, and the
+        # netdev prestart reads the default route to derive the DNS options.
+        # network.target is not enough — it only means "network management has
+        # started". This ordering used to arrive transitively, via
+        # workload-bridge.service's After=network.target; that unit is gone.
+        u.set("Wants", "network-online.target")
+        u.set("After", f"{prereqs_str} network-online.target")
     u.set("StartLimitIntervalSec", "300")
     u.set("StartLimitBurst", "3")
 
@@ -1943,7 +1898,13 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # Environment= is repeatable/cumulative; HOME here and the optional
     # WORKLOADCTL_VM_REBOOT_EXIT below must both survive, so use add() not set().
     svc.add("Environment", f'"HOME={home_dir}"')
-    svc.set("EnvironmentFile", f"-/run/workload-env/workload-{name}.env")
+    svc.add("EnvironmentFile", f"-/run/workload-env/workload-{name}.env")
+    if not bridge_name:
+        # Written by the ExecStartPre below, and read back for ExecStart:
+        # systemd re-reads every EnvironmentFile= once per Exec* command
+        # (exec_spawn() calls exec_context_load_environment() per invocation),
+        # so a file written by a prestart is visible to the start that follows.
+        svc.add("EnvironmentFile", f"-/run/workload-env/workload-{name}.passt")
     # Own the per-VM socket dir; preserve across restarts so virtiofsd
     # sidecars (PartOf=) and QEMU's qmp/console sockets aren't yanked.
     svc.set("RuntimeDirectory", f"workload-vm/{name}")
@@ -1991,6 +1952,13 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         svc.add("Environment",
                 f"WORKLOADCTL_VM_REBOOT_EXIT={VM_REBOOT_EXIT_CODE}")
 
+    if not bridge_name:
+        # Derive the host-dependent passt DNS options. The `+` prefix runs it as
+        # root under User=_wl-<name> — it writes into /run/workload-env, which
+        # the workload user may read but not write. Always exits 0: a VM that
+        # cannot resolve is bad, a VM that will not boot is worse.
+        svc.add("ExecStartPre",
+                f"+/usr/libexec/workloadctl/workload-vm-netdev {dq(name)}")
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")
@@ -2041,23 +2009,13 @@ def generate_vm_workload(config, user_name: str, uid: int):
     paths[("unit", "setup")][0].write_text(setup_content)
     log_msg("  Created setup service")
 
-    # Only emit the shared workload-bridge.service when this VM actually uses
-    # _workload-br (the default). Workloads bridged onto a user-provided bridge
-    # (e.g. br0 onto the LAN) shouldn't drag the _workload-br setup along with them.
-    bridge_name = vm_cfg.get("network", {}).get("bridge", VM_BRIDGE_NAME)
+    # No shared network unit any more (ADR 006). passt runs inside the VM's own
+    # unit, as the workload user, so there is nothing host-global to provision,
+    # refcount or tear down — which is also why the nftables egress table has to
+    # find a new home: workload-bridge.service was the only place a shared table
+    # was created and destroyed.
     wants_dir = SERVICES_DIR / "multi-user.target.wants"
     wants_dir.mkdir(parents=True, exist_ok=True)
-    if bridge_name == VM_BRIDGE_NAME:
-        bridge_content = generate_vm_bridge_service()
-        (SERVICES_DIR / "workload-bridge.service").write_text(bridge_content)
-        log_msg("  Created workload-bridge.service")
-
-        bridge_link = wants_dir / "workload-bridge.service"
-        if bridge_link.exists() or bridge_link.is_symlink():
-            bridge_link.unlink()
-        bridge_link.symlink_to("../workload-bridge.service")
-    else:
-        log_msg(f"  Bridge {bridge_name!r} is user-provided; skipping workload-bridge.service")
 
     # virtiofsd sidecar services — collision-safe tags, same order/set as the
     # VM service's chardevs and the purge/cloud-init sites (B3).

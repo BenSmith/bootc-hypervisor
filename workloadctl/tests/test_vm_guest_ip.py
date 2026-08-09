@@ -283,25 +283,32 @@ class TestVmGuestAgent(unittest.TestCase):
             self.assertEqual(substrate._vm_guest_ip(self.name, "br0"), ip)
 
 
-class TestVmGuestIpLease(unittest.TestCase):
-    """dnsmasq lease lookup on a workloadctl-managed bridge."""
+class TestVmGuestIpPasst(unittest.TestCase):
+    """Under passt there is no host-side address to infer (ADR 006).
 
-    def test_lease_match(self):
-        name = "demo-vm"
-        ip = "192.168.200.123"
-        with tempfile.TemporaryDirectory() as d:
-            lease = Path(d) / "workload-bridge.leases"
-            # dnsmasq lease format: <ts> <mac> <ip> <hostname> <client-id>
-            lease.write_text(
-                f"1700000000 52:54:00:aa:bb:cc {ip} {name} 01:52:54:00:aa:bb:cc\n"
-            )
-            marker = mock.MagicMock()
-            marker.exists.return_value = True  # bridge-managed present
-            with mock.patch.object(substrate, "Path", return_value=marker), \
-                 mock.patch.object(substrate, "_vm_guest_agent_addresses",
-                                   return_value=[]), \
-                 mock.patch.object(substrate, "VM_DHCP_LEASE_FILE", lease):
-                self.assertEqual(substrate._vm_guest_ip(name), ip)
+    The dnsmasq lease branch that used to sit between the agent and ARP went
+    with the managed bridge. What replaced it is not another source but the
+    absence of the question: the guest is assigned the *host's* address, so
+    "which host on this segment is the guest" has no meaningful answer, and
+    management traffic goes to the uid-derived address instead.
+    """
+
+    def test_no_host_side_inference_under_passt(self):
+        # Neither the neighbour table nor mDNS is consulted: both answer a
+        # question that only makes sense on a shared segment. Any subprocess
+        # call here would be one of them, so the mock asserts by never firing.
+        run = mock.MagicMock()
+        with mock.patch.object(substrate, "_vm_guest_agent_addresses",
+                               return_value=[]), \
+             mock.patch.object(substrate.subprocess, "run", run):
+            self.assertEqual(substrate._vm_guest_addresses("demo-vm"), [])
+        run.assert_not_called()
+
+    def test_guest_agent_still_answers_under_passt(self):
+        """The agent asks the guest's own kernel, so it works on any topology."""
+        with mock.patch.object(substrate, "_vm_guest_agent_addresses",
+                               return_value=["10.9.8.7"]):
+            self.assertEqual(substrate._vm_guest_ip("demo-vm"), "10.9.8.7")
 
 
 if __name__ == "__main__":

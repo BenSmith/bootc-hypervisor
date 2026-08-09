@@ -104,7 +104,7 @@ class _WorkloadDir:
 class TestVmSshCommandPinning(unittest.TestCase):
     def test_pins_host_key_no_permissive_options(self):
         config = _make_vm_config()
-        cmd = _vm_ssh_command(config, "192.168.200.5", exec_args=["true"])
+        cmd = _vm_ssh_command(config, ("192.168.200.5", 22), exec_args=["true"])
         joined = " ".join(cmd)
         # Verifies against a per-workload known_hosts keyed by the stable name.
         self.assertIn("StrictHostKeyChecking=yes", cmd)
@@ -126,7 +126,7 @@ class TestVmSshCommandPinning(unittest.TestCase):
         """
         config = _make_vm_config()
         script = "mkfs.ext4 -qF /dev/vdb && echo done > /mnt/d/sentinel"
-        cmd = _vm_ssh_command(config, "192.168.200.5",
+        cmd = _vm_ssh_command(config, ("192.168.200.5", 22),
                               exec_args=["sudo", "sh", "-c", script])
         # ssh's remote command is the single trailing word; unquoting it must
         # give back exactly the argv we asked for.
@@ -1371,10 +1371,11 @@ class TestCapabilityMatrix(unittest.TestCase):
             with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)):
                 shallow = substrate.teardown_plan(purge=False)
                 deep = substrate.teardown_plan(purge=True)
-        # The bridge line appears at both depths (it comes down either way); the
-        # socket dir only on purge.
-        self.assertTrue(any('bridge' in line for line in shallow))
-        self.assertFalse(any('socket dir' in line for line in shallow))
+        # The socket dir is the whole plan, and only on purge. Retiring the
+        # managed bridge (ADR 006) removed the one host-global resource a VM
+        # shared with its siblings, so a shallow teardown now has nothing to
+        # report — passt exits with the VM and leaves nothing behind.
+        self.assertEqual(shallow, [])
         self.assertTrue(any('socket dir' in line for line in deep))
 
     # ContainerSubstrate: resource_usage present → no NotApplicable
@@ -2458,7 +2459,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.exec(["ls"])
@@ -2466,7 +2467,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_exec_runs_ssh_and_returns_code(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=7)) as mock_run:
             rc = substrate.exec(["ls"])
         self.assertEqual(rc, 7)
@@ -2476,7 +2477,7 @@ class TestVMExecShell(unittest.TestCase):
     def test_open_shell_ssh_success_returns_normally(self):
         """A clean SSH session is success: return, don't raise, don't fall back."""
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=0)), \
              patch.object(_vm_mod.os, 'execvp') as mock_execvp:
             substrate.open_shell()
@@ -2485,7 +2486,7 @@ class TestVMExecShell(unittest.TestCase):
     def test_open_shell_ssh_remote_failure_propagates_code(self):
         """A nonzero exit from the remote shell surfaces as that exact code."""
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=17)):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.open_shell()
@@ -2493,7 +2494,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_ssh_failure_falls_back_to_console(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=255)), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
@@ -2503,7 +2504,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_no_ip_falls_to_console_missing_socket(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
              patch('pathlib.Path.exists', return_value=False), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -2512,7 +2513,7 @@ class TestVMExecShell(unittest.TestCase):
 
     def test_open_shell_console_connects_via_socat(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
              patch('pathlib.Path.exists', return_value=True), \
              patch('os.execvp') as mock_exec, \
              patch('sys.stderr', io.StringIO()), \
@@ -2532,7 +2533,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_no_ip_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value=None), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=None), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
                 substrate.lifecycle("reboot")
@@ -2540,7 +2541,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_success_prints_confirmation(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=0)):
             buf = io.StringIO()
             with patch('sys.stdout', buf):
@@ -2549,7 +2550,7 @@ class TestVMLifecycleReboot(unittest.TestCase):
 
     def test_reboot_ssh_failure_exits_1(self):
         substrate = self._substrate()
-        with patch.object(_vm_mod, '_vm_guest_ip', return_value='10.0.0.5'), \
+        with patch.object(_vm_mod, '_vm_ssh_endpoint', return_value=('10.0.0.5', 22)), \
              patch('subprocess.run', return_value=_ok(returncode=1)), \
              patch('sys.stderr', io.StringIO()):
             with self.assertRaises(LifecycleError) as cm:
@@ -2908,72 +2909,47 @@ class TestBackupImplAndHelpers(unittest.TestCase):
 # ── _vm_guest_ip() lookup chain ────────────────────────────────────────────────
 
 class TestVmGuestIp(unittest.TestCase):
+    """Host-side address inference, which now applies only to bridged VMs.
 
-    def test_dnsmasq_lease_match(self):
-        with tempfile.TemporaryDirectory() as d:
-            run_dir = Path(d) / 'run'
-            (run_dir).mkdir()
-            (run_dir / 'bridge-managed').touch()
-            lease_file = Path(d) / 'leases'
-            lease_file.write_text("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
-            with patch('substrate_vm.Path'):
-                # Only patch the bridge-managed marker check and lease file path;
-                # simplest is to patch the two module-level Path constants directly.
-                pass
-        # Simpler: patch the two constants used inside the function.
-        with patch.object(_vm_mod, 'VM_DHCP_LEASE_FILE') as mock_lease:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.leases', delete=False) as f:
-                f.write("1234 aa:bb:cc:dd:ee:ff 192.168.1.5 myvm 01:aa\n")
-                lease_path = Path(f.name)
-            try:
-                mock_lease.exists.return_value = True
-                mock_lease.read_text.return_value = lease_path.read_text()
-                # Blanket-patching Path.exists also makes the guest agent socket
-                # look present, so stub the agent out: this case is about the
-                # lease branch, and without it the lookup spends the agent
-                # timeout connecting to a socket that isn't really there.
-                with patch('pathlib.Path.exists', return_value=True), \
-                     patch.object(_vm_mod, '_vm_guest_agent_addresses',
-                                  return_value=[]):
-                    ip = _vm_mod._vm_guest_ip('myvm')
-            finally:
-                lease_path.unlink()
-        self.assertEqual(ip, '192.168.1.5')
+    Under passt (the default since ADR 006) none of this runs: the guest takes
+    the host's address, so there is nothing to infer, and management traffic
+    goes to the uid-derived address instead. These cases therefore all pass an
+    explicit bridge. The dnsmasq lease branch that used to lead the cascade
+    went with the managed bridge.
+    """
 
-    def test_no_bridge_managed_falls_to_arp(self):
-        with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+    def test_arp_match_on_a_bridge(self):
+        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
-                _ok(stdout="192.168.1.9 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"),  # ip neigh
+                _ok(stdout="192.168.1.9 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
         self.assertEqual(ip, '192.168.1.9')
 
     def test_arp_no_match_falls_to_mdns(self):
-        with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
-                _ok(stdout="192.168.1.9 lladdr 11:22:33:44:55:66 REACHABLE\n"),  # no match
-                _ok(returncode=0, stdout="192.168.1.20 myvm.local\n"),  # getent
+                _ok(stdout="192.168.1.9 lladdr 11:22:33:44:55:66 REACHABLE\n"),
+                _ok(returncode=0, stdout="192.168.1.20 myvm.local\n"),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
         self.assertEqual(ip, '192.168.1.20')
 
     def test_all_lookups_fail_returns_none(self):
-        with patch('pathlib.Path.exists', return_value=False), \
-             patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+        with patch.object(_vm_mod, 'vm_mac_address', return_value='aa:bb:cc:dd:ee:ff'), \
+             patch.object(_vm_mod, '_vm_guest_agent_addresses', return_value=[]), \
              patch('subprocess.run') as mock_run:
             mock_run.side_effect = [
                 _ok(stdout=""),
                 _ok(returncode=2, stdout=""),
             ]
-            ip = _vm_mod._vm_guest_ip('myvm')
+            ip = _vm_mod._vm_guest_ip('myvm', 'br0')
         self.assertIsNone(ip)
 
-
-# ── _accessible_at_config() endpoint parsing branches ─────────────────────────
 
 class TestAccessibleAtConfig(unittest.TestCase):
 

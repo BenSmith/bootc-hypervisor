@@ -35,7 +35,7 @@ from workload_lib import (
     workload_env_dir,
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
-from vm import VM_SOCKET_DIR, VM_BRIDGE_NAME, VM_GUEST_UID, find_ovmf_vars
+from vm import VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars
 from secrets_template import substitute_template
 
 
@@ -641,23 +641,6 @@ def ensure_manager_slice(pw, config):
     else:
         log(f"  WARNING: user@{uid}.service still not in {slice_name} after restart "
             f"(cgroup={cgroup!r}); workload runs but aggregate-slice grouping is lost")
-
-
-def setup_vm_bridge(name: str, bridge: str):
-    """Idempotent: configure qemu-bridge-helper to allow the workload's bridge.
-
-    The workload-bridge.service handles the actual bridge lifecycle at boot;
-    this function ensures the one-time host config (bridge.conf) is in place
-    for whichever bridge this workload uses (managed _workload-br or a pre-existing
-    LAN bridge like br0).
-    """
-    bridge_conf = Path("/etc/qemu/bridge.conf")
-    bridge_conf.parent.mkdir(parents=True, exist_ok=True)
-    existing = bridge_conf.read_text() if bridge_conf.exists() else ""
-    if f"allow {bridge}" not in existing.splitlines():
-        with open(bridge_conf, "a") as f:
-            f.write(f"allow {bridge}\n")
-        log(f"  Added 'allow {bridge}' to {bridge_conf}")
 
 
 def setup_nvram(pw, config: dict):
@@ -1370,15 +1353,16 @@ def _ensure_user(name: str) -> int:
     record_deployment_provenance(name)
 
     if kind == "vm":
-        # VM workloads: bridge config, NVRAM, socket dir, SSH key, cloud-init
+        # VM workloads: NVRAM, socket dir, SSH key, cloud-init
         # Skip subuid/subgid (QEMU doesn't use user namespaces)
         # Skip linger (QEMU runs as a system service, not a user session)
-
-        bridge = config.get("vm", {}).get("network", {}).get("bridge", VM_BRIDGE_NAME)
-        try:
-            setup_vm_bridge(name, bridge)
-        except Exception as e:
-            log(f"  WARNING: Failed to set up VM bridge: {e}")
+        #
+        # No network setup here any more (ADR 006). passt needs no host
+        # configuration at all: no bridge to create, and no /etc/qemu/bridge.conf
+        # entry, because it does not go through setuid-root qemu-bridge-helper.
+        # A VM pinned to an operator-provided bridge does still need that helper
+        # allowed for its bridge, but the operator provisions that bridge
+        # themselves and the allow-list entry belongs with it.
 
         # NVRAM is a prerequisite for boot: the VM unit references nvram.fd
         # unconditionally, so a missing/failed NVRAM yields a flapping service.

@@ -1,7 +1,7 @@
 """
 VM-workload constants, helpers, and schema validation.
 
-Everything specific to `[vm]` workloads: the managed-bridge network params,
+Everything specific to `[vm]` workloads: the uid-derived passt network identity,
 OVMF firmware discovery, MAC derivation, memory parsing, and the [vm]-section
 validator. Kept separate from the container path so the VM surface is legible
 on its own.
@@ -15,7 +15,7 @@ import os
 import re
 from pathlib import Path
 
-from workload_lib import parse_volume_spec
+from workload_lib import UID_MAX, UID_MIN, parse_volume_spec
 
 
 # --- VM constants ---
@@ -36,53 +36,39 @@ VM_GUEST_AGENT_PORT = "org.qemu.guest_agent.0"
 # (which on the host is owned by _wl-<name>); see generate_virtiofs_service.
 VM_GUEST_UID = 1000
 
-# Default bridge for VM workloads.  _workload-br is the workloadctl-managed
-# isolated NAT bridge (auto-provisioned by workload-bridge.service). The name
-# is deliberately distinctive (and reserved) so the always-manage bridge setup
-# won't adopt an unrelated interface; it must stay <=15 chars (Linux IFNAMSIZ).
-# Override to e.g. "br0" to attach VMs directly to a pre-existing LAN bridge.
-VM_BRIDGE_NAME = "_workload-br"
-# firewalld zone the managed bridge is placed in, shipped by the RPM as
-# /usr/lib/firewalld/zones/workloadctl.xml. Our own zone, not libvirt's: we run
-# VMs on raw QEMU, so on a host without libvirt that zone doesn't exist, and
-# borrowing it would inherit another project's policy either way. The zone file
-# pins this same interface name so the binding survives a firewalld reload.
-VM_BRIDGE_FIREWALLD_ZONE = "workloadctl"
-# Managed-bridge network config is HOST-LEVEL, not per-VM (ADR 002): the bridge
-# is one host-global refcounted resource, so its subnet/DNS can't coherently
-# take per-VM overrides. Single source of truth = the subnet CIDR
-# (WORKLOADCTL_VM_BRIDGE_SUBNET), from which the gateway IP, CIDR, and DHCP
-# range are all DERIVED, so a relocated bridge hands guests addresses on its
-# own subnet.
-def managed_bridge_params(subnet_cidr: str) -> tuple[str, str, str, str]:
-    """Derive (gateway_ip, gateway_cidr, normalized_subnet, dhcp_range) for the
-    managed VM bridge from a single subnet CIDR.
+# --- passt networking (ADR 006) ---
+#
+# VM workloads have no bridge. passt terminates the guest's stack in userspace
+# and re-originates its traffic as ordinary host sockets owned by the workload's
+# own uid, so THE WORKLOAD UID IS THE NETWORK IDENTITY — unforgeable by the
+# guest, unique per workload with no allocation step, and matchable by nftables
+# as `meta skuid`. Everything below derives from the uid; there is no registry.
+#
+# Load-bearing precondition: passt keeps its inherited uid ONLY because it is
+# not started as root (conf.c:1007-1017 — started as root it warns once and
+# drops to nobody, collapsing every workload into one uid while traffic keeps
+# flowing). The generated unit's User= is what prevents that, which is why
+# tests/test_vm_passt.py asserts it rather than assuming it.
 
-    The gateway is the first host address; the DHCP window is offsets .100–.199
-    within the subnet. On a subnet too small for that window the range falls
-    back to the full usable span (first host after the gateway through the last
-    host) instead of collapsing onto a single clamped address. Raises
-    ValueError if the subnet leaves no leasable address after the gateway
-    (/31, /32).
-    """
-    net = ipaddress.ip_network(subnet_cidr, strict=False)
-    gateway = net.network_address + 1
-    first_usable = net.network_address + 2  # +1 is the gateway
-    last_usable = net.broadcast_address - 1
-    if last_usable < first_usable:
-        raise ValueError(
-            f"VM bridge subnet {net} has no leasable address after the "
-            f"gateway; use a /30 or larger")
-    dhcp_start = net.network_address + 100
-    dhcp_end = min(net.network_address + 199, last_usable)
-    if dhcp_start > dhcp_end:
-        dhcp_start = first_usable
-    return (str(gateway), f"{gateway}/{net.prefixlen}", str(net),
-            f"{dhcp_start},{dhcp_end},12h")
+# Base of the per-workload management address range. All of 127.0.0.0/8 is
+# loopback and any address in it binds and connects with no configuration, so
+# each workload gets its own address at a FIXED port rather than a shared
+# address at an allocated port. 127.128.0.0 (not 127.0.1.0) avoids 127.0.1.1,
+# which Debian conventionally puts in /etc/hosts for the system hostname.
+# UID_MIN..UID_MAX is 10000-52948 = 42,949 values, comfortably inside both
+# 127.128.0.0/9 and the 16-bit nflog group space.
+VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 
+# Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.
+# Fixed, never configurable, and bound only on the workload's own management
+# address. It must stay above net.ipv4.ip_unprivileged_port_start (1024 by
+# default) because passt binds it as the workload user, not as root — which is
+# why this is 2222 and not 22.
+VM_MGMT_SSH_PORT = 2222
 
-VM_BRIDGE_IP, VM_BRIDGE_CIDR, VM_BRIDGE_SUBNET, VM_DHCP_RANGE = managed_bridge_params(
-    os.environ.get("WORKLOADCTL_VM_BRIDGE_SUBNET", "192.168.200.0/24"))
+# The advertised DNS address is derived at unit start, not here: the generator
+# runs Before=basic.target, where there is no default route yet. See
+# libexec/workload-vm-netdev and generate_vm_service.
 
 # Exit code workload-vm-notify uses to report a guest *reboot* (as opposed to a
 # poweroff, which exits 0). QEMU runs with -no-reboot, so both a guest reboot and
@@ -91,22 +77,6 @@ VM_BRIDGE_IP, VM_BRIDGE_CIDR, VM_BRIDGE_SUBNET, VM_DHCP_RANGE = managed_bridge_p
 # this nonzero code so systemd's Restart=on-failure cycles the VM, while a
 # poweroff (exit 0) leaves it down. Nonzero and outside QEMU's own 0/1 range.
 VM_REBOOT_EXIT_CODE = 133
-# Upstream DNS the bridge dnsmasq forwards guest queries to. Empty by default:
-# the bridge service then lets dnsmasq inherit the host's own /etc/resolv.conf,
-# so guests resolve exactly what the host does — including `.local` names via the
-# host's mDNS resolver — instead of leaking to a hardcoded public resolver. Set
-# WORKLOADCTL_VM_BRIDGE_DNS (comma-separated) to force specific upstreams.
-VM_BRIDGE_DNS = [s.strip() for s in os.environ.get(
-    "WORKLOADCTL_VM_BRIDGE_DNS", "").split(",") if s.strip()]
-# dnsmasq for the bridge runs confined in the SELinux dnsmasq_t domain, which
-# may only write its lease/pid files in dnsmasq-owned, dnsmasq_lease_t-labeled
-# locations. /var/lib/workloads is labeled container_file_t (rootless podman),
-# so dnsmasq_t can neither write nor traverse it — putting the lease there made
-# dnsmasq fail to start on enforcing systems (the default), leaving VMs with no
-# DHCP. /var/lib/dnsmasq ships with the dnsmasq package, already labeled
-# dnsmasq_lease_t, and policy allows dnsmasq_t to create/write files there.
-VM_DHCP_LEASE_FILE = Path("/var/lib/dnsmasq/workload-bridge.leases")
-VM_DHCP_PIDFILE = Path("/var/lib/dnsmasq/workload-bridge.pid")
 
 # OVMF firmware search order (distro paths differ)
 OVMF_CODE_CANDIDATES = [
@@ -136,6 +106,42 @@ def vm_guest_agent_socket(name: str) -> Path:
     return VM_SOCKET_DIR / name / "ga.sock"
 
 
+def vm_management_address(uid: int) -> str:
+    """The workload's own loopback address for management inbound.
+
+    `workloadctl exec`/`shell` reach the guest's sshd here, on
+    VM_MGMT_SSH_PORT. Never routable, never configurable, and distinct from
+    declared published ports ([vm.network].ports), which the operator binds
+    where they choose — the two were conflated in early drafts and are
+    genuinely different (ADR 006).
+
+    Derived from the uid, so uniqueness is inherited from the uid allocator:
+    no registry, no allocation step, and no collision. uid 10000 -> 127.128.0.0,
+    uid 10003 -> 127.128.0.3.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no management address is derivable for it")
+    return str(ipaddress.IPv4Address(VM_MGMT_ADDR_BASE + (uid - UID_MIN)))
+
+
+def vm_nflog_group(uid: int) -> int:
+    """The workload's nflog group, for per-workload host-side packet capture.
+
+    Same derivation, same guarantee as vm_management_address: the offset into
+    the workload uid range. `tcpdump -i nflog:<group>` then reads exactly this
+    workload's traffic, which is the only mechanism that can produce a
+    per-workload host-side capture at all — by the time a packet is on the wire
+    the owning socket is not part of it, so only netfilter sees `meta skuid`.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no nflog group is derivable for it")
+    return uid - UID_MIN
+
+
 def vm_mac_address(name: str) -> str:
     """Derive a stable, locally-administered unicast MAC from the workload name."""
     h = hashlib.md5(f"wl-vm-{name}".encode(), usedforsecurity=False).digest()
@@ -147,8 +153,10 @@ def vm_mac_collisions(name: str, other_names) -> list[str]:
     """Return the subset of other_names whose derived VM MAC equals name's.
 
     vm_mac_address hashes the name into a MAC with no allocation registry, so
-    two distinct names can (rarely) collide on the shared VM bridge — two guests
-    would then fight over one address. This lets `validate` flag it up front.
+    two distinct names can (rarely) collide. Under passt that is harmless —
+    each guest is alone on its own link — but two VMs sharing an
+    operator-provided LAN bridge ([vm.network].bridge) are on one segment and
+    would fight over one address. This lets `validate` flag it up front.
     """
     mine = vm_mac_address(name)
     return sorted(other for other in set(other_names)
@@ -197,6 +205,138 @@ def parse_memory_mib(value) -> int:
 
 
 # --- Validation ---
+
+# Published-port spec, following the container convention already in the schema
+# ([network].ports = ["8080:80"]): an optional bind address, a host port, an
+# optional guest port, an optional /proto. Parsed rather than passed through
+# because passt spells the same thing differently (addr/host:guest, and TCP and
+# UDP on separate netdev properties), so the generator has to take it apart.
+# The bind-address branch must be a dotted quad or bracketed, never a bare run
+# of digits — otherwise "8080:80" parses as address 8080, port 80.
+VM_PORT_RE = re.compile(
+    r"^(?:(?P<addr>\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3}):)?"
+    r"(?P<host>\d+)"
+    r"(?::(?P<guest>\d+))?"
+    r"(?:/(?P<proto>tcp|udp))?$"
+)
+
+
+def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
+    """Parse a [vm.network].ports entry into (bind_addr, host, guest, proto).
+
+    Raises ValueError on anything malformed. `bind_addr` is None when the
+    operator did not pin one, in which case passt binds every address — the
+    same meaning `-p 8080:80` has for podman.
+    """
+    m = VM_PORT_RE.match(spec.strip())
+    if not m:
+        raise ValueError(
+            f"{spec!r} is not a port spec — use '8080:80', '8080', "
+            f"'127.0.0.1:8080:80', or any of those with '/udp'")
+    host = int(m.group("host"))
+    guest = int(m.group("guest") or host)
+    for label, port in (("host", host), ("guest", guest)):
+        if not 1 <= port <= 65535:
+            raise ValueError(f"{spec!r} has a {label} port out of range: {port}")
+    addr = m.group("addr")
+    if addr:
+        addr = addr.strip("[]")
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError:
+            raise ValueError(f"{spec!r} has an invalid bind address: {addr!r}")
+    return (addr, host, guest, m.group("proto") or "tcp")
+
+
+def validate_vm_network(net: dict) -> list[str]:
+    """Validate [vm.network]. Returns a list of error strings.
+
+    There is deliberately no `mode` key (ADR 006): `bridge` present means
+    "attach to that operator-provided host bridge, take a real LAN identity,
+    and be unfiltered"; absent means passt. That makes the contradictory
+    combination unrepresentable rather than a validation rule.
+    """
+    errors: list[str] = []
+    if not isinstance(net, dict):
+        return ["[vm.network] must be a table"]
+
+    # bridge — the unfiltered escape hatch. Optional now: its absence selects
+    # passt, so unlike the pre-ADR-006 schema there is no default bridge name.
+    if "bridge" in net:
+        bridge = net["bridge"]
+        if not isinstance(bridge, str) or not bridge:
+            errors.append(
+                f"[vm.network].bridge must be a non-empty string, got {bridge!r}")
+        elif not re.match(r"^[a-zA-Z0-9_-]+$", bridge) or len(bridge) > 15:
+            # Linux IFNAMSIZ is 16, max 15 visible chars.
+            errors.append(
+                f"[vm.network].bridge {bridge!r} is not a valid interface name "
+                "(letters/digits/_/-, max 15 chars)")
+
+    ports = net.get("ports", [])
+    if not isinstance(ports, list):
+        errors.append(
+            f"[vm.network].ports must be an array of 'host:guest' strings, "
+            f"got {type(ports).__name__}")
+    else:
+        for spec in ports:
+            if not isinstance(spec, str):
+                errors.append(f"[vm.network].ports entries must be strings, got {spec!r}")
+                continue
+            try:
+                parse_vm_port(spec)
+            except ValueError as e:
+                errors.append(f"[vm.network].ports: {e}")
+    if ports and "bridge" in net:
+        # passt publishes ports by binding host sockets; a bridged guest has its
+        # own LAN address and nothing of ours is in its data path to bind them.
+        errors.append(
+            "[vm.network].ports has no effect with .bridge set — a bridged VM "
+            "has its own LAN address, so reach its services there directly")
+
+    outbound_if = net.get("outbound_if")
+    if outbound_if is not None:
+        if not isinstance(outbound_if, str) or not outbound_if:
+            errors.append(
+                f"[vm.network].outbound_if must be a non-empty string, "
+                f"got {outbound_if!r}")
+        elif not re.match(r"^[a-zA-Z0-9_.-]+$", outbound_if) or len(outbound_if) > 15:
+            errors.append(
+                f"[vm.network].outbound_if {outbound_if!r} is not a valid "
+                "interface name (letters/digits/_/./-, max 15 chars)")
+        elif "bridge" in net:
+            errors.append(
+                "[vm.network].outbound_if has no effect with .bridge set — it "
+                "binds passt's host-side sockets, and a bridged VM has none")
+
+    resolver = net.get("resolver", "host")
+    if resolver not in ("host", "none"):
+        errors.append(
+            f"[vm.network].resolver must be 'host' or 'none', got {resolver!r}")
+
+    # Reject rather than ignore. Both keys are part of the accepted design, but
+    # the machinery that gives them meaning — the uid-keyed nftables output
+    # chain and the per-workload proxy — is not built yet. Accepting `egress =
+    # "filtered"` while nothing filters would let an operator believe a VM is
+    # confined when it is wide open, which is worse than not offering the key.
+    for unimplemented, lands_with in (("egress", "the nftables output chain"),
+                                      ("allow", "the nftables output chain")):
+        if unimplemented in net:
+            errors.append(
+                f"[vm.network].{unimplemented} is not implemented yet — it "
+                f"lands with {lands_with}. Until then every VM is unfiltered, "
+                f"and accepting this key would misreport that.")
+
+    # ADR 002's host-level knobs went with the bridge that needed them.
+    for removed in ("subnet", "dns"):
+        if removed in net:
+            errors.append(
+                f"[vm.network].{removed} was managed-bridge configuration and "
+                f"is gone with it (ADR 006). passt serves the guest DHCP/DNS "
+                f"itself, derived from the host at start time.")
+
+    return errors
+
 
 def validate_vm_config(config: dict) -> list[str]:
     """Validate the [vm] section. Returns a list of error strings."""
@@ -253,30 +393,7 @@ def validate_vm_config(config: dict) -> list[str]:
             f"got {restart!r}"
         )
 
-    # [vm.network].bridge — defaults to _workload-br (managed NAT bridge); set to e.g.
-    # "br0" to attach to a pre-existing LAN bridge instead.
-    bridge = vm.get("network", {}).get("bridge", VM_BRIDGE_NAME)
-    if not isinstance(bridge, str) or not bridge:
-        errors.append(f"[vm.network].bridge must be a non-empty string, got {bridge!r}")
-    elif not re.match(r"^[a-zA-Z0-9_-]+$", bridge) or len(bridge) > 15:
-        # Linux IFNAMSIZ is 16, max 15 visible chars.
-        errors.append(
-            f"[vm.network].bridge {bridge!r} is not a valid interface name "
-            "(letters/digits/_/-, max 15 chars)"
-        )
-
-    # The managed bridge's subnet/DNS are HOST-LEVEL config (ADR 002), no longer
-    # per-VM: reject the removed fields with a pointer to the host-level knob
-    # rather than silently ignoring them.
-    net_cfg = vm.get("network", {})
-    for removed in ("subnet", "dns"):
-        if removed in net_cfg:
-            errors.append(
-                f"[vm.network].{removed} is no longer a per-VM setting — the "
-                f"managed bridge's subnet/DNS are host-level (set "
-                f"WORKLOADCTL_VM_BRIDGE_SUBNET / WORKLOADCTL_VM_BRIDGE_DNS). "
-                f"See ADR 002."
-            )
+    errors.extend(validate_vm_network(vm.get("network", {})))
 
     # [vm.cloud_init] — optional override of the seed user-data.
     ci = vm.get("cloud_init", {})

@@ -46,9 +46,21 @@ user = "fedora"
 rollback_keep = 2
 
 [vm.network]
-# Uses the workloadctl-managed bridge by default. Set bridge = "br0" (or your
-# LAN bridge name) to put Forgejo directly on the LAN with a real IP from your
-# router instead.
+# Defaults to passt: no bridge, and the guest is assigned the HOST's address.
+#
+# READ THIS BEFORE DEPLOYING. The cloud-init in this bundle runs Caddy *inside*
+# the guest serving https://virtual-forgejo.local, which assumes the VM has its
+# own LAN address. Under passt it does not. As shipped you therefore need to
+# publish ports on the host — where 80/443 may already be taken, and where the
+# hostname has to point at the host rather than at the VM:
+#
+#   ports = ["8443:443", "8080:80"]
+#
+# If you want the in-guest Caddy to work as designed, give the VM a real LAN
+# identity instead by naming your own LAN bridge. You provision that bridge
+# yourself; it is site-specific, which is why nothing is set here. Note that a
+# bridged VM is unfiltered — host egress policy cannot reach it.
+#
 # bridge = "br0"
 
 [vm.cloud_init]

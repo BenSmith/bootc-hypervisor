@@ -1305,56 +1305,6 @@ class TestEnableLinger(unittest.TestCase):
             self.assertIn("did not become active", str(ctx.exception))
 
 
-class TestSetupVmBridge(unittest.TestCase):
-    def setUp(self):
-        self.mod = _load_script()
-
-    def test_creates_bridge_conf_and_adds_allow_line(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "qemu" / "bridge.conf"
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
-                self.mod.setup_vm_bridge("myvm", "_workload-br")
-            self.assertIn("allow _workload-br", conf.read_text())
-
-    def test_idempotent_when_allow_line_present(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "qemu" / "bridge.conf"
-            conf.parent.mkdir(parents=True)
-            conf.write_text("allow _workload-br\n")
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
-                self.mod.setup_vm_bridge("myvm", "_workload-br")
-            self.assertEqual(conf.read_text().count("allow _workload-br"), 1)
-
-    def test_second_bridge_appended(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "qemu" / "bridge.conf"
-            conf.parent.mkdir(parents=True)
-            conf.write_text("allow br0\n")
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
-                self.mod.setup_vm_bridge("myvm", "_workload-br")
-            text = conf.read_text()
-            self.assertIn("allow br0", text)
-            self.assertIn("allow _workload-br", text)
-
-    def test_prefix_collision_does_not_suppress_allow_line(self):
-        # Regression: an existing "allow br0-lan" line must not suppress adding
-        # "allow br0" — a substring check (`"allow br0" in existing`) would
-        # false-positive on "allow br0-lan" and silently skip the append.
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = Path(tmp) / "qemu" / "bridge.conf"
-            conf.parent.mkdir(parents=True)
-            conf.write_text("allow br0-lan\n")
-            with mock.patch.object(self.mod, "Path", side_effect=lambda p: (
-                conf if p == "/etc/qemu/bridge.conf" else Path(p))):
-                self.mod.setup_vm_bridge("myvm", "br0")
-            lines = conf.read_text().splitlines()
-            self.assertIn("allow br0-lan", lines)
-            self.assertIn("allow br0", lines)
-
-
 class TestSetupNvram(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()
@@ -2002,7 +1952,6 @@ class TestMain(unittest.TestCase):
             "write_environment_file": mock.patch.object(self.mod, "write_environment_file"),
             "restore_selinux_labels": mock.patch.object(self.mod, "restore_selinux_labels"),
             "enable_linger": mock.patch.object(self.mod, "enable_linger"),
-            "setup_vm_bridge": mock.patch.object(self.mod, "setup_vm_bridge"),
             "setup_nvram": mock.patch.object(self.mod, "setup_nvram"),
             "setup_vm_socket_dir": mock.patch.object(self.mod, "setup_vm_socket_dir"),
             "setup_vm_volume_directories": mock.patch.object(self.mod, "setup_vm_volume_directories"),
@@ -2046,7 +1995,6 @@ class TestMain(unittest.TestCase):
         mocks["restore_selinux_labels"].assert_called_once()
         mocks["enable_linger"].assert_called_once()
         # VM-only steps must not run for container workloads
-        mocks["setup_vm_bridge"].assert_not_called()
         mocks["setup_nvram"].assert_not_called()
         mocks["generate_ssh_keypair"].assert_not_called()
         mocks["build_cloud_init_iso"].assert_not_called()
@@ -2101,7 +2049,6 @@ class TestMain(unittest.TestCase):
         with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
             rc = self.mod.main()
         self.assertEqual(rc, 0)
-        mocks["setup_vm_bridge"].assert_called_once()
         mocks["setup_nvram"].assert_called_once()
         mocks["setup_vm_socket_dir"].assert_called_once()
         mocks["setup_vm_volume_directories"].assert_called_once()
@@ -2143,7 +2090,6 @@ class TestMain(unittest.TestCase):
 
     def test_vm_non_fatal_step_failures_still_succeed(self):
         mocks = self._patch_common("vm")
-        mocks["setup_vm_bridge"].side_effect = Exception("bridge boom")
         mocks["setup_vm_socket_dir"].side_effect = Exception("socket boom")
         with mock.patch.object(self.mod.sys, "argv", ["prog", "myvm"]):
             rc = self.mod.main()

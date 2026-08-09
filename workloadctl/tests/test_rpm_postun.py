@@ -122,18 +122,6 @@ class TestPostunScriptlet(unittest.TestCase):
 
     # ── uninstall ($1 == 0) ──────────────────────────────────────────────────
 
-    def test_uninstall_removes_only_managed_bridge_line(self):
-        self._bridge_conf.write_text(
-            "allow virbr0\n"
-            "allow _workload-br\n"
-            "allow br0\n"
-        )
-        self._run("0")
-        self.assertEqual(
-            self._bridge_conf.read_text(),
-            "allow virbr0\nallow br0\n",
-        )
-
     def test_uninstall_removes_fcontext_rule(self):
         self._run("0")
         calls = self._semanage_calls()
@@ -154,25 +142,13 @@ class TestPostunScriptlet(unittest.TestCase):
             "allow br0\nallow virbr0\n",
         )
 
-    def test_uninstall_reloads_firewalld_so_the_zone_disappears(self):
-        # The VM-bridge zone file is gone by %postun time, but a running
-        # firewalld keeps serving it from runtime state until a reload.
-        self._run("0")
-        self.assertEqual(self._firewall_calls(), ["--reload --quiet"])
-
-    # ── upgrade ($1 >= 1) ────────────────────────────────────────────────────
-
     def test_upgrade_is_a_noop(self):
-        self._bridge_conf.write_text("allow _workload-br\nallow br0\n")
+        # An admin's own bridge allow-list is never touched at any $1, and
+        # semanage runs only on a full uninstall.
+        self._bridge_conf.write_text("allow br0\n")
         self._run("1")
-        # Bridge file untouched, semanage never called, firewall left alone —
-        # the zone is still installed on an upgrade.
-        self.assertEqual(
-            self._bridge_conf.read_text(),
-            "allow _workload-br\nallow br0\n",
-        )
+        self.assertEqual(self._bridge_conf.read_text(), "allow br0\n")
         self.assertEqual(self._semanage_calls(), [])
-        self.assertEqual(self._firewall_calls(), [])
 
 
 class TestPostunSpecText(unittest.TestCase):
@@ -182,10 +158,3 @@ class TestPostunSpecText(unittest.TestCase):
     def test_guarded_on_full_uninstall(self):
         self.assertIn("if [ $1 -eq 0 ]; then", _extract_postun_body())
 
-    def test_bridge_sed_is_anchored_to_managed_bridge(self):
-        # Anchored, exact line — never a bare /allow/d that would nuke admin lines.
-        self.assertIn("/^allow _workload-br$/d", _extract_postun_body())
-
-
-if __name__ == "__main__":
-    unittest.main()

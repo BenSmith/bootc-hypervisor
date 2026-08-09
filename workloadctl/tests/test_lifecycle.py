@@ -1103,11 +1103,10 @@ class TestPreflightChecks(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', self._patched_which()):
                 with patch.object(provisioning.Path, 'exists', return_value=True):
-                    with patch.object(provisioning.Path, 'read_text', return_value="allow _workload-br\n"):
-                        with patch('vm.find_ovmf_code', return_value=None):
-                            buf = io.StringIO()
-                            with redirect_stdout(buf):
-                                ok = provisioning.preflight_checks(cfg)
+                    with patch('vm.find_ovmf_code', return_value=None):
+                        buf = io.StringIO()
+                        with redirect_stdout(buf):
+                            ok = provisioning.preflight_checks(cfg)
             self.assertFalse(ok)
             self.assertIn("OVMF firmware", buf.getvalue())
 
@@ -1115,11 +1114,10 @@ class TestPreflightChecks(unittest.TestCase):
         with _cfg(_VM_TOML, 'test-vm') as cfg:
             with patch.object(provisioning.shutil, 'which', self._patched_which()):
                 with patch.object(provisioning.Path, 'exists', return_value=True):
-                    with patch.object(provisioning.Path, 'read_text', return_value="allow _workload-br\n"):
-                        with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
-                            buf = io.StringIO()
-                            with redirect_stdout(buf):
-                                ok = provisioning.preflight_checks(cfg)
+                    with patch('vm.find_ovmf_code', return_value="/usr/share/edk2/ovmf/OVMF_CODE.fd"):
+                        buf = io.StringIO()
+                        with redirect_stdout(buf):
+                            ok = provisioning.preflight_checks(cfg)
             self.assertTrue(ok)
 
 

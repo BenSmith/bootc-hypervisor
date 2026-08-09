@@ -39,7 +39,7 @@ from provisioning import (
     host_setup_artifacts,
 )
 from validation import uses_host_userns
-from vm import VM_BRIDGE_NAME
+from vm import VM_MGMT_SSH_PORT, vm_management_address, vm_nflog_group
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
@@ -460,34 +460,36 @@ def collect_host_artifact_checks(config, _check) -> None:
         _check(f"host_artifact[{artifact.ref}]", passed, message, fix=fix)
 
 
-def shared_bridge_check(state, name: str) -> tuple[bool, str, str | None]:
-    """Verdict for the shared VM bridge unit. `state` as in _unit_props().
+def vm_network_check(config) -> tuple[str, bool, str]:
+    """Report a VM's network topology and its uid-derived values.
 
-    The other half of the same blind spot: `workload_run_files()` excludes
-    shared infra by design ("never includes ... workload-bridge.service"), and
-    for a VM on the managed bridge that unit is the entire network path — it
-    creates `_workload-br` and runs the dnsmasq the guest gets its lease from.
-    The dev host had it fail five times with nothing in any verb saying so.
+    Returns a (check_name, passed, message) triple ready for `_check`.
 
-    Not part of the setup.sh declaration mechanism: no script installs this,
-    it is one fixed unit, and it is shared, so it is checked by name here
-    rather than declared by a workload that does not own it.
+    This exists because ADR 006 made two facts invisible from the TOML. The
+    management address and nflog group are derived from the workload's uid, so
+    nothing in the config says where to ssh or what to capture; and a VM that
+    names a bridge is unfiltered, which the config states only by implication.
     """
-    unit = "workload-bridge.service"
-    if state is None:
-        return (False,
-                f"Shared VM bridge unit is not installed: {unit} — this VM is on "
-                f"the managed bridge {VM_BRIDGE_NAME} and has no network without it",
-                f"sudo workloadctl enable {name}  (the generator emits it)")
-    active = state.get("ActiveState", "unknown")
-    if active == "active":
-        return (True, f"Shared VM bridge active: {unit} ({VM_BRIDGE_NAME})", None)
-    result = state.get("Result", "")
-    detail = active + (f", Result={result}" if result else "")
-    return (False,
-            f"Shared VM bridge is not running: {unit} ({detail}) — "
-            f"{VM_BRIDGE_NAME} and its dnsmasq are this VM's whole network path",
-            f"sudo systemctl status {unit}; journalctl -u {unit} -n 50")
+    bridge = config.vm_bridge
+    if bridge is not None:
+        return ("vm_network", True,
+                f"VM is on operator-provided bridge {bridge} — it has a real "
+                f"LAN identity and host egress policy does not reach it. This "
+                f"is a supported configuration; passt is the filterable one.")
+
+    try:
+        uid = config.uid
+    except Exception:
+        # The user does not exist yet, which check 1 already reports. Say what
+        # is true rather than claiming the network is fine or that it is broken.
+        return ("vm_network", True,
+                "VM uses passt; management address and nflog group are derived "
+                "from the workload uid, which does not exist yet")
+
+    return ("vm_network", True,
+            f"VM uses passt (uid {uid} is its network identity) — "
+            f"ssh {vm_management_address(uid)}:{VM_MGMT_SSH_PORT}, "
+            f"capture with 'tcpdump -i nflog:{vm_nflog_group(uid)}'")
 
 
 def subid_derived_check(
@@ -921,18 +923,18 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     # workload_run_files(), so nothing above this line can see them.
     collect_host_artifact_checks(config, _check)
 
-    # Check 7e: the shared VM bridge, for VMs that use it. Also outside
-    # workload_run_files() — and unlike 7d, nobody declares it: it is one fixed
-    # unit shared by every managed-bridge VM. Skipped for a VM bridged onto a
-    # user-provided interface (br0 onto the LAN), which the generator
-    # deliberately does not emit it for.
-    if config.is_vm and config.enabled:
-        bridge = config.config.get("vm", {}).get("network", {}).get(
-            "bridge", VM_BRIDGE_NAME)
-        if bridge == VM_BRIDGE_NAME:
-            passed, message, fix = shared_bridge_check(
-                _unit_props("workload-bridge.service"), config.name)
-            _check("shared_bridge", passed, message, fix=fix)
+    # Check 7e: the VM's network posture. There is no shared bridge unit to
+    # check any more (ADR 006), but there is something the TOML does not show:
+    # under passt the management address and nflog group are *derived from the
+    # uid*, so an operator reading the config cannot work out where to ssh or
+    # which nflog group to capture. Report the derived values.
+    #
+    # Both outcomes are passes. A VM on an operator-provided bridge takes a
+    # real LAN identity and is unfiltered — that is a supported configuration,
+    # not a lapse, and saying so plainly is what honesty requires here.
+    # Scolding an operator for a deliberate choice would be the wrong reading.
+    if config.is_vm:
+        _check(*vm_network_check(config))
 
     # Check 7f: host trust anchors, for workloads that pull an image. Host-wide
     # state rather than this workload's, reported here for the same reason

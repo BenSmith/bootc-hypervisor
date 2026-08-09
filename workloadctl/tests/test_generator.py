@@ -1915,82 +1915,6 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertIn(f"--translate-uid=map:1000:{uid}:1", sidecar)
         self.assertIn(f"--translate-gid=map:1000:{uid}:1", sidecar)
 
-    def test_bridge_service_does_not_swallow_dnsmasq_failures(self):
-        # The earlier "|| true" trailing the dnsmasq ExecStart hid genuine
-        # failures (missing binary, port in use) and left VMs without DHCP.
-        self._write_vm_config()
-        self._run()
-        bridge = self._read("workload-bridge.service")
-        # The dnsmasq ExecStart line itself must not end with "|| true".
-        # (Other ExecStop lines may legitimately use || true for cleanup.)
-        dnsmasq_lines = [line for line in bridge.splitlines() if "/usr/sbin/dnsmasq" in line]
-        self.assertEqual(len(dnsmasq_lines), 1, dnsmasq_lines)
-        self.assertNotIn("|| true", dnsmasq_lines[0])
-        # The bogus --keep-in-foreground=no flag must not appear.
-        self.assertNotIn("--keep-in-foreground=no", bridge)
-        # Type=forking only allows one ExecStart= line — the setup steps
-        # must be ExecStartPre=, and dnsmasq is the sole ExecStart=.
-        # systemd refuses to load the unit otherwise.
-        exec_starts = [line for line in bridge.splitlines()
-                       if line.startswith("ExecStart=")]
-        self.assertEqual(len(exec_starts), 1, exec_starts)
-        self.assertIn("/usr/sbin/dnsmasq", exec_starts[0])
-
-    def test_bridge_firewalld_step_uses_our_own_zone(self):
-        # The bridge used to be pushed into libvirt's zone. workloadctl runs VMs
-        # on raw QEMU and does not require libvirt, so on an ordinary Fedora host
-        # with firewalld and no libvirt that zone does not exist -- both
-        # firewall-cmd calls failed, the last one's status became the
-        # ExecStartPre's, and every VM workload died on a failed dependency.
-        self._write_vm_config()
-        self._run()
-        bridge = self._read("workload-bridge.service")
-        fw = [line for line in bridge.splitlines() if "firewall-cmd" in line]
-        self.assertEqual(len(fw), 1, fw)
-        self.assertIn("--zone=workloadctl", fw[0])
-        self.assertNotIn("--zone=libvirt", bridge)
-
-    def test_bridge_firewalld_step_cannot_fail_the_unit(self):
-        # Best-effort by design: a missing or stale zone must not take the
-        # bridge -- and with it every VM workload -- down with it. The step ends
-        # on a warning rather than on the exit status of a firewall-cmd.
-        self._write_vm_config()
-        self._run()
-        bridge = self._read("workload-bridge.service")
-        fw = [line for line in bridge.splitlines() if "firewall-cmd" in line][0]
-        # No "-" prefix trick: the guarantee is in the script, so a reader of the
-        # unit sees why it is safe.
-        self.assertIn("systemctl is-active --quiet firewalld || exit 0", fw)
-        self.assertIn("--change-interface=_workload-br && exit 0", fw)
-        # The failure path warns and says how to fix it.
-        self.assertIn("guest DHCP/DNS may be blocked", fw)
-        self.assertIn("firewall-cmd --reload", fw)
-
-    def test_bridge_service_has_no_before_workload_generate(self):
-        # workload-generate is a generator that runs before any unit
-        # activation; Before= on a finished unit is a no-op and was just
-        # noise.
-        self._write_vm_config()
-        self._run()
-        bridge = self._read("workload-bridge.service")
-        self.assertNotIn("Before=workload-generate.service", bridge)
-
-    def test_bridge_owns_workload_vm_runtime_dir(self):
-        # systemd must create /run/workload-vm/ before dnsmasq writes its
-        # pid file into it.
-        self._write_vm_config()
-        self._run()
-        bridge = self._read("workload-bridge.service")
-        self.assertIn("RuntimeDirectory=workload-vm", bridge)
-
-    def test_main_service_requires_bridge_and_build(self):
-        self._write_vm_config()
-        self._run()
-        svc = self._read("workload-fedora-vm.service")
-        self.assertIn("workload-fedora-vm-build.service", svc)
-        self.assertIn("workload-bridge.service", svc)
-        self.assertIn("workload-fedora-vm-setup.service", svc)
-
     def test_execstop_waits_for_graceful_poweroff(self):
         # ExecStop must call workload-vm-shutdown, which *blocks* until the
         # guest powers off. A fire-and-forget `workload-vm-qmp system_powerdown`
@@ -2009,32 +1933,100 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("system_powerdown", svc)
         self.assertIn("TimeoutStopSec=90", svc)
 
-    def test_custom_bridge_overrides_qemu_netdev_and_skips_managed_bridge(self):
-        # vm.network.bridge = "br0" → QEMU netdev uses br0, AND we don't
-        # emit workload-bridge.service or list it as a dependency (the user
-        # is responsible for bringing br0 up themselves).
+    def test_default_is_passt_with_no_bridge_anywhere(self):
+        # ADR 006: omitting [vm.network] selects passt. There is no managed
+        # bridge to fall back to and no shared unit to emit.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("-netdev passt,id=net0,", svc)
+        self.assertNotIn("-netdev bridge", svc)
+        self.assertNotIn("workload-bridge.service", svc)
+        self.assertFalse(
+            (Path(self.services_dir) / "workload-bridge.service").exists(),
+            "no shared bridge unit exists any more",
+        )
+
+    def test_passt_runs_as_the_workload_user(self):
+        # THE load-bearing precondition of the whole egress design (ADR 006,
+        # passt conf.c:1007-1017). passt keeps its inherited uid only because
+        # it is not started as root; started as root it warns once and drops to
+        # nobody, collapsing every workload into a single uid while traffic
+        # keeps flowing normally. Nothing else would catch that, so assert the
+        # User= rather than assuming it.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("User=_wl-fedora-vm", svc)
+        self.assertNotIn("User=root", svc)
+
+    def test_passt_netdev_closes_the_host_loopback_and_search_leaks(self):
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        # passt's default maps the host's loopback onto the gateway address,
+        # which exposes exactly the services that skip auth because they are
+        # not reachable off-box.
+        self.assertIn("map-host-loopback=none", svc)
+        # The resolv.conf search list is otherwise advertised over DHCP and
+        # NDP, leaking internal domain names.
+        self.assertIn("search=none", svc)
+
+    def test_management_address_is_derived_from_the_uid(self):
+        self._write_vm_config()
+        self._run()
+        sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
+        m = re.search(r"^u _wl-fedora-vm (\d+)", sysusers, re.M)
+        assert m is not None
+        uid = int(m.group(1))
+        # 127.128.0.0 + (uid - UID_MIN), spelled out here rather than imported
+        # so a change to the derivation has to be made deliberately in both
+        # places instead of silently agreeing with itself.
+        octets = 0x7F800000 + (uid - 10000)
+        expected = ".".join(str((octets >> shift) & 0xFF)
+                            for shift in (24, 16, 8, 0))
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn(f"tcp-ports={expected}/2222:22", svc)
+
+    def test_published_ports_use_one_key_each(self):
+        # tcp-ports/udp-ports are list-typed netdev properties, and -netdev
+        # passt goes through QemuOpts, where a list is built from REPEATED
+        # KEYS. A comma-joined value would make QEMU read the second entry as
+        # a bare unknown option and refuse to start.
+        self._write_vm_config(
+            extra='[vm.network]\nports = ["8080:80", "5353:53/udp"]')
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("tcp-ports=8080:80", svc)
+        self.assertIn("udp-ports=5353:53", svc)
+        self.assertNotIn("tcp-ports=127.128.0.0/2222:22,8080:80", svc)
+
+    def test_passt_dns_is_deferred_to_a_prestart(self):
+        # The generator runs Before=basic.target, where there is no default
+        # route to derive a DNS address from, so the host-dependent half of the
+        # netdev is written at unit start and spliced in by expansion.
+        self._write_vm_config()
+        self._run()
+        svc = self._read("workload-fedora-vm.service")
+        self.assertIn("${WL_PASST_DNS}", svc)
+        self.assertIn("ExecStartPre=+/usr/libexec/workloadctl/workload-vm-netdev", svc)
+        self.assertIn("EnvironmentFile=-/run/workload-env/workload-fedora-vm.passt", svc)
+        # passt takes the guest's address from a configured host interface, an
+        # ordering that used to arrive transitively via the bridge unit.
+        self.assertIn("network-online.target", svc)
+
+    def test_custom_bridge_is_the_unfiltered_escape_hatch(self):
+        # bridge = "br0" → attach directly, take a real LAN identity, and use
+        # none of the passt machinery. The operator brings br0 up themselves.
         self._write_vm_config(extra='[vm.network]\nbridge = "br0"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
         self.assertIn("-netdev bridge,id=net0,br=br0", svc)
-        self.assertNotIn("br=_workload-br", svc)
+        self.assertNotIn("-netdev passt", svc)
+        # None of the passt-only wiring should appear for a bridged VM.
+        self.assertNotIn("${WL_PASST_DNS}", svc)
+        self.assertNotIn("workload-vm-netdev", svc)
         self.assertNotIn("workload-bridge.service", svc)
-        # The bridge unit file itself must not be generated for this VM
-        self.assertFalse(
-            (Path(self.services_dir) / "workload-bridge.service").exists(),
-            "workload-bridge.service must not be emitted for custom-bridge VMs",
-        )
-
-    def test_default_bridge_still_emits_workload_bridge_service(self):
-        # Regression guard: omitting [vm.network] keeps the managed bridge +
-        # workload-bridge.service.
-        self._write_vm_config()
-        self._run()
-        svc = self._read("workload-fedora-vm.service")
-        self.assertIn("-netdev bridge,id=net0,br=_workload-br", svc)
-        self.assertTrue(
-            (Path(self.services_dir) / "workload-bridge.service").exists(),
-        )
 
     def test_sysusers_grants_kvm_membership(self):
         self._write_vm_config()
@@ -2788,30 +2780,6 @@ class TestGeneratorVmResources(unittest.TestCase):
         self.assertEqual(r2.returncode, 0, msg=r2.stderr)
         wants = Path(self.services_dir) / "multi-user.target.wants"
         self.assertTrue((wants / "workload-revm.service").is_symlink())
-        self.assertTrue((wants / "workload-bridge.service").is_symlink())
-
-    def test_host_level_subnet_override_derives_cidr_and_dhcp_range(self):
-        # The managed-bridge subnet is host-level (ADR 002): overriding it via
-        # WORKLOADCTL_VM_BRIDGE_SUBNET relocates the bridge AND — the ADR-002 fix
-        # — derives the dhcp-range from it, so guests get in-subnet addresses.
-        write_config(self.config_dir, "subnetvm", """\
-            [workload]
-            name = "subnetvm"
-
-            [vm]
-            vcpus = 2
-            memory = "2048M"
-            cloud_image_url = "https://example.com/cloud.qcow2"
-            cloud_image_checksum = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-            user = "fedora"
-        """)
-        with mock.patch.dict(os.environ,
-                             {"WORKLOADCTL_VM_BRIDGE_SUBNET": "10.99.7.0/24"}):
-            result = run_generator(self.config_dir, self.services_dir, self.sysusers_dir)
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        bridge = (Path(self.services_dir) / "workload-bridge.service").read_text()
-        self.assertIn("10.99.7.1/24", bridge)                       # gateway CIDR
-        self.assertIn("--dhcp-range=10.99.7.100,10.99.7.199,12h", bridge)  # derived
 
     def test_vm_sysusers_extra_groups(self):
         write_config(self.config_dir, "grpvm", """\

@@ -416,10 +416,15 @@ class TestRunTreeScansCoverRunFiles(unittest.TestCase):
 
 @PENDING
 class TestRunFilesBoundary(unittest.TestCase):
-    """The excluded set must NEVER appear, even for an adversarial VM-on-bridge
-    workload that references another workload: the global workload-generate.service,
-    the host-refcounted workload-bridge.service + dnsmasq, and any reference to a
-    *different* workload's unit (inter-workload ordering is not an owned file).
+    """The excluded set must NEVER appear, even for an adversarial VM workload
+    that references another workload: the global workload-generate.service, and
+    any reference to a *different* workload's unit (inter-workload ordering is
+    not an owned file).
+
+    workload-bridge.service is still listed as forbidden although the generator
+    can no longer emit it (ADR 006). The assertion costs nothing and states the
+    boundary rather than the current implementation, which is the point of a
+    boundary test.
     """
 
     FORBIDDEN_EXACT = {
@@ -499,11 +504,9 @@ class TestRunFilesParityOracle(unittest.TestCase):
         #    so for a userless fixture it cannot reconstruct that path and omits the
         #    drop-in — matching the removal path's own graceful degradation. The
         #    drop-in's removal-side behavior is covered in test_disable_purge.py.
-        #  - Drop the shared VM bridge infra (workload-bridge.service + its wants
-        #    symlink). The generator materializes it host-global/refcounted as a
-        #    side effect of the first VM workload; it is explicitly NOT workload-
-        #    owned (docs/workload-run-files.md "Explicitly not"), and
-        #    TestRunFilesBoundary forbids it from the helper's set.
+        #  - Drop any shared VM bridge infra. The generator no longer emits it
+        #    at all (ADR 006), so this filter is now vestigial; it is kept so a
+        #    host carrying units from a pre-ADR-006 build still compares equal.
         def owned_only(s):
             return {p for p in s
                     if not p.startswith('user@')

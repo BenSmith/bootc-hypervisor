@@ -536,7 +536,7 @@ def clitest_broken(target: Target):
 
 @pytest.fixture(scope="session")
 def clitest_vm(target: Target):
-    """Shared VM workload on the managed NAT bridge (_workload-br).
+    """Shared VM workload on the default network backend (passt).
 
     Provisioned ONCE per session and reused by every *read-only* VM test
     (introspection, exec, logs, stats, images, …). Mirrors the wording and
@@ -567,7 +567,7 @@ def fresh_vm(target: Target):
 
     A brand-new VM workload instance backed by clitest-vm-fresh.toml
     (workload name clitest-vm-fresh). Uses the same managed NAT bridge
-    (_workload-br) as clitest_vm but with a distinct name, so both can
+    (passt) as clitest_vm but with a distinct name, so both can
     coexist within one session without colliding.
     """
     skip_if_no_kvm(target)
@@ -589,7 +589,7 @@ def clitest_vm_lifecycle(target: Target):
     Booted ONCE per module (stop/start/recreate/reboot tests all share it),
     saving ~3 VM boots vs. per-test fresh_vm.  Backed by
     clitest-vm-lifecycle.toml (distinct name → distinct DHCP/MAC so it can
-    coexist on _workload-br with clitest_vm and clitest-vm-fresh).
+    coexist with clitest_vm and clitest-vm-fresh).
 
     Module scope means this fixture is provisioned the first time any lifecycle
     VM test runs and torn down after the last one in that module finishes —
@@ -609,12 +609,17 @@ def clitest_vm_lifecycle(target: Target):
 
 
 @pytest.fixture()
-def vm_bridge_peer(target: Target):
-    """A second VM on the managed bridge, for the shared-bridge teardown test.
+def vm_peer(target: Target):
+    """A second, independent VM workload the test fully owns.
 
-    Deliberately not one of the fixtures above: that test purges its peer as the
-    last step, which a session- or module-scoped fixture could not survive. Pair
-    it with fresh_vm to get two VMs on _workload-br that the test fully owns.
+    Kept after the shared-bridge teardown test it was written for was deleted
+    with the bridge itself (ADR 006), because the property the egress design
+    rests on cannot be tested with one VM: "one `meta skuid` rule blocks this
+    workload and not its sibling" needs a sibling. That test arrives with the
+    nftables layer; this is the fixture it will pair with fresh_vm.
+
+    Deliberately function-scoped: a test may purge its peer as the last step,
+    which a session- or module-scoped fixture could not survive.
 
     Teardown re-purges, which is a no-op when the test already did it —
     _purge_workload is best-effort by design.

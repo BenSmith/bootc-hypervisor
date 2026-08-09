@@ -1,6 +1,6 @@
 # rt-vm — the runtime rung's minimal [vm] workload (B6 nested-KVM smoke).
 # A single small Fedora Cloud VM on the workloadctl-managed NAT bridge
-# (_workload-br). workloadctl's default VM cloud-init enables sshd, creates the
+# (passt). workloadctl's default VM cloud-init enables sshd, creates the
 # `workload` user, and injects the per-workload SSH key, so `workloadctl exec`
 # (which goes over SSH to the guest) works once cloud-init settles.
 #
@@ -23,4 +23,4 @@ user = "workload"
 rollback_keep = 1
 
 [vm.network]
-# Default: _workload-br (workloadctl-managed NAT bridge)
+# Default: unset — passt (no bridge; the guest takes the host's address)

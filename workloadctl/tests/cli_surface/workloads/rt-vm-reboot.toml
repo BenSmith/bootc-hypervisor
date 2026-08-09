@@ -21,4 +21,4 @@ rollback_keep = 1
 restart = "on-reboot"
 
 [vm.network]
-# Default: _workload-br (workloadctl-managed NAT bridge)
+# Default: unset — passt (no bridge; the guest takes the host's address)

@@ -129,11 +129,19 @@ def preflight_checks(config: WorkloadConfig) -> bool:
             info("    Install: dnf install edk2-ovmf")
             failed = True
 
-        bridge_conf = Path("/etc/qemu/bridge.conf")
+        # Only a VM pinned to an operator-provided bridge goes through
+        # qemu-bridge-helper and so needs an entry in its allow-list. Under
+        # passt (the default) there is no bridge and no setuid-root helper in
+        # the data path at all, so there is nothing to check.
         bridge = config.vm_bridge
-        if not bridge_conf.exists() or f"allow {bridge}" not in bridge_conf.read_text(errors="replace"):
-            info(f"  ! /etc/qemu/bridge.conf missing 'allow {bridge}'")
-            info("    Will be configured automatically on first enable via workload-ensure-user")
+        if bridge is not None:
+            bridge_conf = Path("/etc/qemu/bridge.conf")
+            if (not bridge_conf.exists()
+                    or f"allow {bridge}" not in bridge_conf.read_text(errors="replace")):
+                info(f"  ! /etc/qemu/bridge.conf missing 'allow {bridge}'")
+                info(f"    Add it: echo 'allow {bridge}' | sudo tee -a {bridge_conf}")
+                info("    (workloadctl provisions the bridge you named no more than "
+                     "it provisions the bridge itself)")
 
         return not failed
 

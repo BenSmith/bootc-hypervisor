@@ -2,8 +2,10 @@
 substrate_vm — the VM substrate.
 
 Implements the Substrate port for workloads with a ``[vm]`` section: raw
-QEMU/KVM on the shared ``_workload-br`` bridge, reached over SSH (guest
-interior) and QMP (QEMU monitor).
+QEMU/KVM networked with passt (ADR 006), reached over SSH (guest interior) and
+QMP (QEMU monitor). A VM's SSH endpoint is derived from its workload uid rather
+than discovered, unless it is pinned to an operator-provided bridge — see
+``_vm_ssh_endpoint``.
 
 Optional primitives implemented here: resource_usage, reprovision, addresses,
 teardown, teardown_plan.
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import random
 import shlex
 import shutil
@@ -34,16 +37,16 @@ from substrate import (
     service_active,
 )
 from vm import (
-    VM_BRIDGE_NAME,
-    VM_DHCP_LEASE_FILE,
+    VM_MGMT_SSH_PORT,
     VM_SOCKET_DIR,
     parse_memory_mib,
     vm_guest_agent_socket,
     vm_mac_address,
+    vm_management_address,
 )
 from vm_metrics import get_vm_qmp_metrics
 from workload_lib import workload_service_units
-from workloadctl_core import format_size
+from workloadctl_core import WorkloadUserNotFound, format_size
 
 
 def _vm_console_sock(name: str) -> Path:
@@ -58,9 +61,31 @@ def _vm_guest_user(config) -> str:
     return config.config.get("vm", {}).get("user", "workload")
 
 
+def _vm_ssh_endpoint(config) -> tuple[str, int] | None:
+    """The (host, port) `workloadctl exec`/`shell` should ssh to, or None.
+
+    Two topologies, two answers:
+
+    - **passt** (no bridge): the workload's own management address at a fixed
+      port. Derived from the uid, so it is known without asking the guest
+      anything — there is no lease to wait for and no discovery that can fail.
+      A VM is reachable here as soon as passt is listening and sshd is up.
+    - **operator-provided bridge**: the guest's own LAN address on port 22,
+      which the host has to infer. Returns None while nothing resolves it.
+    """
+    if config.vm_bridge is None:
+        try:
+            uid = config.uid
+        except (WorkloadUserNotFound, ValueError):
+            return None
+        return (vm_management_address(uid), VM_MGMT_SSH_PORT)
+    guest_ip = _vm_guest_ip(config.name, config.vm_bridge)
+    return (guest_ip, 22) if guest_ip else None
+
+
 def _vm_ssh_command(
     config,
-    guest_ip: str,
+    endpoint: tuple[str, int],
     exec_args: list[str] | None = None,
     connect_timeout: int | None = None,
 ) -> list[str]:
@@ -68,15 +93,19 @@ def _vm_ssh_command(
     key_path = _vm_ssh_key(config)
     guest_user = _vm_guest_user(config)
     known_hosts = config.home_dir / ".ssh" / "vm_known_hosts"
+    guest_ip, port = endpoint
     cmd = [
         "ssh",
         *(["-t"] if sys.stdout.isatty() else []),
+        "-p", str(port),
         "-i", str(key_path),
         # Host-key pinning (S1): verify the guest against the per-workload
         # known_hosts written at provisioning time, keyed by the stable
-        # workload name via HostKeyAlias so DHCP/ARP/mDNS address churn never
-        # invalidates the pin. No trust-on-first-use, no MITM on the shared
-        # bridge.
+        # workload name via HostKeyAlias so address churn never invalidates the
+        # pin. No trust-on-first-use, no MITM. The alias matters more under
+        # passt than it did on the bridge: every workload's management address
+        # is a loopback address, so without it ssh would key entries on
+        # near-identical 127.128.x.y hosts.
         "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={known_hosts}",
         "-o", f"HostKeyAlias={config.name}",
@@ -192,7 +221,7 @@ def _vm_guest_agent_addresses(name: str, mac: str) -> list[str]:
     return [ip for _, ip in sorted(found)]
 
 
-def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
+def _vm_guest_ip(name: str, bridge: str | None = None) -> str | None:
     """The single best address for this VM, or None if nothing resolves it.
 
     Thin wrapper over _vm_guest_addresses for the SSH paths, which need exactly
@@ -202,26 +231,31 @@ def _vm_guest_ip(name: str, bridge: str = VM_BRIDGE_NAME) -> str | None:
     return addresses[0] if addresses else None
 
 
-def _vm_guest_addresses(name: str, bridge: str = VM_BRIDGE_NAME) -> list[str]:
+def _vm_guest_addresses(name: str, bridge: str | None = None) -> list[str]:
     """Resolve the VM's addresses, best source first.
 
-    Four sources, in descending order of authority:
+    Under passt (`bridge` is None) a VM has no address of its own to find: the
+    guest is assigned the *host's* address, and management traffic reaches it
+    on the workload's own 127.128.x.y instead. See _vm_ssh_endpoint, which is
+    what the SSH paths actually use. This function then reports only what the
+    guest itself says, for display.
 
-    1. **qemu-guest-agent** — the guest's own answer. Correct on any bridge,
-       and the only source that does not depend on host-side state going stale.
-    2. **dnsmasq leases** — authoritative only when workload-bridge.service
-       actually manages a bridge it created (signalled by
-       /run/workload-vm/bridge-managed). On a pre-existing LAN bridge no dnsmasq
-       of ours runs and any lease entries left in that file are stale, so it is
-       skipped entirely rather than trusted.
-    3. **the host neighbour table**, matched on the MAC we assigned the VM.
+    On an operator-provided bridge the guest does have its own LAN address, and
+    the host has to infer it. Three sources, in descending order of authority:
+
+    1. **qemu-guest-agent** — the guest's own answer, over virtio-serial. The
+       only source that does not depend on host-side state going stale.
+    2. **the host neighbour table**, matched on the MAC we assigned the VM.
        Passive: it can only report a guest the host has recently talked to, so
        a perfectly healthy long-idle VM drops out of it once the entry is
        garbage-collected. That gap is exactly what source 1 closes.
-    4. **mDNS** ({name}.local), when avahi/nss-mdns are wired up on the host.
+    3. **mDNS** ({name}.local), when avahi/nss-mdns are wired up on the host.
+
+    The dnsmasq lease file that used to sit between 1 and 2 went with the
+    managed bridge (ADR 006) — there is no dnsmasq of ours any more.
 
     Returns [] when nothing resolves — a runtime condition (not booted yet, no
-    lease, no agent), not an error.
+    agent), not an error.
     """
     mac = vm_mac_address(name)
 
@@ -229,19 +263,13 @@ def _vm_guest_addresses(name: str, bridge: str = VM_BRIDGE_NAME) -> list[str]:
     if agent:
         return agent
 
-    if Path("/run/workload-vm/bridge-managed").exists():
-        lease_file = VM_DHCP_LEASE_FILE
-        if lease_file.exists():
-            try:
-                for line in lease_file.read_text().splitlines():
-                    parts = line.split()
-                    # dnsmasq lease format: <timestamp> <mac> <ip> <hostname> <client-id>
-                    if len(parts) >= 4 and parts[3] == name:
-                        return [parts[2]]
-            except OSError:
-                pass
+    if bridge is None:
+        # passt: nothing further to try. The neighbour table and mDNS both ask
+        # "which host on this segment is the guest", and under passt there is
+        # no segment and the answer would be the host itself.
+        return []
 
-    # Pre-existing LAN bridge: no lease file.  Look up by the VM's stable MAC.
+    # Operator-provided bridge: look the guest up by the MAC we assigned it.
     try:
         result = subprocess.run(
             ["ip", "neigh", "show", "dev", bridge],
@@ -396,19 +424,30 @@ class VMSubstrate(Substrate):
     def gating_units(self) -> list[str]:
         return workload_service_units(self.config, roles={"setup", "build"})
 
-    def _guest_ip(self) -> str | None:
-        """The single address the SSH paths need; None if not resolvable yet."""
-        return _vm_guest_ip(self.config.name, self.config.vm_bridge)
+    def _guest_ip(self) -> tuple[str, int] | None:
+        """The (host, port) the SSH paths need; None if not resolvable yet."""
+        return _vm_ssh_endpoint(self.config)
 
     def _report_no_guest_ip(self) -> None:
-        """Explain an unresolvable address in terms of the sources we tried.
+        """Explain an unreachable guest in terms of what was actually tried.
 
-        The sources differ by bridge, so a single fixed hint was wrong half the
-        time: on a pre-existing LAN bridge there is no dnsmasq of ours and the
-        lease file the old message pointed at holds nothing but stale entries.
+        The two topologies fail for entirely different reasons, so a single
+        fixed hint would be wrong half the time. Under passt the address is
+        derived and cannot fail to resolve — only the *user* lookup can — so
+        pointing at address discovery there would send someone chasing a
+        problem they do not have.
         """
         name = self.config.name
         bridge = self.config.vm_bridge
+        if bridge is None:
+            error(f"Error: could not determine the management address for VM "
+                  f"'{name}'")
+            error(f"  It is derived from the workload user's uid, so this means "
+                  f"the user '{self.config.username}' does not exist yet — run "
+                  f"'sudo workloadctl enable {name}'.")
+            error(f"  Console access always works: workloadctl shell {name} --console")
+            return
+
         error(f"Error: could not determine IP for VM '{name}'")
         if not vm_guest_agent_socket(name).exists():
             # Two different states, and guessing between them would be wrong
@@ -421,13 +460,10 @@ class VMSubstrate(Substrate):
         else:
             error("  qemu-guest-agent did not answer; install and enable it in "
                   "the guest for address lookup that does not depend on the host.")
-        if bridge == VM_BRIDGE_NAME:
-            error(f"  Checked {VM_DHCP_LEASE_FILE} for a lease.")
-        else:
-            error(f"  On bridge {bridge} (not workloadctl-managed) the guest "
-                  f"leases from that network's own DHCP, so the fallback is the "
-                  f"host neighbour table — which only lists a guest the host has "
-                  f"talked to recently.")
+        error(f"  On bridge {bridge} (operator-provided) the guest leases from "
+              f"that network's own DHCP, so the fallback is the host neighbour "
+              f"table — which only lists a guest the host has talked to "
+              f"recently.")
         error(f"  Console access always works: workloadctl shell {name}")
 
     def addresses(self) -> list[str]:
@@ -444,11 +480,11 @@ class VMSubstrate(Substrate):
         *,
         container: str | None = None,
     ) -> int:
-        guest_ip = self._guest_ip()
-        if not guest_ip:
+        endpoint = self._guest_ip()
+        if not endpoint:
             self._report_no_guest_ip()
             raise LifecycleError(1)
-        ssh_cmd = _vm_ssh_command(self.config, guest_ip, exec_args=argv)
+        ssh_cmd = _vm_ssh_command(self.config, endpoint, exec_args=argv)
         return subprocess.run(ssh_cmd).returncode
 
     def open_shell(
@@ -462,9 +498,9 @@ class VMSubstrate(Substrate):
         # an explicit recovery path when --console is passed or SSH can't
         # reach the VM (no lease, no network, sshd down).
         if not console:
-            guest_ip = self._guest_ip()
-            if guest_ip:
-                ssh_cmd = _vm_ssh_command(self.config, guest_ip, connect_timeout=5)
+            endpoint = self._guest_ip()
+            if endpoint:
+                ssh_cmd = _vm_ssh_command(self.config, endpoint, connect_timeout=5)
                 result = subprocess.run(ssh_cmd)
                 if result.returncode == 0:
                     return
@@ -478,7 +514,8 @@ class VMSubstrate(Substrate):
                 )
             else:
                 error(
-                    f"No IP found for VM '{self.config.name}'; falling back to serial console.",
+                    f"No SSH endpoint for VM '{self.config.name}'; falling back "
+                    f"to serial console.",
                 )
 
         # Connect to the VM serial console via the socat multiplexer.
@@ -514,8 +551,8 @@ class VMSubstrate(Substrate):
             if result.returncode != 0:
                 raise LifecycleError(result.returncode)
         elif action == "reboot":
-            guest_ip = self._guest_ip()
-            if not guest_ip:
+            endpoint = self._guest_ip()
+            if not endpoint:
                 self._report_no_guest_ip()
                 raise LifecycleError(1)
             # Fire the soft-reboot detached via systemd-run --no-block: a direct
@@ -524,7 +561,7 @@ class VMSubstrate(Substrate):
             # in a transient unit lets the SSH command return cleanly (0) before
             # teardown; --collect reaps the unit.
             ssh_cmd = _vm_ssh_command(
-                self.config, guest_ip,
+                self.config, endpoint,
                 exec_args=[
                     "sudo", "systemd-run", "--collect", "--no-block",
                     "systemctl", "soft-reboot",
@@ -747,26 +784,15 @@ class VMSubstrate(Substrate):
         self.rollback_to(latest)
 
 
-    def _last_managed_bridge_vm(self) -> bool:
-        """True if this workload is the last enabled VM on the shared bridge.
-
-        The bridge is shared infrastructure, so it comes down only when nothing
-        else needs it. A VM on its own bridge never owns the shared one.
-        """
-        if self.config.vm_bridge != VM_BRIDGE_NAME:
-            return False
-        return not any(
-            c.is_vm and c.vm_bridge == VM_BRIDGE_NAME and c.name != self.config.name
-            for c in self.manager.get_all_configs(enabled_only=True)
-        )
-
     def teardown(self, *, purge: bool) -> list[str]:
         """Remove what a VM workload owns beyond its generated files.
 
         On purge, the runtime socket dir (QMP + serial sockets, stale once the
-        guest is stopped). At both depths, the shared bridge when this was the
-        last VM using it — so the interface, dnsmasq and the nftables NAT table
-        go away without waiting for a reboot.
+        guest is stopped). That is now the whole list: retiring the managed
+        bridge (ADR 006) removed the only host-global resource a VM shared with
+        its siblings, and with it the refcount that decided when to stop it.
+        passt runs inside each VM's own unit, as that workload's user, so it
+        exits with the VM and leaves nothing behind.
         """
         failures: list[str] = []
 
@@ -778,17 +804,6 @@ class VMSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"remove VM socket dir: {e}")
 
-        try:
-            if self._last_managed_bridge_vm():
-                subprocess.run(
-                    ["systemctl", "stop", "workload-bridge.service"],
-                    check=False,
-                    capture_output=True,
-                )
-                info("  Stopped shared VM bridge (no managed-bridge VMs remain)")
-        except Exception as e:
-            failures.append(f"stop shared VM bridge: {e}")
-
         return failures
 
     def teardown_plan(self, *, purge: bool) -> list[str]:
@@ -798,6 +813,4 @@ class VMSubstrate(Substrate):
             sock_dir = VM_SOCKET_DIR / self.config.name
             if sock_dir.exists():
                 lines.append(f"remove VM socket dir: {sock_dir}")
-        if self._last_managed_bridge_vm():
-            lines.append("stop shared VM bridge (last bridged VM)")
         return lines

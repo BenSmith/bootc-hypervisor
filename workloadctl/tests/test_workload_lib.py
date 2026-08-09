@@ -337,15 +337,18 @@ class TestVmNetworkValidation(unittest.TestCase):
     def test_bridge_only_still_ok(self):
         self.assertEqual(self._net_errors(bridge="br0"), [])
 
-    def test_per_vm_subnet_rejected(self):
+    def test_managed_bridge_subnet_rejected(self):
+        # Went with the bridge (ADR 006). Rejected rather than ignored, so an
+        # operator carrying an old config learns why it stopped meaning
+        # anything instead of finding it silently dropped.
         errs = self._net_errors(subnet="10.100.0.0/24")
         self.assertTrue(errs)
-        self.assertIn("host-level", errs[0])
+        self.assertIn("ADR 006", errs[0])
 
-    def test_per_vm_dns_rejected(self):
+    def test_managed_bridge_dns_rejected(self):
         errs = self._net_errors(dns=["1.1.1.1"])
         self.assertTrue(errs)
-        self.assertIn("host-level", errs[0])
+        self.assertIn("ADR 006", errs[0])
 
 
 class TestSelinuxIdentifiers(unittest.TestCase):
@@ -737,49 +740,6 @@ class TestVirtiofsTags(unittest.TestCase):
         self.assertEqual(len(set(tags)), 3)
         self.assertEqual(tags[:2], ["data-0", "data-1"])
         self.assertTrue(all(len(t) <= 36 for t in tags))
-
-
-class TestManagedBridgeConstants(unittest.TestCase):
-    """Host-level managed-bridge params are derived from the subnet (ADR 002),
-    with the DHCP range on the configured subnet — not a hardcoded window."""
-
-    def test_default_subnet_matches_historical_values(self):
-        # The /24 default must reproduce the pre-ADR hardcoded constants so the
-        # generated bridge unit stays byte-identical.
-        self.assertEqual(vm.VM_BRIDGE_SUBNET, "192.168.200.0/24")
-        self.assertEqual(vm.VM_BRIDGE_IP, "192.168.200.1")
-        self.assertEqual(vm.VM_BRIDGE_CIDR, "192.168.200.1/24")
-        self.assertEqual(vm.VM_DHCP_RANGE,
-                         "192.168.200.100,192.168.200.199,12h")
-
-    def test_default_derivation_matches_module_constants(self):
-        ip, cidr, subnet, dhcp = vm.managed_bridge_params("192.168.200.0/24")
-        self.assertEqual((ip, cidr, subnet, dhcp),
-                         (vm.VM_BRIDGE_IP, vm.VM_BRIDGE_CIDR,
-                          vm.VM_BRIDGE_SUBNET, vm.VM_DHCP_RANGE))
-
-    def test_dhcp_range_is_on_the_configured_subnet(self):
-        # The range must follow the subnet (the latent bug ADR 002 fixes:
-        # dhcp-range was hardcoded 192.168.200.x regardless of subnet).
-        ip, cidr, subnet, dhcp = vm.managed_bridge_params("10.100.0.0/24")
-        self.assertEqual(ip, "10.100.0.1")
-        self.assertEqual(cidr, "10.100.0.1/24")
-        self.assertEqual(dhcp, "10.100.0.100,10.100.0.199,12h")
-
-    def test_small_subnet_dhcp_range_falls_back_to_full_span(self):
-        # A /26 (.0–.63) can't fit the .100–.199 window; instead of collapsing
-        # to a single clamped address it must span first-usable..last-usable.
-        _ip, _cidr, _subnet, dhcp = vm.managed_bridge_params("10.0.0.0/26")
-        self.assertEqual(dhcp, "10.0.0.2,10.0.0.62,12h")
-
-    def test_tiny_subnet_dhcp_range_still_spans_usable_hosts(self):
-        _ip, _cidr, _subnet, dhcp = vm.managed_bridge_params("10.0.0.0/28")
-        self.assertEqual(dhcp, "10.0.0.2,10.0.0.14,12h")
-
-    def test_subnet_with_no_leasable_address_is_rejected(self):
-        for cidr in ("10.0.0.0/31", "10.0.0.0/32"):
-            with self.assertRaises(ValueError):
-                vm.managed_bridge_params(cidr)
 
 
 class TestParseVolumeSpec(unittest.TestCase):

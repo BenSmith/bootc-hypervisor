@@ -572,9 +572,13 @@ class WorkloadConfigPodmanTargetsTest(WorkloadConfigTestBase):
 
 
 class WorkloadConfigMiscPropsTest(WorkloadConfigTestBase):
-    def test_vm_bridge_default(self):
+    def test_vm_bridge_default_is_none_meaning_passt(self):
+        # There is no default bridge any more (ADR 006): the presence of the
+        # key IS the topology selector, so absence must read as None rather
+        # than as some fallback interface name.
         cfg = self._config("vmb1", '[workload]\nname = "vmb1"\n\n[vm]\n')
-        self.assertEqual(cfg.vm_bridge, vm.VM_BRIDGE_NAME)
+        self.assertIsNone(cfg.vm_bridge)
+        self.assertTrue(cfg.vm_is_filterable)
 
     def test_vm_bridge_custom(self):
         cfg = self._config(

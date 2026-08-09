@@ -3,7 +3,7 @@
 # workload user, and touches /var/lib/clitest-vm-ready as a readiness marker.
 # Gate: has_kvm.
 # Distinct name from clitest-vm and clitest-vm-fresh so all three can coexist
-# on _workload-br (distinct name → distinct DHCP/MAC).  This VM is
+# under passt (distinct name → distinct uid → distinct management address).  This VM is
 # module-scoped: booted ONCE for the test_lifecycle.py VM tests (stop, start,
 # recreate, reboot) and torn down after that module, saving ~3 boots vs.
 # function-scoped fresh_vm.
@@ -22,4 +22,4 @@ user = "workload"
 rollback_keep = 1
 
 [vm.network]
-# Default: _workload-br (workloadctl-managed NAT bridge)
+# Default: unset — passt (no bridge; the guest takes the host's address)

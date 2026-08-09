@@ -403,69 +403,6 @@ bridge = "br0"
 """
 
 
-class SharedBridgeCheckTest(unittest.TestCase):
-    def test_active_bridge_passes(self):
-        passed, message, fix = cmd_diagnose.shared_bridge_check(
-            {"ActiveState": "active", "SubState": "exited"}, "forgejo")
-        self.assertTrue(passed)
-        self.assertIsNone(fix)
-
-    def test_failed_bridge_fails_and_says_why_it_matters(self):
-        """The dev host's actual symptom: five failed starts, and no verb mentioned it.
-        The message has to connect the unit to the consequence, or an operator
-        looking at a VM with no network won't recognise this line as the cause."""
-        passed, message, fix = cmd_diagnose.shared_bridge_check(
-            {"ActiveState": "failed", "Result": "exit-code"}, "forgejo")
-        self.assertFalse(passed)
-        self.assertIn("exit-code", message)
-        self.assertIn("network path", message)
-        self.assertIn("journalctl", fix)
-
-    def test_absent_bridge_unit_fails(self):
-        passed, message, fix = cmd_diagnose.shared_bridge_check(None, "forgejo")
-        self.assertFalse(passed)
-        self.assertIn("not installed", message)
-        self.assertIn("workloadctl enable forgejo", fix)
-
-
-class SharedBridgeWiringTest(unittest.TestCase):
-    """The gate: which workloads get the check at all."""
-
-    def _checks(self, toml, enabled=True):
-        # The battery runs end to end, so the checks past the one under test
-        # still shell out to systemctl — which does not exist in the RPM build
-        # container the test suite also runs in. Stub the two doors to it: a
-        # non-zero `subprocess.run` and an inactive `service_active` are both
-        # answers this test discards, and neither can make a shared_bridge
-        # check appear or vanish.
-        completed = subprocess.CompletedProcess([], 1, stdout="", stderr="")
-        with _Bundle(None, name="forgejo", toml=toml, enabled=enabled) as cfg:
-            with patch.object(cmd_diagnose, "_unit_props",
-                              return_value={"ActiveState": "active"}), \
-                 patch.object(cmd_diagnose, "collect_host_artifact_checks"), \
-                 patch.object(cmd_diagnose, "service_active",
-                              return_value=(False, "inactive")), \
-                 patch.object(cmd_diagnose.subprocess, "run",
-                              return_value=completed):
-                checks, _ = cmd_diagnose.collect_diagnose_checks(
-                    cfg, _StubManager())
-        return [c for c in checks if c["check"] == "shared_bridge"]
-
-    def test_managed_bridge_vm_is_checked(self):
-        self.assertEqual(len(self._checks(_VM_TOML)), 1)
-
-    def test_vm_on_a_user_provided_bridge_is_not_checked(self):
-        """The generator deliberately doesn't emit workload-bridge.service for
-        a VM bridged onto br0, so requiring it would fail a correct host."""
-        self.assertEqual(self._checks(_VM_OWN_BRIDGE_TOML), [])
-
-    def test_container_workload_is_not_checked(self):
-        self.assertEqual(self._checks(_TOML_NO_HOST), [])
-
-    def test_disabled_vm_is_not_checked(self):
-        self.assertEqual(self._checks(_VM_TOML, enabled=False), [])
-
-
 class _StubManager:
     """Minimal WorkloadManager stand-in: the battery only needs user_exists()
     to be answerable before it reaches the checks under test here."""

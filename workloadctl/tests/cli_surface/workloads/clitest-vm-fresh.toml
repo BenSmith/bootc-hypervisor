@@ -2,7 +2,7 @@
 # Uses the Fedora 44 Cloud image.  cloud-init enables sshd, creates the
 # workload user, and touches /var/lib/clitest-vm-ready as a readiness marker.
 # Gate: has_kvm.
-# Distinct name from clitest-vm so both can coexist on _workload-br
+# Distinct name from clitest-vm so both can coexist
 # (distinct name → distinct DHCP/MAC) for mutating tests (backup, update/rollback).
 
 [workload]
@@ -19,4 +19,4 @@ user = "workload"
 rollback_keep = 1
 
 [vm.network]
-# Default: _workload-br (workloadctl-managed NAT bridge)
+# Default: unset — passt (no bridge; the guest takes the host's address)

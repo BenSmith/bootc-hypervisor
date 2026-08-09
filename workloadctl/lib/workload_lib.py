@@ -758,8 +758,10 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     """The complete set of run-files owned by one workload.
 
     MUST stay in sync with generators/workload-generate (generate_*_workload) and
-    with the removal path. Never includes shared infra (workload-generate.service,
-    workload-bridge.service, dnsmasq) or references to *other* workloads' units.
+    with the removal path. Never includes shared infra (workload-generate.service)
+    or references to *other* workloads' units. VM workloads no longer contribute
+    any shared unit at all: retiring the managed bridge (ADR 006) removed the one
+    host-global unit the generator materialized as a side effect of the first VM.
 
     Superset semantics: -pod.service and -net.service are listed for every
     container workload (emitted only for the matching mode) so the removable view
