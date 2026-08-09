@@ -1,6 +1,8 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Accepted**, not yet implemented. Supersedes ADR 002.
+**Status:** **Implemented** 2026-08-09 (step 1 of the implementation sequence: the netdev, the schema, and the SELinux label work). Supersedes ADR 002.
+
+The uid-keyed nftables egress policy this decision exists to enable is **not** in that step — VM workloads run unfiltered today, the same posture as under the bridge. `[vm.network].egress` and `.allow` are rejected by `validate` rather than accepted-and-ignored, so no config can claim a confinement that is not in force.
 
 **Date:** 2026-08-09.
 

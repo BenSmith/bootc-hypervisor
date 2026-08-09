@@ -1026,24 +1026,61 @@ Cloud-init mounts the data disk at `/data` in the guest on first boot, formattin
 
 ### Networking
 
-VM workloads use a shared host bridge `_workload-br` (`192.168.200.0/24`). DHCP is served by a dnsmasq instance (`workload-vm-bridge.service`) with leases at `/var/lib/dnsmasq/workload-bridge.leases` (a dnsmasq-owned, SELinux-labeled path the confined `dnsmasq_t` domain can write). Each VM gets a stable MAC address derived from its workload name.
+VM workloads use **passt**, a userspace network backend, and have no bridge at all (see [ADR 006](adr/006-vm-networking-passt-not-managed-bridge.md)). passt terminates the guest's network stack in userspace and re-originates its traffic as ordinary host sockets owned by the workload's own user, so it needs no host privilege — no bridge, no dnsmasq, no host-global `ip_forward`, and no setuid-root `qemu-bridge-helper`. Each VM still gets a stable MAC derived from its workload name.
 
-VMs are not accessible from outside the host without explicit port forwarding on the host. To expose a VM service, add an iptables/nftables DNAT rule or a host-side proxy.
+The consequence worth understanding first: **the guest is assigned the host's own address.** A VM under passt has no LAN identity of its own, so nothing on the network can address it directly. Traffic *from* the guest leaves as though the host sent it.
 
-If firewalld is running, `workload-bridge.service` places `_workload-br` in the **`workloadctl` zone**, shipped by the RPM at `/usr/lib/firewalld/zones/workloadctl.xml`. Modeled on firewalld's `nm-shared`: guests may reach the host's DHCP and DNS (the bridge dnsmasq) and ping the gateway, everything else addressed to the host is rejected, and forwarded traffic is accepted so guests reach the outside world through the bridge's NAT. The zone binds the interface by name, so the assignment survives a `firewall-cmd --reload`. Placing the bridge in the zone is best-effort — if the zone is missing the bridge still comes up and the service logs what to fix, rather than failing and taking every VM workload down with it. (Earlier versions borrowed libvirt's zone, which does not exist on a host without libvirt installed.)
+That is also what makes per-VM policy possible. Because guest traffic arrives on the host as sockets with a known owner, **the workload uid is the VM's network identity** — the guest cannot forge it, it is unique per workload with no allocation step, and nftables can match it as `meta skuid`. Three values derive from the uid with no registry:
 
-The managed bridge's subnet and upstream DNS are **host-level** configuration, not per-VM (see [ADR 002](adr/002-vm-bridge-host-level-network-config.md)) — the bridge is a single host-global resource shared by all VMs. Override them for the whole host via `WORKLOADCTL_VM_BRIDGE_SUBNET` (a CIDR, e.g. `10.100.0.0/24`) and `WORKLOADCTL_VM_BRIDGE_DNS` (comma-separated IPs); the gateway IP and the DHCP range are derived from the subnet. There is no `[vm.network].subnet` / `[vm.network].dns` — setting them is rejected.
+| Derived value | Formula | Used for |
+|---|---|---|
+| Management address | `127.128.0.0 + (uid - UID_MIN)` | inbound SSH for `exec` / `shell` |
+| nflog group | `uid - UID_MIN` | per-workload packet capture |
+| Policy key | the uid itself | `meta skuid` in nftables |
 
-#### Custom bridge
+`workloadctl diagnose <name>` prints the derived values, since they are not inferable from the TOML.
 
-To put a VM directly on an existing host bridge (e.g. a LAN bridge `br0` managed by NetworkManager or `systemd-networkd`), set `[vm.network].bridge`:
+> **VM egress is not filtered yet.** The uid-keyed nftables policy the design above exists to enable has not been built; VMs today reach whatever the host can reach. `[vm.network].egress` and `[vm.network].allow` are therefore **rejected by `validate`** rather than accepted and ignored — a config that claimed a confinement which is not in force would be worse than no key at all.
+
+#### What the guest can reach on the host
+
+- **Host loopback: unreachable.** passt is run with `--map-host-loopback none`; its default would otherwise map the host's loopback onto the gateway address, exposing exactly the services that skip authentication *because* they are not reachable off-box.
+- **The host's default-route address: unreachable, structurally** — the guest is assigned that same address, so traffic to it never leaves the guest's own stack.
+- **Any other host address** — a secondary IP, a second interface — is an ordinary routable destination and *is* reachable.
+
+This is why there is no longer a firewalld zone: on the two addresses that matter, passt's default posture is stricter than the zone was.
+
+#### DNS
+
+passt intercepts the guest's DNS and forwards it to the host's resolver, so the guest is never told a real resolver address. The advertised address and the resolver behind it are derived from the host at unit start by `workload-vm-netdev` — the generator runs before the network is up, so it cannot compute them.
+
+Two things follow. On a host running a stub resolver, the query is made *by the host*, which means guest DNS is invisible to uid-keyed egress policy; log at the host resolver rather than expecting to filter it. And `[vm.network].resolver = "none"` gives the guest no resolver at all — the only setting that closes DNS tunnelling, at the cost of breaking anything not proxy-aware, including cloud-init and package installs.
+
+#### Published ports
+
+VMs can publish ports onto the host, following the same convention as containers. This is new capability: managed-bridge VMs had no port publishing at all.
+
+```toml
+[vm.network]
+ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
+```
+
+`workloadctl exec` / `shell` do not need this — they reach the guest on its management address at a fixed port, which is never routable and never configurable.
+
+#### Pinning egress to an interface
+
+`[vm.network].outbound_if` binds passt's host-side sockets to one interface, so a VM can be made structurally unable to originate on a management VLAN — per-VM egress scoping with no firewall rules involved.
+
+#### Custom bridge — the unfiltered escape hatch
+
+A VM that needs a **real LAN identity** (its own address, reachable by other hosts — e.g. one serving TLS on its own name) attaches directly to a host bridge instead. passt cannot provide this, because the guest takes the host's address.
 
 ```toml
 [vm.network]
 bridge = "br0"
 ```
 
-When at least one VM uses the default `_workload-br`, the generator emits `workload-bridge.service` to bring it up. User-provided bridges are assumed to be managed elsewhere and that service is skipped — workloadctl will not create or modify them. The bridge name must be a valid Linux interface name (≤15 chars, letters/digits/`_`/`-`).
+This is a **supported configuration, not a lapse** — but such a VM is **unfiltered**: its traffic never becomes a host socket, so no host egress policy can reach it. `diagnose` reports this as an informational line. You provision the bridge yourself (NetworkManager or `systemd-networkd`) and add it to `/etc/qemu/bridge.conf`; workloadctl does neither. The bridge name must be a valid Linux interface name (≤15 chars, letters/digits/`_`/`-`). No shipped bundle sets one, because a bridge name is site-specific and need not exist on the target host.
 
 ### Memory Balloon
 
@@ -1135,7 +1172,6 @@ sudo workloadctl rollback fedora-vm
 
 ```
 workload-fedora-vm-build.service   (oneshot, builds system.qcow2 on first enable)
-  └─ workload-vm-bridge.service    (_workload-br bridge + dnsmasq, shared across all VMs)
   └─ workload-fedora-vm-virtiofs-*.service  (virtiofsd sidecars, one per volume)
   └─ workload-fedora-vm.service    (Type=notify; workload-vm-notify starts QEMU,
                                     polls QMP, sends READY=1 when guest is running)
@@ -2338,18 +2374,19 @@ Consider firewall rules for untrusted workloads.
 
 ### VM SSH host-key verification
 
-`workloadctl exec`/`ssh` into a VM connect with `StrictHostKeyChecking=no` (host keys
-are not verified or pinned). This is an accepted tradeoff on the default managed
-bridge (`_workload-br`): it is an isolated, host-local NAT segment where the guest is
-reachable only from the host, so there is no meaningful man-in-the-middle position.
+`workloadctl exec` / `shell` into a VM verify the guest against a per-workload
+`known_hosts` written at provisioning time (`StrictHostKeyChecking=yes`). The pin is
+keyed by the stable workload name via `HostKeyAlias`, so address churn never
+invalidates it — there is no trust-on-first-use.
 
-The tradeoff is **weaker if you attach a VM to a shared LAN bridge** (e.g.
-`[vm.network].bridge = "br0"`): on a LAN, an unverified host key means a spoofed guest
-on the same segment could be connected to transparently. Each workload already has a
-generated SSH keypair, so known-hosts pinning is a viable future hardening for the
-LAN-bridge case; until then, prefer the managed NAT bridge for anything sensitive, or
-verify the guest's identity out of band. (Recorded as decision D4 in the 2026-07 code
-review: keep the current behavior, document the caveat.)
+The alias matters more under passt than it did on a bridge: every workload's
+management address is a loopback address, so without it `ssh` would key its entries
+on near-identical `127.128.x.y` hosts.
+
+This closes the man-in-the-middle exposure the earlier `StrictHostKeyChecking=no`
+behaviour left open for a VM on a shared LAN bridge, where a spoofed guest on the same
+segment could otherwise have been connected to transparently. (Recorded as decision D4
+in the 2026-07 code review, which accepted the caveat; S1 subsequently closed it.)
 
 ### Block Device Access
 

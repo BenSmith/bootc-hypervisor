@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Unit tests for the workload-tree SELinux labeling check in cmd_diagnose.
 
-`workload-ensure-user` registers the fcontext rule for /var/lib/workloads and
-then restorecons the tree. The registration is best-effort and the semanage
-read lock is contended when several workloads enable at once or at boot, so it
-can log one WARNING and return — after which restorecon applies the default
-type and the container is denied writes to its own home, with the warning long
-gone from the journal. That is Q6 Gap 3, and this check is the "surfaces it
-later" half of closing it.
+A workload tree has to carry the label its substrate needs, and the fcontext
+rule that keeps it across relabels has to be registered. The two fail
+independently, and both fail quietly — the symptom is a permission denial much
+later, with nothing at the point of failure connecting the two.
+
+**The expected type differs by substrate.** Containers need container_file_t,
+which rootless podman requires. VMs need svirt_image_t, because `virt_domain`
+has no read, write, getattr or append on container_file_t — a confined QEMU
+cannot use a disk image labelled with it. This check hardcoded
+container_file_t until VM support needed otherwise, which would have reported
+every correctly-labelled VM workload as broken.
 
 Pinned here:
 - The three can't-tell inputs stay unknown rather than reading as broken.
@@ -45,7 +49,13 @@ class SelinuxLabelCheckTest(unittest.TestCase):
             rule_present=True, label="var_lib_t", name="app")
         self.assertFalse(passed)
         self.assertIn("var_lib_t", message)
-        self.assertIn("workload-ensure-user app", fix)
+        # The fix registers the rule and relabels. It deliberately no longer
+        # points at workload-ensure-user: that script stopped registering the
+        # blanket fcontext rule when the registration moved to the RPM's %post,
+        # so running it would restorecon against a policy with no rule for this
+        # path and re-apply the very default label being complained about.
+        self.assertIn("semanage fcontext -a -t container_file_t", fix)
+        self.assertIn("restorecon -RF", fix)
 
     def test_wrong_label_with_no_rule_says_a_relabel_will_not_help(self):
         _, with_rule, _ = cmd_diagnose.selinux_label_check(
@@ -77,6 +87,52 @@ class SelinuxLabelCheckTest(unittest.TestCase):
         passed, _, _ = cmd_diagnose.selinux_label_check(
             rule_present=None, label="var_lib_t", name="app")
         self.assertFalse(passed)
+
+
+class SelinuxLabelCheckVmTest(unittest.TestCase):
+    """The VM half: svirt_image_t, scoped to the workload's own subtree."""
+
+    def test_vm_expects_svirt_image_t(self):
+        passed, message, fix = cmd_diagnose.selinux_label_check(
+            rule_present=True, label="svirt_image_t", name="vm1", is_vm=True)
+        self.assertTrue(passed)
+        self.assertIn("svirt_image_t", message)
+        self.assertIsNone(fix)
+
+    def test_container_file_t_on_a_vm_is_a_failure(self):
+        # The exact state the blanket rule leaves a VM tree in, and the one
+        # this distinction exists to catch: it looks correct by the container
+        # rule and denies a confined QEMU its own disks.
+        passed, message, fix = cmd_diagnose.selinux_label_check(
+            rule_present=True, label="container_file_t", name="vm1", is_vm=True)
+        self.assertFalse(passed)
+        self.assertIn("container_file_t", message)
+        self.assertIn("svirt_image_t", message)
+        self.assertIn("QEMU", message)
+
+    def test_svirt_image_t_on_a_container_is_a_failure(self):
+        # The mirror image, so neither type is silently accepted for both.
+        passed, message, _ = cmd_diagnose.selinux_label_check(
+            rule_present=True, label="svirt_image_t", name="app", is_vm=False)
+        self.assertFalse(passed)
+        self.assertIn("container_file_t", message)
+
+    def test_vm_fix_names_the_workload_subtree_not_the_base(self):
+        # The VM rule is per workload and wins its subtree by specificity; a
+        # fix naming /var/lib/workloads would relabel every sibling container
+        # workload to svirt_image_t and break all of them.
+        _, _, fix = cmd_diagnose.selinux_label_check(
+            rule_present=False, label="svirt_image_t", name="vm1", is_vm=True)
+        self.assertIn("/var/lib/workloads/vm1(/.*)?", fix)
+        self.assertIn("svirt_image_t", fix)
+
+    def test_every_fix_uses_dash_f(self):
+        # Both types are customizable, so a plain `restorecon -R` skips them
+        # and exits 0 — a remediation that appears to work and changes nothing.
+        for is_vm, wrong in ((True, "container_file_t"), (False, "var_lib_t")):
+            _, _, fix = cmd_diagnose.selinux_label_check(
+                rule_present=True, label=wrong, name="w", is_vm=is_vm)
+            self.assertIn("restorecon -RF", fix)
 
 
 class SelinuxTypeTest(unittest.TestCase):

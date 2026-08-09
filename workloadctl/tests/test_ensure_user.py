@@ -1056,55 +1056,6 @@ class TestResolveCloudInitInstanceId(unittest.TestCase):
         self.assertTrue(iid.startswith("myvm-"))
 
 
-class TestSetupSelinuxPolicy(unittest.TestCase):
-    def setUp(self):
-        self.mod = _load_script()
-
-    def test_creates_policy_when_absent(self):
-        calls = []
-
-        def fake_run(argv, **kw):
-            calls.append(argv)
-            if argv[:2] == ["semanage", "fcontext"] and argv[2] == "-l":
-                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
-            self.mod.setup_selinux_policy()
-        add_calls = [c for c in calls if "-a" in c]
-        self.assertEqual(len(add_calls), 1)
-        self.assertIn("container_file_t", add_calls[0])
-
-    def test_noop_when_policy_already_present(self):
-        existing = f"{self.mod.WORKLOADS_BASE}(/.*)?  system_u:object_r:container_file_t:s0\n"
-
-        def fake_run(argv, **kw):
-            if "-l" in argv:
-                return types.SimpleNamespace(returncode=0, stdout=existing, stderr="")
-            raise AssertionError("should not attempt to add when already present")
-
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
-            self.mod.setup_selinux_policy()  # must not raise
-
-    def test_list_failure_warns_and_returns(self):
-        msgs = []
-
-        def fake_run(argv, **kw):
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="semanage broken")
-
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
-            self.mod.setup_selinux_policy()
-        self.assertTrue(any("semanage fcontext -l failed" in m for m in msgs))
-
-    def test_exception_is_caught_and_logged(self):
-        msgs = []
-        with mock.patch.object(self.mod.subprocess, "run", side_effect=OSError("boom")), \
-             mock.patch.object(self.mod, "log", side_effect=msgs.append):
-            self.mod.setup_selinux_policy()  # must not raise
-        self.assertTrue(any("Failed to set up SELinux policy" in m for m in msgs))
-
-
 class TestSetupHomeDirectory(unittest.TestCase):
     def setUp(self):
         self.mod = _load_script()
@@ -1186,7 +1137,15 @@ class TestRestoreSelinuxLabels(unittest.TestCase):
                                side_effect=lambda argv, **kw: (calls.append(argv),
                                                                 types.SimpleNamespace(returncode=0, stderr=""))[1]):
             self.mod.restore_selinux_labels("myapp")
-        self.assertEqual(calls[0][:2], ["restorecon", "-R"])
+        # -F, not plain -R. Both container_file_t and svirt_image_t are in
+        # contexts/customizable_types, and plain restorecon SKIPS any file whose
+        # current type is customizable — it prints "not reset as customized by
+        # admin" only under -v and exits 0. Without -F a VM workload's tree
+        # would silently never migrate off the blanket container_file_t, and the
+        # failure would surface much later as a confined QEMU unable to read its
+        # own disk. The success path is indistinguishable from the no-op one,
+        # which is exactly why this is asserted on the argv.
+        self.assertEqual(calls[0][:2], ["restorecon", "-RF"])
         self.assertIn("/var/lib/workloads/myapp", calls[0])
 
     def test_logs_warning_on_failure(self):
@@ -1945,7 +1904,6 @@ class TestMain(unittest.TestCase):
             "mkdir": mock.patch.object(type(self.mod.WORKLOADS_BASE), "mkdir"),
             "load_config": mock.patch.object(self.mod, "load_config", return_value={"workload": {"name": "test"}}),
             "infer_workload_kind": mock.patch.object(self.mod, "infer_workload_kind", return_value=kind),
-            "setup_selinux_policy": mock.patch.object(self.mod, "setup_selinux_policy"),
             "setup_home_directory": mock.patch.object(self.mod, "setup_home_directory"),
             "configure_subuid_subgid": mock.patch.object(self.mod, "configure_subuid_subgid"),
             "setup_volume_directories": mock.patch.object(self.mod, "setup_volume_directories"),
@@ -2011,7 +1969,6 @@ class TestMain(unittest.TestCase):
         "enable_linger",
     )
     CONTAINER_BEST_EFFORT = (
-        "setup_selinux_policy",
         "setup_home_directory",
         "restore_selinux_labels",
     )

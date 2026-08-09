@@ -21,6 +21,7 @@ from workloadctl_core import WorkloadConfig, WorkloadManager, require_root
 from substrate import LifecycleError
 from provisioning import (
     apply_selinux_policy,
+    apply_vm_fcontext,
     generate_units,
     ImageTransferError,
     preflight_checks,
@@ -80,6 +81,12 @@ def cmd_enable(args, manager: WorkloadManager):
         emit_result([{"workload": args.workload, "result": "failed",
                       "reason": str(e)}], ok=False)
         sys.exit(1)
+
+    # Register the VM tree's fcontext rule (svirt_image_t rather than the
+    # blanket container_file_t). Enable is the right place for it and a
+    # workload's ExecStartPre is not: at boot N workloads would race the same
+    # semanage read lock, whereas an enable is one-time and operator-initiated.
+    apply_vm_fcontext(config, "enable")
 
     info()
     # Generate first: the generator is the single producer of the sysusers

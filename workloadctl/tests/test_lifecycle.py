@@ -703,6 +703,7 @@ import argparse
 import io
 import json
 from contextlib import redirect_stdout, redirect_stderr
+from types import SimpleNamespace
 
 import cmd_cleanup
 import cmd_disable
@@ -1471,6 +1472,73 @@ class TestSelinuxHelpers(unittest.TestCase):
             with redirect_stderr(buf):
                 provisioning._print_available_bundles("anything")
             self.assertEqual(buf.getvalue(), "")
+
+
+# ── apply_vm_fcontext ───────────────────────────────────────────────────────
+
+class TestApplyVmFcontext(unittest.TestCase):
+    """The per-workload svirt_image_t rule for a VM tree.
+
+    Gated on is_vm, NOT on [security].selinux_policy. Labelling is a
+    precondition for a confined VM booting at all, not optional hardening, and
+    that flag is opt-in — a VM that omitted it would fail to start with an
+    EPERM that looks like nothing is wrong.
+    """
+
+    def _run_calls(self, toml, name, action, listing=""):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            out = listing if "-l" in argv else ""
+            return SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+        with _cfg(toml, name) as cfg:
+            with patch.object(provisioning.shutil, 'which', return_value="/usr/sbin/semanage"):
+                with patch.object(provisioning.subprocess, 'run', side_effect=fake_run):
+                    with redirect_stdout(io.StringIO()):
+                        provisioning.apply_vm_fcontext(cfg, action)
+        return calls
+
+    def test_container_workload_is_untouched(self):
+        # A container tree must keep matching the blanket container_file_t
+        # rule; relabelling it svirt_image_t would deny rootless podman.
+        self.assertEqual(
+            self._run_calls(_CONTAINER_TOML, 'test-wl', "enable"), [])
+
+    def test_enable_registers_svirt_image_t_for_the_subtree(self):
+        calls = self._run_calls(_VM_TOML, 'test-vm', "enable")
+        adds = [c for c in calls if "-a" in c]
+        self.assertEqual(len(adds), 1)
+        self.assertIn("svirt_image_t", adds[0])
+        self.assertIn("/var/lib/workloads/test-vm(/.*)?", adds[0])
+
+    def test_enable_relabels_with_dash_f(self):
+        # Both container_file_t and svirt_image_t are customizable types, so a
+        # plain restorecon -R skips them and exits 0 — the migration would
+        # silently never happen.
+        calls = self._run_calls(_VM_TOML, 'test-vm', "enable")
+        relabels = [c for c in calls if c and c[0] == "restorecon"]
+        self.assertEqual(len(relabels), 1)
+        self.assertIn("-RF", relabels[0])
+
+    def test_enable_is_idempotent_when_already_registered(self):
+        listing = "/var/lib/workloads/test-vm(/.*)?  system_u:object_r:svirt_image_t:s0\n"
+        calls = self._run_calls(_VM_TOML, 'test-vm', "enable", listing=listing)
+        self.assertEqual([c for c in calls if "-a" in c], [])
+
+    def test_disable_unregisters_the_same_pattern(self):
+        calls = self._run_calls(_VM_TOML, 'test-vm', "disable")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-d", calls[0])
+        self.assertIn("/var/lib/workloads/test-vm(/.*)?", calls[0])
+
+    def test_missing_semanage_is_not_a_failure(self):
+        with _cfg(_VM_TOML, 'test-vm') as cfg:
+            with patch.object(provisioning.shutil, 'which', return_value=None):
+                with patch.object(provisioning.subprocess, 'run') as run_mock:
+                    provisioning.apply_vm_fcontext(cfg, "enable")
+            run_mock.assert_not_called()
 
 
 # ── apply_selinux_policy ────────────────────────────────────────────────────

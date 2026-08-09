@@ -34,6 +34,7 @@ from workload_lib import (
     WORKLOADS_BASE,
 )
 from provisioning import (
+    vm_fcontext_pattern,
     HOST_ARTIFACT_KINDS,
     HOST_SETUP_ARTIFACTS_ACTION,
     host_setup_artifacts,
@@ -79,20 +80,26 @@ def _getsebool(name: str) -> bool | None:
     return result.stdout.strip().endswith("on")
 
 
-def _fcontext_rule_present() -> bool | None:
-    """Is the persistent fcontext rule for /var/lib/workloads registered?
+def _fcontext_rule_present(pattern: str | None = None) -> bool | None:
+    """Is the persistent fcontext rule for `pattern` registered?
+
+    Defaults to the blanket /var/lib/workloads rule that container workloads
+    rely on. A VM workload passes its own per-workload pattern instead, since
+    that is the rule which actually decides its tree's label — the blanket rule
+    being present says nothing about whether the VM override was registered.
 
     None when it can't be determined — no semanage binary, SELinux disabled,
-    or the read lock is contended right now (the same contention this check
-    exists to detect the aftermath of). None must never read as "missing".
+    or the read lock is contended right now. None must never read as "missing".
     """
+    if pattern is None:
+        pattern = f"{WORKLOADS_BASE}(/.*)?"
     if not shutil.which("semanage"):
         return None
     result = subprocess.run(
         ["semanage", "fcontext", "-l"], capture_output=True, text=True)
     if result.returncode != 0:
         return None
-    return f"{WORKLOADS_BASE}(/.*)?" in result.stdout
+    return pattern in result.stdout
 
 
 # --- CA trust store ---
@@ -257,47 +264,53 @@ def _selinux_type(path: Path) -> str | None:
 
 
 def selinux_label_check(rule_present: bool | None, label: str | None,
-                        name: str) -> tuple[bool, str, str | None]:
+                        name: str, is_vm: bool = False) -> tuple[bool, str, str | None]:
     """Verdict for the workload tree's SELinux labeling: (passed, message, fix).
 
     Two independent facts, because they fail independently and one of them
-    fails silently. `workload-ensure-user` registers the fcontext rule for
-    /var/lib/workloads and then restorecons the workload's tree — but the
-    semanage read lock is contended when several workloads enable at once or
-    at boot, and the registration is best-effort: it logs
+    fails silently. The fcontext rule has to be registered AND the tree has to
+    carry the label it implies; a tree labelled correctly today with no rule
+    behind it reverts on the next relabel.
 
-        WARNING: semanage fcontext -l failed: Could not get direct read lock
-        at /var/lib/selinux/targeted/semanage.read.LOCK
+    **The expected type differs by substrate.** Container workloads need
+    container_file_t, which rootless podman requires. VM workloads need
+    svirt_image_t: `virt_domain` has no read, write, getattr or append on
+    container_file_t, so a confined QEMU cannot use a disk image labelled with
+    it. The VM rule is registered per workload at enable time and wins its own
+    subtree against the blanket rule by specificity.
 
-    once, returns, and never retries. The restorecon then runs against a
-    policy with no rule for this path and applies the *default* label
-    (var_lib_t), so the container is denied writes to its own home. The
-    warning has long since scrolled out of the journal by the time anyone
-    connects it to the denial — which is the whole reason this is a check
-    and not just a log line. Gap 3 of Q6, 2026-07-28.
-
-    A tree that is correctly labeled today but has no registered rule still
-    fails: it is one `restorecon -R /var` or policy relabel away from the
-    same denial, and the fix is one command either way.
+    Historically this check hardcoded container_file_t, which would report
+    every correctly-labelled VM workload as broken.
     """
+    expected = "svirt_image_t" if is_vm else "container_file_t"
+    scope = f"{WORKLOADS_BASE}/{name}" if is_vm else str(WORKLOADS_BASE)
+    consumer = ("a confined QEMU will be denied access to its own disks"
+                if is_vm else "rootless podman will be denied access to it")
+
     if rule_present is None and label is None:
         return (True, "SELinux labeling state unknown "
                       "(semanage unavailable or SELinux disabled)", None)
-    if label is not None and label != "container_file_t":
-        return (False, f"Workload tree is labeled {label}, not container_file_t "
-                       f"— rootless podman will be denied access to it"
+    # `restorecon -RF`, not `-R`: both container_file_t and svirt_image_t are
+    # in contexts/customizable_types, and plain restorecon skips any file whose
+    # *current* type is customizable — printing "not reset as customized by
+    # admin" only under -v, and exiting 0. Without -F the remediation below
+    # would appear to succeed and change nothing.
+    fix = (f"sudo semanage fcontext -a -t {expected} '{scope}(/.*)?' "
+           f"&& sudo restorecon -RF {scope}")
+
+    if label is not None and label != expected:
+        return (False, f"Workload tree is labeled {label}, not {expected} "
+                       f"— {consumer}"
                        + ("" if rule_present else " (and no fcontext rule is "
                           "registered for it, so a relabel will not fix it)"),
-                f"sudo /usr/libexec/workloadctl/workload-ensure-user {name}")
+                fix)
     if rule_present is False:
-        return (False, f"No fcontext rule registered for {WORKLOADS_BASE} — the "
-                       f"tree is labeled correctly now but a relabel will reset "
-                       f"it to the default type (semanage lock contention at "
-                       f"enable time skips this registration silently)",
-                f"sudo semanage fcontext -a -t container_file_t "
-                f"'{WORKLOADS_BASE}(/.*)?' && sudo restorecon -R {WORKLOADS_BASE}")
-    return (True, "SELinux labeling correct (container_file_t, "
-                  "fcontext rule registered)", None)
+        return (False, f"No fcontext rule registered for {scope} — the tree is "
+                       f"labeled correctly now but a full relabel or "
+                       f"`restorecon -F` will reset it to the default type",
+                fix)
+    return (True, f"SELinux labeling correct ({expected}, "
+                  f"fcontext rule registered)", None)
 
 
 def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
@@ -826,14 +839,17 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             _check("home_dir", False, f"Home directory missing: {home_dir}",
                    fix=f"sudo /usr/libexec/workloadctl/workload-ensure-user {config.name}")
 
-    # Check 5b: the workload tree carries the label rootless podman needs, and
-    # the rule that keeps it across relabels is registered. See
-    # selinux_label_check for why a silent skip at enable time surfaces as an
-    # unexplained permission denial much later.
+    # Check 5b: the workload tree carries the label its substrate needs, and the
+    # rule that keeps it across relabels is registered. The expected type and
+    # the rule that governs it both differ between containers (container_file_t,
+    # blanket rule) and VMs (svirt_image_t, per-workload rule) — see
+    # selinux_label_check.
     root_dir = workload_root_dir(config.name)
     if root_dir.exists():
+        pattern = (vm_fcontext_pattern(config.name) if config.is_vm else None)
         passed, message, fix = selinux_label_check(
-            _fcontext_rule_present(), _selinux_type(root_dir), config.name)
+            _fcontext_rule_present(pattern), _selinux_type(root_dir),
+            config.name, is_vm=config.is_vm)
         _check("selinux_labels", passed, message, fix=fix)
 
     # Check 6: Image(s) exist locally

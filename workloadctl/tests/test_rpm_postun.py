@@ -122,11 +122,15 @@ class TestPostunScriptlet(unittest.TestCase):
 
     # ── uninstall ($1 == 0) ──────────────────────────────────────────────────
 
-    def test_uninstall_removes_fcontext_rule(self):
+    def test_uninstall_removes_fcontext_rules(self):
+        # Both rules %post registers: the blanket workload tree and the VM
+        # runtime socket dir. Per-workload VM overrides are not here — those
+        # are unregistered by `disable`, which owns them.
         self._run("0")
-        calls = self._semanage_calls()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0], "fcontext -d /var/lib/workloads(/.*)?")
+        self.assertEqual(
+            self._semanage_calls(),
+            ["fcontext -d /var/lib/workloads(/.*)?",
+             "fcontext -d /run/workload-vm(/.*)?"])
 
     def test_uninstall_missing_bridge_conf_is_noop(self):
         # No bridge.conf present — the -f guard must keep it from erroring.

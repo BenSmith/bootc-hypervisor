@@ -51,38 +51,6 @@ def load_config(name):
         return tomllib.load(f)
 
 
-def setup_selinux_policy():
-    """Ensure SELinux fcontext policy exists for workload directories.
-
-    Idempotent — checks before adding.  Creates a persistent policy
-    that survives system relabels.
-    """
-    try:
-        result = subprocess.run(
-            ["semanage", "fcontext", "-l"],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            log(f"  WARNING: semanage fcontext -l failed: {result.stderr.strip()}")
-            return
-
-        if re.search(re.escape(str(WORKLOADS_BASE)) + r'\(', result.stdout):
-            return  # Already exists
-
-        log(f"  Creating SELinux fcontext policy for {WORKLOADS_BASE}")
-        result = subprocess.run(
-            ["semanage", "fcontext", "-a", "-t", "container_file_t",
-             f"{WORKLOADS_BASE}(/.*)?"],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            log("  SELinux policy created successfully")
-        else:
-            log(f"  WARNING: Failed to create SELinux policy: {result.stderr}")
-    except Exception as e:
-        log(f"  WARNING: Failed to set up SELinux policy: {e}")
-
-
 def configure_subuid_subgid(pw, config):
     """Configure subordinate UID/GID ranges for rootless containers.
 
@@ -502,8 +470,15 @@ def restore_selinux_labels(name):
     user it's the root — anchoring on workload_root_dir covers both subtrees.
     """
     target = str(workload_root_dir(name))
+    # -F is REQUIRED, not belt-and-braces. Both container_file_t and
+    # svirt_image_t are listed in contexts/customizable_types, and plain
+    # restorecon SKIPS any file whose *current* type is customizable — it
+    # prints "not reset as customized by admin", visible only under -v, and
+    # exits 0. Without -F a VM workload's tree would silently never migrate
+    # from the blanket container_file_t to svirt_image_t, and the failure would
+    # surface much later as a confined QEMU unable to read its own disk.
     result = subprocess.run(
-        ["restorecon", "-R", target],
+        ["restorecon", "-RF", target],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -1340,10 +1315,12 @@ def _ensure_user(name: str) -> int:
     # rest; must-succeed steps (marked ERROR + return 1) abort the remaining
     # steps instead, since a workload missing a prerequisite has no reason to
     # continue provisioning
-    try:
-        setup_selinux_policy()
-    except Exception as e:
-        log(f"  WARNING: Failed to set up SELinux policy: {e}")
+    # No fcontext registration here. The blanket /var/lib/workloads rule names
+    # no workload and is install-time work, so it moved to the RPM's %post: run
+    # from every prestart, N workloads raced the same semanage read lock at
+    # every boot, and a lost race was logged once and never retried. The
+    # per-workload VM override (svirt_image_t) is registered at enable, where
+    # it contends with nothing.
 
     try:
         setup_home_directory(pw, name)

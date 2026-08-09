@@ -180,6 +180,32 @@ install -dm 0755 %{buildroot}%{_sysconfdir}/workloads.d
 %post
 %systemd_post workload-exporter.timer workload-exporter-disk.timer
 systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
+# SELinux fcontext rules that name no workload, so they belong at install time.
+#
+# Both used to be registered from workload-ensure-user, i.e. from every
+# workload's ExecStartPre. That meant N workloads racing the same semanage read
+# lock at every boot, for install-time work — and the code logged one warning
+# and returned with no retry, so a lost race left the tree labelled var_lib_t
+# and the container denied writes to its own home, with the warning long
+# scrolled out of the journal by the time anyone connected the two.
+#
+#   1. The blanket rule for the workload tree: rootless podman needs
+#      container_file_t. Per-workload VM overrides (svirt_image_t) are
+#      registered at enable and win their own subtree by specificity; both live
+#      in file_contexts.local, which is required, because .local outranks the
+#      base file wholesale and most-specific-wins applies only within one source.
+#   2. The VM runtime socket dir: a confined QEMU cannot create a socket under
+#      var_run_t, and fails to start rather than degrading. svirt_var_run_t
+#      carries the full sock_file permission set; virt_var_run_t (what libvirt
+#      uses for /run/libvirt) grants only create/setattr/unlink, which is not
+#      enough.
+#
+# Non-fatal throughout: a host without semanage, or with SELinux disabled, must
+# still install the package.
+if [ -x /usr/sbin/semanage ]; then
+    semanage fcontext -a -t container_file_t '/var/lib/workloads(/.*)?' 2>/dev/null || :
+    semanage fcontext -a -t svirt_var_run_t '/run/workload-vm(/.*)?' 2>/dev/null || :
+fi
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -227,6 +253,7 @@ fi
 # alone and still is, since the admin owns it.
 if [ $1 -eq 0 ]; then
     semanage fcontext -d '/var/lib/workloads(/.*)?' 2>/dev/null || :
+    semanage fcontext -d '/run/workload-vm(/.*)?' 2>/dev/null || :
 fi
 
 %files

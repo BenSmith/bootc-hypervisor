@@ -28,7 +28,7 @@ from workloadctl_core import (
     format_size,
     require_root,
 )
-from provisioning import apply_selinux_policy, run_host_setup
+from provisioning import apply_selinux_policy, apply_vm_fcontext, run_host_setup
 
 
 def _remove_runtime_env_files(config: WorkloadConfig) -> list[str]:
@@ -228,6 +228,12 @@ def cmd_disable(args, manager: WorkloadManager):
     # Remove the per-workload SELinux module (1:1 with the workload, so this is
     # an unambiguous teardown — nothing else depends on wl_<name>).
     attempt("remove SELinux module", lambda: apply_selinux_policy(config, "disable"))
+
+    # Unregister the VM tree's fcontext rule. Independent of the module above:
+    # different tool, different file in the store, different gate (is_vm vs
+    # [security].selinux_policy).
+    attempt("remove SELinux fcontext rule",
+            lambda: apply_vm_fcontext(config, "disable"))
 
     # Mark disabled so a future generation (next enable of anything, or boot)
     # won't re-emit this workload.

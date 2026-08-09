@@ -218,10 +218,10 @@ Required primitives are `@abstractmethod`s, so a substrate cannot exist without 
 
 ### VM workloads
 
-A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`):
+A TOML with a top-level `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as a raw QEMU/KVM virtual machine under a systemd unit, via `VMSubstrate` and the `libexec/workload-vm-*` helpers (`workload-vm-build-disk`, `workload-vm-qmp`, `workload-vm-shutdown`, `workload-vm-notify`, `workload-vm-netdev`):
 
 - **Disks** — a writable `system.qcow2` built once from the image source (rebuildable, with generational `system.qcow2.gen-N` rollback, `rollback_keep + 1` retained) plus an optional durable `data.qcow2`. `update`/`reprovision` rebuilds `system.qcow2`; `rollback` restores the previous generation.
-- **Networking** — a shared workloadctl-managed NAT bridge `_workload-br` (`VM_BRIDGE_NAME`) + dnsmasq; per-VM override via `[vm.network].bridge`.
+- **Networking** — **passt** (ADR 006), not a bridge: it terminates the guest's stack in userspace and re-originates traffic as host sockets owned by `_wl-<name>`, so **the workload uid is the network identity** (unforgeable, unique, matchable as `meta skuid`). The guest is assigned the *host's* address, so it has no LAN identity; `exec`/`shell` reach it on a uid-derived management address (`127.128.0.0 + uid offset`, port 2222). `[vm.network].bridge` is the escape hatch for a VM that needs a real LAN identity — supported, and **unfiltered by design**. The uid-keyed egress policy itself is not built yet, so `egress`/`allow` are rejected rather than ignored.
 - **Boot/seed** — UEFI/OVMF firmware; cloud-init seed ISO from `[vm.cloud_init]` (user-data template + `template_vars`); a per-instance SSH key for CLI access. CLI verbs reach a VM over SSH (`exec`/`shell`) or QMP (`incant`, lifecycle, `capture`), not podman.
 
 `workloads/virtual-forgejo/workload.toml` is the live example; `docs/schema-reference.toml` documents `[vm]`, `[vm.cloud_init]`, and `[vm.network]`.
@@ -328,7 +328,7 @@ VM workloads use a separate, mutually-exclusive set of sections:
 
 - `[vm]` — image source (`image` or `cloud_image_url` + `cloud_image_checksum`), memory, vcpus, rollback_keep, data-disk size
 - `[vm.cloud_init]` — user-data template + `template_vars` for per-instance seeding
-- `[vm.network]` — bridge (defaults to `_workload-br`), static addressing
+- `[vm.network]` — `ports` (published, container convention), `outbound_if` (pin egress to one host interface), `resolver` (`"host"` / `"none"`), and `bridge` (absent = passt; present = attach directly and be unfiltered). Presence of `bridge` IS the topology selector — there is no `mode` key.
 
 ## File Structure
 
@@ -345,7 +345,7 @@ lib/backup.py                      # capture() implementation shared by both sub
 generators/workload-generator      # Tiny shell systemd generator (emits workload-generate.service)
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
-libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify)
+libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify, netdev)
 libexec/workload-metrics           # Prometheus metrics exporter
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
@@ -363,7 +363,6 @@ docs/testing.md                    # Test-value rubric: rung model, oracle/contr
 systemd/                           # systemd units (workloads.slice, metrics timer)
 completions/                       # Bash completions
 seccomp-workload-baseline.json     # Default seccomp profile
-firewalld/workloadctl.xml          # firewalld zone for the managed VM bridge (our own, not libvirt's)
 tests/                             # Test suite
 ```
 

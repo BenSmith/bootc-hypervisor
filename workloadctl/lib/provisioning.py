@@ -728,6 +728,79 @@ def _print_available_bundles(bundle: str):
     error("         available bundles: " + ", ".join(available))
 
 
+# SELinux type for a VM workload's tree. NOT container_file_t, which the
+# blanket /var/lib/workloads rule applies: `virt_domain` has no read, write,
+# getattr or append on container_file_t, so a confined QEMU cannot use a disk
+# image labelled with it. svirt_image_t carries the full set.
+VM_IMAGE_SELINUX_TYPE = "svirt_image_t"
+
+
+def vm_fcontext_pattern(name: str) -> str:
+    """The fcontext pattern covering one VM workload's whole tree."""
+    return f"{workload_root_dir(name)}(/.*)?"
+
+
+def apply_vm_fcontext(config: WorkloadConfig, action: str):
+    """Register (enable) or unregister (disable) a VM workload's fcontext rule.
+
+    VM disks need svirt_image_t, not the container_file_t the blanket
+    /var/lib/workloads rule gives them. A per-workload rule wins its whole
+    subtree by specificity — directories, disks, nvram.fd and files nobody
+    enumerated — while sibling container workloads keep matching the blanket
+    rule, so the blanket rule does not move and existing hosts need no
+    migration.
+
+    **Gated on is_vm, not on [security].selinux_policy.** Labelling is a
+    precondition for the VM booting at all once QEMU is confined, not an
+    optional hardening step, and that flag is opt-in — a VM that omitted it
+    would fail to start with an EPERM that looks like nothing is wrong. The two
+    are independent in both directions: this is `semanage`, the policy module is
+    `semodule`, and they land in different files in the store.
+
+    Both rules must live in `file_contexts.local`, which is why this is
+    `semanage` and not a CIL `filecon` shipped in the bundle: `.local` outranks
+    the base `file_contexts` *wholesale*, so most-specific-wins applies only
+    within one source. A module's filecon lands in the base file and would be
+    silently shadowed by the blanket rule.
+
+    Best-effort: a host without semanage, or with SELinux disabled, is not a
+    reason to fail an enable.
+    """
+    if not config.is_vm:
+        return
+    if not shutil.which("semanage"):
+        return
+
+    pattern = vm_fcontext_pattern(config.name)
+
+    if action == "disable":
+        subprocess.run(["semanage", "fcontext", "-d", pattern],
+                       check=False, capture_output=True)
+        return
+
+    listed = subprocess.run(["semanage", "fcontext", "-l"],
+                            capture_output=True, text=True)
+    if listed.returncode == 0 and pattern in listed.stdout:
+        return  # already registered
+
+    result = subprocess.run(
+        ["semanage", "fcontext", "-a", "-t", VM_IMAGE_SELINUX_TYPE, pattern],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        warn(f"  WARNING: could not register the SELinux fcontext rule for "
+             f"'{config.name}': {result.stderr.strip()}")
+        return
+    info(f"  Registered SELinux fcontext: {pattern} -> {VM_IMAGE_SELINUX_TYPE}")
+
+    # Relabel now rather than waiting for the next start. -F is REQUIRED: both
+    # container_file_t and svirt_image_t are in contexts/customizable_types, and
+    # plain restorecon skips any file whose *current* type is listed there,
+    # printing "not reset as customized by admin" only under -v and exiting 0.
+    # Without -F this migration silently never happens.
+    subprocess.run(["restorecon", "-RF", str(workload_root_dir(config.name))],
+                   check=False, capture_output=True)
+
+
 def apply_selinux_policy(config: WorkloadConfig, action: str):
     """Load (enable) or remove (disable) a workload's per-workload SELinux type.
 

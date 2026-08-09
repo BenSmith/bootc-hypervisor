@@ -1,12 +1,14 @@
 # ADR 002: VM managed-bridge network config is host-level, not per-VM
 
-**Superseded by ADR 006** (accepted 2026-08-09, not yet implemented), which
-removes the managed bridge entirely. The reasoning below remains sound for the
-topology it addresses and is kept legible rather than rewritten; it stays in
-force until ADR 006 lands.
+**Superseded by ADR 006** (implemented 2026-08-09), which removed the managed
+bridge entirely. `managed_bridge_params`, `WORKLOADCTL_VM_BRIDGE_SUBNET` and
+`WORKLOADCTL_VM_BRIDGE_DNS` no longer exist, and `[vm.network].subnet`/`.dns`
+are now rejected with a pointer to ADR 006. The reasoning below is kept legible
+rather than rewritten: the finding that a shared, refcount-persistent host
+resource resists per-VM configuration is what motivated removing it.
 
-**Status:** **Implemented** 2026-07-03 (code review 2026-07 follow-up, item D1;
-carded as B16). `managed_bridge_params` in `workload_lib.py` derives the gateway,
+**Status:** **Superseded** 2026-08-09. Was implemented 2026-07-03 (code review
+2026-07 follow-up, item D1; carded as B16). `managed_bridge_params` in `workload_lib.py` derives the gateway,
 CIDR, and DHCP range from `WORKLOADCTL_VM_BRIDGE_SUBNET`; per-VM subnet/dns are
 rejected.
 
