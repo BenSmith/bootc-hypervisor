@@ -552,5 +552,126 @@ class TestWriteEnvDollarEscape(unittest.TestCase):
         self.assertNotIn("SHOULD-NOT-APPEAR", content)
 
 
+class TestRetiredSecretsAreRemoved(unittest.TestCase):
+    """A workload that stops declaring secrets must not keep its old .secrets.
+
+    Retiring a ${SECRET:…} reference and restarting is the normal way to
+    un-secret a live workload, and this ExecStartPre is the only thing on that
+    path that both runs every start and knows the workload now has no secrets.
+    The generator merely stops emitting EnvironmentFile=, `recreate` never
+    touches /run, and cmd_disable skips kind == "env-file" (removal is --purge
+    only). Without the unlink here the decrypted value outlives the config
+    change, the credential, and every restart, until a reboot clears the tmpfs.
+    """
+
+    def setUp(self):
+        self.config_dir = tempfile.mkdtemp()
+        self.creds_dir = tempfile.mkdtemp()
+        self.env_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        for d in (self.config_dir, self.creds_dir, self.env_dir):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _config(self, name, env_block):
+        write_config(self.config_dir, name, f"""\
+            [workload]
+            name = "{name}"
+
+            [container]
+            image = "myapp"
+
+            [container.environment]
+            {env_block}
+        """)
+
+    def test_secrets_file_removed_when_reference_retired(self):
+        # 1. With a secret: the file is written, carrying the plaintext.
+        self._config("retire", 'TOKEN = "${SECRET:tok}"')
+        write_credential(self.creds_dir, "tok", "PLAINTEXT-VALUE")
+
+        result = run_write_env("retire", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        secrets = Path(self.env_dir) / "workload-retire.secrets"
+        self.assertIn("PLAINTEXT-VALUE", secrets.read_text())
+
+        # 2. Reference retired from the TOML, same workload, next start.
+        self._config("retire", 'PLAIN = "nothing-secret"')
+
+        result = run_write_env("retire", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            secrets.exists(),
+            "stale .secrets survived; the decrypted value would persist until reboot",
+        )
+
+    def test_per_container_file_is_scoped_to_its_own_container(self):
+        # Retiring one container's secret must not remove a sibling's file:
+        # out_basename is per-container, so the unlink has to be too.
+        write_config(self.config_dir, "multi", """\
+            [workload]
+            name = "multi"
+            mode = "pod"
+
+            [[containers]]
+            name = "keeps"
+            image = "myapp"
+            [containers.environment]
+            TOKEN = "${SECRET:tok}"
+
+            [[containers]]
+            name = "retires"
+            image = "myapp"
+            [containers.environment]
+            TOKEN = "${SECRET:tok}"
+        """)
+        write_credential(self.creds_dir, "tok", "PLAINTEXT-VALUE")
+
+        for c in ("keeps", "retires"):
+            result = run_write_env("multi", self.config_dir, self.creds_dir,
+                                   self.env_dir, container=c)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        keeps = Path(self.env_dir) / "workload-multi-keeps.secrets"
+        retires = Path(self.env_dir) / "workload-multi-retires.secrets"
+        self.assertTrue(keeps.exists() and retires.exists())
+
+        write_config(self.config_dir, "multi", """\
+            [workload]
+            name = "multi"
+            mode = "pod"
+
+            [[containers]]
+            name = "keeps"
+            image = "myapp"
+            [containers.environment]
+            TOKEN = "${SECRET:tok}"
+
+            [[containers]]
+            name = "retires"
+            image = "myapp"
+            [containers.environment]
+            PLAIN = "nothing-secret"
+        """)
+
+        result = run_write_env("multi", self.config_dir, self.creds_dir,
+                               self.env_dir, container="retires")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(retires.exists(), "retired container's .secrets survived")
+        self.assertIn("PLAINTEXT-VALUE", keeps.read_text(),
+                      "sibling container's .secrets was collaterally removed")
+
+    def test_no_secrets_and_no_stale_file_is_a_clean_noop(self):
+        # The common case: a workload that never had secrets. Must not fail, and
+        # must not create anything.
+        self._config("never", 'PLAIN = "nothing-secret"')
+
+        result = run_write_env("never", self.config_dir, self.creds_dir, self.env_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.strip(), "")
+        self.assertFalse((Path(self.env_dir) / "workload-never.secrets").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

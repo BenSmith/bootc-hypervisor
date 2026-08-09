@@ -104,11 +104,19 @@ RUN if ls /tmp/ca-trust-inject/*.crt >/dev/null 2>&1; then \
 # root is trust that no bundle inspection would reveal. `find /etc/pki -xtype l`
 # to check, `-delete` to sweep.
 #
-# Candidate fixes so this cannot recur, none chosen yet: a boot-time oneshot
-# running `update-ca-trust` (idempotent, self-heals on the next reboot, works
-# regardless of local edits), or a doctor check comparing source/anchors/
-# fingerprints against the extracted bundle (catches it without a reboot but
-# does not fix it).
+# Settled 2026-08-09: detection, not a boot-time fix. `workloadctl diagnose`
+# carries `ca_trust_anchor_check` (lib/cmd_diagnose.py), which asks whether each
+# configured anchor is actually in the extracted bundle and names the right
+# repair — restoring extracted/ from the booted deployment where every anchor is
+# the image's, `update-ca-trust` where the host carries local anchors that
+# restoring would revoke.
+#
+# The rejected alternative was a boot-time oneshot running `update-ca-trust`.
+# It self-heals without an operator, but it writes /etc unconditionally and so
+# *guarantees* the divergence described above on every host forever — trading
+# the merge away to fix a problem that only occurs once the merge is already
+# lost. Detection keeps /etc tracking the image, which is what makes later
+# anchor rotations apply by themselves.
 
 # Break ostree hardlinks on rpmdb: fuse-overlayfs preserves hardlinks during
 # copy-up, so modifying rpmdb.sqlite also propagates to the ostree object and

@@ -81,7 +81,23 @@ def main():
         SECRET_PATTERN.search(str(v)) for v in env_vars.values()
     )
     if not has_secret_env_vars:
-        return 0  # Nothing to do
+        # Nothing to write — but a .secrets file from when this workload *did*
+        # declare secrets must not survive. Retiring a ${SECRET:…} reference and
+        # restarting is the normal way to un-secret a live workload, and nothing
+        # else on that path removes the decrypted value: the generator just stops
+        # emitting the EnvironmentFile= line, `recreate` never touches /run, and
+        # cmd_disable skips kind == "env-file" (removal is --purge only, which is
+        # teardown, not what you run to drop one secret). Without this the
+        # plaintext outlives the config change, the credential, and every restart,
+        # until the tmpfs is cleared by a reboot.
+        stale = ENV_DIR / out_basename
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError as e:
+            # Best-effort: never fail the ExecStartPre and block the workload
+            # from starting over a leftover file.
+            print(f"WARNING: could not remove stale {stale}: {e}", file=sys.stderr)
+        return 0
 
     # A purely-escaped value (`$${SECRET:name}`) is delivered as a literal and
     # reads no credential; only an *unescaped* ref actually needs the decrypted
