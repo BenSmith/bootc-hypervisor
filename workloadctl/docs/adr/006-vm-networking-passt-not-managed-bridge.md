@@ -1,8 +1,11 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Implemented** 2026-08-09 (step 1 of the implementation sequence: the netdev, the schema, and the SELinux label work). Supersedes ADR 002.
+**Status:** **Implemented** through step 2 of the implementation sequence. Supersedes ADR 002.
 
-The uid-keyed nftables egress policy this decision exists to enable is **not** in that step — VM workloads run unfiltered today, the same posture as under the bridge. `[vm.network].egress` and `.allow` are rejected by `validate` rather than accepted-and-ignored, so no config can claim a confinement that is not in force.
+- Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
+- Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
+
+The per-workload HTTP proxy that holds hostname policy (step 4) does not exist yet, which changes the meaning of the default — see *Decisions taken during implementation* below.
 
 **Date:** 2026-08-09.
 
@@ -105,6 +108,36 @@ and enters a user namespace. This holds independently of SELinux.
 back a forgeable identity at the cost of address allocation, per-VM L2 rules,
 and retaining every privileged component above. It is strictly more machinery
 for a strictly weaker property.
+
+## Decisions taken during implementation
+
+Neither of these is settled by the design above; both were decided while
+building step 2 and are recorded here because a later reader would otherwise
+be entitled to "fix" them.
+
+**`allow` takes addresses and ports only, never hostnames.** The entries
+become elements of an nftables set keyed on `ip daddr` / `ip6 daddr`. A
+hostname has no representation there, so accepting one would mean resolving it
+once at unit start and pinning the result for the life of the VM — silently
+wrong from the moment the record moves, and wrong in the permissive direction
+if the address is later reassigned. The design already assigns hostname policy
+to the per-workload proxy (§4.4); `allow` is for the non-HTTP exceptions a
+proxy cannot carry, and those are overwhelmingly single hosts (ssh, a
+database, an NTP peer) where an address is the honest way to say it.
+
+**Until the proxy exists, `egress = "filtered"` with an empty `allow` is a
+validation error.** The design pairs the `"filtered"` default with an implicit
+allow to the workload's own proxy, so an empty allowlist is workable in the
+finished system. The proxy is step 4. In between, the choices were to default
+to `"open"` and flip later, to accept `"filtered"` and let the VM boot
+unreachable, or to refuse the combination. Refusing it was chosen: the secure
+default lands now rather than being retrofitted, and nothing can boot in a
+state where the config claims a confinement the VM does not have — the failure
+mode this whole layer exists to prevent. The cost is that every VM config must
+state a posture explicitly, including ones that only ever wanted defaults;
+`egress = "open"` is what the shipped bundles and examples say, with the
+reason given inline. When the proxy lands, a bare `[vm.network]` becomes valid
+again and means `"filtered"`.
 
 ## Consequences
 

@@ -1071,6 +1071,23 @@ ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
 
 `[vm.network].outbound_if` binds passt's host-side sockets to one interface, so a VM can be made structurally unable to originate on a management VLAN — per-VM egress scoping with no firewall rules involved.
 
+#### Egress filtering
+
+Because passt re-originates guest traffic as host sockets owned by `_wl-<name>`, the workload uid is a complete and unforgeable selector for that VM's outbound traffic. Policy is one nftables table, `inet workload_filter`, applied from a skeleton at every VM start; units add and remove *set elements*, never rules.
+
+```toml
+[vm.network]
+egress = "filtered"
+allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]
+```
+
+Two things about this are easy to get wrong:
+
+- **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry.
+- **`egress` currently has to be stated.** It defaults to `"filtered"`, and the design pairs that default with an automatic allow to the workload's own proxy — which is not built yet. Until it is, `"filtered"` with an empty `allow` is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline.
+
+If the filter itself is the problem, `nft delete table inet workload_filter` removes it wholesale; the next VM start rebuilds it. An abandoned table is inert — the chain's policy is `accept` and the drop rule matches only uids present in the set.
+
 #### Custom bridge — the unfiltered escape hatch
 
 A VM that needs a **real LAN identity** (its own address, reachable by other hosts — e.g. one serving TLS on its own name) attaches directly to a host bridge instead. passt cannot provide this, because the guest takes the host's address.
