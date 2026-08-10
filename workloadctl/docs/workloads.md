@@ -1201,6 +1201,62 @@ sudo semodule -i /usr/share/workloadctl/workload-vm.cil
 sudo restorecon /usr/libexec/virtiofsd
 ```
 
+The same caveat applies to the proxy's domain, which ships alongside it:
+
+```bash
+sudo semodule -i /usr/share/workloadctl/workload-proxy.cil
+sudo restorecon /usr/bin/tinyproxy
+```
+
+### Hostname Egress Policy
+
+Kernel rules match addresses; policy is usually written about names.
+`[vm.network].hosts` closes that gap by giving the workload its own HTTP forward
+proxy, which reads `CONNECT host:443` in plaintext before any TLS handshake — so
+it allowlists the *name*, with no interception and no CA:
+
+```toml
+[vm.network]
+egress = "filtered"
+hosts  = ["example.com", "*.fedoraproject.org"]
+allow  = ["192.168.0.10:22"]      # non-HTTP exceptions only
+```
+
+Resolving names into addresses at rule-install time is the alternative, and it
+is worse in three ways: it races DNS, it breaks on CDN churn, and it opens
+everything sharing an address.
+
+How it fits together:
+
+- One **tinyproxy instance per workload**, running as `_wl-<name>`, listening on
+  the workload's own management address — which no guest can reach.
+- Every guest is told the same proxy address, **`192.0.2.1:3128`** on a
+  dedicated `workload-proxy` dummy link, and an nftables redirect keyed on the
+  workload uid decides which instance it lands on. Cross-workload proxy access
+  is therefore structurally unavailable rather than denied by rule.
+- The endpoint is an **IP literal**, so the proxy path has no DNS dependency —
+  which matters, because DNS is what a compromised guest would attack to escape
+  hostname policy.
+- CONNECT is permitted to **443 only**. Anything else belongs in `allow`.
+
+**The proxy is advisory on its own; the default-deny chain is what binds it.** A
+guest process free to ignore `HTTPS_PROXY` does — and is then dropped by the
+kernel, because `egress = "filtered"` permits nothing the allowlists do not name.
+Verified: a guest that bypasses the proxy entirely cannot reach an allowlisted
+host.
+
+**Only the built-in cloud-config sets the guest's proxy environment.** A
+workload supplying its own `[vm.cloud_init].user_data_file` owns its guest
+configuration; set `http_proxy`/`https_proxy` to `http://192.0.2.1:3128`
+yourself, or the guest will simply be dropped by the filter.
+
+Patterns match the hostname only, so a scheme, a path or a port in a `hosts`
+entry is a validation error rather than a pattern that silently matches nothing.
+
+`workloadctl diagnose <name>` reports whether the redirect is actually armed —
+the proxy can be listening while the guest has no path to it, and every other
+signal looks correct when that happens.
+
 ### Update and Rollback
 
 **Update** rebuilds `system.qcow2` from the configured image source:

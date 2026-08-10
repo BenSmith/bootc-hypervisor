@@ -262,13 +262,12 @@ name = "schema-reference"
 #   "open"     — no filtering. The uid is never added to the set, and the
 #                drop rule (which is set-guarded) never sees this VM.
 #
-# The default is "filtered", but there is no useful implicit allowlist yet:
-# the design pairs "filtered" with an automatic allow to the workload's own
-# HTTP proxy, and that proxy is a later step. So until it lands, "filtered"
-# with an empty .allow is a VALIDATION ERROR rather than a VM that boots and
-# can reach nothing. In other words every VM must currently say which it
-# wants. That is deliberate — a config reading "filtered" while the VM is in
-# fact wide open is the exact misreport this layer exists to prevent.
+# The default is "filtered", and a filtered VM needs somewhere for its traffic
+# to go: either .hosts (HTTP/HTTPS, through its own proxy) or .allow
+# (everything else). "filtered" with neither is a VALIDATION ERROR rather than
+# a VM that boots and can reach nothing. That is deliberate — a config reading
+# "filtered" while the VM is in fact wide open is the exact misreport this
+# layer exists to prevent.
 # egress = "filtered"
 #
 # Optional: destinations this VM may reach when egress = "filtered".
@@ -281,6 +280,33 @@ name = "schema-reference"
 # the non-HTTP exceptions a proxy cannot carry (ssh, a database, an NTP peer).
 # Each family has its own set, so v4 and v6 entries never match each other.
 # allow = ["192.168.0.10:22", "[2001:db8::1]:443"]
+#
+# Optional: hostnames this VM may reach over HTTP and HTTPS.
+# Type: array of hostnames or fnmatch patterns
+# Default: []
+# Setting this gives the workload its own tinyproxy instance, listening on the
+# workload's own management address — which no guest can reach — and reached
+# through a redirect keyed on the workload uid, so cross-workload proxy access
+# is structurally unavailable rather than denied by rule. Every guest is told
+# the same proxy address (192.0.2.1:3128, on a dedicated `workload-proxy` dummy
+# link), and the redirect decides which instance it lands on.
+#
+# Why a proxy and not a resolved allowlist: an HTTP forward proxy reads
+# `CONNECT host:443` in plaintext before any TLS handshake, so it allowlists
+# the NAME with no interception and no CA. Resolving names to addresses at
+# rule-install time instead races DNS, breaks on CDN churn, and opens
+# everything sharing an address.
+#
+# Patterns match the hostname only, so no scheme, no path and no port — those
+# are rejected by `validate` rather than silently matching nothing. CONNECT is
+# permitted to 443 alone; use .allow for any other port.
+#
+# The proxy is advisory on its own: a guest process free to ignore HTTPS_PROXY
+# does. What makes it binding is the default-deny chain above, which leaves
+# such a process nowhere else to go. Only the built-in cloud-config sets the
+# proxy environment — a workload supplying its own [vm.cloud_init].user_data_file
+# owns its guest configuration and must set http_proxy/https_proxy itself.
+# hosts = ["example.com", "*.fedoraproject.org"]
 #
 # Break-glass, if the filter itself is the problem:
 #   nft delete table inet workload_filter
@@ -402,6 +428,7 @@ name = "schema-reference"
 # bridge = "br0"                    # a real LAN identity; unfiltered (see above)
 # egress = "filtered"               # or "open"; must be stated (see above)
 # allow  = ["192.168.0.10:22"]      # addresses and ports only, never hostnames
+# hosts  = ["*.example.com"]        # HTTP/HTTPS hostname policy, via a proxy
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

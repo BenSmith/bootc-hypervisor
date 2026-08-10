@@ -1,12 +1,13 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Implemented** through step 3 of the implementation sequence. Supersedes ADR 002.
+**Status:** **Implemented** through step 4 of the implementation sequence. Supersedes ADR 002.
 
 - Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
 - Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
 - Step 3 (2026-08-10): QEMU confined as `svirt_t`, and the virtiofsd domain.
+- Step 4 (2026-08-10): the per-workload proxy, the `hosts` schema key, and its domain.
 
-The per-workload HTTP proxy that holds hostname policy (step 4) does not exist yet, which changes the meaning of the default — see *Decisions taken during implementation* below.
+Capture (`workloadctl pcap`, step 5) is the remaining step.
 
 **Date:** 2026-08-09.
 
@@ -263,6 +264,97 @@ type on the host, so the fix is an fcontext rule on the operator's path.
 32 MiB write/read/delete at 154 MB/s, mkdir/rmdir, DNS, `workloadctl exec`, and
 a clean stop — zero denials, no leaked passt. `diagnose` reports 12/12, and
 fails as intended when the module is removed.
+
+### Step 4: the proxy
+
+**The open question is closed, and the answer keeps tinyproxy.** The design
+tracked "how large is the SELinux delta for a confined tinyproxy?" as its last
+open question, because the answer could reopen the choice — squid's one
+advantage is that `squid_t` and `squid_exec_t` already exist. Measured: **14
+allow rules, no capabilities at all**, smaller than the virtiofsd domain next
+door. The choice stands, and now on a measurement rather than an estimate.
+
+**Harvesting that module is not like harvesting `wlvfsd_t`.** A permissive run
+is close to useless for tinyproxy: it exits 70 the moment it cannot read its own
+config, so the harvest records the first gate and nothing behind it. The
+permissive pass produced 10 rules, of which the module needed 14 — and the
+missing 4 were each revealed by a separate *enforcing* iteration, one gate at a
+time. Step 3's guidance (harvest permissive, confirm enforcing) inverts here:
+for a fail-fast daemon, enforcing iteration *is* the harvest.
+
+**The advertised address is a constant, not a schema key** — a deliberate
+deviation from §4.4, which says "settable in the schema". The address belongs to
+a host-global dummy interface, so a per-workload key would let two workloads
+disagree about a shared object: the last-write-wins hazard ADR 002 exists to
+describe and this design deleted along with the bridge. A site that genuinely
+uses TEST-NET-1 internally uses `allow` and skips hostname policy.
+
+**The proxy's slice is pinned, not inherited from `[resources]`.** The egress
+exemption below is an nftables `socket cgroupv2 level 2` match, so the cgroup
+path must be exactly two components; a nested custom slice would deepen it and
+the match would silently stop firing. The proxy is not the payload — resource
+control belongs on the VM.
+
+**One module per component, both host-global.** `workload-proxy.cil` is separate
+from `workload-vm.cil` rather than merged: they exist for unrelated reasons (one
+because we run QEMU outside libvirt, one because Fedora has no tinyproxy policy
+at all) and they are removable independently.
+
+### Corrections from the live run (step 4)
+
+Four more the design did not have right, all found by running it.
+
+**The proxy shares the guest's uid, so default-deny drops the proxy too.** This
+is the largest of them, and it follows directly from a property §4.4 presents as
+a *feature*: "each instance runs as `_wl-<name>` … so one `meta skuid` rule
+governs both the direct and the via-proxy path". It does — including the drop.
+On a live VM the guest's CONNECT reached the proxy, the proxy resolved the host,
+and its outbound SYN was dropped by the workload's own filter. Hostname policy
+permitted nothing at all while every component looked healthy.
+
+The fix has to separate proxy from guest *within one uid*, and the control group
+is the only discriminator that does: systemd assigns it, a guest can neither
+enter nor forge it, and it widens no destination or port. The obvious
+alternative — "let this uid reach 443 anywhere" — is fatal, because it is
+exactly the bypass the default-deny chain exists to close. `wl_proxy_cg` is a
+set of cgroup paths in the filter skeleton, managed as elements like everything
+else, and re-added on every proxy start because an element resolves to a cgroup
+id and systemd makes a fresh cgroup each time.
+
+**tinyproxy's client ACL must name the advertised address.** The guest's packet
+is routed to `192.0.2.1` *before* it is translated, so the host picks that same
+address as the source and the proxy sees a client connecting from it. Without
+`Allow 192.0.2.1` every request answers 403 while the listener, the redirect,
+the interface and the guest all look correct; the only trace is tinyproxy's
+"Unauthorized connection from" at INFO level.
+
+**`nft -j list map` renders elements as `[key, value]`, not `{"elem": {...}}`.**
+The set shape and the map shape differ, and the map document is keyed `"map"`
+rather than `"set"`. Reading a map with set-shaped code returns no elements at
+all, which reads as "not armed" — so `diagnose` reported a demonstrably working
+redirect as broken, on the same host, in the same minute.
+
+**Two smaller ones.** iproute2 answers a duplicate address with "Address already
+assigned", not the "File exists" a duplicate *link* produces, so the idempotency
+check failed only on the second start of a workload. And `redirect` is a
+reserved word in nft, so a nat chain cannot be called that — the parse error
+points at the chain name without saying why.
+
+Two things the design worried about turned out to be free. `route_localnet` is
+**not** required: DNAT from the output hook to a 127/8 destination works with it
+at its default 0, verified on a live host and not only in a namespace. And the
+proxy endpoint needs **no** entry in `wl_allow4`: the nat hook (dstnat, -100)
+runs before the filter chain (0), so the filter sees the translated destination
+— the workload's own loopback address — which the skeleton's `oif lo` rule
+already accepts.
+
+**Verified enforcing on Fedora 44:** with `egress = "filtered"` and an empty
+`allow`, a guest reached an allowlisted host over HTTPS (200) and over plain
+HTTP (200), reached a wildcard-matched host (200), was refused a non-allowlisted
+host by the proxy, and was **dropped by the kernel when it bypassed the proxy
+entirely** — which is the property that makes hostname policy binding rather
+than advisory. Clean across a full restart cycle, with zero SELinux denials and
+`diagnose` at 13/13.
 
 ## Consequences
 

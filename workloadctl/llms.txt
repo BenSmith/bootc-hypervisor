@@ -302,6 +302,30 @@ wholesale (`validate` warns). And the shipped policy **dontaudits** the rule
 passt needs under a QEMU-native netdev, so an ordinary AVC harvest will not show
 it — run `semodule -DB` before concluding a harvest is complete.
 
+### Hostname policy: the per-workload proxy (step 4)
+
+`[vm.network].hosts` gives one VM its own tinyproxy, confined by
+`security/workload-proxy.cil` (14 rules, host-global, RPM-loaded like the
+virtiofsd domain). Three non-obvious things hold it together:
+
+- **The proxy runs as the workload's own user, so `meta skuid` cannot tell it
+  from the guest** — and under default-deny that means the drop catches the
+  proxy too, leaving hostname policy permitting nothing. The discriminator is
+  the **control group** (`wl_proxy_cg` in the filter skeleton), which systemd
+  assigns and a guest can neither enter nor forge. Widening by port instead is
+  the bypass the default-deny chain exists to close. The proxy unit's `Slice=`
+  is pinned for this reason: the match is `level 2`, so the cgroup path must
+  stay two components deep.
+- **The guest reaches one advertised address** (`192.0.2.1:3128`) and a uid-keyed
+  nat map sends it to its own instance. The proxy's client ACL must `Allow` that
+  address, not just loopback — the source the host picks for a route to itself
+  *is* that address, and getting this wrong 403s every request while nothing
+  looks broken.
+- **A permissive AVC harvest is nearly useless here.** tinyproxy exits 70 on the
+  first denial, so the harvest stops at the first gate; the module was finished
+  by iterating under *enforcing*, one gate per round. The opposite of how
+  `wlvfsd_t` was derived.
+
 ## Key Commands
 
 | Command | Description |
