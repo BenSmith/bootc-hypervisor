@@ -13,12 +13,12 @@ from types import SimpleNamespace
 
 from provisioning import LOCAL_FCONTEXT_ROOTS, shadowed_filecon_paths
 from vm import (
-    VM_QEMU_CONTEXT, VM_QEMU_TYPE, VM_RUNCON_BIN, WLVFSD_CIL, WLVFSD_MODULE,
+    VM_QEMU_CONTEXT, VM_QEMU_TYPE, VM_RUNCON_BIN, VM_SELINUX_CIL, VM_SELINUX_MODULE,
     qemu_launch_argv,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-CIL = ROOT / "security" / "wlvfsd.cil"
+CIL = ROOT / "security" / "workload-vm.cil"
 SPEC = ROOT / "rpm" / "workloadctl.spec"
 
 QEMU = "/usr/libexec/qemu-kvm"
@@ -137,13 +137,56 @@ class TestCilModule(unittest.TestCase):
 
     def test_socket_dir_type_matches_what_the_rpm_registers(self):
         """/run/workload-vm is svirt_var_run_t, whose real name is qemu_var_run_t."""
-        self.assertIn("(allow wlvfsd_t qemu_var_run_t (sock_file (create setattr)))",
-                      self.rules)
+        self.assertRegex(
+            self.rules,
+            r"allow wlvfsd_t qemu_var_run_t \(sock_file \([^)]*create")
         spec = SPEC.read_text()
         self.assertIn("-t svirt_var_run_t '/run/workload-vm(/.*)?'", spec)
 
     def test_shared_dir_type_matches_the_per_workload_fcontext(self):
         self.assertRegex(self.rules, r"allow wlvfsd_t svirt_image_t \(dir ")
+
+    def test_serves_fuse_writes_not_just_directory_reads(self):
+        """The gap in the original harvest: it ran with no QEMU client, so it
+        never served a request and measured only the open-the-share rules."""
+        for perm in ("create", "write", "unlink"):
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \(file \([^)]*{perm}")
+        for perm in ("add_name", "remove_name", "rmdir"):
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \(dir \([^)]*{perm}")
+
+    def test_can_map_the_guest_memory(self):
+        """virtiofsd maps QEMU's memfd (svirt_tmpfs_t) to move FUSE payloads."""
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t svirt_tmpfs_t \(file \([^)]*map")
+
+    def test_can_traverse_the_container_file_t_parent(self):
+        """/var/lib/workloads keeps the blanket rule; only the subdir is
+        svirt_image_t, so reaching the share crosses a container_file_t dir."""
+        self.assertIn("(allow wlvfsd_t container_file_t (dir (search)))",
+                      self.rules)
+
+    def test_root_virtiofsd_keeps_dac_override(self):
+        """Not a bench artifact: the sidecar runs as root by design, and a root
+        daemon serving a share it does not own needs it. Without it virtiofsd
+        exits 1 with nothing in the journal and the VM fails on the dependency."""
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t self \(capability \([^)]*dac_override")
+
+    def test_grants_what_qemus_native_passt_netdev_needs(self):
+        """Both rules exist only because QEMU spawns passt, where libvirt does.
+
+        The socketpair one is invisible to an ordinary audit harvest: the
+        shipped policy dontaudits it, so the symptom is passt looping on
+        "Failed to add fd to epoll" with an empty audit log.
+        """
+        self.assertIn("(allow svirt_t passt_t (process (signal)))", self.rules)
+        self.assertIn(
+            "(allow passt_t svirt_t (unix_stream_socket (read write)))",
+            self.rules)
 
     def test_its_own_filecon_would_not_be_shadowed(self):
         """Dogfoods the validate rule: /usr/libexec is not in .local."""
@@ -164,11 +207,12 @@ class TestRpmShipsTheModule(unittest.TestCase):
         cls.spec = SPEC.read_text()
 
     def test_installs_the_cil_where_diagnose_tells_operators_to_find_it(self):
-        self.assertIn("security/wlvfsd.cil", self.spec)
+        self.assertIn("security/workload-vm.cil", self.spec)
         # The path diagnose prints in its remediation must be the one the RPM
         # installs, or the fix it offers does not work.
-        self.assertIn(f"{WLVFSD_CIL.rsplit('/', 1)[-1]}", self.spec)
-        self.assertEqual(WLVFSD_CIL, "/usr/share/workloadctl/wlvfsd.cil")
+        self.assertIn(VM_SELINUX_CIL.rsplit("/", 1)[-1], self.spec)
+        self.assertEqual(VM_SELINUX_CIL,
+                         "/usr/share/workloadctl/workload-vm.cil")
 
     def test_post_loads_it_and_relabels_the_binary(self):
         post = self.spec.split("%post", 1)[1].split("%preun", 1)[0]
@@ -177,11 +221,37 @@ class TestRpmShipsTheModule(unittest.TestCase):
 
     def test_postun_removes_it_only_on_full_uninstall(self):
         postun = self.spec.split("%postun", 1)[1]
-        self.assertIn(f"semodule -r {WLVFSD_MODULE}", postun)
+        self.assertIn(f"semodule -r {VM_SELINUX_MODULE}", postun)
         # Guarded by the same $1 -eq 0 block as the fcontext rules: an upgrade
         # must not unload the module out from under a running VM.
         block = postun.split("if [ $1 -eq 0 ]; then", 1)[1]
-        self.assertIn(f"semodule -r {WLVFSD_MODULE}", block)
+        self.assertIn(f"semodule -r {VM_SELINUX_MODULE}", block)
+
+
+class TestSocketDirIsRelabelled(unittest.TestCase):
+    """The fcontext rule alone is inert for a directory created at runtime."""
+
+    def test_setup_relabels_the_vm_socket_dir(self):
+        """The kernel labels a new file from its PARENT, not from file_contexts
+        — that file is only consulted by userspace tools. So the %post semanage
+        rule does nothing for a mkdir'd /run/workload-vm, which inherits
+        var_run_t from /run, and a confined QEMU then cannot create its QMP
+        socket. /run is a tmpfs, so this recurs every boot.
+        """
+        text = (ROOT / "libexec" / "workload-ensure-user").read_text()
+        body = text.split("def setup_vm_socket_dir", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("restorecon", body)
+
+    def test_relabel_happens_before_anything_is_written_into_the_dir(self):
+        """Files created inside inherit from the directory, so a later relabel
+        would leave the sockets and cloud-init.iso behind."""
+        text = (ROOT / "libexec" / "workload-ensure-user").read_text()
+        body = text.split("def setup_vm_socket_dir", 1)[1].split("\ndef ", 1)[0]
+        self.assertLess(body.index("restorecon"), body.index("os.chown"))
+
+    def test_rpm_registers_the_rule_the_relabel_resolves(self):
+        spec = SPEC.read_text()
+        self.assertIn("-t svirt_var_run_t '/run/workload-vm(/.*)?'", spec)
 
 
 class TestShadowedFilecon(unittest.TestCase):
@@ -257,7 +327,7 @@ class TestConfinementDiagnose(unittest.TestCase):
             module_loaded=False,
             qemu_context=f"system_u:system_r:{VM_QEMU_TYPE}:s0")
         self.assertFalse(passed)
-        self.assertIn(WLVFSD_MODULE, msg)
+        self.assertIn(VM_SELINUX_MODULE, msg)
         self.assertIn("semodule -i", msg)
 
     def test_missing_module_does_not_fail_a_vm_with_no_volumes(self):
@@ -298,6 +368,24 @@ class TestConfinementDiagnose(unittest.TestCase):
             qemu_context=f"system_u:system_r:{VM_QEMU_TYPE}:s0")
         self.assertTrue(passed)
         self.assertIn("unknown", msg)
+
+
+class TestQemuProcessLookup(unittest.TestCase):
+    """_vm_qemu_context must not match the wrapper that launched QEMU."""
+
+    def test_requires_the_process_to_be_qemu_not_just_to_name_the_socket(self):
+        """workload-vm-notify is invoked WITH the QEMU command line as its
+        arguments, so its own cmdline contains the QMP socket path. Matching on
+        the path alone finds the wrapper — a Python script, so
+        unconfined_service_t — and reports every confined VM as unconfined.
+        Observed live, with `ps -eo label` showing svirt_t at the same moment.
+        """
+        from cmd_diagnose import _vm_qemu_context
+        import inspect
+        # Body only: the docstring names /cmdline first while explaining this.
+        body = inspect.getsource(_vm_qemu_context).split('"""')[-1]
+        self.assertIn("/comm", body)
+        self.assertLess(body.index("/comm"), body.index("/cmdline"))
 
 
 class TestNotifyWrapperUsesTheTransition(unittest.TestCase):

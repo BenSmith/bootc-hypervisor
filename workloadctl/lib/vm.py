@@ -311,12 +311,14 @@ NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 VM_QEMU_TYPE = "svirt_t"
 VM_QEMU_CONTEXT = f"system_u:system_r:{VM_QEMU_TYPE}:s0"
 
-# The virtiofsd domain. Host-global and installed by the RPM, not shipped
-# through the per-workload [security].selinux_policy bundle: nothing in it is
-# per-workload, and N identical copies would race semodule while gated on a flag
-# that has nothing to do with whether virtiofs works. See security/wlvfsd.cil.
-WLVFSD_MODULE = "wlvfsd"
-WLVFSD_CIL = "/usr/share/workloadctl/wlvfsd.cil"
+# The host-global policy delta VM confinement needs: a domain for the virtiofsd
+# sidecar, and one grant to svirt_t that only a QEMU-native passt netdev needs.
+# Installed by the RPM rather than shipped through the per-workload
+# [security].selinux_policy bundle: nothing in it is per-workload, and N
+# identical copies would race semodule while gated on a flag that has nothing to
+# do with whether virtiofs works. See security/workload-vm.cil.
+VM_SELINUX_MODULE = "workload-vm"
+VM_SELINUX_CIL = "/usr/share/workloadctl/workload-vm.cil"
 
 # The transition needs a wrapper, and only a wrapper. `SELinuxContext=` in the
 # unit does NOT work: systemd execs from init_t and the policy has no

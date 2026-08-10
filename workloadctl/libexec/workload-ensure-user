@@ -639,9 +639,31 @@ def setup_nvram(pw, config: dict):
 
 
 def setup_vm_socket_dir(pw, name: str):
-    """Create the runtime socket directory /run/workload-vm/{name}/."""
+    """Create the runtime socket directory /run/workload-vm/{name}/, labelled.
+
+    The relabel is REQUIRED, and registering the fcontext rule is not enough on
+    its own. The kernel labels a newly created file from its parent directory,
+    not from `file_contexts` — that file is consulted only by userspace tools
+    like restorecon. So the rule the RPM's %post registers
+    (`/run/workload-vm(/.*)? -> svirt_var_run_t`) does nothing for a directory
+    mkdir'd here: it inherits `var_run_t` from /run, and a confined QEMU then
+    cannot create its QMP socket, cannot read the cloud-init ISO, and fails to
+    start rather than degrading. /run is a tmpfs, so this recurs every boot.
+
+    It happens HERE, before anything is written into the directory, because
+    everything created inside afterwards (the sockets, cloud-init.iso) inherits
+    from the directory — relabelling later would leave those behind.
+
+    Plain restorecon, no -F: var_run_t is not a customizable type, unlike the
+    container_file_t/svirt_image_t pair under /var/lib/workloads.
+    """
     sock_dir = VM_SOCKET_DIR / name
     sock_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.which("restorecon"):
+        # Recursive and rooted at the parent: the parent is what the rule names,
+        # and a wrong label there is inherited by every workload's subdirectory.
+        subprocess.run(["restorecon", "-R", str(VM_SOCKET_DIR)],
+                       check=False, capture_output=True)
     os.chown(sock_dir, pw.pw_uid, pw.pw_gid)
     os.chmod(sock_dir, 0o750)
     log(f"  Socket directory: {sock_dir}")

@@ -1,6 +1,24 @@
-; wlvfsd: an SELinux domain for the virtiofsd sidecar of a VM workload.
+; workload-vm: the host-global SELinux delta VM workloads need once QEMU is
+; confined as svirt_t (ADR 006 step 3).
 ;
-; WHY THIS EXISTS
+; Two facts live here, and they have the same root: workloadctl runs QEMU as
+; svirt_t *outside libvirt*, so two things libvirt does for QEMU we do
+; differently, and the shipped policy is written around libvirt's way.
+;
+;   1. A domain for the virtiofsd sidecar (the bulk of this file), because
+;      libvirt's virtiofsd inherits a domain we have no parent to inherit from.
+;   2. `allow svirt_t passt_t:process signal`, because libvirt spawns passt
+;      itself while QEMU's native -netdev passt makes QEMU passt's parent.
+;
+; A NOTE ON VOLUMES. wlvfsd_t is granted the types workloadctl itself labels:
+; svirt_image_t for a workload's own tree, qemu_var_run_t for the socket dir. A
+; volume pointing at an operator path elsewhere carries whatever label that path
+; already has (/srv is var_t, for instance) and the sidecar will be denied it.
+; That is not something this module can pre-empt without granting the union of
+; every type on the host; `workloadctl diagnose` reporting the denial is the
+; right answer, and the fix is an fcontext rule on the operator's path.
+;
+; WHY THE VIRTIOFSD DOMAIN EXISTS
 ;
 ; Once a VM workload's QEMU is confined as svirt_t (ADR 006 step 3), virtiofs
 ; volumes break, because SELinux checks `connectto` against the *peer process's
@@ -68,6 +86,10 @@
 (roletype system_r wlvfsd_t)
 
 (type wlvfsd_exec_t)
+; Required before the filecon below can name it: a type used in a file context
+; must be associated with object_r, or semodule rejects the module with
+; "Type wlvfsd_exec_t is invalid for role object_r".
+(roletype object_r wlvfsd_exec_t)
 (typeattributeset file_type (wlvfsd_exec_t))
 (typeattributeset exec_type (wlvfsd_exec_t))
 (typeattributeset entry_type (wlvfsd_exec_t))
@@ -109,21 +131,55 @@
 ; is the whole reason the unit runs as root (see generate_virtiofsd_service).
 ; sys_chroot is --sandbox=chroot. There is deliberately no cap_userns or
 ; mounton here; if those appear, the sandbox mode changed.
-(allow wlvfsd_t self (capability (chown dac_read_search setpcap sys_chroot sys_resource)))
+;
+; dac_override is NOT a bench artifact, though ADR 006 §9.7 discounts it as one.
+; That note is about QEMU, which production runs as _wl-<name>. virtiofsd runs
+; as ROOT deliberately (generate_virtiofsd_service: an unprivileged virtiofsd
+; squashes every guest-created file to its own uid), and a root daemon serving a
+; share it does not own needs dac_override. Measured: without it the sidecar
+; exits 1 with nothing in the journal, and the VM fails on the dependency.
+;
+; It is also the rule the original permissive harvest missed, because that run
+; had no QEMU client attached and stopped before reaching it — the reason §9.7
+; said an enforcing pass was still required.
+(allow wlvfsd_t self (capability (chown dac_override dac_read_search setpcap sys_chroot sys_resource)))
 (allow wlvfsd_t self (process (setcap setrlimit)))
 
 ; The shared dir lives under /var/lib/workloads/<name>/, which a VM workload's
-; per-workload fcontext rule labels svirt_image_t at enable.
-(allow wlvfsd_t svirt_image_t (dir (getattr open read search)))
+; per-workload fcontext rule labels svirt_image_t at enable. Serving FUSE means
+; the full create/read/write/unlink surface, not just reading the directory —
+; ADR 006 §9.7 flagged this as the gap in the original harvest, which ran with
+; no QEMU client attached and so never served a single request.
+(allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rmdir search write)))
+(allow wlvfsd_t svirt_image_t (file (create getattr open read unlink write)))
+
+; /var/lib/workloads itself keeps the blanket container_file_t rule; only the
+; per-workload subdirectory is svirt_image_t. So reaching the share means
+; traversing a container_file_t directory. Search only — this is a path
+; component, not something the sidecar reads.
+(allow wlvfsd_t container_file_t (dir (search)))
+
+; The guest's memory. QEMU backs it with a memfd labelled svirt_tmpfs_t and
+; virtiofsd maps it to move FUSE payloads without copying. This is the other
+; half of what only appears once a guest does real I/O.
+(allow wlvfsd_t svirt_tmpfs_t (file (map read write)))
+
+; The vhost-user control socket QEMU hands over. Same shape as the passt rule
+; below: a socket created by QEMU, so labelled svirt_t, that the helper must
+; use. Also dontaudit'd upstream, so it does not appear in an ordinary harvest.
+(allow wlvfsd_t svirt_t (unix_stream_socket (read write)))
 
 ; /run/workload-vm(/.*)? is svirt_var_run_t — an alias of qemu_var_run_t, which
 ; CIL resolves to. Registered by the RPM's %post, not per workload.
-(allow wlvfsd_t qemu_var_run_t (dir (add_name getattr search write)))
-(allow wlvfsd_t qemu_var_run_t (file (getattr lock open write)))
-(allow wlvfsd_t qemu_var_run_t (sock_file (create setattr)))
+; remove_name/unlink are the exit path: virtiofsd removes its own socket and
+; pidfile on shutdown. Absent from the original harvest, which never got as far
+; as a clean stop.
+(allow wlvfsd_t qemu_var_run_t (dir (add_name getattr remove_name search write)))
+(allow wlvfsd_t qemu_var_run_t (file (create getattr lock open write)))
+(allow wlvfsd_t qemu_var_run_t (sock_file (create setattr unlink)))
 
 ; sd_notify, and the NSS lookups --socket-group=<user> needs.
-(allow wlvfsd_t init_t (unix_stream_socket (connectto ioctl)))
+(allow wlvfsd_t init_t (unix_stream_socket (connectto ioctl read write)))
 (allow wlvfsd_t systemd_userdbd_t (unix_stream_socket (connectto)))
 (allow wlvfsd_t systemd_homed_t (unix_stream_socket (connectto)))
 (allow wlvfsd_t systemd_userdbd_runtime_t (dir (getattr open read search)))
@@ -137,8 +193,36 @@
 (allow wlvfsd_t nsfs_t (file (getattr)))
 
 ; ---------------------------------------------------------------------------
-; The one line this module exists for
+; What svirt_t needs that the shipped policy does not give it
 ; ---------------------------------------------------------------------------
-; Replaces the blanket `svirt_t -> unconfined_service_t` connectto with a grant
-; scoped to exactly the daemon QEMU is supposed to be talking to.
+; The line the virtiofsd domain exists for: replaces the blanket
+; `svirt_t -> unconfined_service_t` connectto with a grant scoped to exactly
+; the daemon QEMU is supposed to be talking to.
 (allow svirt_t wlvfsd_t (unix_stream_socket (connectto)))
+
+; passt transitions to passt_t for free once QEMU is svirt_t (the shipped policy
+; carries `type_transition svirt_t passt_exec_t:process passt_t`), but the
+; shipped policy does not let svirt_t *signal* passt_t — because under libvirt
+; it never needs to. libvirt spawns passt itself, as its own child. We use
+; QEMU's native `-netdev passt`, so QEMU is passt's parent and signals it on
+; shutdown. Without this, every VM stop leaks a passt process.
+;
+; This is the cost of choosing the native netdev over an externally-managed
+; passt. Measured on a live VM: denied on every stop, and nowhere else.
+(allow svirt_t passt_t (process (signal)))
+
+; The other half of the same fact, and the one that actually stops the VM
+; working. QEMU's native netdev creates a socketpair and forks passt with one
+; end already open; libvirt instead starts passt separately and connects to it
+; by path. So under our topology passt has to read and write a unix_stream_socket
+; labelled svirt_t, which the shipped policy does not allow — it grants passt_t
+; only `svirt_t:fd use` and the fifo_file pair.
+;
+; This one is worth dwelling on, because it is INVISIBLE BY DEFAULT: the shipped
+; policy dontaudits it, so the denial produces no AVC at all. What is observed
+; instead is passt failing with "Failed to add fd to epoll: Operation not
+; permitted" and QEMU respawning it in a tight loop — 1563 suppressed denials in
+; 30 seconds, an unreachable guest, and an audit log with nothing in it. It only
+; became visible under `semodule -DB`. Anyone re-deriving this module's contents
+; from a fresh audit harvest will miss it the same way; disable dontaudit first.
+(allow passt_t svirt_t (unix_stream_socket (read write)))

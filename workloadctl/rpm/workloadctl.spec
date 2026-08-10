@@ -139,8 +139,8 @@ install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
 # that spawns the sidecar rather than through the per-workload
 # [security].selinux_policy bundle — see the header of the file itself. Loaded
 # by %%post, not by any unit.
-install -Dpm 0644 %{_sourcedir}/security/wlvfsd.cil \
-    %{buildroot}%{_datadir}/workloadctl/wlvfsd.cil
+install -Dpm 0644 %{_sourcedir}/security/workload-vm.cil \
+    %{buildroot}%{_datadir}/workloadctl/workload-vm.cil
 
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
@@ -237,8 +237,8 @@ fi
 # store carries local modules (which is any host that has ever run
 # `workloadctl enable` on a selinux_policy workload). `workloadctl diagnose`
 # reports whether the module is loaded, with the command to load it by hand.
-if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/wlvfsd.cil ]; then
-    if semodule -i %{_datadir}/workloadctl/wlvfsd.cil 2>/dev/null; then
+if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-vm.cil ]; then
+    if semodule -i %{_datadir}/workloadctl/workload-vm.cil 2>/dev/null; then
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
     fi
 fi
@@ -294,7 +294,7 @@ if [ $1 -eq 0 ]; then
     # restore the binary to bin_t rather than leaving it labelled for a type
     # that no longer exists.
     if [ -x /usr/sbin/semodule ]; then
-        semodule -r wlvfsd 2>/dev/null || :
+        semodule -r workload-vm 2>/dev/null || :
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
     fi
 fi

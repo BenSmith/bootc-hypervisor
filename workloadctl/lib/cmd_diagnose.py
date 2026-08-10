@@ -43,7 +43,7 @@ from validation import uses_host_userns
 from vm import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
-    VM_SOCKET_DIR, WLVFSD_CIL, WLVFSD_MODULE, nft_drop_counter,
+    VM_SOCKET_DIR, VM_SELINUX_CIL, VM_SELINUX_MODULE, nft_drop_counter,
     nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
     vm_owned_elements,
 )
@@ -550,12 +550,22 @@ def _vm_qemu_context(name: str) -> str | None:
     down from the unit's MainPID, because MainPID is workload-vm-notify: runcon
     execs QEMU in its own process, so QEMU is the wrapper's child, not the
     service's main process.
+
+    The comm test is not belt-and-braces, it is the whole correctness of this
+    function. workload-vm-notify is invoked WITH the full QEMU command line as
+    its arguments, so the wrapper's own cmdline contains the socket path too —
+    matching on the path alone finds the wrapper (unconfined_service_t, since
+    it is a Python script) and reports every confined VM as unconfined. Observed
+    on a live host where `ps -eo label` showed svirt_t at the same moment.
     """
     needle = f"{VM_SOCKET_DIR}/{name}/qmp.sock".encode()
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
         try:
+            with open(f"/proc/{entry.name}/comm") as fh:
+                if not fh.read().startswith("qemu"):
+                    continue
             with open(f"/proc/{entry.name}/cmdline", "rb") as fh:
                 if needle not in fh.read():
                     continue
@@ -602,7 +612,7 @@ def vm_confinement_check(config, *, enabled=PROBE, module_loaded=PROBE,
                 "(nftables egress policy is unaffected — it keys on the uid)")
 
     if module_loaded is PROBE:
-        module_loaded = _selinux_module_loaded(WLVFSD_MODULE)
+        module_loaded = _selinux_module_loaded(VM_SELINUX_MODULE)
     if qemu_context is PROBE:
         qemu_context = _vm_qemu_context(config.name)
 
@@ -620,18 +630,18 @@ def vm_confinement_check(config, *, enabled=PROBE, module_loaded=PROBE,
 
     if has_volumes and module_loaded is False:
         return ("vm_confinement", False,
-                f"the {WLVFSD_MODULE} SELinux module is not loaded, so a "
+                f"the {VM_SELINUX_MODULE} SELinux module is not loaded, so a "
                 f"confined QEMU cannot connect to this VM's virtiofsd sockets "
                 f"and its volumes will not mount. Load it: "
-                f"semodule -i {WLVFSD_CIL}")
+                f"semodule -i {VM_SELINUX_CIL}")
 
     if qemu_context is None:
         state = {True: "loaded", False: "NOT loaded", None: "unknown"}[module_loaded]
         return ("vm_confinement", True,
-                f"VM is not running; {WLVFSD_MODULE} module {state}")
+                f"VM is not running; {VM_SELINUX_MODULE} module {state}")
 
     tail = "" if not has_volumes else \
-        f", {WLVFSD_MODULE} module " + \
+        f", {VM_SELINUX_MODULE} module " + \
         {True: "loaded", False: "NOT loaded", None: "state unknown"}[module_loaded]
     return ("vm_confinement", True, f"QEMU confined as {VM_QEMU_TYPE}{tail}")
 
