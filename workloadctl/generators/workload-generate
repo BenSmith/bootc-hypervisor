@@ -1959,6 +1959,29 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         # cannot resolve is bad, a VM that will not boot is worse.
         svc.add("ExecStartPre",
                 f"+/usr/libexec/workloadctl/workload-vm-netdev {dq(name)}")
+
+        # Egress policy (ADR 006 §4). The skeleton is applied on every VM start
+        # rather than by a shared unit: retiring the bridge removed the only
+        # unit that owned a shared table, and nothing replaces it. The file is
+        # idempotent by construction, and each `nft -f` is one transaction, so
+        # concurrent VM starts cannot interleave.
+        #
+        # NOT `-` prefixed. If the table cannot be built, a VM configured as
+        # filtered would otherwise run wide open while its config claims
+        # confinement — the failure this layer exists to prevent. Fail the
+        # start instead.
+        # The helper applies the skeleton, clears any elements left over from a
+        # previous config, and installs the current ones. It is a script rather
+        # than a few Exec lines because an edited allowlist cannot be reconciled
+        # without enumerating the sets — see its module docstring.
+        svc.add("ExecStartPre",
+                f"+/usr/libexec/workloadctl/workload-vm-filter up {dq(name)}")
+        # ExecStopPost, not ExecStop: systemd runs it on kill and on failure
+        # too, so a crashed VM does not leave its uid armed. Tolerant (`-`)
+        # because the elements are legitimately absent when the start failed
+        # before arming, or after the break-glass `nft delete table`.
+        svc.add("ExecStopPost",
+                f"-+/usr/libexec/workloadctl/workload-vm-filter down {dq(name)}")
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")

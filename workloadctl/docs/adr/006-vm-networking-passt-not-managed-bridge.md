@@ -139,6 +139,28 @@ state a posture explicitly, including ones that only ever wanted defaults;
 reason given inline. When the proxy lands, a bare `[vm.network]` becomes valid
 again and means `"filtered"`.
 
+**Loopback is exempt from the filter, and has to be.** The design treats
+management inbound (§3.3) and egress policy (§4) as independent, and they are
+not. passt binds the management address `127.128.x.y:2222` *as the workload
+user*, so the replies carrying an `exec`/`shell` session are output traffic
+owned by the workload uid and land in the same chain as the guest's own
+traffic. It forwards DNS to `dns-host` the same way, which on a
+systemd-resolved host is `127.0.0.53`. A filtered VM without a loopback
+exemption is therefore unreachable *and* unable to resolve — observed on a
+live VM, where the TCP connection to the management port was accepted and then
+silently died while the drop counter climbed.
+
+This also corrects §5.2 of the design, which states that under a stub resolver
+guest DNS is "invisible to `meta skuid`". It is not: passt makes that query, so
+it carries the workload uid and is filtered like anything else.
+
+The skeleton therefore accepts `oif lo` for filtered uids, before the drop.
+This does not widen what a guest can reach. `--map-host-loopback none` means no
+guest-chosen destination translates to host loopback, so the only loopback
+traffic passt originates is replies on sockets it already bound and the DNS
+forward; a guest packet aimed at `127.0.0.1` never leaves the guest's own
+stack.
+
 ## Consequences
 
 **Removed:**

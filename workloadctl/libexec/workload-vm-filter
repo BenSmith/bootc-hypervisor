@@ -1,0 +1,164 @@
+#!/usr/bin/python3
+"""
+workload-vm-filter: arm or disarm one VM's uid-keyed egress policy.
+
+Usage: workload-vm-filter <up|down> <name>
+
+`up` runs as ExecStartPre, `down` as ExecStopPost (which systemd also runs on
+kill and on failure, unlike ExecStop). Both operate on set *elements* in the
+shared `inet workload_filter` table; neither ever touches a rule.
+
+WHY THIS IS A SCRIPT AND NOT THREE ExecStartPre= LINES
+
+The obvious shape is to let the generator emit the nft commands directly, and
+that very nearly works: `add element` is idempotent, several elements go in one
+command, and one `nft` invocation is one atomic transaction.
+
+It breaks on allowlist *edits*. `ExecStopPost` deletes the entries named in the
+unit file as it exists at stop time, so when an operator removes an entry from
+`allow` and re-enables, the regenerated unit deletes only the entries that are
+still configured, and the dropped one stays in the set — permitting traffic the
+config no longer permits, silently, until the host reboots. Verified on
+nftables 1.1.6: arming {A, B} and then deleting {B} leaves A behind.
+
+nft has no "delete every element whose first field is this uid", so closing
+that means enumerating the sets and deleting by exact value, which is more than
+an Exec line can express. `up` therefore purges this uid from every set before
+adding the configured entries, making the armed state a function of the config
+alone rather than of the config plus every config it ever had.
+
+EXIT CODES
+
+`up` fails loudly. A VM whose config says `egress = "filtered"` and whose
+filter did not arm would run wide open while claiming confinement, which is the
+exact misreport this layer exists to prevent — better to fail the start. `down`
+is tolerant: its element is legitimately absent whenever the start failed
+before arming, or an operator used the break-glass `nft delete table`.
+"""
+import json
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+from vm import (
+    NFT_BIN, NFT_SETS, NFT_SKELETON, NFT_TABLE, VM_EGRESS_DEFAULT,
+    vm_filter_commands, vm_filter_delete_command, vm_owned_elements,
+)
+from workload_lib import workload_config_path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
+    tomllib = None
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def run(argv, check):
+    """Run one nft invocation. Returns the CompletedProcess."""
+    return subprocess.run(argv, capture_output=True, text=True, check=check,
+                          timeout=30)
+
+
+def workload_uid(name: str) -> int:
+    import pwd
+    return pwd.getpwnam(f"_wl-{name}").pw_uid
+
+
+def network_config(name: str) -> dict:
+    with open(workload_config_path(name), "rb") as f:
+        config = tomllib.load(f)
+    return config.get("vm", {}).get("network", {}) or {}
+
+
+def purge(uid: int) -> int:
+    """Remove every element owned by `uid` from every set. Returns the count.
+
+    Tolerant throughout: a missing table or set means there is nothing of ours
+    to remove, which is the desired end state either way.
+    """
+    removed = 0
+    for set_name in NFT_SETS:
+        listed = run([NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(),
+                      set_name], check=False)
+        if listed.returncode != 0:
+            continue
+        try:
+            payload = json.loads(listed.stdout)
+        except ValueError:
+            continue
+        elems = []
+        for item in payload.get("nftables", []):
+            if "set" in item:
+                elems = item["set"].get("elem", [])
+                break
+        owned = vm_owned_elements(uid, elems)
+        if not owned:
+            continue
+        result = run(vm_filter_delete_command(set_name, owned), check=False)
+        if result.returncode == 0:
+            removed += len(owned)
+        else:
+            log(f"  WARNING: could not clear {set_name}: "
+                f"{result.stderr.strip()}")
+    return removed
+
+
+def up(name: str) -> int:
+    uid = workload_uid(name)
+    net = network_config(name)
+    if net.get("bridge"):
+        # No host socket carries the uid; there is nothing to filter.
+        return 0
+
+    # Not tolerant: everything below depends on the table existing.
+    run([NFT_BIN, "-f", NFT_SKELETON], check=True)
+
+    stale = purge(uid)
+    if stale:
+        log(f"  Cleared {stale} stale element(s) for uid {uid}")
+
+    egress = net.get("egress", VM_EGRESS_DEFAULT)
+    if egress != "filtered":
+        log(f"  egress = {egress!r}: {name} is not filtered")
+        return 0
+
+    allow = net.get("allow", [])
+    for argv in vm_filter_commands(uid, allow, "add"):
+        run(argv, check=True)
+    log(f"  Filtered uid {uid} with {len(allow)} allow entr"
+        f"{'y' if len(allow) == 1 else 'ies'}")
+    return 0
+
+
+def down(name: str) -> int:
+    try:
+        uid = workload_uid(name)
+    except KeyError:
+        # The user is already gone (purge ordering); nothing can be armed.
+        return 0
+    purge(uid)
+    return 0
+
+
+def main(argv):
+    if len(argv) != 3 or argv[1] not in ("up", "down"):
+        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
+        return 2
+    action, name = argv[1], argv[2]
+    if action == "up":
+        return up(name)
+    return down(name)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # noqa: BLE001
+        # `up` must fail loudly (see module docstring); `down` must not block a
+        # stop, and systemd already tolerates its failure via the `-` prefix.
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)

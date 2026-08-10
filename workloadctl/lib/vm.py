@@ -251,6 +251,93 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
 VM_EGRESS_MODES = ("filtered", "open")
 VM_EGRESS_DEFAULT = "filtered"
 
+# The uid-keyed egress layer (ADR 006 §4). One table shared by every VM;
+# units manage set *elements* only, never rules.
+NFT_BIN = "/usr/sbin/nft"
+NFT_TABLE = "inet workload_filter"
+NFT_SET_FILTERED = "wl_filtered"
+NFT_SET_ALLOW4 = "wl_allow4"
+NFT_SET_ALLOW6 = "wl_allow6"
+NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
+
+
+def vm_filter_elements(uid: int, allow: list[str]) -> dict[str, list[str]]:
+    """Map set name -> element expressions for one workload.
+
+    Returns only non-empty sets, so a caller can emit one `nft add element`
+    per set and skip the rest. `wl_filtered` carries the bare uid — membership
+    is the family-agnostic question "is this workload under policy at all?",
+    and both the ct-mark and the drop are guarded on it.
+
+    The allowlist splits by address family because in the inet family
+    `ip daddr` matches v4 only and `ip6 daddr` v6 only; an entry in the wrong
+    set would simply never match, which is a silent failure rather than a
+    loud one.
+    """
+    elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
+    v4: list[str] = []
+    v6: list[str] = []
+    for spec in allow:
+        addr, port = parse_vm_allow(spec)
+        (v6 if addr.version == 6 else v4).append(f"{uid} . {addr} . {port}")
+    if v4:
+        elements[NFT_SET_ALLOW4] = v4
+    if v6:
+        elements[NFT_SET_ALLOW6] = v6
+    return elements
+
+
+NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
+
+
+def vm_owned_elements(uid: int, elems) -> list[str]:
+    """Element expressions in one set's `nft -j` output that belong to `uid`.
+
+    Two shapes, because `wl_filtered` holds a bare uid while the allow sets
+    hold concatenations:
+
+        wl_filtered -> [10001, 10002]
+        wl_allow4   -> [{"concat": [10001, "192.168.0.10", 22]}]
+
+    Matching on the first component is what makes a purge possible at all:
+    nft has no "delete every element whose first field is N", so the caller
+    must enumerate, filter here, and delete by exact value.
+    """
+    owned: list[str] = []
+    for elem in elems or []:
+        if isinstance(elem, dict) and "concat" in elem:
+            parts = elem["concat"]
+            if parts and parts[0] == uid:
+                owned.append(" . ".join(str(p) for p in parts))
+        elif elem == uid:
+            owned.append(str(uid))
+    return owned
+
+
+def vm_filter_delete_command(set_name: str, entries: list[str]) -> list[str]:
+    """argv deleting `entries` from `set_name` in one transaction."""
+    return [NFT_BIN, "delete", "element", *NFT_TABLE.split(), set_name,
+            "{ " + ", ".join(entries) + " }"]
+
+
+def vm_filter_commands(uid: int, allow: list[str],
+                       action: str) -> list[list[str]]:
+    """argv lists that arm ("add") or disarm ("delete") one workload.
+
+    Elements for a set go in a single command: nft applies each invocation as
+    one atomic transaction, so a VM is never half-armed — the alternative,
+    one command per entry, could leave a workload in `wl_filtered` with only
+    part of its allowlist installed if a later command failed.
+    """
+    if action not in ("add", "delete"):
+        raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
+    table = NFT_TABLE.split()
+    commands = []
+    for set_name, entries in vm_filter_elements(uid, allow).items():
+        commands.append([NFT_BIN, action, "element", *table, set_name,
+                         "{ " + ", ".join(entries) + " }"])
+    return commands
+
 # `<addr>:<port>` or `[<v6addr>]:<port>`. Addresses only, never hostnames: the
 # allowlist becomes elements of an nftables set keyed on `ip daddr`/`ip6 daddr`,
 # so a name would have to be resolved at unit start and would then be silently

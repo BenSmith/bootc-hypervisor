@@ -787,12 +787,17 @@ class VMSubstrate(Substrate):
     def teardown(self, *, purge: bool) -> list[str]:
         """Remove what a VM workload owns beyond its generated files.
 
-        On purge, the runtime socket dir (QMP + serial sockets, stale once the
-        guest is stopped). That is now the whole list: retiring the managed
-        bridge (ADR 006) removed the only host-global resource a VM shared with
-        its siblings, and with it the refcount that decided when to stop it.
-        passt runs inside each VM's own unit, as that workload's user, so it
-        exits with the VM and leaves nothing behind.
+        On purge: the runtime socket dir (QMP + serial sockets, stale once the
+        guest is stopped), and this workload's elements in the shared nftables
+        sets. Retiring the managed bridge (ADR 006) removed the only host-global
+        resource a VM shared with its siblings, and with it the refcount that
+        decided when to stop it; passt runs inside each VM's own unit, as that
+        workload's user, so it exits with the VM and leaves nothing behind.
+
+        The nft sets are the one exception, and they are swept here rather than
+        left to the unit because purge also deletes the workload user: once the
+        uid is gone the elements can no longer be attributed to anything, and a
+        later workload issued the same uid would inherit them.
         """
         failures: list[str] = []
 
@@ -804,6 +809,14 @@ class VMSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"remove VM socket dir: {e}")
 
+            try:
+                subprocess.run(
+                    ["/usr/libexec/workloadctl/workload-vm-filter",
+                     "down", self.config.name],
+                    capture_output=True, timeout=30, check=False)
+            except Exception as e:
+                failures.append(f"clear egress filter elements: {e}")
+
         return failures
 
     def teardown_plan(self, *, purge: bool) -> list[str]:
@@ -813,4 +826,6 @@ class VMSubstrate(Substrate):
             sock_dir = VM_SOCKET_DIR / self.config.name
             if sock_dir.exists():
                 lines.append(f"remove VM socket dir: {sock_dir}")
+            lines.append(
+                "clear egress filter elements from inet workload_filter")
         return lines
