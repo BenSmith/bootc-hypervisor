@@ -267,5 +267,47 @@ class TestNetdevDnsDerivation(unittest.TestCase):
             self.assertEqual(self.mod.default_gateways(), {})
 
 
+class TestPasstRunsAsTheWorkloadUser(unittest.TestCase):
+    """The uid QEMU is started with IS the VM's network identity.
+
+    passt inherits the uid of whoever spawns it, and every uid-derived value in
+    ADR 006 -- the management address, the nflog group, and (from step 2) the
+    `meta skuid` egress rule -- is keyed on that inheritance holding.
+
+    It holds only because the VM unit carries `User=_wl-<name>`. Started as
+    root, passt does not fail: it logs `Started as root, will change to nobody`
+    once and drops to `nobody`, after which traffic keeps flowing normally
+    while every VM on the host shares one uid and per-workload policy silently
+    matches nothing. Measured on Fedora 44 / passt 0^20260728 / QEMU 10.2.2
+    (2026-08-10): as a normal user the helper runs as that user; under `sudo`
+    the same command line yields `nobody passt --quiet ...`.
+
+    Because the degraded mode is indistinguishable from the working one at the
+    traffic level, the `User=` directive is asserted here rather than left to
+    the snapshot test, which would accept its removal as a rendering change.
+    """
+
+    def test_vm_unit_sets_user_so_passt_inherits_the_workload_uid(self):
+        from tests.test_generator_snapshot import render_matrix
+
+        units = {name: text for name, text in render_matrix().items()
+                 if name.startswith("vm-")}
+        self.assertTrue(units, "no VM fixtures rendered")
+
+        checked = 0
+        for name, text in units.items():
+            # Setup/build helpers legitimately run as root (they create the
+            # user and write into /var before it can be resolved); the unit
+            # that execs QEMU must not.
+            if "qemu-system" not in text:
+                continue
+            checked += 1
+            self.assertRegex(
+                text, r"(?m)^User=_wl-",
+                f"{name} execs QEMU without User=_wl-<name>; passt would "
+                f"inherit root and silently drop to nobody")
+        self.assertGreater(checked, 0, "no rendered unit execs QEMU")
+
+
 if __name__ == "__main__":
     unittest.main()
