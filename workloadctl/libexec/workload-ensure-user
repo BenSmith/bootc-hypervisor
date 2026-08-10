@@ -35,7 +35,7 @@ from workload_lib import (
     workload_env_dir,
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
-from vm import VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars
+from vm import VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars, vm_proxy_env
 from secrets_template import substitute_template
 
 
@@ -835,7 +835,8 @@ def _decrypt_systemd_credential(name: str) -> str:
 def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                               mounts: list, has_data_disk: bool,
                               host_private_key: str = "",
-                              host_public_key: str = "") -> str:
+                              host_public_key: str = "",
+                              proxy_env: dict | None = None) -> str:
     """Render the built-in #cloud-config when no user_data_file is set.
 
     Stays in a simple, controlled subset of YAML so we never need a YAML
@@ -866,6 +867,31 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         for keyline in host_private_key.splitlines():
             lines.append(f"    {keyline}")
         lines.append(f"  ed25519_public: {host_public_key}")
+    # Hostname policy (ADR 006 §4.4): tell the guest where its proxy is. Two
+    # files rather than one because they cover different consumers —
+    # /etc/environment is read by PAM so login sessions and systemd services
+    # inherit it, and profile.d covers interactive shells that never go through
+    # PAM. dnf, curl and git all read these names from the environment.
+    #
+    # This is advisory by construction: a guest process free to ignore
+    # HTTPS_PROXY simply does. What makes the policy binding is the default-deny
+    # egress chain on the host, which leaves such a process nowhere else to go.
+    #
+    # Only the built-in cloud-config gets this. A workload supplying its own
+    # user_data_file owns its guest configuration entirely, and this is
+    # documented there rather than merged into a file we do not parse.
+    if proxy_env:
+        lines.append("write_files:")
+        lines.append("  - path: /etc/environment")
+        lines.append("    append: true")
+        lines.append("    content: |")
+        for key, value in proxy_env.items():
+            lines.append(f"      {key}={value}")
+        lines.append("  - path: /etc/profile.d/99-workload-proxy.sh")
+        lines.append("    permissions: '0644'")
+        lines.append("    content: |")
+        for key, value in proxy_env.items():
+            lines.append(f"      export {key}={value}")
     if mounts:
         lines.append("mounts:")
         for tag, mp, fstype, opts in mounts:
@@ -1143,6 +1169,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             has_data_disk=bool(vm_cfg.get("data_disk_size")),
             host_private_key=host_private_key,
             host_public_key=host_public_key,
+            proxy_env=vm_proxy_env(config),
         )
 
     # Pin the guest host key on the host (S1). Both provisioning paths have now

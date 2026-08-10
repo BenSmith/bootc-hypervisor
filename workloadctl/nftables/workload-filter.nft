@@ -43,6 +43,24 @@ add set inet workload_filter wl_filtered { typeof meta skuid ; }
 add set inet workload_filter wl_allow4 { typeof meta skuid . ip daddr . th dport ; }
 add set inet workload_filter wl_allow6 { typeof meta skuid . ip6 daddr . th dport ; }
 
+# The hostname-policy proxies, by control group (ADR 006 §4.4). Each proxy runs
+# as its workload's own user *on purpose*, so `meta skuid` cannot tell the
+# proxy's traffic from the guest's — and under default-deny that means the drop
+# below catches the proxy too, leaving hostname policy permitting nothing at
+# all. Observed on a live VM: the guest's CONNECT reaches the proxy, the proxy
+# resolves the host, and its outbound SYN is dropped.
+#
+# The control group is the discriminator that survives the shared uid. It is
+# assigned by systemd, is not something a guest can enter or forge, and is
+# exact — no destination or port is widened, so a guest that ignores the proxy
+# and dials 443 directly is still dropped, which is what makes the proxy
+# mandatory rather than advisory.
+#
+# Widening by port instead — "let this uid reach 443 anywhere" — was the
+# obvious alternative and is fatal: it is precisely the bypass the default-deny
+# chain exists to close.
+add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
+
 add chain inet workload_filter output { type filter hook output priority 0; policy accept; }
 flush chain inet workload_filter output
 
@@ -72,6 +90,14 @@ add rule inet workload_filter output meta skuid @wl_filtered ct mark set meta sk
 # sockets it already bound and the DNS forward. A guest packet aimed at
 # 127.0.0.1 never leaves the guest's own stack.
 add rule inet workload_filter output meta skuid @wl_filtered oif lo counter accept
+
+# The proxy's own egress. `level 2` is exact because the proxy unit pins
+# Slice=workloads.slice, making its cgroup path always
+# workloads.slice/workload-<name>-proxy.service — two components, whatever the
+# workload's [resources].slice says. An element resolves to a cgroup id at add
+# time and systemd creates a fresh cgroup on each start, so the element is
+# re-added by the proxy's own ExecStartPre and purged there too.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counter accept
 
 add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept

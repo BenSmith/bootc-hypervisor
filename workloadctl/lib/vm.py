@@ -290,6 +290,192 @@ def vm_filter_elements(uid: int, allow: list[str]) -> dict[str, list[str]]:
 NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 
 
+# --- Hostname policy: the per-workload proxy (ADR 006 §4.4) ---
+#
+# Kernel rules match addresses; policy is written about names. Rather than
+# resolve names to addresses at rule-install time — which races DNS, breaks on
+# CDN churn, and opens everything sharing an address — an HTTP forward proxy
+# reads `CONNECT host:443` in plaintext before any TLS handshake and allowlists
+# the hostname directly, with no interception and no CA.
+#
+# One tinyproxy instance per workload, because tinyproxy's filter directives are
+# instance-global. Each runs as _wl-<name>, so its own outbound traffic carries
+# the same uid as the guest's and one `meta skuid` rule governs both the direct
+# and the via-proxy path. The proxy is a policy layer, not a second trust domain.
+#
+# What binds it: a proxy alone is advisory, since a guest process that ignores
+# HTTPS_PROXY simply does not use it. The default-deny output chain is what
+# makes it mandatory — the uncooperative process has nowhere else to go.
+
+# The address every guest is told to use. It is the same for every workload on
+# purpose: the redirect is keyed on uid, so one advertised endpoint reaches N
+# private listeners and every guest's cloud-init is identical. Two host
+# addresses are ruled out by §3.5 — host loopback is unreachable by design, and
+# the host's default-route address is structurally unreachable because passt
+# assigns the guest that same address — so it has to be some other host address.
+#
+# TEST-NET-1 is reserved for documentation and can never be a destination a
+# guest legitimately wants, and a dummy link keeps it off every real NIC and
+# inert when nothing is running.
+#
+# Deliberately a constant rather than a schema key, which is a documented
+# deviation from the design: the address belongs to a host-global interface, so
+# a per-workload key would let two workloads disagree about a shared object —
+# the last-write-wins hazard ADR 002 exists to describe and this design deleted
+# along with the bridge. A site that genuinely uses TEST-NET-1 internally should
+# use `allow` and skip hostname policy; see docs/workloads.md.
+VM_PROXY_ADDR = "192.0.2.1"
+VM_PROXY_PORT = 3128
+
+# Dummy link carrying the advertised address. Host-global and shared, created
+# on demand and never torn down by a workload stop: it is refcount-free because
+# it holds no per-workload state, costs nothing idle, and an orphan is inert.
+VM_PROXY_IFACE = "workload-proxy"
+
+VM_PROXY_BIN = "/usr/bin/tinyproxy"
+
+# The proxy runs as the workload's own user by design, so `meta skuid` cannot
+# separate its traffic from the guest's — and under default-deny the drop
+# catches the proxy too, leaving hostname policy permitting nothing. The
+# control group is the discriminator that survives the shared uid: systemd
+# assigns it, a guest can neither enter nor forge it, and it widens no
+# destination or port, so a guest that ignores the proxy and dials 443 directly
+# is still dropped.
+#
+# The slice is pinned rather than taken from [resources].slice so the cgroup
+# path is always exactly two components and the rule's `level 2` is exact. The
+# proxy is not the payload; resource control belongs on the VM.
+NFT_SET_PROXY_CG = "wl_proxy_cg"
+VM_PROXY_SLICE = "workloads.slice"
+NFT_PROXY_SKELETON = "/usr/share/workloadctl/workload-proxy.nft"
+NFT_PROXY_TABLE = "inet workload_proxy"
+NFT_PROXY_MAP = "wl_proxy_dest"
+
+# tinyproxy's own client ACL. It must name the advertised address, not just
+# loopback: the guest's packet is routed to 192.0.2.1 before it is translated,
+# so the host picks that same address as the source and the proxy sees a client
+# connecting *from* 192.0.2.1. Omit it and every request answers 403 while the
+# listener, the redirect and the guest all look healthy — the failure logs only
+# as tinyproxy's "Unauthorized connection from".
+VM_PROXY_ALLOWED_CLIENTS = ("127.0.0.0/8", VM_PROXY_ADDR)
+
+# The only port CONNECT may target. Without a ConnectPort directive tinyproxy
+# permits CONNECT to any port, which would turn the proxy into a general TCP
+# tunnel out of the guest and undo the egress policy it exists to express.
+VM_PROXY_PORT_HTTPS = 443
+
+
+def vm_proxy_hosts(net: dict) -> list[str]:
+    """The hostname allowlist for one workload, or [] if it has none."""
+    hosts = net.get("hosts", [])
+    return list(hosts) if isinstance(hosts, list) else []
+
+
+def vm_uses_proxy(config: dict) -> bool:
+    """Whether this workload gets a proxy instance.
+
+    Keyed on `hosts` being non-empty rather than on a separate enable flag, so
+    the schema cannot express "proxy on, allowlist empty" — an instance that
+    permits nothing, which is indistinguishable from a broken one. A bridged VM
+    is outside all of this (§5.3): nothing of ours is in its data path, so there
+    is no uid to key the redirect on.
+    """
+    vm_cfg = config.get("vm", {}) or {}
+    net = vm_cfg.get("network", {}) or {}
+    if not isinstance(net, dict) or net.get("bridge"):
+        return False
+    return bool(vm_proxy_hosts(net))
+
+
+def vm_proxy_runtime_dir(name: str) -> str:
+    """Where one instance's config, allowlist, log and pid file live."""
+    return f"{VM_SOCKET_DIR}/{name}"
+
+
+def vm_proxy_config(name: str, listen_addr: str, hosts: list[str]) -> str:
+    """The tinyproxy.conf for one workload.
+
+    FilterDefaultDeny is the whole point: without it the Filter file is a
+    denylist and an unlisted host is permitted. FilterURLs stays off so the
+    pattern matches the host, which is all a CONNECT carries anyway.
+    """
+    rt = vm_proxy_runtime_dir(name)
+    lines = [
+        f"# tinyproxy for workload {name} — generated by workloadctl, do not edit.",
+        f"Listen {listen_addr}",
+        f"Port {VM_PROXY_PORT}",
+        "Timeout 600",
+        f'PidFile "{rt}/tinyproxy.pid"',
+        f'LogFile "{rt}/tinyproxy.log"',
+        "LogLevel Info",
+        "MaxClients 64",
+        "DisableViaHeader Yes",
+    ]
+    lines += [f"Allow {client}" for client in VM_PROXY_ALLOWED_CLIENTS]
+    lines += [
+        f"ConnectPort {VM_PROXY_PORT_HTTPS}",
+        f'Filter "{rt}/hosts.allow"',
+        "FilterType fnmatch",
+        "FilterURLs Off",
+        "FilterDefaultDeny Yes",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def vm_proxy_filter_file(hosts: list[str]) -> str:
+    """The hostname allowlist file. fnmatch patterns, one per line."""
+    return "".join(f"{host}\n" for host in hosts)
+
+
+def vm_proxy_element(uid: int, listen_addr: str) -> str:
+    """This workload's element in the uid -> listener map."""
+    return f"{uid} : {listen_addr} . {VM_PROXY_PORT}"
+
+
+def vm_proxy_map_command(uid: int, listen_addr: str, action: str) -> list[str]:
+    """`nft add|delete element` for one workload's redirect."""
+    return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(), NFT_PROXY_MAP,
+            "{ " + vm_proxy_element(uid, listen_addr) + " }"]
+
+
+def vm_proxy_cgroup(name: str) -> str:
+    """The control group path of one workload's proxy unit."""
+    return f"{VM_PROXY_SLICE}/workload-{name}-proxy.service"
+
+
+def vm_proxy_cgroup_command(name: str, action: str) -> list[str]:
+    """`nft add|delete element` for one proxy's egress exemption.
+
+    The element lives in the *filter* table, not the proxy table: the rule it
+    feeds has to sit in the output chain ahead of the drop, and that chain is
+    the filter skeleton's.
+    """
+    return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_PROXY_CG,
+            '{ "' + vm_proxy_cgroup(name) + '" }']
+
+
+def vm_proxy_env(config: dict) -> dict[str, str]:
+    """The proxy environment a guest is told to use, or {} if it has none.
+
+    NO_PROXY carries the guest's own view of the host and localhost so guest-local
+    traffic does not loop out through the proxy. It is an IP literal throughout,
+    which is what makes the proxy path free of any DNS dependency — DNS being
+    precisely what a compromised guest would attack to escape hostname policy.
+    """
+    if not vm_uses_proxy(config):
+        return {}
+    url = f"http://{VM_PROXY_ADDR}:{VM_PROXY_PORT}"
+    return {
+        "http_proxy": url,
+        "https_proxy": url,
+        "HTTP_PROXY": url,
+        "HTTPS_PROXY": url,
+        "no_proxy": "localhost,127.0.0.1,::1",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+    }
+
+
 # --- SELinux confinement (ADR 006 step 3) ---
 
 # QEMU runs as svirt_t (alias qemu_t), the domain the shipped policy already
@@ -393,10 +579,17 @@ def vm_owned_elements(uid: int, elems) -> list[str]:
 
 
 def nft_set_elements(payload) -> list:
-    """The `elem` list from one `nft -j list set ...` document."""
+    """The `elem` list from one `nft -j list set|map ...` document.
+
+    Both keys are accepted because a map renders under "map", not "set" —
+    querying a map and matching only on "set" silently returns no elements, and
+    a caller reading that as "nothing is armed" reports a working redirect as
+    broken.
+    """
     for item in (payload or {}).get("nftables", []):
-        if "set" in item:
-            return item["set"].get("elem", []) or []
+        for kind in ("set", "map"):
+            if kind in item:
+                return item[kind].get("elem", []) or []
     return []
 
 
@@ -485,14 +678,11 @@ def _validate_egress(net: dict) -> list[str]:
     are none — both VM bundles are templates. A secure default costs nothing
     now and is expensive to retrofit.
 
-    The design pairs `filtered` with an implicit allow to the workload's own
-    proxy, so an empty `allow` is still workable. That proxy is a later step,
-    so until it exists `filtered` requires a non-empty `allow` — the same
-    condition the design states ("validate errors on `filtered` with neither
-    proxy nor allowlist"), evaluated in a world where the proxy is never
-    present. The failure is loud on purpose: silently treating an
-    un-allowlisted VM as open is the misreported-confinement bug this whole
-    layer exists to prevent.
+    `filtered` needs somewhere for the VM's traffic to go: either an address
+    allowlist or a hostname allowlist served by its own proxy. Neither means a
+    VM that can reach nothing at all, which is rejected. The failure is loud on
+    purpose — silently treating an un-allowlisted VM as open is the
+    misreported-confinement bug this whole layer exists to prevent.
     """
     errors: list[str] = []
 
@@ -520,6 +710,17 @@ def _validate_egress(net: dict) -> list[str]:
             except ValueError as e:
                 errors.append(f"[vm.network].allow: {e}")
 
+    hosts = net.get("hosts", [])
+    if not isinstance(hosts, list):
+        errors.append(
+            f"[vm.network].hosts must be an array of hostname patterns, got "
+            f"{type(hosts).__name__}")
+        hosts = []
+    else:
+        for pattern in hosts:
+            errors.extend(f"[vm.network].hosts: {e}"
+                          for e in _validate_proxy_host(pattern))
+
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
@@ -530,16 +731,55 @@ def _validate_egress(net: dict) -> list[str]:
                     f"bridged VM sends from its own LAN address, not from a "
                     f"host socket owned by the workload user, so there is no "
                     f"uid for the filter to match")
+        if "hosts" in net:
+            errors.append(
+                "[vm.network].hosts has no effect with .bridge set — hostname "
+                "policy is enforced by a proxy the guest is redirected to on "
+                "the workload's own uid, and a bridged guest sends from its "
+                "own LAN address with no host socket in the path")
         return errors
 
-    if egress == "filtered" and not allow:
+    if egress == "filtered" and not allow and not hosts:
         errors.append(
-            "[vm.network].egress is 'filtered' (the default) but .allow is "
-            "empty, so this VM could reach nothing at all. List the "
-            "destinations it needs as '<addr>:<port>', or set egress = "
-            "'open' to opt out of filtering.")
+            "[vm.network].egress is 'filtered' (the default) but both .allow "
+            "and .hosts are empty, so this VM could reach nothing at all. "
+            "List the hostnames it needs as .hosts (HTTP/HTTPS, via its own "
+            "proxy), non-HTTP destinations as .allow entries "
+            "('<addr>:<port>'), or set egress = 'open' to opt out of "
+            "filtering.")
 
     return errors
+
+
+# Hostname patterns are matched by tinyproxy's fnmatch filter against the host
+# alone (FilterURLs Off), so a pattern carrying a scheme, a path or a port never
+# matches anything — a silent hole in an allowlist, which is the failure worth
+# catching at validate time rather than at 3am.
+_PROXY_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
+
+
+def _validate_proxy_host(pattern) -> list[str]:
+    """Validate one [vm.network].hosts pattern. Returns error strings."""
+    if not isinstance(pattern, str):
+        return [f"entries must be strings, got {pattern!r}"]
+    text = pattern.strip()
+    if not text:
+        return ["entries must not be empty"]
+    if "://" in text:
+        return [f"{pattern!r} looks like a URL — patterns match the hostname "
+                f"only, so drop the scheme"]
+    if "/" in text:
+        return [f"{pattern!r} contains a path — patterns match the hostname "
+                f"only (FilterURLs is off), so a path never matches"]
+    if ":" in text:
+        return [f"{pattern!r} contains a port — the proxy allows CONNECT to "
+                f"{VM_PROXY_PORT_HTTPS} only; use .allow for other ports"]
+    if text == "*":
+        return ["'*' matches every host, which is the same as egress = 'open' "
+                "but harder to notice — set egress = 'open' if that is meant"]
+    if not _PROXY_HOST_RE.match(text):
+        return [f"{pattern!r} is not a hostname or fnmatch pattern"]
+    return []
 
 
 def validate_vm_network(net: dict) -> list[str]:

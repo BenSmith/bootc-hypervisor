@@ -817,6 +817,20 @@ class VMSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"clear egress filter elements: {e}")
 
+            # Same reasoning for the proxy redirect: the map is keyed on the
+            # uid, so an element left behind by a purge would be inherited by
+            # whatever workload is issued that uid next — and it would point at
+            # a management address derived from the same uid, so the redirect
+            # would silently send the new workload's guest to the old
+            # workload's hostname policy.
+            try:
+                subprocess.run(
+                    ["/usr/libexec/workloadctl/workload-vm-proxy",
+                     "down", self.config.name],
+                    capture_output=True, timeout=30, check=False)
+            except Exception as e:
+                failures.append(f"clear proxy redirect element: {e}")
+
         return failures
 
     def teardown_plan(self, *, purge: bool) -> list[str]:
@@ -828,4 +842,8 @@ class VMSubstrate(Substrate):
                 lines.append(f"remove VM socket dir: {sock_dir}")
             lines.append(
                 "clear egress filter elements from inet workload_filter")
+            lines.append(
+                "clear proxy redirect element from inet workload_proxy")
+            lines.append(
+                "clear proxy egress exemption from inet workload_filter")
         return lines

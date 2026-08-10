@@ -75,9 +75,9 @@ try:
     )
     from vm import (
         VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
-        VM_GUEST_UID, VM_GUEST_AGENT_PORT,
+        VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_PROXY_BIN, VM_PROXY_SLICE,
         vm_mac_address, vm_management_address, parse_vm_port,
-        find_ovmf_code, parse_memory_mib,
+        find_ovmf_code, parse_memory_mib, vm_proxy_env, vm_uses_proxy,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -1590,7 +1590,7 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     # uids/gids still pass through 1:1, preserving multi-user sharing.
     #
     # --sandbox=chroot is now LOAD-BEARING FOR CONFINEMENT as well, which is not
-    # obvious from the uid-fidelity reason above. security/wlvfsd.cil confines
+    # obvious from the uid-fidelity reason above. security/workload-vm.cil confines
     # this daemon in 18 ordinary rules precisely because chroot mode needs only
     # sys_chroot — no cap_userns, no mounton, none of the pivot_root machinery
     # that made pasta's sandbox expensive to allow (see
@@ -1687,6 +1687,79 @@ def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
     return "-netdev " + ",".join(props)
 
 
+def generate_vm_proxy_service(config, user_name: str) -> str:
+    """Generate the hostname-policy proxy sidecar for one VM (ADR 006 §4.4).
+
+    One tinyproxy instance per workload, listening on the workload's own
+    management address — which no guest can reach (§3.5) — and reached instead
+    through a uid-keyed redirect from one address every guest is told to use.
+
+    Two properties this unit is responsible for. It runs as _wl-<name>, so the
+    proxy's own outbound traffic carries the same uid as the guest's and the
+    single `meta skuid` egress rule governs the direct and the via-proxy path
+    alike. And it declares no RuntimeDirectory, for the same reason the
+    virtiofsd sidecars do not: the VM service owns /run/workload-vm/<name>, and
+    a second claimant would refcount-cleanup the directory on proxy stop and
+    yank the VM's qmp and console sockets out from under it.
+
+    ExecStart is the bare binary, not a runcon wrapper. Unlike QEMU — where the
+    policy deliberately has no init_t -> svirt_t transition — security/
+    workload-proxy.cil declares the transition into wlproxy_t itself, so systemd
+    execs straight into the confined domain.
+    """
+    name = config["workload"]["name"]
+    socket_dir = f"/run/workload-vm/{name}"
+
+    unit = Unit()
+    unit.comment(f"hostname-policy proxy for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Egress proxy for {name}")
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # Before= the VM, so a guest that comes up fast cannot find its proxy
+    # missing; PartOf= so it stops with the VM. Not Requires= in the other
+    # direction — see the BindsTo note on the VM service.
+    u.set("Before", f"workload-{name}.service")
+    u.set("PartOf", f"workload-{name}.service")
+
+    svc = unit.section("Service")
+    # Type=exec, matching the virtiofsd sidecars: tinyproxy has no readiness
+    # protocol, and `-d` keeps it in the foreground so systemd tracks the
+    # process it started rather than a daemonized child.
+    svc.set("Type", "exec")
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    # Pinned, NOT taken from [resources].slice. The egress exemption for this
+    # proxy is an nftables `socket cgroupv2 level 2` match, so the cgroup path
+    # has to be exactly two components — a nested custom slice would deepen it
+    # and the match would silently stop firing, dropping the proxy's own
+    # traffic. The proxy is not the payload; resource control belongs on the VM.
+    svc.set("Slice", VM_PROXY_SLICE)
+    # The `+` prefix runs the prestart as root under User=_wl-<name>: it writes
+    # the generated config into a root-owned runtime dir, creates the shared
+    # dummy interface, and installs an nftables element. Not `-` prefixed — a
+    # redirect that failed to install leaves a healthy-looking proxy that no
+    # guest can reach.
+    svc.add("ExecStartPre",
+            f"+/usr/libexec/workloadctl/workload-vm-proxy up {dq(name)}")
+    svc.add("ExecStart", f"{VM_PROXY_BIN} -d -c {socket_dir}/tinyproxy.conf")
+    # ExecStopPost rather than ExecStop, so a killed or failed proxy still
+    # withdraws its redirect. Tolerant: the element is legitimately absent when
+    # the start failed before installing it.
+    svc.add("ExecStopPost",
+            f"-+/usr/libexec/workloadctl/workload-vm-proxy down {dq(name)}")
+    svc.blank()
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+    svc.blank()
+    svc.add("Restart", "on-failure")
+    svc.add("RestartSec", "5s")
+
+    return unit.render()
+
+
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
@@ -1757,6 +1830,12 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     ]
     for tag in vfs_tags:
         prereqs.append(f"workload-{name}-virtiofs-{tag}.service")
+    # The proxy is a hard prerequisite, not a Wants=. A VM whose config names a
+    # hostname allowlist and whose egress is filtered can reach nothing but its
+    # proxy, so booting the guest without one produces a VM that looks healthy
+    # and cannot do its job — the misreported-confinement failure again.
+    if vm_uses_proxy(config):
+        prereqs.append(f"workload-{name}-proxy.service")
     prereqs_str = " ".join(prereqs)
 
     has_data_disk = bool(vm_cfg.get("data_disk_size"))
@@ -2047,6 +2126,12 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # was created and destroyed.
     wants_dir = SERVICES_DIR / "multi-user.target.wants"
     wants_dir.mkdir(parents=True, exist_ok=True)
+
+    # Hostname-policy proxy sidecar, when [vm.network].hosts is set.
+    proxy_dests = paths.get(("unit", "proxy"), [])
+    if proxy_dests and vm_uses_proxy(config):
+        proxy_dests[0].write_text(generate_vm_proxy_service(config, user_name))
+        log_msg("  Created hostname-policy proxy service")
 
     # virtiofsd sidecar services — collision-safe tags, same order/set as the
     # VM service's chardevs and the purge/cloud-init sites (B3).

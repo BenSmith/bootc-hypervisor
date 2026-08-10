@@ -772,6 +772,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # Lazy import: workloadctl_core imports this module, so a top-level import
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
+    from vm import vm_uses_proxy  # same circularity: vm imports this module
 
     run = RUN_SYSTEMD_SYSTEM
     env = workload_env_dir()
@@ -794,6 +795,13 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
             files.append(WorkloadRunFile(
                 run / f"workload-{name}-virtiofs-{tag}.service", "unit", "virtiofs", True
             ))
+        # Superset semantics, like -pod/-net for containers: always listed so
+        # the removable view unlinks it, emitted only when hostname policy is
+        # configured.
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-proxy.service", "unit", "proxy",
+            vm_uses_proxy(config.config),
+        ))
     else:
         # cgroup-placement drop-in (containers only). Keyed by the workload UID
         # from the passwd db; omitted once the user is gone (UID unreconstructable).
