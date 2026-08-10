@@ -63,6 +63,9 @@ VM_TOML = """\
 [workload]
 name = "test-vm"
 
+[vm.network]
+egress = "open"
+
 [vm]
 image = "example.com/guest:latest"
 """
@@ -70,6 +73,9 @@ image = "example.com/guest:latest"
 VM_TOML_WITH_MEMORY = """\
 [workload]
 name = "test-vm"
+
+[vm.network]
+egress = "open"
 
 [vm]
 image = "example.com/guest:latest"
@@ -2568,6 +2574,9 @@ class TestVMReprovisionFlow(unittest.TestCase):
 name = "test-vm"
 lifecycle = "{lifecycle}"
 
+[vm.network]
+egress = "open"
+
 [vm]
 image = "example.com/guest:latest"
 """
@@ -2651,6 +2660,9 @@ class TestVMRollbackPetGuard(unittest.TestCase):
 [workload]
 name = "test-vm"
 lifecycle = "pet"
+
+[vm.network]
+egress = "open"
 
 [vm]
 image = "example.com/guest:latest"

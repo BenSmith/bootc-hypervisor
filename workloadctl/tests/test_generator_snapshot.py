@@ -397,6 +397,9 @@ FIXTURES = {
             [workload]
             name = "vmfull"
 
+            [vm.network]
+            egress = "open"
+
             [vm]
             cloud_image_url = "https://example.test/img.qcow2"
             cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"

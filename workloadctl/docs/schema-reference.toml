@@ -251,6 +251,42 @@ name = "schema-reference"
 #            cloud-init, package installs and NTP. For purpose-built guests.
 # resolver = "host"
 #
+# REQUIRED IN PRACTICE: how this VM's outbound traffic is treated.
+# Type: string, one of "filtered" | "open"
+# Default: "filtered"
+#   "filtered" — the workload uid is added to the nftables set `wl_filtered`,
+#                and everything it originates is dropped except the entries in
+#                .allow below. Because passt re-originates guest traffic as
+#                host sockets owned by _wl-<name>, `meta skuid` is a complete
+#                and unforgeable per-VM selector.
+#   "open"     — no filtering. The uid is never added to the set, and the
+#                drop rule (which is set-guarded) never sees this VM.
+#
+# The default is "filtered", but there is no useful implicit allowlist yet:
+# the design pairs "filtered" with an automatic allow to the workload's own
+# HTTP proxy, and that proxy is a later step. So until it lands, "filtered"
+# with an empty .allow is a VALIDATION ERROR rather than a VM that boots and
+# can reach nothing. In other words every VM must currently say which it
+# wants. That is deliberate — a config reading "filtered" while the VM is in
+# fact wide open is the exact misreport this layer exists to prevent.
+# egress = "filtered"
+#
+# Optional: destinations this VM may reach when egress = "filtered".
+# Type: array of "<addr>:<port>" strings ("[<v6addr>]:<port>" for IPv6)
+# Default: []
+# ADDRESSES ONLY — never hostnames. These become elements of an nftables set
+# keyed on `ip daddr`/`ip6 daddr`, so a name would have to be resolved once at
+# unit start and would then be silently wrong for the life of the VM the
+# moment the record moved. Hostname policy belongs to the proxy; .allow is for
+# the non-HTTP exceptions a proxy cannot carry (ssh, a database, an NTP peer).
+# Each family has its own set, so v4 and v6 entries never match each other.
+# allow = ["192.168.0.10:22", "[2001:db8::1]:443"]
+#
+# Break-glass, if the filter itself is the problem:
+#   nft delete table inet workload_filter
+# The table is rebuilt by the next VM start. An abandoned table is inert: the
+# chain's policy is accept and the drop rule matches only uids in the set.
+#
 # [vm.cloud_init]
 # Optional: Override the seed ISO's user-data with a custom #cloud-config.
 # Without this section, workloadctl generates a small built-in user-data
@@ -364,6 +400,8 @@ name = "schema-reference"
 #
 # [vm.network]
 # bridge = "br0"                    # a real LAN identity; unfiltered (see above)
+# egress = "filtered"               # or "open"; must be stated (see above)
+# allow  = ["192.168.0.10:22"]      # addresses and ports only, never hostnames
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

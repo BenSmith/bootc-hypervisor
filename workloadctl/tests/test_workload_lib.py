@@ -331,24 +331,27 @@ class TestVmNetworkValidation(unittest.TestCase):
         return [e for e in vm.validate_vm_config(self._cfg(**network))
                 if "network" in e]
 
-    def test_absent_network_ok(self):
-        self.assertEqual(self._net_errors(), [])
+    def test_absent_network_needs_an_egress_decision(self):
+        # `egress` defaults to "filtered" and there is no proxy yet to supply
+        # the implicit allow, so silence is no longer a complete answer.
+        errs = self._net_errors()
+        self.assertTrue(any("could reach nothing at all" in e for e in errs))
 
     def test_bridge_only_still_ok(self):
+        # The escape hatch is unfiltered by definition, so it needs no egress
+        # decision — there is no host socket carrying the workload uid.
         self.assertEqual(self._net_errors(bridge="br0"), [])
 
     def test_managed_bridge_subnet_rejected(self):
         # Went with the bridge (ADR 006). Rejected rather than ignored, so an
         # operator carrying an old config learns why it stopped meaning
         # anything instead of finding it silently dropped.
-        errs = self._net_errors(subnet="10.100.0.0/24")
-        self.assertTrue(errs)
-        self.assertIn("ADR 006", errs[0])
+        errs = self._net_errors(subnet="10.100.0.0/24", egress="open")
+        self.assertTrue(any("ADR 006" in e for e in errs), errs)
 
     def test_managed_bridge_dns_rejected(self):
-        errs = self._net_errors(dns=["1.1.1.1"])
-        self.assertTrue(errs)
-        self.assertIn("ADR 006", errs[0])
+        errs = self._net_errors(dns=["1.1.1.1"], egress="open")
+        self.assertTrue(any("ADR 006" in e for e in errs), errs)
 
 
 class TestSelinuxIdentifiers(unittest.TestCase):
@@ -789,6 +792,10 @@ class TestValidateVmConfig(unittest.TestCase):
             "memory": "2048M",
             "cloud_image_url": "https://example.com/x.qcow2",
             "cloud_image_checksum": "sha256:" + "a" * 64,
+            # Spelled out so these tests assert about images, memory and
+            # cloud-init rather than re-testing the egress default; that has
+            # its own coverage in TestVmNetworkValidation.
+            "network": {"egress": "open"},
         }
         vm.update(vm_overrides)
         return {"workload": {"name": "fedora-vm"}, "vm": vm}
@@ -808,6 +815,7 @@ class TestValidateVmConfig(unittest.TestCase):
                 "cloud_image_checksum": "sha256:" + "d" * 64,
                 "data_disk_size": "50G",
                 "user": "fedora",
+                "network": {"egress": "open"},
             },
         }
         self.assertEqual(validate_workload_config(cfg), [])
@@ -867,7 +875,8 @@ class TestValidateVmConfig(unittest.TestCase):
     def test_local_image_alone_is_valid(self):
         cfg = {
             "workload": {"name": "x"},
-            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/i.qcow2"},
+            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/i.qcow2",
+                   "network": {"egress": "open"}},
         }
         self.assertEqual(validate_workload_config(cfg), [])
 
@@ -897,7 +906,8 @@ class TestVmNetworkBridge(unittest.TestCase):
     def test_default_bridge_when_section_omitted(self):
         cfg = {
             "workload": {"name": "fedora-vm"},
-            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/x.qcow2"},
+            "vm": {"vcpus": 1, "memory": "512M", "local_image": "/srv/x.qcow2",
+                   "network": {"egress": "open"}},
         }
         self.assertEqual(validate_workload_config(cfg), [])
 
@@ -929,6 +939,7 @@ class TestVmCloudInit(unittest.TestCase):
                 "vcpus": 1,
                 "memory": "512M",
                 "local_image": "/srv/x.qcow2",
+                "network": {"egress": "open"},
                 "cloud_init": cloud_init,
             },
         }

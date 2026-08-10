@@ -127,6 +127,12 @@ install -Dpm 0644 %{_sourcedir}/systemd/workloads-dirs.conf \
 install -Dpm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
     %{buildroot}%{_datadir}/containers/seccomp-workload-baseline.json
 
+# The workload_filter skeleton. Data, not a script: each VM unit applies it
+# with `nft -f` at start (it is idempotent by construction), so it is not
+# installed executable and there is no unit that owns it.
+install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
+    %{buildroot}%{_datadir}/workloadctl/workload-filter.nft
+
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
 

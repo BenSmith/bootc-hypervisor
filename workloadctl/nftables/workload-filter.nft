@@ -1,0 +1,63 @@
+#!/usr/sbin/nft -f
+#
+# workload_filter — per-VM egress policy keyed on the workload uid (ADR 006).
+#
+# passt terminates the guest network stack and re-originates every flow as a
+# host socket owned by the workload's own user, so `meta skuid` is a complete,
+# unforgeable per-VM selector. This file is the always-on skeleton; units add
+# and remove *set elements*, never rules.
+#
+# Applied by each VM unit's ExecStartPre. It must therefore be idempotent
+# under concurrent application, which is why it is written the way it is:
+#
+#   - `add table`, `add chain` and `add set` create-if-absent, so re-applying
+#     is a no-op for them.
+#   - `add rule` APPENDS. Applying this file twice without the flush would
+#     duplicate every rule. `flush chain` empties only the chain; set elements
+#     live on the table and survive, so a second VM starting does not disarm
+#     the first.
+#   - each `nft -f` is one atomic transaction, so concurrent VM starts cannot
+#     interleave into a half-built chain.
+#
+# Placement: firewalld runs filter_OUTPUT at filter+10, so this chain at
+# priority 0 evaluates first. firewalld leaves that headroom deliberately.
+# firewalld cannot express this policy itself -- its rich language has no uid
+# predicate, so it can reach the traffic class but cannot tell one VM from
+# another.
+#
+# Break-glass:  nft delete table inet workload_filter
+# An abandoned table is inert: chain policy is accept, the drop is set-guarded,
+# and an empty wl_filtered matches nothing. Orphaned elements self-heal on
+# reboot, since nft state does not survive one.
+
+add table inet workload_filter
+
+# Membership: "is this workload under policy at all?" -- family-agnostic, so
+# one set serves both the mark and the drop.
+add set inet workload_filter wl_filtered { typeof meta skuid ; }
+
+# Allowlists. In the inet family `ip daddr` matches v4 only and `ip6 daddr` v6
+# only, so an allowlist spanning both families needs one set per family.
+# Neither accept rule can fire on the other family's traffic and no explicit
+# `meta nfproto` guard is needed -- the dependency is implicit in the match.
+add set inet workload_filter wl_allow4 { typeof meta skuid . ip daddr . th dport ; }
+add set inet workload_filter wl_allow6 { typeof meta skuid . ip6 daddr . th dport ; }
+
+add chain inet workload_filter output { type filter hook output priority 0; policy accept; }
+flush chain inet workload_filter output
+
+# Non-terminating, and NOT policy: this is what lets a capture attribute
+# *inbound* packets to a workload, since nftables has no input-side uid match.
+# It lives in the always-on skeleton rather than being installed when a capture
+# starts, because a rule added later can only mark connections opened later --
+# and the connection an operator is chasing is already established by the time
+# they come looking.
+add rule inet workload_filter output meta skuid @wl_filtered ct mark set meta skuid or 0x40000000
+
+add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
+add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
+
+# Set-guarded: a workload not in wl_filtered never reaches this rule. The
+# counter is what gives `workloadctl diagnose` per-workload drop counts with no
+# extra machinery.
+add rule inet workload_filter output meta skuid @wl_filtered counter drop

@@ -248,6 +248,105 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
     return (addr, host, guest, m.group("proto") or "tcp")
 
 
+VM_EGRESS_MODES = ("filtered", "open")
+VM_EGRESS_DEFAULT = "filtered"
+
+# `<addr>:<port>` or `[<v6addr>]:<port>`. Addresses only, never hostnames: the
+# allowlist becomes elements of an nftables set keyed on `ip daddr`/`ip6 daddr`,
+# so a name would have to be resolved at unit start and would then be silently
+# wrong for the life of the VM whenever the record changed. Hostname policy is
+# the proxy's job (ADR 006 §4.4), and `allow` is for the non-HTTP exceptions
+# the proxy cannot carry.
+VM_ALLOW_RE = re.compile(
+    r"^(?:\[(?P<v6>[0-9a-fA-F:]+)\]|(?P<v4>\d{1,3}(?:\.\d{1,3}){3})):"
+    r"(?P<port>\d+)$")
+
+
+def parse_vm_allow(spec: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
+    """Parse one [vm.network].allow entry into (address, port).
+
+    Raises ValueError with an operator-readable message.
+    """
+    match = VM_ALLOW_RE.match(spec.strip())
+    if not match:
+        raise ValueError(
+            f"{spec!r} is not '<addr>:<port>' (IPv6 as '[addr]:port'). "
+            f"Addresses only — hostname policy belongs to the proxy")
+    try:
+        addr = ipaddress.ip_address(match.group("v6") or match.group("v4"))
+    except ValueError:
+        raise ValueError(f"{spec!r} does not contain a valid IP address") from None
+    port = int(match.group("port"))
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{spec!r}: port {port} out of range 1-65535")
+    return addr, port
+
+
+def _validate_egress(net: dict) -> list[str]:
+    """Validate [vm.network].egress and .allow.
+
+    `egress` defaults to "filtered" (ADR 006 §5.1): the usual argument for
+    defaulting a new control off is protecting deployed workloads, and there
+    are none — both VM bundles are templates. A secure default costs nothing
+    now and is expensive to retrofit.
+
+    The design pairs `filtered` with an implicit allow to the workload's own
+    proxy, so an empty `allow` is still workable. That proxy is a later step,
+    so until it exists `filtered` requires a non-empty `allow` — the same
+    condition the design states ("validate errors on `filtered` with neither
+    proxy nor allowlist"), evaluated in a world where the proxy is never
+    present. The failure is loud on purpose: silently treating an
+    un-allowlisted VM as open is the misreported-confinement bug this whole
+    layer exists to prevent.
+    """
+    errors: list[str] = []
+
+    egress = net.get("egress", VM_EGRESS_DEFAULT)
+    if egress not in VM_EGRESS_MODES:
+        errors.append(
+            f"[vm.network].egress must be one of "
+            f"{', '.join(repr(m) for m in VM_EGRESS_MODES)}, got {egress!r}")
+        egress = VM_EGRESS_DEFAULT
+
+    allow = net.get("allow", [])
+    if not isinstance(allow, list):
+        errors.append(
+            f"[vm.network].allow must be an array of '<addr>:<port>' strings, "
+            f"got {type(allow).__name__}")
+        allow = []
+    else:
+        for spec in allow:
+            if not isinstance(spec, str):
+                errors.append(
+                    f"[vm.network].allow entries must be strings, got {spec!r}")
+                continue
+            try:
+                parse_vm_allow(spec)
+            except ValueError as e:
+                errors.append(f"[vm.network].allow: {e}")
+
+    # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
+    # guest's data path — no host socket, so no uid to match on.
+    if "bridge" in net:
+        for key in ("egress", "allow"):
+            if key in net:
+                errors.append(
+                    f"[vm.network].{key} has no effect with .bridge set — a "
+                    f"bridged VM sends from its own LAN address, not from a "
+                    f"host socket owned by the workload user, so there is no "
+                    f"uid for the filter to match")
+        return errors
+
+    if egress == "filtered" and not allow:
+        errors.append(
+            "[vm.network].egress is 'filtered' (the default) but .allow is "
+            "empty, so this VM could reach nothing at all. List the "
+            "destinations it needs as '<addr>:<port>', or set egress = "
+            "'open' to opt out of filtering.")
+
+    return errors
+
+
 def validate_vm_network(net: dict) -> list[str]:
     """Validate [vm.network]. Returns a list of error strings.
 
@@ -314,18 +413,7 @@ def validate_vm_network(net: dict) -> list[str]:
         errors.append(
             f"[vm.network].resolver must be 'host' or 'none', got {resolver!r}")
 
-    # Reject rather than ignore. Both keys are part of the accepted design, but
-    # the machinery that gives them meaning — the uid-keyed nftables output
-    # chain and the per-workload proxy — is not built yet. Accepting `egress =
-    # "filtered"` while nothing filters would let an operator believe a VM is
-    # confined when it is wide open, which is worse than not offering the key.
-    for unimplemented, lands_with in (("egress", "the nftables output chain"),
-                                      ("allow", "the nftables output chain")):
-        if unimplemented in net:
-            errors.append(
-                f"[vm.network].{unimplemented} is not implemented yet — it "
-                f"lands with {lands_with}. Until then every VM is unfiltered, "
-                f"and accepting this key would misreport that.")
+    errors += _validate_egress(net)
 
     # ADR 002's host-level knobs went with the bridge that needed them.
     for removed in ("subnet", "dns"):

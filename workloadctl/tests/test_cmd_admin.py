@@ -148,6 +148,9 @@ _VM_TOML = """\
 [workload]
 name = "clitest-vmguard"
 
+[vm.network]
+egress = "open"
+
 [vm]
 cloud_image_url = "https://example.invalid/f.qcow2"
 vcpus = 1
@@ -211,6 +214,9 @@ class ValidateSingleVmMemoryPrecisionTest(unittest.TestCase):
         (self.tmp / name / "workload.toml").write_text(f"""
 [workload]
 name = "{name}"
+
+[vm.network]
+egress = "open"
 
 [vm]
 cloud_image_url = "https://example.invalid/f.qcow2"

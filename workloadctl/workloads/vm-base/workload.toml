@@ -21,6 +21,22 @@ system_disk_size = "20G"
 # data_disk_size = "20G"   # uncomment for a persistent /dev/vdb data disk
 user = "fedora"
 
+[vm.network]
+# `egress` has no safe silent default, so it must be stated. "open" is what a
+# from-scratch VM needs: cloud-init installs packages from Fedora's mirrors,
+# and mirror addresses are neither stable nor enumerable, so an allowlist that
+# covered them would be worthless as a control.
+#
+# Once the guest is provisioned and you know what it actually talks to, switch
+# it over — the allowlist is addresses and ports only, since a hostname would
+# be resolved once at start and then be silently wrong the moment the record
+# moved:
+#
+#   egress = "filtered"
+#   allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]
+#
+egress = "open"
+
 [vm.cloud_init]
 user_data_file = "/usr/share/workloadctl/workloads/vm-base/cloud-init/user-data"
 

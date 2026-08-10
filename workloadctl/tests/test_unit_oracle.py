@@ -84,6 +84,9 @@ CASES = [
     Case("fedora-vm", """\
         [workload]
         name = "fedora-vm"
+        [vm.network]
+        egress = "open"
+
         [vm]
         vcpus = 2
         memory = "2048M"

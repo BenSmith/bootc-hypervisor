@@ -30,3 +30,18 @@ data_disk_size = "50G"
 
 # cloud-init default user for this image
 user = "fedora"
+
+[vm.network]
+# `egress` has no safe silent default, so it has to be stated. "open" is what
+# a general-purpose Fedora guest needs: cloud-init installs packages from
+# mirrors whose addresses are neither stable nor enumerable.
+#
+# Once you know what the guest actually talks to, tighten it. The allowlist
+# holds addresses and ports only — a hostname would be resolved once at start
+# and then be silently wrong the moment the record moved, which is why
+# hostname policy belongs to a proxy instead:
+#
+#   egress = "filtered"
+#   allow  = ["192.168.0.10:22"]
+#
+egress = "open"

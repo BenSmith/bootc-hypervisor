@@ -1745,10 +1745,17 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         for d in (self.config_dir, self.services_dir, self.sysusers_dir):
             shutil.rmtree(d)
 
-    def _write_vm_config(self, name="fedora-vm", extra=""):
+    def _write_vm_config(self, name="fedora-vm", extra="", network='egress = "open"'):
+        # `network` is the body of [vm.network]. It defaults to an explicit
+        # egress posture because `egress` defaults to "filtered" and a VM with
+        # no allowlist fails validation, which would make every fixture here
+        # about egress rather than about what it is testing.
         write_config(self.config_dir, name, f"""\
             [workload]
             name = "{name}"
+
+            [vm.network]
+            {network}
 
             [vm]
             vcpus = 2
@@ -1994,7 +2001,7 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         # KEYS. A comma-joined value would make QEMU read the second entry as
         # a bare unknown option and refuse to start.
         self._write_vm_config(
-            extra='[vm.network]\nports = ["8080:80", "5353:53/udp"]')
+            network='ports = ["8080:80", "5353:53/udp"]\negress = "open"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
         self.assertIn("tcp-ports=8080:80", svc)
@@ -2018,7 +2025,8 @@ class TestGeneratorVmWorkload(unittest.TestCase):
     def test_custom_bridge_is_the_unfiltered_escape_hatch(self):
         # bridge = "br0" → attach directly, take a real LAN identity, and use
         # none of the passt machinery. The operator brings br0 up themselves.
-        self._write_vm_config(extra='[vm.network]\nbridge = "br0"')
+        # A bridged VM is unfiltered by definition, so no egress key.
+        self._write_vm_config(network='bridge = "br0"')
         self._run()
         svc = self._read("workload-fedora-vm.service")
         self.assertIn("-netdev bridge,id=net0,br=br0", svc)
@@ -2049,6 +2057,9 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         write_config(self.config_dir, "minvm", f"""\
             [workload]
             name = "minvm"
+
+            [vm.network]
+            egress = "open"
 
             [vm]
             vcpus = 1
@@ -2696,6 +2707,9 @@ class TestGeneratorVmResources(unittest.TestCase):
             [workload]
             name = "resvm"
 
+            [vm.network]
+            egress = "open"
+
             [vm]
             vcpus = 2
             memory = "2048M"
@@ -2739,6 +2753,9 @@ class TestGeneratorVmResources(unittest.TestCase):
             [workload]
             name = "customvm"
 
+            [vm.network]
+            egress = "open"
+
             [vm]
             vcpus = 2
             memory = "2048M"
@@ -2767,6 +2784,9 @@ class TestGeneratorVmResources(unittest.TestCase):
             [workload]
             name = "revm"
 
+            [vm.network]
+            egress = "open"
+
             [vm]
             vcpus = 2
             memory = "2048M"
@@ -2785,6 +2805,9 @@ class TestGeneratorVmResources(unittest.TestCase):
         write_config(self.config_dir, "grpvm", """\
             [workload]
             name = "grpvm"
+
+            [vm.network]
+            egress = "open"
 
             [vm]
             vcpus = 2

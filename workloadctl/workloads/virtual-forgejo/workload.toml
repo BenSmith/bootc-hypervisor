@@ -46,6 +46,13 @@ user = "fedora"
 rollback_keep = 2
 
 [vm.network]
+# A CI host builds arbitrary code against arbitrary registries and mirrors, so
+# there is no allowlist that both works and means anything. Left open
+# deliberately, and stated rather than defaulted — `egress` defaults to
+# "filtered" (ADR 006 §5.1) and a VM with no reachable destinations would
+# otherwise be a silent boot-and-hang.
+egress = "open"
+
 # Defaults to passt: no bridge, and the guest is assigned the HOST's address.
 #
 # READ THIS BEFORE DEPLOYING. The cloud-init in this bundle runs Caddy *inside*

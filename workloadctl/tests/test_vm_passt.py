@@ -112,8 +112,20 @@ class TestPortSpecs(unittest.TestCase):
 
 
 class TestNetworkValidation(unittest.TestCase):
-    def test_empty_section_is_passt_and_valid(self):
-        self.assertEqual(validate_vm_network({}), [])
+    def test_empty_section_selects_passt_but_needs_an_egress_decision(self):
+        # An empty [vm.network] selects passt, but `egress` defaults to
+        # "filtered" and the implicit allow that would make an empty allowlist
+        # workable is the per-workload proxy, which is a later step. So until
+        # the proxy exists the operator has to say which way they want it --
+        # loudly, because a VM that is silently unfiltered while the config
+        # reads "filtered" is the exact misreport this layer exists to prevent.
+        errs = validate_vm_network({})
+        self.assertTrue(any("could reach nothing at all" in e for e in errs))
+
+    def test_an_explicit_decision_either_way_is_valid(self):
+        self.assertEqual(validate_vm_network({"egress": "open"}), [])
+        self.assertEqual(
+            validate_vm_network({"allow": ["192.168.0.10:22"]}), [])
 
     def test_ports_are_rejected_alongside_a_bridge(self):
         # A bridged guest has its own LAN address and nothing of ours is in its
@@ -127,19 +139,54 @@ class TestNetworkValidation(unittest.TestCase):
         self.assertTrue(any("no effect with .bridge" in e for e in errs))
 
     def test_resolver_enum(self):
-        self.assertEqual(validate_vm_network({"resolver": "host"}), [])
-        self.assertEqual(validate_vm_network({"resolver": "none"}), [])
-        self.assertTrue(validate_vm_network({"resolver": "lan"}))
+        # egress is spelled out so these assert only about `resolver`.
+        for mode in ("host", "none"):
+            self.assertEqual(
+                validate_vm_network({"resolver": mode, "egress": "open"}), [])
+        self.assertTrue(
+            validate_vm_network({"resolver": "lan", "egress": "open"}))
 
-    def test_unimplemented_egress_keys_are_rejected_not_ignored(self):
-        # egress/allow are part of the accepted design but nothing enforces
-        # them yet. Accepting `egress = "filtered"` while every VM is in fact
-        # unfiltered would let an operator believe a VM is confined when it is
-        # wide open — strictly worse than not offering the key at all.
-        for key, value in (("egress", "filtered"), ("allow", ["h:22"])):
-            errs = validate_vm_network({key: value})
-            self.assertTrue(errs, key)
-            self.assertIn("not implemented yet", errs[0])
+    def test_egress_enum(self):
+        self.assertEqual(
+            validate_vm_network({"egress": "filtered",
+                                 "allow": ["10.0.0.1:22"]}), [])
+        self.assertTrue(any(
+            "must be one of" in e
+            for e in validate_vm_network({"egress": "strict"})))
+
+    def test_allow_entries_must_be_addresses_not_hostnames(self):
+        # The allowlist becomes elements of a set keyed on ip/ip6 daddr. A
+        # hostname would have to be resolved once at unit start and would then
+        # be silently wrong for the life of the VM the moment the record moved.
+        errs = validate_vm_network({"allow": ["git.example:22"]})
+        self.assertTrue(any("Addresses only" in e for e in errs), errs)
+
+    def test_allow_accepts_both_families(self):
+        self.assertEqual(
+            validate_vm_network({"allow": ["10.0.0.1:22",
+                                           "[2001:db8::1]:443"]}), [])
+
+    def test_allow_rejects_a_bare_v6_address_without_brackets(self):
+        # Unbracketed, the final ':' before the port is ambiguous with the
+        # address's own colons.
+        self.assertTrue(validate_vm_network({"allow": ["2001:db8::1:22"]}))
+
+    def test_allow_port_range(self):
+        self.assertTrue(any("out of range" in e for e in
+                            validate_vm_network({"allow": ["10.0.0.1:70000"]})))
+
+    def test_egress_keys_are_rejected_alongside_a_bridge(self):
+        # A bridged guest sends from its own LAN address, so no host socket
+        # carries the workload uid and there is nothing for the filter to match.
+        for key, value in (("egress", "filtered"), ("allow", ["10.0.0.1:22"])):
+            errs = validate_vm_network({"bridge": "br0", key: value})
+            self.assertTrue(any("no effect with .bridge" in e for e in errs),
+                            f"{key}: {errs}")
+
+    def test_a_bridged_vm_needs_no_egress_decision(self):
+        # The filtered-with-empty-allow error must not fire here: the escape
+        # hatch is unfiltered by definition, not by omission.
+        self.assertEqual(validate_vm_network({"bridge": "br0"}), [])
 
     def test_bridge_name_must_be_a_valid_interface(self):
         self.assertTrue(validate_vm_network({"bridge": "this-name-is-far-too-long"}))

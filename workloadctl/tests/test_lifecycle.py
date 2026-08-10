@@ -123,6 +123,9 @@ _VM_TOML = """\
 [workload]
 name = "test-vm"
 
+[vm.network]
+egress = "open"
+
 [vm]
 image = "example.com/guest:latest"
 """
@@ -131,6 +134,9 @@ _PET_VM_TOML = """\
 [workload]
 name = "test-vm"
 lifecycle = "pet"
+
+[vm.network]
+egress = "open"
 
 [vm]
 image = "example.com/guest:latest"

@@ -63,6 +63,9 @@ VM_TOML = """\
 [workload]
 name = "{name}"
 
+[vm.network]
+egress = "open"
+
 [vm]
 cloud_image_url = "https://example.com/img.qcow2"
 memory = "2G"

@@ -385,6 +385,9 @@ _VM_TOML = """\
 [workload]
 name = "{name}"
 
+[vm.network]
+egress = "open"
+
 [vm]
 memory = "2G"
 vcpus = 2

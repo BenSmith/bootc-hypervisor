@@ -139,6 +139,9 @@ VM_TOML = """\
 [workload]
 name = "{name}"
 
+[vm.network]
+egress = "open"
+
 [vm]
 cloud_image_url = "https://example.com/img.qcow2"
 cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -153,6 +156,9 @@ VM_WITH_REFS_TOML = """\
 [workload]
 name = "{name}"
 requires = ["other"]
+
+[vm.network]
+egress = "open"
 
 [vm]
 cloud_image_url = "https://example.com/img.qcow2"

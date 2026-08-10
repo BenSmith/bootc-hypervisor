@@ -83,6 +83,9 @@ VM_TOML = """\
 [workload]
 name = "test-vm"
 
+[vm.network]
+egress = "open"
+
 [vm]
 image = "example.com/guest:latest"
 """

@@ -21,4 +21,5 @@ rollback_keep = 1
 restart = "on-reboot"
 
 [vm.network]
+egress = "open"   # step 2 of ADR 006 requires an explicit posture
 # Default: unset — passt (no bridge; the guest takes the host's address)
