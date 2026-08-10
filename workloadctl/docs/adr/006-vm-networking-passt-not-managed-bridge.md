@@ -1,9 +1,10 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Implemented** through step 2 of the implementation sequence. Supersedes ADR 002.
+**Status:** **Implemented** through step 3 of the implementation sequence. Supersedes ADR 002.
 
 - Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
 - Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
+- Step 3 (2026-08-10): QEMU confined as `svirt_t`, and the virtiofsd domain.
 
 The per-workload HTTP proxy that holds hostname policy (step 4) does not exist yet, which changes the meaning of the default — see *Decisions taken during implementation* below.
 
@@ -171,6 +172,98 @@ the number and says explicitly that it is shared, because silently attributing
 a sibling VM's dropped traffic to the one being diagnosed would send an
 operator after the wrong workload.
 
+### Step 3: confinement
+
+**The host-global policy ships in the RPM, not in the image.** The design says
+the virtiofsd domain "ships with the image beside `security/pasta_sandbox.cil`
+and is installed by the RPM", which are two different vehicles. It went in the
+RPM (`workloadctl/security/workload-vm.cil` →
+`/usr/share/workloadctl/workload-vm.cil`, loaded by `%post`) because workloadctl
+is a standalone package that does not depend on this image: a module delivered
+by the image would leave VM confinement broken on any other host, and the code
+that needs the module and the module itself would version-skew. Neither vehicle
+closes the bootc gap the image's own Containerfile already records — the policy
+store lives in `/etc`, which ostree 3-way-merges, so an upgrade does not deliver
+a changed module to a host that has ever loaded a local one. `diagnose` reports
+whether it is loaded, which is the same answer the image gives for its booleans.
+
+**The module carries a second, unrelated-looking rule, and should.** It was
+named for virtiofsd and now also grants `svirt_t` what QEMU's native passt
+netdev needs. Both exist for one reason — workloadctl runs QEMU as `svirt_t`
+*outside libvirt*, and the shipped policy is written around libvirt's
+arrangement — so they are one module, `workload-vm`, rather than a virtiofsd
+module plus a passt module that would always be installed together.
+
+**`runcon`, not a `setexeccon()` call.** `lib/` has no third-party dependencies
+and the stdlib has no SELinux binding, so the alternative is a
+`python3-libselinux` requirement for one call. `runcon` also execs the target in
+its own process, which scopes the pending exec context to the child by
+construction; `setexeccon()` in `workload-vm-notify` would leave it armed for
+whatever that process execs next.
+
+**Confinement is unconditional for VM workloads, and degrades rather than
+fails.** It is not gated on `[security].selinux_policy`, for the same reason
+disk labelling is not: a VM that omitted the flag would be silently unconfined.
+On a host with SELinux disabled the runcon prefix is dropped and the VM runs as
+it did before this step, because failing the start would turn "this host has no
+SELinux" into "VMs do not run". `diagnose` reports which of the two happened.
+
+### Corrections from the enforcing run (step 3)
+
+Five things the design did not have right. Every one of them was found by
+running it, and none would have failed a unit test or a review.
+
+**Registering the fcontext rule does not label the directory.** §9.4 says
+relabel `/run/workload-vm` to `svirt_var_run_t` and "the same command runs",
+which reads as though the `semanage` rule is the work. It is not: the kernel
+labels a newly created file from its *parent directory*, and `file_contexts` is
+consulted only by userspace tools like `restorecon`. A directory mkdir'd under
+`/run` inherits `var_run_t` however many rules name it, so a confined QEMU could
+not create its QMP socket or read the cloud-init ISO — and `/run` is a tmpfs, so
+it recurs every boot. `setup_vm_socket_dir` now runs `restorecon` before
+anything is written into the directory, since everything created inside
+inherits from it.
+
+**passt needs a rule that no audit harvest will show you.** QEMU's native netdev
+forks passt with one end of a socketpair already open; libvirt starts passt
+separately and connects by path. So under our topology `passt_t` must read and
+write a `unix_stream_socket` labelled `svirt_t`, which the shipped policy does
+not grant — and *dontaudits*, so the denial produces no AVC at all. What is
+observed is passt failing with `Failed to add fd to epoll: Operation not
+permitted`, QEMU respawning it in a tight loop, an unreachable guest, and an
+empty audit log. 1563 suppressed denials in 30 seconds, visible only under
+`semodule -DB`. Anyone re-deriving this module from a fresh harvest will miss it
+the same way. QEMU also needs `signal` on `passt_t`, or every stop leaks a passt
+process.
+
+**`dac_override` is genuine for virtiofsd.** §9.7 discounts it as a bench
+artifact of running QEMU as root. That is right about QEMU, which production
+runs as `_wl-<name>`, and wrong about the sidecar, which runs as root
+deliberately (an unprivileged virtiofsd squashes every guest-created file to its
+own uid). Without it virtiofsd exits 1 with nothing in the journal and the VM
+fails on the dependency.
+
+**The permissive harvest under load was larger than "a few more lines".** §9.7
+predicted the FUSE-serving permissions would "close for free" — they did close,
+but they are the whole write surface on `svirt_image_t` (file
+create/read/write/unlink, dir add_name/remove_name/rmdir/write), a mapping of
+QEMU's memfd (`svirt_tmpfs_t`), a `search` on the `container_file_t` parent the
+share is reached through, and the socket cleanup on exit. The prediction that
+one enforcing pass would still be required was correct and load-bearing:
+`dac_override` was denied enforcing after a permissive run that never reached
+it.
+
+**A volume outside the workload tree is not covered.** `wlvfsd_t` is granted the
+types workloadctl itself labels. A volume pointing at an operator path carries
+whatever label that path already has (`/srv` is `var_t`) and the sidecar is
+denied it. The module cannot pre-empt this without granting the union of every
+type on the host, so the fix is an fcontext rule on the operator's path.
+
+**Verified enforcing on Fedora 44 (selinux-policy 44.5):** boot, virtiofs mount,
+32 MiB write/read/delete at 154 MB/s, mkdir/rmdir, DNS, `workloadctl exec`, and
+a clean stop — zero denials, no leaked passt. `diagnose` reports 12/12, and
+fails as intended when the module is removed.
+
 ## Consequences
 
 **Removed:**
@@ -201,14 +294,16 @@ today, so `[vm.network].ports` adds a facility rather than replacing one.
   anything the guest can read can leave through it. Structural.
 - **DNS tunnelling** when the guest is given a forwarding resolver.
 - **VMs on an operator-provided bridge**, which are unfiltered by design.
-- **SELinux confinement of VM workloads.** Today the unit sets no
-  `SELinuxContext=`, so QEMU runs `unconfined_service_t` while container
-  workloads get per-workload types. That asymmetry predates this decision and
-  is not closed by it. passt makes closing it cheaper — the shipped policy
-  already carries a `svirt_t` → `passt_t` transition, and `passt-selinux` is
-  pulled in by a rich dependency on `selinux-policy-targeted` rather than as a
-  weak dep, so it survives `install_weak_deps=False` — but confining QEMU
-  itself remains a separate decision with unresolved cost.
+- ~~**SELinux confinement of VM workloads.**~~ **Closed by step 3**, which the
+  original text listed here as a separate decision with unresolved cost. QEMU
+  now enters `svirt_t` via a `runcon` prefix in `workload-vm-notify`, and passt
+  and swtpm transition for free on the shipped policy's own rules. What was not
+  anticipated is that the QEMU-native passt netdev needs two grants libvirt's
+  arrangement never does — see the corrections above.
+
+- **Confinement of the guest's own workloads.** `svirt_t` bounds what the
+  hypervisor process may touch on the host. It says nothing about what runs
+  inside the guest, which is the guest's own problem.
 
 **Testing debt.** The runtime harness boots a single VM. The central property
 above — one rule blocking one workload and not its sibling — cannot be tested

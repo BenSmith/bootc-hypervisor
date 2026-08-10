@@ -1156,6 +1156,51 @@ tag = "mydata"
 
 virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured. The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
 
+**A volume outside the workload's own tree needs an SELinux label.** The
+workload's directory is labelled `svirt_image_t` at enable, and the sidecar is
+confined (see below), so a share under `/var/lib/workloads/<name>/` works with
+no extra steps. A `host_path` elsewhere carries whatever label that path already
+has — `/srv` is `var_t`, for instance — and the sidecar will be denied it. Give
+the path a label the sidecar is allowed:
+
+```bash
+sudo semanage fcontext -a -t svirt_image_t '/data/myapp(/.*)?'
+sudo restorecon -RF /data/myapp
+```
+
+`workloadctl diagnose <name>` reports the resulting denial rather than leaving
+you with a share that mounts empty.
+
+### SELinux Confinement
+
+VM workloads run QEMU as `svirt_t`, the domain the distro policy already
+maintains for a hypervisor process hosting an untrusted guest. This is
+unconditional — there is no flag to set — and applies to every VM workload.
+`[security].selinux_policy` is a separate, opt-in mechanism for shipping a
+*delta* on top of it (see [Security](#security)).
+
+Three things follow that are worth knowing:
+
+- **passt and swtpm are confined for free.** The shipped policy transitions them
+  out of `svirt_t` automatically, so guest networking and vTPM need no
+  configuration.
+- **On a host with SELinux disabled, VMs run unconfined** rather than failing to
+  start. `workloadctl diagnose` says which of the two you have.
+- **virtiofsd gets its own domain**, shipped as
+  `/usr/share/workloadctl/workload-vm.cil` and loaded by the RPM. Without it a
+  confined QEMU cannot connect to the sidecar and volumes do not mount.
+
+That last one has a delivery caveat on bootc hosts: the SELinux policy store
+lives in `/etc`, which ostree 3-way-merges, so a `bootc upgrade` does not
+deliver a changed module to a machine whose store carries local modules — which
+is any host that has ever enabled a workload with `[security].selinux_policy`.
+`diagnose` reports whether the module is loaded; to load it by hand:
+
+```bash
+sudo semodule -i /usr/share/workloadctl/workload-vm.cil
+sudo restorecon /usr/libexec/virtiofsd
+```
+
 ### Update and Rollback
 
 **Update** rebuilds `system.qcow2` from the configured image source:

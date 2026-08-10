@@ -271,6 +271,37 @@ workloadctl loads alongside the workload module on `enable`. The enable-time
 loader lives in `lib/provisioning.py` (`apply_selinux_policy`); the
 `[security].selinux_policy` flag is documented in `docs/schema-reference.toml`.
 
+**All of the above is the container path. VM workloads confine differently**
+(ADR 006 step 3), and the difference is easy to get wrong:
+
+- **QEMU runs as `svirt_t`, unconditionally and without the flag.** Not a
+  per-workload type: `svirt_t` is the distro's own domain for a hypervisor
+  process hosting an untrusted guest, and re-deriving it would be the mistake
+  the per-workload argument above is *not* making — there is fifteen years of
+  encoded knowledge to inherit, where a container workload has none. The
+  transition is a `runcon` prefix in `libexec/workload-vm-notify`, because
+  systemd execs from `init_t` and the policy has no `init_t → svirt_t`
+  transition; `unconfined_service_t → virt_domain` is what makes it work.
+- **MCS categories are deliberately unused.** libvirt needs them because all its
+  VMs share one uid; ours each run as their own `_wl-<name>`, so DAC already
+  separates them.
+- **So `[security].selinux_policy` means something different on a VM.** The
+  `wl_<name>.process` type it declares has exactly one consumer — the generator
+  passing it to podman — and a VM makes no podman call. A VM's `policy.cil` is a
+  *delta against `svirt_t`*.
+- **Two host-global pieces ship outside that flag:** the `svirt_image_t`
+  fcontext rule per VM workload (semanage at enable, gated on `is_vm`, because
+  labelling is a precondition for booting rather than optional hardening), and
+  `security/workload-vm.cil` — a virtiofsd domain plus the two grants QEMU's
+  native passt netdev needs — which the RPM loads once.
+
+Two traps worth carrying forward if you touch this. A `filecon` in a bundle's
+`policy.cil` under a path workloadctl registers with `semanage` is **silently
+ignored**, because `file_contexts.local` outranks the base `file_contexts`
+wholesale (`validate` warns). And the shipped policy **dontaudits** the rule
+passt needs under a QEMU-native netdev, so an ordinary AVC harvest will not show
+it — run `semodule -DB` before concluding a harvest is complete.
+
 ## Key Commands
 
 | Command | Description |

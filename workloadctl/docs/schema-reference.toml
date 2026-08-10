@@ -964,6 +964,24 @@ virtualization = true
 #         (allow process <target_type> (<class> (<perms>))))
 # Author new policy with `udica` against a running container. See
 # llms.txt "SELinux confinement" for the rationale.
+#
+# ON A VM WORKLOAD THIS MEANS SOMETHING DIFFERENT. A VM makes no podman call, so
+# the wl_<name>.process type this declares is never applied to anything — the VM
+# runs as svirt_t, unconditionally and without this flag. A VM's policy.cil is
+# therefore a DELTA AGAINST svirt_t, not a udica-style container type, and a VM
+# bundle that declares wl_<name>.process is writing a type with no consumer.
+#
+# Two things this flag does not control, both of which happen for every VM
+# workload regardless: the svirt_image_t label on its directory (registered with
+# semanage at enable, because a VM that omitted the flag would otherwise fail to
+# start with an EPERM that looks like nothing is wrong), and the host-global
+# virtiofsd domain the RPM loads.
+#
+# A `filecon` in policy.cil for a path under /var/lib/workloads or
+# /run/workload-vm is silently ignored: it lands in the base file_contexts, and
+# file_contexts.local — where workloadctl registers its rules — outranks that
+# file wholesale. `workloadctl validate` warns about it. Label those trees with
+# semanage instead.
 # selinux_policy = false
 
 # Optional: Additional system groups for the workload user
