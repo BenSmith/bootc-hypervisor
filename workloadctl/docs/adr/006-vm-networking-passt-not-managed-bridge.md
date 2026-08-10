@@ -161,6 +161,16 @@ traffic passt originates is replies on sockets it already bound and the DNS
 forward; a guest packet aimed at `127.0.0.1` never leaves the guest's own
 stack.
 
+**The drop counter is host-wide, not per-workload.** The design says the
+`counter` on the drop rule "gives `diagnose` per-workload drop counts with no
+extra machinery". It does not: there is one drop rule, guarded on set
+membership, so every filtered workload's dropped packets accumulate on the same
+counter. Per-workload counts would need a rule or a named counter per uid,
+which is the machinery the shared rule was chosen to avoid. `diagnose` reports
+the number and says explicitly that it is shared, because silently attributing
+a sibling VM's dropped traffic to the one being diagnosed would send an
+operator after the wrong workload.
+
 ## Consequences
 
 **Removed:**

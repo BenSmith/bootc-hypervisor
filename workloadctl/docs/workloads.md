@@ -1086,6 +1086,8 @@ Two things about this are easy to get wrong:
 - **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry.
 - **`egress` currently has to be stated.** It defaults to `"filtered"`, and the design pairs that default with an automatic allow to the workload's own proxy — which is not built yet. Until it is, `"filtered"` with an empty `allow` is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline.
 
+`workloadctl diagnose <name>` reports whether the policy is actually in force. The case it exists for is a config that says `filtered` while the uid is absent from the set: that VM is wide open, and every other signal — unit active, guest online, `status` green — looks correct. It also prints the drop counter, which is **shared across every filtered VM** rather than per-workload; there is one drop rule, so the number is a host total.
+
 If the filter itself is the problem, `nft delete table inet workload_filter` removes it wholesale; the next VM start rebuilds it. An abandoned table is inert — the chain's policy is `accept` and the drop rule matches only uids present in the set.
 
 #### Custom bridge — the unfiltered escape hatch

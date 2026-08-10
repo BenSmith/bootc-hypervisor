@@ -611,6 +611,11 @@ class WorkloadConfig:
         return self.config.get("vm", {}).get("network", {}).get("bridge")
 
     @property
+    def vm_network(self) -> dict:
+        """The `[vm.network]` table, or {} when the section is absent."""
+        return self.config.get("vm", {}).get("network", {}) or {}
+
+    @property
     def vm_is_filterable(self) -> bool:
         """True when this VM's egress is expressible as host policy.
 

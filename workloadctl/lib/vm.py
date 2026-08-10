@@ -314,6 +314,36 @@ def vm_owned_elements(uid: int, elems) -> list[str]:
     return owned
 
 
+def nft_set_elements(payload) -> list:
+    """The `elem` list from one `nft -j list set ...` document."""
+    for item in (payload or {}).get("nftables", []):
+        if "set" in item:
+            return item["set"].get("elem", []) or []
+    return []
+
+
+def nft_drop_counter(payload) -> tuple[int, int] | None:
+    """(packets, bytes) on the set-guarded drop rule, or None if absent.
+
+    NOTE this counter is **host-wide across every filtered VM**, not
+    per-workload: there is one drop rule and it is guarded on set membership,
+    so every filtered workload's dropped packets land on the same counter.
+    Callers must not present it as belonging to one workload.
+    """
+    for item in (payload or {}).get("nftables", []):
+        rule = item.get("rule") if isinstance(item, dict) else None
+        if not rule:
+            continue
+        exprs = rule.get("expr", [])
+        if not any("drop" in e for e in exprs if isinstance(e, dict)):
+            continue
+        for expr in exprs:
+            if isinstance(expr, dict) and "counter" in expr:
+                counter = expr["counter"]
+                return (counter.get("packets", 0), counter.get("bytes", 0))
+    return None
+
+
 def vm_filter_delete_command(set_name: str, entries: list[str]) -> list[str]:
     """argv deleting `entries` from `set_name` in one transaction."""
     return [NFT_BIN, "delete", "element", *NFT_TABLE.split(), set_name,

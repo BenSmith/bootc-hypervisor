@@ -15,7 +15,8 @@ from unittest import mock
 
 from vm import (
     NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_SKELETON,
-    vm_filter_commands, vm_filter_delete_command, vm_owned_elements,
+    nft_drop_counter, nft_set_elements, vm_filter_commands,
+    vm_filter_delete_command, vm_owned_elements,
 )
 
 SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-filter.nft"
@@ -405,6 +406,124 @@ class TestFilterHelper(unittest.TestCase):
     def test_usage(self):
         self.assertEqual(self.mod.main(["x"]), 2)
         self.assertEqual(self.mod.main(["x", "sideways", "vm1"]), 2)
+
+
+class TestEgressDiagnose(unittest.TestCase):
+    """`diagnose`'s egress check.
+
+    Its reason for existing is the one failure no other signal catches: a
+    config that says "filtered" while the uid is absent from the set. That VM
+    is wide open, and the unit is active, the guest has network, and `status`
+    is green.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+
+    def _config(self, egress="filtered", bridge=None, uid=10001):
+        return SimpleNamespace(
+            name="vm1", uid=uid, vm_bridge=bridge,
+            vm_network={} if egress is None else {"egress": egress})
+
+    def _nft(self, *, table=True, armed=True, allow=(), dropped=None):
+        """Stub _nft_json: model the host's nft state as data."""
+        def fake(*args):
+            if not table:
+                return None
+            if args[0] == "list" and args[1] == "set":
+                name = args[-1]
+                if name == NFT_SET_FILTERED:
+                    return {"nftables": [{"set": {"elem": [10001] if armed else []}}]}
+                if name == NFT_SET_ALLOW4:
+                    return {"nftables": [{"set": {"elem": [
+                        {"concat": [10001, a, p]} for a, p in allow]}}]}
+                return {"nftables": [{"set": {"elem": []}}]}
+            rule = {"expr": [{"counter": {"packets": dropped or 0, "bytes": 0}},
+                             {"drop": None}]}
+            return {"nftables": [{"rule": rule}]} if dropped is not None else {"nftables": []}
+        return mock.patch.object(self.mod, "_nft_json", fake)
+
+    def test_filtered_and_armed_passes_and_counts_entries(self):
+        with self._nft(allow=[("10.0.0.1", 22)], dropped=7):
+            name, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertEqual(name, "vm_egress")
+        self.assertTrue(passed)
+        self.assertIn("1 allow entry", msg)
+
+    def test_filtered_but_not_armed_fails_loudly(self):
+        with self._nft(armed=False):
+            _, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertFalse(passed)
+        self.assertIn("UNFILTERED", msg)
+
+    def test_filtered_with_no_table_fails(self):
+        with self._nft(table=False):
+            _, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertFalse(passed)
+        self.assertIn("absent", msg)
+
+    def test_open_with_no_table_is_consistent(self):
+        with self._nft(table=False):
+            _, passed, _ = self.mod.vm_egress_check(self._config(egress="open"))
+        self.assertTrue(passed)
+
+    def test_open_but_still_armed_fails(self):
+        """A stale element from an earlier config silently filters a VM the
+        operator has since opened up."""
+        with self._nft(armed=True):
+            _, passed, msg = self.mod.vm_egress_check(self._config(egress="open"))
+        self.assertFalse(passed)
+        self.assertIn("stale", msg)
+
+    def test_open_and_not_armed_passes(self):
+        with self._nft(armed=False):
+            _, passed, _ = self.mod.vm_egress_check(self._config(egress="open"))
+        self.assertTrue(passed)
+
+    def test_bridged_vm_is_skipped_entirely(self):
+        self.assertIsNone(self.mod.vm_egress_check(self._config(bridge="br0")))
+
+    def test_drop_count_is_reported_as_shared_not_per_workload(self):
+        """One drop rule guarded on set membership serves every filtered
+        workload, so the counter aggregates them. Presenting it as this VM's
+        would misattribute a sibling's traffic."""
+        with self._nft(dropped=42):
+            _, _, msg = self.mod.vm_egress_check(self._config())
+        self.assertIn("42", msg)
+        self.assertIn("shared", msg)
+
+    def test_missing_user_is_not_reported_here(self):
+        """The user-exists check already says so; repeating it as an egress
+        failure would give one cause two unrelated-looking symptoms."""
+        class NoUser:
+            name, vm_bridge, vm_network = "vm1", None, {"egress": "filtered"}
+
+            @property
+            def uid(self):
+                raise KeyError("_wl-vm1")
+
+        self.assertIsNone(self.mod.vm_egress_check(NoUser()))
+
+
+class TestDropCounterParsing(unittest.TestCase):
+    def test_finds_the_counter_on_the_drop_rule(self):
+        doc = {"nftables": [
+            {"rule": {"expr": [{"counter": {"packets": 1, "bytes": 2}},
+                               {"accept": None}]}},
+            {"rule": {"expr": [{"counter": {"packets": 9, "bytes": 8}},
+                               {"drop": None}]}}]}
+        self.assertEqual(nft_drop_counter(doc), (9, 8))
+
+    def test_none_when_no_drop_rule(self):
+        self.assertIsNone(nft_drop_counter({"nftables": []}))
+        self.assertIsNone(nft_drop_counter(None))
+
+    def test_set_elements_extraction(self):
+        doc = {"nftables": [{"metainfo": {}}, {"set": {"elem": [1, 2]}}]}
+        self.assertEqual(nft_set_elements(doc), [1, 2])
+        self.assertEqual(nft_set_elements({"nftables": []}), [])
+        self.assertEqual(nft_set_elements(None), [])
 
 
 if __name__ == "__main__":

@@ -40,7 +40,11 @@ from provisioning import (
     host_setup_artifacts,
 )
 from validation import uses_host_userns
-from vm import VM_MGMT_SSH_PORT, vm_management_address, vm_nflog_group
+from vm import (
+    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
+    VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, nft_drop_counter, nft_set_elements,
+    vm_management_address, vm_nflog_group, vm_owned_elements,
+)
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
@@ -505,6 +509,87 @@ def vm_network_check(config) -> tuple[str, bool, str]:
             f"capture with 'tcpdump -i nflog:{vm_nflog_group(uid)}'")
 
 
+def _nft_json(*args):
+    """Run `nft -j <args>` and return the parsed document, or None."""
+    try:
+        result = subprocess.run([NFT_BIN, "-j", *args],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return None
+
+
+def vm_egress_check(config) -> tuple[str, bool, str] | None:
+    """Report whether a VM's declared egress posture is actually in force.
+
+    Returns None for workloads the check does not apply to, so the caller can
+    skip emitting a line at all.
+
+    The failure this exists for: a config that says `egress = "filtered"` while
+    the uid is absent from `wl_filtered`. That VM is wide open and every other
+    signal — the unit is active, the guest has network, `status` is green —
+    looks correct. Nothing else in `diagnose` would notice.
+    """
+    if config.vm_bridge is not None:
+        return None                      # unfiltered by design; see vm_network
+    egress = (config.vm_network or {}).get("egress", VM_EGRESS_DEFAULT)
+    try:
+        uid = config.uid
+    except Exception:
+        return None                      # no user yet; check 1 reports it
+
+    table = NFT_TABLE.split()
+    filtered = _nft_json("list", "set", *table, NFT_SET_FILTERED)
+    if filtered is None:
+        if egress != "filtered":
+            return ("vm_egress", True,
+                    f"egress is {egress!r}; no filter table present, which is "
+                    f"consistent")
+        return ("vm_egress", False,
+                f"egress is 'filtered' but the {NFT_TABLE} table is absent, so "
+                f"this VM is NOT filtered. It is rebuilt on the next start: "
+                f"systemctl restart workload-{config.name}.service")
+
+    armed = str(uid) in vm_owned_elements(uid, nft_set_elements(filtered))
+    if egress != "filtered":
+        if armed:
+            return ("vm_egress", False,
+                    f"egress is {egress!r} but uid {uid} is still in "
+                    f"{NFT_SET_FILTERED} — a stale element from an earlier "
+                    f"config is filtering this VM")
+        return ("vm_egress", True, f"egress is {egress!r}; VM is not filtered")
+
+    if not armed:
+        return ("vm_egress", False,
+                f"egress is 'filtered' but uid {uid} is absent from "
+                f"{NFT_SET_FILTERED} — this VM is running UNFILTERED while its "
+                f"config says otherwise. Restart it to re-arm: "
+                f"systemctl restart workload-{config.name}.service")
+
+    allowed = []
+    for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
+        payload = _nft_json("list", "set", *table, set_name)
+        if payload:
+            allowed += vm_owned_elements(uid, nft_set_elements(payload))
+
+    # The drop counter is shared: one rule guarded on set membership serves
+    # every filtered workload, so this is a host-wide total and saying
+    # otherwise would misattribute a sibling's dropped traffic.
+    dropped = nft_drop_counter(_nft_json("list", "chain", *table, "output"))
+    tail = ""
+    if dropped is not None:
+        tail = (f"; {dropped[0]} packets dropped across all filtered VMs "
+                f"(the counter is shared, not per-workload)")
+    return ("vm_egress", True,
+            f"egress filtered on uid {uid} with {len(allowed)} allow "
+            f"entr{'y' if len(allowed) == 1 else 'ies'}{tail}")
+
+
 def subid_derived_check(
     entries: list[tuple[str, tuple[int, int] | None]],
     expected: tuple[int, int],
@@ -951,6 +1036,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     # Scolding an operator for a deliberate choice would be the wrong reading.
     if config.is_vm:
         _check(*vm_network_check(config))
+        egress_result = vm_egress_check(config)
+        if egress_result:
+            _check(*egress_result)
 
     # Check 7f: host trust anchors, for workloads that pull an image. Host-wide
     # state rather than this workload's, reported here for the same reason
