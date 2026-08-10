@@ -98,9 +98,10 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-exporter
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-build-disk
-install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
-%{_libexecdir}/workloadctl/workload-vm-notify
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-qmp
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-shutdown \
@@ -268,6 +269,7 @@ fi
 %{_libexecdir}/workloadctl/workload-write-env
 %{_libexecdir}/workloadctl/workload-exporter
 %{_libexecdir}/workloadctl/workload-vm-build-disk
+%{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown
