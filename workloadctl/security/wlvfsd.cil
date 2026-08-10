@@ -1,0 +1,144 @@
+; wlvfsd: an SELinux domain for the virtiofsd sidecar of a VM workload.
+;
+; WHY THIS EXISTS
+;
+; Once a VM workload's QEMU is confined as svirt_t (ADR 006 step 3), virtiofs
+; volumes break, because SELinux checks `connectto` against the *peer process's
+; domain*, not the socket file's label:
+;
+;   denied { connectto } path="/run/workload-vm/<name>/virtiofs-t0.sock"
+;       scontext=svirt_t tcontext=unconfined_service_t tclass=unix_stream_socket
+;
+; Fedora 44 ships no virtiofsd domain at all — no virtiofsd_t, no
+; virtiofsd_exec_t, no fcontext entry; /usr/libexec/virtiofsd is plain bin_t.
+; (virtiofs_t exists, but that is the *filesystem* type.) So systemd execs our
+; sidecar into unconfined_service_t, and svirt_t may not connect to it.
+;
+; This is not an upstream gap waiting to be filled. libvirt never labels
+; virtiofsd: eight of its QEMU helpers get a child-process label through
+; qemuSecurityCommandRun, and qemu_virtiofs.c is the one that does not — it
+; launches with a plain virCommandRun, so the daemon inherits its parent's
+; domain. Under system-mode libvirt that parent is virtqemud_t, which is in the
+; virt_driver_domain attribute that svirt_t may already connect to; system
+; libvirt works by inheritance rather than by design. A bare systemd sidecar has
+; no such parent. libvirt has no virtiofsd domain because inheritance covers its
+; cases, and the policy has none because libvirt never asked.
+;
+; WHY A DOMAIN RATHER THAN THE BLANKET ALLOW
+;
+; The cheap fix is one rule:
+;
+;   allow svirt_t unconfined_service_t:unix_stream_socket connectto;
+;
+; and it has distro precedent — selinux-policy-40.26-1.fc40 shipped exactly this
+; shape for unconfined_t ("Allow svirt_t connect to unconfined_t over a unix
+; domain socket"), still live in 44.5. But it lets any confined VM reach any
+; unconfined service socket on the host, and it was only ever the cheaper option
+; because the cost of the alternative was unmeasured. It was then measured: the
+; domain below is ordinary rules, no user-namespace machinery, because
+; generate_virtiofsd_service already passes --sandbox=chroot. (Contrast
+; ../../security/pasta_sandbox.cil, which exists precisely because pasta's
+; userns+pivot_root sandbox needs cap_userns and tmpfs_t:dir mounton. Switching
+; the sidecar to --sandbox=namespace would reopen that cost.)
+;
+; A dedicated type also separates virtiofsd from QEMU directly, so MCS
+; categories stay unused (ADR 006 §9.5) — under the blanket allow, every VM's
+; sidecar would share one type and only categories could tell them apart.
+;
+; WHY THIS IS HOST-GLOBAL AND NOT A PER-WORKLOAD BUNDLE
+;
+; Nothing here is per-workload: one process type, one exec type, one entrypoint,
+; and one permission granted to svirt_t. Shipping it through the per-workload
+; `[security].selinux_policy` bundle would mean N identical copies racing
+; semodule, gated on a flag that has nothing to do with whether virtiofs works.
+; The RPM installs and loads it once. The bundle keeps its existing job, the
+; per-workload QEMU delta.
+;
+; NOTE FOR DEPLOYED HOSTS: the policy store lives in /etc, which ostree
+; 3-way-merges, so a `bootc upgrade` does NOT deliver a changed module to a
+; machine whose store has local modifications (the same caveat the image's
+; Containerfile records for its own CIL modules). `workloadctl diagnose` reports
+; whether this module is loaded so the gap is visible rather than silent.
+
+; ---------------------------------------------------------------------------
+; Declarations
+; ---------------------------------------------------------------------------
+(type wlvfsd_t)
+(typeattributeset domain (wlvfsd_t))
+(roletype system_r wlvfsd_t)
+
+(type wlvfsd_exec_t)
+(typeattributeset file_type (wlvfsd_exec_t))
+(typeattributeset exec_type (wlvfsd_exec_t))
+(typeattributeset entry_type (wlvfsd_exec_t))
+
+; Retyping the binary is what keeps the entrypoint narrow. virtiofsd is
+; unlabelled (bin_t), so a domain that took bin_t as its entrypoint would make
+; *every* bin_t binary an entry into wlvfsd_t. This is the same shape the
+; shipped policy already uses for swtpm and passt — and, one directory over, for
+; QEMU itself: /usr/libexec/qemu-kvm is qemu_exec_t, not bin_t.
+;
+; A filecon is safe here specifically. file_contexts.local outranks the base
+; file_contexts wholesale, so most-specific-wins applies only within one source
+; — which is why the per-workload svirt_image_t rule must go through semanage
+; and cannot ship as a filecon. Nothing registers /usr/libexec in
+; file_contexts.local, so this rule competes with the base /usr/libexec/.*
+; entry within one source, where specificity does apply.
+(filecon "/usr/libexec/virtiofsd" file (system_u object_r wlvfsd_exec_t ((s0) (s0))))
+
+; ---------------------------------------------------------------------------
+; Entry: a type transition on the retyped binary, no wrapper
+; ---------------------------------------------------------------------------
+; The sidecar needs none of the runcon machinery the QEMU unit uses, because it
+; has a real exec to transition on rather than a Python wrapper.
+(typetransition init_t wlvfsd_exec_t process wlvfsd_t)
+(allow init_t wlvfsd_exec_t (file (getattr open read execute map)))
+(allow init_t wlvfsd_t (process (transition)))
+(allow wlvfsd_t wlvfsd_exec_t (file (entrypoint execute map getattr ioctl open read)))
+(allow wlvfsd_t init_t (fd (use)))
+(allow wlvfsd_t init_t (fifo_file (append getattr ioctl lock read write)))
+
+; ---------------------------------------------------------------------------
+; What virtiofsd actually does
+; ---------------------------------------------------------------------------
+; Harvested permissive on Fedora 44. Every rule is ordinary: read the shared
+; directory, create the socket, sd_notify back to systemd, NSS lookup for
+; --socket-group, chroot.
+
+; chown: root virtiofsd applies guest-requested ownership on create/chown, which
+; is the whole reason the unit runs as root (see generate_virtiofsd_service).
+; sys_chroot is --sandbox=chroot. There is deliberately no cap_userns or
+; mounton here; if those appear, the sandbox mode changed.
+(allow wlvfsd_t self (capability (chown dac_read_search setpcap sys_chroot sys_resource)))
+(allow wlvfsd_t self (process (setcap setrlimit)))
+
+; The shared dir lives under /var/lib/workloads/<name>/, which a VM workload's
+; per-workload fcontext rule labels svirt_image_t at enable.
+(allow wlvfsd_t svirt_image_t (dir (getattr open read search)))
+
+; /run/workload-vm(/.*)? is svirt_var_run_t — an alias of qemu_var_run_t, which
+; CIL resolves to. Registered by the RPM's %post, not per workload.
+(allow wlvfsd_t qemu_var_run_t (dir (add_name getattr search write)))
+(allow wlvfsd_t qemu_var_run_t (file (getattr lock open write)))
+(allow wlvfsd_t qemu_var_run_t (sock_file (create setattr)))
+
+; sd_notify, and the NSS lookups --socket-group=<user> needs.
+(allow wlvfsd_t init_t (unix_stream_socket (connectto ioctl)))
+(allow wlvfsd_t systemd_userdbd_t (unix_stream_socket (connectto)))
+(allow wlvfsd_t systemd_homed_t (unix_stream_socket (connectto)))
+(allow wlvfsd_t systemd_userdbd_runtime_t (dir (getattr open read search)))
+(allow wlvfsd_t systemd_userdbd_runtime_t (lnk_file (read)))
+(allow wlvfsd_t systemd_userdbd_runtime_t (sock_file (write)))
+(allow wlvfsd_t passwd_file_t (file (getattr open read)))
+(allow wlvfsd_t init_var_run_t (dir (search)))
+
+(allow wlvfsd_t sysctl_fs_t (dir (search)))
+(allow wlvfsd_t sysctl_fs_t (file (getattr open read)))
+(allow wlvfsd_t nsfs_t (file (getattr)))
+
+; ---------------------------------------------------------------------------
+; The one line this module exists for
+; ---------------------------------------------------------------------------
+; Replaces the blanket `svirt_t -> unconfined_service_t` connectto with a grant
+; scoped to exactly the daemon QEMU is supposed to be talking to.
+(allow svirt_t wlvfsd_t (unix_stream_socket (connectto)))

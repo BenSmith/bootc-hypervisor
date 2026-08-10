@@ -1588,6 +1588,14 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     # guest user gets EPERM. The map is internal to virtiofsd (no user
     # namespace needed, compatible with --sandbox=chroot); all other guest
     # uids/gids still pass through 1:1, preserving multi-user sharing.
+    #
+    # --sandbox=chroot is now LOAD-BEARING FOR CONFINEMENT as well, which is not
+    # obvious from the uid-fidelity reason above. security/wlvfsd.cil confines
+    # this daemon in 18 ordinary rules precisely because chroot mode needs only
+    # sys_chroot — no cap_userns, no mounton, none of the pivot_root machinery
+    # that made pasta's sandbox expensive to allow (see
+    # security/pasta_sandbox.cil in the image repo). Switching to
+    # --sandbox=namespace would reopen that cost and require the module to grow.
     svc.set("Environment", f'"HOME={home_dir}"')
     svc.set("ExecStart", virtiofsd_cmd)
     # Wait for virtiofsd to create the socket before QEMU starts.

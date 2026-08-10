@@ -42,8 +42,10 @@ from provisioning import (
 from validation import uses_host_userns
 from vm import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
-    VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, nft_drop_counter, nft_set_elements,
-    vm_management_address, vm_nflog_group, vm_owned_elements,
+    VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
+    VM_SOCKET_DIR, WLVFSD_CIL, WLVFSD_MODULE, nft_drop_counter,
+    nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
+    vm_owned_elements,
 )
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
@@ -522,6 +524,116 @@ def _nft_json(*args):
         return json.loads(result.stdout)
     except ValueError:
         return None
+
+
+# Sentinel for "measure this yourself", distinct from None, which several of
+# these observations use to mean a real state (not running / could not ask).
+PROBE = object()
+
+
+def _selinux_module_loaded(module: str) -> bool | None:
+    """Whether `semodule -l` lists `module`. None if it could not be asked."""
+    try:
+        result = subprocess.run(["semodule", "-l"],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return module in result.stdout.split()
+
+
+def _vm_qemu_context(name: str) -> str | None:
+    """SELinux context of the running QEMU for `name`, or None if not found.
+
+    Found by its QMP socket path in /proc/<pid>/cmdline rather than by walking
+    down from the unit's MainPID, because MainPID is workload-vm-notify: runcon
+    execs QEMU in its own process, so QEMU is the wrapper's child, not the
+    service's main process.
+    """
+    needle = f"{VM_SOCKET_DIR}/{name}/qmp.sock".encode()
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry.name}/cmdline", "rb") as fh:
+                if needle not in fh.read():
+                    continue
+            with open(f"/proc/{entry.name}/attr/current") as fh:
+                return fh.read().strip("\x00\n")
+        except OSError:
+            continue        # the process exited mid-scan, or we may not look
+    return None
+
+
+def vm_confinement_check(config, *, enabled=PROBE, module_loaded=PROBE,
+                         qemu_context=PROBE) -> tuple[str, bool, str] | None:
+    """Report whether a running VM is actually confined as svirt_t.
+
+    The observations are injectable so the verdict logic is testable without a
+    live host; each defaults to the PROBE sentinel and is measured here. The
+    sentinel is not None, because None is a meaningful *observation* for two of
+    the three — "the VM is not running" and "semodule could not be asked" — and
+    conflating those with "go and look" would make them untestable.
+
+    Two failures this exists for, both of which leave every other signal green.
+    A VM whose QEMU never entered `svirt_t` (runcon absent, the transition
+    refused, an old unit still live after an upgrade) runs
+    `unconfined_service_t` while the disks are labelled and the module is
+    loaded — it looks confined from every direction except the one that counts.
+    And a host missing `wlvfsd` breaks virtiofs volumes for a confined VM, which
+    surfaces as a guest that boots without its shares rather than as anything
+    naming SELinux.
+
+    That second one is specifically a bootc hazard: the policy store lives in
+    /etc, which ostree 3-way-merges, so `bootc upgrade` does not deliver the
+    module to a host that has ever loaded a per-workload policy locally.
+    """
+    if not config.is_vm:
+        return None
+
+    if enabled is PROBE:
+        enabled = selinux_enabled()
+    if not enabled:
+        # Not a lapse to scold: SELinux disabled is the host's posture, and the
+        # VM runs exactly as it did before confinement shipped. Say so plainly.
+        return ("vm_confinement", True,
+                "SELinux is disabled on this host; the VM runs unconfined "
+                "(nftables egress policy is unaffected — it keys on the uid)")
+
+    if module_loaded is PROBE:
+        module_loaded = _selinux_module_loaded(WLVFSD_MODULE)
+    if qemu_context is PROBE:
+        qemu_context = _vm_qemu_context(config.name)
+
+    has_volumes = bool(config.config.get("vm", {}).get("volumes"))
+
+    if qemu_context is not None:
+        qemu_type = qemu_context.split(":")[2] if qemu_context.count(":") >= 2 \
+            else qemu_context
+        if qemu_type != VM_QEMU_TYPE:
+            return ("vm_confinement", False,
+                    f"QEMU is running as {qemu_type}, not {VM_QEMU_TYPE} — this "
+                    f"VM is NOT confined. Check that {VM_RUNCON_BIN} exists and "
+                    f"restart it: systemctl restart "
+                    f"workload-{config.name}.service")
+
+    if has_volumes and module_loaded is False:
+        return ("vm_confinement", False,
+                f"the {WLVFSD_MODULE} SELinux module is not loaded, so a "
+                f"confined QEMU cannot connect to this VM's virtiofsd sockets "
+                f"and its volumes will not mount. Load it: "
+                f"semodule -i {WLVFSD_CIL}")
+
+    if qemu_context is None:
+        state = {True: "loaded", False: "NOT loaded", None: "unknown"}[module_loaded]
+        return ("vm_confinement", True,
+                f"VM is not running; {WLVFSD_MODULE} module {state}")
+
+    tail = "" if not has_volumes else \
+        f", {WLVFSD_MODULE} module " + \
+        {True: "loaded", False: "NOT loaded", None: "state unknown"}[module_loaded]
+    return ("vm_confinement", True, f"QEMU confined as {VM_QEMU_TYPE}{tail}")
 
 
 def vm_egress_check(config) -> tuple[str, bool, str] | None:
@@ -1039,6 +1151,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         egress_result = vm_egress_check(config)
         if egress_result:
             _check(*egress_result)
+        confinement_result = vm_confinement_check(config)
+        if confinement_result:
+            _check(*confinement_result)
 
     # Check 7f: host trust anchors, for workloads that pull an image. Host-wide
     # state rather than this workload's, reported here for the same reason

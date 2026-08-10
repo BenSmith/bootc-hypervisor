@@ -20,6 +20,7 @@ about which script and which name, or the check inspects the wrong host.
 import difflib
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -799,6 +800,40 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
     # Without -F this migration silently never happens.
     subprocess.run(["restorecon", "-RF", str(workload_root_dir(config.name))],
                    check=False, capture_output=True)
+
+
+# Path prefixes workloadctl registers in file_contexts.local (the blanket rule
+# from the RPM's %post, plus every per-workload VM rule under the same root).
+# A CIL filecon anywhere under these is unreachable — see below.
+LOCAL_FCONTEXT_ROOTS = ("/var/lib/workloads", "/run/workload-vm")
+
+# CIL is s-expressions, so a filecon is `(filecon "<path>" <class> <context>)`.
+_CIL_FILECON_RE = re.compile(r'\(\s*filecon\s+"([^"]*)"')
+
+
+def shadowed_filecon_paths(cil_text: str) -> list[str]:
+    """Paths in a bundle's `policy.cil` whose `filecon` will be silently ignored.
+
+    A module's filecon lands in the base `file_contexts`, and
+    `file_contexts.local` outranks the base file *wholesale* — most-specific-wins
+    applies only within one source. So a filecon under a path workloadctl has
+    registered via semanage does not conflict with that rule and does not lose
+    on specificity; it is simply never consulted. The label an operator asked
+    for is not applied, nothing errors, and the module loads clean.
+
+    Filecons elsewhere are fine and are how `security/wlvfsd.cil` retypes
+    /usr/libexec/virtiofsd: nothing registers /usr/libexec in `.local`, so that
+    rule competes within the base file where specificity does apply.
+    """
+    shadowed = []
+    for path in _CIL_FILECON_RE.findall(cil_text):
+        # CIL filecons may be literal paths or regexes; either way the leading
+        # literal segment is what decides which source file the entry lands
+        # against, so a plain prefix test is the right comparison.
+        if any(path == root or path.startswith(root + "/")
+               for root in LOCAL_FCONTEXT_ROOTS):
+            shadowed.append(path)
+    return shadowed
 
 
 def apply_selinux_policy(config: WorkloadConfig, action: str):

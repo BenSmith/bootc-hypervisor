@@ -17,6 +17,7 @@ from workload_lib import (
     expand_volume_path,
     GENERATOR_OWNED_DIRECTIVES,
 )
+from provisioning import shadowed_filecon_paths
 from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
 from validation import (
     collect_config_warnings,
@@ -254,6 +255,35 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                    f'[workload] bundle = "{raw_selinux}".',
         })
         warnings += 1
+
+    # A `filecon` in a bundle's policy.cil under a path workloadctl registers
+    # with semanage is inert: the module's entry lands in the base
+    # file_contexts, and file_contexts.local outranks that file wholesale. The
+    # module loads clean, nothing errors, and the label is simply never applied
+    # — invisible unless someone runs matchpathcon, which is why validate says
+    # it. (This is also why the per-workload VM rule is semanage and not CIL.)
+    if config.selinux_policy:
+        try:
+            cil_text = config.resolve_control_file("policy.cil").read_text()
+        except OSError:
+            cil_text = ""   # a missing template is apply_selinux_policy's error
+        shadowed = shadowed_filecon_paths(cil_text)
+        if shadowed:
+            paths = ", ".join(shadowed)
+            checks.append({
+                "check": "selinux_filecon_shadowed",
+                "passed": False,
+                "severity": "warning",
+                "message": f"policy.cil declares filecon for {paths}, which "
+                           f"workloadctl registers in file_contexts.local. "
+                           f".local outranks the base file_contexts wholesale, "
+                           f"so the module's rule is never consulted and the "
+                           f"label is silently not applied.",
+                "fix": "Drop the filecon; label that tree with semanage "
+                       "instead (VM workloads already get svirt_image_t at "
+                       "enable). filecon is fine outside these paths.",
+            })
+            warnings += 1
 
     # [build] / [containers.build]: a containerfile names a file *inside* the
     # build context, so it must be a plain relative path (no traversal). Checked

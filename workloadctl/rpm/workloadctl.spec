@@ -135,6 +135,13 @@ install -Dpm 0644 %{_sourcedir}/seccomp-workload-baseline.json \
 install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
     %{buildroot}%{_datadir}/workloadctl/workload-filter.nft
 
+# The virtiofsd domain. Host-global and mandatory, so it ships with the package
+# that spawns the sidecar rather than through the per-workload
+# [security].selinux_policy bundle — see the header of the file itself. Loaded
+# by %%post, not by any unit.
+install -Dpm 0644 %{_sourcedir}/security/wlvfsd.cil \
+    %{buildroot}%{_datadir}/workloadctl/wlvfsd.cil
+
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
 
@@ -215,6 +222,26 @@ if [ -x /usr/sbin/semanage ]; then
     semanage fcontext -a -t container_file_t '/var/lib/workloads(/.*)?' 2>/dev/null || :
     semanage fcontext -a -t svirt_var_run_t '/run/workload-vm(/.*)?' 2>/dev/null || :
 fi
+# The virtiofsd domain (ADR 006 step 3). Host-global and mandatory: once QEMU is
+# confined, virtiofs volumes stop working without it, so it is not gated on the
+# opt-in [security].selinux_policy flag. Loading is idempotent, so an upgrade
+# that changes the module content picks the change up here.
+#
+# The filecon inside the module retypes /usr/libexec/virtiofsd, and semodule
+# does not relabel existing files, so restorecon after loading. Plain restorecon
+# suffices: bin_t is not a customizable type, unlike the container_file_t /
+# svirt_image_t pair under /var/lib/workloads that needs -F.
+#
+# CAVEAT for deployed bootc hosts: the policy store lives in /etc, which ostree
+# 3-way-merges, so a `bootc upgrade` does not deliver this to a machine whose
+# store carries local modules (which is any host that has ever run
+# `workloadctl enable` on a selinux_policy workload). `workloadctl diagnose`
+# reports whether the module is loaded, with the command to load it by hand.
+if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/wlvfsd.cil ]; then
+    if semodule -i %{_datadir}/workloadctl/wlvfsd.cil 2>/dev/null; then
+        restorecon /usr/libexec/virtiofsd 2>/dev/null || :
+    fi
+fi
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -263,6 +290,13 @@ fi
 if [ $1 -eq 0 ]; then
     semanage fcontext -d '/var/lib/workloads(/.*)?' 2>/dev/null || :
     semanage fcontext -d '/run/workload-vm(/.*)?' 2>/dev/null || :
+    # ...and the virtiofsd domain. Removing the module drops its filecon, so
+    # restore the binary to bin_t rather than leaving it labelled for a type
+    # that no longer exists.
+    if [ -x /usr/sbin/semodule ]; then
+        semodule -r wlvfsd 2>/dev/null || :
+        restorecon /usr/libexec/virtiofsd 2>/dev/null || :
+    fi
 fi
 
 %files

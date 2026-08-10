@@ -321,13 +321,29 @@ class WorkloadConfig:
 
     @property
     def selinux_policy(self) -> bool:
-        """Whether this workload ships a per-workload SELinux type (wl_<name>.process).
+        """Whether this workload ships a CIL policy module of its own.
 
-        When set, enable/disable load/remove the bundle's CIL policy
-        (`policy.cil`) as a name-keyed module, and the generator labels the
-        container with the matching type. Boolean-only — the bundle the CIL is
-        sourced from is the resolved `[workload] bundle` (see `selinux_bundle`),
-        which subsumes the old string form of this field.
+        When set, enable/disable load/remove the bundle's `policy.cil` as a
+        name-keyed module. Boolean-only — the bundle the CIL is sourced from is
+        the resolved `[workload] bundle` (see `selinux_bundle`), which subsumes
+        the old string form of this field.
+
+        **What the module means differs by substrate.** On a container workload
+        it declares the per-workload process type `wl_<name>.process`, which the
+        generator hands to podman as `--security-opt=label=type:`. A VM workload
+        makes no podman call, so nothing ever applies that type: under ADR 006
+        step 3 the VM runs as `svirt_t` (see `vm.VM_QEMU_CONTEXT`), and a VM's
+        `policy.cil` is a *delta against `svirt_t`* rather than a udica-style
+        container type. The flag is worth keeping for both — "this workload
+        ships a policy delta" is true either way and the load/remove mechanism
+        is identical — but a VM bundle that declares `wl_<name>.process`
+        expecting it to be applied is writing a type with no consumer.
+
+        Two things this flag does NOT cover, both host-global and therefore
+        ungated by it: the per-workload `svirt_image_t` fcontext rule (semanage,
+        registered at enable on `is_vm`, because labelling is a precondition for
+        the VM booting at all rather than optional hardening), and the virtiofsd
+        domain in `security/wlvfsd.cil`, which the RPM loads once.
         """
         return bool(self.config.get("security", {}).get("selinux_policy", False))
 

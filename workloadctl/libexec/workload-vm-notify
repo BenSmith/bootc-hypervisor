@@ -16,7 +16,7 @@ import time
 
 sys.dont_write_bytecode = True
 
-from vm import VM_SOCKET_DIR
+from vm import VM_SOCKET_DIR, qemu_launch_argv
 from qmp import QMPClient
 
 
@@ -100,7 +100,12 @@ def main():
 
     # Start QEMU as a child process. We stay alive to hold the service's
     # main PID; systemd tracks *us* for cgroup membership.
-    proc = subprocess.Popen(qemu_cmd, stdin=subprocess.DEVNULL)
+    #
+    # qemu_launch_argv prefixes runcon so QEMU enters svirt_t (ADR 006 step 3).
+    # runcon execs QEMU in its own process rather than forking, so `proc` is
+    # still QEMU itself — the pid we signal below and the pid systemd sees are
+    # unchanged by confinement.
+    proc = subprocess.Popen(qemu_launch_argv(qemu_cmd), stdin=subprocess.DEVNULL)
 
     # Forward SIGTERM/SIGINT to QEMU. In a normal stop the graceful ExecStop
     # (workload-vm-shutdown) has already powered the guest off and QEMU has
