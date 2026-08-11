@@ -42,8 +42,15 @@ class VMTarget(Target):
     """
 
     def __init__(self, *, port, key_path, qmp_sock, pid_path, run_dir,
-                 user="wlrt", host="127.0.0.1", swtpm_pid_path=None):
+                 user="wlrt", host="127.0.0.1", swtpm_pid_path=None,
+                 harness_mode=None):
         super().__init__(dest=f"{user}@{host}")
+        # Which fidelity booted this guest, "dev" or "gate". Tests need it
+        # because the two modes differ in more than fidelity: gate deliberately
+        # does not deploy a source tree (workloadctl comes from the image), so
+        # a check that rebuilds the RPM has nothing to rebuild from. `dest` is
+        # identical in both modes, so this cannot be recovered after the fact.
+        self.harness_mode = harness_mode
         self._setup_mux()
         # SSH options injected into every master + session ssh invocation.
         self._ssh_opts = [

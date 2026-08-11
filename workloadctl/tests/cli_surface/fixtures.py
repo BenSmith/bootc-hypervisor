@@ -61,6 +61,30 @@ def skip_if_no_br0(target: Target):
         pytest.skip("requires br0 bridge interface")
 
 
+def skip_if_no_source_tree(target: Target):
+    """Skip a check that rebuilds the RPM from a tree inside the guest.
+
+    Not a capability gate — a deliberate consequence of what gate mode is.
+    Gate boots the real bootc image and does NOT deploy a source tree, because
+    workloadctl arrives *in the image*; that is the whole property gate exists
+    to verify (`vmlaunch.launch`: `do_deploy = False`). So `~/clitest-src` is
+    correctly absent there, and a check that rebuilds and reinstalls the RPM
+    has nothing to rebuild from.
+
+    Making gate deploy instead would be the wrong fix twice over: it would
+    overwrite the image's workloadctl with a locally built one, destroying the
+    fidelity gate is for, and dev mode already covers RPM upgrade mechanics.
+
+    Only VM targets carry a mode. A hand-provisioned `user@host` or `local`
+    target is left alone, since whether it has a source tree is the operator's
+    business (see conftest's --deploy).
+    """
+    if getattr(target, "harness_mode", None) == "gate":
+        pytest.skip(
+            "gate mode boots the shipped bootc image and deploys no source "
+            "tree — RPM rebuild/upgrade mechanics are dev mode's job")
+
+
 # OVMF firmware search order, mirroring vm.OVMF_CODE_CANDIDATES — the
 # VM path's own pre-flight (lib/provisioning.py) requires one of these plus the
 # qemu binaries + socat. The bootc hypervisor image bakes the whole toolchain;

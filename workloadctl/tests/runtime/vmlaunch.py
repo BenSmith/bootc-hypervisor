@@ -651,6 +651,7 @@ def launch(mode: str, *, mem_mib: int = 2048, vcpus: int = 2,
             qmp_sock=run_dir / "qmp.sock", pid_path=run_dir / "vm.pid",
             run_dir=run_dir,
             swtpm_pid_path=(run_dir / "swtpm.pid") if tpm_sock else None,
+            harness_mode=mode,
         )
         try:
             target.wait_ready(timeout=240.0)

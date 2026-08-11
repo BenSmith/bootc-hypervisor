@@ -44,7 +44,8 @@ import json
 
 import pytest
 
-from fixtures import _enable_workload, _install_toml, _purge_workload, dump_journal
+from fixtures import (_enable_workload, _install_toml, _purge_workload,
+                      dump_journal, skip_if_no_source_tree)
 
 pytestmark = pytest.mark.runtime
 
@@ -95,7 +96,14 @@ def _reinstall(target):
 
 def test_upgrade_under_a_running_workload(target):
     """N -> N+1 leaves the workload running and its state intact, reports the
-    unit/build skew without reporting drift, and clears on re-enable."""
+    unit/build skew without reporting drift, and clears on re-enable.
+
+    Dev mode only. This rebuilds the RPM from the tree the harness deployed
+    into the guest, and gate mode deliberately deploys no tree — the first
+    end-to-end gate run failed here on a missing ~/clitest-src, which was this
+    check's premise not holding rather than anything being wrong.
+    """
+    skip_if_no_source_tree(target)
     _install_toml(target, f"{WORKLOAD}.toml")
     try:
         try:
