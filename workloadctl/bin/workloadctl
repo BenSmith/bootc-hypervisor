@@ -32,6 +32,7 @@ from cmd_cleanup import cmd_cleanup
 from cmd_disable import cmd_disable
 from cmd_enable import cmd_enable
 from cmd_interact import cmd_cp, cmd_exec, cmd_incant, cmd_logs, cmd_shell
+from cmd_pcap import cmd_pcap
 from cmd_lifecycle import (
     cmd_build, cmd_reboot, cmd_recreate, cmd_restart, cmd_start, cmd_stop,
 )
@@ -277,6 +278,61 @@ def main():
     logs_parser.add_argument("extra_args", nargs=argparse.REMAINDER,
                              metavar="[-- JOURNALCTL_ARGS]",
                              help="Additional journalctl arguments (after WORKLOAD)")
+
+    # pcap — tcpdump's surface, because the people who reach for this already
+    # know tcpdump. A vantage is an interface, which needs no new concept.
+    pcap_parser = subparsers.add_parser(
+        "pcap", help="Capture a workload's traffic (host and/or guest vantage)")
+    pcap_parser.set_defaults(func=cmd_pcap)
+    pcap_parser.add_argument("-i", "--interface", metavar="VANTAGE",
+                             action="append",
+                             help="host | guest. Repeatable. Default: host")
+    pcap_parser.add_argument("-D", "--list-interfaces", action="store_true",
+                             help="List this workload's vantages and exit")
+    pcap_parser.add_argument("-Q", "--direction", choices=["in", "out", "inout"],
+                             help="Direction to capture (default: inout)")
+    pcap_parser.add_argument("-s", "--snapshot-length", metavar="SPEC",
+                             help="Bytes kept per packet: 128, or "
+                                  "guest:1500,host:0. 0 means no truncation "
+                                  "(default: 1500)")
+    pcap_parser.add_argument("-w", "--write", metavar="PATH",
+                             help="Write pcapng instead of decoding. '-' is "
+                                  "stdout; a directory with >1 vantage")
+    pcap_parser.add_argument("--detach", action="store_true",
+                             help="Start the capture and return (requires -w)")
+    pcap_parser.add_argument("-c", "--packet-count", type=int, metavar="N",
+                             help="Stop after N packets")
+    pcap_parser.add_argument("-C", "--rotate-size", type=int, metavar="N",
+                             help="Rotate at N million bytes (tcpdump's unit)")
+    pcap_parser.add_argument("-W", "--file-count", type=int, metavar="N",
+                             help="Cap rotation at N files, reused as a ring")
+    pcap_parser.add_argument("-G", "--rotate-seconds", type=int, metavar="N",
+                             help="Rotate every N seconds")
+    pcap_parser.add_argument("--duration", metavar="D",
+                             help="Stop after D (30s, 5m, 1h). 0 disables "
+                                  "(default: 5m)")
+    pcap_parser.add_argument("--max-size", metavar="S",
+                             help="Stop at S (100M, 2G) (default: 100M)")
+    pcap_parser.add_argument("-n", dest="numeric", action="store_true",
+                             help="Do not resolve addresses to names")
+    pcap_parser.add_argument("-q", "--quiet", action="store_true",
+                             help="Suppress prose; warnings and errors still print")
+    pcap_parser.add_argument("--json", action="store_true",
+                             help="Machine-readable result object (requires -w)")
+    pcap_parser.add_argument("--dry-run", action="store_true",
+                             help="Print the plan and exit, changing nothing")
+    pcap_parser.add_argument("--list", action="store_true",
+                             help="List running captures and exit")
+    pcap_parser.add_argument("--stop", action="store_true",
+                             help="Stop the capture on WORKLOAD")
+    pcap_parser.add_argument("workload", nargs="?",
+                             metavar="WORKLOAD[/CONTAINER]",
+                             help="Workload. Required except with --list")
+    # Everything after WORKLOAD is a BPF filter, taken verbatim — the same
+    # passthrough shape `logs` uses for journalctl arguments.
+    pcap_parser.add_argument("filter", nargs=argparse.REMAINDER,
+                             metavar="[FILTER ...]",
+                             help="BPF filter, tcpdump syntax")
 
     reboot_parser = subparsers.add_parser("reboot", help="Soft-reboot a systemd container (keeps overlay)",
                                           parents=[mutating])

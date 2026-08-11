@@ -41,6 +41,13 @@ Requires:       nftables
 # such a VM is filtered default-deny with the proxy as its only route out, so a
 # missing binary is not a degraded feature but a VM that cannot reach anything.
 Requires:       tinyproxy
+# `workloadctl pcap` reads the host-side vantage back through tcpdump and
+# corrects a VM guest-side capture's timestamps with editcap/capinfos. Weak
+# dependencies: capture is a diagnostic, and a host that never runs one should
+# not carry the tools — `pcap -D` reports what is missing rather than failing
+# at the point of use.
+Recommends:     tcpdump
+Suggests:       wireshark-cli
 Suggests:       qemu-kvm
 Suggests:       virtiofsd
 
@@ -101,6 +108,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-write-env \
     %{buildroot}%{_libexecdir}/workloadctl/workload-write-env
 install -Dpm 0755 %{_sourcedir}/libexec/workload-exporter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-exporter
+install -Dpm 0755 %{_sourcedir}/libexec/workload-pcap \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-pcap
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-build-disk \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-build-disk
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-filter \
@@ -336,6 +345,7 @@ fi
 %{_libexecdir}/workloadctl/workload-ensure-user
 %{_libexecdir}/workloadctl/workload-write-env
 %{_libexecdir}/workloadctl/workload-exporter
+%{_libexecdir}/workloadctl/workload-pcap
 %{_libexecdir}/workloadctl/workload-vm-build-disk
 %{_libexecdir}/workloadctl/workload-vm-filter
 %{_libexecdir}/workloadctl/workload-vm-netdev

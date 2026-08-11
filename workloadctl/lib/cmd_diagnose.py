@@ -52,6 +52,7 @@ from vm import (
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
+from pcap import PCAP_INPUT_CHAIN, pcap_unit_name
 
 
 def _gpu_vendors(config) -> set[str]:
@@ -714,6 +715,67 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
             f"entr{'y' if len(allowed) == 1 else 'ies'}{tail}")
 
 
+def capture_check(config, *, unit_active=PROBE, log_rules=PROBE
+                  ) -> tuple[str, bool, str] | None:
+    """Report a running capture, so its extra rule is explained rather than found.
+
+    `pcap` is the one read-flavoured command that writes into the
+    security-critical `inet workload_filter` table. The rule it adds is
+    non-terminating and cannot change accept/drop semantics, but an operator
+    who finds an unexplained rule there is right to be alarmed — so diagnose
+    names it, names the unit that owns it, and says how it goes away.
+
+    Both outcomes are passes. A capture is a deliberate act, not a fault. The
+    line is omitted entirely when nothing is capturing, so this costs a
+    healthy workload nothing.
+    """
+    if unit_active is PROBE:
+        unit_active = service_active(pcap_unit_name(config.name))
+    if log_rules is PROBE:
+        log_rules = _log_rule_count()
+
+    if not unit_active and not log_rules:
+        return None
+
+    unit = pcap_unit_name(config.name)
+    if unit_active:
+        return ("capture", True,
+                f"a packet capture is running ({unit}). It adds a "
+                f"non-terminating `log` rule to {NFT_TABLE}, which cannot "
+                f"change accept/drop semantics and is removed when the "
+                f"capture stops: workloadctl pcap --stop {config.name}")
+
+    # Rules with no unit: a stale artefact rather than an active capture, and
+    # the one state worth flagging — the unit's ExecStopPost should have taken
+    # them, so something removed the unit without running it.
+    return ("capture", False,
+            f"{log_rules} `log` rule(s) remain in {NFT_TABLE} with no capture "
+            f"unit running. They are non-terminating and change no policy, but "
+            f"nothing owns them now. Clear them: nft delete table "
+            f"{NFT_TABLE}  (the skeleton is rebuilt on the next VM start)")
+
+
+def _log_rule_count() -> int:
+    """How many `log` rules the filter table currently carries."""
+    total = 0
+    for chain in ("output", PCAP_INPUT_CHAIN):
+        total += _count_log_rules(
+            _nft_json("list", "chain", *NFT_TABLE.split(), chain))
+    return total
+
+
+def _count_log_rules(payload) -> int:
+    count = 0
+    for item in (payload or {}).get("nftables", []):
+        rule = item.get("rule")
+        if not rule:
+            continue
+        if any("log" in expr for expr in rule.get("expr", [])
+               if isinstance(expr, dict)):
+            count += 1
+    return count
+
+
 def vm_proxy_check(config, *, elements=PROBE, address_present=PROBE
                    ) -> tuple[str, bool, str] | None:
     """Report whether a VM's hostname policy is actually reachable.
@@ -1268,6 +1330,12 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         proxy_result = vm_proxy_check(config)
         if proxy_result:
             _check(*proxy_result)
+
+    # Not gated on is_vm: the host-side vantage works on every substrate,
+    # because `meta skuid` does not care what produced the socket.
+    capture_result = capture_check(config)
+    if capture_result:
+        _check(*capture_result)
 
     # Check 7f: host trust anchors, for workloads that pull an image. Host-wide
     # state rather than this workload's, reported here for the same reason

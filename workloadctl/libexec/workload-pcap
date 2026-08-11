@@ -1,0 +1,509 @@
+#!/usr/bin/python3
+"""
+workload-pcap: run one capture, and take its rules down again whatever happens.
+
+Usage: workload-pcap run <name> <plan-json>
+
+Runs as the whole of a transient `workload-pcap-<name>.service`. That unit —
+not a try/finally in the CLI — is what guarantees teardown: it survives a
+dropped session, a `kill -9` of the CLI, and a reboot, and its RuntimeMaxSec is
+the capture's duration bound.
+
+The plan arrives as JSON rather than being re-derived here. If this program
+recomputed it from the config the two could disagree, and the contract of
+`pcap --dry-run` is precisely that what was printed is what runs.
+
+WHAT IT INSTALLS
+
+  host   a non-terminating `log` rule in inet workload_filter's output chain,
+         plus (for -Q in/inout) a pcap_input chain carrying one rule selected
+         by conntrack mark. Read back with `tcpdump -i nflog:<group>`.
+  guest  for a VM, a filter-dump object added over QMP; for a container,
+         tcpdump inside the workload's own network namespace.
+
+Both are removed on the way out — in a finally, and again by the unit's
+ExecStopPost if this process never reaches it.
+
+TIMESTAMPS ON A VM'S GUEST-SIDE CAPTURE
+
+filter-dump stamps packets with QEMU_CLOCK_VIRTUAL + start_ts, which is wrong
+twice: the clock counts from VM start rather than capture start, and start_ts
+reinterprets the guest's UTC RTC as host local time. The offset is therefore
+`VM uptime + host UTC offset`, and only the first term is guessable. So it is
+measured instead — the wall-clock time of a probe packet this program emits is
+compared with the timestamp that packet carries in the finished file, and
+`editcap -t` shifts by the difference. That needs nothing from the guest and is
+immune to both error terms.
+"""
+import json
+import os
+import pwd
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+from pcap import (
+    PCAP_INPUT_CHAIN, VANTAGE_GUEST, VANTAGE_HOST, filter_dump_id,
+    filter_dump_object, guest_staging_path, log_rule_handles, nflog_group,
+    pcap_delete_command, pcap_rule_commands, tcpdump_argv,
+)
+from vm import (
+    NFT_BIN, NFT_TABLE, NFT_SKELETON, VM_MGMT_SSH_PORT, VM_SOCKET_DIR,
+    vm_management_address,
+)
+from qmp import QMPClient
+
+EDITCAP = "/usr/bin/editcap"
+
+
+def _exit_on_term(signum, _frame):
+    """Turn SIGTERM into SystemExit so the `finally` in main() actually runs.
+
+    Python's default SIGTERM disposition terminates the process outright — it
+    does NOT unwind, so finally blocks are skipped. Which means the ordinary
+    `systemctl stop` path, the one an operator uses every time, was the one
+    path where the guest-side file never got finalized: the process died, and
+    the unit's ExecStopPost then found a staged file with nobody left to move
+    it. Measured, not theorised.
+
+    SystemExit unwinds normally, so teardown, the timestamp correction and the
+    move all happen before the process goes.
+    """
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, _exit_on_term)
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def run(argv, check=False):
+    return subprocess.run(argv, capture_output=True, text=True, check=check,
+                          timeout=30)
+
+
+# --- host vantage ---
+
+def host_up(plan: dict) -> None:
+    """Install the log rules. The skeleton first: it carries the `ct mark set`
+    rule inbound attribution depends on, and a host that has never started a
+    filtered VM has no table at all."""
+    run([NFT_BIN, "-f", NFT_SKELETON], check=True)
+    for command in pcap_rule_commands(plan["uid"],
+                                      plan["snaplen"][VANTAGE_HOST],
+                                      plan["direction"]):
+        run(command, check=True)
+    log(f"  Logging uid {plan['uid']} to nflog group "
+        f"{nflog_group(plan['uid'])} ({plan['direction']})")
+
+
+def host_down(uid: int) -> None:
+    """Remove this capture's log rules, by handle.
+
+    BY HANDLE, because nft has no other way to delete a rule: a delete spelled
+    with the rule's own text fails, and fails *silently* under a tolerant
+    runner — which leaves a log rule in the security-critical table with
+    nothing owning it. Found on the bench, where the first implementation's
+    teardown removed nothing at all.
+
+    Narrowed to this workload's nflog group so a concurrent capture on another
+    workload keeps its rule.
+
+    Tolerant throughout: a rule is legitimately absent when the start failed
+    partway, or after the break-glass `nft delete table`.
+    """
+    group = nflog_group(uid)
+    removed = 0
+    for chain in ("output", PCAP_INPUT_CHAIN):
+        listed = run([NFT_BIN, "-j", "-a", "list", "chain",
+                      *NFT_TABLE.split(), chain])
+        if listed.returncode != 0:
+            continue
+        try:
+            payload = json.loads(listed.stdout)
+        except ValueError:
+            continue
+        # Highest handle first: deleting does not renumber, but reverse order
+        # keeps the intent obvious if that ever changes.
+        for handle in sorted(log_rule_handles(payload, group), reverse=True):
+            if run(pcap_delete_command(chain, handle)).returncode == 0:
+                removed += 1
+    # The input chain exists only while something is capturing, so take it with
+    # us — an empty chain in the security-critical table is one more thing for
+    # `drift` to have to explain. Fails harmlessly while another capture still
+    # has a rule in it.
+    run([NFT_BIN, "delete", "chain", *NFT_TABLE.split(), PCAP_INPUT_CHAIN])
+    if removed:
+        log(f"  Removed {removed} log rule(s) for nflog group {group}")
+
+
+# --- guest vantage, VM ---
+
+def qmp_socket(name: str) -> str:
+    """The control monitor, not the metrics one.
+
+    A QMP socket serves one client at a time. Our use is two brief
+    control-flavoured calls, so it belongs on the same monitor as
+    system_powerdown rather than on the channel the exporter polls on a timer —
+    colliding with a timer is likelier than colliding with a shutdown.
+    """
+    return f"{VM_SOCKET_DIR}/{name}/qmp.sock"
+
+
+def guest_vm_up(name: str, plan: dict) -> str | None:
+    """Add the filter-dump object. Returns its id, or None if it did not take.
+
+    Writes into the workload's runtime dir, never straight to the operator's
+    `-w` path: QEMU runs as _wl-<name> and confined as svirt_t, so an ordinary
+    path fails on DAC before SELinux has an opinion.
+
+    And it fails SILENTLY. QEMU accepts `object-add`, the object exists, and no
+    file is ever created — measured. So the file's existence is checked here
+    rather than trusted, because the alternative is a capture that reports
+    success and produces nothing.
+    """
+    staging = guest_staging_path(name)
+    obj = filter_dump_object(0, staging, plan["snaplen"][VANTAGE_GUEST])
+    try:
+        _qmp(name, "object-add", obj)
+    except Exception as e:  # noqa: BLE001
+        log(f"  ERROR: QEMU refused the capture object: {e}")
+        return None
+    for _ in range(20):
+        if os.path.exists(staging):
+            break
+        time.sleep(0.1)
+    else:
+        log(f"  ERROR: QEMU accepted the capture object but never created "
+            f"{staging}. Is the VM running, and is that directory writable by "
+            f"_wl-{name}?")
+        guest_vm_down(name, obj["id"])
+        return None
+    log(f"  Tapping netdev {obj['netdev']} into {staging} "
+        f"(maxlen {obj['maxlen']})")
+    return obj["id"]
+
+
+def _qmp(name: str, command: str, arguments: dict):
+    """One QMP round trip on the control monitor.
+
+    connect/negotiate/close by hand rather than as a context manager: QMPClient
+    is constructed empty and connected separately, and a monitor serves one
+    client at a time, so holding it open across the capture would block
+    ExecStop's system_powerdown for the whole run.
+    """
+    client = QMPClient()
+    try:
+        client.connect(qmp_socket(name), timeout=5.0, recv_timeout=5.0)
+        client.negotiate()
+        return client.execute(command, arguments)
+    finally:
+        client.close()
+
+
+def guest_vm_down(name: str, object_id: str) -> None:
+    try:
+        _qmp(name, "object-del", {"id": object_id})
+    except Exception as e:  # noqa: BLE001
+        log(f"  WARNING: could not remove {object_id}: {e}")
+
+
+# --- guest vantage, container ---
+
+def container_netns_pid(name: str) -> int | None:
+    """The pid whose network namespace a container's guest-side capture enters.
+
+    Read as the workload user, because the container belongs to that user's
+    rootless podman. `nsenter` then runs as root, which this program already is
+    — no privilege beyond what pcap requires anyway.
+    """
+    result = run(["runuser", "-u", f"_wl-{name}", "--",
+                  "podman", "inspect", "--format", "{{.State.Pid}}", name])
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def container_interface(pid: int) -> str:
+    """The interface to capture on, discovered rather than assumed.
+
+    pasta names its tun after the host interface it templated from, falling
+    back to tap0 only when there is no template, and podman may pass its own —
+    measured on podman 5.8.4, a pasta container's is `enp1s0` (copying the
+    host's) while a custom-network container gets a veth called `eth0`. No
+    single name is right for both, so read the default route inside the
+    namespace.
+    """
+    result = run(["nsenter", "-t", str(pid), "-n", "ip", "-o", "route",
+                  "show", "default"])
+    parts = result.stdout.split()
+    if "dev" in parts:
+        return parts[parts.index("dev") + 1]
+    # No default route inside the namespace. `any` still captures, and saying
+    # so beats guessing tap0 — which is right for neither pasta nor a veth.
+    log("  WARNING: no default route in the namespace; capturing on 'any'")
+    return "any"
+
+
+# --- the probe, and the timestamp correction ---
+
+def emit_probe(uid: int) -> float:
+    """Cause one guest-visible packet at a wall-clock instant we know.
+
+    A TCP connect to the workload's management address makes passt hand the
+    guest a SYN, which the tap sees. Nothing is sent, nothing needs to answer,
+    and the guest needs no cooperation — which is the point. Deriving the
+    offset from guest uptime instead (an earlier design's proposal) would have
+    left a full timezone offset in place, silently, on every non-UTC host.
+
+    Returns the wall-clock time of the probe. Even if the connection is
+    refused, the SYN is emitted and stamped, so a guest with no sshd still
+    yields a usable reference.
+    """
+    import socket
+    address = vm_management_address(uid)
+    stamp = time.time()
+    try:
+        with socket.create_connection((address, VM_MGMT_SSH_PORT), timeout=2):
+            pass
+    except OSError:
+        pass
+    return stamp
+
+
+def correct_timestamps(path: str, offset: float) -> bool:
+    """Shift a guest-side file by a measured offset with `editcap -t`."""
+    if not shutil.which(EDITCAP) and not os.path.exists(EDITCAP):
+        log("  WARNING: editcap not installed; guest-side timestamps are "
+            "offset by the VM's uptime plus this host's UTC offset. Relative "
+            "deltas within the file are still correct.")
+        return False
+    tmp = f"{path}.shifted"
+    result = run([EDITCAP, "-t", f"{-offset:.6f}", path, tmp])
+    if result.returncode != 0:
+        log(f"  WARNING: editcap failed: {result.stderr.strip()}")
+        return False
+    os.replace(tmp, path)
+    log(f"  Corrected guest-side timestamps by {-offset:.3f}s")
+    return True
+
+
+# --- the run ---
+
+def cleanup(name: str) -> int:
+    """Remove everything a capture could have left behind. Idempotent.
+
+    Runs as the unit's ExecStopPost, so it fires on a clean exit, a failed
+    start, a RuntimeMaxSec timeout and a `kill -9` alike — the cases a
+    `finally` in the capture process cannot reach. Doing the work twice is
+    normal and costs a few nft calls.
+    """
+    try:
+        uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+    except KeyError:
+        return 0
+    host_down(uid)
+    # The filter-dump object outlives its file, so drop it even when this run
+    # never installed one — QEMU answers "object not found" and we move on.
+    try:
+        _qmp(name, "object-del", {"id": filter_dump_id(0)})
+        log(f"  Removed {filter_dump_id(0)} from {name}")
+    except Exception:  # noqa: BLE001
+        pass
+    # A staged file still here means the capture process died without
+    # finalizing — a kill -9, or an OOM kill. Say where it is rather than
+    # delete it: the packets are real, the operator asked for them, and only
+    # their timestamps are uncorrected. It lives in a tmpfs, there is at most
+    # one per workload, and the next capture overwrites it.
+    staging = guest_staging_path(name)
+    if os.path.exists(staging):
+        log(f"  A staged capture remains at {staging} — the capture process "
+            f"did not finalize, so its timestamps are offset by the VM's "
+            f"uptime plus this host's UTC offset. Relative deltas are correct.")
+    return 0
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "cleanup":
+        return cleanup(argv[2])
+    if len(argv) != 4 or argv[1] != "run":
+        print(f"usage: {argv[0]} run <name> <plan-json>\n"
+              f"       {argv[0]} cleanup <name>", file=sys.stderr)
+        return 2
+    name, plan = argv[2], json.loads(argv[3])
+    vantages = plan["vantages"]
+
+    readers: list[subprocess.Popen] = []
+    object_id = None
+    started = None
+
+    try:
+        if VANTAGE_HOST in vantages:
+            host_up(plan)
+        if VANTAGE_GUEST in vantages:
+            path = _path_for(plan, VANTAGE_GUEST)
+            if plan["substrate"].startswith("VM"):
+                object_id = guest_vm_up(name, plan)
+                if object_id is None:
+                    return 1
+                # After the tap, not before: a probe emitted before the object
+                # exists is not in the file, and the correction would then be
+                # measured against whatever unrelated packet happened to be
+                # first.
+                started = emit_probe(plan["uid"])
+            else:
+                readers.append(_container_reader(name, plan, path))
+
+        if VANTAGE_HOST in vantages:
+            readers.append(_host_reader(plan))
+
+        _wait(readers, plan)
+        return 0
+    finally:
+        if object_id:
+            guest_vm_down(name, object_id)
+            _finalize_guest(name, _path_for(plan, VANTAGE_GUEST), started)
+        for reader in readers:
+            _terminate(reader)
+        if VANTAGE_HOST in vantages:
+            host_down(plan["uid"])
+
+
+def _path_for(plan: dict, vantage: str) -> str | None:
+    write = plan.get("write")
+    if not write or write == "-":
+        return write
+    if len(plan["vantages"]) > 1:
+        return f"{write.rstrip('/')}/{vantage}.pcap"
+    return write
+
+
+def _host_reader(plan: dict) -> subprocess.Popen:
+    argv = tcpdump_argv(
+        plan["uid"], plan["snaplen"][VANTAGE_HOST],
+        write=_path_for(plan, VANTAGE_HOST),
+        packet_count=plan.get("packet_count"),
+        rotate_size=plan.get("rotate_size"),
+        file_count=plan.get("file_count"),
+        rotate_seconds=plan.get("rotate_seconds"),
+        numeric=plan.get("numeric", False),
+        bpf=plan.get("bpf"))
+    log(f"  {' '.join(argv)}")
+    return subprocess.Popen(argv)
+
+
+def _container_reader(name: str, plan: dict, path: str | None) -> subprocess.Popen:
+    pid = container_netns_pid(name)
+    if pid is None:
+        raise RuntimeError(
+            f"could not find {name}'s container pid; is the workload running?")
+    interface = container_interface(pid)
+    argv = ["nsenter", "-t", str(pid), "-n", "tcpdump", "-i", interface,
+            "-s", str(plan["snaplen"][VANTAGE_GUEST]), "-U"]
+    if path:
+        argv += ["-w", path]
+    if plan.get("bpf"):
+        argv += list(plan["bpf"])
+    log(f"  {' '.join(argv)}")
+    return subprocess.Popen(argv)
+
+
+def _wait(readers: list[subprocess.Popen], plan: dict) -> None:
+    """Follow the capture until a bound trips or a reader exits.
+
+    The duration bound is RuntimeMaxSec on the unit, so it is not implemented
+    here. Size is: at link rate, time is not a size bound, and the filter-dump
+    path has no `-C` of its own — so poll st_size on whatever files exist.
+    """
+    max_size = plan.get("max_size_bytes") or 0
+    paths = [p for p in (_path_for(plan, v) for v in plan["vantages"])
+             if p and p != "-"]
+    while True:
+        for reader in readers:
+            if reader.poll() is not None:
+                return
+        if max_size:
+            total = sum(os.path.getsize(p) for p in paths if os.path.exists(p))
+            if total >= max_size:
+                log(f"  Size bound reached ({total} bytes); stopping.")
+                return
+        if not readers and not paths:
+            # A VM guest-side capture with no file to watch: nothing to poll,
+            # so wait for RuntimeMaxSec or an explicit stop.
+            signal.pause()
+        time.sleep(1)
+
+
+def _finalize_guest(name: str, dest: str | None, started: float | None) -> None:
+    """Correct the staged file's timestamps, then put it where -w asked.
+
+    Two steps in one place because they are the same step: the move exists
+    because a confined QEMU cannot write the operator's path, and the
+    correction exists because filter-dump's clock is wrong twice — and the
+    correction already forced a finalize, so the move rides along free.
+    """
+    staging = guest_staging_path(name)
+    if not os.path.exists(staging):
+        return
+    if started is not None:
+        first = _first_packet_time(staging)
+        if first is not None:
+            correct_timestamps(staging, first - started)
+    if not dest or dest == "-":
+        os.unlink(staging)
+        return
+    shutil.move(staging, dest)
+    os.chmod(dest, 0o640)
+    log(f"  Wrote {dest}")
+
+
+# capinfos labels this "Earliest packet time" (wireshark 4.x); older builds say
+# "First packet time". Matching only one of them is a silent no-op — the
+# correction is skipped, the file keeps a timestamp hours in the future, and
+# nothing says so. Which is what happened on the bench.
+_FIRST_PACKET_LABELS = ("Earliest packet time", "First packet time")
+
+
+def _first_packet_time(path: str) -> float | None:
+    """Epoch seconds of the first packet, per capinfos. -S makes it numeric."""
+    result = run(["capinfos", "-a", "-S", path])
+    if result.returncode != 0:
+        log(f"  WARNING: capinfos could not read {path}; leaving guest-side "
+            f"timestamps uncorrected")
+        return None
+    for line in result.stdout.splitlines():
+        if any(label in line for label in _FIRST_PACKET_LABELS):
+            try:
+                return float(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    log("  WARNING: capinfos reported no first-packet time; leaving guest-side "
+        "timestamps uncorrected")
+    return None
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
