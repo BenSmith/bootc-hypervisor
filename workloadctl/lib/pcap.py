@@ -92,6 +92,7 @@ def pcap_vantages(config) -> list[Vantage]:
                 f"unavailable: [vm.network].bridge = {config.vm_bridge!r}, so "
                 f"the guest sends from its own LAN address and no host socket "
                 f"carries its uid",
+                supports_filter=False,
             ),
             Vantage(
                 VANTAGE_GUEST, True,
@@ -112,7 +113,8 @@ def pcap_vantages(config) -> list[Vantage]:
             Vantage(VANTAGE_HOST, True,
                     "the traffic as it leaves this machine. For a host-network "
                     "container the workload uid is the ONLY thing separating "
-                    "its traffic from the host's own"),
+                    "its traffic from the host's own",
+                    supports_filter=False),
             Vantage(VANTAGE_GUEST, False,
                     "unavailable: [network] mode = \"host\" shares the host's "
                     "network namespace, so there is nothing separate to tap"),
@@ -129,7 +131,8 @@ def pcap_vantages(config) -> list[Vantage]:
     return [
         Vantage(VANTAGE_HOST, True,
                 "the traffic as it leaves this machine, after pasta "
-                "re-originated it onto host sockets owned by this workload"),
+                "re-originated it onto host sockets owned by this workload",
+                supports_filter=False),
         Vantage(VANTAGE_GUEST, True,
                 "what the workload put on the wire inside its own network "
                 "namespace, before pasta translated it — DHCP, ARP/NDP, and "
@@ -437,6 +440,17 @@ class PcapPlan:
     max_size: int
     steps: list[tuple[str, str, list[str]]] = field(default_factory=list)
     unit: str = ""
+    # The podman container whose network namespace a container's guest-side
+    # vantage enters. Resolved by the CLI, which is the only side that can:
+    # the podman name is `workload-<name>` for a single-container workload and
+    # `workload-<name>-<container>` for one member of a pod, and picking the
+    # wrong one captures a sibling's traffic without saying so.
+    podman_container: str | None = None
+    # Whether this plan actually installs a QEMU filter-dump object. Not
+    # derivable from `vantages` alone: a *container's* guest-side vantage is an
+    # nsenter'd tcpdump with no QEMU anywhere near it, and a plan that promises
+    # to remove an object it never added is not a promise.
+    has_qemu_object: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -450,6 +464,8 @@ class PcapPlan:
             "duration_sec": self.duration,
             "max_size_bytes": self.max_size,
             "unit": self.unit,
+            "has_qemu_object": self.has_qemu_object,
+            "podman_container": self.podman_container,
             "steps": [{"vantage": v, "summary": s, "commands": c}
                       for v, s, c in self.steps],
         }
@@ -457,7 +473,8 @@ class PcapPlan:
 
 def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
                direction: str, write: str | None, duration: int,
-               max_size: int, bpf: list[str] | None = None) -> PcapPlan:
+               max_size: int, bpf: list[str] | None = None,
+               container: str | None = None) -> PcapPlan:
     """Assemble the plan both `--dry-run` and the helper work from."""
     uid = config.uid
     substrate = "VM, passt" if config.is_vm and config.vm_bridge is None else (
@@ -468,6 +485,10 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
         vantages=list(vantages), snaplen=dict(snaplen), direction=direction,
         write=write, duration=duration, max_size=max_size,
         unit=pcap_unit_name(config.name),
+        has_qemu_object=config.is_vm and VANTAGE_GUEST in vantages,
+        podman_container=(None if config.is_vm
+                          else config.podman_container_name(
+                              container or config.name)),
     )
     detail = {v.name: v.detail for v in pcap_vantages(config)}
 
@@ -496,8 +517,8 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
                 plan.steps.append((vantage, detail[vantage], commands))
             else:
                 plan.steps.append((vantage, detail[vantage], [
-                    f"nsenter into the workload's network namespace, then "
-                    f"tcpdump -s {snaplen[vantage]}"
+                    f"nsenter into {plan.podman_container}'s network "
+                    f"namespace, then tcpdump -s {snaplen[vantage]}"
                     + (f" -w {path}" if write else ""),
                 ]))
     return plan
@@ -556,11 +577,25 @@ def render_plan(plan: PcapPlan) -> str:
                "window." if len(plan.vantages) > 1 else ""))
 
     lines.append("")
-    lines.append(
-        f"Owned by {plan.unit}, so the nftables rule"
-        + (" and the QEMU object are" if VANTAGE_GUEST in plan.vantages
-           else " is")
-        + " removed even if this command is killed or your session drops.")
+    # Name only what this plan actually installs. A container's guest-side
+    # vantage has no QEMU object, and a guest-only capture installs no nftables
+    # rule at all — claiming either would make the plan a worse promise than
+    # saying nothing.
+    installed = []
+    if VANTAGE_HOST in plan.vantages:
+        installed.append("the nftables rule")
+    if plan.has_qemu_object:
+        installed.append("the QEMU object")
+    if installed:
+        subject = " and ".join(installed)
+        verb = "is" if len(installed) == 1 else "are"
+        lines.append(
+            f"Owned by {plan.unit}, so {subject} {verb} removed even if this "
+            f"command is killed or your session drops.")
+    else:
+        lines.append(
+            f"Owned by {plan.unit}, so the capture stops even if this command "
+            f"is killed or your session drops.")
     return "\n".join(lines)
 
 
@@ -584,8 +619,8 @@ def _humanize_size(size: int) -> str:
 def validate_request(config, *, vantages: list[str], direction: str,
                      bpf: list[str] | None, write: str | None,
                      detach: bool, json_output: bool,
-                     rotation: bool, tcpdump_present: bool | None = None
-                     ) -> list[str]:
+                     rotation: bool, tcpdump_present: bool | None = None,
+                     container: str | None = None) -> list[str]:
     """Everything that makes a request incoherent, as error strings.
 
     Rejecting rather than resolving cleverly, in two places especially: a
@@ -596,6 +631,24 @@ def validate_request(config, *, vantages: list[str], direction: str,
     errors: list[str] = []
     table = {v.name: v for v in pcap_vantages(config)}
 
+    # WORKLOAD/CONTAINER. Accepting the syntax and then ignoring the container
+    # half would capture a sibling's namespace with nothing said about it,
+    # which is worse than refusing the form outright.
+    if container is not None:
+        if config.is_vm:
+            errors.append(
+                f"{config.name}/{container}: a VM workload has no containers")
+        elif container not in config.container_names():
+            errors.append(
+                f"{container!r} is not a container in {config.name} "
+                f"({', '.join(config.container_names())})")
+    elif not config.is_vm and len(config.container_names()) > 1:
+        errors.append(
+            f"{config.name} runs {len(config.container_names())} containers "
+            f"({', '.join(config.container_names())}); name one as "
+            f"{config.name}/<container> — under 'pod' mode they share a "
+            f"namespace, but a capture must still say which it means")
+
     for vantage in vantages:
         if vantage not in table:
             errors.append(f"{vantage!r} is not a vantage "
@@ -605,11 +658,32 @@ def validate_request(config, *, vantages: list[str], direction: str,
             errors.append(f"vantage {vantage!r}: {table[vantage].detail}")
 
     known = [table[v] for v in vantages if v in table]
-    if bpf and any(not v.supports_filter for v in known):
-        errors.append(
-            "a BPF filter cannot be applied to every selected vantage "
-            "(a VM's guest side taps the netdev and accepts no filter), and "
-            "two captures narrowed differently cannot be compared")
+    if bpf:
+        unfilterable = [v.name for v in known if not v.supports_filter]
+        if unfilterable:
+            reasons = []
+            if VANTAGE_HOST in unfilterable:
+                # Measured, and it is a hard error rather than a silent no-op:
+                # tcpdump refuses to start with "NFLOG link-layer type
+                # filtering not implemented". The design's capability table
+                # says this vantage takes a filter; it does not.
+                reasons.append(
+                    "the host vantage reads an nflog pseudo-device, and "
+                    "libpcap cannot compile a BPF filter for that link type "
+                    "at all (tcpdump: \"NFLOG link-layer type filtering not "
+                    "implemented\")")
+            if VANTAGE_GUEST in unfilterable:
+                reasons.append(
+                    "a VM's guest side taps the netdev through QEMU's "
+                    "filter-dump, which accepts only a file and a length")
+            errors.append(
+                f"a BPF filter cannot be applied to "
+                f"{' or '.join(repr(v) for v in unfilterable)}: "
+                + "; ".join(reasons)
+                + ". Capture unfiltered and narrow on read "
+                  "(tcpdump -r <file> is also unfiltered for nflog — decode "
+                  "and grep), or use a container's guest vantage, which is a "
+                  "real AF_PACKET capture and takes a full expression")
     if direction != DIRECTION_DEFAULT and any(
             not v.supports_direction for v in known):
         errors.append(

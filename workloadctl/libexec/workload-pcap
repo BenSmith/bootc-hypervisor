@@ -56,6 +56,8 @@ from vm import (
     vm_management_address,
 )
 from qmp import QMPClient
+from podman import Podman
+from workload_lib import workload_home_dir
 
 EDITCAP = "/usr/bin/editcap"
 
@@ -216,21 +218,31 @@ def guest_vm_down(name: str, object_id: str) -> None:
 
 # --- guest vantage, container ---
 
-def container_netns_pid(name: str) -> int | None:
+def container_netns_pid(name: str, plan: dict) -> int | None:
     """The pid whose network namespace a container's guest-side capture enters.
 
-    Read as the workload user, because the container belongs to that user's
-    rootless podman. `nsenter` then runs as root, which this program already is
-    — no privilege beyond what pcap requires anyway.
+    Through lib/podman.py, not a hand-rolled `runuser`: talking to a workload
+    user's rootless podman needs XDG_RUNTIME_DIR, HOME and that user's session
+    bus, and `runuser` alone supplies none of them — it does not even leave a
+    cwd the workload user can enter, so the first attempt failed with "cannot
+    chdir to /home/ben" before podman ran at all.
+
+    The container name comes from the plan, because the podman name is
+    `workload-<name>` for a single-container workload and
+    `workload-<name>-<container>` for one member of a pod. Guessing the bare
+    workload name finds nothing; guessing the wrong member captures a sibling's
+    traffic and says nothing about it.
     """
-    result = run(["runuser", "-u", f"_wl-{name}", "--",
-                  "podman", "inspect", "--format", "{{.State.Pid}}", name])
-    if result.returncode != 0:
+    container = plan.get("podman_container")
+    if not container:
         return None
-    try:
-        return int(result.stdout.strip())
-    except ValueError:
+    podman = Podman.for_user(f"_wl-{name}", plan["uid"],
+                             workload_home_dir(name))
+    info = podman.container_inspect(container)
+    if info is None:
         return None
+    pid = (info.get("State") or {}).get("Pid")
+    return int(pid) if pid else None
 
 
 def container_interface(pid: int) -> str:
@@ -402,10 +414,11 @@ def _host_reader(plan: dict) -> subprocess.Popen:
 
 
 def _container_reader(name: str, plan: dict, path: str | None) -> subprocess.Popen:
-    pid = container_netns_pid(name)
+    pid = container_netns_pid(name, plan)
     if pid is None:
         raise RuntimeError(
-            f"could not find {name}'s container pid; is the workload running?")
+            f"could not find a running container for "
+            f"{plan.get('podman_container') or name}; is the workload up?")
     interface = container_interface(pid)
     argv = ["nsenter", "-t", str(pid), "-n", "tcpdump", "-i", interface,
             "-s", str(plan["snaplen"][VANTAGE_GUEST]), "-U"]

@@ -55,8 +55,10 @@ def cmd_pcap(args, manager):
         cli_log.error("a workload is required (except with --list)")
         return 2
 
-    config = load_config_or_exit(args.workload.split("/")[0],
-                                 json_mode=bool(getattr(args, "json", False)))
+    workload, _, container = args.workload.partition("/")
+    config = load_config_or_exit(
+        workload, json_mode=bool(getattr(args, "json", False)))
+    args.container = container or None
 
     if getattr(args, "list_interfaces", False):
         return _report_vantages(args, config)
@@ -87,9 +89,17 @@ def _report_vantages(args, config) -> int:
     for vantage in vantages:
         mark = "✓" if vantage.available else "✗"
         print(f"  {mark} {vantage.name:<6} {vantage.detail}")
-        if vantage.available and not vantage.supports_filter:
-            print("           cannot be narrowed by a BPF filter, cannot "
-                  "honor -Q, and does not rotate")
+        if not vantage.available:
+            continue
+        limits = []
+        if not vantage.supports_filter:
+            limits.append("takes no BPF filter")
+        if not vantage.supports_direction:
+            limits.append("cannot honor -Q")
+        if not vantage.supports_rotation:
+            limits.append("does not rotate")
+        if limits:
+            print(f"           {', '.join(limits)}")
     return 0
 
 
@@ -153,10 +163,12 @@ def _start_capture(args, config) -> int:
     rotation = any(getattr(args, key, None) for key in
                    ("rotate_size", "file_count", "rotate_seconds"))
 
+    container = getattr(args, "container", None)
     errors = validate_request(
         config, vantages=vantages, direction=direction, bpf=bpf, write=write,
         detach=getattr(args, "detach", False),
-        json_output=getattr(args, "json", False), rotation=rotation)
+        json_output=getattr(args, "json", False), rotation=rotation,
+        container=container)
     if errors:
         for error in errors:
             cli_log.error(error)
@@ -168,7 +180,7 @@ def _start_capture(args, config) -> int:
 
     plan = build_plan(config, vantages=vantages, snaplen=snaplen,
                       direction=direction, write=write, duration=duration,
-                      max_size=max_size, bpf=bpf)
+                      max_size=max_size, bpf=bpf, container=container)
 
     # One renderer for both, following the rule substrate.py already states for
     # `disable --dry-run`: whatever one does, the other must describe.

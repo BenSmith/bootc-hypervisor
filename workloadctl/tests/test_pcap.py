@@ -34,11 +34,16 @@ def vm_config(name="fj", uid=10003, bridge=None):
         get_network_mode=lambda: "pasta")
 
 
-def container_config(name="web", uid=10004, mode="pasta"):
+def container_config(name="web", uid=10004, mode="pasta", containers=None):
+    names = containers or [name]
     return SimpleNamespace(
         name=name, uid=uid, is_vm=False, vm_bridge=None, vm_network={},
         config={"network": {"mode": mode}},
-        get_network_mode=lambda: mode)
+        get_network_mode=lambda: mode,
+        container_names=lambda: names,
+        podman_container_name=lambda c: (
+            f"workload-{name}" if names == [name] else f"workload-{name}-{c}"),
+    )
 
 
 class TestVantages(unittest.TestCase):
@@ -90,6 +95,14 @@ class TestVantages(unittest.TestCase):
         guest = [v for v in pcap_vantages(container_config())
                  if v.name == VANTAGE_GUEST][0]
         self.assertTrue(guest.supports_filter)
+
+    def test_no_host_vantage_anywhere_takes_a_filter(self):
+        """nflog is nflog on every substrate."""
+        for config in (vm_config(), container_config(),
+                       container_config(mode="host")):
+            host = [v for v in pcap_vantages(config)
+                    if v.name == VANTAGE_HOST][0]
+            self.assertFalse(host.supports_filter, config.get_network_mode())
 
 
 class TestBounds(unittest.TestCase):
@@ -234,16 +247,28 @@ class TestValidation(unittest.TestCase):
         params.update(kwargs)
         return validate_request(config, **params)
 
-    def test_a_filter_spanning_a_filterless_vantage_is_rejected(self):
-        """Two captures narrowed differently cannot be compared, and comparing
-        them is the only reason to select two."""
+    def test_the_host_vantage_takes_no_bpf_filter(self):
+        """MEASURED: libpcap cannot compile a filter for the nflog link type,
+        and tcpdump refuses to start rather than silently ignoring it. §6.5's
+        capability table says this vantage supports FILTER; it does not."""
+        errors = self._errors(vm_config(), bpf=["port", "443"])
+        self.assertTrue(any("NFLOG link-layer type filtering" in e
+                            for e in errors))
+
+    def test_a_filter_on_a_vm_is_rejected_for_both_vantages(self):
         errors = self._errors(vm_config(),
                               vantages=[VANTAGE_HOST, VANTAGE_GUEST],
                               bpf=["port", "443"])
-        self.assertTrue(any("cannot be compared" in e for e in errors))
+        joined = " ".join(errors)
+        self.assertIn("host", joined)
+        self.assertIn("filter-dump", joined)
 
-    def test_a_filter_on_the_host_vantage_alone_is_fine(self):
-        self.assertEqual(self._errors(vm_config(), bpf=["port", "443"]), [])
+    def test_a_container_guest_vantage_still_takes_a_filter(self):
+        """It is a real AF_PACKET capture in a namespace — lossy under load,
+        but it takes a full expression."""
+        self.assertEqual(
+            self._errors(container_config(), vantages=[VANTAGE_GUEST],
+                         bpf=["port", "443"]), [])
 
     def test_a_missing_tcpdump_is_reported_rather_than_hit_at_use(self):
         errors = self._errors(vm_config(), tcpdump_present=False)
@@ -288,6 +313,52 @@ class TestValidation(unittest.TestCase):
         self.assertTrue(any("must be a directory" in e for e in errors))
 
 
+class TestContainerTargeting(unittest.TestCase):
+    """WORKLOAD/CONTAINER. Accepting the syntax and ignoring the container half
+    captures a sibling's namespace with nothing said about it."""
+
+    def _errors(self, config, **kwargs):
+        params = dict(vantages=[VANTAGE_GUEST], direction=DIRECTION_DEFAULT,
+                      bpf=None, write=None, detach=False, json_output=False,
+                      rotation=False, tcpdump_present=True)
+        params.update(kwargs)
+        return validate_request(config, **params)
+
+    def test_a_single_container_workload_needs_no_container_name(self):
+        self.assertEqual(self._errors(container_config()), [])
+
+    def test_a_multi_container_workload_must_name_one(self):
+        config = container_config(containers=["web", "db"])
+        errors = self._errors(config)
+        self.assertTrue(any("name one as" in e for e in errors))
+
+    def test_an_unknown_container_is_rejected(self):
+        config = container_config(containers=["web", "db"])
+        errors = self._errors(config, container="cache")
+        self.assertTrue(any("is not a container in" in e for e in errors))
+
+    def test_a_vm_has_no_containers(self):
+        errors = self._errors(vm_config(), container="anything")
+        self.assertTrue(any("has no containers" in e for e in errors))
+
+    def test_the_plan_carries_the_podman_name_not_the_workload_name(self):
+        """`workload-<name>` for a single-container workload and
+        `workload-<name>-<container>` for a pod member — guessing the bare
+        workload name finds nothing."""
+        plan = build_plan(container_config(containers=["web", "db"]),
+                          vantages=[VANTAGE_GUEST],
+                          snaplen={VANTAGE_GUEST: 1500}, direction="inout",
+                          write=None, duration=0, max_size=0, container="db")
+        self.assertEqual(plan.podman_container, "workload-web-db")
+        self.assertEqual(plan.to_json()["podman_container"], "workload-web-db")
+
+    def test_a_vm_plan_carries_no_podman_name(self):
+        plan = build_plan(vm_config(), vantages=[VANTAGE_GUEST],
+                          snaplen={VANTAGE_GUEST: 1500}, direction="inout",
+                          write=None, duration=0, max_size=0)
+        self.assertIsNone(plan.podman_container)
+
+
 class TestPlan(unittest.TestCase):
     """The plan is computed, never templated — real uid, real group, real
     netdev — so a vantage whose line cannot be computed is not captured."""
@@ -314,6 +385,36 @@ class TestPlan(unittest.TestCase):
         rendered = render_plan(self.plan)
         self.assertIn(pcap_unit_name("fj"), rendered)
         self.assertIn("killed", rendered)
+
+    def test_it_promises_only_what_it_installs(self):
+        """A container's guest-side vantage is an nsenter'd tcpdump with no
+        QEMU anywhere near it, and a guest-only capture installs no nftables
+        rule — a plan that promises to remove either would be a worse promise
+        than saying nothing."""
+        container = build_plan(
+            container_config(), vantages=[VANTAGE_GUEST],
+            snaplen={VANTAGE_GUEST: 1500}, direction="inout", write=None,
+            duration=0, max_size=0)
+        rendered = render_plan(container)
+        self.assertNotIn("QEMU object", rendered)
+        self.assertNotIn("nftables rule", rendered)
+        self.assertIn("the capture stops", rendered)
+
+    def test_a_vm_guest_capture_still_promises_the_qemu_object(self):
+        vm_guest = build_plan(
+            vm_config(), vantages=[VANTAGE_GUEST],
+            snaplen={VANTAGE_GUEST: 1500}, direction="inout", write=None,
+            duration=0, max_size=0)
+        rendered = render_plan(vm_guest)
+        self.assertIn("the QEMU object is removed", rendered)
+        self.assertNotIn("nftables rule", rendered)
+
+    def test_a_host_only_capture_promises_only_the_rule(self):
+        host_only = build_plan(
+            vm_config(), vantages=[VANTAGE_HOST],
+            snaplen={VANTAGE_HOST: 1500}, direction="inout", write=None,
+            duration=0, max_size=0)
+        self.assertIn("the nftables rule is removed", render_plan(host_only))
 
     def test_it_states_both_bounds_and_that_they_are_shared(self):
         rendered = render_plan(self.plan)
@@ -455,6 +556,18 @@ class TestHelperContract(unittest.TestCase):
                            self.source.index("# --- guest vantage, VM ---")]
         self.assertIn("delete", down)
         self.assertIn("PCAP_INPUT_CHAIN", down)
+
+    def test_the_container_pid_goes_through_the_podman_wrapper(self):
+        """Talking to a workload user's rootless podman needs
+        XDG_RUNTIME_DIR, HOME and that user's session bus. A hand-rolled
+        `runuser` supplies none of them and does not even leave a cwd the
+        workload user can enter."""
+        body = self.source[self.source.index("def container_netns_pid"):]
+        # Assert on the code, not the docstring, which names runuser to say
+        # why it is not used.
+        code = body.split('"""')[2]
+        self.assertIn("Podman.for_user", code)
+        self.assertNotIn("runuser", code)
 
     def test_the_container_interface_is_discovered_not_assumed(self):
         """pasta names its tun after the host interface it templated from and
