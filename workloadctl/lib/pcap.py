@@ -6,6 +6,12 @@ root, no nftables — so the plan `pcap --dry-run` prints is the same object the
 helper executes. That equivalence is the point (ADR 006 §6.6): whatever one
 does, the other must describe, or the plan stops being a promise.
 
+One exception, and it preserves rather than breaks that equivalence:
+`host_buffer_kib()` reads net.core.rmem_max. It is called once, in build_plan,
+and the answer is stored *in* the plan — so the helper uses the value that was
+printed rather than re-reading it. Resolving environment once and carrying it
+is what keeps the promise; re-deriving it at both ends is what would break it.
+
 The verb is `pcap` rather than `trace` because `trace` means event tracing
 everywhere nearby (ftrace, strace, distributed tracing), and `dump` in the virt
 world means a *memory* dump. Someone who wants a packet capture looks for pcap.
@@ -403,10 +409,47 @@ def pcap_delete_command(chain: str, handle: int) -> list[str]:
             "handle", str(handle)]
 
 
+# Without `-B`, libpcap never calls setsockopt at all — pcap-netfilter-linux.c
+# guards it on `if (handle->opt.buffer_size != 0)` — so the netlink socket keeps
+# the kernel default, `net.core.rmem_default`, measured at 212992 bytes. At a
+# 1500-byte snaplen that is ~140 packets of headroom, which is why the loss in
+# LOSS_NOTE was so easy to provoke: 4 MiB took it to zero.
+#
+# Derived from rmem_max rather than hardcoded, because `SO_RCVBUF` (libpcap does
+# not use SO_RCVBUFFORCE) is silently clamped to it. A literal would be wrong in
+# both directions — clamped down on a host that lowered the ceiling, while the
+# code claims a buffer it did not get, and leaving headroom unused on one that
+# raised it. Asking for exactly the ceiling is the most any caller can get.
+#
+# Deliberately NOT accompanied by a sysctl raising rmem_max. It is a host-global
+# limit that a netns cannot override, so widening it for an occasional
+# diagnostic loosens a bound for every socket on the box. The counter is the
+# trigger: if a real capture reports loss at the ceiling, that is evidence for
+# raising it, rather than a guess made in advance.
+RMEM_MAX_PATH = "/proc/sys/net/core/rmem_max"
+
+
+def host_buffer_kib(path: str = RMEM_MAX_PATH) -> int | None:
+    """`-B` for the host reader, in KiB, or None to leave libpcap alone.
+
+    The one environment read in this module. It does not break the dry-run
+    equivalence the docstring promises, because the value is resolved once into
+    the plan — so what `--dry-run` prints is still exactly what runs, rather
+    than being re-derived later on a host that might answer differently.
+    """
+    try:
+        with open(path) as f:
+            value = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    return value // 1024 or None
+
+
 def tcpdump_argv(uid: int, snaplen: int, *, write: str | None = None,
                  packet_count: int | None = None, rotate_size: int | None = None,
                  file_count: int | None = None, rotate_seconds: int | None = None,
                  numeric: bool = False, bpf: list[str] | None = None,
+                 buffer_kib: int | None = None,
                  tcpdump: str = "/usr/bin/tcpdump") -> list[str]:
     """The reader for the host vantage."""
     argv = [tcpdump, "-i", f"nflog:{nflog_group(uid)}", "-s", str(snaplen)]
@@ -418,6 +461,11 @@ def tcpdump_argv(uid: int, snaplen: int, *, write: str | None = None,
     # comparing two files. -U flushes per packet so a following reader sees
     # traffic as it happens rather than a block at a time.
     argv += ["-U"]
+    # Ahead of every optional flag so it is visible in `--dry-run`
+    # output next to the snaplen, the other knob that decides whether
+    # this capture is complete.
+    if buffer_kib:
+        argv += ["-B", str(buffer_kib)]
     if numeric:
         argv.append("-n")
     if write:
@@ -549,6 +597,9 @@ class PcapPlan:
     # nsenter'd tcpdump with no QEMU anywhere near it, and a plan that promises
     # to remove an object it never added is not a promise.
     has_qemu_object: bool = False
+    # `-B` for the host reader, resolved from net.core.rmem_max at plan
+    # time so the printed plan and the executed command cannot disagree.
+    buffer_kib: int | None = None
 
     def to_json(self) -> dict:
         return {
@@ -563,6 +614,7 @@ class PcapPlan:
             "max_size_bytes": self.max_size,
             "unit": self.unit,
             "has_qemu_object": self.has_qemu_object,
+            "buffer_kib": self.buffer_kib,
             "podman_container": self.podman_container,
             "steps": [{"vantage": v, "summary": s, "commands": c}
                       for v, s, c in self.steps],
@@ -587,6 +639,8 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
         podman_container=(None if config.is_vm
                           else config.podman_container_name(
                               container or config.name)),
+        buffer_kib=(host_buffer_kib() if VANTAGE_HOST in vantages
+                    else None),
     )
     detail = {v.name: v.detail for v in pcap_vantages(config)}
 
@@ -596,7 +650,8 @@ def build_plan(config, *, vantages: list[str], snaplen: dict[str, int],
                      pcap_rule_commands(uid, snaplen[vantage], direction)]
             reader = " ".join(tcpdump_argv(
                 uid, snaplen[vantage],
-                write=_vantage_path(write, vantage, len(vantages)), bpf=bpf))
+                write=_vantage_path(write, vantage, len(vantages)), bpf=bpf,
+                buffer_kib=plan.buffer_kib))
             plan.steps.append((vantage, detail[vantage], rules + [reader]))
         else:
             path = _vantage_path(write, vantage, len(vantages)) or "(none)"

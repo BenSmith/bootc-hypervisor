@@ -8,6 +8,8 @@ the snaplen default, what `filter-dump` cannot do, and that `log group` takes a
 literal.
 """
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ from types import SimpleNamespace
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
     PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX,
-    QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT,
+    QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT, host_buffer_kib,
     VANTAGE_GUEST, VANTAGE_HOST, available_vantages, build_plan,
     filter_dump_object, parse_duration, parse_size, parse_snaplen,
     log_rule_handles, pcap_delete_command, pcap_input_rule, pcap_output_rule,
@@ -723,3 +725,69 @@ class TestDiagnose(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCaptureBuffer(unittest.TestCase):
+    """`-B`, derived from net.core.rmem_max.
+
+    Without it libpcap never calls setsockopt at all
+    (pcap-netfilter-linux.c guards on `opt.buffer_size != 0`), so the netlink
+    socket keeps net.core.rmem_default — 212992 bytes, about 140 packets at the
+    default snaplen. Measured: that loses ~130-530 of 200,000 packets, and
+    4 MiB loses none.
+    """
+
+    def test_it_is_derived_from_rmem_max_not_hardcoded(self):
+        """SO_RCVBUF is silently clamped to rmem_max, so a literal would be
+        wrong in both directions: clamped down on a host that lowered the
+        ceiling while the code claims a buffer it did not get, and short of
+        what is available on one that raised it."""
+        with tempfile.NamedTemporaryFile("w", suffix=".rmem", delete=False) as f:
+            f.write("4194304\n")
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(host_buffer_kib(path), 4096)
+
+    def test_an_unreadable_rmem_max_leaves_libpcap_alone(self):
+        """None, not a guess. A wrong number here is worse than no flag: it
+        would report a buffer in --dry-run that the socket never got."""
+        self.assertIsNone(host_buffer_kib("/nonexistent/rmem_max"))
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("not-a-number\n")
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(host_buffer_kib(path))
+
+    def test_a_sub_kib_ceiling_yields_no_flag(self):
+        """`-B 0` would be a request for nothing; omitting the flag is what
+        'use the default' actually spells."""
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("512\n")
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(host_buffer_kib(path))
+
+    def test_the_flag_is_omitted_when_unresolved(self):
+        argv = tcpdump_argv(10003, 1500, buffer_kib=None)
+        self.assertNotIn("-B", argv)
+
+    def test_the_flag_carries_the_resolved_value(self):
+        argv = tcpdump_argv(10003, 1500, buffer_kib=4096)
+        self.assertEqual(argv[argv.index("-B") + 1], "4096")
+
+    def test_the_plan_carries_the_value_it_printed(self):
+        """The helper must use the number --dry-run showed, not re-read
+        rmem_max later on a host that could answer differently."""
+        plan = build_plan(vm_config(), vantages=[VANTAGE_HOST],
+                          snaplen={VANTAGE_HOST: 1500}, direction="inout",
+                          write="/var/tmp/x.pcap", duration=0, max_size=0)
+        self.assertIn("buffer_kib", plan.to_json())
+        if plan.buffer_kib:
+            self.assertIn(f"-B {plan.buffer_kib}", render_plan(plan))
+
+    def test_a_guest_only_plan_resolves_no_buffer(self):
+        """Nothing reads nflog, so there is no socket to size."""
+        plan = build_plan(vm_config(), vantages=[VANTAGE_GUEST],
+                          snaplen={VANTAGE_GUEST: 1500}, direction="inout",
+                          write=None, duration=0, max_size=0)
+        self.assertIsNone(plan.buffer_kib)

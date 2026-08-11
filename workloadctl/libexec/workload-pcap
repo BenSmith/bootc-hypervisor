@@ -506,7 +506,8 @@ def _host_reader(plan: dict) -> subprocess.Popen:
         file_count=plan.get("file_count"),
         rotate_seconds=plan.get("rotate_seconds"),
         numeric=plan.get("numeric", False),
-        bpf=plan.get("bpf"))
+        bpf=plan.get("bpf"),
+        buffer_kib=plan.get("buffer_kib"))
     log(f"  {' '.join(argv)}")
     return subprocess.Popen(argv)
 
