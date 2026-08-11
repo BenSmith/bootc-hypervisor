@@ -210,9 +210,9 @@ def parse_snaplen(spec, vantages: list[str]) -> dict[str, int]:
 # `log group` takes a LITERAL, never an expression. `log group ct mark`,
 # `log group ct mark and 0x3fffffff` and `log group @nh,0,16` are all parse
 # errors, so the group is computed here and emitted as a constant — which
-# forces one input rule per workload being captured rather than one generic
-# rule serving all of them. Unlike the output chain, where units only ever add
-# set elements, inbound capture adds and removes a *rule*.
+# forces one rule per workload being captured rather than one generic rule
+# serving all of them. Unlike the policy chain, where units only ever add set
+# elements, capture adds and removes *rules*.
 
 # Tag the conntrack mark rather than storing a bare uid, so a site's own marks
 # stay distinguishable from ours. Must agree with the skeleton's `ct mark set`.
@@ -220,7 +220,28 @@ CT_MARK_TAG = 0x40000000
 CT_MARK_MASK = 0xC0000000
 CT_MARK_UID_MASK = 0x3FFFFFFF
 
+# BOTH directions get their own chain, created on demand. The outbound one is
+# not merely tidiness — it is the difference between working and not:
+#
+#   - `nft add rule` APPENDS, and the skeleton's `output` chain ends with a
+#     terminating `accept`/`drop` for every filtered uid. A log rule appended
+#     there is unreachable for exactly the workloads this feature exists to
+#     observe. Verified on nftables 1.1.6: the rule lands at the bottom, below
+#     `meta skuid @wl_filtered counter drop`, and never counts a packet.
+#   - the skeleton carries `flush chain ... output` so it can be re-applied
+#     idempotently, so every VM start — and every other workload's capture —
+#     silently deleted an in-flight capture's rule. Set elements survive a
+#     flush; appended rules do not.
+#
+# Priority filter-10 puts capture AHEAD of policy, which also means a packet is
+# captured before the drop decides its fate. That is the more useful vantage
+# anyway: "what did this workload try to reach" is the question an
+# egress-filtering feature gets asked. It is after nat's dstnat (-100), so a
+# packet through the hostname proxy is captured with its translated
+# destination — the same view the policy chain has.
+PCAP_OUTPUT_CHAIN = "pcap_output"
 PCAP_INPUT_CHAIN = "pcap_input"
+PCAP_CHAINS = (PCAP_OUTPUT_CHAIN, PCAP_INPUT_CHAIN)
 
 
 def nflog_group(uid: int) -> int:
@@ -245,6 +266,16 @@ def pcap_input_rule(uid: int, snaplen: int) -> str:
     cannot help there — nftables has no input-side uid match at all (`socket
     uid` is a parse error). So attribution travels with the connection, set by
     the always-on `ct mark set` rule in the skeleton.
+
+    That rule is guarded on the workload uid range, not on `@wl_filtered`: the
+    mark is attribution, not policy, so an unfiltered VM and a container carry
+    it too. Guarding it on set membership made this rule match nothing at all
+    for every workload that is not filtered.
+
+    Note the first inbound packet of an *unsolicited* connection — a published
+    port nobody has replied on yet — arrives before any outbound packet has
+    marked the conntrack entry, so it is missed. Everything from the reply
+    onward is attributed.
     """
     return (f"ct mark and {CT_MARK_MASK:#x} == {CT_MARK_TAG:#x} "
             f"ct mark and {CT_MARK_UID_MASK:#x} == {uid} "
@@ -258,16 +289,27 @@ def pcap_rule_commands(uid: int, snaplen: int, direction: str) -> list[list[str]
     **nft cannot delete a rule by its text** — deletion is by handle, and a
     text-shaped delete fails silently, leaving a log rule in the
     security-critical table with nothing owning it. Removal goes through
-    pcap_delete_commands(), which reads the live handles.
+    pcap_delete_command(), which reads the live handles.
 
-    The input chain is created on demand rather than living in the always-on
-    skeleton: it exists only while something is capturing, and an empty chain
-    in that table is one more thing for `drift` to have to explain.
+    Both chains are created on demand rather than living in the always-on
+    skeleton: they exist only while something is capturing, an empty chain in
+    that table is one more thing for `drift` to have to explain — and, the
+    reason that matters rather than merely reads well, a chain the skeleton
+    does not own is a chain the skeleton's `flush` cannot take out from under
+    a running capture. `add chain` is create-if-absent, so a second workload
+    starting a capture joins the existing chain instead of disturbing it.
+
+    Nothing here appends to the skeleton's own `output` chain. See the
+    PCAP_OUTPUT_CHAIN comment for why that was not a survivable place to put a
+    rule.
     """
     table = NFT_TABLE.split()
     commands: list[list[str]] = []
     if direction in ("out", "inout"):
-        commands.append([NFT_BIN, "add", "rule", *table, "output",
+        commands.append([NFT_BIN, "add", "chain", *table, PCAP_OUTPUT_CHAIN,
+                         "{ type filter hook output priority filter - 10; "
+                         "policy accept; }"])
+        commands.append([NFT_BIN, "add", "rule", *table, PCAP_OUTPUT_CHAIN,
                          *pcap_output_rule(uid, snaplen).split()])
     if direction in ("in", "inout"):
         commands.append([NFT_BIN, "add", "chain", *table, PCAP_INPUT_CHAIN,

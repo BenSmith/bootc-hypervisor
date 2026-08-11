@@ -47,7 +47,7 @@ import time
 sys.dont_write_bytecode = True
 
 from pcap import (
-    PCAP_INPUT_CHAIN, VANTAGE_GUEST, VANTAGE_HOST, filter_dump_id,
+    PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, filter_dump_id,
     filter_dump_object, guest_staging_path, log_rule_handles, nflog_group,
     pcap_delete_command, pcap_rule_commands, tcpdump_argv,
 )
@@ -95,7 +95,14 @@ def run(argv, check=False):
 def host_up(plan: dict) -> None:
     """Install the log rules. The skeleton first: it carries the `ct mark set`
     rule inbound attribution depends on, and a host that has never started a
-    filtered VM has no table at all."""
+    filtered VM has no table at all.
+
+    Applying the skeleton flushes its `output` chain. That is safe here only
+    because our rules live in chains of our own (PCAP_CHAINS) which the
+    skeleton neither declares nor flushes — when the log rule was appended to
+    `output`, this very line deleted the rule of any capture already running,
+    as did every VM start.
+    """
     run([NFT_BIN, "-f", NFT_SKELETON], check=True)
     for command in pcap_rule_commands(plan["uid"],
                                       plan["snaplen"][VANTAGE_HOST],
@@ -122,7 +129,7 @@ def host_down(uid: int) -> None:
     """
     group = nflog_group(uid)
     removed = 0
-    for chain in ("output", PCAP_INPUT_CHAIN):
+    for chain in PCAP_CHAINS:
         listed = run([NFT_BIN, "-j", "-a", "list", "chain",
                       *NFT_TABLE.split(), chain])
         if listed.returncode != 0:
@@ -136,11 +143,22 @@ def host_down(uid: int) -> None:
         for handle in sorted(log_rule_handles(payload, group), reverse=True):
             if run(pcap_delete_command(chain, handle)).returncode == 0:
                 removed += 1
-    # The input chain exists only while something is capturing, so take it with
-    # us — an empty chain in the security-critical table is one more thing for
-    # `drift` to have to explain. Fails harmlessly while another capture still
-    # has a rule in it.
-    run([NFT_BIN, "delete", "chain", *NFT_TABLE.split(), PCAP_INPUT_CHAIN])
+        # Take the chain with us, but ONLY once it holds no other capture's
+        # rule. `nft delete chain` does NOT refuse a non-empty base chain — it
+        # succeeds and takes the rules with it — so "delete and let it fail
+        # harmlessly" is not a thing that happens: it silently ended every
+        # concurrent capture. Re-list rather than reusing `payload`, which is
+        # from before our own deletes.
+        remaining = run([NFT_BIN, "-j", "-a", "list", "chain",
+                         *NFT_TABLE.split(), chain])
+        if remaining.returncode != 0:
+            continue
+        try:
+            still_there = log_rule_handles(json.loads(remaining.stdout))
+        except ValueError:
+            continue
+        if not still_there:
+            run([NFT_BIN, "delete", "chain", *NFT_TABLE.split(), chain])
     if removed:
         log(f"  Removed {removed} log rule(s) for nflog group {group}")
 

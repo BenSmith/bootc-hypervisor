@@ -70,7 +70,15 @@ flush chain inet workload_filter output
 # starts, because a rule added later can only mark connections opened later --
 # and the connection an operator is chasing is already established by the time
 # they come looking.
-add rule inet workload_filter output meta skuid @wl_filtered ct mark set meta skuid or 0x40000000
+#
+# Guarded on the workload uid RANGE, not on @wl_filtered. Attribution is not
+# policy: a container and an `egress = "open"` VM are exactly as interesting to
+# capture as a filtered one, and keying this on set membership made
+# `pcap -Q in` silently empty for every workload that is not filtered -- while
+# `-Q out` worked, so each workload class had one working direction and no
+# error. The range is the whole of what UID_MIN..UID_MAX in lib/workload_lib.py
+# allocates; tests/test_pcap.py asserts the two agree rather than trusting it.
+add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta skuid or 0x40000000
 
 # Loopback is the workload's own control plane, not egress. Without this a
 # filtered VM is cut off from the host in two ways that both look like bugs

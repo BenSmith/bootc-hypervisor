@@ -374,6 +374,44 @@ per-container annotation stayed possible later. tcpdump cannot write it —
 dumpcap/tshark). QEMU's `filter-dump` writes classic pcap too, so both vantages
 agree on the format, which is what actually matters for comparing two files.
 
+### Corrections from review (step 5)
+
+Three, all one mistake: **capture wrote into chains the policy skeleton owns.**
+Each half of it was silent, and the live run missed all three because it
+exercised one workload at a time, and an unfiltered one.
+
+**An appended rule is not a reachable rule.** `nft add rule` appends, and the
+skeleton's `output` chain ends with a terminating `accept`/`drop` for every
+filtered uid — so the outbound `log` rule landed below the drop and could never
+match. `pcap -Q out` captured nothing at all for exactly the workloads egress
+filtering exists to observe, while reporting a healthy capture.
+
+**The skeleton flushes what it owns.** `flush chain ... output` is what makes
+the skeleton re-appliable, and it deleted any in-flight capture's rule — on
+every VM start, and on any other workload starting a capture. Set elements
+survive a flush; appended rules do not.
+
+Both are fixed by the same move: capture now lives in `pcap_output` and
+`pcap_input`, created on demand, which the skeleton neither declares nor
+flushes. `pcap_output` sits at `filter - 10`, ahead of policy, so a packet is
+captured *before* the drop decides its fate — which is the more useful vantage
+anyway.
+
+**`nft delete chain` does not refuse a non-empty base chain.** It succeeds and
+takes the rules with it, so teardown's "delete it and let it fail harmlessly"
+silently ended every concurrent capture. A chain is now deleted only after a
+re-list shows no `log` rule left in it.
+
+A fourth, related: the skeleton's `ct mark set` rule was guarded on
+`@wl_filtered`. The mark is *attribution*, not policy — inbound capture selects
+on it — so guarding it on the policy set made `-Q in` silently empty for every
+container and every `egress = "open"` VM. It is now guarded on the workload uid
+range, which is what the mark always meant.
+
+The common lesson is narrower than "test concurrency": **a feature that writes
+into a table another component owns has to write into its own chain**, or it
+inherits that component's ordering and its flushes.
+
 ### Corrections from the live run (step 5)
 
 Six, and five of them were teardown or ownership rather than capture.

@@ -52,7 +52,7 @@ from vm import (
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
-from pcap import PCAP_INPUT_CHAIN, pcap_unit_name
+from pcap import PCAP_CHAINS, pcap_unit_name
 
 
 def _gpu_vendors(config) -> set[str]:
@@ -758,7 +758,7 @@ def capture_check(config, *, unit_active=PROBE, log_rules=PROBE
 def _log_rule_count() -> int:
     """How many `log` rules the filter table currently carries."""
     total = 0
-    for chain in ("output", PCAP_INPUT_CHAIN):
+    for chain in PCAP_CHAINS:
         total += _count_log_rules(
             _nft_json("list", "chain", *NFT_TABLE.split(), chain))
     return total

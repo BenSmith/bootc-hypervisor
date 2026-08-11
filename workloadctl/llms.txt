@@ -330,9 +330,22 @@ virtiofsd domain). Three non-obvious things hold it together:
 
 `workloadctl pcap` writes a non-terminating `log` rule into the
 security-critical `inet workload_filter` table and reads it back through
-`tcpdump -i nflog:<uid - UID_MIN>`. Four things bite here, all found by running
-it rather than by review:
+`tcpdump -i nflog:<uid - UID_MIN>`. Things that bite here:
 
+- **Capture gets its own chains — `pcap_output` (at `filter - 10`) and
+  `pcap_input` — and never writes into the skeleton's `output` chain.** Two
+  reasons, and both were silent failures before: `nft add rule` appends, so a
+  log rule in `output` lands *below* the terminating drop and never matches for
+  a filtered workload; and the skeleton carries `flush chain ... output`, so
+  every VM start deleted any running capture's rule. Being ahead of policy also
+  means dropped packets are captured, which is usually the point.
+- **Deleting a capture chain is guarded on it being empty.** `nft delete chain`
+  does *not* refuse a non-empty base chain — it succeeds and takes the rules
+  with it, so an unguarded delete ended every concurrent capture.
+- **The skeleton's `ct mark set` is guarded on the uid RANGE, not
+  `@wl_filtered`.** The mark is attribution, not policy; `-Q in` selects on it,
+  so guarding it on the policy set made inbound capture silently empty for
+  containers and `egress = "open"` VMs.
 - **nft deletes rules by handle, never by text.** A text-shaped delete fails
   silently under a tolerant runner, leaving a log rule nobody owns. Teardown
   reads live handles and narrows them to the workload's nflog group so a

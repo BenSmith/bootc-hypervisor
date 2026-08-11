@@ -18,6 +18,7 @@ from vm import (
     nft_drop_counter, nft_set_elements, vm_filter_commands,
     vm_filter_delete_command, vm_owned_elements,
 )
+from workload_lib import UID_MAX, UID_MIN
 
 SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-filter.nft"
 
@@ -74,20 +75,40 @@ class TestSkeleton(unittest.TestCase):
 
         It must (a) exist in the always-on skeleton -- a rule added when a
         capture starts could only mark connections opened later, and the
-        connection an operator is chasing is already established -- (b) be
-        guarded on membership like the drop, and (c) carry no verdict, or it
-        would terminate evaluation and the allow/drop rules below would never
-        run.
+        connection an operator is chasing is already established -- and (b)
+        carry no verdict, or it would terminate evaluation and the allow/drop
+        rules below would never run.
         """
         marks = [d for d in self.directives if "ct mark set" in d]
         self.assertEqual(len(marks), 1, f"expected exactly one mark rule: {marks}")
         rule = marks[0]
-        self.assertIn(f"@{NFT_SET_FILTERED}", rule)
         for verdict in ("accept", "drop", "reject", "return", "goto", "jump"):
             self.assertNotIn(
                 f" {verdict}", rule,
                 f"the mark rule carries a {verdict} verdict, which would stop "
                 f"evaluation before the allow and drop rules")
+
+    def test_the_mark_covers_every_workload_not_only_filtered_ones(self):
+        """The mark is ATTRIBUTION, not policy.
+
+        Guarding it on @wl_filtered like the drop is the obvious-looking thing
+        and it is wrong: `pcap -Q in` selects packets by this mark, so a mark
+        that only fires for filtered workloads makes inbound capture silently
+        empty for every container and every `egress = "open"` VM -- while
+        `-Q out` kept working, so each workload class had exactly one working
+        direction and neither reported an error.
+
+        The range must be the whole of what lib/workload_lib.py allocates, or
+        workloads at one end of it are unattributable.
+        """
+        rule = [d for d in self.directives if "ct mark set" in d][0]
+        self.assertNotIn(
+            f"@{NFT_SET_FILTERED}", rule,
+            "the mark is guarded on set membership, so unfiltered workloads "
+            "carry no mark and inbound capture cannot attribute them")
+        self.assertIn(f"meta skuid {UID_MIN}-{UID_MAX}", rule,
+                      f"the skeleton's uid range must match "
+                      f"UID_MIN..UID_MAX ({UID_MIN}-{UID_MAX})")
 
     def test_mark_precedes_the_terminating_rules(self):
         idx = [i for i, d in enumerate(self.directives) if d.startswith("add rule")]

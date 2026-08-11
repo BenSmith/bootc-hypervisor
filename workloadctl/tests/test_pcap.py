@@ -14,7 +14,8 @@ from types import SimpleNamespace
 
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
-    PCAP_INPUT_CHAIN, PCAP_UNIT_PREFIX, QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT,
+    PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX,
+    QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT,
     VANTAGE_GUEST, VANTAGE_HOST, available_vantages, build_plan,
     filter_dump_object, parse_duration, parse_size, parse_snaplen,
     log_rule_handles, pcap_delete_command, pcap_input_rule, pcap_output_rule,
@@ -188,8 +189,56 @@ class TestHostVantageRules(unittest.TestCase):
 
     def test_out_only_installs_no_input_chain(self):
         commands = pcap_rule_commands(10003, 1500, "out")
-        self.assertEqual(len(commands), 1)
-        self.assertNotIn(PCAP_INPUT_CHAIN, " ".join(commands[0]))
+        self.assertEqual(len(commands), 2)  # chain, then rule
+        self.assertNotIn(PCAP_INPUT_CHAIN, " ".join(
+            part for command in commands for part in command))
+
+    def test_out_creates_the_chain_before_the_rule(self):
+        commands = pcap_rule_commands(10003, 1500, "out")
+        self.assertIn("chain", commands[0])
+        self.assertIn(PCAP_OUTPUT_CHAIN, commands[0])
+        self.assertIn("rule", commands[1])
+
+    def test_no_rule_is_ever_added_to_the_skeletons_own_chains(self):
+        """The bug this exists to prevent, and it was silent in both halves.
+
+        `nft add rule` APPENDS, and the skeleton's `output` chain ends with a
+        terminating accept/drop for every filtered uid — so a log rule appended
+        there is unreachable for exactly the workloads this feature exists to
+        observe, and counts nothing while looking installed. The skeleton also
+        carries `flush chain ... output` so it can be re-applied idempotently,
+        which meant every VM start deleted an in-flight capture's rule.
+
+        Both are avoided by the same thing: never write into a chain the
+        skeleton owns.
+        """
+        skeleton = (ROOT / "nftables" / "workload-filter.nft").read_text()
+        owned = {line.split()[-1] for line in skeleton.splitlines()
+                 if line.startswith(("add chain ", "flush chain "))}
+        self.assertTrue(owned, "parsed no chains out of the skeleton")
+        for direction in ("in", "out", "inout"):
+            for command in pcap_rule_commands(10003, 1500, direction):
+                if "rule" not in command and "chain" not in command:
+                    continue
+                self.assertFalse(
+                    owned & set(command),
+                    f"pcap writes into a skeleton-owned chain "
+                    f"({owned & set(command)}) for direction {direction!r}: "
+                    f"{' '.join(command)}")
+
+    def test_the_output_chain_runs_ahead_of_policy(self):
+        """Capture before the verdict, so a DROPPED packet still appears —
+        which is the question an egress-filtering feature gets asked."""
+        chain_cmd = pcap_rule_commands(10003, 1500, "out")[0]
+        spec = " ".join(chain_cmd)
+        self.assertIn("hook output", spec)
+        self.assertIn("filter - 10", spec)
+        skeleton = (ROOT / "nftables" / "workload-filter.nft").read_text()
+        policy = [line for line in skeleton.splitlines()
+                  if line.startswith("add chain") and "hook output" in line][0]
+        self.assertIn("priority 0", policy,
+                      "the policy chain moved; re-check that filter-10 is "
+                      "still ahead of it")
 
     def test_in_creates_the_chain_before_the_rule(self):
         commands = pcap_rule_commands(10003, 1500, "in")
@@ -567,13 +616,36 @@ class TestHelperContract(unittest.TestCase):
         enough to have a plan."""
         self.assertIn("def cleanup(name: str)", self.source)
 
-    def test_the_input_chain_is_removed_with_the_rules(self):
+    def test_the_capture_chains_are_removed_with_the_rules(self):
         """An empty chain in the security-critical table is one more thing for
         drift to have to explain."""
-        down = self.source[self.source.index("def host_down"):
+        self.assertIn("delete", self._host_down())
+        self.assertIn("PCAP_CHAINS", self._host_down())
+
+    def test_a_chain_is_only_deleted_once_it_holds_no_other_rule(self):
+        """`nft delete chain` does NOT refuse a non-empty base chain — it
+        succeeds and takes the rules with it. Verified on nftables 1.1.6.
+
+        So the original "delete it and let it fail harmlessly if someone else
+        still has a rule in there" was not harmless: one workload's capture
+        ending silently ended every concurrent one. The re-list matters as much
+        as the guard — checking the payload from before our own deletes would
+        never find the chain empty.
+        """
+        down = self._host_down()
+        delete_at = down.index('"delete", "chain"')
+        guard = down[:delete_at]
+        self.assertIn("if not still_there:", guard,
+                      "the chain delete is not guarded on the chain being "
+                      "empty of other captures' rules")
+        self.assertEqual(
+            2, guard.count("list\", \"chain"),
+            "host_down must re-list after deleting its own rules; the earlier "
+            "payload predates them and would always look non-empty")
+
+    def _host_down(self) -> str:
+        return self.source[self.source.index("def host_down"):
                            self.source.index("# --- guest vantage, VM ---")]
-        self.assertIn("delete", down)
-        self.assertIn("PCAP_INPUT_CHAIN", down)
 
     def test_the_container_pid_goes_through_the_podman_wrapper(self):
         """Talking to a workload user's rootless podman needs
