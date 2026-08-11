@@ -34,12 +34,16 @@ def vm_config(name="fj", uid=10003, bridge=None):
         get_network_mode=lambda: "pasta")
 
 
-def container_config(name="web", uid=10004, mode="pasta", containers=None):
+def container_config(name="web", uid=10004, mode="pasta", containers=None,
+                     topology=None):
+    """`mode` is the [network] mode; `topology` is workload.mode
+    (single|pod|bridge), which is what decides namespace sharing."""
     names = containers or [name]
     return SimpleNamespace(
         name=name, uid=uid, is_vm=False, vm_bridge=None, vm_network={},
         config={"network": {"mode": mode}},
         get_network_mode=lambda: mode,
+        mode=topology or ("single" if names == [name] else "pod"),
         container_names=lambda: names,
         podman_container_name=lambda c: (
             f"workload-{name}" if names == [name] else f"workload-{name}-{c}"),
@@ -327,10 +331,24 @@ class TestContainerTargeting(unittest.TestCase):
     def test_a_single_container_workload_needs_no_container_name(self):
         self.assertEqual(self._errors(container_config()), [])
 
-    def test_a_multi_container_workload_must_name_one(self):
-        config = container_config(containers=["web", "db"])
+    def test_pod_mode_needs_no_container_name(self):
+        """Pod containers share ONE network namespace, so a guest-side capture
+        is whole-workload and naming a member changes nothing."""
+        config = container_config(containers=["web", "db"], topology="pod")
+        self.assertEqual(self._errors(config), [])
+
+    def test_bridge_mode_must_name_one(self):
+        """Only bridge mode gives each container its own netns."""
+        config = container_config(containers=["web", "db"], topology="bridge")
         errors = self._errors(config)
         self.assertTrue(any("name one as" in e for e in errors))
+
+    def test_the_host_vantage_never_needs_a_container_name(self):
+        """Every container of a workload runs as the same user, so `meta skuid`
+        gathers all of them — the host vantage is whole-workload by
+        construction, on every topology."""
+        config = container_config(containers=["web", "db"], topology="bridge")
+        self.assertEqual(self._errors(config, vantages=[VANTAGE_HOST]), [])
 
     def test_an_unknown_container_is_rejected(self):
         config = container_config(containers=["web", "db"])

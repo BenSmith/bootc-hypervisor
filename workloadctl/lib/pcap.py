@@ -634,6 +634,15 @@ def validate_request(config, *, vantages: list[str], direction: str,
     # WORKLOAD/CONTAINER. Accepting the syntax and then ignoring the container
     # half would capture a sibling's namespace with nothing said about it,
     # which is worse than refusing the form outright.
+    #
+    # But it is only ever needed for ONE topology. The host vantage is
+    # inherently whole-workload — every container of a workload runs as the
+    # same `_wl-<name>` user, so `meta skuid` gathers all of them and a
+    # container name would be meaningless there. Under `pod` mode the
+    # containers share one network namespace by construction, so a guest-side
+    # capture is whole-workload too and naming one member is ceremony that
+    # changes nothing. Only `bridge` mode gives each container its own netns,
+    # and only there does a capture have to say which it means.
     if container is not None:
         if config.is_vm:
             errors.append(
@@ -642,12 +651,14 @@ def validate_request(config, *, vantages: list[str], direction: str,
             errors.append(
                 f"{container!r} is not a container in {config.name} "
                 f"({', '.join(config.container_names())})")
-    elif not config.is_vm and len(config.container_names()) > 1:
+    elif (not config.is_vm and VANTAGE_GUEST in vantages
+            and config.mode == "bridge"):
         errors.append(
-            f"{config.name} runs {len(config.container_names())} containers "
-            f"({', '.join(config.container_names())}); name one as "
-            f"{config.name}/<container> — under 'pod' mode they share a "
-            f"namespace, but a capture must still say which it means")
+            f"{config.name} runs in 'bridge' mode, where each container has "
+            f"its own network namespace — name one as "
+            f"{config.name}/<container> ({', '.join(config.container_names())}). "
+            f"The host vantage needs no container: every container runs as the "
+            f"same user, so it captures the whole workload at once")
 
     for vantage in vantages:
         if vantage not in table:
