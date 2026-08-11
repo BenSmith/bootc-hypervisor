@@ -308,6 +308,11 @@ name = "schema-reference"
 # owns its guest configuration and must set http_proxy/https_proxy itself.
 # hosts = ["example.com", "*.fedoraproject.org"]
 #
+# Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
+# --pcap has no size limit, no rotation and no runtime toggle — it writes until
+# the process exits — which is the wrong shape for a persistent setting. See
+# docs/workloads.md.
+#
 # Break-glass, if the filter itself is the problem:
 #   nft delete table inet workload_filter
 # The table is rebuilt by the next VM start. An abandoned table is inert: the

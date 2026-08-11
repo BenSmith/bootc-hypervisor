@@ -326,10 +326,39 @@ virtiofsd domain). Three non-obvious things hold it together:
   by iterating under *enforcing*, one gate per round. The opposite of how
   `wlvfsd_t` was derived.
 
+### Packet capture (step 5)
+
+`workloadctl pcap` writes a non-terminating `log` rule into the
+security-critical `inet workload_filter` table and reads it back through
+`tcpdump -i nflog:<uid - UID_MIN>`. Four things bite here, all found by running
+it rather than by review:
+
+- **nft deletes rules by handle, never by text.** A text-shaped delete fails
+  silently under a tolerant runner, leaving a log rule nobody owns. Teardown
+  reads live handles and narrows them to the workload's nflog group so a
+  concurrent capture keeps its own rule.
+- **SIGTERM skips `finally`.** Python's default disposition terminates without
+  unwinding, so `systemctl stop` — the normal path — was the one that never
+  finalized a guest-side file. `libexec/workload-pcap` turns SIGTERM into
+  `SystemExit`; the unit's `ExecStopPost` covers `kill -9`.
+- **A confined QEMU cannot write an operator's `-w` path**, and fails on DAC
+  before SELinux is consulted — silently, with `object-add` accepted and no
+  file created. Guest-side captures are staged in `/run/workload-vm/<name>/`
+  (labelled `qemu_var_run_t` by step 3) and moved on finalize.
+- **Guest-side timestamps are wrong by VM uptime + the host's UTC offset.**
+  Measured at −29,407 s on a PDT host. The offset is measured with a probe
+  packet, never derived from guest uptime — deriving it leaves the timezone
+  term in place, silently, on every non-UTC host.
+
+The plan travels from CLI to helper as JSON so `--dry-run` and the run cannot
+disagree. `diagnose` reports a live capture, so the extra rule is explained
+rather than discovered.
+
 ## Key Commands
 
 | Command | Description |
 |---|---|
+| `workloadctl pcap <name> [FILTER]` | Capture traffic; `-D` lists vantages, `--dry-run` prints the exact nft rule first |
 | `workloadctl catalog` | List shippable bundles under `/usr/share/workloadctl/workloads/` |
 | `workloadctl init <bundle> [--as <name>]` | Stamp a catalog bundle into `/etc/workloads.d/<name>/workload.toml` (sets `bundle` when name diverges) |
 | `workloadctl duplicate <src> <new>` | Copy a live workload (alias `clone`); resolves `bundle` to the source's, lints host-global settings |

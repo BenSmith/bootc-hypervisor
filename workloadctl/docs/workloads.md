@@ -1257,6 +1257,76 @@ entry is a validation error rather than a pattern that silently matches nothing.
 the proxy can be listening while the guest has no path to it, and every other
 signal looks correct when that happens.
 
+### Packet Capture
+
+`workloadctl pcap` captures a workload's traffic. The surface is tcpdump's, and
+the one new idea is that **a vantage is an interface** — which tcpdump users
+already accept from `any`, `lo` and `nflog:3`:
+
+```bash
+workloadctl pcap -D fedora-vm                       # what this workload offers
+workloadctl pcap fedora-vm                          # decode to the terminal
+workloadctl pcap -w /var/tmp/cap.pcap fedora-vm port 443
+workloadctl pcap -i host -i guest --detach -w /var/tmp/cap fedora-vm
+workloadctl pcap --list                             # running captures
+workloadctl pcap --stop fedora-vm
+```
+
+**Two vantages, because under passt they genuinely differ.**
+
+| | sees | mechanism |
+|---|---|---|
+| `host` (default) | the real host socket, after passt/pasta re-originated the traffic | an nftables `log` rule + `tcpdump -i nflog:<group>` |
+| `guest` | the workload's own framing, before translation | a QEMU `filter-dump` object (VM) or tcpdump in the netns (container) |
+
+The guest side is what shows you DHCP, ARP/NDP and the DNS passt or pasta
+answers itself — traffic that never becomes a host socket and so cannot appear
+host-side at any snaplen. The host side is the only mechanism that can produce
+a per-workload capture at all: by the time a packet is on the wire the owning
+socket is not part of it, so only netfilter sees `meta skuid`.
+
+`-D` reports which vantages a workload has and why any are missing — a bridged
+VM has no host vantage, a `mode = "host"` container has no guest vantage.
+
+**A VM's guest side is a dumb backend.** `filter-dump` accepts only a file and
+a length, so it takes no BPF filter, cannot honor `-Q`, and does not rotate.
+`-D` says so before you hit it, and a filter that cannot be applied to *every*
+selected vantage is rejected rather than applied to one — two captures narrowed
+differently cannot be compared, and comparing them is the only reason to select
+two.
+
+**Nothing is written without `-w`**, exactly as tcpdump behaves. Captures are
+bounded at 5 minutes or 100 MB by default, whichever trips first, and both
+vantages stop together so the files cover the same window.
+
+**The snaplen default is 1500, not "everything".** passt hands the guest a
+65520-byte MTU and segments are captured whole — measured at 10.9 KB per packet,
+so an untruncated capture reaches a 100 MB bound in seconds. 1500 keeps the
+first segment of each connection, where the TLS SNI and the HTTP request line
+live. Truncation loses payload only: packet counts and true lengths stay exact.
+
+**`--dry-run` is an audit step, not a preview.** `pcap` is the one
+read-flavoured command that writes into the security-critical
+`inet workload_filter` table, so it prints the exact rule before installing it —
+letting you confirm it is a non-terminating `log` rule that cannot change
+accept/drop semantics. `diagnose` also reports a live capture, so an operator
+who finds that rule is told what put it there.
+
+**Teardown belongs to systemd.** The capture runs in a transient
+`workload-pcap-<name>.service` whose `ExecStopPost` removes the nftables rule
+and the QEMU object, so a dropped session, a `kill -9` or a reboot cannot leave
+either behind. `--list` and `--stop` read systemd rather than a registry of our
+own, which is why a reboot ending every capture is self-correcting.
+
+> **Guest-side timestamps are corrected on finalize.** QEMU stamps
+> `filter-dump` packets with a clock that counts from VM start, then adds the
+> guest's UTC RTC reinterpreted as host local time — so raw timestamps are off
+> by the VM's uptime *plus* this host's UTC offset (measured at −29,407 s on a
+> PDT host: 28,800 + ~607 s of uptime). `pcap` measures the offset with a probe
+> packet and shifts the file with `editcap`, which needs nothing from the guest.
+> Relative deltas inside a file are correct either way; the correction is what
+> makes two vantages comparable. Install `wireshark-cli` for it.
+
 ### Update and Rollback
 
 **Update** rebuilds `system.qcow2` from the configured image source:

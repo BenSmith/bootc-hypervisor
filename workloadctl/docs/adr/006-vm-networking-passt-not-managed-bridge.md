@@ -1,13 +1,12 @@
 # ADR 006: VM networking uses passt, not a shared managed bridge
 
-**Status:** **Implemented** through step 4 of the implementation sequence. Supersedes ADR 002.
+**Status:** **Implemented.** All five steps of the implementation sequence. Supersedes ADR 002.
 
 - Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
 - Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
 - Step 3 (2026-08-10): QEMU confined as `svirt_t`, and the virtiofsd domain.
 - Step 4 (2026-08-10): the per-workload proxy, the `hosts` schema key, and its domain.
-
-Capture (`workloadctl pcap`, step 5) is the remaining step.
+- Step 5 (2026-08-11): `workloadctl pcap`, both vantages, and the timestamp correction.
 
 **Date:** 2026-08-09.
 
@@ -356,6 +355,86 @@ entirely** — which is the property that makes hostname policy binding rather
 than advisory. Clean across a full restart cycle, with zero SELinux denials and
 `diagnose` at 13/13.
 
+### Step 5: capture
+
+**Host-side first, as the sequence directs** — it is the default, works on
+every substrate, and needs no QMP. The guest side followed, and the ordering
+paid: every teardown and ownership defect below was found with the simpler
+vantage, before a QMP object was in the picture.
+
+**The plan is one object, not two renderings.** `--dry-run` prints it and the
+helper executes it, and it travels to the helper as JSON rather than being
+re-derived — because a helper that recomputed the plan from the config could
+disagree with what was printed, and the whole contract of §6.6 is that they
+cannot.
+
+**Both files are classic pcap, not pcapng.** The design wanted pcapng so
+per-container annotation stayed possible later. tcpdump cannot write it —
+`--pcap-ng` is not a tcpdump option at all (4.99.6; it belongs to
+dumpcap/tshark). QEMU's `filter-dump` writes classic pcap too, so both vantages
+agree on the format, which is what actually matters for comparing two files.
+
+### Corrections from the live run (step 5)
+
+Six, and five of them were teardown or ownership rather than capture.
+
+**nft cannot delete a rule by its text.** Deletion is by handle. A text-shaped
+delete fails, and fails *silently* under a tolerant runner — so the first
+implementation's teardown removed nothing at all, and left a `log` rule in the
+security-critical table with nothing owning it. Removal now reads the live
+handles and narrows them to this workload's nflog group, so a concurrent
+capture on another workload keeps its rule.
+
+**SIGTERM does not run `finally`.** Python's default disposition terminates the
+process outright without unwinding, so the ordinary `systemctl stop` path — the
+one an operator uses every time — was the single path where a guest-side
+capture never got finalized: the process died, and `ExecStopPost` then found a
+staged file with nobody left to move it. The helper now turns SIGTERM into
+`SystemExit`.
+
+**A confined QEMU cannot write the operator's `-w` path**, which §13 predicted
+and which is worse than predicted: it fails on plain **DAC** before SELinux has
+an opinion (QEMU runs as `_wl-<name>`, the path is root-owned), and it fails
+*silently* — `object-add` is accepted, the object exists, and no file ever
+appears. The capture is staged in the workload's own runtime directory, which
+step 3 already labelled `qemu_var_run_t` so a confined QEMU could create
+sockets there, and moved on finalize. The move rides along free because the
+timestamp correction already required a finalize step. The file's existence is
+now checked rather than trusted.
+
+**`Type=exec` marks a unit active before it can fail.** A capture whose
+`object-add` QEMU refuses, or whose tcpdump exits on a bad option, is
+observably "active" first — so `--detach` reported "Capturing in the
+background" for a unit that was already dead. The settle check is now a dwell
+rather than a poll-until-active: the interesting states arrive quickly, and the
+wrong answer is the early one.
+
+**capinfos says "Earliest packet time", not "First packet time."** Matching one
+label is a silent no-op — the correction is skipped, the file keeps a timestamp
+hours in the future, and nothing says so. Both labels are accepted and a failed
+correction now warns.
+
+**A second capture was refused only after the plan had been narrated**, which
+described something that was not going to happen.
+
+**§6.9 confirmed on hardware, both terms.** The measured offset was
+**−29,407.4 s**: 28,800 s of PDT offset plus ~607 s of VM uptime, exactly the
+two independent errors the design separated. After correction the file's first
+packet landed on wall clock. The probe is a TCP connect to the workload's own
+management address — passt hands the guest a SYN, which the tap sees, and the
+guest is not asked for anything.
+
+**Verified on Fedora 44:** host vantage alone (rule installed, traffic
+attributed, rule removed, file readable); guest vantage alone (object added,
+staged, corrected, moved); both together, producing files whose first packets
+are 1.0 s apart on the same wall clock — the alignment that is the entire point
+of two vantages, and which does not exist without the correction. The guest
+file held 77 packets to the host file's 18, which is §6.2's claim about what
+never becomes a host socket, measured. A `kill -9` of the capture process left
+**zero** rules, no chain, and no QEMU object — teardown by `ExecStopPost`, not
+by a `finally`. A second concurrent capture was refused by name. Zero SELinux
+denials throughout.
+
 ## Consequences
 
 **Removed:**
@@ -386,6 +465,8 @@ today, so `[vm.network].ports` adds a facility rather than replacing one.
   anything the guest can read can leave through it. Structural.
 - **DNS tunnelling** when the guest is given a forwarding resolver.
 - **VMs on an operator-provided bridge**, which are unfiltered by design.
+- **Capture of a workload that is not running.** Both vantages need a live
+  process — a socket to attribute or a netdev to tap.
 - ~~**SELinux confinement of VM workloads.**~~ **Closed by step 3**, which the
   original text listed here as a separate decision with unresolved cost. QEMU
   now enters `svirt_t` via a `runcon` prefix in `workload-vm-notify`, and passt
