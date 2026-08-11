@@ -383,6 +383,37 @@ RUN set -- /tmp/wl-rpms/workloadctl-*.rpm && \
     rm -rf /tmp/wl-rpms && \
     dnf clean all
 
+# Declare tinyproxy's user, which its own packaging does not.
+#
+# workloadctl hard-requires tinyproxy (one instance per VM workload that sets
+# [vm.network].hosts — ADR 006 §4.4), and tinyproxy-1.11.2-8.fc44 still creates
+# its account the legacy way: `groupadd -r` / `useradd -r` in %pre, with no
+# sysusers.d fragment. That writes /etc/passwd and /etc/group entries with no
+# declaration behind them, which bootc's `etc-sysusers` lint reports — and since
+# our lint runs with --fatal-warnings, it fails the build.
+#
+# It fails the VARIANT builds only. The base image lints before this layer, so
+# hypervisor-bootc is clean and hypervisor-{amd,nvidia-*} are not, which reads
+# as a GPU problem and is not one.
+#
+# bootc is right to care. /etc is per-machine and 3-way merged across upgrades,
+# so an account that exists only in the build's /etc/passwd is not guaranteed to
+# exist — or to keep the same uid — on a machine that upgrades into this image.
+# A fragment under /usr/lib regenerates it deterministically on every boot.
+#
+# Values mirror the %pre scriptlet exactly (`-d /usr/share/tinyproxy
+# -s /sbin/nologin -c 'tinyproxy user'`). The ids stay dynamic: sysusers never
+# rewrites an account that already exists, so pinning a number here would only
+# invent a second source of truth.
+#
+# Note this account is dead weight for us. Our proxies run as the workload's own
+# _wl-<name> user (that shared uid is the whole mechanism the egress filter keys
+# on), and the shipped tinyproxy.service stays disabled by the default preset.
+# The entry is declared because it EXISTS, not because anything uses it.
+RUN printf 'g tinyproxy - -\n' > /usr/lib/sysusers.d/hypervisor-tinyproxy.conf && \
+    printf 'u tinyproxy - "tinyproxy user" /usr/share/tinyproxy /sbin/nologin\n' \
+        >> /usr/lib/sysusers.d/hypervisor-tinyproxy.conf
+
 # Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
 COPY bin/cosy /usr/bin/
