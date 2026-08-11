@@ -427,5 +427,28 @@ RUN chmod 0755 /usr/bin/cosy && \
     /usr/bin/cosy completion bash > /usr/share/bash-completion/completions/cosy && \
     chmod 0644 /usr/share/bash-completion/completions/cosy
 
+# Lint again, after everything.
+#
+# The lint above runs partway through this file, before the workloadctl RPM and
+# the layers that follow it. So the base image never re-checked the /etc entries
+# its own dependencies create, and a tinyproxy packaging gap surfaced instead as
+# a hypervisor-amd build failure — a lint about a workloadctl dependency,
+# reported by the GPU image, hundreds of layers from its cause.
+#
+# The variants have always covered this ground incidentally, by linting on top
+# of the finished base. That is the wrong place to find out: it is a slower
+# feedback loop, it fails three images for one defect, and it points at the
+# wrong file.
+#
+# The earlier call stays where it is rather than moving here. Two lints cost
+# seconds, and keeping the first one means a regression in the packages layer
+# still fails at the packages layer instead of at the bottom of the file.
+#
+# Same three exemptions, deliberately not widened — see the earlier call for
+# what each covers. Verified clean at this point on a full build (10 checks
+# passed, 0 warnings) before this was added, so it carries no accepted debt.
+RUN bootc container lint --fatal-warnings \
+    --skip var-tmpfiles --skip var-log --skip nonempty-run-tmp
+
 LABEL org.opencontainers.image.title="Hypervisor bootc Image"
 LABEL org.opencontainers.image.description="generic bootc-based hypervisor"
