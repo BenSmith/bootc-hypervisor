@@ -48,8 +48,8 @@ sys.dont_write_bytecode = True
 
 from pcap import (
     PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, filter_dump_id,
-    filter_dump_object, guest_staging_path, log_rule_handles, nflog_group,
-    pcap_delete_command, pcap_rule_commands, tcpdump_argv,
+    filter_dump_object, guest_staging_path, log_rule_handles, log_rule_packets,
+    nflog_group, pcap_delete_command, pcap_rule_commands, tcpdump_argv,
 )
 from vm import (
     NFT_BIN, NFT_TABLE, NFT_SKELETON, VM_MGMT_SSH_PORT, VM_SOCKET_DIR,
@@ -110,6 +110,83 @@ def host_up(plan: dict) -> None:
         run(command, check=True)
     log(f"  Logging uid {plan['uid']} to nflog group "
         f"{nflog_group(plan['uid'])} ({plan['direction']})")
+
+
+def matched_packets(uid: int) -> int | None:
+    """What the KERNEL handed to nflog for this workload, from the rule counter.
+
+    Must be read before host_down deletes the rules. Returns None when no log
+    rule is present, which is not zero: "nothing was captured" and "there was
+    nothing to capture with" are different answers and only one of them is a
+    bug.
+    """
+    group = nflog_group(uid)
+    total = 0
+    found = False
+    for chain in PCAP_CHAINS:
+        listed = run([NFT_BIN, "-j", "-a", "list", "chain",
+                      *NFT_TABLE.split(), chain])
+        if listed.returncode != 0:
+            continue
+        try:
+            payload = json.loads(listed.stdout)
+        except ValueError:
+            continue
+        if log_rule_handles(payload, group):
+            found = True
+            total += log_rule_packets(payload, group)
+    return total if found else None
+
+
+def report_completeness(plan: dict) -> None:
+    """Say whether the host-side file actually holds what the kernel matched.
+
+    nflog drops under load and does not report it — tcpdump's own "dropped by
+    kernel" admitted 7 against an actual shortfall of 530 in the run that
+    motivated this, because the loss happens upstream of libpcap. So the only
+    trustworthy completeness signal is the rule counter, and the only place it
+    can be read is here, before teardown removes the rule.
+
+    Silent on the happy path. An operator who did not lose packets does not
+    need to be told about a failure mode they did not hit.
+    """
+    matched = matched_packets(plan["uid"])
+    if matched is None:
+        return
+    path = _path_for(plan, VANTAGE_HOST)
+    if not path or path == "-" or not os.path.exists(path):
+        log(f"  Host vantage: {matched} packets matched")
+        return
+    captured = _packet_count(path)
+    if captured is None or captured >= matched:
+        in_file = "unknown" if captured is None else str(captured)
+        log(f"  Host vantage: {matched} packets matched, {in_file} in the file")
+        return
+    lost = matched - captured
+    log(f"  WARNING: the host-side capture is INCOMPLETE — the kernel matched "
+        f"{matched} packets and only {captured} reached {path} ({lost} lost, "
+        f"{lost * 100.0 / matched:.2f}%). nflog copies packets over a netlink "
+        f"buffer that overflows under load; the packets were sent, this file "
+        f"just does not have all of them. Do not read a gap here as the "
+        f"workload not having sent something. The guest vantage (-i guest) "
+        f"taps QEMU's datapath and has no such failure mode.")
+
+
+def _packet_count(path: str) -> int | None:
+    """Packets actually in a pcap file. `-M` keeps the number machine-readable.
+
+    Label checked against capinfos rather than assumed — guessing one is what
+    made the guest-side timestamp correction a silent no-op on the bench.
+    """
+    result = run(["capinfos", "-c", "-M", path])
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if "Number of packets" in line:
+            digits = "".join(c for c in line.split(":", 1)[-1] if c.isdigit())
+            if digits:
+                return int(digits)
+    return None
 
 
 def host_down(uid: int) -> None:
@@ -405,6 +482,9 @@ def main(argv):
         for reader in readers:
             _terminate(reader)
         if VANTAGE_HOST in vantages:
+            # Order matters: the counter lives on the rule host_down deletes,
+            # and the file is only complete once tcpdump above has exited.
+            report_completeness(plan)
             host_down(plan["uid"])
 
 

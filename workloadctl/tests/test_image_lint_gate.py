@@ -42,27 +42,42 @@ def _lint_calls(text: str) -> list[str]:
                      "image half not present (standalone workloadctl checkout)")
 class TestImageLintGate(unittest.TestCase):
     def test_every_hypervisor_image_lints_itself(self):
-        """A variant with no lint call builds green while checking nothing."""
+        """A variant with no lint call builds green while checking nothing.
+
+        At least one, not exactly one. The base image lints twice on purpose:
+        once partway through, so a regression in the packages layer fails at
+        the packages layer, and once at the end, because everything after the
+        first call — the workloadctl RPM and what it drags in — was otherwise
+        checked only incidentally by the variants. That gap is what turned a
+        tinyproxy packaging bug into a hypervisor-amd build failure.
+
+        The count is not the invariant. The invariant is that every call is a
+        real gate, which the two tests below check on ALL calls rather than on
+        the first — a second call that quietly dropped --fatal-warnings or
+        granted itself an extra --skip would otherwise be invisible here.
+        """
         for cf in CONTAINERFILES:
             with self.subTest(containerfile=cf.name):
-                self.assertEqual(
+                self.assertGreaterEqual(
                     len(_lint_calls(cf.read_text())), 1,
-                    f"{cf.name} should run `bootc container lint` exactly once")
+                    f"{cf.name} should run `bootc container lint` at least once")
 
     def test_warnings_are_fatal_everywhere(self):
         """Without --fatal-warnings bootc exits 0 on warnings, which is how the
         pre-`--skip` allowlist managed to be decorative for so long."""
         for cf in CONTAINERFILES:
-            with self.subTest(containerfile=cf.name):
-                call = _lint_calls(cf.read_text())[0]
-                self.assertIn("--fatal-warnings", call)
+            for i, call in enumerate(_lint_calls(cf.read_text())):
+                with self.subTest(containerfile=cf.name, call=i):
+                    self.assertIn("--fatal-warnings", call)
 
     def test_the_skip_set_is_identical_across_variants(self):
         """The base image's three exemptions are the whole exemption budget. A
         variant granting a fourth would suppress a lint the base still enforces,
-        and only its own build would ever know."""
+        and only its own build would ever know. The same applies to a second
+        call within one file, so this checks every call and not just the first.
+        """
         for cf in CONTAINERFILES:
-            with self.subTest(containerfile=cf.name):
-                call = _lint_calls(cf.read_text())[0]
-                skips = set(re.findall(r"--skip\s+(\S+)", call))
-                self.assertEqual(skips, set(EXPECTED_SKIPS))
+            for i, call in enumerate(_lint_calls(cf.read_text())):
+                with self.subTest(containerfile=cf.name, call=i):
+                    skips = set(re.findall(r"--skip\s+(\S+)", call))
+                    self.assertEqual(skips, set(EXPECTED_SKIPS))

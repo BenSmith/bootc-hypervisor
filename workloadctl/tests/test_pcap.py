@@ -445,7 +445,7 @@ class TestPlan(unittest.TestCase):
     def test_it_shows_the_exact_rule_before_installing_it(self):
         """Which is what makes --dry-run an audit step rather than pedagogy."""
         rendered = render_plan(self.plan)
-        self.assertIn("meta skuid 10003 log group 3", rendered)
+        self.assertIn("meta skuid 10003 counter log group 3", rendered)
         self.assertIn("continue", rendered)
 
     def test_it_names_the_unit_that_owns_teardown(self):

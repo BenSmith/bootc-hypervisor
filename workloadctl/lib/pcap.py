@@ -59,6 +59,34 @@ MAX_SIZE_DEFAULT = "100M"
 QEMU_MAXLEN_UNLIMITED = 65536
 
 
+# The host vantage can silently under-report, and this is why every host-side
+# rule carries a `counter`.
+#
+# nflog copies each matched packet to userspace over a netlink socket whose
+# receive buffer can overflow. The network is unaffected — the *capture* loses
+# packets. QEMU's filter-dump sits in the datapath and has no such failure mode,
+# which is a second reason to keep both vantages.
+#
+# Measured on nftables 1.1.6 / tcpdump 4.99.6, 200k UDP packets at ~1400 bytes:
+# the rule counter recorded all 200,000 while tcpdump received 199,470 /
+# 199,830 / 199,872 across three runs. Reproducible, and at a rate a VM pulling
+# a large file will reach.
+#
+# The dangerous part is not the loss, it is that nothing reports it.
+# tcpdump's own "dropped by kernel" admitted 7, 0 and 2 against actual
+# shortfalls of 530, 170 and 128 — the drop happens upstream of libpcap, so
+# libpcap's accounting is self-consistent and wrong ("199470 captured, 199470
+# received by filter"). /proc/net/netfilter/nfnetlink_log does not exist on
+# current kernels either. A capture that silently under-reports is worse than
+# no capture when the question is "did this workload reach X", because absence
+# of evidence reads as evidence of absence.
+#
+# So the rule counts what the kernel matched, and teardown compares that against
+# the packets actually in the file. That comparison is the only signal there is.
+LOSS_NOTE = ("nflog can drop under load and does not report it; the rule "
+             "counter is compared against the file on stop")
+
+
 @dataclass
 class Vantage:
     """One capture point, available or not, with the reason if not."""
@@ -86,8 +114,9 @@ def pcap_vantages(config) -> list[Vantage]:
         return [
             Vantage(
                 VANTAGE_HOST, not bridged,
-                "the traffic as it leaves this machine, after passt "
-                "re-originated it onto host sockets owned by this workload"
+                ("the traffic as it leaves this machine, after passt "
+                 "re-originated it onto host sockets owned by this "
+                 "workload. " + LOSS_NOTE)
                 if not bridged else
                 f"unavailable: [vm.network].bridge = {config.vm_bridge!r}, so "
                 f"the guest sends from its own LAN address and no host socket "
@@ -113,7 +142,7 @@ def pcap_vantages(config) -> list[Vantage]:
             Vantage(VANTAGE_HOST, True,
                     "the traffic as it leaves this machine. For a host-network "
                     "container the workload uid is the ONLY thing separating "
-                    "its traffic from the host's own",
+                    "its traffic from the host's own. " + LOSS_NOTE,
                     supports_filter=False),
             Vantage(VANTAGE_GUEST, False,
                     "unavailable: [network] mode = \"host\" shares the host's "
@@ -131,7 +160,8 @@ def pcap_vantages(config) -> list[Vantage]:
     return [
         Vantage(VANTAGE_HOST, True,
                 "the traffic as it leaves this machine, after pasta "
-                "re-originated it onto host sockets owned by this workload",
+                "re-originated it onto host sockets owned by this workload. "
+                + LOSS_NOTE,
                 supports_filter=False),
         Vantage(VANTAGE_GUEST, True,
                 "what the workload put on the wire inside its own network "
@@ -248,14 +278,40 @@ def nflog_group(uid: int) -> int:
     return vm_nflog_group(uid)
 
 
+def log_rule_packets(payload, group: int | None = None) -> int:
+    """Packets matched by the host-side log rules, from `nft -j list chain`.
+
+    Ground truth for completeness: this is what the kernel handed to nflog,
+    whatever userspace then managed to receive. `counter` and `log` are sibling
+    expressions in one rule, so the group narrowing and the count come from the
+    same object and cannot be mismatched.
+    """
+    total = 0
+    for item in (payload or {}).get("nftables", []):
+        rule = item.get("rule")
+        if not rule:
+            continue
+        exprs = [e for e in rule.get("expr", []) if isinstance(e, dict)]
+        logs = [e["log"] for e in exprs if "log" in e]
+        if not logs:
+            continue
+        if group is not None and logs[0].get("group") != group:
+            continue
+        for expr in exprs:
+            if "counter" in expr:
+                total += expr["counter"].get("packets", 0)
+    return total
+
+
 def pcap_output_rule(uid: int, snaplen: int) -> str:
     """The outbound `log` rule, as nft would print it.
 
     Non-terminating and set-free: it cannot change accept/drop semantics, which
     is exactly what `--dry-run` exists to let an operator confirm before this
-    goes into the security-critical table.
+    goes into the security-critical table. `counter` is non-terminating too —
+    see LOSS_NOTE for why it is the only way to know this capture is complete.
     """
-    return (f"meta skuid {uid} log group {nflog_group(uid)} "
+    return (f"meta skuid {uid} counter log group {nflog_group(uid)} "
             f"snaplen {snaplen} continue")
 
 
@@ -279,7 +335,7 @@ def pcap_input_rule(uid: int, snaplen: int) -> str:
     """
     return (f"ct mark and {CT_MARK_MASK:#x} == {CT_MARK_TAG:#x} "
             f"ct mark and {CT_MARK_UID_MASK:#x} == {uid} "
-            f"log group {nflog_group(uid)} snaplen {snaplen} continue")
+            f"counter log group {nflog_group(uid)} snaplen {snaplen} continue")
 
 
 def pcap_rule_commands(uid: int, snaplen: int, direction: str) -> list[list[str]]:
