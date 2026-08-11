@@ -1,0 +1,29 @@
+# rt-vm-egress-open — the control half of the two-VM egress isolation proof.
+# Byte-identical to rt-vm-egress-filtered.toml apart from the name and
+# `egress`, so the only variable between the two guests is the posture.
+#
+# It is the control in the strict sense: it runs concurrently with the filtered
+# VM, on the same host, against the same destination, at the same instant. If
+# it too were blocked, the filtered VM's failure would say nothing about
+# `meta skuid` — only that egress was broken. Do NOT give it an `allow` list;
+# an open VM's uid is never added to `wl_filtered`, and the set-guarded drop
+# never sees it.
+#
+# Nested inside the harness guest, so keep it minimal. Do NOT enable this
+# manually; it is managed by the runtime harness.
+
+[workload]
+name = "rt-vm-egress-open"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "768M"
+system_disk_size = "6G"
+user = "workload"
+rollback_keep = 1
+
+[vm.network]
+egress = "open"

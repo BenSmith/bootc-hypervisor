@@ -478,7 +478,19 @@ today, so `[vm.network].ports` adds a facility rather than replacing one.
   hypervisor process may touch on the host. It says nothing about what runs
   inside the guest, which is the guest's own problem.
 
-**Testing debt.** The runtime harness boots a single VM. The central property
-above — one rule blocking one workload and not its sibling — cannot be tested
-with one VM. A multi-VM harness is required to cover it, and is tracked
-separately as lower priority than the implementation itself.
+**Testing debt: closed.** The runtime harness now boots two VMs.
+`tests/cli_surface/test_runtime_vm_egress_isolation.py` runs a filtered
+workload and an open one concurrently, from TOMLs that differ in exactly two
+lines, and asserts the difference: the open VM reaches a destination the
+filtered one cannot, and the filtered one still reaches the single entry in its
+own `allow` list. A second test purges the open VM and shows the survivor stays
+armed — the disarming direction being the silent one, since a VM that quietly
+stops being filtered keeps passing every other check.
+
+The shape of that test is the point. A single filtered VM failing to reach a
+host proves only that something is broken; the property lives in the
+*difference* between two guests that are identical apart from a posture. Both
+tests guard their own preconditions first — the postures are read back out of
+`wl_filtered` before any probe, and the run skips rather than passes if the
+harness host cannot reach the destination itself — because every one of those
+would otherwise turn into a green that means nothing.

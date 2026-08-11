@@ -609,34 +609,6 @@ def clitest_vm_lifecycle(target: Target):
 
 
 @pytest.fixture()
-def vm_peer(target: Target):
-    """A second, independent VM workload the test fully owns.
-
-    Kept after the shared-bridge teardown test it was written for was deleted
-    with the bridge itself (ADR 006), because the property the egress design
-    rests on cannot be tested with one VM: "one `meta skuid` rule blocks this
-    workload and not its sibling" needs a sibling. That test arrives with the
-    nftables layer; this is the fixture it will pair with fresh_vm.
-
-    Deliberately function-scoped: a test may purge its peer as the last step,
-    which a session- or module-scoped fixture could not survive.
-
-    Teardown re-purges, which is a no-op when the test already did it —
-    _purge_workload is best-effort by design.
-    """
-    skip_if_no_kvm(target)
-    name = _install_toml(target, "clitest-vm-peer.toml")
-    try:
-        _enable_workload(target, name, timeout=600, expect_container=False)
-        time.sleep(30)
-    except Exception:
-        _purge_workload(target, name)
-        raise
-    yield name
-    _purge_workload(target, name)
-
-
-@pytest.fixture()
 def vm_with_data_disk(target: Target):
     """A VM carrying a data disk, for the backup→restore round-trip.
 

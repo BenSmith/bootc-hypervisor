@@ -1,0 +1,35 @@
+# rt-vm-egress-filtered — the filtered half of the runtime rung's two-VM egress
+# isolation proof (ADR 006 §8). Its sibling rt-vm-egress-open.toml is identical
+# apart from the name and the posture, so the ONLY difference between the two
+# guests is which uid the nftables rule matches.
+#
+# That is the whole point. The property this design rests on — "one `meta skuid`
+# rule blocks this workload and not its sibling" — cannot be shown with one VM,
+# because a single filtered VM that cannot reach a host proves only that
+# something is broken somewhere. The sibling reaching the same host at the same
+# instant is what makes it a per-workload rule rather than a host-wide one.
+#
+# `allow` names an address and port, never a hostname (see the ADR): the entry
+# becomes an element of a set keyed on `ip daddr`, where a name has no
+# representation. 1.1.1.1:53 is chosen because it answers TCP, needs no DNS to
+# reach, and is stable enough to assert on.
+#
+# Nested inside the harness guest, so keep it minimal. Do NOT enable this
+# manually; it is managed by the runtime harness.
+
+[workload]
+name = "rt-vm-egress-filtered"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "768M"
+system_disk_size = "6G"
+user = "workload"
+rollback_keep = 1
+
+[vm.network]
+egress = "filtered"
+allow = ["1.1.1.1:53"]
