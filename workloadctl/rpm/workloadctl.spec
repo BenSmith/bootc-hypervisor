@@ -120,6 +120,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-proxy \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-proxy
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-broker \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-broker
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-notify
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-qmp \
@@ -157,6 +159,8 @@ install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
 # applied with `nft -f` by the proxy sidecar's prestart, idempotent, unowned.
 install -Dpm 0644 %{_sourcedir}/nftables/workload-proxy.nft \
     %{buildroot}%{_datadir}/workloadctl/workload-proxy.nft
+install -Dpm 0644 %{_sourcedir}/nftables/workload-broker.nft \
+    %{buildroot}%{_datadir}/workloadctl/workload-broker.nft
 
 # The virtiofsd domain. Host-global and mandatory, so it ships with the package
 # that spawns the sidecar rather than through the per-workload
@@ -353,6 +357,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-proxy
+%{_libexecdir}/workloadctl/workload-vm-broker
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown
 %{_unitdir}/workload-exporter.service

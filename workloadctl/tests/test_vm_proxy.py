@@ -208,8 +208,11 @@ class TestInterfaceProvisioning(unittest.TestCase):
         """iproute2 answers a duplicate address with "Address already assigned",
         not the "File exists" a duplicate link produces — so tolerating the
         wrong phrase fails only on the SECOND start of a workload."""
-        source = (ROOT / "libexec" / "workload-vm-proxy").read_text()
-        body = cls_body(source, "def ensure_interface")
+        # Lives in lib/vm.py, not the proxy script: the broker helper needs the
+        # same advertised interface, and libexec entrypoints have no extension
+        # so neither can import the other.
+        source = (ROOT / "lib" / "vm.py").read_text()
+        body = cls_body(source, "def ensure_advertised_interface")
         self.assertIn('"addr", "show"', body)
         self.assertLess(body.index('"addr", "show"'), body.index('"addr", "add"'))
 
@@ -479,7 +482,7 @@ class TestCloudInit(unittest.TestCase):
         return self.ensure._render_default_user_data(
             name="web", guest_user="fedora", pubkey="ssh-ed25519 AAAA",
             mounts=[], has_data_disk=False,
-            proxy_env=vm_proxy_env(net_config(hosts=hosts)) if hosts else {})
+            guest_env=vm_proxy_env(net_config(hosts=hosts)) if hosts else {})
 
     def test_writes_the_proxy_into_the_guest_environment(self):
         text = self._render(["example.com"])
@@ -589,7 +592,7 @@ class TestHelperContract(unittest.TestCase):
         cost nothing idle — which is why there is no refcount to get wrong."""
         down = cls_body(self.source, "def down")
         self.assertNotIn("link", down)
-        self.assertNotIn("ensure_interface", down)
+        self.assertNotIn("ensure_advertised_interface", down)
 
     def test_up_purges_before_adding(self):
         """`add element` on an existing key does not overwrite it, so a

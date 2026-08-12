@@ -1268,6 +1268,42 @@ entry is a validation error rather than a pattern that silently matches nothing.
 the proxy can be listening while the guest has no path to it, and every other
 signal looks correct when that happens.
 
+### Reaching a Credential Broker
+
+Software inside a guest sometimes needs to call an API that requires a key —
+and a guest that holds the key is a guest that can leak it. `[vm.network].broker`
+opens a path to a host-side broker that holds the credential instead and
+attaches it on the way out, so nothing inside the VM ever sees one:
+
+```toml
+[vm.network]
+egress = "filtered"
+broker = true
+```
+
+The guest is handed `WORKLOAD_BROKER_URL`, an IP literal, and its own software
+maps that to whatever base-URL variable it reads. The variable is deliberately
+neutral: clients disagree about the spelling, so naming one here would be wrong
+for every other.
+
+The same mechanism as the hostname proxy, at a different port on the same
+advertised address: every guest dials one endpoint and the kernel rewrites the
+destination per uid. **A workload without the key gets no translation, and
+nothing is listening where it would dial** — so one VM cannot reach another's
+broker, and that is a property of the topology rather than a rule that could be
+misconfigured.
+
+Two things this deliberately does not do. It does not run the broker — that is a
+separate host service with its own unit and its own credentials, and if it is
+down a guest sees a connection refused. And it does not require
+`egress = "filtered"`, unlike `hosts`: the broker holds the credential either
+way, so an unfiltered guest still cannot obtain one. Filtering is what stops the
+guest reaching *other* destinations, which is a separate question with a
+separate answer.
+
+Rejected with `bridge` set — the redirect is keyed on the uid of a host socket,
+and a bridged VM does not create one.
+
 ### Packet Capture
 
 `workloadctl pcap` captures a workload's traffic. The surface is tcpdump's, and

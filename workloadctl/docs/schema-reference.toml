@@ -318,6 +318,26 @@ name = "schema-reference"
 # and must set http_proxy/https_proxy itself.
 # hosts = ["example.com", "*.fedoraproject.org"]
 #
+# Optional: give this VM a path to a host-side credential broker, so software
+# inside it can call an API it holds no key for. The host rewrites one advertised
+# endpoint per uid, so a guest can reach its own broker and no other; a workload
+# without this key gets no translation and nothing is listening where it would
+# dial, which makes the boundary structural rather than a rule to misconfigure.
+#
+# workloadctl provides reachability only. It does not run the broker, ship one,
+# or know what a credential is — that is a separate host service with its own
+# unit. If it is not running, a guest sees a connection refused.
+#
+# The endpoint is handed to the guest as WORKLOAD_BROKER_URL. Deliberately not a
+# provider's own base-URL variable: clients disagree about the spelling, so the
+# guest image maps this to whatever its software reads. As with .hosts, only the
+# built-in cloud-config sets it — a workload supplying its own user_data_file
+# must carry it across itself.
+#
+# Rejected with .bridge set: the redirect is keyed on the uid of a host socket,
+# and a bridged VM does not create one.
+# broker = true
+#
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
 # the process exits — which is the wrong shape for a persistent setting. See
@@ -444,6 +464,7 @@ name = "schema-reference"
 # egress = "filtered"               # or "open"; must be stated (see above)
 # allow  = ["192.168.0.10:22"]      # addresses and ports only, never hostnames
 # hosts  = ["*.example.com"]        # HTTP/HTTPS names; needs egress "filtered"
+# broker = true                     # path to a host-side credential broker
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

@@ -35,7 +35,8 @@ from workload_lib import (
     workload_env_dir,
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
-from vm import VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars, vm_proxy_env
+from vm import (VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars, vm_broker_env,
+                vm_proxy_env)
 from secrets_template import substitute_template
 
 
@@ -836,7 +837,7 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                               mounts: list, has_data_disk: bool,
                               host_private_key: str = "",
                               host_public_key: str = "",
-                              proxy_env: dict | None = None) -> str:
+                              guest_env: dict | None = None) -> str:
     """Render the built-in #cloud-config when no user_data_file is set.
 
     Stays in a simple, controlled subset of YAML so we never need a YAML
@@ -880,17 +881,20 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
     # Only the built-in cloud-config gets this. A workload supplying its own
     # user_data_file owns its guest configuration entirely, and this is
     # documented there rather than merged into a file we do not parse.
-    if proxy_env:
+    if guest_env:
         lines.append("write_files:")
         lines.append("  - path: /etc/environment")
         lines.append("    append: true")
         lines.append("    content: |")
-        for key, value in proxy_env.items():
+        for key, value in guest_env.items():
             lines.append(f"      {key}={value}")
+        # Filename kept as -proxy despite now carrying the broker endpoint too:
+        # renaming it would leave the old file behind on every existing guest,
+        # since cloud-config runs once at first boot.
         lines.append("  - path: /etc/profile.d/99-workload-proxy.sh")
         lines.append("    permissions: '0644'")
         lines.append("    content: |")
-        for key, value in proxy_env.items():
+        for key, value in guest_env.items():
             lines.append(f"      export {key}={value}")
     if mounts:
         lines.append("mounts:")
@@ -1169,7 +1173,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             has_data_disk=bool(vm_cfg.get("data_disk_size")),
             host_private_key=host_private_key,
             host_public_key=host_public_key,
-            proxy_env=vm_proxy_env(config),
+            guest_env={**vm_proxy_env(config), **vm_broker_env(config)},
         )
 
     # Pin the guest host key on the host (S1). Both provisioning paths have now

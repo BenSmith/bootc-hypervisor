@@ -281,6 +281,7 @@ VM_EGRESS_DEFAULT = "filtered"
 # The uid-keyed egress layer (ADR 006 §4). One table shared by every VM;
 # units manage set *elements* only, never rules.
 NFT_BIN = "/usr/sbin/nft"
+IP_BIN = "/usr/sbin/ip"
 NFT_TABLE = "inet workload_filter"
 NFT_SET_FILTERED = "wl_filtered"
 NFT_SET_ALLOW4 = "wl_allow4"
@@ -501,6 +502,120 @@ def vm_proxy_env(config: dict) -> dict[str, str]:
         "no_proxy": "localhost,127.0.0.1,::1",
         "NO_PROXY": "localhost,127.0.0.1,::1",
     }
+
+
+# --- The credential broker endpoint ---
+#
+# A host-side service that holds a provider API key and forwards to exactly one
+# upstream, so a sandboxed agent inside a guest never receives a credential. The
+# guest points its client at an advertised endpoint; the broker attaches the
+# real key on the way out.
+#
+# workloadctl owns reachability and nothing else. It does not start the broker,
+# ship it, or know what a credential is: it adds this workload's element to the
+# redirect map and tells the guest where to dial. The broker is one host service
+# with its own unit and its own lifecycle.
+#
+# The advertised address is the proxy's, distinguished by port. One dummy link,
+# one host address, two services — a second address would need a second
+# interface to hang it on and would buy nothing, since the redirect is keyed on
+# uid either way.
+VM_BROKER_PORT = 8081
+
+# Where the broker actually listens. This is the value every element carries,
+# so it has to agree with `listen_address`/`listen_port` in the broker's own
+# broker.toml -- a cross-repo constant, checked by neither side at build time.
+# A mismatch shows up as a guest connection refused after translation, which
+# looks identical to the broker being down.
+VM_BROKER_LISTEN_ADDR = "127.0.0.1"
+VM_BROKER_LISTEN_PORT = 8081
+
+NFT_BROKER_SKELETON = "/usr/share/workloadctl/workload-broker.nft"
+NFT_BROKER_TABLE = "inet workload_broker"
+NFT_BROKER_MAP = "wl_broker_dest"
+
+# What the guest is told. Deliberately neutral rather than a provider's own
+# base-URL variable: there is no universal spelling of one -- Node and Python
+# clients disagree, and providers disagree with each other -- so naming a
+# specific client's variable here would make workloadctl wrong for every other
+# client. The guest image maps this to whatever its agent reads, which is one
+# line of cloud-init and belongs with the software that has an opinion.
+VM_BROKER_ENV_VAR = "WORKLOAD_BROKER_URL"
+
+
+def vm_uses_broker(config: dict) -> bool:
+    """Whether this workload gets a broker map element.
+
+    A bridged VM is outside this for the same reason it is outside egress
+    policy and the proxy (§5.3): nothing of ours is in its data path, so there
+    is no uid to key the redirect on and no advertised address it can reach.
+    """
+    vm_cfg = config.get("vm", {}) or {}
+    net = vm_cfg.get("network", {}) or {}
+    if not isinstance(net, dict) or net.get("bridge"):
+        return False
+    return bool(net.get("broker"))
+
+
+def vm_broker_element(uid: int) -> str:
+    """This workload's element in the uid -> broker listener map."""
+    return f"{uid} : {VM_BROKER_LISTEN_ADDR} . {VM_BROKER_LISTEN_PORT}"
+
+
+def vm_broker_map_command(uid: int, action: str) -> list[str]:
+    """`nft add|delete element` for one workload's broker redirect."""
+    return [NFT_BIN, action, "element", *NFT_BROKER_TABLE.split(), NFT_BROKER_MAP,
+            "{ " + vm_broker_element(uid) + " }"]
+
+
+def vm_broker_env(config: dict) -> dict[str, str]:
+    """The broker endpoint a guest is told to use, or {} if it has none.
+
+    An IP literal, like the proxy's, so reaching the broker never depends on
+    DNS -- which is what a compromised guest would attack to escape policy.
+    """
+    if not vm_uses_broker(config):
+        return {}
+    return {VM_BROKER_ENV_VAR: f"http://{VM_PROXY_ADDR}:{VM_BROKER_PORT}"}
+
+
+def ensure_advertised_interface(run) -> None:
+    """Create the dummy link carrying the advertised address, idempotently.
+
+    `run(argv)` is injected rather than imported so this module stays free of
+    subprocess; the proxy and broker helpers each pass their own. They both need
+    this and neither can import the other -- libexec entrypoints have no
+    extension, so they are not importable.
+
+    Both steps tolerate "already exists" because two VMs starting concurrently
+    race here -- there is no lock and deliberately no owning unit. Anything else
+    is fatal: without the address the redirect's destination is unroutable and
+    the guest's connection fails with no useful diagnostic.
+    """
+    result = run([IP_BIN, "link", "add", VM_PROXY_IFACE, "type", "dummy"])
+    if result.returncode != 0 and "File exists" not in result.stderr:
+        raise RuntimeError(
+            f"could not create {VM_PROXY_IFACE}: {result.stderr.strip()}")
+
+    # Query, then add. Not "add and tolerate the error": iproute2 answers a
+    # duplicate address with "Address already assigned", not the "File exists"
+    # the duplicate-link case produces, so a string match on the wrong phrase
+    # fails only on the SECOND start of a workload — which is how this was
+    # found, and not by any test.
+    shown = run([IP_BIN, "-o", "addr", "show", "dev", VM_PROXY_IFACE])
+    if VM_PROXY_ADDR not in shown.stdout:
+        result = run([IP_BIN, "addr", "add", f"{VM_PROXY_ADDR}/32",
+                      "dev", VM_PROXY_IFACE])
+        if result.returncode != 0 and "xist" not in result.stderr \
+                and "assigned" not in result.stderr:
+            raise RuntimeError(
+                f"could not add {VM_PROXY_ADDR} to {VM_PROXY_IFACE}: "
+                f"{result.stderr.strip()}")
+
+    result = run([IP_BIN, "link", "set", VM_PROXY_IFACE, "up"])
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"could not bring up {VM_PROXY_IFACE}: {result.stderr.strip()}")
 
 
 # --- SELinux confinement (ADR 006 step 3) ---
@@ -893,6 +1008,22 @@ def validate_vm_network(net: dict) -> list[str]:
         errors.append(
             "[vm.network].ports has no effect with .bridge set — a bridged VM "
             "has its own LAN address, so reach its services there directly")
+
+    if "broker" in net:
+        broker = net["broker"]
+        if not isinstance(broker, bool):
+            errors.append(
+                f"[vm.network].broker must be true or false, got {broker!r}")
+        elif broker and "bridge" in net:
+            # Same reasoning as .hosts and .egress: a bridged guest reaches the
+            # LAN on its own address with nothing of ours in the path, so there
+            # is no uid to key the redirect on and the advertised address is not
+            # reachable from it. Silently ignoring the key would leave an
+            # operator believing a credential boundary exists.
+            errors.append(
+                "[vm.network].broker has no effect with .bridge set — the "
+                "redirect is keyed on the uid of a host socket, and a bridged "
+                "VM has none. Drop .bridge to use the broker")
 
     outbound_if = net.get("outbound_if")
     if outbound_if is not None:

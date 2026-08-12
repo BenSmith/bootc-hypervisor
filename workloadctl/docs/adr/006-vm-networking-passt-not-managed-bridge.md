@@ -555,6 +555,31 @@ because a `hosts` list accepted and then ignored *would* be the misreport. It
 joins the two refusals already there — `hosts` with `bridge`, and
 `hosts = ["*"]`.
 
+### The advertised endpoint got a second consumer
+
+`[vm.network].broker` reaches a host-side credential broker over the same
+mechanism as the proxy: one advertised endpoint, rewritten per uid by a nat
+output rule. Added after this ADR was accepted, and it is recorded here because
+it is evidence about the design rather than a new decision — the uid-keyed
+redirect turned out to be reusable, and the second consumer needed no new
+address, no new interface, and no change to the first.
+
+Three things about it are deliberately unlike the proxy. Its element lifecycle
+rides the VM unit rather than a unit of its own, because the broker is a single
+host service and there is no per-workload process for it to follow. It is a
+separate table, since a workload may have a broker and no proxy and would
+otherwise depend on a skeleton applied by a unit that does not exist for it. And
+it does not require `egress = "filtered"`: the reason `hosts` does is that an
+unenforceable allowlist misreports, whereas a broker holds the credential
+regardless of what else the guest can reach.
+
+One thing worth recording for anyone else building on the redirect: a translated
+connection is still recorded by the *client* under the address it dialled, not
+the one the receiver is bound to. A host service that identifies callers by
+matching socket tables therefore has to look for the advertised endpoint —
+measured, after the naive form matched nothing and would have refused every
+guest while passing a loopback test.
+
 ## Consequences
 
 **Removed:**

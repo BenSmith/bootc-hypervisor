@@ -1,0 +1,115 @@
+#!/usr/bin/python3
+"""
+workload-vm-broker: open or close one VM's path to the credential broker.
+
+Usage: workload-vm-broker <up|down> <name>
+
+`up` runs as an ExecStartPre of the VM unit, `down` as an ExecStopPost. Between
+them they own two things: the shared advertised endpoint (a dummy interface and
+an nftables nat chain) and this workload's element in the uid -> broker map.
+
+WHY THIS RIDES THE VM UNIT AND NOT A UNIT OF ITS OWN
+
+The hostname-policy proxy has one instance per workload, so its element lifecycle
+belongs to that instance's unit. The broker does not: it is a single host service
+with its own unit, its own credentials and its own restart policy, and nothing
+about it is per-workload except the entitlement recorded here. There is no
+per-workload process to hang this on, so it hangs on the VM.
+
+WHAT THIS DELIBERATELY DOES NOT DO
+
+Start, stop, install or check the broker. If it is down, a guest's connection is
+refused after translation — the same symptom as an unentitled workload, and the
+right place to notice it is the broker's own unit, not every VM that might use
+it. Coupling the two would make a VM fail to start because an unrelated host
+service was being restarted.
+
+EXIT CODES
+
+`up` fails loudly, on the same reasoning as workload-vm-filter: a guest told to
+reach a broker at an address nothing translates gets a connection refused, and
+an agent inside it reports an unreachable API rather than a missing entitlement.
+Better to fail the start than to boot a sandbox that cannot work and does not
+say why. `down` is tolerant: its element is legitimately absent whenever the
+start failed before installing it.
+"""
+import pwd
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+from vm import (
+    NFT_BIN, NFT_BROKER_SKELETON, VM_BROKER_PORT, VM_PROXY_ADDR,
+    ensure_advertised_interface, vm_broker_map_command, vm_uses_broker,
+)
+from workload_lib import workload_config_path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
+    tomllib = None
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def run(argv, check=False):
+    return subprocess.run(argv, capture_output=True, text=True, check=check,
+                          timeout=30)
+
+
+def load_config(name: str) -> dict:
+    with open(workload_config_path(name), "rb") as f:
+        return tomllib.load(f)
+
+
+def up(name: str) -> int:
+    config = load_config(name)
+    if not vm_uses_broker(config):
+        # The ExecStartPre should not have been generated at all; treat it as a
+        # no-op rather than a failure so an edited config that drops the key
+        # stops cleanly instead of blocking the workload's start.
+        return 0
+
+    uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+
+    ensure_advertised_interface(run)
+    run([NFT_BIN, "-f", NFT_BROKER_SKELETON], check=True)
+
+    # Purge before adding: an element for this uid may name a stale listener if
+    # the broker was ever moved, and `add element` on an existing key does not
+    # overwrite it.
+    run(vm_broker_map_command(uid, "delete"))
+    run(vm_broker_map_command(uid, "add"), check=True)
+
+    log(f"  Broker reachable for uid {uid} at "
+        f"{VM_PROXY_ADDR}:{VM_BROKER_PORT}")
+    return 0
+
+
+def down(name: str) -> int:
+    try:
+        uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+    except KeyError:
+        return 0
+    # nft matches on the key, so the value in the command is immaterial here.
+    run(vm_broker_map_command(uid, "delete"))
+    return 0
+
+
+def main(argv):
+    if len(argv) != 3 or argv[1] not in ("up", "down"):
+        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
+        return 2
+    action, name = argv[1], argv[2]
+    return up(name) if action == "up" else down(name)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)

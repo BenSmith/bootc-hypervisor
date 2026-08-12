@@ -77,7 +77,8 @@ try:
         VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
         VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_PROXY_BIN, VM_PROXY_SLICE,
         vm_mac_address, vm_management_address, parse_vm_port,
-        find_ovmf_code, parse_memory_mib, vm_proxy_env, vm_uses_proxy,
+        find_ovmf_code, parse_memory_mib, vm_proxy_env, vm_uses_broker,
+        vm_uses_proxy,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -2069,6 +2070,22 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
         # before arming, or after the break-glass `nft delete table`.
         svc.add("ExecStopPost",
                 f"-+/usr/libexec/workloadctl/workload-vm-filter down {dq(name)}")
+
+        if vm_uses_broker(config):
+            # Reachability for the host-side credential broker. This rides the
+            # VM unit rather than a unit of its own because the broker is a
+            # single host service — unlike the hostname-policy proxy, there is
+            # no per-workload process whose lifecycle the map element could
+            # follow.
+            #
+            # NOT `-` prefixed, for the filter's reason in a different shape: a
+            # guest told to reach a broker that nothing translates for it sees a
+            # connection refused, and the agent inside reports an unreachable
+            # API rather than a missing entitlement.
+            svc.add("ExecStartPre",
+                    f"+/usr/libexec/workloadctl/workload-vm-broker up {dq(name)}")
+            svc.add("ExecStopPost",
+                    f"-+/usr/libexec/workloadctl/workload-vm-broker down {dq(name)}")
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")
