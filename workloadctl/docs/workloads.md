@@ -1295,7 +1295,9 @@ misconfigured.
 
 Two things this deliberately does not do. It does not run the broker — that is a
 separate host service with its own unit and its own credentials, and if it is
-down a guest sees a connection refused. And it does not require
+down a guest sees a connection refused. It does fix where that service must
+listen: the rewrite targets `127.0.0.1:8081`, so a broker bound anywhere else is
+indistinguishable from one that is not running. And it does not require
 `egress = "filtered"`, unlike `hosts`: the broker holds the credential either
 way, so an unfiltered guest still cannot obtain one. Filtering is what stops the
 guest reaching *other* destinations, which is a separate question with a

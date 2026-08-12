@@ -22,9 +22,9 @@
 # There is one broker today and every element carries the same value, so a set
 # of entitled uids plus a constant `dnat to` would express what is deployed. The
 # map costs nothing extra and keeps per-workload broker instances available
-# without an nft change — which docs/design.md in the broker repo argues for
-# once sandboxes hold *different* credentials, since a shared process then holds
-# all of them.
+# without an nft change — which is the right shape once sandboxes hold
+# *different* credentials, since one shared process then holds all of them and a
+# single bug leaks the set rather than one member of it.
 #
 # Membership is entitlement: a uid absent from the map gets no translation, and
 # nothing listens at the advertised address, so its connection is refused rather
