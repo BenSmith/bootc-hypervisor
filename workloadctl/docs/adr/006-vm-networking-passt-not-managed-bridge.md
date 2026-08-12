@@ -62,10 +62,12 @@ and the 16-bit nflog group space. The `127.128.0.0` base avoids `127.0.1.1`,
 which Debian conventionally places in `/etc/hosts`.
 
 The per-VM schema gains `[vm.network]` with `ports`, `egress`
-(`"filtered"` default / `"open"`), `allow`, `outbound_if`, and `resolver`
-(`"host"` default / `"none"`). `[vm.network].bridge` is retained as the
-unfiltered escape hatch: a VM that names an operator-provided bridge attaches
-directly, takes a real LAN identity, and is not filtered — by design.
+(`"filtered"` default / `"open"`), `allow`, `hosts`, `outbound_if`, and
+`resolver` (`"host"` default / `"none"`). `allow` is address policy; `hosts`
+is hostname policy, served by the per-workload proxy step 4 added.
+`[vm.network].bridge` is retained as the unfiltered escape hatch: a VM that
+names an operator-provided bridge attaches directly, takes a real LAN
+identity, and is not filtered — by design.
 
 ## Rationale
 
@@ -112,8 +114,8 @@ for a strictly weaker property.
 
 ## Decisions taken during implementation
 
-Neither of these is settled by the design above; both were decided while
-building step 2 and are recorded here because a later reader would otherwise
+Four things the design above does not settle. All were decided or found while
+building step 2, and are recorded here because a later reader would otherwise
 be entitled to "fix" them.
 
 **`allow` takes addresses and ports only, never hostnames.** The entries
@@ -121,24 +123,30 @@ become elements of an nftables set keyed on `ip daddr` / `ip6 daddr`. A
 hostname has no representation there, so accepting one would mean resolving it
 once at unit start and pinning the result for the life of the VM — silently
 wrong from the moment the record moves, and wrong in the permissive direction
-if the address is later reassigned. The design already assigns hostname policy
-to the per-workload proxy (§4.4); `allow` is for the non-HTTP exceptions a
+if the address is later reassigned. Hostname policy is `hosts`, carried by the
+per-workload proxy step 4 added; `allow` is for the non-HTTP exceptions a
 proxy cannot carry, and those are overwhelmingly single hosts (ssh, a
 database, an NTP peer) where an address is the honest way to say it.
 
-**Until the proxy exists, `egress = "filtered"` with an empty `allow` is a
-validation error.** The design pairs the `"filtered"` default with an implicit
-allow to the workload's own proxy, so an empty allowlist is workable in the
-finished system. The proxy is step 4. In between, the choices were to default
-to `"open"` and flip later, to accept `"filtered"` and let the VM boot
-unreachable, or to refuse the combination. Refusing it was chosen: the secure
-default lands now rather than being retrofitted, and nothing can boot in a
-state where the config claims a confinement the VM does not have — the failure
-mode this whole layer exists to prevent. The cost is that every VM config must
-state a posture explicitly, including ones that only ever wanted defaults;
-`egress = "open"` is what the shipped bundles and examples say, with the
-reason given inline. When the proxy lands, a bare `[vm.network]` becomes valid
-again and means `"filtered"`.
+**`egress = "filtered"` with nothing reachable is a validation error.** The
+choices were to default to `"open"` and tighten later, to accept `"filtered"`
+and let the VM boot unreachable, or to refuse the combination. Refusing it was
+chosen: the secure default lands now rather than being retrofitted, and nothing
+can boot in a state where the config claims a confinement the VM does not have
+— the failure mode this whole layer exists to prevent. The cost is that every
+VM config must state a posture explicitly, including ones that only ever wanted
+defaults; `egress = "open"` is what the shipped bundles and examples say, with
+the reason given inline.
+
+Step 4 was expected to retire this. The design pairs the `"filtered"` default
+with an implicit allow to the workload's own proxy, which would have made a
+bare `[vm.network]` valid again and meaning `"filtered"`. It did not, because a
+workload gets a proxy instance only when `hosts` is non-empty — the schema
+deliberately cannot express "proxy on, allowlist empty", an instance permitting
+nothing being indistinguishable from a broken one. A bare `[vm.network]`
+therefore still describes a VM that can reach nothing. The refusal is permanent,
+with its trigger widened rather than removed: `"filtered"` is an error when
+`allow` and `hosts` are *both* empty.
 
 **Loopback is exempt from the filter, and has to be.** The design treats
 management inbound (§3.3) and egress policy (§4) as independent, and they are
@@ -491,8 +499,12 @@ denials throughout.
 `managed_bridge_params()` is the mechanism ADR 002 introduced; removing it is
 what makes this a supersession rather than an amendment.
 
-**Added:** netdev construction in the generator, the nftables skeleton and its
-element management, and the schema keys above.
+**Added:** netdev construction in the generator (step 1); the nftables
+skeleton, its element management, and the schema keys above (step 2); the
+`runcon` prefix in `workload-vm-notify` and the `workload-vm` policy module
+(step 3); the per-workload tinyproxy, its uid-keyed redirect, and the
+`workload-proxy` policy module (step 4); `workloadctl pcap` and its two
+vantages (step 5).
 
 **New capability, not a migration.** Managed-bridge VMs have no port publishing
 today, so `[vm.network].ports` adds a facility rather than replacing one.
