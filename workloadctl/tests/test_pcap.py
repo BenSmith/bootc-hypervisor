@@ -9,6 +9,7 @@ literal.
 """
 
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,12 +17,13 @@ from types import SimpleNamespace
 
 from pcap import (
     CT_MARK_MASK, CT_MARK_TAG, CT_MARK_UID_MASK, DIRECTION_DEFAULT,
-    PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX,
+    PCAP_INPUT_CHAIN, PCAP_OUTPUT_CHAIN, PCAP_UNIT_PREFIX, PcapFormatError,
     QEMU_MAXLEN_UNLIMITED, SNAPLEN_DEFAULT, host_buffer_kib,
     VANTAGE_GUEST, VANTAGE_HOST, available_vantages, build_plan,
     filter_dump_object, parse_duration, parse_size, parse_snaplen,
-    log_rule_handles, pcap_delete_command, pcap_input_rule, pcap_output_rule,
-    pcap_rule_commands, pcap_unit_name,
+    log_rule_handles, pcap_delete_command, pcap_first_timestamp,
+    pcap_input_rule, pcap_output_rule, pcap_packet_count, pcap_rule_commands,
+    pcap_shift_timestamps, pcap_unit_name,
     pcap_vantages, render_plan, systemd_run_argv, tcpdump_argv,
     validate_request,
 )
@@ -601,17 +603,28 @@ class TestHelperContract(unittest.TestCase):
         body = self.source[self.source.index("def cleanup"):]
         self.assertNotIn("os.unlink(staging)", body[:1400])
 
-    def test_both_capinfos_labels_are_accepted(self):
-        """capinfos says "Earliest packet time" (wireshark 4.x) where older
-        builds say "First packet time". Matching one is a silent no-op: the
-        correction is skipped and the file keeps a timestamp hours in the
-        future with nothing saying so."""
-        self.assertIn("Earliest packet time", self.source)
-        self.assertIn("First packet time", self.source)
+    def test_no_wireshark_cli_tool_is_shelled_out_to(self):
+        """capinfos and editcap live in wireshark-cli, which is not installed
+        by default, and every call to them sat in the finally block — so a host
+        with tcpdump and without them lost the capture it had just taken."""
+        for tool in ("capinfos", "editcap"):
+            self.assertNotIn(f'"{tool}"', self.source)
+            self.assertNotIn(f"'{tool}'", self.source)
 
     def test_a_failed_correction_is_reported_not_silent(self):
         body = self.source[self.source.index("def _first_packet_time"):]
         self.assertIn("WARNING", body[:900])
+
+    def test_the_finalize_path_cannot_raise_past_the_move(self):
+        """_finalize_guest reads a timestamp, shifts, then moves the file to
+        the operator's -w path. An exception from either of the first two skips
+        the move, and ExecStopPost deliberately does not do it — so both are
+        wrapped rather than allowed to propagate."""
+        for name in ("_first_packet_time", "correct_timestamps"):
+            body = self.source[self.source.index(f"def {name}"):]
+            body = body[:body.index("\n\n\n")]
+            self.assertIn("except (OSError, PcapFormatError)", body,
+                          f"{name} must not propagate out of the finally block")
 
     def test_cleanup_is_idempotent_and_needs_no_plan(self):
         """It runs as ExecStopPost, including after a start that never got far
@@ -791,3 +804,175 @@ class TestCaptureBuffer(unittest.TestCase):
                           snaplen={VANTAGE_GUEST: 1500}, direction="inout",
                           write=None, duration=0, max_size=0)
         self.assertIsNone(plan.buffer_kib)
+
+
+def _read(path, count=-1):
+    with open(path, "rb") as f:
+        return f.read(count)
+
+
+def _build_pcap(path, packets, *, endian="<", magic=b"\xa1\xb2\xc3\xd4",
+                snaplen=262144, linktype=1):
+    """Write a classic pcap. Packets are (seconds, fraction, payload)."""
+    with open(path, "wb") as f:
+        f.write(magic)
+        f.write(struct.pack(endian + "HHiIII", 2, 4, 0, 0, snaplen, linktype))
+        for seconds, fraction, payload in packets:
+            f.write(struct.pack(endian + "IIII", seconds, fraction,
+                                len(payload), len(payload)))
+            f.write(payload)
+
+
+class TestPcapFiles(unittest.TestCase):
+    """The two questions capinfos answered and the one editcap did.
+
+    Reading the format rather than shelling out is not only about the missing
+    dependency: parsing capinfos' output meant matching a label it renamed
+    between releases, which silently skipped the timestamp correction.
+    """
+
+    PACKETS = [(1754899200, 123456, b"\x01" * 60),
+               (1754899201, 500000, b"\x02" * 1400),
+               (1754899202, 999999, b"\x03" * 14)]
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "c.pcap")
+
+    def test_count_and_first_timestamp(self):
+        _build_pcap(self.path, self.PACKETS)
+        self.assertEqual(pcap_packet_count(self.path), 3)
+        self.assertAlmostEqual(pcap_first_timestamp(self.path),
+                               1754899200.123456, places=6)
+
+    def test_big_endian_is_read_the_same(self):
+        """The magic, not the host's byte order, decides how to unpack."""
+        _build_pcap(self.path, self.PACKETS, endian=">",
+                    magic=b"\xd4\xc3\xb2\xa1")
+        self.assertEqual(pcap_packet_count(self.path), 3)
+        self.assertAlmostEqual(pcap_first_timestamp(self.path),
+                               1754899200.123456, places=6)
+
+    def test_nanosecond_magic_is_not_read_as_microseconds(self):
+        """a1b23c4d means the fractional field is nanoseconds. Reading it with
+        the microsecond divisor puts the packet 123 seconds late."""
+        _build_pcap(self.path, [(1754899200, 123456789, b"\x01" * 4)],
+                    magic=b"\xa1\xb2\x3c\x4d")
+        self.assertAlmostEqual(pcap_first_timestamp(self.path),
+                               1754899200.123456789, places=6)
+
+    def test_an_empty_capture_is_zero_packets_and_no_timestamp(self):
+        """Distinct from unreadable, which raises. Only one is worth a
+        warning, and the caller skips the correction on this one."""
+        _build_pcap(self.path, [])
+        self.assertEqual(pcap_packet_count(self.path), 0)
+        self.assertIsNone(pcap_first_timestamp(self.path))
+
+    def test_a_torn_final_record_is_not_counted(self):
+        """A capture killed mid-write leaves a partial record. Counting it
+        would report a packet the file cannot yield — and this number is
+        compared against the kernel's to detect exactly that kind of gap."""
+        _build_pcap(self.path, self.PACKETS)
+        whole = _read(self.path)
+        for chop, expected in ((30, 2), (700, 1)):
+            with open(self.path, "wb") as f:
+                f.write(whole[:-chop])
+            self.assertEqual(pcap_packet_count(self.path), expected)
+
+    def test_a_record_header_torn_in_half_is_not_counted(self):
+        _build_pcap(self.path, self.PACKETS)
+        whole = _read(self.path)
+        with open(self.path, "wb") as f:
+            f.write(whole[:30])          # 24-byte header + 6 stray bytes
+        self.assertEqual(pcap_packet_count(self.path), 0)
+
+    def test_a_corrupt_length_cannot_walk_past_eof(self):
+        """The seek is bounded by the file size, not by a length read out of
+        the file, so a garbage record header stops the walk rather than
+        raising or looping."""
+        _build_pcap(self.path, [(1, 0, b"\x01" * 4)])
+        data = bytearray(_read(self.path))
+        data[24 + 8:24 + 12] = struct.pack("<I", 0xFFFFFFF0)
+        with open(self.path, "wb") as f:
+            f.write(bytes(data))
+        self.assertEqual(pcap_packet_count(self.path), 0)
+
+    def test_pcapng_is_named_rather_than_called_corrupt(self):
+        with open(self.path, "wb") as f:
+            f.write(b"\x0a\x0d\x0d\x0a" + b"\x00" * 40)
+        with self.assertRaises(PcapFormatError) as caught:
+            pcap_packet_count(self.path)
+        self.assertIn("pcapng", str(caught.exception))
+
+    def test_a_non_pcap_file_raises(self):
+        with open(self.path, "wb") as f:
+            f.write(b"not a capture at all")
+        for reader in (pcap_packet_count, pcap_first_timestamp):
+            with self.assertRaises(PcapFormatError):
+                reader(self.path)
+
+
+class TestPcapShift(unittest.TestCase):
+    """What `editcap -t` did. The offsets this corrects are large — the
+    measured one was -29,407 s — because filter-dump's clock is wrong by the
+    VM's uptime plus the host's UTC offset."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.src = os.path.join(self.dir, "in.pcap")
+        self.dst = os.path.join(self.dir, "out.pcap")
+
+    def test_every_packet_moves_by_the_same_delta(self):
+        packets = [(1754899200, 0, b"\x01" * 8),
+                   (1754899260, 500000, b"\x02" * 8)]
+        _build_pcap(self.src, packets)
+        self.assertEqual(pcap_shift_timestamps(self.src, self.dst, -29407.4), 2)
+        self.assertAlmostEqual(pcap_first_timestamp(self.dst),
+                               1754899200 - 29407.4, places=5)
+        self.assertEqual(pcap_packet_count(self.dst), 2)
+
+    def test_relative_deltas_survive_the_shift(self):
+        """The property that made an uncorrected file still useful: only the
+        origin was wrong, never the spacing."""
+        packets = [(1754899200, 250000, b"\x01" * 8),
+                   (1754899207, 750000, b"\x02" * 8)]
+        _build_pcap(self.src, packets)
+        pcap_shift_timestamps(self.src, self.dst, -29407.4)
+        with open(self.dst, "rb") as f:
+            f.read(24)
+            first = struct.unpack("<II", f.read(8))
+            f.read(8 + 8)
+            second = struct.unpack("<II", f.read(8))
+        gap = (second[0] + second[1] / 1e6) - (first[0] + first[1] / 1e6)
+        self.assertAlmostEqual(gap, 7.5, places=6)
+
+    def test_microsecond_precision_is_not_lost_to_float_error(self):
+        """A 2026 epoch needs 16 significant digits to carry microseconds,
+        past what float64 holds — so the arithmetic is in integer ticks."""
+        _build_pcap(self.src, [(1754899200, 654321, b"\x01" * 4)])
+        pcap_shift_timestamps(self.src, self.dst, 1.0)
+        with open(self.dst, "rb") as f:
+            f.read(24)
+            seconds, fraction = struct.unpack("<II", f.read(8))
+        self.assertEqual((seconds, fraction), (1754899201, 654321))
+
+    def test_the_global_header_is_copied_verbatim(self):
+        """Snaplen and link type are the writer's business. Rewriting them
+        would be a second way for this to be wrong."""
+        _build_pcap(self.src, [(1, 0, b"\x01" * 4)], snaplen=96, linktype=113)
+        pcap_shift_timestamps(self.src, self.dst, 5.0)
+        self.assertEqual(_read(self.src, 24), _read(self.dst, 24))
+
+    def test_a_shift_past_the_epoch_clamps_instead_of_wrapping(self):
+        """The fields are unsigned, so a negative result would land in 2106."""
+        _build_pcap(self.src, [(5, 0, b"\x01" * 4)])
+        pcap_shift_timestamps(self.src, self.dst, -100.0)
+        self.assertEqual(pcap_first_timestamp(self.dst), 0.0)
+
+    def test_a_torn_source_yields_a_whole_destination(self):
+        _build_pcap(self.src, [(1, 0, b"\x01" * 8), (2, 0, b"\x02" * 8)])
+        whole = _read(self.src)
+        with open(self.src, "wb") as f:
+            f.write(whole[:-4])
+        self.assertEqual(pcap_shift_timestamps(self.src, self.dst, 1.0), 1)
+        self.assertEqual(pcap_packet_count(self.dst), 1)

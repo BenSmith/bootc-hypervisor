@@ -1245,6 +1245,15 @@ kernel, because `egress = "filtered"` permits nothing the allowlists do not name
 Verified: a guest that bypasses the proxy entirely cannot reach an allowlisted
 host.
 
+Which is why **`hosts` requires `egress = "filtered"`**, and `validate` rejects
+the pair otherwise. Under `"open"` there is no drop, so the allowlist would bind
+only the guests that choose to be bound — while still standing up a daemon that
+parses guest-controlled HTTP, with its own SELinux domain and an egress
+exemption the guest's uid does not get. That is attack surface bought for a
+control that does not hold, so the combination is refused rather than built. It
+joins `hosts` with `bridge` (no uid in that guest's path) and `hosts = ["*"]`
+(`egress = "open"` spelled so nobody notices in review).
+
 **Only the built-in cloud-config sets the guest's proxy environment.** A
 workload supplying its own `[vm.cloud_init].user_data_file` owns its guest
 configuration; set `http_proxy`/`https_proxy` to `http://192.0.2.1:3128`
@@ -1321,11 +1330,11 @@ own, which is why a reboot ending every capture is self-correcting.
 > **Guest-side timestamps are corrected on finalize.** QEMU stamps
 > `filter-dump` packets with a clock that counts from VM start, then adds the
 > guest's UTC RTC reinterpreted as host local time — so raw timestamps are off
-> by the VM's uptime *plus* this host's UTC offset (measured at −29,407 s on a
-> PDT host: 28,800 + ~607 s of uptime). `pcap` measures the offset with a probe
-> packet and shifts the file with `editcap`, which needs nothing from the guest.
-> Relative deltas inside a file are correct either way; the correction is what
-> makes two vantages comparable. Install `wireshark-cli` for it.
+> by the VM's uptime *plus* this host's standard-time UTC offset (measured at
+> −29,407 s: 28,800 + ~607 s of uptime). `pcap` measures the offset with a probe
+> packet and shifts every record by it, which needs nothing from the guest and
+> no extra tools. Relative deltas inside a file are correct either way; the
+> correction is what makes two vantages comparable.
 
 ### Update and Rollback
 

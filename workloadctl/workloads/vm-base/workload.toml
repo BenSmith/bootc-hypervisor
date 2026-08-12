@@ -35,7 +35,9 @@ user = "fedora"
 #   allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]   # the rest, by address
 #
 # `hosts` gives this workload its own proxy, which reads the name out of
-# `CONNECT host:443` before any TLS handshake — no interception, no CA.
+# `CONNECT host:443` before any TLS handshake — no interception, no CA. It
+# requires egress = "filtered", because the drop is what leaves a guest that
+# ignores HTTPS_PROXY nowhere else to go.
 # `allow` becomes nftables elements keyed on the destination address, so it
 # takes addresses and ports only: a hostname there would be resolved once at
 # start and then be silently wrong the moment the record moved. Setting

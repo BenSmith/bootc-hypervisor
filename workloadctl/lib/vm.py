@@ -59,6 +59,14 @@ VM_GUEST_UID = 1000
 # 127.128.0.0/9 and the 16-bit nflog group space.
 VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 
+# The whole reservation, not just the allocated part. `ports` may otherwise name
+# any bind address, and one naming another workload's management address has
+# passt publish a guest port where that workload's SSH listener belongs — with
+# start order deciding the winner. The host-key pin stops that short of a session
+# in the wrong guest, but a plane documented as never configurable should not be
+# reachable from a config key.
+VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
+
 # Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.
 # Fixed, never configurable, and bound only on the workload's own management
 # address. It must stay above net.ipv4.ip_unprivileged_port_start (1024 by
@@ -748,6 +756,24 @@ def _validate_egress(net: dict) -> list[str]:
             "('<addr>:<port>'), or set egress = 'open' to opt out of "
             "filtering.")
 
+    # The drop is what makes the allowlist binding — it leaves a guest that
+    # ignores HTTPS_PROXY nowhere else to go. Under 'open' there is none, so the
+    # allowlist binds only cooperative guests while the proxy still costs a
+    # daemon parsing guest-controlled HTTP, its own SELinux domain, and an egress
+    # exemption the guest's uid does not get.
+    #
+    # Refused, not silently skipped: a `hosts` list accepted and then ignored is
+    # the misreported confinement this layer exists to prevent. Joins .hosts with
+    # .bridge (no uid in the path) and .hosts = ["*"].
+    if egress == "open" and hosts:
+        errors.append(
+            "[vm.network].hosts is set but .egress is 'open', so nothing "
+            "requires the guest to use the proxy — a process that ignores "
+            "HTTPS_PROXY reaches the internet directly and the allowlist binds "
+            "only the guests that cooperate. Set egress = 'filtered' to make "
+            "the hostname allowlist enforceable, or drop .hosts to run "
+            "unfiltered without a proxy.")
+
     return errors
 
 
@@ -780,6 +806,18 @@ def _validate_proxy_host(pattern) -> list[str]:
     if not _PROXY_HOST_RE.match(text):
         return [f"{pattern!r} is not a hostname or fnmatch pattern"]
     return []
+
+
+def _in_management_range(addr: str) -> bool:
+    """Whether a bind address falls inside the reserved management range.
+
+    IPv6 and unparseable addresses answer False: the range is v4-only, and
+    parse_vm_port has already rejected anything malformed.
+    """
+    try:
+        return ipaddress.ip_address(addr) in VM_MGMT_NETWORK
+    except (ValueError, TypeError):
+        return False
 
 
 def validate_vm_network(net: dict) -> list[str]:
@@ -818,9 +856,18 @@ def validate_vm_network(net: dict) -> list[str]:
                 errors.append(f"[vm.network].ports entries must be strings, got {spec!r}")
                 continue
             try:
-                parse_vm_port(spec)
+                bind_addr, _host, _guest, _proto = parse_vm_port(spec)
             except ValueError as e:
                 errors.append(f"[vm.network].ports: {e}")
+                continue
+            if bind_addr and _in_management_range(bind_addr):
+                errors.append(
+                    f"[vm.network].ports: {spec!r} binds into "
+                    f"{VM_MGMT_NETWORK}, reserved for the management addresses "
+                    f"`workloadctl exec` and `shell` reach a guest on — it would "
+                    f"collide with whichever workload owns that address, decided "
+                    f"by start order. Bind 127.0.0.1, a LAN address, or omit the "
+                    f"address to publish on all of them")
     if ports and "bridge" in net:
         # passt publishes ports by binding host sockets; a bridged guest has its
         # own LAN address and nothing of ours is in its data path to bind them.

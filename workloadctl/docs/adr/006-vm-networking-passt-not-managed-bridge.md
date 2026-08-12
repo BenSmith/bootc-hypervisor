@@ -464,8 +464,11 @@ correction now warns.
 described something that was not going to happen.
 
 **§6.9 confirmed on hardware, both terms.** The measured offset was
-**−29,407.4 s**: 28,800 s of PDT offset plus ~607 s of VM uptime, exactly the
-two independent errors the design separated. After correction the file's first
+**−29,407.4 s**: 28,800 s of timezone offset plus ~607 s of VM uptime, exactly
+the two independent errors the design separated. 28,800 s is the *standard*-time
+offset (PST) on a host that was on PDT at the time, because `gmtime_r` leaves
+`tm_isdst` at 0 and `mktime` then applies no DST — so the term is not even the
+offset in force when the capture ran. After correction the file's first
 packet landed on wall clock. The probe is a TCP connect to the workload's own
 management address — passt hands the guest a SYN, which the tap sees, and the
 guest is not asked for anything.
@@ -480,6 +483,50 @@ never becomes a host socket, measured. A `kill -9` of the capture process left
 **zero** rules, no chain, and no QEMU object — teardown by `ExecStopPost`, not
 by a `finally`. A second concurrent capture was refused by name. Zero SELinux
 denials throughout.
+
+### Corrections from the pre-merge review
+
+Three, found by reading rather than running, and the first would have hit every
+default install.
+
+**capinfos and editcap are not installed, and were called from a `finally`.**
+Packet counts, first-packet times and the guest-side shift went through
+wireshark-cli, which the spec listed as `Suggests:` — and dnf installs
+`Recommends:` but not `Suggests:`, so the default host had tcpdump and neither
+finisher. Every one of those calls sits in the helper's teardown block, so the
+`FileNotFoundError` aborted the rest of it: the guest-side file was never moved
+to the operator's `-w` path, and only the unit's `ExecStopPost` kept a `log`
+rule from being left behind. The tell that it was an oversight rather than a
+choice is that `editcap` *was* guarded and capinfos was not, from the same
+package.
+
+All three are now read out of the file in `lib/pcap.py` — classic pcap is a
+24-byte header and 16 bytes per record, and both our writers emit it — so the
+dependency is gone rather than guarded. That also retires a silent failure of
+its own: capinfos renamed the first-packet label between releases, and matching
+one spelling skipped the correction without saying so.
+
+**`[vm.network].ports` could bind the management range.** Any valid address was
+accepted, including the `127.128.0.0/9` that carries the per-workload
+management addresses, so one workload could publish a guest port where
+another's SSH listener belongs — with start order deciding the winner. The
+host-key pin stops that short of a session in the wrong guest, since `exec`
+fails verification rather than connecting, but a plane the design calls "never
+routable and never configurable" should not be reachable from a config key.
+Now rejected; the rest of 127/8 is still a normal bind address.
+
+**`hosts` with `egress = "open"` is refused.** It was accepted, and it built a
+proxy that bound only the guests choosing to be bound — the drop is what makes
+the allowlist mandatory. The first review draft called this a misreport and it
+is not: `open` means unfiltered, `diagnose` says so plainly, and the
+no-silent-default rule means nobody reaches `open` without typing it. The
+reason to refuse it is narrower and better: a proxy is a daemon parsing
+guest-controlled input, with its own SELinux domain and an egress exemption the
+guest's uid does not get, and that is the wrong thing to stand up for a control
+that stops only cooperative guests. Refused rather than silently skipped,
+because a `hosts` list accepted and then ignored *would* be the misreport. It
+joins the two refusals already there — `hosts` with `bridge`, and
+`hosts = ["*"]`.
 
 ## Consequences
 

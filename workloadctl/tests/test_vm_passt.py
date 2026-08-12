@@ -113,10 +113,9 @@ class TestPortSpecs(unittest.TestCase):
 
 class TestNetworkValidation(unittest.TestCase):
     def test_empty_section_selects_passt_but_needs_an_egress_decision(self):
-        # An empty [vm.network] selects passt, but `egress` defaults to
-        # "filtered" and the implicit allow that would make an empty allowlist
-        # workable is the per-workload proxy, which is a later step. So until
-        # the proxy exists the operator has to say which way they want it --
+        # An empty [vm.network] selects passt, and `egress` defaults to
+        # "filtered" -- with neither .allow nor .hosts, that VM could reach
+        # nothing at all. The operator has to say which way they want it,
         # loudly, because a VM that is silently unfiltered while the config
         # reads "filtered" is the exact misreport this layer exists to prevent.
         errs = validate_vm_network({})
@@ -126,6 +125,22 @@ class TestNetworkValidation(unittest.TestCase):
         self.assertEqual(validate_vm_network({"egress": "open"}), [])
         self.assertEqual(
             validate_vm_network({"allow": ["192.168.0.10:22"]}), [])
+
+    def test_ports_may_not_bind_the_management_range(self):
+        # 127.128.0.0/9 carries the per-workload management addresses passt
+        # binds sshd on. A ports entry naming one publishes a guest port where
+        # another workload's control plane belongs, and start order decides
+        # which of the two gets the bind.
+        for spec in ("127.128.0.3:2222:22", "127.128.5.9:8080:80"):
+            errs = validate_vm_network({"egress": "open", "ports": [spec]})
+            self.assertTrue(any("127.128.0.0/9" in e for e in errs), spec)
+
+    def test_ordinary_loopback_is_still_a_valid_bind_address(self):
+        # Only the management /9 is reserved -- the rest of 127/8 is a normal
+        # thing to publish on and the error message recommends it.
+        self.assertEqual(
+            validate_vm_network({"egress": "open",
+                                 "ports": ["127.0.0.1:8080:80"]}), [])
 
     def test_ports_are_rejected_alongside_a_bridge(self):
         # A bridged guest has its own LAN address and nothing of ours is in its

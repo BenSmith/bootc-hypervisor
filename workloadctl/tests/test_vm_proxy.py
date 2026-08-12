@@ -277,6 +277,27 @@ class TestValidation(unittest.TestCase):
         errors = validate_vm_network({"bridge": "br0", "hosts": ["a.com"]})
         self.assertTrue(any("no effect with .bridge" in e for e in errors))
 
+    def test_hosts_with_open_egress_is_rejected(self):
+        """The drop is what makes the allowlist binding. Without it the proxy
+        stops only cooperative guests, while still costing a daemon that parses
+        guest-controlled HTTP — attack surface for a control that does not
+        hold. Third member of the family with .bridge and ["*"]."""
+        errors = validate_vm_network({"hosts": ["a.com"], "egress": "open"})
+        self.assertTrue(any("nothing requires the guest to use the proxy" in e
+                            for e in errors))
+
+    def test_the_rejection_names_both_ways_out(self):
+        """Refused rather than silently skipped, so the error has to say what
+        to do: enforce it, or drop it."""
+        errors = validate_vm_network({"hosts": ["a.com"], "egress": "open"})
+        joined = " ".join(errors)
+        self.assertIn("egress = 'filtered'", joined)
+        self.assertIn("drop .hosts", joined)
+
+    def test_hosts_under_filtered_egress_is_the_supported_shape(self):
+        self.assertEqual(
+            validate_vm_network({"hosts": ["a.com"], "egress": "filtered"}), [])
+
     def test_hosts_must_be_a_list(self):
         errors = validate_vm_network({"hosts": "example.com"})
         self.assertTrue(any("must be an array" in e for e in errors))

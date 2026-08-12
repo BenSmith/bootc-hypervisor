@@ -228,6 +228,11 @@ name = "schema-reference"
 # Same convention as a container's [network].ports. This is new capability:
 # managed-bridge VMs had no port publishing at all. Ignored (and rejected by
 # validate) when .bridge is set, since a bridged guest has its own address.
+#
+# A bind address in 127.128.0.0/9 is rejected: that range carries the
+# per-workload management addresses `exec` and `shell` reach a guest on, and
+# publishing into it would collide with whichever workload owns that address,
+# with start order deciding the winner. 127.0.0.1 and the rest of 127/8 are fine.
 # ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
 #
 # Optional: Pin this VM's outbound traffic to one host interface.
@@ -301,11 +306,16 @@ name = "schema-reference"
 # are rejected by `validate` rather than silently matching nothing. CONNECT is
 # permitted to 443 alone; use .allow for any other port.
 #
-# The proxy is advisory on its own: a guest process free to ignore HTTPS_PROXY
-# does. What makes it binding is the default-deny chain above, which leaves
-# such a process nowhere else to go. Only the built-in cloud-config sets the
-# proxy environment — a workload supplying its own [vm.cloud_init].user_data_file
-# owns its guest configuration and must set http_proxy/https_proxy itself.
+# REQUIRES egress = "filtered", and validate rejects the pair otherwise. The
+# proxy is advisory on its own — a guest process free to ignore HTTPS_PROXY does
+# — and the default-deny chain is what leaves such a process nowhere else to go.
+# Under "open" there is no drop, so the allowlist would bind only cooperative
+# guests while still costing a daemon that parses guest-controlled HTTP. Set
+# egress = "filtered" to enforce the list, or drop .hosts to run without a proxy.
+#
+# Only the built-in cloud-config sets the proxy environment — a workload
+# supplying its own [vm.cloud_init].user_data_file owns its guest configuration
+# and must set http_proxy/https_proxy itself.
 # hosts = ["example.com", "*.fedoraproject.org"]
 #
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
@@ -433,7 +443,7 @@ name = "schema-reference"
 # bridge = "br0"                    # a real LAN identity; unfiltered (see above)
 # egress = "filtered"               # or "open"; must be stated (see above)
 # allow  = ["192.168.0.10:22"]      # addresses and ports only, never hostnames
-# hosts  = ["*.example.com"]        # HTTP/HTTPS hostname policy, via a proxy
+# hosts  = ["*.example.com"]        # HTTP/HTTPS names; needs egress "filtered"
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

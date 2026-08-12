@@ -41,13 +41,15 @@ Requires:       nftables
 # such a VM is filtered default-deny with the proxy as its only route out, so a
 # missing binary is not a degraded feature but a VM that cannot reach anything.
 Requires:       tinyproxy
-# `workloadctl pcap` reads the host-side vantage back through tcpdump and
-# corrects a VM guest-side capture's timestamps with editcap/capinfos. Weak
-# dependencies: capture is a diagnostic, and a host that never runs one should
-# not carry the tools — `pcap -D` reports what is missing rather than failing
-# at the point of use.
+# `workloadctl pcap` reads the host-side vantage back through tcpdump. Weak,
+# because capture is a diagnostic and `pcap -D` reports a missing tcpdump rather
+# than failing at the point of use.
+#
+# No wireshark-cli. Packet counts, first-packet times and the guest-side
+# timestamp shift are done in lib/pcap.py, because capinfos and editcap were
+# reached from the helper's finally block — where a host that did not install
+# this optional package lost the capture it had just taken.
 Recommends:     tcpdump
-Suggests:       wireshark-cli
 Suggests:       qemu-kvm
 Suggests:       virtiofsd
 

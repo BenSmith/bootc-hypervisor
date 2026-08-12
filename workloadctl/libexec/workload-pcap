@@ -31,9 +31,13 @@ twice: the clock counts from VM start rather than capture start, and start_ts
 reinterprets the guest's UTC RTC as host local time. The offset is therefore
 `VM uptime + host UTC offset`, and only the first term is guessable. So it is
 measured instead — the wall-clock time of a probe packet this program emits is
-compared with the timestamp that packet carries in the finished file, and
-`editcap -t` shifts by the difference. That needs nothing from the guest and is
-immune to both error terms.
+compared with the timestamp that packet carries in the finished file, and every
+record is shifted by the difference. That needs nothing from the guest and is
+immune to both error terms. It is also self-neutralising: were QEMU fixed, the
+measured difference would be ~0 and the shift a no-op.
+
+Reading and rewriting those files is done in lib/pcap.py rather than through
+capinfos and editcap, which ship in a package that is not installed by default.
 """
 import json
 import os
@@ -47,9 +51,10 @@ import time
 sys.dont_write_bytecode = True
 
 from pcap import (
-    PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, filter_dump_id,
+    PCAP_CHAINS, VANTAGE_GUEST, VANTAGE_HOST, PcapFormatError, filter_dump_id,
     filter_dump_object, guest_staging_path, log_rule_handles, log_rule_packets,
-    nflog_group, pcap_delete_command, pcap_rule_commands, tcpdump_argv,
+    nflog_group, pcap_delete_command, pcap_first_timestamp, pcap_packet_count,
+    pcap_rule_commands, pcap_shift_timestamps, tcpdump_argv,
 )
 from vm import (
     NFT_BIN, NFT_TABLE, NFT_SKELETON, VM_MGMT_SSH_PORT, VM_SOCKET_DIR,
@@ -58,8 +63,6 @@ from vm import (
 from qmp import QMPClient
 from podman import Podman
 from workload_lib import workload_home_dir
-
-EDITCAP = "/usr/bin/editcap"
 
 
 def _exit_on_term(signum, _frame):
@@ -173,20 +176,16 @@ def report_completeness(plan: dict) -> None:
 
 
 def _packet_count(path: str) -> int | None:
-    """Packets actually in a pcap file. `-M` keeps the number machine-readable.
+    """Packets actually in a pcap file. None when it cannot be read at all.
 
-    Label checked against capinfos rather than assumed — guessing one is what
-    made the guest-side timestamp correction a silent no-op on the bench.
+    Read directly rather than through capinfos, which is absent on a default
+    install — see the format notes in lib/pcap.py.
     """
-    result = run(["capinfos", "-c", "-M", path])
-    if result.returncode != 0:
+    try:
+        return pcap_packet_count(path)
+    except (OSError, PcapFormatError) as e:
+        log(f"  WARNING: could not count packets in {path}: {e}")
         return None
-    for line in result.stdout.splitlines():
-        if "Number of packets" in line:
-            digits = "".join(c for c in line.split(":", 1)[-1] if c.isdigit())
-            if digits:
-                return int(digits)
-    return None
 
 
 def host_down(uid: int) -> None:
@@ -388,19 +387,27 @@ def emit_probe(uid: int) -> float:
 
 
 def correct_timestamps(path: str, offset: float) -> bool:
-    """Shift a guest-side file by a measured offset with `editcap -t`."""
-    if not shutil.which(EDITCAP) and not os.path.exists(EDITCAP):
-        log("  WARNING: editcap not installed; guest-side timestamps are "
-            "offset by the VM's uptime plus this host's UTC offset. Relative "
-            "deltas within the file are still correct.")
-        return False
+    """Shift a guest-side file by a measured offset.
+
+    What `editcap -t` did, minus the dependency — which mattered because this
+    sits in the finalize path that also moves the file to the operator's -w
+    destination, so a missing binary aborted the move and the capture never
+    appeared. Still write-then-rename: a failure partway must not leave a
+    half-shifted file where the whole one was.
+    """
     tmp = f"{path}.shifted"
-    result = run([EDITCAP, "-t", f"{-offset:.6f}", path, tmp])
-    if result.returncode != 0:
-        log(f"  WARNING: editcap failed: {result.stderr.strip()}")
+    try:
+        shifted = pcap_shift_timestamps(path, tmp, -offset)
+    except (OSError, PcapFormatError) as e:
+        log(f"  WARNING: could not correct guest-side timestamps: {e}. They "
+            f"are offset by the VM's uptime plus this host's UTC offset; "
+            f"relative deltas within the file are still correct.")
+        if os.path.exists(tmp):
+            os.unlink(tmp)
         return False
     os.replace(tmp, path)
-    log(f"  Corrected guest-side timestamps by {-offset:.3f}s")
+    log(f"  Corrected guest-side timestamps by {-offset:.3f}s "
+        f"({shifted} packets)")
     return True
 
 
@@ -578,29 +585,19 @@ def _finalize_guest(name: str, dest: str | None, started: float | None) -> None:
     log(f"  Wrote {dest}")
 
 
-# capinfos labels this "Earliest packet time" (wireshark 4.x); older builds say
-# "First packet time". Matching only one of them is a silent no-op — the
-# correction is skipped, the file keeps a timestamp hours in the future, and
-# nothing says so. Which is what happened on the bench.
-_FIRST_PACKET_LABELS = ("Earliest packet time", "First packet time")
-
-
 def _first_packet_time(path: str) -> float | None:
-    """Epoch seconds of the first packet, per capinfos. -S makes it numeric."""
-    result = run(["capinfos", "-a", "-S", path])
-    if result.returncode != 0:
-        log(f"  WARNING: capinfos could not read {path}; leaving guest-side "
-            f"timestamps uncorrected")
+    """Epoch seconds of the first packet, read from the record header.
+
+    Parsing capinfos meant matching a label that was renamed between wireshark
+    releases, and matching one spelling silently skipped the correction. None
+    means the file holds no packets — nothing to correct, so no warning.
+    """
+    try:
+        return pcap_first_timestamp(path)
+    except (OSError, PcapFormatError) as e:
+        log(f"  WARNING: could not read a first-packet time from {path} ({e}); "
+            f"leaving guest-side timestamps uncorrected")
         return None
-    for line in result.stdout.splitlines():
-        if any(label in line for label in _FIRST_PACKET_LABELS):
-            try:
-                return float(line.split(":", 1)[1].strip())
-            except ValueError:
-                return None
-    log("  WARNING: capinfos reported no first-packet time; leaving guest-side "
-        "timestamps uncorrected")
-    return None
 
 
 def _terminate(proc: subprocess.Popen) -> None:
