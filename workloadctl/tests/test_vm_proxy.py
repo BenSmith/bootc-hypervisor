@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from vm import (
     NFT_PROXY_MAP, NFT_PROXY_SKELETON, NFT_PROXY_TABLE, NFT_SET_PROXY_CG,
+    VM_BROKER_ENV_VAR, vm_broker_env,
     VM_PROXY_ADDR, VM_PROXY_BIN, VM_PROXY_IFACE, VM_PROXY_PORT,
     VM_PROXY_PORT_HTTPS, vm_management_address, vm_proxy_config,
     vm_proxy_element, vm_proxy_env, vm_proxy_filter_file, vm_proxy_hosts,
@@ -235,6 +236,25 @@ class TestGuestEnvironment(unittest.TestCase):
     def test_no_proxy_covers_the_guests_own_loopback(self):
         env = vm_proxy_env(net_config(hosts=["example.com"]))
         self.assertIn("127.0.0.1", env["NO_PROXY"])
+
+    def test_no_proxy_covers_the_advertised_address(self):
+        """A workload with both a proxy and a broker is handed one address for
+        both, at different ports. Without this a client that honours proxy
+        variables asks the proxy to fetch the broker, and the proxy's allowlist
+        holds internet hostnames rather than this address -- so the guest gets a
+        403 that reads like the broker refusing it."""
+        for env in (vm_proxy_env(net_config(hosts=["example.com"])),
+                    vm_proxy_env(net_config(hosts=["example.com"], broker=True))):
+            self.assertIn(VM_PROXY_ADDR, env["NO_PROXY"])
+            self.assertIn(VM_PROXY_ADDR, env["no_proxy"])
+
+    def test_the_proxy_and_broker_urls_are_both_bypassed_by_one_entry(self):
+        """One host entry covers every port, so the broker needs no entry of its
+        own and adding a third endpoint later needs no change here."""
+        env = vm_proxy_env(net_config(hosts=["example.com"], broker=True))
+        bypass = env["NO_PROXY"].split(",")
+        for url in (env["HTTPS_PROXY"], vm_broker_env(net_config(broker=True))[VM_BROKER_ENV_VAR]):
+            self.assertIn(url.split("//")[1].split(":")[0], bypass)
 
     def test_a_workload_without_hosts_gets_nothing(self):
         self.assertEqual(vm_proxy_env(net_config()), {})

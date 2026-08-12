@@ -490,17 +490,27 @@ def vm_proxy_env(config: dict) -> dict[str, str]:
     traffic does not loop out through the proxy. It is an IP literal throughout,
     which is what makes the proxy path free of any DNS dependency — DNS being
     precisely what a compromised guest would attack to escape hostname policy.
+
+    The advertised address is in NO_PROXY too, and it is load-bearing rather
+    than tidiness. Everything at that address is one of the host's own endpoints
+    for this guest — the proxy itself, and the broker on another port — and a
+    client that honours proxy variables would otherwise ask the proxy to fetch
+    the broker for it. The proxy's allowlist holds hostnames a guest may reach
+    on the internet and will not contain this address, so it answers 403: a
+    refusal that reads exactly like the broker rejecting the caller, for a
+    request that never reached the broker at all.
     """
     if not vm_uses_proxy(config):
         return {}
     url = f"http://{VM_PROXY_ADDR}:{VM_PROXY_PORT}"
+    bypass = f"localhost,127.0.0.1,::1,{VM_PROXY_ADDR}"
     return {
         "http_proxy": url,
         "https_proxy": url,
         "HTTP_PROXY": url,
         "HTTPS_PROXY": url,
-        "no_proxy": "localhost,127.0.0.1,::1",
-        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": bypass,
+        "NO_PROXY": bypass,
     }
 
 

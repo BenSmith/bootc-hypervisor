@@ -1288,7 +1288,10 @@ for every other.
 
 The same mechanism as the hostname proxy, at a different port on the same
 advertised address: every guest dials one endpoint and the kernel rewrites the
-destination per uid. **A workload without the key gets no translation, and
+destination per uid. A workload can have both, and when it does the advertised
+address is in the guest's `NO_PROXY` — otherwise a client honouring proxy
+variables would ask the proxy to fetch the broker, and the proxy's allowlist
+holds internet hostnames rather than this address. **A workload without the key gets no translation, and
 nothing is listening where it would dial** — so one VM cannot reach another's
 broker, and that is a property of the topology rather than a rule that could be
 misconfigured.
