@@ -159,10 +159,18 @@ def up(name: str) -> int:
     run(vm_proxy_map_command(uid, listen_addr, "delete"))
     run(vm_proxy_map_command(uid, listen_addr, "add"), check=True)
 
-    # Exempt this proxy's own egress from the default-deny drop. An element
-    # resolves to a cgroup id when it is added and systemd creates a fresh
-    # cgroup on every start, so the previous start's element is stale and is
-    # replaced here rather than accumulating.
+    # Exempt this proxy's own egress from the default-deny drop. systemd makes a
+    # fresh cgroup on every start and an element resolves to a cgroup *id* when
+    # it is added, so this pair adds the current one and removes nothing: both
+    # commands name a path, and by the time ExecStartPre runs that path already
+    # resolves to the NEW id. The previous start's element is retired by `down`
+    # below, which runs while its cgroup is still live. The delete stays as the
+    # idempotent half of an add — a restart that somehow reused an id must not
+    # fail on "element exists".
+    #
+    # An element that outlives its cgroup (ExecStopPost never ran) is inert:
+    # kernfs ids are not reused, so it matches nothing, and nft state does not
+    # survive a reboot.
     run(vm_proxy_cgroup_command(name, "delete"))
     run(vm_proxy_cgroup_command(name, "add"), check=True)
 

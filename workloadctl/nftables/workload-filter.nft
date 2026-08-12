@@ -78,6 +78,15 @@ flush chain inet workload_filter output
 # `-Q out` worked, so each workload class had one working direction and no
 # error. The range is the whole of what UID_MIN..UID_MAX in lib/workload_lib.py
 # allocates; tests/test_pcap.py asserts the two agree rather than trusting it.
+#
+# This ASSIGNS the mark, and it claims the whole of it: the 0x40000000 tag plus
+# a uid of up to 52948 spend all 32 bits, so there is nowhere for another
+# component's mark to live alongside ours. On a host that marks connections for
+# its own policy routing, any mark set on a workload's connections is replaced
+# here. Nothing in this project sets one, and the only way to keep one would be
+# to give up either the tag or the uid -- which is to say, the attribution. A
+# site that needs the mark for something else wants the break-glass at the top
+# of this file.
 add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta skuid or 0x40000000
 
 # Loopback is the workload's own control plane, not egress. Without this a
@@ -103,14 +112,21 @@ add rule inet workload_filter output meta skuid @wl_filtered oif lo counter acce
 # Slice=workloads.slice, making its cgroup path always
 # workloads.slice/workload-<name>-proxy.service — two components, whatever the
 # workload's [resources].slice says. An element resolves to a cgroup id at add
-# time and systemd creates a fresh cgroup on each start, so the element is
-# re-added by the proxy's own ExecStartPre and purged there too.
+# time and systemd creates a fresh cgroup on each start, so the proxy's own
+# ExecStartPre adds the current one and its ExecStopPost removes it — the only
+# point at which a path still resolves to the id being retired.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counter accept
 
 add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
 
-# Set-guarded: a workload not in wl_filtered never reaches this rule. The
-# counter is what gives `workloadctl diagnose` per-workload drop counts with no
-# extra machinery.
+# Set-guarded: a workload not in wl_filtered never reaches this rule.
+#
+# The counter is HOST-WIDE, not per-workload. One rule guarded on set membership
+# serves every filtered VM, so they all accumulate on the same number. Getting
+# per-workload counts would take a rule or a named counter per uid, which is
+# exactly the machinery a single set-guarded rule was chosen to avoid — so
+# `diagnose` reports the figure and says it is shared, because attributing a
+# sibling's dropped traffic to the workload being diagnosed would send an
+# operator after the wrong VM.
 add rule inet workload_filter output meta skuid @wl_filtered counter drop

@@ -252,8 +252,11 @@ def parse_snaplen(spec, vantages: list[str]) -> dict[str, int]:
 # serving all of them. Unlike the policy chain, where units only ever add set
 # elements, capture adds and removes *rules*.
 
-# Tag the conntrack mark rather than storing a bare uid, so a site's own marks
-# stay distinguishable from ours. Must agree with the skeleton's `ct mark set`.
+# Tag the conntrack mark rather than storing a bare uid, so one of ours is
+# recognisable as ours when read. It does NOT let a site's mark coexist: the
+# skeleton's rule is an assignment, and the tag plus the uid spend all 32 bits,
+# so on a workload's connections the mark is wholly ours. Must agree with that
+# rule.
 CT_MARK_TAG = 0x40000000
 CT_MARK_MASK = 0xC0000000
 CT_MARK_UID_MASK = 0x3FFFFFFF
