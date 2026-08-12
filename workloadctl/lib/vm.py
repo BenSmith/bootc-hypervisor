@@ -74,6 +74,12 @@ VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
 # why this is 2222 and not 22.
 VM_MGMT_SSH_PORT = 2222
 
+# Base of the per-workload nflog group range, for the same reason the management
+# addresses start at 127.128.0.0 rather than 127.0.0.0: a bare `uid - UID_MIN`
+# lands the first workload on group 0, which is the netfilter default. See
+# vm_nflog_group. 1000 + 42,948 = 43,948, inside the 16-bit group space.
+NFLOG_GROUP_BASE = 1000
+
 # The advertised DNS address is derived at unit start, not here: the generator
 # runs Before=basic.target, where there is no default route yet. See
 # libexec/workload-vm-netdev and generate_vm_service.
@@ -137,17 +143,30 @@ def vm_management_address(uid: int) -> str:
 def vm_nflog_group(uid: int) -> int:
     """The workload's nflog group, for per-workload host-side packet capture.
 
-    Same derivation, same guarantee as vm_management_address: the offset into
-    the workload uid range. `tcpdump -i nflog:<group>` then reads exactly this
-    workload's traffic, which is the only mechanism that can produce a
-    per-workload host-side capture at all — by the time a packet is on the wire
-    the owning socket is not part of it, so only netfilter sees `meta skuid`.
+    Same derivation and same guarantee as vm_management_address — the offset
+    into the workload uid range — but offset by a base, for the reason that one
+    starts at 127.128.0.0 rather than at 127.0.0.0.
+
+    A bare offset put the FIRST workload allocated on any host on group 0, which
+    is iptables' `--nflog-group` default and the group stock ulogd
+    configurations bind. Nothing crashes — 0 is a valid group — but the two
+    consumers see each other's packets: a site's logged traffic lands in that
+    workload's capture attributed to it, and the workload's traffic lands in the
+    site's host-wide log. Neither side is told. The capture direction would not
+    even warn, since report_completeness only speaks up when a file holds FEWER
+    packets than the kernel counter matched, and this gives it more.
+
+    Base 1000 clears the small numbers convention uses (0 for the iptables
+    default, 1 and 2 in ulogd's shipped examples) by two orders of magnitude.
+    The range becomes 1000-43948, still inside the 16-bit group space with
+    21,587 to spare, and nothing else changes: the value is still a pure
+    function of the uid, with no registry and no allocation step.
     """
     if uid < UID_MIN or uid > UID_MAX:
         raise ValueError(
             f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
             f"no nflog group is derivable for it")
-    return uid - UID_MIN
+    return NFLOG_GROUP_BASE + (uid - UID_MIN)
 
 
 def vm_mac_address(name: str) -> str:

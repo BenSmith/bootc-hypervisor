@@ -19,12 +19,14 @@ DNS work" would pass on a leaking configuration.
 
 import importlib.machinery
 import importlib.util
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from vm import (
+    NFLOG_GROUP_BASE,
     VM_MGMT_SSH_PORT,
     parse_vm_port,
     validate_vm_network,
@@ -52,18 +54,49 @@ class TestUidDerivedValues(unittest.TestCase):
         self.assertEqual(vm_management_address(10256), "127.128.1.0")
         self.assertEqual(vm_management_address(UID_MAX), "127.128.167.196")
 
-    def test_nflog_groups_are_the_offset(self):
-        self.assertEqual(vm_nflog_group(10000), 0)
-        self.assertEqual(vm_nflog_group(10003), 3)
-        self.assertEqual(vm_nflog_group(UID_MAX), UID_MAX - UID_MIN)
+    def test_nflog_groups_are_the_offset_from_a_base(self):
+        self.assertEqual(NFLOG_GROUP_BASE, 1000)
+        self.assertEqual(vm_nflog_group(10000), 1000)
+        self.assertEqual(vm_nflog_group(10003), 1003)
+        self.assertEqual(vm_nflog_group(UID_MAX), 43948)
+
+    def test_no_workload_lands_on_a_conventional_group(self):
+        # Group 0 is iptables' --nflog-group default and what stock ulogd
+        # configurations bind, so a bare offset put the FIRST workload
+        # allocated on any host onto the most contended group there is. The
+        # two consumers then see each other's packets, silently and in both
+        # directions. 1 and 2 appear in ulogd's shipped examples.
+        self.assertNotIn(vm_nflog_group(UID_MIN), (0, 1, 2))
 
     def test_the_whole_uid_range_fits_its_targets(self):
         # 42,949 workloads must fit inside 127.128.0.0/9 and the 16-bit nflog
-        # group space. The nflog half is the tighter of the two and the one
-        # that would fail silently — a group number above 65535 would be
-        # truncated by the kernel, so two workloads would share a capture.
+        # group space, the base included. The nflog half is the tighter of the
+        # two and the one that would fail silently — a group number above 65535
+        # would be truncated by the kernel, so two workloads would share a
+        # capture.
         self.assertLess(vm_nflog_group(UID_MAX), 65536)
         self.assertTrue(vm_management_address(UID_MAX).startswith("127."))
+
+    def test_the_first_and_last_addresses_are_actually_bindable(self):
+        # uid 10000 -> 127.128.0.0, which is the first workload on any fresh
+        # host and looks like a network address. It is not: lo carries
+        # 127.0.0.1/8, so the only special addresses of that prefix are
+        # 127.0.0.0 and 127.255.255.255, and the range sits between them. The
+        # .0/.255 instinct comes from /24 subnetting, which is not in play.
+        # Every other test here asserts the string, which would not have caught
+        # an address that could not be bound.
+        for uid in (UID_MIN, UID_MIN + 255, UID_MIN + 256, UID_MAX):
+            address = vm_management_address(uid)
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((address, 0))
+            except OSError as e:
+                if uid == UID_MIN:
+                    self.skipTest(f"no usable loopback in this environment: {e}")
+                self.fail(f"uid {uid} -> {address} could not be bound: {e}")
+            finally:
+                sock.close()
 
     def test_base_avoids_the_debian_hosts_entry(self):
         # 127.0.1.1 is conventionally the system hostname in Debian's

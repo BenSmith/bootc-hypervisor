@@ -172,7 +172,7 @@ class TestHostVantageRules(unittest.TestCase):
         `log group @nh,0,16` are all parse errors, which is what forces one
         input rule per workload rather than one generic rule."""
         rule = pcap_output_rule(10003, 1500)
-        self.assertIn("log group 3 ", rule)
+        self.assertIn("log group 1003 ", rule)
         self.assertNotIn("log group ct", rule)
 
     def test_inbound_is_selected_by_conntrack_mark(self):
@@ -270,7 +270,7 @@ class TestHostVantageRules(unittest.TestCase):
 
     def test_the_reader_is_pointed_at_this_workloads_group(self):
         argv = tcpdump_argv(10003, 1500)
-        self.assertIn("nflog:3", argv)
+        self.assertIn("nflog:1003", argv)
 
     def test_the_reader_does_not_ask_tcpdump_for_pcapng(self):
         """tcpdump cannot write pcapng — `--pcap-ng` is not a tcpdump option
@@ -444,12 +444,12 @@ class TestPlan(unittest.TestCase):
     def test_it_carries_the_real_uid_and_group(self):
         rendered = render_plan(self.plan)
         self.assertIn("uid 10003", rendered)
-        self.assertIn("nflog:3", rendered)
+        self.assertIn("nflog:1003", rendered)
 
     def test_it_shows_the_exact_rule_before_installing_it(self):
         """Which is what makes --dry-run an audit step rather than pedagogy."""
         rendered = render_plan(self.plan)
-        self.assertIn("meta skuid 10003 counter log group 3", rendered)
+        self.assertIn("meta skuid 10003 counter log group 1003", rendered)
         self.assertIn("continue", rendered)
 
     def test_it_names_the_unit_that_owns_teardown(self):

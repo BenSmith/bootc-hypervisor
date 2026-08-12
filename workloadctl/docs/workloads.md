@@ -1035,12 +1035,14 @@ That is also what makes per-VM policy possible. Because guest traffic arrives on
 | Derived value | Formula | Used for |
 |---|---|---|
 | Management address | `127.128.0.0 + (uid - UID_MIN)` | inbound SSH for `exec` / `shell` |
-| nflog group | `uid - UID_MIN` | per-workload packet capture |
+| nflog group | `1000 + (uid - UID_MIN)` | per-workload packet capture |
 | Policy key | the uid itself | `meta skuid` in nftables |
+
+Both bases exist to miss a convention rather than to look tidy: `127.128.0.0` clears `127.0.1.1`, which Debian puts in `/etc/hosts`, and `1000` clears nflog group 0, which is iptables' `--nflog-group` default and what stock ulogd binds — without it the first workload on a host would silently share a capture group with the host's own logging.
 
 `workloadctl diagnose <name>` prints the derived values, since they are not inferable from the TOML.
 
-> **VM egress is not filtered yet.** The uid-keyed nftables policy the design above exists to enable has not been built; VMs today reach whatever the host can reach. `[vm.network].egress` and `[vm.network].allow` are therefore **rejected by `validate`** rather than accepted and ignored — a config that claimed a confinement which is not in force would be worse than no key at all.
+See [Egress filtering](#egress-filtering) for what `[vm.network].egress` and `.allow` do with the policy key, and [Hostname Egress Policy](#hostname-egress-policy) for `.hosts`.
 
 #### What the guest can reach on the host
 
@@ -1084,7 +1086,7 @@ allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]
 Two things about this are easy to get wrong:
 
 - **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry.
-- **`egress` currently has to be stated.** It defaults to `"filtered"`, and the design pairs that default with an automatic allow to the workload's own proxy — which is not built yet. Until it is, `"filtered"` with an empty `allow` is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline.
+- **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses) or `.hosts` (names, through its own proxy). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Step 4 was expected to retire this rule by giving `"filtered"` an implicit allow to the proxy, and did not — a workload only gets a proxy when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
 
 `workloadctl diagnose <name>` reports whether the policy is actually in force. The case it exists for is a config that says `filtered` while the uid is absent from the set: that VM is wide open, and every other signal — unit active, guest online, `status` green — looks correct. It also prints the drop counter, which is **shared across every filtered VM** rather than per-workload; there is one drop rule, so the number is a host total.
 

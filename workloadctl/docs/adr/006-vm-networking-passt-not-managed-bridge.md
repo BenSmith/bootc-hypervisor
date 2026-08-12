@@ -54,12 +54,32 @@ Three values derive from the uid with no registry:
 | Derived value | Formula | Used for |
 |---|---|---|
 | Management address | `127.128.0.0 + (uid - UID_MIN)` | inbound SSH, proxy listener |
-| nflog group | `uid - UID_MIN` | per-workload packet capture |
+| nflog group | `1000 + (uid - UID_MIN)` | per-workload packet capture |
 | Policy key | the uid itself | `meta skuid` in nftables |
 
 `UID_MIN..UID_MAX` is 10000–52948 — 42,949 values, inside both `127.128.0.0/9`
-and the 16-bit nflog group space. The `127.128.0.0` base avoids `127.0.1.1`,
-which Debian conventionally places in `/etc/hosts`.
+and the 16-bit nflog group space.
+
+**Both bases exist to miss a convention, and the second was added late.** The
+`127.128.0.0` base avoids `127.0.1.1`, which Debian conventionally places in
+`/etc/hosts`. The nflog group originally had no base, which put the *first*
+workload allocated on any host on group 0 — iptables' `--nflog-group` default
+and what stock ulogd configurations bind. That is not a crash: it silently
+merges two streams in both directions, putting a site's logged packets into
+that workload's capture and the workload's packets into the site's log. Base
+1000 clears the small numbers convention uses and leaves 21,587 groups spare.
+
+Everything customary in `127.0.0.0/8` sits below the range — `127.0.0.1`,
+Debian's `127.0.1.1`, systemd-resolved's `127.0.0.53`/`.54`, Istio's
+`127.0.0.6`, the DNSBL `127.0.0.2`/`.3` — because RFC 6890 registers the /8 as
+one undivided Loopback block, so there is nothing *reserved* to hit and the
+conventions cluster at the bottom where the addresses are memorable. The range
+also spans addresses that look like network and broadcast addresses
+(`127.128.0.0` for the first workload, `127.128.0.255` for the 256th), and they
+are ordinary hosts: `lo` carries `127.0.0.1/8`, so the only special addresses of
+that prefix are `127.0.0.0` and `127.255.255.255`, neither of which is in range.
+Verified by binding and completing a TCP round trip on both, since every unit
+test until now asserted only the string.
 
 The per-VM schema gains `[vm.network]` with `ports`, `egress`
 (`"filtered"` default / `"open"`), `allow`, `hosts`, `outbound_if`, and
@@ -514,6 +534,13 @@ host-key pin stops that short of a session in the wrong guest, since `exec`
 fails verification rather than connecting, but a plane the design calls "never
 routable and never configurable" should not be reachable from a config key.
 Now rejected; the rest of 127/8 is still a normal bind address.
+
+**The nflog group had no base, so the first workload took group 0.** The
+address derivation got a base specifically to dodge `127.0.1.1`; the group
+derivation got none, and landed on the netfilter default — see the Decision
+above for what that merges. Fixed by the same move the addresses already used.
+The addresses themselves check out, including the `.0` and `.255` ones, which
+is now asserted by binding rather than by spelling.
 
 **`hosts` with `egress = "open"` is refused.** It was accepted, and it built a
 proxy that bound only the guests choosing to be bound — the drop is what makes
