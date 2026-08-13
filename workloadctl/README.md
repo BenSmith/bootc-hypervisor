@@ -120,6 +120,7 @@ Most mutating commands require `sudo`. Read-only commands work as any user.
 - [Workload guide](docs/workloads.md) — full configuration reference with examples
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
+- [Filtered VM walkthrough](docs/vm-egress-walkthrough.md) — one VM's egress policy, TOML to packet
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema
 - [Example configs](workloads/) — real-world workload definitions, one bundle per directory
 

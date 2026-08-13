@@ -1092,6 +1092,8 @@ Two things about this are easy to get wrong:
 
 If the filter itself is the problem, `nft delete table inet workload_filter` removes it wholesale; the next VM start rebuilds it. An abandoned table is inert — the chain's policy is `accept` and the drop rule matches only uids present in the set.
 
+For one filtered VM followed end to end — validation, both prestart scripts, the output chain rule by rule, and a packet's path through it — see the [filtered VM walkthrough](vm-egress-walkthrough.md).
+
 #### Custom bridge — the unfiltered escape hatch
 
 A VM that needs a **real LAN identity** (its own address, reachable by other hosts — e.g. one serving TLS on its own name) attaches directly to a host bridge instead. passt cannot provide this, because the guest takes the host's address.
@@ -1267,6 +1269,10 @@ entry is a validation error rather than a pattern that silently matches nothing.
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —
 the proxy can be listening while the guest has no path to it, and every other
 signal looks correct when that happens.
+
+The [filtered VM walkthrough](vm-egress-walkthrough.md) traces a single CONNECT
+from the guest through the redirect, the proxy's allowlist and the proxy's own
+exempted egress, alongside the two paths that are refused.
 
 ### Reaching a Credential Broker
 
