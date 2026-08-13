@@ -142,7 +142,21 @@
 ; It is also the rule the original permissive harvest missed, because that run
 ; had no QEMU client attached and stopped before reaching it — the reason §9.7
 ; said an enforcing pass was still required.
-(allow wlvfsd_t self (capability (chown dac_override dac_read_search setpcap sys_chroot sys_resource)))
+;
+; setuid/setgid/fowner/fsetid are the second half of the same argument, and were
+; missing for the same reason: the harvests that produced this list exercised
+; reads and root-side creates, never a write *as the guest user*. virtiofsd
+; serves each request under the requesting uid/gid — that is the whole point of
+; running it as root with --translate-uid — so a create by the guest's own user
+; needs setresuid/setresgid, and preserving a file's mode across that switch
+; needs fowner and fsetid.
+;
+; Measured on a live VM: without setgid a guest writing into its share gets
+; EPERM on create with no AVC visible to `ausearch` (grep audit.log directly).
+; Without setattr below, cloud-init's chown of the new user's home is denied, so
+; /home/<user>/.ssh stays root-owned and sshd rejects the injected key — the VM
+; boots, looks healthy, and `workloadctl exec` cannot reach it.
+(allow wlvfsd_t self (capability (chown dac_override dac_read_search fowner fsetid setgid setpcap setuid sys_chroot sys_resource)))
 (allow wlvfsd_t self (process (setcap setrlimit)))
 
 ; The shared dir lives under /var/lib/workloads/<name>/, which a VM workload's
@@ -150,8 +164,21 @@
 ; the full create/read/write/unlink surface, not just reading the directory —
 ; ADR 006 §9.7 flagged this as the gap in the original harvest, which ran with
 ; no QEMU client attached and so never served a single request.
-(allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rmdir search write)))
-(allow wlvfsd_t svirt_image_t (file (create getattr open read unlink write)))
+;
+; `setattr` covers chown/chmod/utimes arriving from the guest. A share is a
+; filesystem, not a blob store: the guest owns the metadata on it, and a
+; permission model that lets a guest create a file but never chown it is not a
+; subset of "share a directory" — it is a different, broken thing. The most
+; visible casualty is cloud-init, which chowns the default user's home on first
+; boot and is silently denied.
+(allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
+(allow wlvfsd_t svirt_image_t (file (create getattr open read setattr unlink write)))
+
+; statfs on the backing filesystem, which the guest reaches through `df` on the
+; mount. Read-only and about the filesystem rather than any file on it; without
+; it `df /mnt/share` in the guest fails with EPERM while every actual read and
+; write succeeds, which reads as a broken mount rather than a missing rule.
+(allow wlvfsd_t fs_t (filesystem (getattr)))
 
 ; /var/lib/workloads itself keeps the blanket container_file_t rule; only the
 ; per-workload subdirectory is svirt_image_t. So reaching the share means
