@@ -419,7 +419,7 @@ Configuration that matters, beyond the comments in the example:
 | | |
 |---|---|
 | `403` | The caller resolved to no configured sandbox — or could not be resolved at all, which is never rescued by `allow_unknown_callers` (§5). |
-| `400` | An absolute-form request target (that is a *proxy's* job, not this one's), or a `Content-Length` that is not a non-negative number. |
+| `400` | An absolute-form request target (that is a *proxy's* job, not this one's); a `Content-Length` that is not a non-negative number; or two of them, which frame two different messages. |
 | `411` | A chunked request body. The broker does not decode one, and forwarding it as an empty body — which is what it used to do — meant the provider answered a request the caller never sent. Send `Content-Length`. |
 | `413` | A body over 64 MiB. |
 

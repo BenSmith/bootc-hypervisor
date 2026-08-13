@@ -130,12 +130,27 @@ def peer_uid_from(rows, locals_, peer):
 
     The peer's row is this connection mirrored: its local address is our remote
     and its remote is our local. `locals_` is every endpoint that "our local"
-    may be recorded as -- see _local_endpoints, which explains why there is more
+    may be recorded as -- see local_endpoints, which explains why there is more
     than one.
+
+    The port test before the split is a filter, not a shortcut: the row we want
+    carries the peer's port in its local column, so a line without that hex
+    anywhere cannot be it. The peer's port is ephemeral and therefore nearly
+    unique, so `in` -- which runs in C -- rejects almost every row before Python
+    touches it. Measured over a 1638-row table: 1.188ms to split and hex-decode
+    every row, 0.034ms with the filter, same uid. 34x, and it scales with the
+    host's socket count, which is not something a caller should be able to make
+    the broker pay per connection.
+
+    The survivors are checked exactly as before. This narrows the work without
+    widening the match.
     """
     want_local = (_norm(peer[0]), peer[1])
     want_remotes = {(_norm(host), port) for host, port in locals_}
+    needle = f":{peer[1]:04X}"
     for line in rows:
+        if needle not in line:
+            continue
         f = line.split()
         if len(f) < 10:
             continue
@@ -419,7 +434,17 @@ def request_framing(path, headers):
                    "chunked request bodies are not accepted; send "
                    "Content-Length\n")
 
-    raw = headers.get("Content-Length")
+    declared = headers.get_all("Content-Length") or []
+    if len(declared) > 1:
+        # Two lengths frame two different messages. Picking one (get() takes the
+        # first) leaves the rest of the other in the socket, to be read as the
+        # next request line -- the same desynchronisation the chunked case
+        # produced, arrived at from the other direction. RFC 9112 §6.3 says
+        # reject, and there is no legitimate sender to accommodate.
+        return 0, (400, "duplicate-content-length",
+                   "Content-Length appears more than once\n")
+
+    raw = declared[0] if declared else None
     if raw is None or raw.strip() == "":
         return 0, None
     try:
@@ -486,7 +511,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     timeout = CONNECTION_TIMEOUT
 
     def setup(self):
-        """Take the uid resolved at admission, then hand off to the base class.
+        """Resolve the caller, take a slot against its ceiling, then hand off.
+
+        Identity is settled here, once per connection rather than once per
+        request: it is what the per-caller ceiling is applied to, and what
+        _identify then uses without scanning the socket tables again.
 
         TLS to the guest is also completed here rather than on the listening
         socket. Wrapping the listener made accept() perform the handshake, so a
@@ -495,7 +524,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         bound, because the connection never reaches a handler at all. In this
         thread the same stall costs one slot and expires on the timeout.
         """
-        self.caller_uid = self.server.take_caller_uid(self.request)
+        try:
+            self.caller_uid = peer_uid(local_endpoints(self.request),
+                                       self.client_address)
+        except OSError:
+            self.caller_uid = None  # peer vanished between accept and lookup
+        if not self.server.admit_caller(self.request, self.caller_uid):
+            raise CallerCeilingExceeded(self.server._bucket(self.caller_uid))
+
         guest_ctx = self.server.guest_tls_context
         if guest_ctx is not None:
             # Before wrapping: the handshake happens inside wrap_socket, and an
@@ -678,6 +714,21 @@ MAX_PER_CALLER = 8
 UNIDENTIFIED = "unidentified"
 
 
+class CallerCeilingExceeded(Exception):
+    """Raised out of Handler.setup() by a caller already at MAX_PER_CALLER.
+
+    An exception rather than a return, because setup() has no way to decline:
+    BaseRequestHandler runs setup/handle/finish from its constructor. Raising
+    reaches process_request_thread, which reports it through handle_error and
+    closes the connection in its finally -- releasing the thread immediately,
+    which is what makes the refusal cheap.
+    """
+
+    def __init__(self, bucket):
+        super().__init__(f"caller {bucket} is at its connection ceiling")
+        self.bucket = bucket
+
+
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -701,20 +752,41 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def _bucket(self, uid):
         return UNIDENTIFIED if uid is None else uid
 
-    def take_caller_uid(self, request):
-        """The uid resolved when `request` was admitted. Called once, by its
-        handler; returns None if the connection was never admitted here."""
+    def admit_caller(self, request, uid):
+        """Count this connection against its caller's ceiling, or refuse it.
+
+        Called from the handler thread rather than the accept loop, and that
+        placement is measured rather than tasteful. Resolving a caller means
+        reading /proc/net/tcp, which the kernel generates on demand: 3.8ms per
+        connection with ~1300 sockets on the host, and it grows with that
+        number. In the accept loop -- where the first version of this put it --
+        every one of those milliseconds is time no other caller can be accepted,
+        which hands a caller a way to slow the whole broker down by connecting
+        in a loop. A quieter version of the denial of service the ceiling exists
+        to stop.
+
+        In the handler it costs a thread, which is what MAX_CONCURRENT bounds,
+        and the thread is released as soon as the refusal is raised. A caller
+        over its ceiling therefore holds nothing.
+
+        The read still dominates and is still per connection. Asking the kernel
+        for one socket instead of the table (a NETLINK_INET_DIAG query filtered
+        by port) would make it O(1), and is the obvious next move if this ever
+        matters -- but it means hand-rolled netlink parsing in the one function
+        whose wrong answer is the wrong credential, so it is not a change to
+        make casually.
+        """
+        bucket = self._bucket(uid)
         with self._lock:
-            return self._caller_of.get(request)
+            held = self._held.get(bucket, 0)
+            if held >= MAX_PER_CALLER:
+                return False
+            self._held[bucket] = held + 1
+            self._caller_of[request] = uid
+        return True
 
     def process_request(self, request, client_address):
-        """Admit or refuse, before a thread exists to be starved.
-
-        Identity is resolved here rather than in the handler because a
-        per-caller ceiling has to know who is calling to apply one. It costs a
-        /proc/net/tcp scan in the accept loop -- the same scan the handler used
-        to do, moved rather than added.
-        """
+        """Take a global slot, or refuse before a thread exists to be starved."""
         if not self._slots.acquire(blocking=False):
             log("deny", reason="too-many-connections", src=client_address[0])
             # Bypass our own shutdown_request: we never took a slot, and
@@ -722,33 +794,13 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
             super().shutdown_request(request)
             return
 
-        try:
-            uid = peer_uid(local_endpoints(request), client_address)
-        except OSError:
-            uid = None  # peer vanished between accept and lookup
-        bucket = self._bucket(uid)
-
-        with self._lock:
-            held = self._held.get(bucket, 0)
-            admit = held < MAX_PER_CALLER
-            if admit:
-                self._held[bucket] = held + 1
-                self._caller_of[request] = uid
-
-        # Refuse OUTSIDE the lock. shutdown_request takes the same lock to do
-        # its own bookkeeping, and this lock is not reentrant -- calling it from
-        # in there deadlocked the accept loop, which then held the lock for ever
-        # and blocked every handler thread trying to finish. Found by
-        # TestOneCallerCannotTakeThePool, which is why that test exists.
-        if not admit:
-            log("deny", reason="too-many-connections-for-caller",
-                caller=bucket, held=held)
-            # We DID take a global slot, so release it through our own
-            # shutdown_request rather than the base class's. The per-caller
-            # count is untouched: this connection was never counted.
-            self.shutdown_request(request)
-            return
-
+        # No try/except around this. `t.start()` does raise when the host is out
+        # of threads, and the slot must come back when it does -- but
+        # BaseServer._handle_request_noblock already calls shutdown_request on
+        # any exception out of process_request. Releasing it here as well is a
+        # double release, which a BoundedSemaphore turns into "Semaphore
+        # released too many times" at the worst possible moment. Written that
+        # way first; TestAFailedSpawnDoesNotLeakASlot caught it.
         super().process_request(request, client_address)
 
     def shutdown_request(self, request):
@@ -770,15 +822,27 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
             self._slots.release()
 
     def handle_error(self, request, client_address):
-        """One line, not a traceback.
+        """One line for the expected, a traceback for the rest.
 
-        A stalled TLS handshake or a caller that vanishes mid-request is
-        ordinary here and says nothing an operator can act on, while the default
-        prints a full traceback to the journal for each one -- which is itself a
-        log-flooding lever for a hostile sandbox.
+        A stalled TLS handshake, a caller that vanishes mid-request, a caller
+        over its ceiling: ordinary here, saying nothing an operator can act on,
+        and the default's full traceback for each one is itself a log-flooding
+        lever for a hostile sandbox.
+
+        Anything else is a bug in this program, and swallowing its traceback
+        would mean debugging the broker from a single exception name with no
+        line number. Those keep the default.
         """
         exc = sys.exception()
-        log("connection-error", error=type(exc).__name__)
+        if isinstance(exc, CallerCeilingExceeded):
+            log("deny", reason="too-many-connections-for-caller",
+                caller=exc.bucket)
+        elif isinstance(exc, (OSError, ssl.SSLError, TimeoutError, EOFError)):
+            # ssl.SSLError and TimeoutError are OSError subclasses; named for
+            # the reader, not for the isinstance.
+            log("connection-error", error=type(exc).__name__)
+        else:
+            super().handle_error(request, client_address)
 
 
 def main():

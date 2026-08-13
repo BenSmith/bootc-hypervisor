@@ -15,6 +15,7 @@ broker would forward anything.
 """
 
 import contextlib
+import io
 import socket
 import threading
 import unittest
@@ -134,6 +135,16 @@ class TestRequestFraming(unittest.TestCase):
         _, rejection = broker.request_framing(
             "/v1/messages", headers(Content_Length="twelve"))
         self.assertEqual(rejection[0], 400)
+
+    def test_two_content_lengths_are_refused(self):
+        """Two lengths frame two messages; taking the first leaves the rest of
+        the other in the socket, to be read as the next request line."""
+        msg = Message()
+        msg["Content-Length"] = "4"
+        msg["Content-Length"] = "40"
+        _, rejection = broker.request_framing("/v1/messages", msg)
+        self.assertEqual(rejection[0], 400)
+        self.assertEqual(rejection[1], "duplicate-content-length")
 
     def test_a_negative_content_length_is_refused(self):
         """rfile.read(-1) reads to EOF, so this held a slot for as long as the
@@ -259,6 +270,51 @@ class TestOneCallerCannotTakeThePool(BrokerServerCase):
             second.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n"
                            b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
             self.assertIn(b"411", self.drain(second))
+
+
+class TestAFailedSpawnDoesNotLeakASlot(unittest.TestCase):
+    """`t.start()` raises when the host is out of threads, and nothing
+    downstream runs shutdown_request for a thread that never started.
+
+    A leaked global slot is bad; a leaked per-caller slot is worse, because it
+    locks that one caller out for the life of the process — and the host being
+    out of threads is exactly the moment the broker needs to recover on its own.
+    The pool here is one connection wide so a single leak is the difference
+    between working and wedged.
+    """
+
+    def test_the_slot_comes_back_after_the_thread_fails_to_start(self):
+        with mock.patch.object(broker, "MAX_CONCURRENT", 1):
+            class H(broker.Handler):
+                config = {"connect_timeout": 1.0, "read_timeout": 1.0}
+                profiles, fallback, overflow = {}, profile(), 65534
+
+            server = broker.Server(("127.0.0.1", 0), H)
+            self.addCleanup(server.server_close)
+            port = server.server_address[1]
+
+            with mock.patch("threading.Thread.start",
+                            side_effect=RuntimeError("can't start new thread")):
+                doomed = socket.create_connection(("127.0.0.1", port), timeout=5)
+                self.addCleanup(doomed.close)
+                # BaseServer reports it through handle_error and closes the
+                # connection itself; the traceback is wanted behaviour (this is
+                # a bug, not a hostile caller) and only noise here.
+                with contextlib.redirect_stderr(io.StringIO()):
+                    server.handle_request()
+
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 5)
+            self.addCleanup(server.shutdown)
+
+            after = socket.create_connection(("127.0.0.1", port), timeout=5)
+            self.addCleanup(after.close)
+            after.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n"
+                          b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+            after.settimeout(5)
+            self.assertIn(b"411", after.recv(200),
+                          "the only slot was never returned")
 
 
 class TestIdleConnectionsAreReaped(BrokerServerCase):

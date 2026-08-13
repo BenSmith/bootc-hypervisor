@@ -74,6 +74,23 @@ class TestPeerUidFrom(unittest.TestCase):
         rows = [proc_row("0100007F:1F91", "00000000:0000", uid=999, inode=1)]
         self.assertIsNone(broker.peer_uid_from(rows, self.locals_, self.peer))
 
+    def test_the_port_prefilter_does_not_skip_the_right_row(self):
+        """The scan rejects rows without the peer's port hex anywhere in them,
+        which is a filter and must not become a second matching rule: the port
+        can appear in another row's *remote* column, and the row that matches on
+        both columns still has to win."""
+        peer, ours = ("127.0.0.1", 0x9000), ("127.0.0.1", 8081)
+        decoy = proc_row("0100007F:1F91", "0100007F:9000", uid=0, inode=555)
+        real = proc_row("0100007F:9000", "0100007F:1F91", uid=10001, inode=777)
+        self.assertEqual(
+            broker.peer_uid_from([decoy, real], [ours], peer), 10001)
+
+    def test_a_row_without_the_peer_port_is_never_considered(self):
+        other = proc_row("0100007F:8888", "0100007F:1F91", uid=10002, inode=778)
+        self.assertIsNone(
+            broker.peer_uid_from([other], [("127.0.0.1", 8081)],
+                                 ("127.0.0.1", 0x9000)))
+
     def test_a_different_connection_does_not_match(self):
         rows = [proc_row("0100007F:AFC9", "0100007F:1F91", uid=10000, inode=7)]
         self.assertIsNone(broker.peer_uid_from(rows, self.locals_, self.peer))
@@ -91,7 +108,7 @@ class TestPeerUidThroughRedirect(unittest.TestCase):
     Measured, not assumed: under output DNAT the client socket keeps recording
     the address it dialled, so its row's remote is the ADVERTISED endpoint while
     the server is bound to the translated one. Matching only getsockname() finds
-    nothing and every guest gets a 403 -- which is why _local_endpoints offers
+    nothing and every guest gets a 403 -- which is why local_endpoints offers
     both.
     """
 
