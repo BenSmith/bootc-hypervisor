@@ -281,3 +281,39 @@ decides "what should be a build step."
 
 > Distinct from the shipped `drift` verb, which compares generated-vs-deployed
 > systemd unit files — a different axis (config-vs-running, not state-vs-image).
+
+---
+
+### VM virtiofs: make the guest→host id policy a TOML knob
+**Why:** the current policy is hardcoded and it is a real trade, not a default
+- **Effort:** Small
+- **Value:** Medium (unblocks a use case we deliberately closed)
+- **Interest:** Low for now — no workload wants it yet
+
+virtiofsd now squashes *every* guest id onto the workload uid (`squash-guest`
+either side of the `map:1000:<uid>:1` entry). That was chosen deliberately:
+passthrough let a guest create host files owned by any uid it named, and a guest
+planting a setuid-root binary in its share produced `-rwsr-xr-x root root` on the
+host — which `backup` would then carry into an archive, since it captures `data/`.
+
+What it costs is real though. Squash is one-way, so the reverse lookup finds only
+the `map` entry and every squashed file reads back as the guest's default user —
+a multi-user guest loses per-user ownership inside the share, in the guest as well
+as on the host. A guest `chown` to any other id silently succeeds and does
+nothing. Fine for single-user appliance VMs; there is currently no way to ask for
+anything else.
+
+**Shape:** a small enum (`squash` default / `passthrough`), not raw ranges. Ranges
+must partition — virtiofsd rejects any entry intersecting one already added, so a
+user-supplied overlap is a sidecar start failure and the VM does not boot. Keep
+the default on `squash`: opting into passthrough should be a sentence someone
+wrote on purpose.
+
+**Adjacent, separate:** pin the guest's default user to the workload uid instead
+of 1000, so the operator has one number rather than two reconciled by a map
+(closer to how a container workload reads). Drops the `map` entry, keeps both
+squashes — but trades a guest image that is portable across hosts for one carrying
+a host-allocated uid in its `/etc/passwd`, which bites on restore to another
+machine.
+
+**Status:** captured, not planned

@@ -1542,13 +1542,49 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     socket_path = f"/run/workload-vm/{name}/virtiofs-{tag}.sock"
     home_dir = str(workload_state_dir(name))
 
+    # Every guest id lands on the host as the workload user. The `map` entry is
+    # bidirectional, so the guest's own user reads its files back as itself; the
+    # two squashes cover everything on either side of it, one-way.
+    #
+    # WHY NOT LET OTHER GUEST IDS THROUGH. They used to, and it is the obvious
+    # reading of "share a directory faithfully" — but the guest chooses those
+    # ids, so passthrough means a guest can create host files owned by any uid
+    # it names, root included, with any mode it likes. Verified on a live VM: a
+    # guest planting a setuid-root binary in its share produced
+    # `-rwsr-xr-x root root` on the host filesystem. The share sits in a 0700
+    # workload-owned directory and nothing on the host execs from it, so it is
+    # not directly exploitable — but `backup` captures data/, so the bit travels
+    # in the archive to wherever it is restored, and anything that ever runs as
+    # _wl-<name> and execs from the tree gets root. Squashing removes the
+    # primitive rather than relying on those two facts staying true.
+    #
+    # What it costs: a multi-user guest no longer sees per-user ownership inside
+    # the share, on the host OR in the guest — squash is one-way, so the reverse
+    # lookup finds only the `map` entry and every squashed file reads back as
+    # the guest's default user. That is the deliberate trade. These are
+    # single-user appliance VMs; a workload that genuinely needs multi-user
+    # sharing wants a data disk, which is a block device the guest formats and
+    # owns outright.
+    #
+    # The ranges must PARTITION: virtiofsd rejects any entry whose source range
+    # intersects one already added (soft_idmap::IdMap::do_push), so an overlap
+    # is a start failure, not a precedence question. And the tail cannot reach
+    # the top of the range — ranges are half-open and built with checked_add, so
+    # ending at 2^32 overflows. The one id left identity-mapped is 4294967295,
+    # the overflow/`nobody` id, which no guest process runs as.
+    squash_tail = (1 << 32) - 1 - (VM_GUEST_UID + 1)
+    idmap = " ".join(
+        f"--translate-{kind}=map:{VM_GUEST_UID}:{uid}:1 "
+        f"--translate-{kind}=squash-guest:0:{uid}:{VM_GUEST_UID} "
+        f"--translate-{kind}=squash-guest:{VM_GUEST_UID + 1}:{uid}:{squash_tail}"
+        for kind in ("uid", "gid")
+    )
     virtiofsd_cmd = (
         f"/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
         f"--socket-group={user_name} "
         f"--shared-dir={dq(host_path)} "
-        f"--translate-uid=map:{VM_GUEST_UID}:{uid}:1 "
-        f"--translate-gid=map:{VM_GUEST_UID}:{uid}:1 "
+        f"{idmap} "
         f"--cache=auto --sandbox=chroot"
     )
 
@@ -1575,20 +1611,21 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     # without waiting for sd_notify. virtiofsd 1.x only sends READY after
     # QEMU connects, which deadlocks with Type=notify + Before=VM.service.
     svc.set("Type", "exec")
-    # Run as root so virtiofsd can faithfully apply guest-requested uids
-    # and gids on file/dir creation and chown. Unprivileged virtiofsd
-    # squashes everything to its own uid, which breaks multi-user data
-    # sharing inside the guest. --sandbox=chroot still confines the
-    # daemon's view of the host filesystem; --socket-group lets the
-    # unprivileged QEMU process connect.
+    # Run as root so virtiofsd can apply the mapped uid/gid on creation and
+    # chown: it setresuid/setresgid's to the target for each request, which
+    # needs CAP_SETUID/CAP_SETGID (and fowner/fsetid to carry the mode across
+    # the switch) — see the capability rule in security/workload-vm.cil.
+    # --sandbox=chroot still confines the daemon's view of the host filesystem;
+    # --socket-group lets the unprivileged QEMU process connect.
     #
-    # --translate-uid/--translate-gid bidirectionally remap the guest's
-    # primary user (VM_GUEST_UID, the cloud-init default user) to the host
-    # workload uid/gid. Without this the share is owned by _wl-<name>
-    # (uid>=10000) on the host while the guest writes as uid 1000, so the
-    # guest user gets EPERM. The map is internal to virtiofsd (no user
-    # namespace needed, compatible with --sandbox=chroot); all other guest
-    # uids/gids still pass through 1:1, preserving multi-user sharing.
+    # Running it unprivileged instead would squash everything to virtiofsd's own
+    # uid, which lands in the same place the id map below now arrives at
+    # deliberately — but by way of EPERM on every guest write rather than a
+    # translation, so the guest cannot write its own share at all.
+    #
+    # --translate-uid/--translate-gid do the mapping internally (no user
+    # namespace, compatible with --sandbox=chroot). See the block above the
+    # command for what they map and why nothing passes through.
     #
     # --sandbox=chroot is now LOAD-BEARING FOR CONFINEMENT as well, which is not
     # obvious from the uid-fidelity reason above. security/workload-vm.cil confines

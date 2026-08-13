@@ -1903,14 +1903,13 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("User=", sidecar)
         self.assertIn("--sandbox=chroot", sidecar)
 
-    def test_virtiofsd_translates_guest_user_to_host_workload_uid(self):
-        # The guest's primary user is uid/gid 1000 (cloud-init default), while
-        # the host share is owned by the workload user (>=10000). virtiofsd must
-        # bidirectionally translate 1000 <-> the workload uid so the guest user
-        # can write the share. The exact slot isn't deterministic across hosts
-        # (get_next_uid scans the live passwd DB — a CI runner with any UID in
-        # [10000, 52948] shifts it off 10000), so derive the allocated uid from
-        # the drop-in rather than hardcoding it.
+    def _sidecar_and_uid(self):
+        """Render a VM with one volume; return (sidecar text, allocated uid).
+
+        The uid slot isn't deterministic across hosts (get_next_uid scans the
+        live passwd DB — a CI runner with any UID in [10000, 52948] shifts it
+        off 10000), so it is read back from the drop-in rather than hardcoded.
+        """
         self._write_vm_config(extra='volumes = ["/srv/data:/mnt/data"]')
         self._run()
         sysusers = (Path(self.sysusers_dir) / "workload-fedora-vm.conf").read_text()
@@ -1918,9 +1917,54 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         assert m is not None
         uid = int(m.group(1))
         self.assertGreaterEqual(uid, 10000)
-        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-data.service")
+        return self._read("workload-fedora-vm-virtiofs-mnt-data.service"), uid
+
+    def test_virtiofsd_translates_guest_user_to_host_workload_uid(self):
+        # The guest's primary user is uid/gid 1000 (cloud-init default), while
+        # the host share is owned by the workload user (>=10000). This entry is
+        # `map`, the only bidirectional kind, so the guest user both writes the
+        # share and reads its own files back as itself.
+        sidecar, uid = self._sidecar_and_uid()
         self.assertIn(f"--translate-uid=map:1000:{uid}:1", sidecar)
         self.assertIn(f"--translate-gid=map:1000:{uid}:1", sidecar)
+
+    def test_virtiofsd_squashes_every_other_guest_id_to_the_workload_user(self):
+        # The security property. Passthrough lets a guest create host files
+        # owned by any uid it names — measured on a live VM, a guest planting a
+        # setuid-root binary in its share produced `-rwsr-xr-x root root` on the
+        # host, which `backup` would then carry into an archive. Both squashes
+        # must be present: without the low one the guest's root can still do it,
+        # and without the high one any uid above the default user can.
+        sidecar, uid = self._sidecar_and_uid()
+        for kind in ("uid", "gid"):
+            self.assertIn(f"--translate-{kind}=squash-guest:0:{uid}:1000", sidecar)
+            self.assertIn(f"--translate-{kind}=squash-guest:1001:{uid}:4294966294",
+                          sidecar)
+
+    def test_virtiofsd_id_ranges_partition_and_do_not_overflow(self):
+        # Two independent constraints, both fatal at start rather than silent.
+        #
+        # virtiofsd rejects any entry whose source range intersects one already
+        # added (soft_idmap::IdMap::do_push), so the three ranges must partition
+        # rather than layer — there is no precedence rule to fall back on.
+        #
+        # Ranges are half-open and built with checked_add, so a tail reaching
+        # 2^32 fails to parse. Ending one short leaves 4294967295 — the
+        # overflow/`nobody` id — identity-mapped, which no guest process runs as.
+        sidecar, uid = self._sidecar_and_uid()
+        spans = []
+        for m in re.finditer(rf"--translate-uid=(?:squash-guest|map):"
+                             rf"(\d+):{uid}:(\d+)", sidecar):
+            base, count = int(m.group(1)), int(m.group(2))
+            spans.append((base, base + count))
+        self.assertEqual(len(spans), 3, f"expected three uid ranges, got {spans}")
+        spans.sort()
+        self.assertEqual(spans[0][0], 0, "the low squash must start at 0")
+        for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
+            self.assertEqual(prev_end, next_start,
+                             f"ranges must abut exactly, not overlap or gap: {spans}")
+        self.assertEqual(spans[-1][1], (1 << 32) - 1,
+                         "the tail must stop one short of 2^32 (checked_add)")
 
     def test_execstop_waits_for_graceful_poweroff(self):
         # ExecStop must call workload-vm-shutdown, which *blocks* until the
