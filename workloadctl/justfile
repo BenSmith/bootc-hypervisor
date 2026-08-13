@@ -108,16 +108,18 @@ coverage-html: coverage
   python3 -m coverage html --rcfile=.coveragerc
   @echo "HTML report: file://$(pwd)/htmlcov/index.html"
 
-# Lint: byte-compile every Python source (syntax check)
+# Lint: byte-compile every Python source (syntax check).
+# libexec/agent-broker is named separately: it is the one entrypoint there that
+# is not a workload-* helper, so the glob above it does not reach it.
 lint:
-  python3 -m py_compile lib/*.py bin/workloadctl generators/workload-generate libexec/workload-*
+  python3 -m py_compile lib/*.py bin/workloadctl generators/workload-generate libexec/workload-* libexec/agent-broker
 
 # Lint with ruff (dev-only); scripts named explicitly since they lack .py.
 # tests/ and libexec/ scripts insert lib/ onto sys.path before importing
 # from it (no venv/package manager here), which ruff flags as E402
 # (import not at top of file) — that pattern is intentional.
 lint-ruff *args:
-  ruff check {{args}} --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-*
+  ruff check {{args}} --per-file-ignores "tests/*.py:E402,libexec/*:E402" lib/ tests/ bin/workloadctl generators/workload-generate libexec/workload-* libexec/agent-broker
 
 # Type-check with mypy (dev-only, advisory). lib/ + tests/ run together
 # (--explicit-package-bases avoids a false "duplicate module" clash between

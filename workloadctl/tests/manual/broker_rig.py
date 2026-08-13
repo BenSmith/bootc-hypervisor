@@ -9,8 +9,8 @@ probes the broker from inside each guest.
 WHY FOUR GUESTS
 
 Every unit test on both sides of this passes today. What none of them can reach
-is whether the kernel, the guest, and two separate repos' constants agree in a
-live system -- and the two defects found while building this both lived in
+is whether the kernel, the guest and the installed package agree in a live
+system -- and the two defects found while building this both lived in
 *combinations*, invisible to the simplest possible test:
 
   * the client records the address it DIALLED, not the one the broker is bound
@@ -66,6 +66,12 @@ ADVERTISED = "192.0.2.1"
 BROKER_PORT = 8081
 PROXY_PORT = 3128
 BROKER_LISTEN = ("127.0.0.1", 8081)
+
+# The installed broker, not the one in this checkout. Everything else the rig
+# exercises -- the generator, the VM units, the nft skeletons -- is whatever the
+# RPM put on the host, so the broker is too: a green run then means the package
+# is right, which is the claim worth making. `just rpm-install` refreshes it.
+BROKER_BIN = Path("/usr/libexec/workloadctl/agent-broker")
 
 STUB_PORT = 19999
 DNS_ALLOW = "1.1.1.1:53"
@@ -136,6 +142,9 @@ def preflight():
             sys.exit(f"missing {tool}")
     if not Path("/dev/kvm").exists():
         sys.exit("no /dev/kvm")
+    if not os.access(BROKER_BIN, os.X_OK):
+        sys.exit(f"missing {BROKER_BIN} — it ships in the workloadctl RPM; "
+                 f"run `just rpm-install` from the checkout")
     # A stale listener on EITHER port silently takes traffic that should have
     # gone to a process this run started, and the result reads as a fault in
     # whatever is downstream of it.
@@ -238,7 +247,7 @@ def start_services(rigdir):
     children.append(stub)
     env = {**os.environ, "CREDENTIALS_DIRECTORY": str(CREDS),
            "SSL_CERT_FILE": str(cert)}
-    broker = subprocess.Popen([sys.executable, str(rigdir / "broker.py"), str(cfg)],
+    broker = subprocess.Popen([sys.executable, str(BROKER_BIN), str(cfg)],
                               stdout=broker_log, stderr=broker_log, env=env)
     children.append(broker)
 

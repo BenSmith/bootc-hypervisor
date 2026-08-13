@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""
+agent-broker — a credential-holding reverse proxy for sandboxed coding agents.
+
+The sandbox never receives a provider API key. It points its client at this
+broker (ANTHROPIC_BASE_URL / OPENAI_BASE_URL / base_url) and the broker attaches
+the real credential on the way out. Guest -> broker is plain HTTP on an address
+only that guest can reach; broker -> provider is ordinary verified TLS from the
+host. No CA in the guest, no TLS interception, nothing to break certificate
+pinning.
+
+Callers are identified by the uid owning the far end of the connection, which
+the host assigns and nothing inside a guest can forge. Each one may carry its
+own credential and upstream. See docs/agent-broker.md §5 -- in particular the two
+ways this identification fails without erroring.
+
+Deliberately NOT a general proxy. The upstream is fixed by config and is never
+taken from the request, so a compromised sandbox cannot steer this at anything
+else. A broker that forwarded to a guest-chosen destination would be an SSRF
+pivot with a credential welded to it — the exact failure this design exists to
+avoid.
+
+stdlib only (matches workloadctl's no-third-party-deps rule). Needs 3.11+ for
+tomllib.
+
+Usage: agent-broker /etc/agent-broker/broker.toml
+"""
+
+import dataclasses
+import http.client
+import http.server
+import ipaddress
+import os
+import pwd
+import socket
+import socketserver
+import ssl
+import struct
+import sys
+import threading
+import time
+import tomllib
+import urllib.parse
+from pathlib import Path
+
+# Headers that are meaningful only for a single transport hop and must never be
+# copied across one (RFC 9110 §7.6.1).
+HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+})
+
+# Anything the guest sends that looks like a credential is dropped rather than
+# forwarded. The guest has no legitimate reason to set these: we supply the
+# credential, and letting a caller pass its own through would turn the broker
+# into an open relay for whatever key a compromised sandbox happened to find.
+STRIP_FROM_REQUEST = frozenset({
+    "authorization", "x-api-key", "api-key", "x-goog-api-key",
+    "cookie", "host", "content-length",
+})
+
+# Read at most this much request body. Generous enough for a large context
+# window, small enough that a runaway sandbox can't exhaust host memory.
+MAX_REQUEST_BYTES = 64 * 1024 * 1024
+CHUNK = 64 * 1024
+
+
+def log(event, **fields):
+    """One structured line per event, to stderr -> journal. Never logs bodies,
+    headers, or anything derived from the credential."""
+    parts = " ".join(f"{k}={v}" for k, v in fields.items())
+    print(f"[{time.strftime('%H:%M:%S')}] {event} {parts}", file=sys.stderr, flush=True)
+
+
+# --- caller identity -------------------------------------------------------
+#
+# The host's VM networking re-originates every guest flow as a host socket owned
+# by that workload's own user, so the source address is the same for all of them
+# and carries no information. The uid does: the host assigned it, the guest
+# cannot reach it, and it is the same primitive the host's egress rules match on.
+#
+# The kernel records the owner of every socket and /proc/net exposes it, so the
+# lookup is a table read -- no handshake, nothing for a caller to participate in
+# or lie about.
+
+WORKLOAD_USER_PREFIX = "_wl-"
+PROC_NET_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
+
+# Recovers what a connection was aimed at before the host translated it.
+SO_ORIGINAL_DST = 80
+
+
+def _norm(addr):
+    """Canonical address, with v4-mapped v6 collapsed to plain v4.
+
+    A dual-stack listener reports peers as ::ffff:a.b.c.d while the row for the
+    same socket may sit in either table, so both sides of a comparison have to
+    be flattened or an exact match never happens.
+    """
+    ip = ipaddress.ip_address(addr)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _proc_addr(text):
+    """Decode a /proc/net address: 32-bit words, each little-endian, in hex."""
+    raw = bytes.fromhex(text)
+    return _norm(b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4)))
+
+
+def peer_uid_from(rows, locals_, peer):
+    """uid owning `peer`'s socket, given /proc/net/tcp data lines, or None.
+
+    The peer's row is this connection mirrored: its local address is our remote
+    and its remote is our local. `locals_` is every endpoint that "our local"
+    may be recorded as -- see _local_endpoints, which explains why there is more
+    than one.
+    """
+    want_local = (_norm(peer[0]), peer[1])
+    want_remotes = {(_norm(host), port) for host, port in locals_}
+    for line in rows:
+        f = line.split()
+        if len(f) < 10:
+            continue
+        try:
+            local_host, local_port = f[1].split(":")
+            if (_proc_addr(local_host), int(local_port, 16)) != want_local:
+                continue
+            remote_host, remote_port = f[2].split(":")
+            if (_proc_addr(remote_host), int(remote_port, 16)) not in want_remotes:
+                continue
+            # inode 0 is a socket with no owning process -- a TIME_WAIT remnant,
+            # which the kernel reports with uid 0. Reading that as identity
+            # would silently attribute the request to root.
+            if int(f[9]) == 0:
+                continue
+            return int(f[7])
+        except ValueError:
+            continue
+    return None
+
+
+def peer_uid(locals_, peer):
+    """uid owning the far end of an accepted connection, or None."""
+    for path in PROC_NET_TCP:
+        try:
+            with open(path) as fh:
+                rows = fh.readlines()[1:]
+        except OSError:
+            continue
+        uid = peer_uid_from(rows, locals_, peer)
+        if uid is not None:
+            return uid
+    return None
+
+
+def workload_name(uid):
+    """Workload name behind a uid, or None if it is not a workload user."""
+    try:
+        user = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+    if not user.startswith(WORKLOAD_USER_PREFIX):
+        return None
+    return user[len(WORKLOAD_USER_PREFIX):]
+
+
+def userns_ranges(uid_map):
+    """The host uid ranges this namespace can represent, as (start, count).
+
+    /proc/net translates the uid column through the *reader's* namespace, so an
+    owner outside these ranges reads as the overflow uid instead. Enough of
+    those and every caller collapses into one identity, with the broker still
+    serving traffic and no error anywhere.
+    """
+    ranges = []
+    for line in uid_map.splitlines():
+        f = line.split()
+        if len(f) != 3:
+            continue
+        try:
+            ranges.append((int(f[1]), int(f[2])))
+        except ValueError:
+            continue
+    return ranges
+
+
+def userns_maps_everything(uid_map):
+    """Whether this is an unrestricted namespace -- the initial one, in practice."""
+    return any(start == 0 and count >= 0xFFFFFFFF
+               for start, count in userns_ranges(uid_map))
+
+
+def unmappable_sandboxes(sandbox_names, uid_map):
+    """Configured sandboxes whose uid this namespace cannot represent.
+
+    Checked against the uids that actually matter rather than against the shape
+    of the map, because a namespace can be restricted and still map the whole
+    workload range -- refusing that would be a false alarm, and an operator who
+    hits one learns to route around the check.
+    """
+    ranges = userns_ranges(uid_map)
+    unmappable = []
+    for name in sandbox_names:
+        user = WORKLOAD_USER_PREFIX + name
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            continue  # workload not created yet; nothing to check against
+        if not any(start <= uid < start + count for start, count in ranges):
+            unmappable.append(f"{user} (uid {uid})")
+    return unmappable
+
+
+def overflow_uid():
+    """The uid the kernel substitutes for one it cannot map."""
+    try:
+        return int(Path("/proc/sys/kernel/overflowuid").read_text().strip())
+    except (OSError, ValueError):
+        return 65534
+
+
+# --- configuration ---------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Profile:
+    """Everything a request needs, resolved per caller."""
+    name: str
+    host: str
+    port: int
+    prefix: str
+    auth_header: str
+    auth_format: str
+    secret: str
+
+
+def _split_upstream(url, where):
+    up = urllib.parse.urlsplit(url)
+    if up.scheme != "https" or not up.hostname:
+        sys.exit(f"{where}: 'upstream' must be an https:// URL with a hostname")
+    if up.query or up.fragment:
+        sys.exit(f"{where}: 'upstream' must not carry a query or fragment")
+    # A base path on the upstream ("/v1") is prefixed to every forwarded path.
+    return up.hostname, up.port or 443, up.path.rstrip("/")
+
+
+def load_config(path):
+    with open(path, "rb") as fh:
+        cfg = tomllib.load(fh)
+
+    # Address-keyed config predates uid identity and cannot work: every guest
+    # now arrives from the same address, so these entries would match nothing
+    # and 403 everything. Refuse it rather than let a stale file look applied.
+    if "allow_unknown_sources" in cfg:
+        sys.exit("broker.toml: 'allow_unknown_sources' is now "
+                 "'allow_unknown_callers' -- callers are identified by uid, "
+                 "not by address (docs/agent-broker.md §5)")
+    for key, value in cfg.get("sandboxes", {}).items():
+        if not isinstance(value, dict):
+            sys.exit(f"broker.toml: [sandboxes] maps a workload NAME to a "
+                     f"table now, not {key!r} to a string -- callers are "
+                     f"identified by uid, not by address (docs/agent-broker.md §5)")
+
+    for required in ("upstream", "credential"):
+        if not cfg.get(required):
+            sys.exit(f"broker.toml: '{required}' is required")
+
+    cfg.setdefault("listen_address", "127.0.0.1")
+    cfg.setdefault("listen_port", 8081)
+    cfg.setdefault("auth_header", "x-api-key")
+    cfg.setdefault("auth_format", "{secret}")
+    cfg.setdefault("sandboxes", {})
+    cfg.setdefault("allow_unknown_callers", False)
+    cfg.setdefault("connect_timeout", 15.0)
+    cfg.setdefault("read_timeout", 900.0)  # long: streamed completions idle
+    return cfg
+
+
+def build_profiles(cfg, load=None):
+    """Resolve every sandbox to a Profile, plus the fallback for unknown callers.
+
+    Each sandbox inherits the top-level upstream, credential and auth settings
+    and may override any of them, so one broker can front several providers or
+    hand different sandboxes keys with different spend limits. The caller never
+    influences which profile applies -- that is the whole point of identifying
+    it -- so an upstream named here is as safe as one named at the top level.
+    """
+    load = load or load_credential
+    secrets = {}
+
+    def resolve(name, spec, where):
+        credential = spec.get("credential", cfg["credential"])
+        if credential not in secrets:
+            secrets[credential] = load(credential)
+        host, port, prefix = _split_upstream(
+            spec.get("upstream", cfg["upstream"]), where)
+        return Profile(
+            name=name,
+            host=host,
+            port=port,
+            prefix=prefix,
+            auth_header=spec.get("auth_header", cfg["auth_header"]),
+            auth_format=spec.get("auth_format", cfg["auth_format"]),
+            secret=secrets[credential],
+        )
+
+    profiles = {name: resolve(name, spec, f"[sandboxes.{name}]")
+                for name, spec in cfg["sandboxes"].items()}
+    fallback = (resolve("unknown", {}, "broker.toml")
+                if cfg["allow_unknown_callers"] else None)
+    return profiles, fallback
+
+
+def load_credential(name):
+    """Read the secret from the systemd credentials directory.
+
+    systemd puts LoadCredentialEncrypted= material on a tmpfs at 0400 owned by
+    the service user, which is why the broker never needs to read a file the
+    rest of the host can see. Falls back to an env var only to keep local
+    development possible.
+    """
+    creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds_dir:
+        secret = Path(creds_dir, name).read_text().strip()
+        if not secret:
+            sys.exit(f"credential '{name}' is empty")
+        return secret
+    env = os.environ.get("AGENT_BROKER_SECRET")
+    if env:
+        log("warn", msg="using AGENT_BROKER_SECRET; prefer systemd LoadCredentialEncrypted")
+        return env.strip()
+    sys.exit("no credential: run under systemd with LoadCredentialEncrypted=, "
+             "or set AGENT_BROKER_SECRET for local testing")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    # Set by main(). Class attributes so every request sees the same objects.
+    config = None
+    profiles = {}
+    fallback = None
+    overflow = 65534
+    tls_context = None
+
+    protocol_version = "HTTP/1.1"
+    server_version = "agent-broker"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):
+        pass  # replaced by explicit structured logging in _forward
+
+    # Every method the provider APIs use lands in one place.
+    def do_GET(self):
+        self._forward("GET")
+
+    def do_POST(self):
+        self._forward("POST")
+
+    def do_DELETE(self):
+        self._forward("DELETE")
+
+    def _local_endpoints(self):
+        """Every endpoint this connection's local end may be recorded under.
+
+        The host reaches a guest's broker by rewriting one advertised
+        destination per uid, and the *client* socket keeps recording the address
+        it dialled rather than the one we ended up bound to. Matching only
+        getsockname() therefore misses precisely the traffic the redirect
+        creates -- and misses it as a 403, which looks like a config error
+        rather than a lookup that cannot match. SO_ORIGINAL_DST recovers what
+        the caller aimed at; both are accepted so the untranslated path (local
+        testing) keeps working.
+        """
+        endpoints = [tuple(self.connection.getsockname()[:2])]
+        try:
+            raw = self.connection.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
+            port, packed = struct.unpack("!2xH4s8x", raw)
+            endpoints.append((socket.inet_ntoa(packed), port))
+        except (OSError, struct.error):
+            pass  # no conntrack entry: nothing translated this
+        return endpoints
+
+    def _identify(self):
+        """(profile, label) for this caller; profile is None if it gets nothing.
+
+        The uid on the far end is the identity. The two failures that mean the
+        *mechanism* is broken -- no peer socket, or a uid this namespace cannot
+        map -- are never rescued by allow_unknown_callers, because both make
+        every caller look alike, which is the one thing the fallback must not
+        paper over.
+        """
+        uid = peer_uid(self._local_endpoints(), self.client_address)
+        if uid is None:
+            return None, "no-peer-socket"
+        if uid == self.overflow:
+            return None, "uid-unmapped"
+
+        name = workload_name(uid)
+        label = name or f"uid:{uid}"
+        if name is not None and name in self.profiles:
+            return self.profiles[name], label
+        return self.fallback, label
+
+    def _fail(self, status, message):
+        body = message.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _forward(self, method):
+        started = time.monotonic()
+        profile, sandbox = self._identify()
+        if profile is None:
+            log("deny", reason="unidentified", caller=sandbox)
+            self._fail(403, "caller not registered with the broker\n")
+            return
+
+        # Reject absolute-form request targets ("GET https://elsewhere/..."),
+        # which is how a client asks a *proxy* to pick the destination. We are
+        # not a proxy; the destination is ours.
+        if not self.path.startswith("/"):
+            log("deny", reason="absolute-target", sandbox=sandbox)
+            self._fail(400, "absolute request targets are not accepted\n")
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_REQUEST_BYTES:
+            log("deny", reason="body-too-large", sandbox=sandbox, bytes=length)
+            self._fail(413, "request body too large\n")
+            return
+        body = self.rfile.read(length) if length else None
+
+        # Denylist rather than allowlist: provider SDKs send version and beta
+        # headers that change faster than we would keep an allowlist current,
+        # and dropping one silently breaks requests in ways that are painful to
+        # debug. Everything genuinely dangerous is enumerated above.
+        headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower() not in STRIP_FROM_REQUEST and k.lower() not in HOP_BY_HOP
+        }
+        headers[profile.auth_header] = profile.auth_format.format(
+            secret=profile.secret
+        )
+        headers["Host"] = profile.host
+        if body is not None:
+            headers["Content-Length"] = str(len(body))
+
+        path = profile.prefix + self.path
+        conn = None
+        try:
+            conn = http.client.HTTPSConnection(
+                profile.host,
+                profile.port,
+                context=self.tls_context,
+                timeout=self.config["connect_timeout"],
+            )
+            conn.request(method, path, body=body, headers=headers)
+            # Streamed completions can idle between tokens for far longer than
+            # a connect timeout should allow.
+            conn.sock.settimeout(self.config["read_timeout"])
+            resp = conn.getresponse()
+            sent = self._relay(resp)
+            log("ok", sandbox=sandbox, method=method, path=self.path,
+                status=resp.status, bytes=sent,
+                ms=int((time.monotonic() - started) * 1000))
+        except (OSError, http.client.HTTPException) as exc:
+            log("upstream-error", sandbox=sandbox, path=self.path,
+                error=type(exc).__name__)
+            try:
+                self._fail(502, f"upstream request failed: {type(exc).__name__}\n")
+            except OSError:
+                pass  # client already gone
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _relay(self, resp):
+        """Stream the upstream response back without buffering it.
+
+        read1() is the load-bearing call. A plain read(n) blocks until it has n
+        bytes or EOF, which turns a token-by-token SSE stream into one silent
+        pause followed by the whole answer at once — the agent still works but
+        the interaction feels broken. read1() returns whatever has arrived.
+        """
+        passthrough = [
+            (k, v) for k, v in resp.getheaders()
+            if k.lower() not in HOP_BY_HOP and k.lower() != "content-length"
+        ]
+        declared = resp.getheader("Content-Length")
+        # 204 and 304 must not carry a body; framing them as chunked (even as a
+        # bare terminator) is a protocol violation that strict clients reject.
+        bodiless = resp.status in (204, 304)
+
+        self.send_response(resp.status)
+        for k, v in passthrough:
+            self.send_header(k, v)
+        if bodiless:
+            pass
+        elif declared is not None:
+            self.send_header("Content-Length", declared)
+        else:
+            # No length up front (streaming): re-frame as chunked so the client
+            # can consume it incrementally and still see a clean end-of-message.
+            self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        sent = 0
+        if bodiless:
+            return sent
+        while True:
+            buf = resp.read1(CHUNK)
+            if not buf:
+                break
+            if declared is None:
+                self.wfile.write(f"{len(buf):X}\r\n".encode())
+                self.wfile.write(buf)
+                self.wfile.write(b"\r\n")
+            else:
+                self.wfile.write(buf)
+            self.wfile.flush()
+            sent += len(buf)
+        if declared is None:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        return sent
+
+
+MAX_CONCURRENT = 32
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    block_on_close = False
+
+    _slots = None  # set in __init__; a semaphore, not a count
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ThreadingMixIn spawns one thread per connection with no ceiling, so a
+        # sandbox in a loop can exhaust host threads. A few concurrent streams
+        # per sandbox is generous; past the bound we refuse the connection
+        # rather than queue it, so the guest gets a fast error instead of a hang.
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            log("deny", reason="too-many-connections", src=client_address[0])
+            # Bypass our own shutdown_request: we never took a slot, and
+            # releasing one we do not hold would inflate the pool for everyone.
+            super().shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        """Called by ThreadingMixIn once the handler thread is done."""
+        try:
+            super().shutdown_request(request)
+        finally:
+            self._slots.release()
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(f"usage: {sys.argv[0]} <config.toml>")
+    cfg = load_config(sys.argv[1])
+
+    # Refuse to run somewhere identification cannot work. From a user namespace
+    # that does not map a workload's uid, that caller reads as the overflow uid
+    # -- which raises nothing, it just merges sandboxes into one identity. In a
+    # unit this means PrivateUsers= must stay unset; the rest of the hardening
+    # set is unaffected.
+    try:
+        uid_map = Path("/proc/self/uid_map").read_text()
+    except OSError as exc:
+        sys.exit(f"cannot read /proc/self/uid_map ({exc.strerror}); caller "
+                 "identification needs it")
+    blind_to = unmappable_sandboxes(cfg["sandboxes"], uid_map)
+    if blind_to:
+        sys.exit("this user namespace cannot represent " + ", ".join(blind_to) +
+                 " -- those callers would be indistinguishable. Unset "
+                 "PrivateUsers= in the unit (docs/agent-broker.md §5)")
+    if not userns_maps_everything(uid_map):
+        # Every configured sandbox checked out, but an unconfigured one might
+        # still land outside the map, and that failure is silent.
+        log("warn", msg="running in a user namespace; callers outside its uid "
+                        "map cannot be identified")
+
+    Handler.config = cfg
+    Handler.profiles, Handler.fallback = build_profiles(cfg)
+    Handler.overflow = overflow_uid()
+    # Verified TLS to the provider, using the host's trust store. There is no
+    # option to disable verification and there should not be one.
+    ctx = ssl.create_default_context()
+    if cfg.get("relax_x509_strict"):
+        # Python 3.13+ enables VERIFY_X509_STRICT in create_default_context(),
+        # which enforces RFC 5280 details most CAs honor but some private ones
+        # do not -- notably a root without a keyUsage extension, which fails as
+        # "CA cert does not include key usage extension" even though curl and
+        # Node accept the same chain.
+        #
+        # This clears ONLY that strictness flag. Chain building, signature
+        # verification, expiry, and hostname matching all still apply. It is
+        # not a path to an unverified connection. Fix the CA instead where you
+        # can; this exists for the case where you cannot.
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    Handler.tls_context = ctx
+
+    addr = (cfg["listen_address"], int(cfg["listen_port"]))
+    server = Server(addr, Handler)
+
+    # Optional: serve HTTPS to the guest, for agents that refuse to send
+    # credentials over plaintext. One cert for one name, signed by a private CA
+    # the guest trusts — internal PKI, not interception.
+    if cfg.get("tls_cert") and cfg.get("tls_key"):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cfg["tls_cert"], cfg["tls_key"])
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
+    else:
+        scheme = "http"
+
+    log("listening", url=f"{scheme}://{addr[0]}:{addr[1]}",
+        upstream=cfg["upstream"], sandboxes=len(Handler.profiles),
+        unknown="allowed" if Handler.fallback else "refused")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log("shutdown")
+
+
+if __name__ == "__main__":
+    main()

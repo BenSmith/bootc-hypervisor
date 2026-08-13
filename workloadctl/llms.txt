@@ -326,6 +326,33 @@ virtiofsd domain). Three non-obvious things hold it together:
   by iterating under *enforcing*, one gate per round. The opposite of how
   `wlvfsd_t` was derived.
 
+### The credential broker
+
+`[vm.network].broker = true` entitles one VM to reach `libexec/agent-broker`, a
+standalone program this package ships and does not enable. The guest never holds
+a provider API key: it dials the same advertised literal every guest gets
+(`192.0.2.1:8081`), a uid-keyed nat map sends it to the broker, and the broker
+attaches the real credential on the way out. Guest→broker is plain HTTP, so no
+CA goes into the guest and nothing breaks certificate pinning.
+
+- **Identity is the uid owning the far end of the connection**, read out of
+  `/proc/net/tcp`. The host assigns it and a guest cannot forge it, which is why
+  two guests dialling one literal can hold different keys. It fails *silently*
+  when it fails: from a user namespace that cannot map a workload's uid, every
+  caller reads as the overflow uid and they all merge into one identity. The
+  unit therefore must not set `PrivateUsers=`, and the program refuses to start
+  when it can prove that is happening.
+- **The upstream is fixed by config and never taken from a request.** That is
+  the whole security property — a broker that forwarded to a guest-chosen
+  destination would be an SSRF pivot with a credential welded to it.
+- **`libexec/workload-vm-broker` is a different thing**: the per-VM map element,
+  run from the VM unit, which deliberately does not start, stop or check the
+  broker. Its address must match the broker's listen defaults, asserted by
+  `tests/test_vm_broker.py` — a drift there is indistinguishable from the broker
+  being down.
+- **Never proven end to end.** Both halves have unit tests; no real guest has
+  ever dialled a real broker. `tests/manual/broker_rig.py` is the rig for it.
+
 ### Packet capture (step 5)
 
 `workloadctl pcap` writes a non-terminating `log` rule into the
@@ -443,6 +470,7 @@ generators/workload-generator      # Tiny shell systemd generator (emits workloa
 generators/workload-generate       # Python script run by workload-generate.service at early boot
 libexec/workload-ensure-user       # Per-workload user setup (ExecStartPre)
 libexec/workload-vm-*              # VM helpers (build-disk, qmp, shutdown, notify, netdev)
+libexec/agent-broker               # The credential broker: a standalone program, not a helper (shipped disabled)
 libexec/workload-metrics           # Prometheus metrics exporter
 lib/workloadctl_core.py            # WorkloadConfig / WorkloadManager (TOML loading, paths, lifecycle field)
 lib/workload_lib.py                # Shared library (config parsing, UID allocation, VM bridge constants)
@@ -455,6 +483,8 @@ docs/workloads.md                  # Full configuration guide
 docs/workload-run-files.md         # Authoritative per-workload run-file topology (what disable/drift/inspect enumerate)
 docs/cli.md                        # Complete CLI reference
 docs/secrets.md                    # Secrets management guide
+docs/agent-broker.md               # Credential broker: threat model, identity, operation
+docs/agent-broker.toml.example     # Annotated broker config (installed to /usr/share/doc/workloadctl/)
 docs/schema-reference.toml         # Annotated TOML schema with all options
 docs/testing.md                    # Test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
 systemd/                           # systemd units (workloads.slice, metrics timer)
@@ -483,6 +513,7 @@ Pre-built container definitions ship in their bundle dir (`workloads/<bundle>/`)
 - [Workload run-files](docs/workload-run-files.md) — authoritative per-workload run-file topology (units + secrets env + wants symlink; what disable/drift/inspect must agree on)
 - [CLI reference](docs/cli.md) — complete command documentation
 - [Secrets management](docs/secrets.md) — TPM2-encrypted credentials
+- [Credential broker](docs/agent-broker.md) — threat model, peer-uid identity, and how to configure and run `agent-broker.service`
 - [Schema reference](docs/schema-reference.toml) — annotated TOML schema with all options
 - [Testing](docs/testing.md) — test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
 - [Example configs](workloads/) — each workloads/<bundle>/workload.toml — real-world workload definitions

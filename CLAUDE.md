@@ -72,7 +72,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 - `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
 - `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (`VM_BRIDGE_NAME`, UID math).
-- `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics).
+- `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics). `libexec/agent-broker` is the odd one out: a whole standalone program, not a helper — see below.
 - `workloads/<name>/` — the shipped bundles. Each is a directory with `workload.toml` at minimum, plus optional extras it needs: a `Containerfile` for self-built images, `README.md`, `cloud-init/`, additional unit files. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.
 
@@ -83,6 +83,25 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 ### VM workloads
 
 A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+
+### The credential broker
+
+`libexec/agent-broker` holds a provider API key that a sandboxed coding-agent VM
+is never given, and attaches it to outbound requests the guest makes through it.
+It is a whole program (stdlib only, ~600 lines), shipped by the workloadctl RPM
+as `agent-broker.service` but **not enabled** — it has no config until an
+operator writes `/etc/agent-broker/broker.toml`. Callers are identified by the
+uid owning the far end of the connection, so two guests dialling the same
+advertised literal get different credentials.
+
+Do not confuse it with `libexec/workload-vm-broker`, which is the per-VM nft map
+element that lets one guest reach it. Two constants must agree across those two
+halves — the broker's `listen_address`/`listen_port` defaults and
+`VM_BROKER_LISTEN_ADDR`/`VM_BROKER_LISTEN_PORT` in `lib/vm.py`; a drift looks
+exactly like the broker being down, and `tests/test_vm_broker.py` asserts it.
+Design, threat model and operating instructions: `workloadctl/docs/agent-broker.md`.
+The end-to-end seam (a real guest dialling a real broker) is still unproven —
+`tests/manual/broker_rig.py` is the rig for it and has not been run.
 
 ## Docs policy: tracked files may not cite untracked docs
 

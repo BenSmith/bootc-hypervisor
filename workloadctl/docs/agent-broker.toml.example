@@ -1,0 +1,95 @@
+# agent-broker configuration.
+#
+# The upstream is fixed here and never taken from a request. That is the
+# security property: a compromised sandbox can reach this broker, and through
+# it exactly one provider, and nothing else.
+
+# Bind loopback, never 0.0.0.0. Guests do not route to this address; the host
+# rewrites their fixed advertised endpoint to it, per uid, before the packet
+# reaches anything. See docs/agent-broker.md §7.
+listen_address = "127.0.0.1"
+listen_port = 8081
+
+# --- defaults, inherited by every sandbox below ----------------------------
+
+upstream = "https://api.anthropic.com"
+
+# Name of the systemd credential holding the real API key. At runtime the
+# broker reads $CREDENTIALS_DIRECTORY/<credential>, and it needs a matching
+# LoadCredentialEncrypted= line in the unit.
+credential = "anthropic-api-key"
+
+# How the credential is attached to outbound requests.
+#   Anthropic:  auth_header = "x-api-key",       auth_format = "{secret}"
+#   OpenAI:     auth_header = "Authorization",   auth_format = "Bearer {secret}"
+#   Gemini:     auth_header = "x-goog-api-key",  auth_format = "{secret}"
+auth_header = "x-api-key"
+auth_format = "{secret}"
+
+# Optional. Serve HTTPS to the guest for agents that refuse plaintext
+# credentials. One certificate for one hostname, signed by a private CA that
+# the guest trusts. Leave both unset to serve plain HTTP.
+# tls_cert = "/etc/agent-broker/broker.crt"
+# tls_key  = "/etc/agent-broker/broker.key"
+
+# Timeouts, seconds. read_timeout must tolerate a long idle gap between
+# streamed tokens; connect_timeout should stay short.
+connect_timeout = 15.0
+read_timeout = 900.0
+
+# --- sandboxes -------------------------------------------------------------
+#
+# Keyed by WORKLOAD NAME. The broker resolves the caller by the uid owning the
+# far end of the connection -- assigned by the host, unforgeable from inside a
+# guest -- and looks up `_wl-<name>` from it. Anything unlisted gets 403.
+#
+# Each sandbox inherits the settings above and may override any of them, so
+# different sandboxes can hold different keys, or different providers.
+
+[sandboxes.agent-scratch]
+credential = "anthropic-cheap-key"
+
+[sandboxes.agent-review]
+# inherits upstream, credential, auth_header, auth_format
+
+# [sandboxes.agent-local]
+# upstream = "https://inference.internal:8443"
+# credential = "local-inference-key"
+# auth_header = "Authorization"
+# auth_format = "Bearer {secret}"
+
+# Set true only for local testing, where the caller is your own login rather
+# than a workload user. In production an unregistered caller is a sandbox you
+# did not create.
+allow_unknown_callers = false
+
+# --- host wiring, for reference -------------------------------------------
+#
+# Guests reach this broker through a per-uid destination rewrite, the same
+# mechanism that steers each workload to its own filtering proxy: every guest is
+# handed one fixed advertised endpoint, and the host translates it per uid to
+# the real listener. A workload with no map entry gets no translation and
+# nothing is listening where it dialled, so cross-sandbox access is
+# structurally unavailable rather than denied by a rule. That map is
+# workloadctl's to maintain: a `workload_broker` table, keyed on uid, with an
+# element added per workload that sets `broker = true`. See docs/agent-broker.md §7.
+#
+# The address and port above must match what those elements carry. That is
+# asserted by tests/test_vm_broker.py against lib/vm.py, but only for the
+# defaults -- override them here and you are on your own, and a mismatch looks
+# exactly like the broker being down.
+#
+# Guest environment (Node/Bun agents), from $WORKLOAD_BROKER_URL:
+#
+#   ANTHROPIC_BASE_URL=http://192.0.2.1:8081
+#   NODE_EXTRA_CA_CERTS=/etc/ssl/certs/broker-ca.pem   # only if serving HTTPS
+#
+# Guest environment (Python agents):
+#
+#   base_url in the provider config
+#   SSL_CERT_FILE=/etc/ssl/certs/broker-bundle.pem     # only if serving HTTPS
+#
+# NOTE: NODE_EXTRA_CA_CERTS *appends* to the runtime's bundled roots.
+# SSL_CERT_FILE *replaces* the bundle, so broker-bundle.pem must be certifi's
+# cacert.pem concatenated with the broker CA, or every other TLS call the agent
+# makes will fail. docs/agent-broker.md §4.

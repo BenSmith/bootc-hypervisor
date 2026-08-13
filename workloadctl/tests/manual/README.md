@@ -10,16 +10,20 @@ Boots four throwaway VM workloads, runs a broker and a stub upstream on the
 host, and probes the broker from inside each guest. 18 assertions, ~4 minutes
 after the first run (which downloads a Fedora Cloud image).
 
-It is here rather than in `tests/cli_surface/` for one reason: the broker is a
-separate program in a separate repository, so this rig cannot be satisfied by
-anything in this tree alone. Promoting it into the runtime rung means deciding
-how that dependency is supplied to CI, which is a larger question than the rig.
+It used to be here because the broker lived in a separate repository, so the rig
+could not be satisfied by anything in this tree alone. That is no longer true —
+the broker ships in the workloadctl RPM. What keeps it out of `tests/cli_surface/`
+now is only what keeps everything else in this directory out: it needs root and
+boots four VMs of its own, so promoting it into the runtime rung is harness work
+rather than a dependency question.
 
 ### What it needs
 
 - a KVM host, root, and the VM toolchain (`qemu-system-x86_64`, `qemu-img`,
   `socat`, OVMF, `tinyproxy`, `passt`, `nft`)
-- `broker.py` from the agent-broker repository, copied in beside these files
+- the workloadctl RPM installed: the rig runs the *installed* broker at
+  `/usr/libexec/workloadctl/agent-broker`, so a green run says the package is
+  right. `just rpm-install` refreshes it from the checkout.
 - outbound HTTPS on first run, for the cloud image
 
 It creates `/var/lib/broker-rig/` for the image, credentials and logs, and
@@ -28,7 +32,6 @@ generates a throwaway certificate for the stub which the broker trusts through
 borrowed machine gets nothing installed into it.
 
 ```bash
-cp /path/to/agent-broker/broker.py tests/manual/
 sudo python3 tests/manual/broker_rig.py            # --keep leaves it all up
 ```
 

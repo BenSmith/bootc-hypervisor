@@ -6,9 +6,11 @@ agree, and a test that computes both sides from the same constant cannot fail
 when they drift apart.
 """
 
+import tempfile
 import unittest
 from pathlib import Path
 
+from tests import load_script
 from vm import (
     NFT_BROKER_MAP, NFT_BROKER_SKELETON, NFT_BROKER_TABLE, VM_BROKER_ENV_VAR,
     VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT, VM_BROKER_PORT,
@@ -143,6 +145,38 @@ class TestValidation(unittest.TestCase):
         for mode in ("filtered", "open"):
             errors = validate_vm_network({"broker": True, "egress": mode})
             self.assertEqual([e for e in errors if "broker" in e], [], mode)
+
+
+class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):
+    """The destination of the redirect and the broker's own listener.
+
+    These are two independent definitions of one address: VM_BROKER_LISTEN_ADDR
+    and VM_BROKER_LISTEN_PORT are what every map element sends a guest's packet
+    to, and the broker's config defaults are where it accepts one. They were a
+    cross-repo constant that neither side checked until the broker moved into
+    this package -- which is most of the reason it moved.
+
+    A drift here is invisible from either side alone and produces a guest
+    connection refused *after* translation: identical, from the guest, to the
+    broker being down, to the workload having no map element, and to the
+    advertised address not existing.
+    """
+
+    def defaults(self):
+        """The broker's effective config when the operator sets neither key."""
+        broker = load_script("libexec/agent-broker")
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as fh:
+            # upstream and credential are required; nothing here reads them.
+            fh.write('upstream = "https://api.example.invalid"\n'
+                     'credential = "unused"\n')
+            fh.flush()
+            return broker.load_config(fh.name)
+
+    def test_address_matches(self):
+        self.assertEqual(self.defaults()["listen_address"], VM_BROKER_LISTEN_ADDR)
+
+    def test_port_matches(self):
+        self.assertEqual(int(self.defaults()["listen_port"]), VM_BROKER_LISTEN_PORT)
 
 
 if __name__ == "__main__":

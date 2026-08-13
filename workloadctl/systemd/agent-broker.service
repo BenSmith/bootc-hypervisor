@@ -1,0 +1,92 @@
+[Unit]
+Description=Credential broker for sandboxed coding agents
+# Shipped by the workloadctl RPM, like the program itself. A unit on a host
+# cannot usefully cite a checkout that only exists on the machine it was
+# written on.
+Documentation=file:/usr/share/doc/workloadctl/agent-broker.md
+After=network.target
+
+[Service]
+Type=exec
+# The program and the directory both come from the RPM; the config in that
+# directory does not. It names an upstream and a credential, so it is host
+# state -- start from /usr/share/doc/workloadctl/agent-broker.toml.example.
+#
+# THIS UNIT IS NOT ENABLED BY THE PACKAGE. The preset is vendor-default
+# `disable *` and 80-workloadctl.preset enables only the exporter timers, so a
+# host that installs workloadctl gets an inert unit and nothing else. Enabling
+# it without a broker.toml would produce a restart loop on a host that never
+# asked for a broker.
+ExecStart=/usr/libexec/workloadctl/agent-broker /etc/agent-broker/broker.toml
+Restart=on-failure
+RestartSec=2
+
+# The credentials. systemd decrypts each into a tmpfs at 0400 owned by the
+# (dynamic) service user; they never exist as files any other account can read,
+# and they are gone when the unit stops. Create one with:
+#   systemd-creds encrypt --name=anthropic-api-key - \
+#       /etc/agent-broker/anthropic-api-key.cred
+#
+# One name, spelled three times, and all three must agree: --name= is sealed
+# into the blob and verified on decrypt, the name left of the colon below is the
+# filename the broker finds under $CREDENTIALS_DIRECTORY, and `credential =` in
+# broker.toml is what it looks for there. Every mismatch fails at start, which
+# is the good case -- systemd refuses to decrypt before exec, or the broker dies
+# reading a file that is not there. Nothing reaches the point of serving a
+# request without its credential.
+#
+# The blobs live here rather than in /etc/credstore.encrypted, which systemd
+# would search for a bare `LoadCredentialEncrypted=<name>`: that directory is a
+# flat namespace shared with every other unit on the host -- workloadctl keeps
+# its workload credentials there -- and "anthropic-api-key" is exactly the kind
+# of name two of them would pick. An explicit path keeps this unit's material
+# in this unit's directory.
+#
+# One line per credential named anywhere in broker.toml. Sandboxes may each
+# carry their own, so this is not necessarily a single key. They are read at
+# start and not re-read, so rotating one means restarting the unit.
+LoadCredentialEncrypted=anthropic-api-key:/etc/agent-broker/anthropic-api-key.cred
+
+# No persistent identity: the broker owns no files and needs no home.
+DynamicUser=yes
+
+# This process holds a live API key in memory and parses input from a sandbox
+# that is assumed to be hostile. Lock it down accordingly.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+# PrivateUsers= is deliberately NOT set. The broker identifies each sandbox by
+# the uid owning the far end of the connection, and /proc/net translates that
+# column through the reader's user namespace -- from a restricted one every
+# caller reads as the overflow uid and they all collapse into one identity,
+# with no error. The broker refuses to start if it detects this.
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# Coredumps would contain the credential.
+LimitCORE=0
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

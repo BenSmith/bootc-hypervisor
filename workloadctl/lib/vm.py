@@ -532,11 +532,13 @@ def vm_proxy_env(config: dict) -> dict[str, str]:
 # uid either way.
 VM_BROKER_PORT = 8081
 
-# Where the broker actually listens. This is the value every element carries,
-# so it has to agree with `listen_address`/`listen_port` in the broker's own
-# broker.toml -- a cross-repo constant, checked by neither side at build time.
-# A mismatch shows up as a guest connection refused after translation, which
-# looks identical to the broker being down.
+# Where the broker actually listens. This is the value every element carries, so
+# it has to agree with the defaults `libexec/agent-broker` applies when an
+# operator sets neither `listen_address` nor `listen_port` in broker.toml. That
+# used to be a cross-repo constant checked by neither side; the broker ships in
+# this package now, and tests/test_vm_broker.py asserts the two agree. Keep it
+# that way -- a mismatch shows up as a guest connection refused after
+# translation, which looks identical to the broker being down.
 VM_BROKER_LISTEN_ADDR = "127.0.0.1"
 VM_BROKER_LISTEN_PORT = 8081
 
