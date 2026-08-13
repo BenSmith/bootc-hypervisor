@@ -633,6 +633,81 @@ class TestHelperContract(unittest.TestCase):
         self.assertIn("return 0", up.split("vm_uses_proxy")[1][:400])
 
 
+class TestRuntimeFixture(unittest.TestCase):
+    """The runtime rung's hostname-policy VM, checked without a KVM host.
+
+    tests/cli_surface/test_runtime_vm_hostname_policy.py boots this workload and
+    probes it for one answer on an allowlisted name and a different one on a
+    name that is not on the list. Every one of those probes is evidence only
+    while the fixture still says what they assume.
+
+    Nothing else validates that file, and the suite it belongs to runs weekly on
+    a host with /dev/kvm — so a drifted allowlist would surface days later as a
+    confusing runtime failure, or worse, as a green run proving nothing (an
+    allowlist that gained the apex would make the wildcard test pass for the
+    wrong reason). These checks are text, and they run on every PR.
+    """
+
+    FIXTURE = (ROOT / "tests" / "cli_surface" / "workloads"
+               / "rt-vm-hostname.toml")
+    WILDCARD = "*.wl-wild.test"
+    APEX = "wl-wild.test"
+
+    def setUp(self):
+        import tomllib
+        if not self.FIXTURE.exists():
+            self.skipTest(f"{self.FIXTURE.name} is not in this checkout")
+        with open(self.FIXTURE, "rb") as f:
+            self.config = tomllib.load(f)
+        self.net = self.config["vm"]["network"]
+
+    def test_the_fixture_is_a_config_workloadctl_would_accept(self):
+        """A fixture that fails `validate` fails at enable, inside the harness
+        guest, as a timeout with no useful message."""
+        self.assertEqual(validate_vm_network(self.net), [])
+
+    def test_egress_is_filtered_so_the_proxy_is_binding(self):
+        """Under `open` the proxy is advisory and the guest could reach an
+        unlisted host directly — the 403 probe would still pass, and would no
+        longer mean the policy holds."""
+        self.assertEqual(self.net.get("egress"), "filtered")
+
+    def test_there_is_no_address_allowlist(self):
+        """`allow` would give the guest a second path out. Then a reachable
+        destination would no longer imply the proxy permitted it."""
+        self.assertEqual(self.net.get("allow", []), [])
+
+    def test_it_carries_both_an_exact_entry_and_a_wildcard(self):
+        hosts = self.net.get("hosts", [])
+        self.assertTrue(any("*" in h for h in hosts),
+                        f"no wildcard entry in {hosts}; the apex test needs one")
+        self.assertTrue(any("*" not in h for h in hosts),
+                        f"no exact entry in {hosts}; the positive probe needs one")
+
+    def test_the_wildcards_apex_is_not_itself_listed(self):
+        """The load-bearing absence.
+
+        `*.wl-wild.test` does not match `wl-wild.test` — that is the claim the
+        runtime test pins and the docs tell operators about. Listing the apex
+        explicitly would make the guest reach it for an ordinary reason and turn
+        a real finding into a test that cannot fail.
+        """
+        hosts = self.net.get("hosts", [])
+        self.assertIn(self.WILDCARD, hosts)
+        self.assertNotIn(self.APEX, hosts,
+                         f"{self.APEX} is listed outright, so the apex probe "
+                         f"would pass without proving anything about {self.WILDCARD}")
+
+    def test_the_names_cannot_resolve_on_the_public_internet(self):
+        """RFC 6761 reserves `.test`. The harness points these at a local stub
+        through /etc/hosts; if that setup were ever skipped, the failure has to
+        be 'no upstream', never 'a different upstream'."""
+        for host in self.net.get("hosts", []):
+            self.assertTrue(host.endswith(".test"),
+                            f"{host!r} is not under .test, so this fixture can "
+                            f"reach something real when the stub is absent")
+
+
 def cls_body(source: str, marker: str) -> str:
     """The text of one top-level def, up to the next one."""
     start = source.index(marker)

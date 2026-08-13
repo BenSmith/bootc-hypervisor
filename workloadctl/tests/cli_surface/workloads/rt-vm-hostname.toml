@@ -1,0 +1,42 @@
+# rt-vm-hostname — the runtime rung's hostname-policy VM (ADR 006 §4.4).
+#
+# The unit suite proves the proxy is CONSTRUCTED correctly — tinyproxy.conf's
+# FilterDefaultDeny, the uid-keyed redirect, the cgroup exemption, the generated
+# unit. What it cannot reach is whether a booted guest, given all of that,
+# actually gets one answer for an allowlisted name and a different one for an
+# unlisted name. That is what this workload exists for.
+#
+# `hosts` and no `allow`: deliberate, and valid (a filtered VM needs one or the
+# other, not both). It means every destination this guest can reach, it reaches
+# through the proxy — so a probe that succeeds proves the proxy permitted it
+# rather than proving some other path existed.
+#
+# The names are under `.test`, which RFC 6761 reserves and guarantees will never
+# resolve publicly. The test points them at a stub on the harness host through
+# /etc/hosts. If that setup were ever skipped, the names would fail to resolve
+# rather than silently reaching something real on the internet — the failure
+# mode of a hermetic test should be "no upstream", never "a different upstream".
+#
+# Two entries, and the pair is the point:
+#   - wl-allowed.test    an exact name
+#   - *.wl-wild.test     a wildcard, which does NOT cover the bare apex
+#
+# Nested inside the harness guest, so keep it minimal. Do NOT enable this
+# manually; it is managed by the runtime harness.
+
+[workload]
+name = "rt-vm-hostname"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "768M"
+system_disk_size = "6G"
+user = "workload"
+rollback_keep = 1
+
+[vm.network]
+egress = "filtered"
+hosts = ["wl-allowed.test", "*.wl-wild.test"]
