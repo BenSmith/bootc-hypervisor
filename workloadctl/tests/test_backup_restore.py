@@ -254,10 +254,16 @@ class TestAssertNoMountsUnder(unittest.TestCase):
         self.assertIn("Unmount", msg)
 
 
-class TestRestoreForceRefusesOverMount(unittest.TestCase):
-    """The guard has to actually run before the rmtree, not merely exist."""
+class TestRestoreRefusesOverMount(unittest.TestCase):
+    """The guard has to actually run before the rmtree, not merely exist.
 
-    def test_force_restore_aborts_before_deleting_anything(self):
+    Both restore paths cross the boundary, in different ways: --force deletes
+    through the mount, and the merge writes through it. The archive here carries
+    a file at the mount's own path, which is what an archive taken before the
+    share was mounted looks like — the ordinary way to arrive at this.
+    """
+
+    def _restore_over_a_mount(self, *, force):
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         etc, var = tmp / "etc", tmp / "var"
         etc.mkdir()
@@ -276,7 +282,9 @@ class TestRestoreForceRefusesOverMount(unittest.TestCase):
             _lstat_faking_dev(cmd_backup, {str(mnt)}, fake_dev=999)))
 
         stage = tmp / "stage"
-        (stage / "data").mkdir(parents=True)
+        (stage / "data" / "somedir").mkdir(parents=True)
+        (stage / "data" / "somedir" / "on-the-share.txt").write_text(
+            "from an archive that predates the mount")
         (stage / "workload.toml").write_text(
             '[workload]\nname = "app"\n[container]\nimage = "x"\n')
         archive = tmp / "backup.tar.zst"
@@ -285,11 +293,20 @@ class TestRestoreForceRefusesOverMount(unittest.TestCase):
             check=True,
         )
 
-        args = argparse.Namespace(archive=str(archive), force=True, enable=False)
+        args = argparse.Namespace(archive=str(archive), force=force, enable=False)
         with self.assertRaises(SystemExit) as cm:
             cmd_backup.cmd_restore(args, manager=None)  # type: ignore[arg-type]
         self.assertEqual(cm.exception.code, 1)
-        # The whole point: the share's contents are still there.
+        return share_file
+
+    def test_force_restore_aborts_before_deleting_anything(self):
+        share_file = self._restore_over_a_mount(force=True)
+        self.assertEqual(share_file.read_text(), "belongs to the file server")
+
+    def test_a_merge_restore_aborts_before_writing_through_the_mount(self):
+        """Without --force nothing is deleted, but copytree(dirs_exist_ok=True)
+        would land the archive's copy on the operator's file server."""
+        share_file = self._restore_over_a_mount(force=False)
         self.assertEqual(share_file.read_text(), "belongs to the file server")
 
 

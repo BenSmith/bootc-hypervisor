@@ -147,6 +147,50 @@ class TestValidation(unittest.TestCase):
             self.assertEqual([e for e in errors if "broker" in e], [], mode)
 
 
+class TestEveryNonBridgedVmRunsTheHelper(unittest.TestCase):
+    """The entitlement is withdrawn as deliberately as it is granted.
+
+    Emitting the ExecStartPre only for entitled VMs was the obvious reading and
+    it leaves a hole: map elements are keyed by uid, get_next_uid() reuses the
+    lowest free one, and an element that outlives its workload then belongs to
+    whichever workload inherits that uid — one that runs no broker code and so
+    never notices. The helper decides; the unit only has to call it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gen = load_script("generators/workload-generate")
+
+    def unit(self, **net):
+        return self.gen.generate_vm_service(
+            {"workload": {"name": "web"}, "vm": {"network": net}},
+            "_wl-web", 10005)
+
+    def test_an_entitled_vm_calls_it(self):
+        self.assertIn('ExecStartPre=+/usr/libexec/workloadctl/workload-vm-broker up "web"',
+                      self.unit(broker=True))
+
+    def test_a_vm_without_a_broker_calls_it_too(self):
+        """So that a uid inherited from a workload that had one is cleared."""
+        self.assertIn('ExecStartPre=+/usr/libexec/workloadctl/workload-vm-broker up "web"',
+                      self.unit())
+
+    def test_the_call_is_not_tolerant(self):
+        """A guest told to reach a broker nothing translates for it reports an
+        unreachable API, not a missing entitlement."""
+        unit = self.unit(broker=True)
+        self.assertNotIn("ExecStartPre=-+/usr/libexec/workloadctl/workload-vm-broker",
+                         unit)
+
+    def test_the_element_is_withdrawn_on_stop_kill_and_failure(self):
+        self.assertIn('ExecStopPost=-+/usr/libexec/workloadctl/workload-vm-broker down "web"',
+                      self.unit(broker=True))
+
+    def test_a_bridged_vm_is_left_alone(self):
+        """Nothing of ours is in its data path, so there is no uid to key on."""
+        self.assertNotIn("workload-vm-broker", self.unit(bridge="br0"))
+
+
 class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):
     """The destination of the redirect and the broker's own listener.
 

@@ -220,12 +220,20 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
             # It stops at filesystem boundaries, though. data/ is a plain local
             # directory in the normal case, which is what made a straight copy
             # the whole story — but an operator can mount something under it (a
-            # network share behind a VM's virtiofs volume, a second disk, a bind
-            # mount), and copytree does not stop at mount points. It would pull
-            # that entire filesystem across into the archive, over whatever
-            # transport backs it, with the workload STOPPED — cold consistency
-            # is the default. Data on a mount under data/ is backed up by
-            # whatever owns that mount, so skip it and say so.
+            # network share behind a VM's virtiofs volume, a second disk), and
+            # copytree does not stop at mount points. It would pull that entire
+            # filesystem across into the archive, over whatever transport backs
+            # it, with the workload STOPPED — cold consistency is the default.
+            # Data on a mount under data/ is backed up by whatever owns that
+            # mount, so skip it and say so.
+            #
+            # The boundary is st_dev, which is what `--one-file-system` means
+            # everywhere else and carries the same blind spot: a bind mount of
+            # the SAME filesystem is not a different device and is copied like
+            # any other directory. Nothing here can see it — /proc/self/mountinfo
+            # would be needed — and the case that motivated this (network
+            # storage, separate disks) always crosses a device, so it is
+            # deliberately out of scope rather than overlooked.
             data_dir = config.data_dir
             if data_dir.is_dir():
                 shutil.copytree(

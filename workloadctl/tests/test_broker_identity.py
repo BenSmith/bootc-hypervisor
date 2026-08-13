@@ -226,36 +226,33 @@ class TestIdentifyRefusals(unittest.TestCase):
     """
 
     def _handler(self, uid):
+        """A handler whose connection was admitted with `uid` on the far end.
+
+        caller_uid is what Server.process_request resolved when it granted this
+        connection a slot; the handler no longer looks it up itself, so the
+        fixture is the uid rather than a patched lookup.
+        """
         handler = broker.Handler.__new__(broker.Handler)
         handler.profiles = {}
         handler.fallback = "a-permissive-profile"
         handler.overflow = 65534
-        handler.connection = mock.Mock(
-            getsockname=lambda: ("127.0.0.1", 8081),
-            # No conntrack entry, which is what an untranslated connection gets.
-            getsockopt=mock.Mock(side_effect=OSError))
-        handler.client_address = ("127.0.0.1", 45000)
-        return handler, mock.patch.object(broker, "peer_uid", return_value=uid)
+        handler.caller_uid = uid
+        return handler
 
     def test_no_peer_socket_is_refused_even_when_unknown_are_allowed(self):
-        handler, patched = self._handler(None)
-        with patched:
-            profile, label = handler._identify()
+        profile, label = self._handler(None)._identify()
         self.assertIsNone(profile)
         self.assertEqual(label, "no-peer-socket")
 
     def test_an_unmapped_uid_is_refused_even_when_unknown_are_allowed(self):
-        handler, patched = self._handler(65534)
-        with patched:
-            profile, label = handler._identify()
+        profile, label = self._handler(65534)._identify()
         self.assertIsNone(profile)
         self.assertEqual(label, "uid-unmapped")
 
     def test_an_ordinary_unknown_caller_still_gets_the_fallback(self):
-        handler, patched = self._handler(10001)
-        with patched, mock.patch.object(broker, "workload_name",
-                                        return_value="not-in-config"):
-            profile, label = handler._identify()
+        with mock.patch.object(broker, "workload_name",
+                               return_value="not-in-config"):
+            profile, label = self._handler(10001)._identify()
         self.assertEqual(profile, "a-permissive-profile")
         self.assertEqual(label, "not-in-config")
 

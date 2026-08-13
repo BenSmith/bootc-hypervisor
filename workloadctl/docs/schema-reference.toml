@@ -331,15 +331,25 @@ name = "schema-reference"
 # without this key gets no translation and nothing is listening where it would
 # dial, which makes the boundary structural rather than a rule to misconfigure.
 #
-# workloadctl provides reachability only. It does not run the broker, ship one,
-# or know what a credential is — that is a separate host service with its own
-# unit. If it is not running, a guest sees a connection refused.
+# workloadctl provides reachability only. It does not run the broker or know
+# what a credential is — that is a separate service (agent-broker.service, which
+# this package ships and does not enable). If it is not running, a guest sees a
+# connection refused.
 #
 # The endpoint is handed to the guest as WORKLOAD_BROKER_URL. Deliberately not a
 # provider's own base-URL variable: clients disagree about the spelling, so the
 # guest image maps this to whatever its software reads. As with .hosts, only the
 # built-in cloud-config sets it — a workload supplying its own user_data_file
 # must carry it across itself.
+#
+# SETTING THIS ON AN EXISTING VM ONLY GETS YOU HALF OF IT. The host side follows
+# the config: the next start adds the map element and the guest becomes able to
+# reach the broker. The guest side does not. WORKLOAD_BROKER_URL is written by
+# cloud-init, which runs once per instance-id, so an already-provisioned guest
+# never sees the variable and its agent has nothing to point at. Either set it
+# before first boot, or write the variable into the guest yourself — the value
+# is the same fixed literal for every guest (VM_BROKER_ENV_VAR and the address
+# built in lib/vm.py).
 #
 # Rejected with .bridge set: the redirect is keyed on the uid of a host socket,
 # and a bridged VM does not create one.

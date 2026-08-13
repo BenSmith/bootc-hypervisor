@@ -60,7 +60,12 @@ credential = "anthropic-cheap-key"
 
 # Set true only for local testing, where the caller is your own login rather
 # than a workload user. In production an unregistered caller is a sandbox you
-# did not create.
+# did not create. The broker logs a warning at startup while this is on.
+#
+# It also changes what the host-side entitlement is worth. Off, a caller must be
+# both routed here and named below, so neither list alone hands out a
+# credential. On, the redirect map is the only thing left — and its elements are
+# keyed by uid, which workloadctl reuses as soon as one is free.
 allow_unknown_callers = false
 
 # --- host wiring, for reference -------------------------------------------

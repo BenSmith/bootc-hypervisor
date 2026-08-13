@@ -54,6 +54,11 @@ HOP_BY_HOP = frozenset({
 # forwarded. The guest has no legitimate reason to set these: we supply the
 # credential, and letting a caller pass its own through would turn the broker
 # into an open relay for whatever key a compromised sandbox happened to find.
+#
+# This list is not the whole story, and must not be treated as it: the
+# configured `auth_header` is stripped too, by name, in forwarded_headers().
+# These four are the ones worth dropping even when they are not the header this
+# broker uses.
 STRIP_FROM_REQUEST = frozenset({
     "authorization", "x-api-key", "api-key", "x-goog-api-key",
     "cookie", "host", "content-length",
@@ -63,6 +68,17 @@ STRIP_FROM_REQUEST = frozenset({
 # window, small enough that a runaway sandbox can't exhaust host memory.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 CHUNK = 64 * 1024
+
+# How long a connection may make no progress before it is dropped. Without one,
+# a caller that opens a socket and sends nothing holds its handler thread for
+# ever -- and with a bounded pool, enough of those deny the broker to every
+# other sandbox. Measured: 32 silent connections were sufficient.
+#
+# It bounds each blocking operation, not the request, so a client trickling
+# bytes is not caught by this; MAX_PER_CALLER is what stops one caller taking
+# the pool that way. Idle keep-alive connections are also reaped by it, which is
+# ordinary (nginx defaults to 75s) and costs a reconnect at worst.
+CONNECTION_TIMEOUT = 60.0
 
 
 def log(event, **fields):
@@ -226,7 +242,14 @@ def overflow_uid():
 
 @dataclasses.dataclass(frozen=True)
 class Profile:
-    """Everything a request needs, resolved per caller."""
+    """Everything a request needs, resolved per caller.
+
+    `auth_value` is the finished header value, rendered once at startup rather
+    than per request. auth_format is operator-written and `str.format` raises on
+    a typo like "Bearer {token}"; rendering it here makes that a refusal to
+    start, which is how every other config error in this file behaves, instead
+    of a 500 on every request from a broker that came up clean.
+    """
     name: str
     host: str
     port: int
@@ -234,6 +257,7 @@ class Profile:
     auth_header: str
     auth_format: str
     secret: str
+    auth_value: str
 
 
 def _split_upstream(url, where):
@@ -296,14 +320,24 @@ def build_profiles(cfg, load=None):
             secrets[credential] = load(credential)
         host, port, prefix = _split_upstream(
             spec.get("upstream", cfg["upstream"]), where)
+        auth_format = spec.get("auth_format", cfg["auth_format"])
+        try:
+            auth_value = auth_format.format(secret=secrets[credential])
+        except (KeyError, IndexError, ValueError) as exc:
+            # The message deliberately does not echo auth_format: the whole
+            # point of the string is that a secret is substituted into it, and a
+            # sufficiently wrong one could already hold part of it.
+            sys.exit(f"{where}: 'auth_format' is not a usable format string "
+                     f"({type(exc).__name__}); it takes exactly {{secret}}")
         return Profile(
             name=name,
             host=host,
             port=port,
             prefix=prefix,
             auth_header=spec.get("auth_header", cfg["auth_header"]),
-            auth_format=spec.get("auth_format", cfg["auth_format"]),
+            auth_format=auth_format,
             secret=secrets[credential],
+            auth_value=auth_value,
         )
 
     profiles = {name: resolve(name, spec, f"[sandboxes.{name}]")
@@ -335,17 +369,140 @@ def load_credential(name):
              "or set AGENT_BROKER_SECRET for local testing")
 
 
+# --- the request path ------------------------------------------------------
+#
+# Free functions, not methods, because everything below decides what leaves this
+# host carrying a credential and none of it needs a socket to be decided. As
+# methods they were reachable only by standing up a server with a TLS upstream,
+# which is why the whole request path went untested while config and identity
+# were covered three ways.
+
+
+def forwarded_headers(incoming, profile):
+    """The headers to send upstream, given the ones the caller sent.
+
+    The configured auth header is stripped by name as well as by the fixed list.
+    STRIP_FROM_REQUEST is matched case-insensitively but the outgoing dict is
+    keyed by whatever case the *caller* used, so with a custom auth_header a
+    caller sending `x-custom-key` and a broker adding `X-Custom-Key` produced
+    two distinct keys and both went upstream. Measured, with the caller's value
+    arriving intact beside the real credential.
+    """
+    strip = STRIP_FROM_REQUEST | HOP_BY_HOP | {profile.auth_header.lower()}
+    headers = {k: v for k, v in incoming.items() if k.lower() not in strip}
+    headers[profile.auth_header] = profile.auth_value
+    headers["Host"] = profile.host
+    return headers
+
+
+def request_framing(path, headers):
+    """(body length, rejection) for a request, before any of it is forwarded.
+
+    A rejection is (status, log reason, client message); None means proceed.
+    Every one of these closes the connection rather than reading on, because
+    each means the body is either unread or unreadable and the stream can no
+    longer be framed -- see _fail.
+
+    The chunked case is the reason this exists. Transfer-Encoding is hop-by-hop
+    and was stripped, and no Content-Length meant length 0, so a chunked request
+    body was silently dropped and forwarded as empty: 200 OK, nothing logged,
+    the provider seeing a request the caller did not send. Measured.
+    """
+    if not path.startswith("/"):
+        # Absolute-form targets ("GET https://elsewhere/...") are how a client
+        # asks a *proxy* to choose the destination. We are not a proxy.
+        return 0, (400, "absolute-target",
+                   "absolute request targets are not accepted\n")
+
+    if headers.get("Transfer-Encoding"):
+        return 0, (411, "chunked-request",
+                   "chunked request bodies are not accepted; send "
+                   "Content-Length\n")
+
+    raw = headers.get("Content-Length")
+    if raw is None or raw.strip() == "":
+        return 0, None
+    try:
+        length = int(raw)
+    except ValueError:
+        return 0, (400, "bad-content-length",
+                   "Content-Length is not a number\n")
+    if length < 0:
+        # int("-1") is not a size. Left unchecked it reached rfile.read(-1),
+        # which reads to EOF -- so the handler blocked until the caller chose to
+        # close, holding a slot for as long as it liked.
+        return 0, (400, "bad-content-length",
+                   "Content-Length is negative\n")
+    if length > MAX_REQUEST_BYTES:
+        return length, (413, "body-too-large", "request body too large\n")
+    return length, None
+
+
+def response_framing(status, headers):
+    """(headers to pass back, declared length, whether a body is forbidden)."""
+    passthrough = [(k, v) for k, v in headers
+                   if k.lower() not in HOP_BY_HOP and k.lower() != "content-length"]
+    declared = next((v for k, v in headers if k.lower() == "content-length"), None)
+    # 204 and 304 must not carry a body; framing them as chunked (even as a bare
+    # terminator) is a protocol violation that strict clients reject.
+    return passthrough, declared, status in (204, 304)
+
+
+def local_endpoints(sock):
+    """Every endpoint this connection's local end may be recorded under.
+
+    The host reaches a guest's broker by rewriting one advertised destination
+    per uid, and the *client* socket keeps recording the address it dialled
+    rather than the one we ended up bound to. Matching only getsockname()
+    therefore misses precisely the traffic the redirect creates -- and misses it
+    as a 403, which looks like a config error rather than a lookup that cannot
+    match. SO_ORIGINAL_DST recovers what the caller aimed at; both are accepted
+    so the untranslated path (local testing) keeps working.
+    """
+    endpoints = [tuple(sock.getsockname()[:2])]
+    try:
+        raw = sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
+        port, packed = struct.unpack("!2xH4s8x", raw)
+        endpoints.append((socket.inet_ntoa(packed), port))
+    except (OSError, struct.error):
+        pass  # no conntrack entry: nothing translated this
+    return endpoints
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     # Set by main(). Class attributes so every request sees the same objects.
     config = None
     profiles = {}
     fallback = None
     overflow = 65534
-    tls_context = None
+    upstream_context = None
 
     protocol_version = "HTTP/1.1"
     server_version = "agent-broker"
     sys_version = ""
+
+    # Applied to the connection by StreamRequestHandler.setup(). See
+    # CONNECTION_TIMEOUT.
+    timeout = CONNECTION_TIMEOUT
+
+    def setup(self):
+        """Take the uid resolved at admission, then hand off to the base class.
+
+        TLS to the guest is also completed here rather than on the listening
+        socket. Wrapping the listener made accept() perform the handshake, so a
+        caller that connected and then stalled it blocked the accept loop for
+        every other sandbox -- a denial of service that MAX_CONCURRENT does not
+        bound, because the connection never reaches a handler at all. In this
+        thread the same stall costs one slot and expires on the timeout.
+        """
+        self.caller_uid = self.server.take_caller_uid(self.request)
+        guest_ctx = self.server.guest_tls_context
+        if guest_ctx is not None:
+            # Before wrapping: the handshake happens inside wrap_socket, and an
+            # unarmed socket would let it hang for as long as the caller likes.
+            self.request.settimeout(self.timeout)
+            self.request = guest_ctx.wrap_socket(self.request, server_side=True)
+        super().setup()
 
     def log_message(self, fmt, *args):
         pass  # replaced by explicit structured logging in _forward
@@ -360,37 +517,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._forward("DELETE")
 
-    def _local_endpoints(self):
-        """Every endpoint this connection's local end may be recorded under.
-
-        The host reaches a guest's broker by rewriting one advertised
-        destination per uid, and the *client* socket keeps recording the address
-        it dialled rather than the one we ended up bound to. Matching only
-        getsockname() therefore misses precisely the traffic the redirect
-        creates -- and misses it as a 403, which looks like a config error
-        rather than a lookup that cannot match. SO_ORIGINAL_DST recovers what
-        the caller aimed at; both are accepted so the untranslated path (local
-        testing) keeps working.
-        """
-        endpoints = [tuple(self.connection.getsockname()[:2])]
-        try:
-            raw = self.connection.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-            port, packed = struct.unpack("!2xH4s8x", raw)
-            endpoints.append((socket.inet_ntoa(packed), port))
-        except (OSError, struct.error):
-            pass  # no conntrack entry: nothing translated this
-        return endpoints
-
     def _identify(self):
         """(profile, label) for this caller; profile is None if it gets nothing.
 
-        The uid on the far end is the identity. The two failures that mean the
-        *mechanism* is broken -- no peer socket, or a uid this namespace cannot
-        map -- are never rescued by allow_unknown_callers, because both make
-        every caller look alike, which is the one thing the fallback must not
-        paper over.
+        The uid on the far end is the identity, resolved once when the
+        connection was admitted (Server.process_request) because the per-caller
+        connection ceiling has to know who is calling before it grants a slot.
+        The two failures that mean the *mechanism* is broken -- no peer socket,
+        or a uid this namespace cannot map -- are never rescued by
+        allow_unknown_callers, because both make every caller look alike, which
+        is the one thing the fallback must not paper over.
         """
-        uid = peer_uid(self._local_endpoints(), self.client_address)
+        uid = self.caller_uid
         if uid is None:
             return None, "no-peer-socket"
         if uid == self.overflow:
@@ -403,7 +541,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.fallback, label
 
     def _fail(self, status, message):
+        """Answer without forwarding, and end the connection.
+
+        close_connection is set for every refusal, not just politeness in a
+        header. A rejected request has left its body unread -- rejected because
+        it was unreadable, in the chunked and bad-length cases -- so the next
+        thing on the wire is body bytes where a request line should be. Reading
+        on desynchronises the connection: measured as a following pipelined
+        request that silently received no response at all.
+        """
         body = message.encode()
+        self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -419,33 +567,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._fail(403, "caller not registered with the broker\n")
             return
 
-        # Reject absolute-form request targets ("GET https://elsewhere/..."),
-        # which is how a client asks a *proxy* to pick the destination. We are
-        # not a proxy; the destination is ours.
-        if not self.path.startswith("/"):
-            log("deny", reason="absolute-target", sandbox=sandbox)
-            self._fail(400, "absolute request targets are not accepted\n")
-            return
-
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_REQUEST_BYTES:
-            log("deny", reason="body-too-large", sandbox=sandbox, bytes=length)
-            self._fail(413, "request body too large\n")
+        length, rejection = request_framing(self.path, self.headers)
+        if rejection is not None:
+            status, reason, message = rejection
+            log("deny", reason=reason, sandbox=sandbox, bytes=length)
+            self._fail(status, message)
             return
         body = self.rfile.read(length) if length else None
 
         # Denylist rather than allowlist: provider SDKs send version and beta
         # headers that change faster than we would keep an allowlist current,
         # and dropping one silently breaks requests in ways that are painful to
-        # debug. Everything genuinely dangerous is enumerated above.
-        headers = {
-            k: v for k, v in self.headers.items()
-            if k.lower() not in STRIP_FROM_REQUEST and k.lower() not in HOP_BY_HOP
-        }
-        headers[profile.auth_header] = profile.auth_format.format(
-            secret=profile.secret
-        )
-        headers["Host"] = profile.host
+        # debug. Everything genuinely dangerous is enumerated in
+        # forwarded_headers.
+        headers = forwarded_headers(self.headers, profile)
         if body is not None:
             headers["Content-Length"] = str(len(body))
 
@@ -455,7 +590,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             conn = http.client.HTTPSConnection(
                 profile.host,
                 profile.port,
-                context=self.tls_context,
+                context=self.upstream_context,
                 timeout=self.config["connect_timeout"],
             )
             conn.request(method, path, body=body, headers=headers)
@@ -486,14 +621,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pause followed by the whole answer at once — the agent still works but
         the interaction feels broken. read1() returns whatever has arrived.
         """
-        passthrough = [
-            (k, v) for k, v in resp.getheaders()
-            if k.lower() not in HOP_BY_HOP and k.lower() != "content-length"
-        ]
-        declared = resp.getheader("Content-Length")
-        # 204 and 304 must not carry a body; framing them as chunked (even as a
-        # bare terminator) is a protocol violation that strict clients reject.
-        bodiless = resp.status in (204, 304)
+        passthrough, declared, bodiless = response_framing(
+            resp.status, resp.getheaders())
 
         self.send_response(resp.status)
         for k, v in passthrough:
@@ -531,37 +660,125 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 MAX_CONCURRENT = 32
 
+# ...and how many of those one caller may hold. The global bound alone is a
+# denial-of-service lever rather than a protection: a single hostile sandbox
+# opening MAX_CONCURRENT connections takes the whole pool and every other
+# sandbox is refused. Measured, with nothing more exotic than 32 sockets that
+# connect and send no bytes at all.
+#
+# Sandboxes do not share a budget, so one in a loop cannot reach past its own.
+# Eight concurrent streams is generous for an agent; past it the connection is
+# refused immediately rather than queued, so the caller gets a fast error
+# instead of a hang.
+MAX_PER_CALLER = 8
+
+# The bucket unidentified callers share. They are refused a credential by
+# _identify anyway; the ceiling exists so that a caller the socket tables cannot
+# resolve still cannot occupy the pool.
+UNIDENTIFIED = "unidentified"
+
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     block_on_close = False
 
+    # TLS to the guest, when configured. Applied per connection in
+    # Handler.setup(), never to the listening socket -- see that method.
+    guest_tls_context = None
+
     _slots = None  # set in __init__; a semaphore, not a count
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # ThreadingMixIn spawns one thread per connection with no ceiling, so a
-        # sandbox in a loop can exhaust host threads. A few concurrent streams
-        # per sandbox is generous; past the bound we refuse the connection
-        # rather than queue it, so the guest gets a fast error instead of a hang.
+        # sandbox in a loop can exhaust host threads.
         self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+        self._lock = threading.Lock()
+        self._held = {}       # caller bucket -> live connections
+        self._caller_of = {}  # accepted socket -> uid, handed to its handler
+
+    def _bucket(self, uid):
+        return UNIDENTIFIED if uid is None else uid
+
+    def take_caller_uid(self, request):
+        """The uid resolved when `request` was admitted. Called once, by its
+        handler; returns None if the connection was never admitted here."""
+        with self._lock:
+            return self._caller_of.get(request)
 
     def process_request(self, request, client_address):
+        """Admit or refuse, before a thread exists to be starved.
+
+        Identity is resolved here rather than in the handler because a
+        per-caller ceiling has to know who is calling to apply one. It costs a
+        /proc/net/tcp scan in the accept loop -- the same scan the handler used
+        to do, moved rather than added.
+        """
         if not self._slots.acquire(blocking=False):
             log("deny", reason="too-many-connections", src=client_address[0])
             # Bypass our own shutdown_request: we never took a slot, and
             # releasing one we do not hold would inflate the pool for everyone.
             super().shutdown_request(request)
             return
+
+        try:
+            uid = peer_uid(local_endpoints(request), client_address)
+        except OSError:
+            uid = None  # peer vanished between accept and lookup
+        bucket = self._bucket(uid)
+
+        with self._lock:
+            held = self._held.get(bucket, 0)
+            admit = held < MAX_PER_CALLER
+            if admit:
+                self._held[bucket] = held + 1
+                self._caller_of[request] = uid
+
+        # Refuse OUTSIDE the lock. shutdown_request takes the same lock to do
+        # its own bookkeeping, and this lock is not reentrant -- calling it from
+        # in there deadlocked the accept loop, which then held the lock for ever
+        # and blocked every handler thread trying to finish. Found by
+        # TestOneCallerCannotTakeThePool, which is why that test exists.
+        if not admit:
+            log("deny", reason="too-many-connections-for-caller",
+                caller=bucket, held=held)
+            # We DID take a global slot, so release it through our own
+            # shutdown_request rather than the base class's. The per-caller
+            # count is untouched: this connection was never counted.
+            self.shutdown_request(request)
+            return
+
         super().process_request(request, client_address)
 
     def shutdown_request(self, request):
         """Called by ThreadingMixIn once the handler thread is done."""
         try:
+            with self._lock:
+                if request in self._caller_of:
+                    bucket = self._bucket(self._caller_of.pop(request))
+                    remaining = self._held.get(bucket, 1) - 1
+                    if remaining > 0:
+                        self._held[bucket] = remaining
+                    else:
+                        # Drop the key rather than leave a zero: the map is
+                        # keyed by uid and would otherwise grow one entry per
+                        # workload that ever called, for the life of the process.
+                        self._held.pop(bucket, None)
             super().shutdown_request(request)
         finally:
             self._slots.release()
+
+    def handle_error(self, request, client_address):
+        """One line, not a traceback.
+
+        A stalled TLS handshake or a caller that vanishes mid-request is
+        ordinary here and says nothing an operator can act on, while the default
+        prints a full traceback to the journal for each one -- which is itself a
+        log-flooding lever for a hostile sandbox.
+        """
+        exc = sys.exception()
+        log("connection-error", error=type(exc).__name__)
 
 
 def main():
@@ -608,7 +825,21 @@ def main():
         # not a path to an unverified connection. Fix the CA instead where you
         # can; this exists for the case where you cannot.
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-    Handler.tls_context = ctx
+    Handler.upstream_context = ctx
+
+    if Handler.fallback is not None:
+        # Louder than the one word in the `listening` line below, because this
+        # is the setting that changes what the host-side entitlement means. With
+        # it off, a caller must be BOTH routed here (an nft map element, added
+        # by its VM unit) and named in broker.toml -- so a map element left
+        # behind by a deleted workload cannot hand a credential to whatever
+        # workload later inherits its uid, because the name will not match. With
+        # it on, the map is the only thing standing between a caller and the
+        # fallback credential, and map elements outlive workloads.
+        log("warn", msg="allow_unknown_callers is set: any caller that reaches "
+                        "this broker gets the default credential, whether or "
+                        "not it is a configured sandbox. Intended for local "
+                        "testing only.")
 
     addr = (cfg["listen_address"], int(cfg["listen_port"]))
     server = Server(addr, Handler)
@@ -616,10 +847,15 @@ def main():
     # Optional: serve HTTPS to the guest, for agents that refuse to send
     # credentials over plaintext. One cert for one name, signed by a private CA
     # the guest trusts — internal PKI, not interception.
+    #
+    # The context is handed to the server and applied per connection in
+    # Handler.setup(); the listening socket stays plain. Wrapping the listener
+    # is the obvious spelling and it moves the handshake into accept(), where
+    # one caller stalling it stops the broker accepting anything at all.
     if cfg.get("tls_cert") and cfg.get("tls_key"):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cfg["tls_cert"], cfg["tls_key"])
-        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        guest_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        guest_ctx.load_cert_chain(cfg["tls_cert"], cfg["tls_key"])
+        server.guest_tls_context = guest_ctx
         scheme = "https"
     else:
         scheme = "http"

@@ -8,6 +8,11 @@ Usage: workload-vm-broker <up|down> <name>
 them they own two things: the shared advertised endpoint (a dummy interface and
 an nftables nat chain) and this workload's element in the uid -> broker map.
 
+`up` runs for every non-bridged VM, entitled or not: for an entitled one it
+installs the element, and for the rest it makes sure no element is there. A uid
+is reused as soon as it is free, so "no element" is a thing that has to be
+enforced rather than assumed.
+
 WHY THIS RIDES THE VM UNIT AND NOT A UNIT OF ITS OWN
 
 The hostname-policy proxy has one instance per workload, so its element lifecycle
@@ -67,13 +72,27 @@ def load_config(name: str) -> dict:
 
 def up(name: str) -> int:
     config = load_config(name)
-    if not vm_uses_broker(config):
-        # The ExecStartPre should not have been generated at all; treat it as a
-        # no-op rather than a failure so an edited config that drops the key
-        # stops cleanly instead of blocking the workload's start.
-        return 0
-
     uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+
+    if not vm_uses_broker(config):
+        # Not entitled: make sure nothing says otherwise. This is the reason the
+        # unentitled case does work rather than returning early.
+        #
+        # Elements are keyed by uid, and get_next_uid() hands out the lowest
+        # free one — so uids are reused as a matter of course. An element that
+        # outlives its workload (a `down` that never ran, a host killed between
+        # the two) would then belong to whoever inherits the uid, and that
+        # workload runs no broker code of its own to notice. The broker still
+        # refuses it, because [sandboxes] is keyed by NAME and the name will not
+        # match — unless allow_unknown_callers is set, at which point the map is
+        # the only thing left. Clearing it here means the entitlement cannot
+        # outlive the workload that was granted it, whatever the broker's config
+        # says.
+        #
+        # Tolerant throughout: with no table, no map or no element there is
+        # nothing to clear, which is the overwhelmingly common case.
+        run(vm_broker_map_command(uid, "delete"))
+        return 0
 
     ensure_advertised_interface(run)
     run([NFT_BIN, "-f", NFT_BROKER_SKELETON], check=True)

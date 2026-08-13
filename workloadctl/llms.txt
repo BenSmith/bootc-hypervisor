@@ -349,7 +349,15 @@ CA goes into the guest and nothing breaks certificate pinning.
   run from the VM unit, which deliberately does not start, stop or check the
   broker. Its address must match the broker's listen defaults, asserted by
   `tests/test_vm_broker.py` — a drift there is indistinguishable from the broker
-  being down.
+  being down. It runs for *every* non-bridged VM, installing the element or
+  removing one, because uids are reused and an entitlement must not outlive the
+  workload it was granted to.
+- **Admission is bounded per caller, not just in total.** 32 connections
+  overall, 8 for any one caller, and 60 seconds of no progress ends a
+  connection. A single global bound is a denial-of-service lever rather than a
+  protection: one sandbox opening 32 sockets and sending nothing denied the
+  broker to every other sandbox, which is measured in
+  `tests/test_broker_request.py`.
 - **Never proven end to end.** Both halves have unit tests; no real guest has
   ever dialled a real broker. `tests/manual/broker_rig.py` is the rig for it.
 

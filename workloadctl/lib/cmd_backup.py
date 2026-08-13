@@ -179,8 +179,7 @@ def _assert_no_escaping_symlinks(root: Path) -> None:
 
 
 def _assert_no_mounts_under(root: Path) -> None:
-    """Reject a `--force` replacement of `root` if another filesystem is mounted
-    inside it.
+    """Reject a restore into `root` if another filesystem is mounted inside it.
 
     `restore --force` replaces data/ wholesale, and `shutil.rmtree` does not
     stop at filesystem boundaries. With a mount under data/ it recurses into
@@ -189,10 +188,17 @@ def _assert_no_mounts_under(root: Path) -> None:
     the contents of an operator's file server is not an acceptable failure mode
     for a command whose job is to put data back.
 
+    The merge path — no --force — is checked for the same reason in a quieter
+    shape. It deletes nothing, but `copytree(dirs_exist_ok=True)` writes
+    *through* the mount point, so an archive holding files at that path lands
+    them on the operator's file server. That happens whenever the archive
+    predates the mount, which is the ordinary way to arrive here: captured when
+    the path was a plain directory, restored after a share was mounted over it.
+
     Refusing beats skipping. Backup omits these mounts by design (see
-    backup._ignore_other_filesystems), so the archive has nothing to restore
-    there anyway; unmounting is a deliberate operator action, and a partially
-    replaced data/ is worse than a restore that declined to start.
+    backup._ignore_other_filesystems), so a current archive has nothing to
+    restore there anyway; unmounting is a deliberate operator action, and a
+    half-written data/ is worse than a restore that declined to start.
     """
     root_dev = root.stat().st_dev
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -204,11 +210,12 @@ def _assert_no_mounts_under(root: Path) -> None:
                 continue
             if dev != root_dev:
                 # Raising here also prunes the walk: we never descend into the
-                # mount we are refusing to delete.
+                # mount we are refusing to write to.
                 raise ValueError(
                     f"a separate filesystem is mounted under the data directory: "
-                    f"{p}. Unmount it before restoring with --force (it is not "
-                    f"captured in backups, so the archive holds nothing for it)."
+                    f"{p}. Unmount it before restoring (it is not captured in "
+                    f"backups, so the archive holds nothing for it — and a "
+                    f"restore would write into it, or with --force delete it)."
                 )
 
 
@@ -349,12 +356,14 @@ def cmd_restore(args, manager: WorkloadManager):
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
             if dest_data.exists():
+                # Both branches, not just the destructive one: --force deletes
+                # through a mount point and the merge writes through it.
+                try:
+                    _assert_no_mounts_under(dest_data)
+                except ValueError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    sys.exit(1)
                 if args.force:
-                    try:
-                        _assert_no_mounts_under(dest_data)
-                    except ValueError as e:
-                        print(f"Error: {e}", file=sys.stderr)
-                        sys.exit(1)
                     shutil.rmtree(dest_data)
                 else:
                     print("  Warning: data/ exists, merging (use --force to replace)")

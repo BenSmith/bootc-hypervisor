@@ -117,6 +117,40 @@ class TestProfiles(unittest.TestCase):
         self.assertIsNotNone(fallback)
         self.assertEqual(fallback.secret, "secret-of-main-key")
 
+    def test_the_credential_is_rendered_into_the_header_at_startup(self):
+        """Not per request. auth_format is operator-written and str.format
+        raises on a typo, so rendering it here is the difference between a
+        refusal to start and a broker that comes up clean and 500s every
+        request it is ever given."""
+        profiles, _ = self.build(BASE + """
+            [sandboxes.local]
+            auth_header = "Authorization"
+            auth_format = "Bearer {secret}"
+        """)
+        self.assertEqual(profiles["local"].auth_value, "Bearer secret-of-main-key")
+
+    def test_an_unusable_auth_format_is_refused_at_startup(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                self.build(BASE + """
+                    [sandboxes.typo]
+                    auth_format = "Bearer {token}"
+                """)
+        self.assertIn("[sandboxes.typo]", str(caught.exception))
+        self.assertIn("auth_format", str(caught.exception))
+
+    def test_the_refusal_does_not_echo_the_format_string(self):
+        """It is the string a secret is substituted into; a wrong one may
+        already hold part of it."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                self.build(BASE + """
+                    [sandboxes.typo]
+                    auth_format = "Bearer {token}-leaky"
+                """)
+        self.assertNotIn("leaky", str(caught.exception))
+
     def test_a_non_https_upstream_is_refused(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):

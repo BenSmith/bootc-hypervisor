@@ -408,6 +408,30 @@ Configuration that matters, beyond the comments in the example:
   installed.
 - **`relax_x509_strict`** exists for private CAs missing `keyUsage`, which
   Python 3.13+ rejects (§8). Do not set it without a reason.
+- **`allow_unknown_callers` is for local testing and logs a warning at
+  startup.** With it off, a caller needs to be both routed here (a map element,
+  added by its own VM unit) and named in `[sandboxes]`, so neither list alone
+  grants a credential. With it on, the map is the only thing left — and map
+  elements are keyed by uid, which workloadctl reuses.
+
+### What the broker refuses, and why a client might see it
+
+| | |
+|---|---|
+| `403` | The caller resolved to no configured sandbox — or could not be resolved at all, which is never rescued by `allow_unknown_callers` (§5). |
+| `400` | An absolute-form request target (that is a *proxy's* job, not this one's), or a `Content-Length` that is not a non-negative number. |
+| `411` | A chunked request body. The broker does not decode one, and forwarding it as an empty body — which is what it used to do — meant the provider answered a request the caller never sent. Send `Content-Length`. |
+| `413` | A body over 64 MiB. |
+
+Every refusal closes the connection: a rejected request has left its body
+unread, so the next bytes on the wire are body where a request line should be.
+
+A connection may also be closed with no reply at all. That is the admission
+bound: 32 concurrent connections in total, and 8 for any one caller. The
+per-caller ceiling is the one that matters — without it a single sandbox
+opening 32 sockets, sending nothing, denied the broker to every other sandbox
+on the host. Connections that make no progress for 60 seconds are dropped, so
+holding one open costs a caller something.
 
 ### What the guest does with it
 
