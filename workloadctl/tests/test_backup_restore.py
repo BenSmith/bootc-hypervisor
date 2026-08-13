@@ -12,6 +12,7 @@ escapes the workloads tree.
 """
 import argparse
 import io
+import os
 import shutil
 import subprocess
 import tarfile
@@ -22,6 +23,7 @@ from unittest import mock
 
 
 import workload_lib  # noqa: E402
+import backup  # noqa: E402
 import cmd_backup  # noqa: E402
 
 
@@ -103,6 +105,192 @@ class TestAssertNoEscapingSymlinks(unittest.TestCase):
         (self.root / "bad").symlink_to("../../etc")
         with self.assertRaises(ValueError):
             cmd_backup._assert_no_escaping_symlinks(self.root)
+
+
+def _lstat_faking_dev(module, fake_paths: set, fake_dev: int):
+    """An `os.lstat` replacement that reports `fake_dev` for `fake_paths`.
+
+    A real mount point needs root, so the filesystem boundary is simulated at
+    the only place either guard inspects it. Everything else — the walk, the
+    copytree, the tree on disk — is real. `st_dev` is index 2 of the 10-tuple
+    `os.stat_result` accepts.
+    """
+    real_lstat = module.os.lstat
+
+    def lstat(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        if str(path) in fake_paths:
+            fields = list(st[:10])
+            fields[2] = fake_dev
+            return os.stat_result(tuple(fields))
+        return st
+
+    return lstat
+
+
+class TestBackupSkipsOtherFilesystems(unittest.TestCase):
+    """Capture must stop at mount points under data/.
+
+    copytree does not stop at filesystem boundaries on its own, so a share
+    mounted under data/ would otherwise be pulled wholesale into every archive
+    — across the network, with the workload stopped.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.src = self.tmp / "data"
+        self.src.mkdir()
+        (self.src / "keep.txt").write_text("precious")
+        self.mnt = self.src / "somedir"
+        self.mnt.mkdir()
+        (self.mnt / "on-the-share.txt").write_text("belongs to the file server")
+
+    def _ignore(self, fake_paths):
+        self.enterContext(mock.patch.object(
+            backup.os, "lstat",
+            _lstat_faking_dev(backup, fake_paths, fake_dev=999)))
+        return backup._ignore_other_filesystems(self.src, quiet=True)
+
+    def test_same_filesystem_skips_nothing(self):
+        ignore = self._ignore(set())
+        self.assertEqual(ignore(str(self.src), ["keep.txt", "somedir"]), set())
+
+    def test_entry_on_another_filesystem_is_skipped(self):
+        ignore = self._ignore({str(self.mnt)})
+        self.assertEqual(ignore(str(self.src), ["keep.txt", "somedir"]), {"somedir"})
+
+    def test_copytree_omits_the_mounted_subtree_but_keeps_the_rest(self):
+        # The callback has to satisfy copytree's real contract, not just look
+        # right in isolation.
+        dest = self.tmp / "staging"
+        shutil.copytree(
+            self.src, dest, symlinks=True, dirs_exist_ok=False,
+            ignore=self._ignore({str(self.mnt)}),
+        )
+        self.assertEqual((dest / "keep.txt").read_text(), "precious")
+        self.assertFalse((dest / "somedir").exists())
+
+    def test_nested_mount_is_skipped_not_just_top_level(self):
+        deep = self.src / "a" / "b"
+        deep.mkdir(parents=True)
+        nested = deep / "share"
+        nested.mkdir()
+        (nested / "f").write_text("x")
+        dest = self.tmp / "staging"
+        shutil.copytree(
+            self.src, dest, symlinks=True, dirs_exist_ok=False,
+            ignore=self._ignore({str(nested)}),
+        )
+        self.assertTrue((dest / "a" / "b").is_dir())
+        self.assertFalse((dest / "a" / "b" / "share").exists())
+
+    def test_symlink_to_another_filesystem_is_still_captured(self):
+        # Judged by the filesystem holding the link, which is what
+        # symlinks=True copies. Resolving instead would drop ordinary content.
+        (self.src / "link").symlink_to("/etc/hostname")
+        ignore = self._ignore(set())
+        self.assertEqual(ignore(str(self.src), ["link"]), set())
+
+    def test_skips_are_warned_about_not_silent(self):
+        ignore = self.enterContext(mock.patch.object(backup, "warn"))
+        self.enterContext(mock.patch.object(
+            backup.os, "lstat",
+            _lstat_faking_dev(backup, {str(self.mnt)}, fake_dev=999)))
+        backup._ignore_other_filesystems(self.src, quiet=False)(
+            str(self.src), ["keep.txt", "somedir"])
+        self.assertEqual(ignore.call_count, 1)
+        self.assertIn("somedir", ignore.call_args[0][0])
+
+
+class TestAssertNoMountsUnder(unittest.TestCase):
+    """`restore --force` must refuse rather than rmtree through a mount.
+
+    shutil.rmtree would unlink the mounted filesystem's contents and only then
+    fail on the busy mount point — after the data is gone.
+    """
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.root / "sub").mkdir()
+        (self.root / "sub" / "f").write_text("x")
+
+    def _fake(self, fake_paths):
+        self.enterContext(mock.patch.object(
+            cmd_backup.os, "lstat",
+            _lstat_faking_dev(cmd_backup, fake_paths, fake_dev=999)))
+
+    def test_plain_tree_ok(self):
+        self._fake(set())
+        cmd_backup._assert_no_mounts_under(self.root)  # no raise
+
+    def test_empty_tree_ok(self):
+        self._fake(set())
+        cmd_backup._assert_no_mounts_under(
+            Path(self.enterContext(tempfile.TemporaryDirectory())))
+
+    def test_mount_at_top_level_rejected(self):
+        mnt = self.root / "somedir"
+        mnt.mkdir()
+        self._fake({str(mnt)})
+        with self.assertRaises(ValueError) as cm:
+            cmd_backup._assert_no_mounts_under(self.root)
+        self.assertIn("somedir", str(cm.exception))
+
+    def test_nested_mount_rejected(self):
+        mnt = self.root / "sub" / "share"
+        mnt.mkdir()
+        self._fake({str(mnt)})
+        with self.assertRaises(ValueError):
+            cmd_backup._assert_no_mounts_under(self.root)
+
+    def test_error_names_the_path_and_says_what_to_do(self):
+        mnt = self.root / "somedir"
+        mnt.mkdir()
+        self._fake({str(mnt)})
+        with self.assertRaises(ValueError) as cm:
+            cmd_backup._assert_no_mounts_under(self.root)
+        msg = str(cm.exception)
+        self.assertIn(str(mnt), msg)
+        self.assertIn("Unmount", msg)
+
+
+class TestRestoreForceRefusesOverMount(unittest.TestCase):
+    """The guard has to actually run before the rmtree, not merely exist."""
+
+    def test_force_restore_aborts_before_deleting_anything(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        etc, var = tmp / "etc", tmp / "var"
+        etc.mkdir()
+        dest_data = var / "app" / "data"
+        mnt = dest_data / "somedir"
+        mnt.mkdir(parents=True)
+        share_file = mnt / "on-the-share.txt"
+        share_file.write_text("belongs to the file server")
+
+        self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", etc))
+        self.enterContext(mock.patch.object(
+            cmd_backup, "workload_data_dir", lambda n: var / n / "data"))
+        self.enterContext(mock.patch.object(
+            cmd_backup.os, "lstat",
+            _lstat_faking_dev(cmd_backup, {str(mnt)}, fake_dev=999)))
+
+        stage = tmp / "stage"
+        (stage / "data").mkdir(parents=True)
+        (stage / "workload.toml").write_text(
+            '[workload]\nname = "app"\n[container]\nimage = "x"\n')
+        archive = tmp / "backup.tar.zst"
+        subprocess.run(
+            ["tar", "-C", str(stage), "--zstd", "-cf", str(archive), "."],
+            check=True,
+        )
+
+        args = argparse.Namespace(archive=str(archive), force=True, enable=False)
+        with self.assertRaises(SystemExit) as cm:
+            cmd_backup.cmd_restore(args, manager=None)  # type: ignore[arg-type]
+        self.assertEqual(cm.exception.code, 1)
+        # The whole point: the share's contents are still there.
+        self.assertEqual(share_file.read_text(), "belongs to the file server")
 
 
 class TestBackupOne(unittest.TestCase):

@@ -143,6 +143,42 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
     return size
 
 
+def _ignore_other_filesystems(root: Path, *, quiet: bool):
+    """Build a `shutil.copytree` ignore callback that stops at mount points.
+
+    Returns the names in each visited directory that sit on a different
+    filesystem than `root` -- `--one-file-system` semantics, applied at every
+    level rather than only the top, so a mount nested deep in the tree is
+    skipped too.
+
+    lstat, not stat: a symlink is judged by the filesystem holding the *link*,
+    which is what `symlinks=True` copies. Resolving it would skip ordinary
+    in-tree symlinks merely because they point at another filesystem.
+
+    Skips are warned about, never silent. An archive quietly missing a subtree
+    is a problem discovered at restore time, which is the worst time.
+    """
+    root_dev = root.stat().st_dev
+
+    def ignore(src, names):
+        skipped = set()
+        for name in names:
+            try:
+                if os.lstat(os.path.join(src, name)).st_dev != root_dev:
+                    skipped.add(name)
+            except OSError:
+                # Vanished between scandir and lstat -- leave it to copytree,
+                # which reports per-entry errors properly.
+                continue
+        if skipped and not quiet:
+            for name in sorted(skipped):
+                warn(f"  Warning: skipping '{os.path.join(src, name)}' — separate "
+                     f"filesystem, not captured in this archive")
+        return skipped
+
+    return ignore
+
+
 def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -> None:
     """Internal backup implementation shared by container and VM paths."""
     name = config.name
@@ -179,12 +215,23 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
             # state/ (podman graphroot, VM system.qcow2 + gen snapshots,
             # .image-cache) is reconstructible from registries/Containerfiles
             # and is deliberately never in backup scope, so no exclude filtering
-            # is needed: the archive is a straight copy of data/.
+            # is needed on that axis: the archive is a copy of data/.
+            #
+            # It stops at filesystem boundaries, though. data/ is a plain local
+            # directory in the normal case, which is what made a straight copy
+            # the whole story — but an operator can mount something under it (a
+            # network share behind a VM's virtiofs volume, a second disk, a bind
+            # mount), and copytree does not stop at mount points. It would pull
+            # that entire filesystem across into the archive, over whatever
+            # transport backs it, with the workload STOPPED — cold consistency
+            # is the default. Data on a mount under data/ is backed up by
+            # whatever owns that mount, so skip it and say so.
             data_dir = config.data_dir
             if data_dir.is_dir():
                 shutil.copytree(
                     data_dir, staging / "data",
                     symlinks=True, dirs_exist_ok=False,
+                    ignore=_ignore_other_filesystems(data_dir, quiet=quiet),
                 )
             else:
                 (staging / "data").mkdir()

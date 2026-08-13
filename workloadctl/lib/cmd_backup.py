@@ -178,6 +178,40 @@ def _assert_no_escaping_symlinks(root: Path) -> None:
                 )
 
 
+def _assert_no_mounts_under(root: Path) -> None:
+    """Reject a `--force` replacement of `root` if another filesystem is mounted
+    inside it.
+
+    `restore --force` replaces data/ wholesale, and `shutil.rmtree` does not
+    stop at filesystem boundaries. With a mount under data/ it recurses into
+    that filesystem, unlinks its contents, and only *then* fails — rmdir on the
+    now-busy mount point raises EBUSY, long after the files are gone. Deleting
+    the contents of an operator's file server is not an acceptable failure mode
+    for a command whose job is to put data back.
+
+    Refusing beats skipping. Backup omits these mounts by design (see
+    backup._ignore_other_filesystems), so the archive has nothing to restore
+    there anyway; unmounting is a deliberate operator action, and a partially
+    replaced data/ is worse than a restore that declined to start.
+    """
+    root_dev = root.stat().st_dev
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for entry in dirnames + filenames:
+            p = Path(dirpath) / entry
+            try:
+                dev = os.lstat(p).st_dev
+            except OSError:
+                continue
+            if dev != root_dev:
+                # Raising here also prunes the walk: we never descend into the
+                # mount we are refusing to delete.
+                raise ValueError(
+                    f"a separate filesystem is mounted under the data directory: "
+                    f"{p}. Unmount it before restoring with --force (it is not "
+                    f"captured in backups, so the archive holds nothing for it)."
+                )
+
+
 def _extract_archive(archive: Path, staging: Path) -> None:
     """Extract a `.tar.zst` backup archive into `staging`.
 
@@ -316,6 +350,11 @@ def cmd_restore(args, manager: WorkloadManager):
                 sys.exit(1)
             if dest_data.exists():
                 if args.force:
+                    try:
+                        _assert_no_mounts_under(dest_data)
+                    except ValueError as e:
+                        print(f"Error: {e}", file=sys.stderr)
+                        sys.exit(1)
                     shutil.rmtree(dest_data)
                 else:
                     print("  Warning: data/ exists, merging (use --force to replace)")

@@ -1874,6 +1874,26 @@ pihole-20260315-120000.tar.zst
 
 Everything else (system user, subuid/subgid, linger, SELinux labels, podman images) is recreated automatically by `workloadctl enable`.
 
+#### Mounts under `data/` are not captured
+
+Backup stops at filesystem boundaries. If you mount something inside a workload's
+data directory — a network share behind a VM's virtiofs volume, a second disk, a
+bind mount — that subtree is skipped, and the backup prints a warning naming
+each path it skipped. Whatever owns the mount owns its backup.
+
+For the same reason, `restore --force` **refuses to run** while such a mount is
+in place, rather than replacing `data/` around it:
+
+```
+Error: a separate filesystem is mounted under the data directory:
+/var/lib/workloads/pihole/data/somedir. Unmount it before restoring with
+--force (it is not captured in backups, so the archive holds nothing for it).
+```
+
+Unmount it and re-run. The refusal is deliberate: replacement deletes the old
+`data/` tree first, and a recursive delete does not stop at mount points either
+— it would empty the mounted filesystem before failing on the busy mount point.
+
 ### Portable Credential Transfer
 
 Credentials created with `workloadctl secret create` are encrypted with `systemd-creds` and bound to the machine's TPM. They can't be decrypted on another machine. `secret export` and `secret import` solve this by converting between TPM-bound and passphrase-based encryption.
