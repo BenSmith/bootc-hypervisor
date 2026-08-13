@@ -306,6 +306,13 @@ name = "schema-reference"
 # are rejected by `validate` rather than silently matching nothing. CONNECT is
 # permitted to 443 alone; use .allow for any other port.
 #
+# fnmatch, NOT a DNS suffix match. `*.example.com` requires something before the
+# dot, so it does not cover the bare `example.com` — list the apex separately
+# when you want both, as the example below does. Measured on a live VM: with
+# ["*.fedoraproject.org"], download.fedoraproject.org is proxied and
+# fedoraproject.org is refused, and the refusal is a 403 indistinguishable from
+# any other policy denial.
+#
 # REQUIRES egress = "filtered", and validate rejects the pair otherwise. The
 # proxy is advisory on its own — a guest process free to ignore HTTPS_PROXY does
 # — and the default-deny chain is what leaves such a process nowhere else to go.
@@ -463,7 +470,8 @@ name = "schema-reference"
 # bridge = "br0"                    # a real LAN identity; unfiltered (see above)
 # egress = "filtered"               # or "open"; must be stated (see above)
 # allow  = ["192.168.0.10:22"]      # addresses and ports only, never hostnames
-# hosts  = ["*.example.com"]        # HTTP/HTTPS names; needs egress "filtered"
+# hosts  = ["example.com", "*.example.com"]   # names; needs egress "filtered".
+#                                   # Both: the wildcard excludes the apex.
 # broker = true                     # path to a host-side credential broker
 #
 # [vm.cloud_init]

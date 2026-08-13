@@ -15,7 +15,9 @@ an operator writes. Call the workload `web`, with uid 10004:
 ```toml
 [vm.network]
 egress = "filtered"                                    # the default; stated for clarity
-hosts  = ["*.fedoraproject.org", "api.example.com"]    # HTTP/HTTPS, by name
+hosts  = ["*.fedoraproject.org", "api.example.com"]    # HTTP/HTTPS, by name;
+                                                       # the wildcard excludes
+                                                       # the bare apex — see below
 allow  = ["192.168.0.10:22"]                           # everything else, by address
 ```
 
@@ -136,6 +138,14 @@ Then the two paths that don't work, which are the point:
 - **The guest asks the proxy for a host not on the list.** 403, before any TLS
   handshake — the name comes out of the plaintext CONNECT, so there is no
   interception and no CA.
+
+That second refusal has a trap in it. The patterns are fnmatch, not a DNS suffix
+match, so `*.fedoraproject.org` requires something before the dot and does **not**
+cover the bare `fedoraproject.org`. On the VM above, `download.fedoraproject.org`
+is proxied and `fedoraproject.org` is refused — with a 403 identical to the one
+an entirely unlisted host gets. Nothing distinguishes "you did not allowlist this"
+from "your pattern did not reach as far as you thought". List the apex separately
+when you want both.
 
 Widening by port instead — "let this uid reach 443 anywhere" — was the obvious
 alternative to rule 3 and is fatal: it is precisely the bypass rule 6 exists to

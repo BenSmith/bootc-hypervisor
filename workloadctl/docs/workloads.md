@@ -1266,6 +1266,19 @@ yourself, or the guest will simply be dropped by the filter.
 Patterns match the hostname only, so a scheme, a path or a port in a `hosts`
 entry is a validation error rather than a pattern that silently matches nothing.
 
+**`*.example.com` does not cover `example.com`.** The patterns are fnmatch, not
+a DNS suffix match, and the wildcard needs something to match before the dot.
+List the apex separately when you want both:
+
+```toml
+hosts = ["fedoraproject.org", "*.fedoraproject.org"]
+```
+
+Verified on a live filtered VM: with only the wildcard, `download.fedoraproject.org`
+is proxied and `fedoraproject.org` is refused. This is worth knowing because the
+refusal is a 403 — identical to the one an unlisted host gets, so it reads as a
+policy decision rather than a pattern that didn't reach as far as intended.
+
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —
 the proxy can be listening while the guest has no path to it, and every other
 signal looks correct when that happens.
