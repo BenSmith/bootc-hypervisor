@@ -144,12 +144,20 @@ class TestBackupSkipsOtherFilesystems(unittest.TestCase):
         self.mnt = self.src / "somedir"
         self.mnt.mkdir()
         (self.mnt / "on-the-share.txt").write_text("belongs to the file server")
+        self.spool = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def _mountinfo(self, *points):
+        path = self.spool / "mountinfo"
+        path.write_text("".join(
+            f"36 35 0:24 / {p} rw,relatime shared:1 - tmpfs tmpfs rw\n"
+            for p in points))
+        self.enterContext(mock.patch.object(workload_lib, "MOUNTINFO", path))
 
     def _ignore(self, fake_paths):
         self.enterContext(mock.patch.object(
             backup.os, "lstat",
             _lstat_faking_dev(backup, fake_paths, fake_dev=999)))
-        return backup._ignore_other_filesystems(self.src, quiet=True)
+        return backup._ignore_mount_points(self.src, quiet=True)
 
     def test_same_filesystem_skips_nothing(self):
         ignore = self._ignore(set())
@@ -191,12 +199,50 @@ class TestBackupSkipsOtherFilesystems(unittest.TestCase):
         ignore = self._ignore(set())
         self.assertEqual(ignore(str(self.src), ["link"]), set())
 
+    def test_a_same_device_bind_mount_is_skipped(self):
+        """The blind spot. A bind of a directory on the same filesystem reports
+        the same st_dev on both sides, so it looked like an ordinary
+        subdirectory and went into the archive whole — while restore refuses to
+        write over it, leaving the two halves disagreeing about the same path.
+        No device faking here: that is the point."""
+        self._mountinfo(self.mnt)
+        ignore = backup._ignore_mount_points(self.src, quiet=True)
+        self.assertEqual(ignore(str(self.src), ["keep.txt", "somedir"]),
+                         {"somedir"})
+
+    def test_an_ordinary_directory_on_one_device_is_still_captured(self):
+        """The other half: mountinfo naming things elsewhere must not make
+        every directory look like a mount."""
+        self._mountinfo("/srv/media", self.src)
+        ignore = backup._ignore_mount_points(self.src, quiet=True)
+        self.assertEqual(ignore(str(self.src), ["keep.txt", "somedir"]), set())
+
+    def test_a_symlink_pointing_at_a_mount_is_not_itself_a_mount(self):
+        """The mountinfo test joins onto the resolved *directory*, never the
+        entry, for the reason lstat is used over stat: following the link would
+        drop an ordinary in-tree symlink for where it happens to point."""
+        (self.src / "link").symlink_to(self.mnt)
+        self._mountinfo(self.mnt)
+        ignore = backup._ignore_mount_points(self.src, quiet=True)
+        self.assertEqual(ignore(str(self.src), ["link"]), set())
+
+    def test_backup_skips_exactly_what_restore_refuses(self):
+        """The invariant the blind spot broke. An archive that captured a
+        subtree restore will not write back is one nobody can fully restore,
+        and the mismatch only shows up at restore time."""
+        self._mountinfo(self.mnt)
+        ignore = backup._ignore_mount_points(self.src, quiet=True)
+        skipped = ignore(str(self.src), ["keep.txt", "somedir"])
+        self.assertIn("somedir", skipped)
+        with self.assertRaises(ValueError):
+            cmd_backup._assert_no_mounts_under(self.src)
+
     def test_skips_are_warned_about_not_silent(self):
         ignore = self.enterContext(mock.patch.object(backup, "warn"))
         self.enterContext(mock.patch.object(
             backup.os, "lstat",
             _lstat_faking_dev(backup, {str(self.mnt)}, fake_dev=999)))
-        backup._ignore_other_filesystems(self.src, quiet=False)(
+        backup._ignore_mount_points(self.src, quiet=False)(
             str(self.src), ["keep.txt", "somedir"])
         self.assertEqual(ignore.call_count, 1)
         self.assertIn("somedir", ignore.call_args[0][0])
@@ -282,7 +328,7 @@ class TestBindMountsAreCaughtToo(unittest.TestCase):
         path.write_text("".join(
             f"36 35 0:24 / {p} rw,relatime shared:1 - tmpfs tmpfs rw\n"
             for p in points))
-        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", path))
+        self.enterContext(mock.patch.object(workload_lib, "MOUNTINFO", path))
 
     def test_a_same_device_bind_mount_under_the_tree_is_refused(self):
         target = self.root / "sub" / "share"
@@ -317,7 +363,7 @@ class TestBindMountsAreCaughtToo(unittest.TestCase):
     def test_an_unreadable_mountinfo_falls_back_to_the_device_walk(self):
         """Degrade to the older, narrower check rather than to no check."""
         self.enterContext(mock.patch.object(
-            cmd_backup, "MOUNTINFO", self.spool / "does-not-exist"))
+            workload_lib, "MOUNTINFO", self.spool / "does-not-exist"))
         mnt = self.root / "sub" / "elsewhere"
         mnt.mkdir()
         self.enterContext(mock.patch.object(
@@ -348,7 +394,7 @@ class TestForceRefusesAMountedDataDir(unittest.TestCase):
         path.write_text("".join(
             f"36 35 0:24 / {p} rw,relatime shared:1 - tmpfs tmpfs rw\n"
             for p in points))
-        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", path))
+        self.enterContext(mock.patch.object(workload_lib, "MOUNTINFO", path))
 
     def test_a_mounted_data_dir_is_refused(self):
         self._mountinfo(self.data)
@@ -381,7 +427,7 @@ class TestForceRefusesAMountedDataDir(unittest.TestCase):
         Narrower than mountinfo in the same way the device walk is — a
         same-device bind mount is invisible to it — but better than nothing."""
         self.enterContext(mock.patch.object(
-            cmd_backup, "MOUNTINFO", self.spool / "does-not-exist"))
+            workload_lib, "MOUNTINFO", self.spool / "does-not-exist"))
         self.enterContext(mock.patch.object(
             cmd_backup.os, "lstat",
             _lstat_faking_dev(cmd_backup, {str(self.data)}, fake_dev=999)))
@@ -471,7 +517,7 @@ class TestRestoreRefusesToForceOverAMountedDataDir(unittest.TestCase):
         mountinfo = tmp / "mountinfo"
         mountinfo.write_text(
             f"36 35 0:24 / {dest_data} rw,relatime shared:1 - tmpfs tmpfs rw\n")
-        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", mountinfo))
+        self.enterContext(mock.patch.object(workload_lib, "MOUNTINFO", mountinfo))
 
         stage = tmp / "stage"
         (stage / "data").mkdir(parents=True)

@@ -22,7 +22,7 @@ from secrets_template import auto_detect_credentials
 from service_runtime import restart_workload_service
 from substrate import BackupError
 from vm import VM_SOCKET_DIR
-from workload_lib import CREDSTORE_DIR, workload_config_path
+from workload_lib import CREDSTORE_DIR, mount_points, workload_config_path
 
 
 def backup_vm(config, output: Path, *, quiet: bool) -> int:
@@ -143,37 +143,57 @@ def backup_vm_crash(config, output: Path, *, quiet: bool) -> int:
     return size
 
 
-def _ignore_other_filesystems(root: Path, *, quiet: bool):
+def _ignore_mount_points(root: Path, *, quiet: bool):
     """Build a `shutil.copytree` ignore callback that stops at mount points.
 
-    Returns the names in each visited directory that sit on a different
-    filesystem than `root` -- `--one-file-system` semantics, applied at every
-    level rather than only the top, so a mount nested deep in the tree is
-    skipped too.
+    Applied at every level rather than only the top, so a mount nested deep in
+    the tree is skipped too.
+
+    TWO TESTS, BECAUSE A MOUNT IS NOT ALWAYS ANOTHER FILESYSTEM
+
+    Comparing st_dev is `--one-file-system` semantics and it misses a bind
+    mount of a directory that lives on the same filesystem: both sides report
+    the same device, so the bind looks like an ordinary subdirectory and is
+    pulled into the archive whole. That is the mirror of the restore bug --
+    there rmtree followed the same bind and deleted the source's files -- and
+    it leaves the two halves disagreeing, since restore now refuses to write
+    over a mount that backup was happy to capture.
+
+    mountinfo names the mount points whatever their device, so it is consulted
+    alongside the device test rather than instead of it: on a host where it
+    cannot be read, the device test still catches everything it ever did.
 
     lstat, not stat: a symlink is judged by the filesystem holding the *link*,
     which is what `symlinks=True` copies. Resolving it would skip ordinary
-    in-tree symlinks merely because they point at another filesystem.
+    in-tree symlinks merely because they point at another filesystem. The
+    mountinfo test joins onto the resolved *directory* for the same reason --
+    it must not follow a symlinked entry and call it a mount.
 
     Skips are warned about, never silent. An archive quietly missing a subtree
     is a problem discovered at restore time, which is the worst time.
     """
     root_dev = root.stat().st_dev
+    # Read once per backup, not once per directory: a data/ tree can hold a lot
+    # of directories and the mount table does not change under us mid-copy in
+    # any way we could act on.
+    mounts = mount_points()
 
     def ignore(src, names):
+        src_resolved = Path(src).resolve()
         skipped = set()
         for name in names:
             try:
-                if os.lstat(os.path.join(src, name)).st_dev != root_dev:
-                    skipped.add(name)
+                other_fs = os.lstat(os.path.join(src, name)).st_dev != root_dev
             except OSError:
                 # Vanished between scandir and lstat -- leave it to copytree,
                 # which reports per-entry errors properly.
                 continue
+            if other_fs or src_resolved / name in mounts:
+                skipped.add(name)
         if skipped and not quiet:
             for name in sorted(skipped):
-                warn(f"  Warning: skipping '{os.path.join(src, name)}' — separate "
-                     f"filesystem, not captured in this archive")
+                warn(f"  Warning: skipping '{os.path.join(src, name)}' — a mount "
+                     f"point, not captured in this archive")
         return skipped
 
     return ignore
@@ -217,29 +237,30 @@ def backup_impl(config, output: Path, *, no_stop: bool, quiet: bool, vm: bool) -
             # and is deliberately never in backup scope, so no exclude filtering
             # is needed on that axis: the archive is a copy of data/.
             #
-            # It stops at filesystem boundaries, though. data/ is a plain local
+            # It stops at mount points, though. data/ is a plain local
             # directory in the normal case, which is what made a straight copy
             # the whole story — but an operator can mount something under it (a
-            # network share behind a VM's virtiofs volume, a second disk), and
-            # copytree does not stop at mount points. It would pull that entire
-            # filesystem across into the archive, over whatever transport backs
-            # it, with the workload STOPPED — cold consistency is the default.
-            # Data on a mount under data/ is backed up by whatever owns that
-            # mount, so skip it and say so.
+            # network share behind a VM's virtiofs volume, a second disk, a bind
+            # mount), and copytree does not stop at mount points. It would pull
+            # that entire filesystem across into the archive, over whatever
+            # transport backs it, with the workload STOPPED — cold consistency
+            # is the default. Data on a mount under data/ is backed up by
+            # whatever owns that mount, so skip it and say so.
             #
-            # The boundary is st_dev, which is what `--one-file-system` means
-            # everywhere else and carries the same blind spot: a bind mount of
-            # the SAME filesystem is not a different device and is copied like
-            # any other directory. Nothing here can see it — /proc/self/mountinfo
-            # would be needed — and the case that motivated this (network
-            # storage, separate disks) always crosses a device, so it is
-            # deliberately out of scope rather than overlooked.
+            # Mount points, not filesystem boundaries: st_dev is what
+            # `--one-file-system` means everywhere else, and on its own it
+            # misses a bind mount of the SAME filesystem, which is not a
+            # different device. Restore refuses to write over any mount here, so
+            # capturing one would put a subtree in the archive that could never
+            # be restored to the path it came from — the two halves disagreeing
+            # about the same directory. _ignore_mount_points reads the same
+            # mount list restore does, which is what keeps them agreeing.
             data_dir = config.data_dir
             if data_dir.is_dir():
                 shutil.copytree(
                     data_dir, staging / "data",
                     symlinks=True, dirs_exist_ok=False,
-                    ignore=_ignore_other_filesystems(data_dir, quiet=quiet),
+                    ignore=_ignore_mount_points(data_dir, quiet=quiet),
                 )
             else:
                 (staging / "data").mkdir()

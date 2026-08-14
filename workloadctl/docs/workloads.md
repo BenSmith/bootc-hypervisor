@@ -1899,14 +1899,10 @@ Everything else (system user, subuid/subgid, linger, SELinux labels, podman imag
 
 #### Mounts under `data/` are not captured
 
-Backup stops at filesystem boundaries. If you mount another *filesystem* inside a
-workload's data directory — a network share, a second disk — that subtree is
-skipped, and the backup prints a warning naming each path it skipped. Whatever
-owns the mount owns its backup.
-
-A bind mount of a directory on the **same** filesystem is the exception, and it
-cuts the other way: it reports the same device on both sides, so backup does not
-see a boundary and captures it like any other directory.
+Backup stops at mount points. If you mount anything inside a workload's data
+directory — a network share, a second disk, a bind mount of a directory
+elsewhere on the same disk — that subtree is skipped, and the backup prints a
+warning naming each path it skipped. Whatever owns the mount owns its backup.
 
 Restore **refuses to run** while any mount is in place under `data/` — both
 paths, not just `--force`:

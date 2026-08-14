@@ -73,6 +73,55 @@ def workload_config_dir() -> Path:
 # Persistent workload data directory
 WORKLOADS_BASE = Path("/var/lib/workloads")
 
+# The kernel's list of mount points. Lives here rather than in backup.py because
+# both halves of backup/restore need it and they do not import each other.
+MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def _unescape_mountinfo(text: str) -> str:
+    r"""Decode the octal escapes mountinfo uses for space, tab, newline and \\."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and text[i + 1:i + 4].isdigit() and len(text) >= i + 4:
+            out.append(chr(int(text[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def mount_points(mountinfo: Path | None = None) -> set[Path]:
+    """Every mount point visible to this process, from /proc/self/mountinfo.
+
+    This is the only way to see a bind mount of a directory that lives on the
+    same filesystem: it reports the same st_dev on both sides, so comparing
+    devices -- which is what "stop at filesystem boundaries" naturally becomes
+    in code -- cannot distinguish it from an ordinary subdirectory. Backup and
+    restore both have to, since one would capture the bind source's files and
+    the other would delete them.
+
+    Field 5 (index 4) is the mount point. An unreadable mountinfo yields
+    nothing rather than raising, so a host without /proc degrades to the
+    narrower st_dev checks its callers still carry, rather than to no check.
+
+    Resolved at call time, not bound as a default argument: a default is
+    evaluated once when the function is defined, which would make the module
+    constant unpatchable and every test of this read the real host's mounts.
+    """
+    mountinfo = mountinfo or MOUNTINFO
+    try:
+        lines = mountinfo.read_text().splitlines()
+    except OSError:
+        return set()
+    points = set()
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) > 4:
+            points.add(Path(_unescape_mountinfo(fields[4])))
+    return points
+
+
 # systemd-creds credential store. Secrets are created here (`workloadctl secret`),
 # loaded from here by the generator, and decrypted at runtime by
 # workload-ensure-user. Single source of truth so backup/restore/rotate can't
