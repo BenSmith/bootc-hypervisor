@@ -58,6 +58,7 @@ lifecycle note under "The set").
 | `/run/systemd/system/workload-<name>-net.service` | `bridge` mode (the auto-created `workload-<name>-net` network) |
 | `/run/systemd/system/workload-<name>-<cname>.service` | one per container, in `pod`/`bridge`/multi |
 | `/run/systemd/system/workload-<name>-virtiofs-<tag>.service` | one per virtiofs volume, VM workloads |
+| `/run/systemd/system/workload-<name>-proxy.service` | VM workloads with `[vm.network].hosts` (the per-VM filtering proxy). Enumerated for every VM regardless, on the same superset rule as `-pod`/`-net` below |
 
 > **Emitted vs. removable (the deletion superset).** The generator writes exactly the
 > conditional units a given mode/kind needs. The *removal* path, by contrast,
@@ -118,7 +119,7 @@ These are easy to blur and enumerating them as workload-owned is a bug:
 `lib/workload_lib.py` provides `workload_service_name(name)` →
 `workload-<name>.service` and `workload_container_name(name)` → `workload-<name>`.
 These cover only the two simplest names; the **derived** run-files above
-(`-setup`, `-build`, `-pod`, `-net`, `-virtiofs-<tag>`, `-<cname>`, the `.wants`
+(`-setup`, `-build`, `-pod`, `-net`, `-proxy`, `-virtiofs-<tag>`, `-<cname>`, the `.wants`
 symlink, the sysusers `.conf`, the `user@<uid>` drop-in, and the `.env` / `.secrets`
 env files) are currently spelled by hand at each call site.
 

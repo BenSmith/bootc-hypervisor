@@ -5,7 +5,7 @@ _workload_ctl_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="backup build catalog cleanup clone cp create diagnose disable drift duplicate edit enable exec health images incant info init list logs reboot recreate restart restore rollback secret shell start stats status stop update validate help"
+    local commands="backup build catalog cleanup clone cp create diagnose disable doctor drift duplicate edit enable exec health images incant info init install list logs pcap reboot recreate restart restore rollback secret shell start stats status stop update validate"
     local workload_dir="/etc/workloads.d"
     local credstore_dir="/etc/credstore.encrypted"
     local bundles_dir="/usr/share/workloadctl/workloads"
@@ -25,7 +25,10 @@ _workload_ctl_completion() {
     # For commands that accept <workload>/<container>: if $cur looks like
     # "name/partial", offer container names from the loaded systemd units
     # for that workload. The unit naming is workload-<name>-<container>.service,
-    # with three reserved suffixes (setup/pod/net) that are not containers.
+    # sharing that shape with the generator's own helper units, which are not
+    # containers: setup/pod/net/build, a VM's proxy, and virtiofs-<tag>. The
+    # authoritative list is docs/workload-run-files.md — a helper added there and
+    # not here is offered as if it were a container, and `exec`s into nothing.
     # If no per-container units exist, this is a single-container workload —
     # the "/" form doesn't apply, so we return no completions.
     _workloadctl_ref_complete() {
@@ -40,7 +43,7 @@ _workload_ctl_completion() {
         containers=$(systemctl list-unit-files --no-legend "workload-${wl}-*.service" 2>/dev/null \
             | awk '{print $1}' \
             | sed -E "s/^workload-${wl}-//;s/\\.service$//" \
-            | grep -Ev '^(setup|pod|net|build|virtiofs-.*)$')
+            | grep -Ev '^(setup|pod|net|build|proxy|virtiofs-.*)$')
         if [[ -z "$containers" ]]; then
             return
         fi
@@ -108,11 +111,46 @@ _workload_ctl_completion() {
             return 0
             ;;
         init)
-            # First arg: bundle name; then --as NAME
+            # First arg: bundle name; then --as NAME. --scratch/--scratch-vm
+            # take no bundle at all, but offering them alongside costs nothing.
             if [[ "$cur" == -* || "$prev" == "init" && $cword -gt 2 ]]; then
-                COMPREPLY=( $(compgen -W "--as" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--as --scratch --scratch-vm" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$bundles" -- "$cur") )
+            fi
+            return 0
+            ;;
+        install)
+            # A source directory containing workload.toml
+            _filedir -d
+            return 0
+            ;;
+        doctor)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
+            fi
+            return 0
+            ;;
+        pcap)
+            # Flags, then <workload>[/<container>], then a BPF filter we cannot
+            # usefully complete. --list and --stop are the two that change what
+            # the positional means, but both still take a workload.
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-i --interface -D --list-interfaces
+                    -Q --direction -s --snapshot-length -w --write --detach
+                    -c --packet-count -C --rotate-size -W --file-count
+                    -G --rotate-seconds --duration --max-size -n -q --quiet
+                    --json --dry-run --list --stop" -- "$cur") )
+            elif [[ "$prev" == "-i" || "$prev" == "--interface" ]]; then
+                COMPREPLY=( $(compgen -W "host guest" -- "$cur") )
+            elif [[ "$prev" == "-Q" || "$prev" == "--direction" ]]; then
+                COMPREPLY=( $(compgen -W "in out inout" -- "$cur") )
+            elif [[ "$prev" == "-w" || "$prev" == "--write" ]]; then
+                _filedir
+            elif [[ $cword -eq 2 ]]; then
+                _workloadctl_ref_complete "$cur"
             fi
             return 0
             ;;
@@ -147,8 +185,12 @@ _workload_ctl_completion() {
                 COMPREPLY=( $(compgen -W "$workloads" -- "$cur") )
             elif [[ $cword -eq 3 ]]; then
                 # Offer common bundle control file names
+                # The subdir layout, <name>/workload.toml — this read used to
+                # name a flat <name>.toml, which no longer exists, so `bundle`
+                # was never found and a renamed instance (init --as, duplicate)
+                # silently completed against a bundle dir that is not its own.
                 local wl="${words[2]}"
-                local toml="/etc/workloads.d/${wl}.toml"
+                local toml="${workload_dir}/${wl}/workload.toml"
                 local bundle_name="$wl"
                 if [[ -f "$toml" ]]; then
                     local b
@@ -295,7 +337,7 @@ _workload_ctl_completion() {
         create)
             # Complete with flags for create command
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--image --enable --network --ports --volumes --device --gpu --input --audio --virtualization --groups --systemd --shm-size --cpu-quota --cpu-weight --memory-max --memory-high --memory-swap-max --io-weight --tasks-max" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--image --enable --init --network --ports --volumes --device --gpu --input --audio --virtualization --groups --systemd --shm-size --cpu-quota --cpu-weight --memory-max --memory-high --memory-swap-max --io-weight --tasks-max" -- "$cur") )
             elif [[ "$prev" == "--gpu" ]]; then
                 COMPREPLY=( $(compgen -W "amd nvidia none" -- "$cur") )
             elif [[ "$prev" == "--systemd" ]]; then
@@ -395,10 +437,6 @@ _workload_ctl_completion() {
         cp)
             # Complete with workload:path syntax or files
             _filedir
-            return 0
-            ;;
-        help)
-            # No completion needed
             return 0
             ;;
     esac
