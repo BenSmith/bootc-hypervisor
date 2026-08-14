@@ -193,6 +193,17 @@ class TestResponseFraming(unittest.TestCase):
                   ("Content-Type", "application/json")])
         self.assertEqual(passthrough, [("Content-Type", "application/json")])
 
+    def test_headers_the_handler_stamps_itself_do_not_come_back(self):
+        """BaseHTTPRequestHandler writes Date and Server onto every response,
+        so relaying the upstream's produces two of each — a duplicate that a
+        client resolves by picking one, and that intermediaries resolve
+        differently from each other."""
+        passthrough, _, _ = broker.response_framing(
+            200, [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
+                  ("Server", "upstream-edge/2"),
+                  ("Content-Type", "application/json")])
+        self.assertEqual(passthrough, [("Content-Type", "application/json")])
+
     def test_204_and_304_carry_no_body(self):
         for status in (204, 304):
             _, _, bodiless = broker.response_framing(status, [])
@@ -349,16 +360,17 @@ class TestARefusalEndsTheConnection(BrokerServerCase):
         self.assertIn(b"Connection: close", received)
 
 
-class DyingResponse:
-    """An upstream response that delivers a little and then breaks.
+class StubResponse:
+    """An upstream response that hands out `chunks` and then ends.
 
-    `chunks` are handed out by read1() in order; then the connection fails the
-    way a dropped upstream really does — IncompleteRead, which is the
-    HTTPException the request path already catches.
+    `die` picks how it ends: IncompleteRead, which is how a dropped upstream
+    really presents and is the HTTPException the request path already catches,
+    or a clean b"" EOF.
     """
 
-    def __init__(self, status, hdrs, chunks):
-        self.status, self._headers, self._chunks = status, hdrs, list(chunks)
+    def __init__(self, status, hdrs, chunks, die=True):
+        self.status, self._headers = status, hdrs
+        self._chunks, self._die = list(chunks), die
 
     def getheaders(self):
         return self._headers
@@ -366,11 +378,13 @@ class DyingResponse:
     def read1(self, _n):
         if self._chunks:
             return self._chunks.pop(0)
-        raise broker.http.client.IncompleteRead(b"", 1)
+        if self._die:
+            raise broker.http.client.IncompleteRead(b"", 1)
+        return b""
 
 
 class DyingUpstream:
-    """Stands in for HTTPSConnection. Answers, then dies mid-body."""
+    """Stands in for HTTPSConnection. Answers, then ends per its response."""
 
     response = None  # set per test
 
@@ -402,9 +416,9 @@ class TestAnUpstreamDyingMidResponse(BrokerServerCase):
     response, and a body that ends without its terminator.
     """
 
-    def _drive(self, status, hdrs, chunks):
+    def _drive(self, status, hdrs, chunks, die=True):
         upstream = DyingUpstream
-        upstream.response = DyingResponse(status, hdrs, chunks)
+        upstream.response = StubResponse(status, hdrs, chunks, die=die)
         with mock.patch.object(broker.http.client, "HTTPSConnection", upstream):
             sock = self.connect()
             sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -450,6 +464,43 @@ class TestAnUpstreamDyingMidResponse(BrokerServerCase):
             received = self.drain(sock)
 
         self.assertIn(b"502", received.split(b"\r\n")[0])
+
+
+class TestARelayedResponseIsWellFormed(TestAnUpstreamDyingMidResponse):
+    """Header hygiene on the wire, where the duplicates actually appear.
+
+    response_framing is unit-tested above, but it only decides what is passed
+    *through* — the handler adds Date and Server itself afterwards, so whether
+    the caller ends up with one of each is a property of the two together and
+    cannot be seen from either alone.
+    """
+
+    def _headers_of(self, received):
+        head = received.partition(b"\r\n\r\n")[0]
+        counts = {}
+        for line in head.split(b"\r\n")[1:]:
+            name = line.split(b":")[0].strip().lower()
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def test_the_caller_gets_one_date_and_one_server(self):
+        received = self._drive(
+            200,
+            [("Date", "Mon, 01 Jan 2035 00:00:00 GMT"),
+             ("Server", "upstream-edge/2"),
+             ("Content-Type", "application/json"),
+             ("Content-Length", "2")],
+            [b"{}"], die=False)
+
+        counts = self._headers_of(received)
+        self.assertEqual(counts.get(b"date"), 1, "duplicate Date reached the caller")
+        self.assertEqual(counts.get(b"server"), 1,
+                         "duplicate Server reached the caller")
+        self.assertEqual(counts.get(b"content-length"), 1,
+                         "the upstream's length survived the re-framing")
+        self.assertNotIn(b"upstream-edge/2", received,
+                         "the provider's edge is named to the sandbox")
+        self.assertTrue(received.endswith(b"{}"))
 
 
 if __name__ == "__main__":

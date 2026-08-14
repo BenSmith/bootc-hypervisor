@@ -65,6 +65,21 @@ STRIP_FROM_REQUEST = frozenset({
     "cookie", "host", "content-length",
 })
 
+# Dropped from a relayed response. Beyond the hop-by-hop set:
+#
+# `content-length` because this hop re-frames the body and declares its own --
+# a streamed response goes back chunked, so the upstream's number would be a
+# lie about a message it no longer describes.
+#
+# `date` and `server` because BaseHTTPRequestHandler stamps both onto every
+# response it sends. Passing the upstream's through produces two of each, and a
+# client picking the wrong one of two Dates is the mild outcome; header-count
+# mismatches are also the raw material for request-smuggling confusion between
+# intermediaries. Ours are the correct ones to keep: this hop generated this
+# message, and the broker naming itself in `server` beats leaking the shape of
+# the provider's edge into a sandbox.
+DROP_FROM_RESPONSE = HOP_BY_HOP | {"content-length", "date", "server"}
+
 # Read at most this much request body. Generous enough for a large context
 # window, small enough that a runaway sandbox can't exhaust host memory.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -503,7 +518,7 @@ def request_framing(path, headers):
 def response_framing(status, headers):
     """(headers to pass back, declared length, whether a body is forbidden)."""
     passthrough = [(k, v) for k, v in headers
-                   if k.lower() not in HOP_BY_HOP and k.lower() != "content-length"]
+                   if k.lower() not in DROP_FROM_RESPONSE]
     declared = next((v for k, v in headers if k.lower() == "content-length"), None)
     # 204 and 304 must not carry a body; framing them as chunked (even as a bare
     # terminator) is a protocol violation that strict clients reject.
