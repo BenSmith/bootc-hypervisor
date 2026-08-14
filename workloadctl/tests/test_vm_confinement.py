@@ -147,8 +147,9 @@ class TestCilModule(unittest.TestCase):
         self.assertRegex(self.rules, r"allow wlvfsd_t svirt_image_t \(dir ")
 
     def test_serves_fuse_writes_not_just_directory_reads(self):
-        """The gap in the original harvest: it ran with no QEMU client, so it
-        never served a request and measured only the open-the-share rules."""
+        """Serving FUSE means the whole write surface, not just opening the
+        share. A harvest taken with no QEMU client attached never serves a
+        request, so it measures the open-the-share rules and none of these."""
         for perm in ("create", "write", "unlink"):
             self.assertRegex(
                 self.rules,
