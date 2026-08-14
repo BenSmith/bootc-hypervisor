@@ -37,6 +37,20 @@ auth_format = "{secret}"
 connect_timeout = 15.0
 read_timeout = 900.0
 
+# Set true only for local testing, where the caller is your own login rather
+# than a workload user. In production an unregistered caller is a sandbox you
+# did not create. The broker logs a warning at startup while this is on.
+#
+# It also changes what the host-side entitlement is worth. Off, a caller must be
+# both routed here and named in [sandboxes] below, so neither list alone hands
+# out a credential. On, the redirect map is the only thing left — and its
+# elements are keyed by uid, which workloadctl reuses as soon as one is free.
+#
+# Keep it above the [sandboxes] tables. Below them it is parsed into whichever
+# table precedes it, where the broker never reads it: the default applies and
+# nothing says so.
+allow_unknown_callers = false
+
 # --- sandboxes -------------------------------------------------------------
 #
 # Keyed by WORKLOAD NAME. The broker resolves the caller by the uid owning the
@@ -57,16 +71,6 @@ credential = "anthropic-cheap-key"
 # credential = "local-inference-key"
 # auth_header = "Authorization"
 # auth_format = "Bearer {secret}"
-
-# Set true only for local testing, where the caller is your own login rather
-# than a workload user. In production an unregistered caller is a sandbox you
-# did not create. The broker logs a warning at startup while this is on.
-#
-# It also changes what the host-side entitlement is worth. Off, a caller must be
-# both routed here and named below, so neither list alone hands out a
-# credential. On, the redirect map is the only thing left — and its elements are
-# keyed by uid, which workloadctl reuses as soon as one is free.
-allow_unknown_callers = false
 
 # --- host wiring, for reference -------------------------------------------
 #

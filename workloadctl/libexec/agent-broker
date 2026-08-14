@@ -27,6 +27,7 @@ Usage: agent-broker /etc/agent-broker/broker.toml
 """
 
 import dataclasses
+import difflib
 import http.client
 import http.server
 import ipaddress
@@ -285,6 +286,37 @@ def _split_upstream(url, where):
     return up.hostname, up.port or 443, up.path.rstrip("/")
 
 
+# Every key the broker reads, at each level. Anything else is a typo or a key
+# from a version that did not survive, and both are refused rather than
+# defaulted: an operator who writes `allow_unknown_caller` or `tls_certificate`
+# gets a broker that starts, reports itself healthy, and applies a policy they
+# did not choose. Unknown keys are cheap to catch and silent to miss, and every
+# one of these decides who gets a credential.
+CONFIG_KEYS = frozenset({
+    "upstream", "credential", "listen_address", "listen_port", "auth_header",
+    "auth_format", "sandboxes", "allow_unknown_callers", "connect_timeout",
+    "read_timeout", "relax_x509_strict", "tls_cert", "tls_key",
+})
+
+# What a [sandboxes.<name>] table may override. Narrower than the top level by
+# design: the rest are host-global.
+SANDBOX_KEYS = frozenset({"upstream", "credential", "auth_header", "auth_format"})
+
+
+def reject_unknown_keys(present, known, where):
+    """Refuse anything outside `known`, naming the nearest real key if there
+    is one -- most of these are a plural or an underscore away from correct."""
+    unknown = sorted(set(present) - known)
+    if not unknown:
+        return
+    described = []
+    for key in unknown:
+        near = difflib.get_close_matches(key, sorted(known), n=1)
+        described.append(f"'{key}'" + (f" (did you mean '{near[0]}'?)" if near else ""))
+    plural = "s" if len(unknown) > 1 else ""
+    sys.exit(f"{where}: unknown key{plural}: " + ", ".join(described))
+
+
 def load_config(path):
     with open(path, "rb") as fh:
         cfg = tomllib.load(fh)
@@ -301,6 +333,11 @@ def load_config(path):
             sys.exit(f"broker.toml: [sandboxes] maps a workload NAME to a "
                      f"table now, not {key!r} to a string -- callers are "
                      f"identified by uid, not by address (docs/agent-broker.md §5)")
+        reject_unknown_keys(value, SANDBOX_KEYS, f"broker.toml: [sandboxes.{key}]")
+
+    # After the two migration checks above, so a stale file gets the message
+    # that explains it rather than a bare "unknown key".
+    reject_unknown_keys(cfg, CONFIG_KEYS, "broker.toml")
 
     for required in ("upstream", "credential"):
         if not cfg.get(required):

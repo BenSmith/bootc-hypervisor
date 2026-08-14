@@ -408,6 +408,11 @@ Configuration that matters, beyond the comments in the example:
   installed.
 - **`relax_x509_strict`** exists for private CAs missing `keyUsage`, which
   Python 3.13+ rejects (§8). Do not set it without a reason.
+- **A key the broker does not read is a startup error**, at the top level and
+  inside `[sandboxes.<name>]` alike, with the nearest real key suggested. Every
+  option here decides who receives a credential or how the guest is served, so
+  a typo that silently falls back to the default gives an operator a broker
+  that starts, looks healthy, and applies a policy they did not pick.
 - **`allow_unknown_callers` is for local testing and logs a warning at
   startup.** With it off, a caller needs to be both routed here (a map element,
   added by its own VM unit) and named in `[sandboxes]`, so neither list alone

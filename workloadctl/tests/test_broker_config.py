@@ -5,6 +5,7 @@ import io
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 from tests import load_script
 
@@ -52,6 +53,77 @@ class TestStaleConfigIsRefused(unittest.TestCase):
         self.assertExits(BASE + """
             allow_unknown_sources = true
         """, "allow_unknown_callers")
+
+
+class TestUnknownKeysAreRefused(TestStaleConfigIsRefused):
+    """A key the broker does not read is a policy the operator thinks they set.
+
+    Every one of these silently applies a default instead: the broker starts,
+    logs nothing unusual and reports itself healthy while allowing callers it
+    was told to refuse, or serving plaintext where a cert was meant. There is
+    no legitimate extra key, so the cost of refusing is zero.
+    """
+
+    def test_a_misspelt_top_level_key_is_refused(self):
+        self.assertExits(BASE + """
+            allow_unknown_caller = true
+        """, "allow_unknown_callers")  # the suggestion, not just the rejection
+
+    def test_a_misspelt_sandbox_key_is_refused(self):
+        self.assertExits(BASE + """
+            [sandboxes.agent]
+            credentials = "other-key"
+        """, "[sandboxes.agent]")
+
+    def test_the_rejection_names_the_key(self):
+        self.assertExits(BASE + """
+            tls_certificate = "/etc/x.pem"
+        """, "tls_certificate")
+
+    def test_every_documented_key_is_accepted(self):
+        """The other half: the list must not have gone stale against the code
+        that reads it, or a valid config stops loading."""
+        cfg = load("""
+            upstream = "https://api.example.com/v1"
+            credential = "main-key"
+            listen_address = "127.0.0.1"
+            listen_port = 8081
+            auth_header = "x-api-key"
+            auth_format = "{secret}"
+            allow_unknown_callers = false
+            connect_timeout = 15.0
+            read_timeout = 900.0
+            relax_x509_strict = false
+            tls_cert = "/etc/broker.pem"
+            tls_key = "/etc/broker.key"
+
+            [sandboxes.agent]
+            upstream = "https://other.example.com/v1"
+            credential = "agent-key"
+            auth_header = "authorization"
+            auth_format = "Bearer {secret}"
+        """)
+        self.assertEqual(cfg["listen_port"], 8081)
+        self.assertIn("agent", cfg["sandboxes"])
+
+
+class TestTheShippedExampleIsValid(unittest.TestCase):
+    """The example is the file operators are told to copy, so a defect in it is
+    a defect in every deployment that follows the instructions.
+
+    It had one: `allow_unknown_callers` sat after the [sandboxes.*] tables, so
+    TOML parsed it into the last of them and the broker never read it. Setting
+    it for local testing did nothing at all, silently.
+    """
+
+    def test_it_loads(self):
+        cfg = broker.load_config(
+            str(Path(__file__).resolve().parents[1] /
+                "docs" / "agent-broker.toml.example"))
+        # Not just that it parses: that the keys landed at the level that reads
+        # them. A scalar swallowed by a preceding table still parses fine.
+        self.assertIn("allow_unknown_callers", cfg)
+        self.assertTrue(cfg["sandboxes"], "the example shows no sandboxes")
 
 
 class TestProfiles(unittest.TestCase):
