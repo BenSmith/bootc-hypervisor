@@ -327,6 +327,68 @@ class TestBindMountsAreCaughtToo(unittest.TestCase):
             cmd_backup._assert_no_mounts_under(self.root)
 
 
+class TestForceRefusesAMountedDataDir(unittest.TestCase):
+    """data/ being a mount point is the one --force cannot survive.
+
+    rmtree empties the mounted filesystem and only then fails EBUSY on the
+    mount point, so the loss is complete before anything reports a problem —
+    and for a bind mount the files it empties are the bind source's, somewhere
+    else entirely. The merge path is deliberately exempt: writing *into* a
+    mounted data/ is what an operator with a disk there is asking for.
+    """
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.spool = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def _mountinfo(self, *points):
+        path = self.spool / "mountinfo"
+        path.write_text("".join(
+            f"36 35 0:24 / {p} rw,relatime shared:1 - tmpfs tmpfs rw\n"
+            for p in points))
+        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", path))
+
+    def test_a_mounted_data_dir_is_refused(self):
+        self._mountinfo(self.data)
+        with self.assertRaises(ValueError) as cm:
+            cmd_backup._assert_data_dir_is_not_a_mount(self.data)
+        self.assertIn(str(self.data), str(cm.exception))
+
+    def test_the_refusal_offers_the_merge_as_a_way_through(self):
+        """An operator with a disk at data/ has somewhere to go: this is the
+        one restore they cannot run, not a wall."""
+        self._mountinfo(self.data)
+        with self.assertRaises(ValueError) as cm:
+            cmd_backup._assert_data_dir_is_not_a_mount(self.data)
+        self.assertIn("--force", str(cm.exception))
+        self.assertIn("Unmount", str(cm.exception))
+
+    def test_an_ordinary_data_dir_is_fine(self):
+        self._mountinfo("/srv/media", self.root)
+        cmd_backup._assert_data_dir_is_not_a_mount(self.data)  # no raise
+
+    def test_a_mount_under_it_is_not_this_check_s_business(self):
+        """That is _assert_no_mounts_under, which runs on both paths. Two
+        checks with two scopes; this one must not quietly take on the other's."""
+        (self.data / "share").mkdir()
+        self._mountinfo(self.data / "share")
+        cmd_backup._assert_data_dir_is_not_a_mount(self.data)  # no raise
+
+    def test_a_separate_disk_is_caught_without_mountinfo(self):
+        """The fallback: a device that differs from the parent's is a mount.
+        Narrower than mountinfo in the same way the device walk is — a
+        same-device bind mount is invisible to it — but better than nothing."""
+        self.enterContext(mock.patch.object(
+            cmd_backup, "MOUNTINFO", self.spool / "does-not-exist"))
+        self.enterContext(mock.patch.object(
+            cmd_backup.os, "lstat",
+            _lstat_faking_dev(cmd_backup, {str(self.data)}, fake_dev=999)))
+        with self.assertRaises(ValueError):
+            cmd_backup._assert_data_dir_is_not_a_mount(self.data)
+
+
 class TestRestoreRefusesOverMount(unittest.TestCase):
     """The guard has to actually run before the rmtree, not merely exist.
 
@@ -381,6 +443,65 @@ class TestRestoreRefusesOverMount(unittest.TestCase):
         would land the archive's copy on the operator's file server."""
         share_file = self._restore_over_a_mount(force=False)
         self.assertEqual(share_file.read_text(), "belongs to the file server")
+
+
+class TestRestoreRefusesToForceOverAMountedDataDir(unittest.TestCase):
+    """The guard reaching cmd_restore, not just existing beside it.
+
+    Same shape as TestRestoreRefusesOverMount, one level up: here data/ *is*
+    the mount rather than holding one. --force must abort with the files
+    intact; the merge must go through, because that is the setup working as
+    intended rather than a hazard.
+    """
+
+    def _restore(self, *, force):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        etc, var = tmp / "etc", tmp / "var"
+        etc.mkdir()
+        dest_data = var / "app" / "data"
+        dest_data.mkdir(parents=True)
+        on_the_disk = dest_data / "on-the-disk.txt"
+        on_the_disk.write_text("lives on the mounted disk")
+
+        self.enterContext(mock.patch.object(cmd_backup, "require_root", lambda: None))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", etc))
+        self.enterContext(mock.patch.object(
+            cmd_backup, "workload_data_dir", lambda n: var / n / "data"))
+        # data/ itself is the mount point, and nothing is mounted inside it.
+        mountinfo = tmp / "mountinfo"
+        mountinfo.write_text(
+            f"36 35 0:24 / {dest_data} rw,relatime shared:1 - tmpfs tmpfs rw\n")
+        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", mountinfo))
+
+        stage = tmp / "stage"
+        (stage / "data").mkdir(parents=True)
+        (stage / "data" / "from-archive.txt").write_text("restored")
+        (stage / "workload.toml").write_text(
+            '[workload]\nname = "app"\n[container]\nimage = "x"\n')
+        archive = tmp / "backup.tar.zst"
+        subprocess.run(
+            ["tar", "-C", str(stage), "--zstd", "-cf", str(archive), "."],
+            check=True,
+        )
+
+        args = argparse.Namespace(archive=str(archive), force=force, enable=False)
+        return args, dest_data, on_the_disk
+
+    def test_force_aborts_with_the_disk_untouched(self):
+        args, dest_data, on_the_disk = self._restore(force=True)
+        with self.assertRaises(SystemExit) as cm:
+            cmd_backup.cmd_restore(args, manager=None)  # type: ignore[arg-type]
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(on_the_disk.read_text(), "lives on the mounted disk")
+        self.assertFalse((dest_data / "from-archive.txt").exists())
+
+    def test_a_merge_is_still_allowed_through(self):
+        """The exemption, asserted rather than assumed: refusing this too would
+        break the operator who put data/ on its own disk on purpose."""
+        args, dest_data, on_the_disk = self._restore(force=False)
+        cmd_backup.cmd_restore(args, manager=None)  # type: ignore[arg-type]
+        self.assertEqual(on_the_disk.read_text(), "lives on the mounted disk")
+        self.assertEqual((dest_data / "from-archive.txt").read_text(), "restored")
 
 
 class TestBackupOne(unittest.TestCase):

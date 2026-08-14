@@ -284,6 +284,52 @@ def _assert_no_mounts_under(root: Path) -> None:
                 )
 
 
+def _assert_data_dir_is_not_a_mount(root: Path) -> None:
+    """Reject `restore --force` when data/ is *itself* a mount point.
+
+    Separate from _assert_no_mounts_under because the two restore paths want
+    different answers here, and only one of them is dangerous.
+
+    `--force` replaces data/ with shutil.rmtree, which unlinks every file
+    inside and only *then* calls rmdir on the mount point and fails EBUSY. The
+    contents are already gone by the time anything reports a problem — and for
+    a bind mount those contents are the bind source's, so the loss lands on the
+    operator's original directory somewhere else entirely.
+
+    The merge path is deliberately left alone. copytree writes *into* the
+    mounted filesystem, which is precisely what an operator who put data/ on
+    its own disk is asking for, and backup captures such a data/ in full (the
+    ignore callback is rooted at data_dir, so the mounted filesystem is the
+    baseline device rather than a boundary). Restoring one of those archives by
+    merging is ordinary, works today, and must keep working.
+
+    Refusing is all this does. Emptying the directory without removing it would
+    be right for a mounted disk and catastrophic for a bind mount, and the two
+    are not reliably distinguishable from mountinfo -- a bind of a filesystem
+    root reports the same mount root, `/`, as a whole-filesystem mount. That is
+    a judgement about the operator's intent, so it is left to the operator.
+    """
+    root_resolved = root.resolve()
+    on_a_mount = root_resolved in _mount_points()
+    if not on_a_mount:
+        # Fallback for an unreadable mountinfo, and narrower in the same way
+        # the device walk is: a directory whose device differs from its
+        # parent's is a mount, but a same-device bind mount is invisible here.
+        try:
+            on_a_mount = os.lstat(root).st_dev != os.lstat(root.parent).st_dev
+        except OSError:
+            on_a_mount = False
+    if on_a_mount:
+        raise ValueError(
+            f"the data directory is itself a mount point: {root}. --force "
+            f"replaces it with rmtree, which empties the mounted filesystem "
+            f"and only then fails on the busy mount point — and for a bind "
+            f"mount the files it empties are the original directory's. "
+            f"Unmount it first, or empty it yourself, or restore without "
+            f"--force to merge into it."
+        )
+
+
 def _extract_archive(archive: Path, staging: Path) -> None:
     """Extract a `.tar.zst` backup archive into `staging`.
 
@@ -425,6 +471,11 @@ def cmd_restore(args, manager: WorkloadManager):
                 # through a mount point and the merge writes through it.
                 try:
                     _assert_no_mounts_under(dest_data)
+                    if args.force:
+                        # Only the destructive path. A merge into a data/ that
+                        # is its own mount is what an operator with a disk
+                        # there is asking for; rmtree of it is not.
+                        _assert_data_dir_is_not_a_mount(dest_data)
                 except ValueError as e:
                     print(f"Error: {e}", file=sys.stderr)
                     sys.exit(1)

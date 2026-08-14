@@ -1899,23 +1899,54 @@ Everything else (system user, subuid/subgid, linger, SELinux labels, podman imag
 
 #### Mounts under `data/` are not captured
 
-Backup stops at filesystem boundaries. If you mount something inside a workload's
-data directory — a network share behind a VM's virtiofs volume, a second disk, a
-bind mount — that subtree is skipped, and the backup prints a warning naming
-each path it skipped. Whatever owns the mount owns its backup.
+Backup stops at filesystem boundaries. If you mount another *filesystem* inside a
+workload's data directory — a network share, a second disk — that subtree is
+skipped, and the backup prints a warning naming each path it skipped. Whatever
+owns the mount owns its backup.
 
-For the same reason, `restore --force` **refuses to run** while such a mount is
-in place, rather than replacing `data/` around it:
+A bind mount of a directory on the **same** filesystem is the exception, and it
+cuts the other way: it reports the same device on both sides, so backup does not
+see a boundary and captures it like any other directory.
+
+Restore **refuses to run** while any mount is in place under `data/` — both
+paths, not just `--force`:
 
 ```
-Error: a separate filesystem is mounted under the data directory:
-/var/lib/workloads/pihole/data/somedir. Unmount it before restoring with
---force (it is not captured in backups, so the archive holds nothing for it).
+Error: a mount point exists under the data directory:
+/var/lib/workloads/pihole/data/somedir. Unmount it before restoring — a
+restore writes through it, or with --force deletes what is on the other side
+of it (for a bind mount, that is the original directory).
 ```
 
-Unmount it and re-run. The refusal is deliberate: replacement deletes the old
-`data/` tree first, and a recursive delete does not stop at mount points either
-— it would empty the mounted filesystem before failing on the busy mount point.
+Unmount it and re-run. Both halves of that are deliberate. `--force` replaces
+`data/` by deleting the old tree first, and a recursive delete does not stop at
+mount points — it empties the mounted filesystem and only then fails on the busy
+mount point, by which time the files are gone. Without `--force` nothing is
+deleted, but the merge writes *through* the mount point, landing the archive's
+copy on whatever is mounted there.
+
+#### `data/` itself being a mount
+
+Putting a workload's whole `data/` on its own disk is supported, and backup
+captures it in full — the boundary check is rooted at `data/`, so the mounted
+filesystem is the baseline rather than an edge to stop at.
+
+`restore --force` still refuses:
+
+```
+Error: the data directory is itself a mount point:
+/var/lib/workloads/pihole/data. --force replaces it with rmtree, which empties
+the mounted filesystem and only then fails on the busy mount point — and for a
+bind mount the files it empties are the original directory's. Unmount it first,
+or empty it yourself, or restore without --force to merge into it.
+```
+
+Restoring **without** `--force` is allowed and is the intended route: merging
+writes into the mounted filesystem, which is what a disk mounted there is for.
+workloadctl will not empty the mount for you, because "replace `data/`" means
+two different things depending on what is mounted — for a disk it plausibly
+means emptying it, and for a bind mount it would destroy the original directory
+somewhere else on the host. That is a call only you can make.
 
 ### Portable Credential Transfer
 
