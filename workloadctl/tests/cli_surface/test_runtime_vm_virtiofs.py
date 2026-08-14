@@ -2,25 +2,23 @@
 test_runtime_vm_virtiofs.py — B6 runtime check: a `[vm]` workload's virtiofs
 share is actually usable by the guest, and the sidecar serving it is unprivileged.
 
-WHY THIS EXISTS. Until this file, nothing in the rung declared a `[vm].volumes`
-entry, so nothing ever started a virtiofsd sidecar on a booted host. The unit
-tests around it are real but they are all about the *text* of the unit — that
-the flags are spelled right, that the id ranges partition, that the sidecar does
-not declare RuntimeDirectory. Every bug this share has actually had was invisible
-to that kind of test and needed a guest writing to a real share to find:
+WHY THIS EXISTS. The unit tests around a virtiofs share are all about the *text*
+of the unit — that the flags are spelled right, that the id ranges partition,
+that the sidecar does not declare RuntimeDirectory. A rendered unit can be
+correct in every one of those ways while the share it produces is broken, and
+the breakages are not subtle once a guest touches them:
 
-  * the id map let a guest create host files owned by any uid it named,
-    including root, and a setuid-root binary planted from the guest showed up on
-    the host as `-rwsr-xr-x root root`;
-  * the SELinux module was missing lnk_file, so `ln -s` anywhere in the share
-    failed with EPERM under enforcing while every other operation worked —
-    a share that looks healthy until a package install or a git checkout;
-    fifo_file and sock_file were the same gap one step further out;
-  * `mv` between two directories in the share was denied for want of dir:reparent;
-  * a root-owned pid file left by an older sidecar stopped the unprivileged one
-    from starting, with an error that reads as a policy fault.
+  * an id map that lets a guest create host files owned by any uid it names,
+    root included, so a setuid-root binary planted from the guest lands on the
+    host as `-rwsr-xr-x root root`;
+  * a missing SELinux class — `ln -s` returning EPERM under enforcing while
+    every read, write, create and delete around it succeeds, or `mv` between two
+    directories denied for want of dir:reparent;
+  * a root-owned pid file in /run stopping the unprivileged daemon from
+    starting, with an error that reads as a policy fault.
 
-So the checks here are deliberately about *behaviour under a guest*, not shape.
+None of that is reachable without a guest writing to a real share, so the checks
+here are about *behaviour under a guest* rather than shape.
 
 Same gates and nested-KVM shape as test_runtime_vm_smoke.py: default-safe skips
 without nested /dev/kvm or the VM toolchain (this really runs under gate mode).
@@ -107,9 +105,9 @@ def test_sidecar_is_active_and_the_guest_has_the_share_mounted(vm):
 
 def test_sidecar_runs_unprivileged_with_no_capabilities(vm):
     """The privilege claim, measured on the running process rather than read off
-    the unit file. It used to run as root with CAP_SETUID/CAP_SETGID so it could
-    impersonate the calling guest user; the id map removed the caller, so there
-    is nothing left for it to be privileged for."""
+    the unit file. virtiofsd would need CAP_SETUID/CAP_SETGID to impersonate the
+    calling guest user per request; the id map means there is no caller to
+    impersonate, so there is nothing for it to be privileged for."""
     r = vm.run(["systemctl", "show", "-p", "MainPID", "--value", SIDECAR],
                sudo=False, check=True)
     pid = r.stdout.strip()

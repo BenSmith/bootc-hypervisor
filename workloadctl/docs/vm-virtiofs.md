@@ -31,7 +31,7 @@ user rather than as root.
 
 **Why.** Passing guest ids through is the obvious reading of "share a directory
 faithfully", and it means the guest chooses the owner and mode of files on the
-host filesystem. Measured on a live VM before this changed: a guest planting a
+host filesystem. Measured on a live VM with passthrough: a guest planting a
 setuid-root binary in its share produced `-rwsr-xr-x root root` on the host. The
 share sits in a 0700 workload-owned directory and nothing on the host execs from
 it, so it was not directly exploitable — but `backup` collects `data/`, so the
@@ -46,40 +46,40 @@ user. These are single-user appliance VMs. A workload that genuinely needs
 multi-user ownership wants a **data disk**: a block device the guest formats and
 owns outright, with no host-side identity to translate.
 
-**One id is not covered and does not need to be.** `--translate-*` ranges are
-half-open and built with `checked_add`, so a range reaching 2³² fails to parse;
-4294967295 is therefore left identity-mapped, and virtiofsd identity-maps
-anything unmapped rather than refusing it. While the daemon ran as root that was
-a hole — see §2. Unprivileged, it lands with everything else.
+**One id is not covered, and only §2 makes that safe.** `--translate-*` ranges
+are half-open and built with `checked_add`, so a range reaching 2³² fails to
+parse; 4294967295 is therefore left identity-mapped, and virtiofsd identity-maps
+anything unmapped rather than refusing it. Unprivileged it lands with everything
+else — at euid 0 it would not.
 
 ---
 
-## 2. The daemon has no privileges, because the map left it nobody to be
+## 2. The daemon has no privileges, because the map leaves it nobody to be
 
 virtiofsd serves each request under the *calling guest user's* uid and gid: it
-`setresuid`/`setresgid`s per request. That needs `CAP_SETUID`/`CAP_SETGID`, plus
-`fowner`/`fsetid` to carry a file's mode across the switch — which is why the
-sidecar originally ran as root.
+`setresuid`/`setresgid`s per request. That is what would demand
+`CAP_SETUID`/`CAP_SETGID`, plus `fowner`/`fsetid` to carry a file's mode across
+the switch.
 
-The id map removed the caller. Every guest id now translates to the one host
-uid, so `self.uid == current_uid` and the switch is never attempted at all
+The id map means it never happens. Every guest id translates to the one host
+uid, so `self.uid == current_uid` and the switch is not attempted at all
 (virtiofsd `passthrough/credentials.rs`: `change_uid = !self.uid.is_root() &&
-self.uid != current_uid`). A root daemon impersonating callers became an
-unprivileged daemon with no caller to impersonate.
+self.uid != current_uid`). There is no caller to impersonate, so there is
+nothing to be privileged for.
 
 It runs as `_wl-<name>` with `CapabilityBoundingSet=` and `AmbientCapabilities=`
 empty. Not reduced — empty.
 
-**The id map is now load-bearing for function, not only for security.** If a
-future change lets other guest ids through, the sidecar fails with `EPERM` on
-the credential switch rather than silently regaining the old privilege. That is
-the failure direction to preserve.
+**The id map is load-bearing for function, not only for security.** If a change
+lets other guest ids through, the sidecar fails with `EPERM` on the credential
+switch rather than quietly needing privilege back. That is the failure direction
+to preserve.
 
-It also closes the 4294967295 gap as a side effect. As root, a guest could ask
-for that uid, have virtiofsd call `setresuid(-1, 4294967295, -1)` — which the
-kernel reads as `-1`, "leave it alone", and returns success — and get a
-root-owned file. Unprivileged, the identical no-op leaves the euid at the
-workload user.
+It is also what makes the 4294967295 gap in §1 harmless. For that id virtiofsd
+calls `setresuid(-1, 4294967295, -1)` — which the kernel reads as `-1`, "leave
+it alone", and returns success — so the file gets whatever euid was already in
+effect. Unprivileged that is the workload user. At euid 0 it would be root, and
+a guest naming that id could plant a root-owned file.
 
 ### Why `--sandbox=none`
 
@@ -89,10 +89,10 @@ workload user.
 | `namespace` | Works, but needs `user_namespace create`, `cap_userns { sys_admin setpcap }`, and mount/mounton/unmount across several types — the cost `security/pasta_sandbox.cil` exists to pay. A bad trade for a process that holds no capabilities. |
 | `none` | What ships. Confined by the three layers below. |
 
-Dropping the chroot lost the daemon's self-imposed view restriction and gained a
-process that cannot chown, cannot setuid, and holds nothing to abuse. virtiofsd
-still installs its own seccomp filter, so that layer is untouched — and note it
-sets `PR_SET_NO_NEW_PRIVS` on *itself* in doing so, after the exec, which is the
+What that costs is the daemon's own view restriction; what it buys is a process
+that cannot chown, cannot setuid, and holds nothing to abuse. virtiofsd still
+installs its own seccomp filter, so that layer is intact — and note it sets
+`PR_SET_NO_NEW_PRIVS` on *itself* in doing so, **after** the exec, which is the
 only reason NNP can be observed on the running process at all (see §4).
 
 ---
@@ -105,8 +105,8 @@ only reason NNP can be observed on the running process at all (see §4).
    hierarchy read-only — `/run` included — with `ReadWritePaths=` naming exactly
    the share and the socket directory. Plus `ProtectProc=invisible`,
    `PrivateTmp=`, and `ProtectHome=` where the share allows it.
-3. **The `wlvfsd_t` SELinux domain**, which is now the whole of the type
-   enforcement rather than a backstop behind a chroot.
+3. **The `wlvfsd_t` SELinux domain**, which is the whole of the type
+   enforcement — there is no sandbox of virtiofsd's own behind it.
 
 The domain exists for a reason unrelated to any of this: once QEMU is confined
 as `svirt_t`, SELinux checks `connectto` against the *peer process's* domain,
@@ -189,17 +189,14 @@ served. `[vm].volumes` takes an arbitrary host path, so the generator sets
 
 ## 5. The SELinux rule list, and how it is produced
 
-**The method is the point, because the method is what has been wrong.** Each
-earlier version of this module was a list of the classes whoever wrote it
-happened to exercise, and each shipped something that worked for exactly those
-operations: the first harvest ran with no QEMU client attached at all, the
-second never wrote as the guest user, the third never created a symlink. Every
-gap presented identically — a share that is healthy until one ordinary
-operation is not.
+**The method is the point.** A permissive harvest yields exactly the classes the
+harvest exercised, and nothing warns about the rest — so an incomplete workout
+does not produce a module that fails, it produces one that serves a share which
+is healthy until a single ordinary operation is not.
 
-The current list was rebuilt from nothing: every `wlvfsd_t` rule removed, the
-domain marked permissive, dontaudit disabled, and a live guest driven through
-the filesystem surface rather than a remembered subset.
+Do not extend the list from a denial in isolation. Rebuild it: remove every
+`wlvfsd_t` rule, mark the domain permissive, disable dontaudit, and drive a live
+guest across the whole filesystem surface.
 
 ```bash
 sudo semanage permissive -a wlvfsd_t
@@ -214,19 +211,19 @@ read+create+rename+delete, hard link, FIFO and unix socket create and delete,
 chmod/chown/utimes on both files **and** directories, rename within a directory
 and across directories, statfs, a first-boot cloud-init, and a clean stop.
 
-Three passes were needed and each found what the last had missed:
+The classes an incomplete workout drops are predictable, and they are the ones
+below `file`:
 
-| pass | added |
+| class / permission | what a guest loses without it |
 |---|---|
-| 1 | `dir:rename`, `file:rename`, and `lnk_file` — absent entirely |
-| 2 | `dir:setattr`, `file:link`, `lnk_file:rename`, `fifo_file`, `sock_file` |
-| 3 | `dir:reparent`, `fifo_file:unlink`, `sock_file:unlink` |
+| `lnk_file` | `ln -s` anywhere in the share |
+| `fifo_file`, `sock_file` | a build that opens a FIFO; a daemon binding a unix socket in its own home |
+| `dir:setattr` | chmod/chown/utimes on a directory — cloud-init chowns a HOME |
+| `dir:rename`, `dir:reparent` | `mv` within a directory, and between two of them |
+| `file:link` | hard links |
 
-All of them pre-existing, and none reachable by any test that reads the rendered
-unit file. Concretely, under the previous module a guest could not `ln -s`
-anywhere in its share, `mv` between two directories in it, hard-link, chmod a
-directory, or create a FIFO or unix socket — while every other operation
-succeeded.
+A workout of files and directories alone finds none of them, and none is
+reachable by any test that reads the rendered unit file.
 
 **If this list ever needs extending, extend the workout first.**
 

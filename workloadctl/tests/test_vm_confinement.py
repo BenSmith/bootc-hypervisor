@@ -173,19 +173,19 @@ class TestCilModule(unittest.TestCase):
         """The sidecar's unit sets CapabilityBoundingSet= empty, so the process
         holds nothing SELinux could be asked to permit. A capability rule here
         would be unreachable text — and, worse, would read as a claim that the
-        daemon still needs privilege. The ten that used to be here (chown,
-        dac_override, setuid, setgid, fowner, fsetid, sys_chroot, ...) all
-        existed for the per-request credential switch the id map removed."""
+        daemon needs privilege. A capability denial for wlvfsd_t means the UNIT
+        changed, and the question is why it needs the privilege."""
         self.assertNotIn("(capability", self.rules)
         for cap in ("chown", "dac_override", "dac_read_search", "setuid",
                     "setgid", "fowner", "fsetid", "sys_resource", "setpcap"):
             self.assertNotIn(cap, self.rules, f"{cap} is back")
 
     def test_serves_every_kind_of_node_a_filesystem_has(self):
-        """The class list is where this module has been wrong twice. lnk_file was
-        missing outright — `ln -s` in a share failed under enforcing while every
-        other operation worked — and fifo_file/sock_file were the same gap one
-        step out. Create without unlink is the same bug in miniature."""
+        """A share is a filesystem, and these are the classes a workout of files
+        and directories alone never reaches. Without lnk_file, `ln -s` in a share
+        fails under enforcing while every other operation works; fifo_file and
+        sock_file are the same gap one step out. Create without unlink is the
+        same bug in miniature."""
         for cls in ("lnk_file", "fifo_file", "sock_file"):
             self.assertRegex(
                 self.rules,
@@ -198,7 +198,7 @@ class TestCilModule(unittest.TestCase):
 
     def test_supports_moving_things_around(self):
         """`mv` within a directory needs rename; `mv` between directories needs
-        reparent as well. Both were absent until a harvest actually ran one."""
+        reparent as well. Neither appears in a harvest that never runs one."""
         self.assertRegex(self.rules,
                          r"allow wlvfsd_t svirt_image_t \(dir \([^)]*rename")
         self.assertRegex(self.rules,
@@ -209,17 +209,17 @@ class TestCilModule(unittest.TestCase):
                          r"allow wlvfsd_t svirt_image_t \(file \([^)]*link")
 
     def test_directory_metadata_is_settable_not_just_file_metadata(self):
-        """cloud-init chowns the default user's HOME, a directory. The file-only
-        version of this rule passed every file-level test and still left a guest
-        whose injected ssh key sshd would not accept."""
+        """cloud-init chowns the default user's HOME, a directory. A file-only
+        version of this rule passes every file-level test and still leaves a
+        guest whose injected ssh key sshd will not accept."""
         self.assertRegex(self.rules,
                          r"allow wlvfsd_t svirt_image_t \(dir \([^)]*setattr")
 
     def test_drops_the_nss_lookups_socket_group_needed(self):
-        """--socket-group=<user> was the only reason this domain ever resolved a
-        group name. The unit dropped the option once the socket came to be owned
-        by the user QEMU already runs as, so the whole userdb/passwd block goes
-        with it — confirmed by a from-scratch permissive rebuild."""
+        """Resolving a group name is something only --socket-group=<user> would
+        ask for, and the unit does not pass it — the socket is already owned by
+        the user QEMU runs as. So the whole userdb/passwd block is absent,
+        confirmed by a from-scratch permissive rebuild."""
         for t in ("systemd_userdbd_t", "systemd_homed_t",
                   "systemd_userdbd_runtime_t", "passwd_file_t"):
             self.assertNotIn(t, self.rules)

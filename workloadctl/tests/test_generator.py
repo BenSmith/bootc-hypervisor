@@ -1901,14 +1901,14 @@ class TestGeneratorVmWorkload(unittest.TestCase):
     def test_virtiofsd_runs_unprivileged_with_no_capabilities(self):
         # The daemon has no caller to impersonate: the id map sends every guest
         # id to this one host uid, so virtiofsd's per-request credential switch
-        # is never attempted and the CAP_SETUID/CAP_SETGID that forced it to run
-        # as root are not needed. Verified on a live VM: CapPrm/CapEff/CapBnd
-        # all zero, and a first-boot cloud-init still completes.
+        # is never attempted and needs no CAP_SETUID/CAP_SETGID. Verified on a
+        # live VM: CapPrm/CapEff/CapBnd all zero, and a first-boot cloud-init
+        # completes.
         sidecar, _uid = self._sidecar_and_uid()
         self.assertIn("User=_wl-fedora-vm", sidecar)
         self.assertIn("Group=_wl-fedora-vm", sidecar)
-        # Empty, not reduced. A non-empty set here means something regained a
-        # privilege and the id-map argument above no longer holds.
+        # Empty, not reduced. A non-empty set here means something gained a
+        # privilege and the id-map argument above does not hold.
         self.assertIn("CapabilityBoundingSet=\n", sidecar)
         self.assertIn("AmbientCapabilities=\n", sidecar)
 
@@ -1937,9 +1937,9 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("--sandbox=chroot", sidecar)
         self.assertNotIn("--sandbox=namespace", sidecar)
         self.assertIn("--inode-file-handles=never", sidecar)
-        # --socket-group existed so an unprivileged QEMU could reach a
-        # root-owned socket. The socket is now owned by the user QEMU already
-        # runs as, and the option's only other effect is to widen its mode.
+        # --socket-group is what an unprivileged QEMU would need to reach a
+        # root-owned socket. This socket is owned by the user QEMU runs as, so
+        # the option's only remaining effect would be to widen its mode.
         self.assertNotIn("--socket-group", sidecar)
 
     def test_virtiofsd_can_write_the_share_and_the_socket_dir(self):
