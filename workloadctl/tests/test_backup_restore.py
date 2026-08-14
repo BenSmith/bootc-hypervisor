@@ -254,6 +254,79 @@ class TestAssertNoMountsUnder(unittest.TestCase):
         self.assertIn("Unmount", msg)
 
 
+class TestBindMountsAreCaughtToo(unittest.TestCase):
+    """The case st_dev is structurally unable to see.
+
+    `mount --bind` of a directory that lives on the same filesystem reports the
+    same st_dev on both sides, so the device walk finds nothing while rmtree
+    still follows it and unlinks the files at the bind *source* — somewhere
+    else on that filesystem entirely. It is also the likelier of the two to
+    exist, since binding a directory from the same disk needs no second disk.
+
+    mountinfo is the list that knows, so these drive a synthetic one: the
+    parser is under test as much as the check.
+    """
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.root / "sub").mkdir()
+        self.spool = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def _mountinfo(self, *points):
+        """A mountinfo naming `points` as mount points, and nothing else.
+
+        Every entry claims the same device as everything else, which is the
+        situation being tested: nothing in the tree looks unusual to lstat.
+        """
+        path = self.spool / "mountinfo"
+        path.write_text("".join(
+            f"36 35 0:24 / {p} rw,relatime shared:1 - tmpfs tmpfs rw\n"
+            for p in points))
+        self.enterContext(mock.patch.object(cmd_backup, "MOUNTINFO", path))
+
+    def test_a_same_device_bind_mount_under_the_tree_is_refused(self):
+        target = self.root / "sub" / "share"
+        target.mkdir()
+        self._mountinfo(target)
+        with self.assertRaises(ValueError) as cm:
+            cmd_backup._assert_no_mounts_under(self.root)
+        self.assertIn(str(target), str(cm.exception))
+        self.assertIn("Unmount", str(cm.exception))
+
+    def test_a_mount_somewhere_else_is_not_this_tree_s_problem(self):
+        self._mountinfo("/srv/media", "/home", self.root.parent)
+        cmd_backup._assert_no_mounts_under(self.root)  # no raise
+
+    def test_the_data_dir_being_a_mount_itself_is_not_under_itself(self):
+        """Deliberate boundary: this guard is about mounts *inside* the tree.
+        An operator who put data/ on its own disk is served by the merge path
+        writing into it, which is what they asked for."""
+        self._mountinfo(self.root)
+        cmd_backup._assert_no_mounts_under(self.root)  # no raise
+
+    def test_a_mount_point_with_a_space_is_decoded(self):
+        """mountinfo octal-escapes space, tab, newline and backslash. Left
+        encoded, `/mnt/my\\040share` matches no real path and the mount is
+        missed — the failure being silent is what makes it worth a test."""
+        target = self.root / "my share"
+        target.mkdir()
+        self._mountinfo(str(target).replace(" ", r"\040"))
+        with self.assertRaises(ValueError):
+            cmd_backup._assert_no_mounts_under(self.root)
+
+    def test_an_unreadable_mountinfo_falls_back_to_the_device_walk(self):
+        """Degrade to the older, narrower check rather than to no check."""
+        self.enterContext(mock.patch.object(
+            cmd_backup, "MOUNTINFO", self.spool / "does-not-exist"))
+        mnt = self.root / "sub" / "elsewhere"
+        mnt.mkdir()
+        self.enterContext(mock.patch.object(
+            cmd_backup.os, "lstat",
+            _lstat_faking_dev(cmd_backup, {str(mnt)}, fake_dev=999)))
+        with self.assertRaises(ValueError):
+            cmd_backup._assert_no_mounts_under(self.root)
+
+
 class TestRestoreRefusesOverMount(unittest.TestCase):
     """The guard has to actually run before the rmtree, not merely exist.
 

@@ -178,6 +178,47 @@ def _assert_no_escaping_symlinks(root: Path) -> None:
                 )
 
 
+MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def _unescape_mountinfo(text: str) -> str:
+    r"""Decode the octal escapes mountinfo uses for space, tab, newline and \\."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and text[i + 1:i + 4].isdigit() and len(text) >= i + 4:
+            out.append(chr(int(text[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _mount_points(mountinfo: Path | None = None) -> list[Path]:
+    """Every mount point visible to this process, from /proc/self/mountinfo.
+
+    Field 5 (index 4) is the mount point. An unreadable mountinfo yields
+    nothing rather than raising: the st_dev walk in _assert_no_mounts_under is
+    still there and still catches the cross-device case, so a host without
+    /proc degrades to the older, narrower check instead of to no check.
+
+    Resolved at call time, not bound as a default argument: a default is
+    evaluated once when the function is defined, which would make the module
+    constant unpatchable and every test of this read the real host's mounts.
+    """
+    mountinfo = mountinfo or MOUNTINFO
+    try:
+        lines = mountinfo.read_text().splitlines()
+    except OSError:
+        return []
+    points = []
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) > 4:
+            points.append(Path(_unescape_mountinfo(fields[4])))
+    return points
+
+
 def _assert_no_mounts_under(root: Path) -> None:
     """Reject a restore into `root` if another filesystem is mounted inside it.
 
@@ -195,11 +236,35 @@ def _assert_no_mounts_under(root: Path) -> None:
     predates the mount, which is the ordinary way to arrive here: captured when
     the path was a plain directory, restored after a share was mounted over it.
 
-    Refusing beats skipping. Backup omits these mounts by design (see
+    Refusing beats skipping. Backup omits cross-device mounts by design (see
     backup._ignore_other_filesystems), so a current archive has nothing to
     restore there anyway; unmounting is a deliberate operator action, and a
     half-written data/ is worse than a restore that declined to start.
+
+    TWO CHECKS, BECAUSE st_dev DOES NOT SEE A BIND MOUNT
+
+    Comparing st_dev finds another *filesystem*, which is not the same as
+    finding another mount. `mount --bind` of a directory that lives on the same
+    filesystem reports the same st_dev on both sides, so the walk below sees
+    nothing unusual — while rmtree still follows it and unlinks the files at
+    the bind *source*, somewhere else on that filesystem entirely. Same
+    catastrophe as the cross-device case, and the more likely one to exist:
+    binding a directory from the same disk needs no second disk.
+
+    mountinfo is the authoritative list and is checked first because it covers
+    both kinds. The st_dev walk stays as the fallback for a host where
+    /proc/self/mountinfo cannot be read.
     """
+    root_resolved = root.resolve()
+    for point in _mount_points():
+        if point != root_resolved and point.is_relative_to(root_resolved):
+            raise ValueError(
+                f"a mount point exists under the data directory: {point}. "
+                f"Unmount it before restoring — a restore writes through it, "
+                f"or with --force deletes what is on the other side of it "
+                f"(for a bind mount, that is the original directory)."
+            )
+
     root_dev = root.stat().st_dev
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         for entry in dirnames + filenames:
