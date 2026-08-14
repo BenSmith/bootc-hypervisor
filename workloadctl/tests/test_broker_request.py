@@ -383,6 +383,54 @@ class StubResponse:
         return b""
 
 
+class TestTheBodyBudgetIsShared(BrokerServerCase):
+    """The bound the other two limits do not express.
+
+    A request body is buffered whole before it is forwarded. MAX_REQUEST_BYTES
+    bounds one of them and MAX_PER_CALLER bounds one caller's connections, so
+    every individual request stays legal while the sum does not: 32 connections
+    each sending 64 MiB reserved 2 GiB. On a hypervisor that is memory the VMs
+    are using.
+    """
+
+    def test_a_request_past_the_shared_budget_is_refused(self):
+        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 64):
+            sock = self.connect()
+            sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
+                         b"Content-Length: 128\r\n\r\n" + b"x" * 128)
+            received = self.drain(sock)
+        self.assertIn(b"503", received.split(b"\r\n")[0])
+
+    def test_a_bodiless_request_never_costs_budget(self):
+        """Otherwise a full budget stops GETs, which hold nothing."""
+        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 0):
+            self.assertTrue(self.server.reserve_body(0))
+
+    def test_one_request_can_exhaust_the_budget_for_another(self):
+        """The property under test: the budget is shared, not per connection.
+        A per-connection cap is what MAX_REQUEST_BYTES already was."""
+        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 100):
+            self.assertTrue(self.server.reserve_body(60))
+            self.assertFalse(self.server.reserve_body(60),
+                             "two 60-byte bodies fit in a 100-byte budget")
+            self.server.release_body(60)
+            self.assertTrue(self.server.reserve_body(60),
+                            "the budget did not come back when the first ended")
+            self.server.release_body(60)
+        self.assertEqual(self.server._inflight, 0)
+
+    def test_the_budget_comes_back_after_a_refusal(self):
+        """The leak that would turn a transient overload into a wedged broker:
+        every later request refused because a reservation was never returned."""
+        with mock.patch.object(broker, "MAX_INFLIGHT_BYTES", 64):
+            for _ in range(3):
+                sock = self.connect()
+                sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Length: 128\r\n\r\n" + b"x" * 128)
+                self.drain(sock)
+        self.assertEqual(self.server._inflight, 0)
+
+
 class DyingUpstream:
     """Stands in for HTTPSConnection. Answers, then ends per its response."""
 

@@ -427,6 +427,7 @@ Configuration that matters, beyond the comments in the example:
 | `400` | An absolute-form request target (that is a *proxy's* job, not this one's); a `Content-Length` that is not a non-negative number; or two of them, which frame two different messages. |
 | `411` | A chunked request body. The broker does not decode one, and forwarding it as an empty body — which is what it used to do — meant the provider answered a request the caller never sent. Send `Content-Length`. |
 | `413` | A body over 64 MiB. |
+| `503` | The broker is already holding 256 MiB of request bodies for other callers. Retryable, and not about this request: 64 MiB is legal for any one of them, so it is the sum that is refused. |
 
 Every refusal closes the connection: a rejected request has left its body
 unread, so the next bytes on the wire are body where a request line should be.
@@ -437,6 +438,12 @@ per-caller ceiling is the one that matters — without it a single sandbox
 opening 32 sockets, sending nothing, denied the broker to every other sandbox
 on the host. Connections that make no progress for 60 seconds are dropped, so
 holding one open costs a caller something.
+
+Memory is bounded separately from connections, because a request body is
+buffered whole before it goes upstream and neither of the connection limits
+says anything about size. 256 MiB across all callers at once, reserved on the
+declared `Content-Length` before the bytes are read. This is a hypervisor: the
+RAM a sandboxed agent would be reaching for is RAM the VMs are using.
 
 An upstream that fails is `502` — but only while the broker still owns the
 response. Once the upstream's own status and headers have gone to the caller,
