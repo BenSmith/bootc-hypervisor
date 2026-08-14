@@ -128,6 +128,31 @@ def _lstat_faking_dev(module, fake_paths: set, fake_dev: int):
     return lstat
 
 
+def _route_subprocess(case):
+    """tar for real, every other command a no-op, for the duration of `case`.
+
+    cmd_restore runs `systemctl stop` before it reaches any of the guards these
+    tests are about. That is fine on a developer box and fatal in CI: the image
+    build compiles this RPM inside a bare `fedora:latest` container with no
+    systemd, where the call raises FileNotFoundError and the test *errors*
+    rather than exercising anything.
+
+    tar has to stay real — the archive is genuinely extracted — so route on
+    argv[0] rather than mocking subprocess wholesale. Note this patches the
+    shared subprocess module, so archive-building calls in the tests themselves
+    also come through here, which is the other reason tar cannot be stubbed.
+    """
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd and cmd[0] == "tar":
+            return real_run(cmd, *a, **kw)
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    case.enterContext(mock.patch.object(cmd_backup.subprocess, "run",
+                                        side_effect=fake_run))
+
+
 class TestBackupSkipsOtherFilesystems(unittest.TestCase):
     """Capture must stop at mount points under data/.
 
@@ -461,6 +486,7 @@ class TestRestoreRefusesOverMount(unittest.TestCase):
         self.enterContext(mock.patch.object(
             cmd_backup.os, "lstat",
             _lstat_faking_dev(cmd_backup, {str(mnt)}, fake_dev=999)))
+        _route_subprocess(self)
 
         stage = tmp / "stage"
         (stage / "data" / "somedir").mkdir(parents=True)
@@ -518,6 +544,7 @@ class TestRestoreRefusesToForceOverAMountedDataDir(unittest.TestCase):
         mountinfo.write_text(
             f"36 35 0:24 / {dest_data} rw,relatime shared:1 - tmpfs tmpfs rw\n")
         self.enterContext(mock.patch.object(workload_lib, "MOUNTINFO", mountinfo))
+        _route_subprocess(self)
 
         stage = tmp / "stage"
         (stage / "data").mkdir(parents=True)
@@ -645,16 +672,7 @@ class TestRestoreFlow(unittest.TestCase):
         self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.etc))
         self.enterContext(mock.patch.object(
             cmd_backup, "workload_data_dir", lambda n: self.var / n / "data"))
-        # systemctl stop / any subprocess other than tar → no-op mock, but tar
-        # must run for real to extract the archive. Route by argv[0].
-        real_run = subprocess.run
-
-        def fake_run(cmd, *a, **kw):
-            if cmd and cmd[0] == "tar":
-                return real_run(cmd, *a, **kw)
-            return mock.Mock(returncode=0, stdout="", stderr="")
-        self.enterContext(mock.patch.object(cmd_backup.subprocess, "run",
-                                            side_effect=fake_run))
+        _route_subprocess(self)
 
     def _args(self, archive, **kw):
         base = dict(archive=str(archive), force=False, enable=False)
