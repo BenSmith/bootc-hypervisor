@@ -187,10 +187,24 @@ def make_stub_cert():
     keyCertSign -- the same defect the design doc's relax_x509_strict exists
     for. Emitting a well-formed cert here keeps the rig testing the broker
     rather than that.
+
+    An existing pair is reused only while it is still valid. Existence alone is
+    not enough: the certificate lives two days and the rig is run by hand, so
+    the common case is a rerun after it has lapsed -- and a stale one fails at
+    the upstream leg, which reads as a TLS fault in the broker rather than as
+    the rig's own leftover.
     """
     cert, key = RIG / "stub-cert.pem", RIG / "stub-key.pem"
     if cert.exists() and key.exists():
-        return cert, key
+        # -checkend is seconds ahead, not now: a certificate expiring mid-run
+        # is the same failure, arriving later and harder to read.
+        fresh = run(["openssl", "x509", "-checkend", "3600", "-noout",
+                     "-in", str(cert)], check=False, timeout=60)
+        if fresh.returncode == 0:
+            return cert, key
+        say(f"  stub certificate {cert} has expired — regenerating")
+        cert.unlink()
+        key.unlink(missing_ok=True)
     run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", str(key), "-out", str(cert), "-days", "2",
          "-subj", "/CN=localhost",

@@ -104,8 +104,10 @@ halves — the broker's `listen_address`/`listen_port` defaults and
 `VM_BROKER_LISTEN_ADDR`/`VM_BROKER_LISTEN_PORT` in `lib/vm.py`; a drift looks
 exactly like the broker being down, and `tests/test_vm_broker.py` asserts it.
 Design, threat model and operating instructions: `workloadctl/docs/agent-broker.md`.
-The end-to-end seam (a real guest dialling a real broker) is still unproven —
-`tests/manual/broker_rig.py` is the rig for it and has not been run.
+The end-to-end seam (a real guest dialling a real broker) is proven by
+`tests/manual/broker_rig.py` — four throwaway VM workloads, 18 assertions,
+last green 2026-08-14 against the installed RPM. It needs root and a KVM host,
+so it runs by hand, not in `just test` or the runtime rung.
 
 ## Docs policy: tracked files may not cite untracked docs
 
