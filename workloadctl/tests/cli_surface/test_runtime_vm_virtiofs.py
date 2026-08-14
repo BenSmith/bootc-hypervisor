@@ -42,6 +42,32 @@ GUEST_SHARE = "/mnt/share"
 SOCKET = f"/run/workload-vm/{WORKLOAD}/virtiofs-mnt-share.sock"
 
 
+def _dump_denials(target):
+    """Print the guest's recent audit denials alongside the journal.
+
+    Added because a gate failure here could not be diagnosed without it: the
+    sidecar died with `Mmap(PermissionDenied)` and the journal dump showed the
+    error but nothing about whether SELinux caused it. For a daemon whose whole
+    design is "unprivileged, confined by policy", a denial is the single most
+    likely explanation and the one thing the harness was not capturing.
+
+    Best-effort and never raises — this runs on a path that is already failing,
+    and losing the real error behind a diagnostic's own exception is a bad
+    trade. Plain grep rather than ausearch: ausearch's own time filters have
+    been unreliable enough to hide records that were sitting in the log.
+    """
+    for pattern in ("wlvfsd", "virtiofsd", "denied"):
+        try:
+            r = target.run(["grep", "-a", "-m", "25", pattern,
+                            "/var/log/audit/audit.log"],
+                           sudo=True, check=False, timeout=60)
+            if r.stdout.strip():
+                print(f"----- audit.log matches for {pattern!r} -----")
+                print(r.stdout[-4000:])
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not mask
+            print(f"----- could not read audit.log for {pattern!r}: {exc}")
+
+
 @pytest.fixture(scope="module")
 def vm(target):
     """Boot the share-carrying VM once for the whole module.
@@ -53,18 +79,20 @@ def vm(target):
     skip_if_no_kvm(target)
     skip_if_no_vm_toolchain(target)
 
-    _install_toml(target, f"{WORKLOAD}.toml")
     try:
+        _install_toml(target, f"{WORKLOAD}.toml")
         try:
             _enable_workload(target, WORKLOAD, timeout=900, expect_container=False)
         except Exception:
             dump_journal(target, WORKLOAD, extra_units=[SIDECAR])
+            _dump_denials(target)
             raise
 
         reached = poll_vm_reachable(target, WORKLOAD, token="virtiofs-up",
                                     timeout=300)
         if not (reached and reached.rc == 0 and "virtiofs-up" in reached.stdout):
             dump_journal(target, WORKLOAD, extra_units=[SIDECAR])
+            _dump_denials(target)
         assert reached is not None and reached.rc == 0, (
             f"`workloadctl exec {WORKLOAD}` never reached the guest "
             f"(rc={None if reached is None else reached.rc})"

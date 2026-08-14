@@ -110,18 +110,32 @@ def _stub_up(target):
     """
     target.put_content(STUB_SOURCE, STUB_SCRIPT)
     names = " ".join([ALLOWED, WILD_SUB, WILD_APEX])
+    # Lists, and `bash -c` for anything with shell syntax in it. There is no
+    # shell on the far end: Target.run shlex.splits a string command and
+    # shlex.quotes it back together, so `>>`, `&` and `$!` written bare arrive
+    # as literal arguments. `printf ... '>>' /etc/hosts` then exits 0 having
+    # appended nothing, and the backgrounding never happens — the stub runs in
+    # the foreground and holds the ssh channel until the 300s timeout.
+    #
+    # A list bypasses the split, so the whole script becomes one argument to
+    # bash -c. _stub_listening already worked for exactly this reason: its
+    # shell fragment was quoted, so shlex round-tripped it intact.
     target.run(
-        f"printf '127.0.0.1 {names}  # {HOSTS_MARK}\\n' >> /etc/hosts",
+        ["bash", "-c",
+         f"printf '127.0.0.1 {names}  # {HOSTS_MARK}\\n' >> /etc/hosts"],
         sudo=True, check=True)
     # UNLISTED resolves too. If it did not, a 403 for it would be ambiguous —
     # tinyproxy refuses on the filter before it ever resolves, but a reader
     # cannot tell that from the result, and a test whose negative case would
     # also pass with the mechanism removed is not evidence.
     target.run(
-        f"printf '127.0.0.1 {UNLISTED}  # {HOSTS_MARK}\\n' >> /etc/hosts",
+        ["bash", "-c",
+         f"printf '127.0.0.1 {UNLISTED}  # {HOSTS_MARK}\\n' >> /etc/hosts"],
         sudo=True, check=True)
     target.run(
-        f"setsid nohup python3 {STUB_SCRIPT} >/dev/null 2>&1 & echo $! > {STUB_PID}",
+        ["bash", "-c",
+         f"setsid nohup python3 {STUB_SCRIPT} >/dev/null 2>&1 & "
+         f"echo $! > {STUB_PID}"],
         sudo=True, check=True)
 
 
@@ -143,12 +157,16 @@ def _env_value(env, name):
 
 def _stub_down(target):
     """Tolerant teardown: every step is legitimately a no-op after a failed setup."""
-    target.run(f"test -f {STUB_PID} && kill $(cat {STUB_PID}) || true",
+    # `&&`, `$(...)` and `||` are shell syntax too — see _stub_up. Left as a
+    # bare string this killed nothing, so every run leaked its stub.
+    target.run(["bash", "-c",
+                f"test -f {STUB_PID} && kill $(cat {STUB_PID}) || true"],
                sudo=True, check=False)
-    target.run(f"rm -f {STUB_PID} {STUB_SCRIPT}", sudo=True, check=False)
+    target.run(["rm", "-f", STUB_PID, STUB_SCRIPT], sudo=True, check=False)
     # A pidfile rather than `pkill -f`: the pattern would also match the shell
     # ssh spawned to run it, killing the connection instead of the stub.
-    target.run(f"sed -i '/{HOSTS_MARK}/d' /etc/hosts", sudo=True, check=False)
+    target.run(["sed", "-i", f"/{HOSTS_MARK}/d", "/etc/hosts"],
+               sudo=True, check=False)
 
 
 def _stub_listening(target) -> bool:
