@@ -1178,6 +1178,11 @@ The sidecar itself runs as `_wl-<name>` with no capabilities, which is possible
 only because of that mapping: with no guest identity left to assume, it has
 nothing to be privileged for.
 
+[vm-virtiofs.md](vm-virtiofs.md) covers the rest: what confines the sidecar, the
+SELinux rule list and how it is produced, and the three things that break a
+share (a `NoNewPrivileges=` drop-in, a stale pid file after an upgrade, and a
+volume under `/home`).
+
 **A volume outside the workload's own tree needs an SELinux label.** The
 workload's directory is labelled `svirt_image_t` at enable, and the sidecar is
 confined (see below), so a share under `/var/lib/workloads/<name>/` works with

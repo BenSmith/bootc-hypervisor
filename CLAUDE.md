@@ -84,6 +84,8 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
 
+Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` — every guest id squashes to the workload user on the host, the sidecar runs unprivileged with an empty capability bounding set, and the unit must never gain `NoNewPrivileges=` (it breaks the SELinux domain transition and fails with a bare `203/EXEC`).
+
 ### The credential broker
 
 `libexec/agent-broker` holds a provider API key that a sandboxed coding-agent VM

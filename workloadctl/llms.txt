@@ -315,7 +315,9 @@ A harvest is only ever as good as the workout behind it, and this is where the
 virtiofsd domain has been wrong twice: the module is a list of the classes
 someone happened to exercise, so a share can pass every test and still deny
 `ln -s`. `security/workload-vm.cil` records the workout its current list came
-from — extend that before extending the rules.
+from — extend that before extending the rules. `docs/vm-virtiofs.md` is the
+connected version: the share's ownership model, why the sidecar holds no
+capabilities, what confines it instead, and the symptom table.
 
 ### Hostname policy: the per-workload proxy (step 4)
 

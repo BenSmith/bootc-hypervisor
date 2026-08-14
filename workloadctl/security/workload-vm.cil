@@ -1,6 +1,10 @@
 ; workload-vm: the host-global SELinux delta VM workloads need once QEMU is
 ; confined as svirt_t (ADR 006 step 3).
 ;
+; The connected version of everything below — the share's ownership model, why
+; the sidecar holds no capabilities, what confines it instead of the chroot, and
+; a symptom table — is docs/vm-virtiofs.md. This file carries the per-rule why.
+;
 ; Two facts live here, and they have the same root: workloadctl runs QEMU as
 ; svirt_t *outside libvirt*, so two things libvirt does for QEMU we do
 ; differently, and the shipped policy is written around libvirt's way.
