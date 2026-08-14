@@ -597,6 +597,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _forward(self, method):
         started = time.monotonic()
+        # Per request, not per connection: a keep-alive connection runs this
+        # handler many times and the second request must not inherit the
+        # first's verdict about whether a response is already on the wire.
+        self.response_started = False
         profile, sandbox = self._identify()
         if profile is None:
             log("deny", reason="unidentified", caller=sandbox)
@@ -640,11 +644,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ms=int((time.monotonic() - started) * 1000))
         except (OSError, http.client.HTTPException) as exc:
             log("upstream-error", sandbox=sandbox, path=self.path,
-                error=type(exc).__name__)
-            try:
-                self._fail(502, f"upstream request failed: {type(exc).__name__}\n")
-            except OSError:
-                pass  # client already gone
+                error=type(exc).__name__, streamed=self.response_started)
+            if self.response_started:
+                # A status line and headers -- and usually some body -- are
+                # already on the wire. _fail() would send a *second* complete
+                # response, which the client reads as body content of the
+                # first: under Content-Length it either truncates or arrives as
+                # trailing garbage, and under chunked its raw bytes are parsed
+                # as a chunk header and kill the message. Both leave the caller
+                # holding something that looks like an answer.
+                #
+                # Dropping the connection instead is the one signal every
+                # client already understands. A Content-Length body short of
+                # its declared length, or a chunked body with no terminating
+                # 0-chunk, is a truncated message by definition -- so the
+                # caller gets an error rather than a plausible answer, which is
+                # the whole point when the response carries model output.
+                self.close_connection = True
+            else:
+                try:
+                    self._fail(502,
+                               f"upstream request failed: {type(exc).__name__}\n")
+                except OSError:
+                    pass  # client already gone
         finally:
             if conn is not None:
                 conn.close()
@@ -671,6 +693,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # No length up front (streaming): re-frame as chunked so the client
             # can consume it incrementally and still see a clean end-of-message.
             self.send_header("Transfer-Encoding", "chunked")
+        # Set before the flush, not after: once end_headers() has begun writing
+        # there is no state in which sending a different response is still
+        # correct, and a partial head is exactly the case where appending a
+        # second one does the most damage. See the handler in _forward.
+        self.response_started = True
         self.end_headers()
 
         sent = 0

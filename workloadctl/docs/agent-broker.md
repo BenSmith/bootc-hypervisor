@@ -433,6 +433,17 @@ opening 32 sockets, sending nothing, denied the broker to every other sandbox
 on the host. Connections that make no progress for 60 seconds are dropped, so
 holding one open costs a caller something.
 
+An upstream that fails is `502` — but only while the broker still owns the
+response. Once the upstream's own status and headers have gone to the caller,
+a failure part-way through the body cannot be reported as a status, because
+one is already sent; writing a 502 there puts a whole second response *inside
+the first one's body*, which a caller reads as content. So the connection is
+dropped instead, leaving a body short of its `Content-Length` or a chunked body
+with no terminating chunk. Both are truncated messages by definition, which is
+what makes a client raise rather than hand a half-finished completion to the
+agent as if it were the whole answer. In the log the two cases are one event
+with `streamed=` telling them apart.
+
 ### What the guest does with it
 
 Every guest is handed the same advertised literal in `WORKLOAD_BROKER_URL`

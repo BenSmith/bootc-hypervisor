@@ -9,9 +9,11 @@ hardcoded names, and a chunked request body was dropped in silence and answered
 200. Both are asserted below, on the pure functions the request path was split
 into precisely so they could be.
 
-The socket tests at the bottom are about connection *admission* rather than
-content, so they need no upstream: every one of them is decided before the
-broker would forward anything.
+Most of the socket tests at the bottom are about connection *admission* rather
+than content, so they need no upstream: they are decided before the broker
+would forward anything. The last class is the exception — what the caller is
+left holding when an upstream dies *after* the answer started — so it stands a
+fake upstream up behind the real server.
 """
 
 import contextlib
@@ -345,6 +347,109 @@ class TestARefusalEndsTheConnection(BrokerServerCase):
         self.assertEqual(received.count(b"HTTP/1.1"), 1,
                          "the leftover body must not be parsed as a request")
         self.assertIn(b"Connection: close", received)
+
+
+class DyingResponse:
+    """An upstream response that delivers a little and then breaks.
+
+    `chunks` are handed out by read1() in order; then the connection fails the
+    way a dropped upstream really does — IncompleteRead, which is the
+    HTTPException the request path already catches.
+    """
+
+    def __init__(self, status, hdrs, chunks):
+        self.status, self._headers, self._chunks = status, hdrs, list(chunks)
+
+    def getheaders(self):
+        return self._headers
+
+    def read1(self, _n):
+        if self._chunks:
+            return self._chunks.pop(0)
+        raise broker.http.client.IncompleteRead(b"", 1)
+
+
+class DyingUpstream:
+    """Stands in for HTTPSConnection. Answers, then dies mid-body."""
+
+    response = None  # set per test
+
+    def __init__(self, *args, **kwargs):
+        self.sock = mock.Mock()
+
+    def request(self, *args, **kwargs):
+        pass
+
+    def getresponse(self):
+        return self.response
+
+    def close(self):
+        pass
+
+
+class TestAnUpstreamDyingMidResponse(BrokerServerCase):
+    """What the caller is left holding when the upstream drops mid-answer.
+
+    The head is already on the wire by then, so there is no way to retract it
+    and send a 502 instead: doing that writes a second complete response *into
+    the body of the first*. Under Content-Length the caller either truncates at
+    the declared length or keeps the trailing garbage; under chunked, the raw
+    status line is parsed as a chunk header. Both hand back something shaped
+    like an answer, which for relayed model output is the worst outcome
+    available — worse than an error, because nothing downstream can tell.
+
+    Truncation is the fix and the assertion: one status line, no second
+    response, and a body that ends without its terminator.
+    """
+
+    def _drive(self, status, hdrs, chunks):
+        upstream = DyingUpstream
+        upstream.response = DyingResponse(status, hdrs, chunks)
+        with mock.patch.object(broker.http.client, "HTTPSConnection", upstream):
+            sock = self.connect()
+            sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
+            return self.drain(sock)
+
+    def test_a_streaming_response_is_truncated_not_capped_with_a_502(self):
+        received = self._drive(200, [("content-type", "text/event-stream")],
+                               [b"data: one\n\n", b"data: two\n\n"])
+
+        self.assertIn(b"200", received.split(b"\r\n")[0],
+                      "the upstream's own status must still reach the caller")
+        self.assertEqual(received.count(b"HTTP/1.1 "), 1,
+                         "a second response was written into the first's body")
+        self.assertNotIn(b"502", received)
+        self.assertIn(b"data: one", received, "delivered bytes are kept")
+        self.assertFalse(received.endswith(b"0\r\n\r\n"),
+                         "a terminated chunked body claims the answer is "
+                         "complete, which is exactly what it is not")
+
+    def test_a_counted_response_stops_short_of_its_declared_length(self):
+        received = self._drive(200, [("content-length", "4096")], [b"partial"])
+
+        self.assertEqual(received.count(b"HTTP/1.1 "), 1,
+                         "a second response was written into the first's body")
+        self.assertNotIn(b"502", received)
+        head, _, body = received.partition(b"\r\n\r\n")
+        self.assertIn(b"Content-Length: 4096", head)
+        self.assertLess(len(body), 4096,
+                        "short of the declared length is how the caller learns "
+                        "the message was cut off")
+
+    def test_a_failure_before_the_head_still_answers_502(self):
+        """The other side of the same branch: nothing is on the wire yet, so a
+        real error response is both possible and correct."""
+        class DeadOnArrival(DyingUpstream):
+            def getresponse(self):
+                raise broker.http.client.IncompleteRead(b"", 1)
+
+        with mock.patch.object(broker.http.client, "HTTPSConnection",
+                               DeadOnArrival):
+            sock = self.connect()
+            sock.sendall(b"GET /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n")
+            received = self.drain(sock)
+
+        self.assertIn(b"502", received.split(b"\r\n")[0])
 
 
 if __name__ == "__main__":
