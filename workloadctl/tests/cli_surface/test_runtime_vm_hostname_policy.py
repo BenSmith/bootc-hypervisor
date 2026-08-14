@@ -125,6 +125,22 @@ def _stub_up(target):
         sudo=True, check=True)
 
 
+def _env_value(env, name):
+    """The value of one variable in `env` output, or None if it is not set.
+
+    Assertions about a proxy variable have to be made against the variable's
+    own value, not against the whole blob. Every address this test cares about
+    appears somewhere in that blob by construction — the advertised address is
+    in `https_proxy` — so `ADDR in env` is true however NO_PROXY is set, and
+    cannot fail on the regression it is written to catch.
+    """
+    for line in env.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key == name:
+            return value
+    return None
+
+
 def _stub_down(target):
     """Tolerant teardown: every step is legitimately a no-op after a failed setup."""
     target.run(f"test -f {STUB_PID} && kill $(cat {STUB_PID}) || true",
@@ -361,10 +377,14 @@ def test_the_guest_environment_carries_the_proxy(target):
             "the guest's login environment has no https_proxy, so every "
             "proxy-honouring client in it dials the internet directly and is "
             "dropped by the filter")
-        assert f"NO_PROXY=" in env and PROXY_ADDR in env, (
-            "the advertised address is not in the guest's NO_PROXY, which is "
-            "the regression that made a broker request go through the proxy "
-            "and come back as a 403 indistinguishable from a real refusal")
+
+        no_proxy = _env_value(env, "NO_PROXY")
+        assert no_proxy is not None, "the guest's login environment has no NO_PROXY"
+        assert PROXY_ADDR in no_proxy.split(","), (
+            f"the advertised address is not in the guest's NO_PROXY "
+            f"({no_proxy!r}), which is the regression that made a broker "
+            f"request go through the proxy and come back as a 403 "
+            f"indistinguishable from a real refusal")
 
     finally:
         _purge_workload(target, WORKLOAD)
