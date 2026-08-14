@@ -224,9 +224,16 @@ def test_the_proxy_answers_by_name(target):
     skip_if_no_kvm(target)
     skip_if_no_vm_toolchain(target)
 
-    _install_toml(target, f"{WORKLOAD}.toml")
-    _stub_up(target)
     try:
+        # Inside the try, both of them: _stub_up appends to the target's
+        # /etc/hosts before it starts the listener, so a failure part-way
+        # through leaves those lines behind for every later test on the same
+        # target — pointing fixture names at a 127.0.0.1 with nothing on it.
+        # _stub_down and _purge_workload are both no-ops against state that was
+        # never created, which is what makes covering the setup safe.
+        _install_toml(target, f"{WORKLOAD}.toml")
+        _stub_up(target)
+
         assert _stub_listening(target), (
             f"the harness stub is not listening on 127.0.0.1:{STUB_PORT}, so "
             f"an allowlisted name would fail for want of an upstream and the "
@@ -309,9 +316,10 @@ def test_a_wildcard_entry_does_not_cover_its_own_apex(target):
     skip_if_no_kvm(target)
     skip_if_no_vm_toolchain(target)
 
-    _install_toml(target, f"{WORKLOAD}.toml")
-    _stub_up(target)
     try:
+        _install_toml(target, f"{WORKLOAD}.toml")
+        _stub_up(target)  # inside the try — see the note in the test above
+
         assert _stub_listening(target), "harness stub is not listening"
         try:
             _enable_workload(target, WORKLOAD, timeout=900,
@@ -356,8 +364,8 @@ def test_the_guest_environment_carries_the_proxy(target):
     skip_if_no_kvm(target)
     skip_if_no_vm_toolchain(target)
 
-    _install_toml(target, f"{WORKLOAD}.toml")
     try:
+        _install_toml(target, f"{WORKLOAD}.toml")
         try:
             _enable_workload(target, WORKLOAD, timeout=900,
                              expect_container=False)
