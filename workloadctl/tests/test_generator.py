@@ -1897,11 +1897,89 @@ class TestGeneratorVmWorkload(unittest.TestCase):
         self.assertNotIn("NotifyAccess=", sidecar)
         socket_path = "/run/workload-vm/fedora-vm/virtiofs-mnt-data.sock"
         self.assertIn(f"test -S {socket_path}", sidecar)
-        # Must run as root so virtiofsd can faithfully apply guest-requested
-        # uid/gid on writes (unprivileged virtiofsd squashes everything to its
-        # own uid, breaking multi-user data sharing inside the guest).
-        self.assertNotIn("User=", sidecar)
-        self.assertIn("--sandbox=chroot", sidecar)
+
+    def test_virtiofsd_runs_unprivileged_with_no_capabilities(self):
+        # The daemon has no caller to impersonate: the id map sends every guest
+        # id to this one host uid, so virtiofsd's per-request credential switch
+        # is never attempted and the CAP_SETUID/CAP_SETGID that forced it to run
+        # as root are not needed. Verified on a live VM: CapPrm/CapEff/CapBnd
+        # all zero, and a first-boot cloud-init still completes.
+        sidecar, _uid = self._sidecar_and_uid()
+        self.assertIn("User=_wl-fedora-vm", sidecar)
+        self.assertIn("Group=_wl-fedora-vm", sidecar)
+        # Empty, not reduced. A non-empty set here means something regained a
+        # privilege and the id-map argument above no longer holds.
+        self.assertIn("CapabilityBoundingSet=\n", sidecar)
+        self.assertIn("AmbientCapabilities=\n", sidecar)
+
+    def test_virtiofsd_does_not_set_no_new_privileges(self):
+        # Looks like the obvious next tightening; breaks the unit outright.
+        # NNP makes the kernel refuse any SELinux domain transition that is not
+        # bounded by the calling domain, and wlvfsd_t is not bounded by init_t:
+        # exec fails 203/EXEC with op=security_bounded_transition in the audit
+        # log and nothing pointing at the cause. It would also buy nothing —
+        # the bounding set is already empty. (virtiofsd sets NNP on *itself*
+        # after exec, via its own seccomp filter, so the property is kept; it
+        # just cannot be applied before the transition.)
+        sidecar, _uid = self._sidecar_and_uid()
+        self.assertNotIn("NoNewPrivileges=", sidecar)
+        self.assertNotIn("DynamicUser=", sidecar)
+
+    def test_virtiofsd_sandbox_and_file_handles_match_being_unprivileged(self):
+        # --sandbox=chroot is root-only ("sandbox mode 'chroot' can only be used
+        # by root"), and --sandbox=namespace would need cap_userns plus the
+        # mount/mounton surface the CIL module deliberately does not grant.
+        # --inode-file-handles defaults to `prefer`, which needs
+        # CAP_DAC_READ_SEARCH: it can only fail here, and its fallback logs a
+        # WARN and one AVC per start that look like a policy bug.
+        sidecar, _uid = self._sidecar_and_uid()
+        self.assertIn("--sandbox=none", sidecar)
+        self.assertNotIn("--sandbox=chroot", sidecar)
+        self.assertNotIn("--sandbox=namespace", sidecar)
+        self.assertIn("--inode-file-handles=never", sidecar)
+        # --socket-group existed so an unprivileged QEMU could reach a
+        # root-owned socket. The socket is now owned by the user QEMU already
+        # runs as, and the option's only other effect is to widen its mode.
+        self.assertNotIn("--socket-group", sidecar)
+
+    def test_virtiofsd_can_write_the_share_and_the_socket_dir(self):
+        # ProtectSystem=strict mounts the whole hierarchy read-only, /run
+        # included, so both have to be named back or the share is served
+        # read-only and the socket cannot be created.
+        sidecar, _uid = self._sidecar_and_uid()
+        self.assertIn("ProtectSystem=strict", sidecar)
+        self.assertIn(
+            'ReadWritePaths="/srv/data" "/run/workload-vm/fedora-vm"', sidecar)
+
+    def test_virtiofsd_does_not_mask_a_share_it_has_to_serve(self):
+        # ProtectHome= blanks /home, /root and /run/user. A volume may point
+        # into one of them, and it cannot be both masked and served.
+        self._write_vm_config(extra='volumes = ["/home/media:/mnt/media"]')
+        self._run()
+        sidecar = self._read("workload-fedora-vm-virtiofs-mnt-media.service")
+        self.assertNotIn("ProtectHome=", sidecar)
+        self.assertIn('ReadWritePaths="/home/media"', sidecar)
+
+    def test_virtiofsd_clears_a_stale_socket_and_pid_file(self):
+        # The upgrade hazard, measured: the root-era sidecar leaves a root-owned
+        # 0600 <socket>.pid behind, virtiofsd opens that path O_CREAT|O_WRONLY,
+        # and the unprivileged daemon dies with "Error creating pid file ...
+        # Permission denied" — which reads as an SELinux or policy fault. /run
+        # is a tmpfs so a reboot hides it; a restart after `dnf upgrade` does
+        # not. Both names, because the socket has the same problem.
+        sidecar, _uid = self._sidecar_and_uid()
+        sock = "/run/workload-vm/fedora-vm/virtiofs-mnt-data.sock"
+        self.assertIn(f'ExecStartPre=/bin/rm -f "{sock}" "{sock}.pid"', sidecar)
+        # Not `-` prefixed: a removal that genuinely fails is the diagnostic.
+        self.assertNotIn("ExecStartPre=-", sidecar)
+
+    def test_virtiofsd_gets_the_fd_headroom_it_asks_for(self):
+        # virtiofsd wants RLIMIT_NOFILE=1_000_000 and holds an fd per open guest
+        # file — more of them now that file handles are off. As root it raised
+        # its own hard limit; unprivileged it cannot, so systemd has to, and
+        # without this it silently runs at the login hard limit instead.
+        sidecar, _uid = self._sidecar_and_uid()
+        self.assertIn("LimitNOFILE=1000000", sidecar)
 
     def _sidecar_and_uid(self):
         """Render a VM with one volume; return (sidecar text, allocated uid).

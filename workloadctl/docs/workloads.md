@@ -1160,6 +1160,24 @@ tag = "mydata"
 
 virtiofs requires shared memory (`memory-backend-memfd`). The generator adds this automatically when volumes are configured. The host path is served by a `virtiofsd` sidecar service (`workload-<name>-virtiofs-<tag>.service`) started before the VM.
 
+**Everything in the share belongs to `_wl-<name>` on the host, whatever the guest
+says.** The sidecar maps the guest's primary user (uid 1000) to the workload user
+both ways, so that user reads its own files back as itself; every *other* guest
+id — root included — is squashed one-way onto the same host user. A guest that
+creates a file as root, or `chown`s one to root, gets a file owned by
+`_wl-<name>` on the host, and inside the guest it reads back as the default user
+rather than as root.
+
+That is deliberate. Without it a guest picks the owner and mode of files on the
+host filesystem, so it can plant a setuid-root binary in a directory `backup`
+will collect. The cost is that a *multi-user* guest does not see per-user
+ownership inside the share. If you need that, use a data disk — a block device
+the guest formats and owns outright — rather than a share.
+
+The sidecar itself runs as `_wl-<name>` with no capabilities, which is possible
+only because of that mapping: with no guest identity left to assume, it has
+nothing to be privileged for.
+
 **A volume outside the workload's own tree needs an SELinux label.** The
 workload's directory is labelled `svirt_image_t` at enable, and the sidecar is
 confined (see below), so a share under `/var/lib/workloads/<name>/` works with

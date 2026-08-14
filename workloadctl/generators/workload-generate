@@ -1538,8 +1538,16 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     must not declare RuntimeDirectory or they would refcount-cleanup the dir
     on sidecar stop and yank the VM's qmp/console sockets out from under it.
     """
-    socket_path = f"/run/workload-vm/{name}/virtiofs-{tag}.sock"
+    runtime_dir = f"/run/workload-vm/{name}"
+    socket_path = f"{runtime_dir}/virtiofs-{tag}.sock"
     home_dir = str(workload_state_dir(name))
+
+    # ProtectHome= masks /home, /root and /run/user. [vm].volumes takes an
+    # arbitrary host path, and one pointing into any of those cannot be both
+    # masked and served — so take the hardening only where it costs nothing.
+    protect_home = not any(
+        host_path == p or host_path.startswith(p + "/")
+        for p in ("/home", "/root", "/run/user"))
 
     # Every guest id lands on the host as the workload user. The `map` entry is
     # bidirectional, so the guest's own user reads its files back as itself; the
@@ -1569,8 +1577,19 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     # intersects one already added (soft_idmap::IdMap::do_push), so an overlap
     # is a start failure, not a precedence question. And the tail cannot reach
     # the top of the range — ranges are half-open and built with checked_add, so
-    # ending at 2^32 overflows. The one id left identity-mapped is 4294967295,
-    # the overflow/`nobody` id, which no guest process runs as.
+    # ending at 2^32 overflows.
+    #
+    # THE ONE ID THAT ESCAPES, AND WHY IT NO LONGER MATTERS. 4294967295 is left
+    # identity-mapped, and virtiofsd identity-maps anything unmapped rather than
+    # refusing it (soft_idmap: "unmapped ranges default to identity mapping").
+    # No --translate-* entry can cover it, per the overflow above. While this
+    # daemon ran as root that was a hole: virtiofsd's credential switch skips
+    # only id 0 (`is_root()` is `== 0`), so it would setresuid(-1, 4294967295,
+    # -1) — which the kernel reads as -1, "leave it alone", and returns success
+    # — and create the file with the caller's euid still 0. A guest could plant
+    # a root-owned file by asking for uid 4294967295. Running unprivileged
+    # closes it: the same no-op switch now leaves euid at the workload user, so
+    # the escaping id lands exactly where every squashed id lands.
     squash_tail = (1 << 32) - 1 - (VM_GUEST_UID + 1)
     idmap = " ".join(
         f"--translate-{kind}=map:{VM_GUEST_UID}:{uid}:1 "
@@ -1578,13 +1597,23 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
         f"--translate-{kind}=squash-guest:{VM_GUEST_UID + 1}:{uid}:{squash_tail}"
         for kind in ("uid", "gid")
     )
+    # --inode-file-handles=never overrides virtiofsd's default of `prefer`.
+    # File handles (name_to_handle_at/open_by_handle_at) need CAP_DAC_READ_SEARCH
+    # in the initial user namespace, which this daemon no longer has and cannot
+    # regain — so `prefer` can only ever fail and fall back. Measured: it fails
+    # once at startup and virtiofsd disables handles for the rest of the run
+    # ("File handles do not appear safe to use"), leaving a WARN in the journal
+    # and one dac_read_search AVC per start that look like a policy bug and are
+    # not. Asking for the fallback directly costs nothing and says nothing false.
+    #
+    # The trade the flag documents — handles keep fewer fds open — is why
+    # LimitNOFILE= below is set rather than left at the default.
     virtiofsd_cmd = (
         f"/usr/libexec/virtiofsd "
         f"--socket-path={socket_path} "
-        f"--socket-group={user_name} "
         f"--shared-dir={dq(host_path)} "
         f"{idmap} "
-        f"--cache=auto --sandbox=chroot"
+        f"--cache=auto --sandbox=none --inode-file-handles=never"
     )
 
     unit = Unit()
@@ -1610,30 +1639,91 @@ def generate_virtiofs_service(name: str, tag: str, host_path: str, user_name: st
     # without waiting for sd_notify. virtiofsd 1.x only sends READY after
     # QEMU connects, which deadlocks with Type=notify + Before=VM.service.
     svc.set("Type", "exec")
-    # Run as root so virtiofsd can apply the mapped uid/gid on creation and
-    # chown: it setresuid/setresgid's to the target for each request, which
-    # needs CAP_SETUID/CAP_SETGID (and fowner/fsetid to carry the mode across
-    # the switch) — see the capability rule in security/workload-vm.cil.
-    # --sandbox=chroot still confines the daemon's view of the host filesystem;
-    # --socket-group lets the unprivileged QEMU process connect.
+
+    # WHY THIS RUNS AS THE WORKLOAD USER, WITH NO CAPABILITIES AT ALL.
     #
-    # Running it unprivileged instead would squash everything to virtiofsd's own
-    # uid, which lands in the same place the id map below now arrives at
-    # deliberately — but by way of EPERM on every guest write rather than a
-    # translation, so the guest cannot write its own share at all.
+    # It used to run as root under --sandbox=chroot, because virtiofsd serves
+    # each request under the requesting guest's uid/gid — setresuid/setresgid
+    # per request — and that needs CAP_SETUID/CAP_SETGID, plus fowner/fsetid to
+    # carry a file's mode across the switch. The id map above removed the reason:
+    # every guest id now translates to this one host uid, so `self.uid ==
+    # current_uid` and virtiofsd's credential switch is never attempted
+    # (passthrough/credentials.rs: `change_uid = !self.uid.is_root() && self.uid
+    # != current_uid`). What was a root daemon impersonating callers is now an
+    # unprivileged daemon that has no caller to impersonate.
     #
-    # --translate-uid/--translate-gid do the mapping internally (no user
-    # namespace, compatible with --sandbox=chroot). See the block above the
-    # command for what they map and why nothing passes through.
+    # So the id map is now load-bearing for FUNCTION as well as for security: if
+    # a future change lets other guest ids through, this unit stops working
+    # (EPERM on the switch) rather than silently regaining the old privilege.
+    # That is the failure direction we want.
     #
-    # --sandbox=chroot is now LOAD-BEARING FOR CONFINEMENT as well, which is not
-    # obvious from the uid-fidelity reason above. security/workload-vm.cil confines
-    # this daemon in 18 ordinary rules precisely because chroot mode needs only
-    # sys_chroot — no cap_userns, no mounton, none of the pivot_root machinery
-    # that made pasta's sandbox expensive to allow (see
-    # security/pasta_sandbox.cil in the image repo). Switching to
-    # --sandbox=namespace would reopen that cost and require the module to grow.
+    # Measured on a live VM under SELinux enforcing: CapPrm/CapEff/CapBnd all 0,
+    # euid/egid the workload user, and a first-boot cloud-init — the thing the
+    # old fowner/fsetid rules existed for — completes with /home/<user>/.ssh
+    # 0700 and authorized_keys 0600.
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    # Empty, not merely reduced: with the credential switch gone there is nothing
+    # left that wants a capability. This is also what makes the capability rule
+    # in security/workload-vm.cil vestigial rather than load-bearing — SELinux
+    # cannot grant a capability the process does not hold.
+    svc.set("CapabilityBoundingSet", "")
+    svc.set("AmbientCapabilities", "")
+
+    # DO NOT ADD NoNewPrivileges=yes (nor DynamicUser=yes, which implies it).
+    #
+    # It looks like the obvious next tightening and it breaks the unit outright,
+    # with an error that points nowhere near the cause: exec fails 203/EXEC,
+    # "Permission denied", on a 0755 binary. Under NNP the kernel refuses any
+    # SELinux domain transition that is not *bounded* by the calling domain, and
+    # wlvfsd_t is not bounded by init_t:
+    #
+    #   type=SELINUX_ERR op=security_bounded_transition seresult=denied
+    #     oldcontext=system_u:system_r:init_t:s0
+    #     newcontext=system_u:system_r:wlvfsd_t:s0
+    #
+    # systemd then retries as execute_no_trans, which is also denied. Setting
+    # SELinuxContext= explicitly does not help — the bounded check is on the
+    # transition, however it is requested. Making it work would mean a typebounds
+    # declaration in security/workload-vm.cil, i.e. constraining wlvfsd_t to a
+    # subset of init_t forever, to buy a no-op: the bounding set is already
+    # empty, so there are no privileges left to gain.
+    #
+    # The seccomp-based options (PrivateDevices=, ProtectKernel*=,
+    # RestrictSUIDSGID=, SystemCallFilter=, ...) are NOT affected, despite the
+    # documentation's "requires NNP" phrasing: systemd only forces NNP for them
+    # when the *manager* lacks CAP_SYS_ADMIN (exec-invoke.c
+    # context_has_no_new_privileges), which is never true for a system service.
+    # They are omitted here because they are untested against virtiofsd, not
+    # because they cannot be used.
+    svc.set("ProtectSystem", "strict")
+    if protect_home:
+        svc.set("ProtectHome", "yes")
+    svc.set("ProtectProc", "invisible")
+    svc.set("PrivateTmp", "yes")
+    # ProtectSystem=strict makes the whole hierarchy read-only, /run included, so
+    # both the share and the socket directory have to be named back.
+    svc.set("ReadWritePaths", f"{uq(host_path)} {uq(runtime_dir)}")
+    # virtiofsd asks for RLIMIT_NOFILE=1_000_000 (limits.rs DEFAULT_NOFILE) and
+    # holds an fd per open guest file. As root it could raise its own hard limit;
+    # unprivileged it cannot, so systemd — which still has the privilege at this
+    # point — raises it before dropping. Without this the daemon logs a warning
+    # and quietly runs with the login hard limit instead.
+    svc.set("LimitNOFILE", "1000000")
+
     svc.set("Environment", f'"HOME={home_dir}"')
+    # The socket and its lock file are recreated on every start, and a leftover
+    # of either stops this unit dead. The pid file is the one that bites on
+    # upgrade: virtiofsd opens it O_CREAT|O_WRONLY mode 0600 (util.rs
+    # write_pid_file), so one written by the root-era sidecar is unopenable by
+    # the workload user and the daemon exits with "Error creating pid file ...
+    # Permission denied" — which reads as a policy or SELinux problem rather
+    # than a stale file. Removing it here is safe against a live peer: virtiofsd
+    # takes an flock and re-checks the inode precisely so a racing unlink is
+    # handled. Not prefixed with `-`: if the removal genuinely fails, rm's error
+    # is the diagnostic we want in the journal.
+    svc.add("ExecStartPre",
+            f"/bin/rm -f {dq(socket_path)} {dq(socket_path + '.pid')}")
     svc.set("ExecStart", virtiofsd_cmd)
     # Wait for virtiofsd to create the socket before QEMU starts.
     # virtiofsd creates the socket before blocking on accept(), so this

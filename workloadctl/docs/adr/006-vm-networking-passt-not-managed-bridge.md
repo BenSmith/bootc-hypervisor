@@ -271,6 +271,25 @@ deliberately (an unprivileged virtiofsd squashes every guest-created file to its
 own uid). Without it virtiofsd exits 1 with nothing in the journal and the VM
 fails on the dependency.
 
+> **Amended 2026-08-14 — the sidecar no longer runs as root, and this finding no
+> longer holds.** The premise above was true when written: an unprivileged
+> virtiofsd squashed every guest-created file to its own uid, so serving a share
+> faithfully required a root daemon that switched credentials per request, and
+> `dac_override`/`setuid`/`setgid`/`fowner`/`fsetid` followed from that.
+>
+> The id map introduced later made the premise false. Every guest id now
+> translates to the one host uid, so virtiofsd's credential switch is never
+> attempted — the squash the finding treated as a defect is now the deliberate
+> behaviour, arrived at by translation rather than by EPERM. The sidecar runs as
+> `_wl-<name>` with `CapabilityBoundingSet=` empty, `--sandbox=none` (chroot mode
+> is root-only), and the unit's own mount namespace in place of the chroot.
+> `wlvfsd_t` consequently grants **no capability at all**.
+>
+> One constraint came out of it and is easy to trip: the unit must not set
+> `NoNewPrivileges=`, which makes the kernel refuse the `init_t` → `wlvfsd_t`
+> transition (`op=security_bounded_transition`) and fails the exec with a bare
+> 203/EXEC. See the comment in `generate_virtiofs_service`.
+
 **The permissive harvest under load was larger than "a few more lines".** §9.7
 predicted the FUSE-serving permissions would "close for free" — they did close,
 but they are the whole write surface on `svirt_image_t` (file

@@ -126,14 +126,14 @@ class TestCilModule(unittest.TestCase):
             r"allow svirt_t unconfined_service_t .*connectto")
 
     def test_no_user_namespace_permissions(self):
-        """--sandbox=chroot is load-bearing: chroot mode needs none of these.
+        """The sidecar runs --sandbox=none, so none of this should appear.
 
-        If cap_userns or mounton ever appear here, the sidecar was switched to
-        --sandbox=namespace and generate_virtiofsd_service's comment is stale.
+        If cap_userns or mounton ever show up the sandbox mode changed to
+        namespace, which reopens the cost pasta_sandbox.cil exists to pay.
+        sys_chroot going the same way is the chroot mode leaving.
         """
-        for perm in ("cap_userns", "mounton", "pivot_root"):
+        for perm in ("cap_userns", "mounton", "pivot_root", "sys_chroot"):
             self.assertNotIn(perm, self.rules)
-        self.assertIn("sys_chroot", self.rules)
 
     def test_socket_dir_type_matches_what_the_rpm_registers(self):
         """/run/workload-vm is svirt_var_run_t, whose real name is qemu_var_run_t."""
@@ -169,12 +169,60 @@ class TestCilModule(unittest.TestCase):
         self.assertIn("(allow wlvfsd_t container_file_t (dir (search)))",
                       self.rules)
 
-    def test_root_virtiofsd_keeps_dac_override(self):
-        """Not a bench artifact: the sidecar runs as root by design, and a root
-        daemon serving a share it does not own needs it. Without it virtiofsd
-        exits 1 with nothing in the journal and the VM fails on the dependency."""
+    def test_grants_the_sidecar_no_capability_at_all(self):
+        """The sidecar's unit sets CapabilityBoundingSet= empty, so the process
+        holds nothing SELinux could be asked to permit. A capability rule here
+        would be unreachable text — and, worse, would read as a claim that the
+        daemon still needs privilege. The ten that used to be here (chown,
+        dac_override, setuid, setgid, fowner, fsetid, sys_chroot, ...) all
+        existed for the per-request credential switch the id map removed."""
+        self.assertNotIn("(capability", self.rules)
+        for cap in ("chown", "dac_override", "dac_read_search", "setuid",
+                    "setgid", "fowner", "fsetid", "sys_resource", "setpcap"):
+            self.assertNotIn(cap, self.rules, f"{cap} is back")
+
+    def test_serves_every_kind_of_node_a_filesystem_has(self):
+        """The class list is where this module has been wrong twice. lnk_file was
+        missing outright — `ln -s` in a share failed under enforcing while every
+        other operation worked — and fifo_file/sock_file were the same gap one
+        step out. Create without unlink is the same bug in miniature."""
+        for cls in ("lnk_file", "fifo_file", "sock_file"):
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \({cls} \([^)]*create",
+                f"{cls} cannot be created in a share")
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \({cls} \([^)]*unlink",
+                f"{cls} can be created but not removed")
+
+    def test_supports_moving_things_around(self):
+        """`mv` within a directory needs rename; `mv` between directories needs
+        reparent as well. Both were absent until a harvest actually ran one."""
         self.assertRegex(self.rules,
-                         r"allow wlvfsd_t self \(capability \([^)]*dac_override")
+                         r"allow wlvfsd_t svirt_image_t \(dir \([^)]*rename")
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t svirt_image_t \(dir \([^)]*reparent")
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t svirt_image_t \(file \([^)]*rename")
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t svirt_image_t \(file \([^)]*link")
+
+    def test_directory_metadata_is_settable_not_just_file_metadata(self):
+        """cloud-init chowns the default user's HOME, a directory. The file-only
+        version of this rule passed every file-level test and still left a guest
+        whose injected ssh key sshd would not accept."""
+        self.assertRegex(self.rules,
+                         r"allow wlvfsd_t svirt_image_t \(dir \([^)]*setattr")
+
+    def test_drops_the_nss_lookups_socket_group_needed(self):
+        """--socket-group=<user> was the only reason this domain ever resolved a
+        group name. The unit dropped the option once the socket came to be owned
+        by the user QEMU already runs as, so the whole userdb/passwd block goes
+        with it — confirmed by a from-scratch permissive rebuild."""
+        for t in ("systemd_userdbd_t", "systemd_homed_t",
+                  "systemd_userdbd_runtime_t", "passwd_file_t"):
+            self.assertNotIn(t, self.rules)
 
     def test_grants_what_qemus_native_passt_netdev_needs(self):
         """Both rules exist only because QEMU spawns passt, where libvirt does.

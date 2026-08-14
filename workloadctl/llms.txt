@@ -295,12 +295,27 @@ loader lives in `lib/provisioning.py` (`apply_selinux_policy`); the
   `security/workload-vm.cil` — a virtiofsd domain plus the two grants QEMU's
   native passt netdev needs — which the RPM loads once.
 
-Two traps worth carrying forward if you touch this. A `filecon` in a bundle's
+Three traps worth carrying forward if you touch this. A `filecon` in a bundle's
 `policy.cil` under a path workloadctl registers with `semanage` is **silently
 ignored**, because `file_contexts.local` outranks the base `file_contexts`
-wholesale (`validate` warns). And the shipped policy **dontaudits** the rule
-passt needs under a QEMU-native netdev, so an ordinary AVC harvest will not show
-it — run `semodule -DB` before concluding a harvest is complete.
+wholesale (`validate` warns). The shipped policy **dontaudits** the rule passt
+needs under a QEMU-native netdev, so an ordinary AVC harvest will not show it —
+run `semodule -DB` before concluding a harvest is complete. And **no unit that
+transitions into one of our domains may set `NoNewPrivileges=`** (nor
+`DynamicUser=`, which implies it): NNP makes the kernel refuse any transition
+not *bounded* by the calling domain, and none of ours are bounded by `init_t`.
+The symptom is a bare `203/EXEC` "Permission denied" on a mode-0755 binary, with
+`op=security_bounded_transition` in the audit log and nothing else pointing at
+the cause. The seccomp-implying options (`PrivateDevices=`, `ProtectKernel*=`,
+`SystemCallFilter=`, ...) are fine despite the documentation's phrasing —
+systemd only forces NNP for those when the *manager* lacks `CAP_SYS_ADMIN`,
+which never holds for a system service.
+
+A harvest is only ever as good as the workout behind it, and this is where the
+virtiofsd domain has been wrong twice: the module is a list of the classes
+someone happened to exercise, so a share can pass every test and still deny
+`ln -s`. `security/workload-vm.cil` records the workout its current list came
+from — extend that before extending the rules.
 
 ### Hostname policy: the per-workload proxy (step 4)
 

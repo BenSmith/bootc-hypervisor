@@ -54,10 +54,33 @@
 ; unconfined service socket on the host, and it was only ever the cheaper option
 ; because the cost of the alternative was unmeasured. It was then measured: the
 ; domain below is ordinary rules, no user-namespace machinery, because
-; generate_virtiofsd_service already passes --sandbox=chroot. (Contrast
-; ../../security/pasta_sandbox.cil, which exists precisely because pasta's
-; userns+pivot_root sandbox needs cap_userns and tmpfs_t:dir mounton. Switching
-; the sidecar to --sandbox=namespace would reopen that cost.)
+; generate_virtiofs_service passes --sandbox=none and confines the daemon by
+; other means (see the next section). (Contrast ../../security/pasta_sandbox.cil,
+; which exists precisely because pasta's userns+pivot_root sandbox needs
+; cap_userns and tmpfs_t:dir mounton. Switching the sidecar to
+; --sandbox=namespace would reopen that cost.)
+;
+; WHAT CONFINES THE SIDECAR, NOW THAT NOTHING IN IT IS PRIVILEGED
+;
+; This domain used to be one of three layers around a ROOT daemon, and the
+; loudest of the three was virtiofsd's own --sandbox=chroot. It is not root any
+; more: generate_virtiofs_service runs it as _wl-<name> with an empty capability
+; bounding set, which the id map made possible (every guest id translates to the
+; one host uid, so virtiofsd never switches credentials and never needs
+; CAP_SETUID). Three things confine it now, and the chroot is not among them:
+;
+;   * DAC — it is the workload's own unprivileged user, so the share is the only
+;     interesting thing it can write even with no policy at all.
+;   * The unit's mount namespace — ProtectSystem=strict, ProtectHome=,
+;     ProtectProc=invisible, and a ReadWritePaths= naming exactly the share and
+;     the socket directory.
+;   * This module, which is now the whole of the type enforcement rather than a
+;     backstop behind a chroot.
+;
+; Dropping the chroot lost the daemon's self-imposed view restriction and gained
+; a process that cannot chown, cannot setuid, and holds no capability to abuse in
+; the first place. The rules below shrank accordingly: no chown, no
+; dac_override, no setuid/setgid/fowner/fsetid, no sys_chroot.
 ;
 ; A dedicated type also separates virtiofsd from QEMU directly, so MCS
 ; categories stay unused (ADR 006 §9.5) — under the blanket allow, every VM's
@@ -117,62 +140,76 @@
 (allow init_t wlvfsd_exec_t (file (getattr open read execute map)))
 (allow init_t wlvfsd_t (process (transition)))
 (allow wlvfsd_t wlvfsd_exec_t (file (entrypoint execute map getattr ioctl open read)))
-(allow wlvfsd_t init_t (fd (use)))
-(allow wlvfsd_t init_t (fifo_file (append getattr ioctl lock read write)))
 
 ; ---------------------------------------------------------------------------
 ; What virtiofsd actually does
 ; ---------------------------------------------------------------------------
-; Harvested permissive on Fedora 44. Every rule is ordinary: read the shared
-; directory, create the socket, sd_notify back to systemd, NSS lookup for
-; --socket-group, chroot.
-
-; chown: root virtiofsd applies guest-requested ownership on create/chown, which
-; is the whole reason the unit runs as root (see generate_virtiofsd_service).
-; sys_chroot is --sandbox=chroot. There is deliberately no cap_userns or
-; mounton here; if those appear, the sandbox mode changed.
+; HOW THIS LIST WAS PRODUCED, because the method is what previous versions got
+; wrong. Every earlier harvest measured whatever the person happened to try, and
+; each one shipped a module that worked for exactly those operations: the first
+; ran with no QEMU client attached at all, the second never wrote as the guest
+; user, the third never created a symlink. Each gap presented the same way — a
+; share that is healthy until one ordinary operation is not.
 ;
-; dac_override is NOT a bench artifact, though ADR 006 §9.7 discounts it as one.
-; That note is about QEMU, which production runs as _wl-<name>. virtiofsd runs
-; as ROOT deliberately (generate_virtiofsd_service: an unprivileged virtiofsd
-; squashes every guest-created file to its own uid), and a root daemon serving a
-; share it does not own needs dac_override. Measured: without it the sidecar
-; exits 1 with nothing in the journal, and the VM fails on the dependency.
+; So this list was rebuilt by REMOVING every wlvfsd_t rule, marking the domain
+; permissive with dontaudit disabled (`semanage permissive -a wlvfsd_t;
+; semodule -DB`), and driving a live guest through the filesystem surface rather
+; than a remembered subset: create/read/write/truncate/append, mkdir/rmdir,
+; symlink read+create+rename+delete, hard link, FIFO and unix socket create and
+; delete, chmod/chown/utimes on both files AND directories, rename within a
+; directory and across directories, statfs, a first-boot cloud-init, and a clean
+; stop. Anything not in the resulting AVC set is not below.
 ;
-; It is also the rule the original permissive harvest missed, because that run
-; had no QEMU client attached and stopped before reaching it — the reason §9.7
-; said an enforcing pass was still required.
+; Three passes were needed and each found something the previous had missed:
+; pass 2 added dir:setattr, file:link, lnk_file:rename, fifo_file and sock_file;
+; pass 3 added dir:reparent and the fifo/sock unlinks. If this ever needs
+; extending, extend the WORKOUT first.
 ;
-; setuid/setgid/fowner/fsetid are the second half of the same argument, and were
-; missing for the same reason: the harvests that produced this list exercised
-; reads and root-side creates, never a write *as the guest user*. virtiofsd
-; serves each request under the requesting uid/gid — that is the whole point of
-; running it as root with --translate-uid — so a create by the guest's own user
-; needs setresuid/setresgid, and preserving a file's mode across that switch
-; needs fowner and fsetid.
+; THERE IS NO CAPABILITY RULE, AND THAT IS THE POINT.
 ;
-; Measured on a live VM: without setgid a guest writing into its share gets
-; EPERM on create with no AVC visible to `ausearch` (grep audit.log directly).
-; Without setattr below, cloud-init's chown of the new user's home is denied, so
-; /home/<user>/.ssh stays root-owned and sshd rejects the injected key — the VM
-; boots, looks healthy, and `workloadctl exec` cannot reach it.
-(allow wlvfsd_t self (capability (chown dac_override dac_read_search fowner fsetid setgid setpcap setuid sys_chroot sys_resource)))
-(allow wlvfsd_t self (process (setcap setrlimit)))
+; There used to be ten: chown dac_override dac_read_search fowner fsetid setgid
+; setpcap setuid sys_chroot sys_resource. Every one of them existed because the
+; daemon ran as root and switched credentials per request. It does neither now
+; (generate_virtiofs_service), and its unit sets CapabilityBoundingSet= empty, so
+; the process holds nothing SELinux could be asked to permit — a capability rule
+; here would be text that can never be reached. If a capability denial ever
+; appears for wlvfsd_t, the unit changed, and the question to ask is why it needs
+; the privilege back, not whether to add the allow.
+;
+; sys_resource in particular is gone because the unit sets LimitNOFILE=1000000:
+; systemd raises the limit while it still has the privilege, so virtiofsd's own
+; setrlimit no longer has to raise a hard limit.
 
 ; The shared dir lives under /var/lib/workloads/<name>/, which a VM workload's
 ; per-workload fcontext rule labels svirt_image_t at enable. Serving FUSE means
-; the full create/read/write/unlink surface, not just reading the directory —
-; ADR 006 §9.7 flagged this as the gap in the original harvest, which ran with
-; no QEMU client attached and so never served a single request.
+; the full create/read/write/unlink surface, not just reading the directory
+; (ADR 006 §9.7).
 ;
-; `setattr` covers chown/chmod/utimes arriving from the guest. A share is a
-; filesystem, not a blob store: the guest owns the metadata on it, and a
-; permission model that lets a guest create a file but never chown it is not a
-; subset of "share a directory" — it is a different, broken thing. The most
-; visible casualty is cloud-init, which chowns the default user's home on first
-; boot and is silently denied.
-(allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
-(allow wlvfsd_t svirt_image_t (file (create getattr open read setattr unlink write)))
+; `setattr` covers chown/chmod/utimes arriving from the guest, on directories as
+; well as files. A share is a filesystem, not a blob store: the guest owns the
+; metadata on it, and a permission model that lets a guest create a file but
+; never chown it is not a subset of "share a directory" — it is a different,
+; broken thing. The most visible casualty is cloud-init, which chowns the default
+; user's home on first boot and is silently denied.
+;
+; The three classes below `file` are all the same story and it is worth naming
+; once: a share is a filesystem, and a guest that can create a kind of node but
+; not remove it, or move it, has a filesystem with a hole in it. lnk_file was the
+; live bug — under enforcing, `ln -s` anywhere in the share failed with EPERM
+; while every other operation succeeded, so the share looked healthy right up
+; until something ordinary needed a symlink (a package install, a build tree, a
+; git checkout). fifo_file and sock_file are the same shape one step further out:
+; a build that opens a FIFO, or any daemon the guest runs that binds a unix
+; socket inside its own home, would have hit it next.
+;
+; `rename` and `reparent` are on the dir line for the same reason: `mv` within a
+; directory needs rename, and `mv` into a different one needs reparent as well.
+; `link` on the file line is hard links.
+(allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rename reparent rmdir search setattr write)))
+(allow wlvfsd_t svirt_image_t (file (create getattr link open read rename setattr unlink write)))
+(allow wlvfsd_t svirt_image_t (lnk_file (create getattr read rename unlink)))
+(allow wlvfsd_t svirt_image_t (fifo_file (create getattr unlink)))
+(allow wlvfsd_t svirt_image_t (sock_file (create getattr unlink)))
 
 ; statfs on the backing filesystem, which the guest reaches through `df` on the
 ; mount. Read-only and about the filesystem rather than any file on it; without
@@ -201,23 +238,25 @@
 ; remove_name/unlink are the exit path: virtiofsd removes its own socket and
 ; pidfile on shutdown. Absent from the original harvest, which never got as far
 ; as a clean stop.
+; `file` is the pid file virtiofsd writes and flocks next to the socket; the
+; sock_file line is the socket itself. remove_name/unlink are the exit path:
+; virtiofsd removes its own socket on shutdown. There is no `sock_file setattr`
+; any more — that was --socket-group's chown of the socket, and the unit dropped
+; the option once the socket came to be owned by the user QEMU already runs as.
 (allow wlvfsd_t qemu_var_run_t (dir (add_name getattr remove_name search write)))
 (allow wlvfsd_t qemu_var_run_t (file (create getattr lock open write)))
-(allow wlvfsd_t qemu_var_run_t (sock_file (create setattr unlink)))
+(allow wlvfsd_t qemu_var_run_t (sock_file (create unlink)))
 
-; sd_notify, and the NSS lookups --socket-group=<user> needs.
-(allow wlvfsd_t init_t (unix_stream_socket (connectto ioctl read write)))
-(allow wlvfsd_t systemd_userdbd_t (unix_stream_socket (connectto)))
-(allow wlvfsd_t systemd_homed_t (unix_stream_socket (connectto)))
-(allow wlvfsd_t systemd_userdbd_runtime_t (dir (getattr open read search)))
-(allow wlvfsd_t systemd_userdbd_runtime_t (lnk_file (read)))
-(allow wlvfsd_t systemd_userdbd_runtime_t (sock_file (write)))
-(allow wlvfsd_t passwd_file_t (file (getattr open read)))
-(allow wlvfsd_t init_var_run_t (dir (search)))
+; The journal, via inherited stdout/stderr (StandardOutput=journal). There is
+; deliberately no `connectto` and no NSS block here: this domain used to carry
+; systemd_userdbd_t, systemd_homed_t, passwd_file_t and friends purely so
+; --socket-group=<user> could resolve a group name, and the unit no longer passes
+; it. Confirmed by the rebuild above — nothing looked those up.
+(allow wlvfsd_t init_t (unix_stream_socket (ioctl read write)))
 
+; /proc/sys/fs/nr_open, read once at startup by the rlimit setup.
 (allow wlvfsd_t sysctl_fs_t (dir (search)))
 (allow wlvfsd_t sysctl_fs_t (file (getattr open read)))
-(allow wlvfsd_t nsfs_t (file (getattr)))
 
 ; ---------------------------------------------------------------------------
 ; What svirt_t needs that the shipped policy does not give it
