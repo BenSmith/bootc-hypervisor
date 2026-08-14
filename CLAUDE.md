@@ -71,7 +71,7 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 ### Code layout (workloadctl/)
 
 - `bin/workloadctl` — the CLI (argparse). One `cmd_<name>(args, manager)` function per subcommand, wired up in `main()`. Mutating commands call `require_root()`.
-- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (`VM_BRIDGE_NAME`, UID math).
+- `lib/workload_lib.py` — `WorkloadConfig` / `WorkloadManager`, TOML loading, paths, constants (UID math). VM-specific constants live in `lib/vm.py`.
 - `generators/`, `libexec/` — boot-time and helper scripts (also the `workload-vm-*` VM helpers and `workload-exporter` for Prometheus metrics). `libexec/agent-broker` is the odd one out: a whole standalone program, not a helper — see below.
 - `workloads/<name>/` — the shipped bundles. Each is a directory with `workload.toml` at minimum, plus optional extras it needs: a `Containerfile` for self-built images, `README.md`, `cloud-init/`, additional unit files. `docs/schema-reference.toml` is the annotated full schema.
 - `tests/` — `test_*.py` unittest modules.
@@ -82,7 +82,9 @@ The hard-won design rationale lives in `workloadctl/llms.txt` and `workloadctl/d
 
 ### VM workloads
 
-A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — shared `_workload-br` bridge (`VM_BRIDGE_NAME`) + dnsmasq, UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+A TOML with a `[vm]` section (mutually exclusive with `[container]`/`[[containers]]`) runs as raw QEMU/KVM instead of a container — UEFI/OVMF, split `system.qcow2`/`data.qcow2` with generational rollback (`system.qcow2.gen-N`), virtiofs volumes, cloud-init seed, per-workload SSH key. CLI VM paths use SSH/QMP (`_vm_*` helpers, `libexec/workload-vm-*`) instead of podman. `workloads/virtual-forgejo/` is the live example; see `docs/schema-reference.toml` `[vm]` section.
+
+Networking is **passt, not a bridge** (ADR 006, `workloadctl/docs/adr/006-vm-networking-passt-not-managed-bridge.md`). There is no `_workload-br`, no `workload-bridge.service` and no dnsmasq of ours — passt terminates the guest's stack in userspace and re-originates its traffic as host sockets owned by `_wl-<name>`, which is what makes the workload uid an unforgeable selector for `meta skuid` egress policy. Consequences that catch people out: the guest has **no LAN identity of its own** (it is assigned the host's address), `workloadctl exec`/`shell` reach it on a uid-derived management address (`127.128.x.y:2222`, never routable, never configurable), and inbound otherwise needs an explicit `[vm.network].ports`. `[vm.network].bridge` is an escape hatch for a VM that needs a real LAN address; the operator provisions that bridge, workloadctl does not.
 
 Virtiofs volumes have their own design doc, `workloadctl/docs/vm-virtiofs.md` — every guest id squashes to the workload user on the host, the sidecar runs unprivileged with an empty capability bounding set, and the unit must never gain `NoNewPrivileges=` (it breaks the SELinux domain transition and fails with a bare `203/EXEC`).
 

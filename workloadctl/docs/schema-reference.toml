@@ -90,15 +90,20 @@ name = "schema-reference"
 # Quick comparison with container workloads:
 #   - Same TOML file, same CLI (enable/disable/shell/exec/update/rollback/info)
 #   - Same per-workload isolation user _wl-{name} and home dir
-#   - Raw QEMU (not libvirt): service file, UEFI NVRAM, bridge networking, SSH
+#   - Raw QEMU (not libvirt): service file, UEFI NVRAM, passt networking, SSH
 #   - shell → socat serial console; exec → SSH
 #   - update → rebuilds system disk with generational rollback
 #
 # Networking:
-#   All VM workloads join the shared _workload-br bridge (192.168.200.0/24).
-#   DHCP assigns addresses in 192.168.200.100-199; hostnames are the workload
-#   name (e.g. "myvm"). The bridge and dnsmasq are managed by
-#   workload-bridge.service (auto-created alongside the first VM workload).
+#   passt, not a bridge (ADR 006). There is no shared bridge, no dnsmasq and no
+#   DHCP range: the guest is assigned the HOST's address and has no LAN identity
+#   of its own, so nothing on the LAN can address it directly. Reach it with
+#   `workloadctl exec` / `shell`, on a management address derived from the
+#   workload uid (127.128.x.y port 2222) — never routable, never configurable,
+#   printed by `workloadctl diagnose <name>`. To take inbound from elsewhere,
+#   declare [vm.network].ports; to give the guest a real LAN address instead,
+#   set [vm.network].bridge and provision that bridge yourself. Full detail in
+#   the [vm.network] section below.
 #
 # Disk layout (under /var/lib/workloads/{name}):
 #   system.qcow2        - Writable root disk (built from image source once)

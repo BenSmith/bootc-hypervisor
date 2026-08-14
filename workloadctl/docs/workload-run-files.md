@@ -102,8 +102,12 @@ These are easy to blur and enumerating them as workload-owned is a bug:
 
 - **`workload-generate.service`** and the generator itself — one **global** unit, not
   per-workload.
-- **`workload-bridge.service`** + dnsmasq — **shared** VM bridge infrastructure, one
-  per host, refcounted across all VM workloads.
+- **`workload-bridge.service`** + dnsmasq — was **shared** VM bridge infrastructure,
+  one per host, refcounted across all VM workloads. Retiring the managed bridge
+  (ADR 006) removed it: the generator can no longer emit either, and a VM uses
+  passt. Still named here, and still asserted absent by the boundary test,
+  because the entry states where the line falls rather than what the generator
+  currently happens to write.
 - **Dependency *references*** to `workload-<other>.service` in `Requires=` / `After=` /
   `--pod=` / `--network=` lines — these point at *other* workloads (inter-workload
   ordering); they are not files this workload owns. Removing them as if owned would

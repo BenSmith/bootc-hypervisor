@@ -27,9 +27,13 @@ template vars.
 
 1. **(Optional) override defaults** in `virtual-forgejo.toml`:
 
-   - `[vm.network].bridge` — defaults to `_workload-br`. Set to your LAN bridge
-     (e.g. `br0`) if you want Forgejo on the LAN. `workload-bridge.service`
-     is only generated when you stay on `_workload-br`.
+   - `[vm.network].bridge` — unset by default, meaning passt: **no bridge, and
+     the guest is assigned the host's address**, so nothing on the LAN can
+     reach it directly. Set it to your own LAN bridge (e.g. `br0`) to give the
+     VM a real LAN identity — read the note in `workload.toml`, because the
+     Caddy in this bundle serves `https://virtual-forgejo.local` and assumes
+     one. You provision that bridge yourself, and a bridged VM is unfiltered:
+     host egress policy cannot reach it.
    - `[vm.cloud_init.template_vars]`:
      - `HYPERVISOR_REPO_URL`, `RUNNER_VERSION` — usually leave alone.
      - `FORGEJO_URL` — runner registers against this URL. Defaults to the
