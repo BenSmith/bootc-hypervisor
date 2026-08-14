@@ -377,8 +377,10 @@ CA goes into the guest and nothing breaks certificate pinning.
   protection: one sandbox opening 32 sockets and sending nothing denied the
   broker to every other sandbox, which is measured in
   `tests/test_broker_request.py`.
-- **Never proven end to end.** Both halves have unit tests; no real guest has
-  ever dialled a real broker. `tests/manual/broker_rig.py` is the rig for it.
+- **Proven end to end only by hand.** `tests/manual/broker_rig.py` boots four
+  real guests against a real broker and was last green 2026-08-14 (18/18,
+  against the installed RPM). It needs root and four VMs, so nothing automatic
+  runs it: a regression surfaces when someone next runs it, not when it lands.
 
 ### Packet capture (step 5)
 
@@ -514,7 +516,8 @@ docs/agent-broker.md               # Credential broker: threat model, identity, 
 docs/agent-broker.toml.example     # Annotated broker config (installed to /usr/share/doc/workloadctl/)
 docs/schema-reference.toml         # Annotated TOML schema with all options
 docs/testing.md                    # Test-value rubric: rung model, oracle/contract/snapshot, deletion heuristic
-systemd/                           # systemd units (workloads.slice, metrics timer)
+systemd/                           # systemd units (workloads.slice, metrics timers, agent-broker.service)
+nftables/                          # nft skeletons: workload-filter, workload-proxy, workload-broker
 completions/                       # Bash completions
 seccomp-workload-baseline.json     # Default seccomp profile
 tests/                             # Test suite

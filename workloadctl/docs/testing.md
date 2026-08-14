@@ -25,6 +25,13 @@ host-persistence races (UID recycling, stale runtime dirs) on a long-lived
 host. When adding a test, know which rung it's proving and don't let rung 2
 stand in for rung 3.
 
+Outside the model entirely is `tests/manual/`: checks that need root and boot
+VMs of their own, so nothing automatic runs them — see that directory's README.
+They are not a fourth rung but an admission that a rung-3 harness cannot reach
+everything (`broker_rig.py` boots four guests at once to tell them apart by uid).
+Write one only when the property genuinely cannot be proven by a harness-owned
+VM, and record when it was last run, because nothing else will notice it rotting.
+
 ## The deletion heuristic
 
 Before writing (or keeping) a test, ask: **"if I delete this test, what real

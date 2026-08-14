@@ -485,13 +485,12 @@ is not a workload user and matches no sandbox.
 
 ## 11. What is not built
 
-- **No guest has ever dialled it.** The path in §7 has been proven a segment at
-  a time — the redirect in a namespace, identity against live kernel tables, the
-  broker against a real upstream — but never once end to end from an actual VM.
-  `tests/manual/broker_rig.py` is the rig that would close this; it has not been
-  run. Until it has, treat the seam as untested however green the suites are.
 - **No consumer.** No workload sets `broker = true`, and there is no sandbox VM
   and no guest image. The feature has zero users.
+- **Nothing runs the end-to-end check but a person.** The seam is proven (see
+  below) by a rig needing root and four VMs of its own, so it is neither a PR
+  gate nor part of the runtime rung. A regression in it surfaces when someone
+  next runs it by hand, not when it is introduced.
 
 Built 2026-08-12: peer-uid identification, per-sandbox credential and upstream
 profiles, the startup guard for the namespace failure, a test suite that asserts
@@ -500,3 +499,17 @@ redirect described in §7. Packaged 2026-08-13 into the workloadctl RPM, which
 answered the open question of where it lives: not a workload — being precisely
 what workloads are not trusted with — but shipped by the thing that manages
 them, on the host, in the image.
+
+Proven end to end 2026-08-14 on a KVM host, against the installed RPM rather
+than a checkout: `tests/manual/broker_rig.py`, 18/18. Four guests differing by
+one line of config each, so the claims come apart — two dialled the same
+advertised literal and were told apart by the uid owning the socket, each
+receiving its own credential; the guest without `broker = true` could not
+connect at all, holding no element of the redirect map; and forcing the proxy
+with `NO_PROXY` cleared reproduced the pre-fix 403, confirming the default path
+does not traverse the proxy. Before this, the path in §7 had only ever been
+proven a segment at a time — the redirect in a namespace, identity against live
+kernel tables, the broker against a real upstream — which is what let two
+defects live in the *combinations*: a client recording the address it dialled
+rather than the one the broker is bound to, and a guest with both a proxy and a
+broker sending its broker request through the proxy.

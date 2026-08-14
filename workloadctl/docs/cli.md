@@ -920,6 +920,12 @@ sudo workloadctl backup [--json] [--all] [--output PATH] [--consistency {cold,cr
 | `--consistency {cold,crash}` | Consistency level (default `cold`). `cold` stops the service, copies, then restarts — always safe. `crash` copies without stopping the service: for VMs the vCPUs are paused via QMP for the copy (crash-consistent, resume-safe); for containers the rootfs/volumes are copied live (may be inconsistent). |
 | `--json` | Output archive paths and sizes as JSON instead of printing progress |
 
+**Backup stops at mount points.** Anything mounted inside `data/` — a network
+share, a second disk, a bind mount — is skipped, with a warning naming each path,
+because capturing it would pull a whole foreign filesystem into the archive and
+`restore` would refuse to write it back. Whatever owns the mount owns its backup.
+See [Mounts under `data/` are not captured](workloads.md#mounts-under-data-are-not-captured).
+
 A backup captures **only the precious `data/` subtree** (for every substrate). The reconstructible `state/` subtree — podman graphroot, container images, and a VM's `system.qcow2` (+ `system.qcow2.gen-N`, `*.image-cache`) — is deliberately excluded and rebuilt on `enable`/`update`. For VMs this means the durable `data.qcow2` is archived but the OS disk is not: a **`pet` VM's in-place changes to `system.qcow2` are not recoverable from a backup** (a `pet` VM never rotates its system disk, so it also has no generation to roll back to). Bake durable VM state into a `data.qcow2` volume, or into the guest image, rather than the system disk.
 
 [↑ top](#workloadctl-command-reference)
@@ -936,6 +942,16 @@ sudo workloadctl restore [--force] [--enable] <archive>
 |---|---|
 | `--force` | Overwrite existing config, credentials, and home directory if they exist |
 | `--enable` | Enable the workload immediately after restoring |
+
+> **Restore refuses to run over a mounted `data/`.** If anything is mounted
+> under the data directory — or if `data/` is itself a mount — the command stops
+> and names the path, on both paths and not just `--force`. Unmounting is a
+> deliberate operator action, and a half-replaced `data/` is worse than a restore
+> that declined to start: `--force` empties the target first, so following a
+> mount would delete the mounted filesystem's contents (for a bind mount, the
+> original directory's) and only then fail on the busy mount point. Without
+> `--force` nothing is deleted, but the merge would write *through* the mount.
+> See [Mounts under `data/` are not captured](workloads.md#mounts-under-data-are-not-captured).
 
 > **DR caveat — secrets are host-bound.** A backup archives the encrypted
 > credential blobs from `/etc/credstore` but not the unlock material. Secrets
