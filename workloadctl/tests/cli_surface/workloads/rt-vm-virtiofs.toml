@@ -1,0 +1,34 @@
+# rt-vm-virtiofs — the runtime rung's virtiofs share (B6).
+#
+# Same minimal Fedora Cloud VM as rt-vm.toml, plus one [vm].volumes entry, which
+# is the only thing that makes the generator emit a virtiofsd sidecar. Nothing
+# in the rung exercised that path before: unit-file tests prove the sidecar is
+# *written* correctly and say nothing about whether a guest can then use it, and
+# every bug this share has had — the id map, the missing lnk_file/fifo_file/
+# sock_file classes, the stale root-owned pid file on upgrade — was invisible
+# until a real guest wrote to a real share.
+#
+# ./ anchors on the workload data dir, so this is
+# /var/lib/workloads/rt-vm-virtiofs/data/share -> /mnt/share in the guest.
+# workload-ensure-user creates in-tree volume directories, so there is no host
+# setup step and no path that might not exist on the runner.
+#
+# Deliberately small for the same reason as rt-vm: this runs *nested* inside the
+# runtime harness guest. Do NOT enable this manually; the harness manages it.
+
+[workload]
+name = "rt-vm-virtiofs"
+enabled = false
+
+[vm]
+cloud_image_url = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+vcpus = 1
+memory = "768M"
+system_disk_size = "6G"
+user = "workload"
+rollback_keep = 1
+volumes = ["./share:/mnt/share"]
+
+[vm.network]
+egress = "open"   # step 2 of ADR 006 requires an explicit posture
