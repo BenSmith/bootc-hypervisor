@@ -147,7 +147,7 @@ class TestValidation(unittest.TestCase):
             self.assertEqual([e for e in errors if "broker" in e], [], mode)
 
 
-class TestEveryNonBridgedVmRunsTheHelper(unittest.TestCase):
+class TestEveryVmRunsTheHelper(unittest.TestCase):
     """The entitlement is withdrawn as deliberately as it is granted.
 
     Emitting the ExecStartPre only for entitled VMs was the obvious reading and
@@ -155,6 +155,12 @@ class TestEveryNonBridgedVmRunsTheHelper(unittest.TestCase):
     lowest free one, and an element that outlives its workload then belongs to
     whichever workload inherits that uid — one that runs no broker code and so
     never notices. The helper decides; the unit only has to call it.
+
+    Which is why *every* VM calls it, bridged included. A bridged VM is never
+    entitled, but it owns a uid like any other, and being outside the map is
+    not the same as being outside the reuse that makes stale elements possible.
+    Skipping the sweep for it left the inheriting workload as the one case the
+    sweep did not cover.
     """
 
     @classmethod
@@ -186,9 +192,26 @@ class TestEveryNonBridgedVmRunsTheHelper(unittest.TestCase):
         self.assertIn('ExecStopPost=-+/usr/libexec/workloadctl/workload-vm-broker down "web"',
                       self.unit(broker=True))
 
-    def test_a_bridged_vm_is_left_alone(self):
-        """Nothing of ours is in its data path, so there is no uid to key on."""
-        self.assertNotIn("workload-vm-broker", self.unit(bridge="br0"))
+    def test_a_bridged_vm_sweeps_too(self):
+        """It can never hold an element of its own — vm_uses_broker is False for
+        it — but it can inherit one, which is what the sweep is for."""
+        unit = self.unit(bridge="br0")
+        self.assertIn('workload-vm-broker up "web"', unit)
+        self.assertIn('ExecStopPost=-+/usr/libexec/workloadctl/workload-vm-broker '
+                      'down "web"', unit)
+
+    def test_a_bridged_vm_is_not_failed_by_the_sweep(self):
+        """The one place tolerance is right. A bridged guest is never told a
+        broker address, so nothing it does depends on this running — and a
+        purely bridged host needs nftables for nothing else, so a missing nft
+        must not take its VMs down."""
+        self.assertIn('ExecStartPre=-+/usr/libexec/workloadctl/workload-vm-broker '
+                      'up "web"', self.unit(bridge="br0"))
+
+    def test_a_bridged_vm_still_gets_no_element(self):
+        """The sweep is not an entitlement: the helper reads the config and a
+        bridged VM never qualifies, whatever `broker` says."""
+        self.assertFalse(vm_uses_broker(config(broker=True, bridge="br0")))
 
 
 class TestRedirectLandsWhereTheBrokerListens(unittest.TestCase):

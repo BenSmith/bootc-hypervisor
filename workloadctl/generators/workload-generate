@@ -2220,6 +2220,25 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
                 f"+/usr/libexec/workloadctl/workload-vm-broker up {dq(name)}")
         svc.add("ExecStopPost",
                 f"-+/usr/libexec/workloadctl/workload-vm-broker down {dq(name)}")
+    else:
+        # A bridged VM gets no element — nothing of ours is in its data path,
+        # so vm_uses_broker() is False for it — but it still owns a uid, and
+        # that is what the map is keyed by. Uids are handed out lowest-free
+        # first, so an element left behind by a deleted workload (a `down` that
+        # never ran, a host killed between the two) passes to whoever inherits
+        # the uid. The sweep that exists to stop precisely that ran only for
+        # VMs that were themselves non-bridged, which left the inheriting VM
+        # able to be the one case it does not cover.
+        #
+        # Tolerant, unlike the non-bridged `up`. There it is a precondition:
+        # the guest has been told a broker address and a missing translation
+        # looks to the agent like an unreachable API. Here the guest is never
+        # told anything, so this is hygiene — and a purely bridged host needs
+        # nftables for nothing else, so it must not lose its VMs to a sweep.
+        svc.add("ExecStartPre",
+                f"-+/usr/libexec/workloadctl/workload-vm-broker up {dq(name)}")
+        svc.add("ExecStopPost",
+                f"-+/usr/libexec/workloadctl/workload-vm-broker down {dq(name)}")
     svc.add("ExecStart",
             f"/usr/libexec/workloadctl/workload-vm-notify {dq(name)} \\\n"
             f"    {qemu_cmd}")

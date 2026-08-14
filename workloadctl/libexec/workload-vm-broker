@@ -8,10 +8,11 @@ Usage: workload-vm-broker <up|down> <name>
 them they own two things: the shared advertised endpoint (a dummy interface and
 an nftables nat chain) and this workload's element in the uid -> broker map.
 
-`up` runs for every non-bridged VM, entitled or not: for an entitled one it
-installs the element, and for the rest it makes sure no element is there. A uid
-is reused as soon as it is free, so "no element" is a thing that has to be
-enforced rather than assumed.
+`up` runs for every VM, entitled or not: for an entitled one it installs the
+element, and for the rest it makes sure no element is there. A uid is reused as
+soon as it is free, so "no element" is a thing that has to be enforced rather
+than assumed — and that includes bridged VMs, which are never entitled but do
+own a uid a previously entitled workload may have held.
 
 WHY THIS RIDES THE VM UNIT AND NOT A UNIT OF ITS OWN
 
