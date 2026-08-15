@@ -19,6 +19,8 @@ vcpus = 2
 memory = "2G"
 system_disk_size = "20G"
 # data_disk_size = "20G"   # uncomment for a persistent /dev/vdb data disk
+# The account the CLI logs in as. The seed below creates it from
+# ${WORKLOADCTL_VM_USER}, so this line is the only place to change it.
 user = "fedora"
 
 [vm.network]

@@ -1489,6 +1489,7 @@ These magic variables are always injected:
 
 - `${WORKLOADCTL_SSH_KEY}` — the workload's generated SSH pubkey. Drop into `users[].ssh_authorized_keys` to keep `workloadctl exec` working.
 - `${WORKLOADCTL_WORKLOAD_NAME}` — the workload name (useful for `hostname:`).
+- `${WORKLOADCTL_VM_USER}` — `[vm].user`, the account the CLI logs in as. Use it for `users[].name` instead of repeating the literal: the TOML is the half you edit, and a seed that creates a different account leaves the VM unreachable.
 - `${WORKLOADCTL_VM_HOST_KEY_B64}` — the workload's SSH **host** private key, base64-encoded (single line). `${WORKLOADCTL_VM_HOST_PUBKEY}` is the matching public key.
 
 **Host-key pinning (required for custom seeds).** The CLI verifies the guest with `StrictHostKeyChecking=yes` against a pinned host key, so a custom `user_data_file` **must install that host key or provisioning fails** (no trust-on-first-use). Drop this into the seed — base64 keeps the multi-line PEM on one line, which a YAML `write_files` block scalar can't otherwise carry:

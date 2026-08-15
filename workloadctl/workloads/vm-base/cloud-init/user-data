@@ -3,6 +3,7 @@
 # time (see docs/workloads.md "Bootstrapping a VM with cloud-init"):
 #   $${WORKLOADCTL_SSH_KEY}        the workload's auto-generated pubkey
 #   $${WORKLOADCTL_WORKLOAD_NAME}  this workload's name
+#   $${WORKLOADCTL_VM_USER}        [vm].user — the account the CLI logs in as
 #   $${WORKLOADCTL_VM_HOST_KEY_B64} the workload's SSH *host* key (base64 PEM)
 #   $${WORKLOADCTL_VM_HOST_PUBKEY}  matching host public key
 #   $${VAR}                        from [vm.cloud_init.template_vars] or env
@@ -11,7 +12,7 @@ hostname: ${WORKLOADCTL_WORKLOAD_NAME}
 
 users:
   - default
-  - name: fedora
+  - name: ${WORKLOADCTL_VM_USER}
     groups: [wheel]
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash

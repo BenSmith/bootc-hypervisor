@@ -411,6 +411,11 @@ name = "schema-reference"
 #                                   Drop this into users[].ssh_authorized_keys
 #                                   so `workloadctl exec` keeps working.
 #   ${WORKLOADCTL_WORKLOAD_NAME}  - The workload name (e.g. for hostname).
+#   ${WORKLOADCTL_VM_USER}        - [vm].user, the account the CLI logs in as.
+#                                   Use it for users[].name rather than
+#                                   repeating the literal — a seed that creates
+#                                   a different account leaves the VM
+#                                   unreachable.
 #   ${WORKLOADCTL_VM_HOST_KEY_B64} - The workload's SSH *host* private key,
 #                                   base64-encoded (single line). REQUIRED for a
 #                                   custom seed: the CLI pins the host key

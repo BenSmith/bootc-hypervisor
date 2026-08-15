@@ -1100,6 +1100,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # without having to read it from somewhere else.
         template_vars.setdefault("WORKLOADCTL_SSH_KEY", pubkey)
         template_vars.setdefault("WORKLOADCTL_WORKLOAD_NAME", name)
+        # [vm].user is what the CLI SSHes in as, so a custom seed has to create
+        # exactly that account. Inject it rather than making the seed repeat the
+        # literal: a drifted pair is an unreachable VM, and the TOML is the half
+        # the operator edits. Safe to splice unquoted — guest_user was validated
+        # as a POSIX username above.
+        template_vars.setdefault("WORKLOADCTL_VM_USER", guest_user)
         # Host-key pinning magic vars (S1). A custom seed bypasses the built-in
         # ssh_keys: block, so the operator must install our host key themselves
         # to keep the pin valid — these expose the material to do it. The _B64

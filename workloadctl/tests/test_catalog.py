@@ -241,6 +241,35 @@ class TestVmBaseBundle(CatalogTestBase):
         self.assertEqual(shipped, cmd_catalog._SCRATCH_VM_USER_DATA)
 
 
+class TestVmSeedUserIsNotDuplicated(CatalogTestBase):
+    """A shipped VM seed must take its login account from [vm].user, not repeat it.
+
+    The CLI SSHes in as [vm].user; a seed that hardcodes a different account
+    leaves the VM unreachable, and nothing at build time compares the two.
+    """
+
+    def test_shipped_vm_seeds_use_the_magic_var(self):
+        checked = 0
+        for toml_path in sorted(REPO_BUNDLES.glob("*/workload.toml")):
+            data = tomllib.loads(toml_path.read_text())
+            vm = data.get("vm")
+            if not vm:
+                continue
+            seed = toml_path.parent / "cloud-init" / "user-data"
+            if not seed.exists():
+                continue
+            text = seed.read_text()
+            if "users:" not in text:
+                continue
+            checked += 1
+            user = vm.get("user", "workload")
+            self.assertNotIn(f"- name: {user}", text,
+                             f"{seed} hardcodes the [vm].user literal; use "
+                             f"${{WORKLOADCTL_VM_USER}} instead")
+            self.assertIn("- name: ${WORKLOADCTL_VM_USER}", text, str(seed))
+        self.assertGreater(checked, 0, "no shipped VM bundle seeds found")
+
+
 class TestDuplicate(CatalogTestBase):
     def test_duplicate_resolves_bundle_to_source_name(self):
         cmd_catalog.cmd_init(_ns(bundle="alloy", as_name=None), self.manager)

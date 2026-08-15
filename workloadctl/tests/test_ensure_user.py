@@ -270,6 +270,21 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         text = self._read_user_data("myforge")
         self.assertIn("name: myforge", text)
 
+    def test_template_injects_magic_vm_user(self):
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nuser: ${WORKLOADCTL_VM_USER}\n")
+        cfg = {"vm": {"user": "builder",
+                      "cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        self.assertIn("user: builder", self._read_user_data())
+
+    def test_template_magic_vm_user_falls_back_to_default(self):
+        ud = self.config_dir / "user-data"
+        ud.write_text("#cloud-config\nuser: ${WORKLOADCTL_VM_USER}\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
+        self._run_build(cfg)
+        self.assertIn("user: workload", self._read_user_data())
+
     def test_template_resolves_secrets(self):
         ud = self.config_dir / "user-data"
         ud.write_text("#cloud-config\ntoken: ${SECRET:runner-token}\n")

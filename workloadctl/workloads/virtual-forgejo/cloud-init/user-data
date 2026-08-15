@@ -4,7 +4,8 @@
 # Substitutions are performed by workloadctl (workload-ensure-user) at ISO
 # build time — see docs/workloads.md "Bootstrapping a VM with cloud-init"
 # for the full list of placeholder forms. Magic vars injected here:
-# WORKLOADCTL_SSH_KEY (workload's pubkey), WORKLOADCTL_WORKLOAD_NAME, and the
+# WORKLOADCTL_SSH_KEY (workload's pubkey), WORKLOADCTL_WORKLOAD_NAME,
+# WORKLOADCTL_VM_USER ([vm].user, the account the CLI logs in as), and the
 # SSH host key (WORKLOADCTL_VM_HOST_KEY_B64 / WORKLOADCTL_VM_HOST_PUBKEY).
 #
 # No idle-poweroff: Forgejo lives here too, so this VM is always-on.
@@ -22,7 +23,7 @@ ssh_pwauth: false
 
 users:
   - default
-  - name: fedora
+  - name: ${WORKLOADCTL_VM_USER}
     groups: [wheel]
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
