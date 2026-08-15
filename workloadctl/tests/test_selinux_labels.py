@@ -135,6 +135,129 @@ class SelinuxLabelCheckVmTest(unittest.TestCase):
             self.assertIn("restorecon -RF", fix)
 
 
+class VmSocketDirSelinuxCheckTest(unittest.TestCase):
+    """The runtime half: /run/workload-vm, where QEMU puts its QMP socket.
+
+    Written from a real outage. A host rebuild left this rule unregistered, so
+    the directory came up var_run_t on a tmpfs that recreates it every boot,
+    and confined QEMU died creating its first socket. Every VM workload on the
+    host failed with `QMP socket not ready after 60s` — a message that names a
+    socket, a timeout and nothing else, while diagnose reported 11/12 healthy.
+    """
+
+    def test_correct_label_and_registered_rule_passes_clean(self):
+        passed, _, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="qemu_var_run_t")
+        self.assertTrue(passed)
+        self.assertIsNone(fix)
+
+    def test_the_alias_spelling_is_accepted_too(self):
+        """The rule is written svirt_var_run_t and the kernel stores
+        qemu_var_run_t. A check that knew only the spelling from the spec would
+        report every correctly-labelled host as broken."""
+        passed, _, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="svirt_var_run_t")
+        self.assertTrue(passed)
+
+    def test_var_run_t_is_the_failure_and_the_message_names_qmp(self):
+        """var_run_t is precisely what /run hands down when no rule matches,
+        so it is the label an operator will actually be looking at — and the
+        message has to reach the words they searched for."""
+        passed, message, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t")
+        self.assertFalse(passed)
+        self.assertIn("var_run_t", message)
+        self.assertIn("QMP", message)
+        self.assertIn("restorecon", fix)
+
+    def test_the_message_names_virtiofsd_as_well_as_qemu(self):
+        """Reproduced on a real host both ways: QEMU times out on the QMP
+        socket, but virtiofsd is denied its pid file first, so a VM with
+        volumes fails one layer earlier with a plain "Permission denied" and
+        never reaches QEMU. A message naming only QEMU does not match what
+        that operator is looking at."""
+        _, message, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t")
+        self.assertIn("virtiofsd", message)
+        self.assertIn("QEMU", message)
+
+    def test_wrong_label_says_a_restart_will_not_clear_it(self):
+        """RuntimeDirectoryPreserve=yes keeps the mislabelled directory across
+        `systemctl restart`, so the first thing anyone tries cannot work. If
+        the message does not say so they will try it repeatedly."""
+        _, message, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t")
+        self.assertIn("restart", message)
+
+    def test_wrong_label_with_no_rule_says_the_boot_relabel_is_a_no_op(self):
+        _, with_rule, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t")
+        _, without_rule, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=False, label="var_run_t")
+        self.assertNotIn("no-op", with_rule)
+        self.assertIn("no-op", without_rule)
+
+    def test_missing_rule_fails_even_with_the_directory_absent(self):
+        """The state a fresh rebuild is in: nothing is mislabelled yet because
+        nothing exists yet, and the next boot breaks every VM on the host.
+        Catching it here is the whole point — after the boot it is an outage.
+        """
+        passed, message, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=False, label=None)
+        self.assertFalse(passed)
+        self.assertIn("/run/workload-vm(/.*)?", message)
+        self.assertIn("semanage fcontext -a -t svirt_var_run_t", fix)
+
+    def test_missing_rule_fails_even_when_the_label_is_right_today(self):
+        """The latent case: someone relabelled by hand, it works now, and the
+        next boot recreates the tmpfs directory with nothing to restore from."""
+        passed, _, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="qemu_var_run_t")
+        self.assertTrue(passed)
+        passed, _, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=False, label="qemu_var_run_t")
+        self.assertFalse(passed)
+
+    def test_unknown_everything_passes_rather_than_guessing(self):
+        passed, message, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=None, label=None)
+        self.assertTrue(passed)
+        self.assertIn("unknown", message)
+        self.assertIsNone(fix)
+
+    def test_unknown_rule_state_does_not_fail_a_correct_label(self):
+        """semanage unreadable, or its read lock contended right now. Must not
+        read as "no rule registered"."""
+        passed, _, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=None, label="qemu_var_run_t")
+        self.assertTrue(passed)
+        self.assertIsNone(fix)
+
+    def test_a_stopped_workload_is_not_a_finding(self):
+        """No directory (label None) with the rule registered is the ordinary
+        state of every stopped VM workload. Reporting it would make diagnose
+        cry wolf on a host where nothing is wrong."""
+        passed, _, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label=None)
+        self.assertTrue(passed)
+
+    def test_the_message_names_the_directory_actually_inspected(self):
+        """The parent and one workload's preserved subdirectory can disagree,
+        and the fix is useless if it names the one that was already fine."""
+        _, message, _ = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t",
+            path="/run/workload-vm/git")
+        self.assertIn("/run/workload-vm/git", message)
+
+    def test_the_fix_does_not_use_dash_f(self):
+        """Unlike the workload tree, neither var_run_t nor qemu_var_run_t is a
+        customizable type, so -F buys nothing and would overreach."""
+        _, _, fix = cmd_diagnose.vm_socket_dir_selinux_check(
+            rule_present=True, label="var_run_t")
+        self.assertIn("restorecon -R ", fix)
+        self.assertNotIn("-RF", fix)
+
+
 class SelinuxTypeTest(unittest.TestCase):
     def test_type_field_is_extracted_from_the_context(self):
         self._patch_xattr(b"system_u:object_r:container_file_t:s0\x00")

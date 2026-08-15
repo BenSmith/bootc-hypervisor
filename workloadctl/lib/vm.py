@@ -23,6 +23,20 @@ from workload_lib import UID_MAX, UID_MIN, parse_volume_spec
 # Runtime socket directory for VM workloads: /run/workload-vm/{name}/
 VM_SOCKET_DIR = Path("/run/workload-vm")
 
+# The SELinux type that directory must carry, and the fcontext pattern the RPM's
+# %post registers to give it that type. A confined QEMU cannot create a socket
+# under /run's default var_run_t, so without this the guest dies before it binds
+# QMP and the only symptom is a timeout that names nothing SELinux.
+#
+# Two spellings, both needed. svirt_var_run_t is an ALIAS: it is what the rule
+# is written with (and what the policy and every doc call it), but the kernel
+# stores the real name, so getfattr, `ls -Z` and matchpathcon all report
+# qemu_var_run_t. A label comparison that knows only one of them is wrong half
+# the time, which is why the check below accepts either.
+VM_SOCKET_SELINUX_TYPE = "svirt_var_run_t"
+VM_SOCKET_SELINUX_TYPE_REAL = "qemu_var_run_t"
+VM_SOCKET_FCONTEXT_PATTERN = f"{VM_SOCKET_DIR}(/.*)?"
+
 # virtio-serial port name qemu-guest-agent binds to inside the guest. Fixed by
 # the agent, not by us — qemu-ga only attaches to a virtserialport with exactly
 # this name, so both the generator's -device line and any host-side client have

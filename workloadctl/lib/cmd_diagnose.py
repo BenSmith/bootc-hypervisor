@@ -43,7 +43,9 @@ from validation import uses_host_userns
 from vm import (
     NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
-    VM_SOCKET_DIR, VM_SELINUX_CIL, VM_SELINUX_MODULE, nft_drop_counter,
+    VM_SOCKET_DIR, VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
+    VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
+    nft_drop_counter,
     nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
     vm_owned_elements,
     NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
@@ -320,6 +322,81 @@ def selinux_label_check(rule_present: bool | None, label: str | None,
                 fix)
     return (True, f"SELinux labeling correct ({expected}, "
                   f"fcontext rule registered)", None)
+
+
+def vm_socket_dir_selinux_check(rule_present: bool | None, label: str | None,
+                                path: str | None = None
+                                ) -> tuple[bool, str, str | None]:
+    """Verdict for /run/workload-vm's SELinux labeling: (passed, message, fix).
+
+    The sibling of selinux_label_check for the *runtime* half. Same two
+    independent facts — the fcontext rule is registered, and the directory
+    carries the type it implies — but they fail differently here, and worse:
+
+      * /run is a tmpfs, so the directory is recreated every boot and
+        `workload-ensure-user` restorecons it at each one. That relabel is a
+        silent no-op when no rule is registered, so a lost rule is not noticed
+        at the moment it is lost but at the next boot.
+      * the unit sets RuntimeDirectoryPreserve=yes, so a directory that came up
+        mislabelled survives every `systemctl restart`. Restarting the workload
+        cannot fix it and neither can re-running ensure-user's relabel once
+        anything has been created inside; the fix has to name the directory.
+
+    The reported symptom is whichever confined domain reaches the directory
+    first, which is not the same for every workload — verified by breaking a
+    real host both ways. QEMU (svirt_t) times out on the QMP socket; virtiofsd
+    (wlvfsd_t) fails earlier still on its pid file, so a VM with volumes never
+    reaches QEMU at all and shows a plain "Permission denied" instead. Naming
+    only one of them sends half the readers looking in the wrong place.
+
+    Host-global, unlike the per-workload tree rule, so a single missing rule
+    takes out every VM workload at once. Reported per workload anyway, because
+    that is where the operator is looking when the guest will not boot.
+
+    `label` is None when the directory does not exist — the ordinary state for
+    a stopped workload, and not a finding: nothing is mislabelled yet, and the
+    rule is what decides how it comes up. `path` names whichever directory the
+    caller actually inspected (the shared parent, or one workload's preserved
+    subdirectory under it), so the message points at the thing to relabel.
+    """
+    path = path or str(VM_SOCKET_DIR)
+    if rule_present is None and label is None:
+        return (True, "VM socket dir SELinux state unknown "
+                      "(semanage unavailable or SELinux disabled)", None)
+
+    # Plain restorecon, no -F: neither var_run_t nor qemu_var_run_t is a
+    # customizable type, so nothing is skipped. Rooted at the parent because
+    # that is what the rule names and a wrong label there is inherited by every
+    # workload's subdirectory.
+    fix = (f"sudo semanage fcontext -a -t {VM_SOCKET_SELINUX_TYPE} "
+           f"'{VM_SOCKET_FCONTEXT_PATTERN}' "
+           f"&& sudo systemctl stop workload-<name> "
+           f"&& sudo restorecon -R {VM_SOCKET_DIR}")
+
+    if label is not None and label not in (VM_SOCKET_SELINUX_TYPE,
+                                           VM_SOCKET_SELINUX_TYPE_REAL):
+        return (False, f"{path} is labeled {label}, not "
+                       f"{VM_SOCKET_SELINUX_TYPE_REAL} — nothing confined can "
+                       f"write there, so the guest will not start: QEMU cannot "
+                       f"create its QMP socket (a bare 60s timeout), and on a "
+                       f"VM with volumes virtiofsd fails one layer earlier "
+                       f"creating its pid file (a plain 'Permission denied')"
+                       + ("" if rule_present else
+                          " (and no fcontext rule is registered, so the "
+                          "relabel at boot is a no-op)")
+                       + ". RuntimeDirectoryPreserve=yes keeps the "
+                         "mislabelled directory across restarts, so a restart "
+                         "will not clear this",
+                fix)
+    if rule_present is False:
+        return (False, f"No fcontext rule registered for "
+                       f"{VM_SOCKET_FCONTEXT_PATTERN} — the next boot recreates "
+                       f"{VM_SOCKET_DIR} on tmpfs as var_run_t and every VM "
+                       f"workload on this host stops starting",
+                fix)
+    return (True, f"VM socket dir labeled correctly "
+                  f"({VM_SOCKET_SELINUX_TYPE_REAL}, fcontext rule registered)",
+            None)
 
 
 def gpu_selinux_check(xserver: bool | None, blanket: bool | None,
@@ -1221,6 +1298,31 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             _fcontext_rule_present(pattern), _selinux_type(root_dir),
             config.name, is_vm=config.is_vm)
         _check("selinux_labels", passed, message, fix=fix)
+
+    # Check 5c: the VM runtime socket dir. Host-global, and checked separately
+    # from 5b because the two rules are registered by different things at
+    # different times — the tree rule per workload at enable, this one once by
+    # the RPM's %post — so one being right says nothing about the other. A host
+    # rebuild that drops this one takes out every VM workload with a timeout
+    # that names nothing SELinux; see vm_socket_dir_selinux_check.
+    if config.is_vm:
+        # Both halves, parent first. The parent is what the rule names and what
+        # a fresh boot inherits from, but RuntimeDirectoryPreserve=yes means a
+        # workload's own subdirectory can stay mislabelled under a parent that
+        # was since put right — the exact shape of a host where the rule was
+        # added by hand and only the running service restarted. Report the
+        # first one that is wrong, so the fix names a directory that is
+        # actually wrong rather than the one further up.
+        rule_present = _fcontext_rule_present(VM_SOCKET_FCONTEXT_PATTERN)
+        inspected = str(VM_SOCKET_DIR)
+        label = _selinux_type(VM_SOCKET_DIR) if VM_SOCKET_DIR.exists() else None
+        if label in (VM_SOCKET_SELINUX_TYPE, VM_SOCKET_SELINUX_TYPE_REAL):
+            sock_dir = VM_SOCKET_DIR / config.name
+            if sock_dir.exists():
+                inspected, label = str(sock_dir), _selinux_type(sock_dir)
+        passed, message, fix = vm_socket_dir_selinux_check(
+            rule_present, label, inspected)
+        _check("vm_socket_dir_selinux", passed, message, fix=fix)
 
     # Check 6: Image(s) exist locally
     if user_exists:

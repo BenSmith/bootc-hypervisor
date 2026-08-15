@@ -522,6 +522,20 @@ class DiagnoseVmScopeTest(unittest.TestCase):
         self.assertIn("linger_enabled", names)
         self.assertIn("container_running", names)
 
+    def test_vm_gets_the_runtime_socket_dir_selinux_check(self):
+        """/run/workload-vm is where QEMU puts its QMP socket, and a wrong
+        label there is a VM that will not boot with a message that names
+        nothing SELinux. It is checked separately from the workload tree
+        because the two rules are registered by different things at different
+        times, so one being right says nothing about the other."""
+        self.assertIn("vm_socket_dir_selinux", self._check_names("guest"))
+
+    def test_containers_do_not_get_it(self):
+        """Nothing rootless goes near /run/workload-vm, so reporting it on a
+        container workload would be a check the operator can neither act on
+        nor make pass."""
+        self.assertNotIn("vm_socket_dir_selinux", self._check_names("app"))
+
 
 class AskYesNoTest(unittest.TestCase):
     def test_yes_variants_true(self):

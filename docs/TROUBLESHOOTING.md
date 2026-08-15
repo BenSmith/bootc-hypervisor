@@ -405,6 +405,82 @@ registered: everything works until the next relabel, which resets the tree to th
 default type. `diagnose` fails on this deliberately — the fix is the same
 `semanage fcontext -a` above.
 
+### 13. VM workload fails with `QMP socket not ready after 60s`
+
+**Symptoms:**
+- A VM workload will not start; the unit fails and restarts until systemd gives
+  up with `Start request repeated too quickly`
+- `systemctl status workload-<name>` shows:
+```
+Status: "Timeout waiting for QMP: QMP socket not ready after 60s: /run/workload-vm/<name>/qmp.sock"
+```
+- The journal shows QEMU starting each time and nothing else — no QEMU error
+- Every VM workload on the host fails the same way; container workloads are fine
+- **On a VM with volumes you may never see the QMP message at all.** virtiofsd
+  reaches the directory before QEMU does, so the workload fails on a dependency
+  instead, and the visible error is a plain DAC-looking one:
+```
+virtiofsd: Error creating pid file '/run/workload-vm/<name>/virtiofs-<vol>.sock.pid':
+    Permission denied (os error 13)
+workload-<name>.service: A dependency job for workload-<name>.service failed.
+```
+  Same cause, one layer earlier. The audit log names the domain that was
+  actually denied — `wlvfsd_t` here, `svirt_t` for QEMU.
+
+**Cause:**
+Almost always SELinux, and nothing in the message says so. QEMU runs confined as
+`svirt_t` and cannot create a socket under `/run`'s default `var_run_t`, so it
+dies creating its first socket — before it ever binds QMP, which is why the only
+symptom is the wrapper's timeout. Confirm with the audit log, which is where the
+real evidence is:
+
+```bash
+sudo grep -a denied /var/log/audit/audit.log | grep -aE 'qemu|virtiofsd' | tail
+# avc: denied { create } for comm="qemu-system-x86" name="ga.sock"
+#     scontext=...:svirt_t tcontext=...:var_run_t tclass=sock_file
+# avc: denied { write } for comm="virtiofsd" name="<workload>"
+#     scontext=...:wlvfsd_t tcontext=...:var_run_t tclass=dir
+```
+
+The directory gets its correct type from an fcontext rule the RPM's `%post`
+registers (`/run/workload-vm(/.*)? -> svirt_var_run_t`) plus the `restorecon`
+that `workload-ensure-user` runs at each boot — `/run` is a tmpfs, so the
+directory is recreated every time. Without the rule that relabel is a silent
+no-op. A host rebuild or a failed install that drops the rule therefore breaks
+every VM on the machine at the *next* boot, not at the moment the rule was lost.
+
+Two things make it stick, and both mislead:
+- **`systemctl restart` cannot fix it.** The unit sets
+  `RuntimeDirectoryPreserve=yes`, so a directory that came up mislabelled
+  survives every restart. The fix has to name the directory.
+- **`workload-ensure-user` runs once per boot**, from
+  `workload-<name>-setup.service` — not on each service start — so re-running
+  the service does not re-run the relabel either.
+
+**Fix:**
+```bash
+# Confirm both halves. The rule is written with the alias svirt_var_run_t;
+# the kernel reports its real name, qemu_var_run_t.
+sudo semanage fcontext -l -C | grep workload
+sudo ls -Zd /run/workload-vm /run/workload-vm/<name>
+
+sudo semanage fcontext -a -t svirt_var_run_t '/run/workload-vm(/.*)?'
+sudo systemctl stop workload-<name>
+sudo restorecon -R /run/workload-vm      # no -F: this type is not customizable
+sudo systemctl daemon-reexec             # PID 1 caches file_contexts
+sudo systemctl start workload-<name>
+```
+
+Then run `workloadctl diagnose <name>`. It checks this rule and the directory's
+label directly (`vm_socket_dir_selinux`), and it also catches the per-workload
+`svirt_image_t` rule for `/var/lib/workloads/<name>`, which is registered at
+`workloadctl enable` and is lost by the same reinstall — units regenerate at
+boot, so `enable` never re-runs to put it back.
+
+Since the loss is what matters, `%post` now reports a rule that did not
+register, on stderr, at install time. If you see that warning during a
+`dnf install`/`upgrade`, act on it then: nothing re-runs `%post`.
+
 ## Viewing Logs
 
 Container stdout/stderr go straight into the systemd journal via podman's passthrough log driver — each line is stored exactly once, tagged with the container name as the syslog identifier (`SyslogIdentifier=workload-<name>`, or `workload-<wl>-<ctr>` for pod/bridge member containers). Log lines read `workload-<name>[pid]: message`.

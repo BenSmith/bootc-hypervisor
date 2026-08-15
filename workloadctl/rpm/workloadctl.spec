@@ -288,10 +288,66 @@ systemd-tmpfiles --create workloads-dirs.conf 2>/dev/null || :
 #      enough.
 #
 # Non-fatal throughout: a host without semanage, or with SELinux disabled, must
-# still install the package.
+# still install the package. Non-fatal is not the same as silent, though, and
+# these used to be `2>/dev/null || :` — which discards the only evidence that a
+# rule did not take. That cost an outage: a host rebuild left
+# /run/workload-vm(/.*)? unregistered, the runtime dir came up var_run_t, and
+# every VM workload failed with a bare "QMP socket not ready after 60s" that
+# named nothing SELinux. The registration is also the kind of thing that only
+# has to be lost once — nothing re-runs %%post, and the relabel that consumes
+# the rule (workload-ensure-user) is a silent no-op without it.
+#
+# The verdict comes from the store, never from semanage's exit status. Two
+# reasons, and the second is the one that matters:
+#
+#   1. Re-registering an existing rule — the ordinary reinstall and upgrade
+#      path — is not reported consistently. Measured on Fedora 44
+#      (policycoreutils-python-utils): exit 0, with "already defined, modifying
+#      instead" on *stdout*. Older and non-Fedora semanage exits nonzero with
+#      "ValueError: ... already defined" on stderr. Reading a nonzero exit as
+#      "warn" would fire on nearly every transaction on those hosts.
+#   2. A zero exit is not evidence the rule landed. The host this was written
+#      for came out of a rebuild with one of these two rules registered and the
+#      other not, from a transaction that reported success — and because the
+#      old code discarded the output, which one it was and why is not
+#      recoverable. Asking the store afterwards is the only check that would
+#      have caught that, whatever the exit status had been.
+#
+# So: attempt, then confirm, and warn only on a rule that is genuinely absent.
+# Capturing 2>&1 also keeps the "modifying instead" chatter out of the
+# transaction log, which is where it used to go. What is reported quotes
+# semanage's own message, because the reason is not reconstructable later —
+# nothing re-runs %%post, and this is the only moment anyone will see it.
+wl_fcontext() {
+    wl_err=$(semanage fcontext -a -t "$1" "$2" 2>&1)
+    if semanage fcontext -l -C 2>/dev/null | grep -qF "$2"; then
+        return 0
+    fi
+    cat >&2 <<EOF
+workloadctl: WARNING: could not register the SELinux fcontext rule
+      $2 -> $1
+  semanage said: $wl_err
+  Consequence: $3
+  To register it by hand:
+      sudo semanage fcontext -a -t $1 '$2'
+      sudo restorecon $4
+EOF
+    return 0
+}
+# $4 is the whole restorecon argument, flags included, because the two rules
+# need different ones. -F is REQUIRED under /var/lib/workloads: container_file_t
+# and svirt_image_t are both in contexts/customizable_types, and plain
+# restorecon skips any file already carrying a customizable type, exiting 0 —
+# the remediation would appear to work and change nothing. Neither var_run_t nor
+# qemu_var_run_t is customizable, so /run/workload-vm needs no -F and should not
+# be told to use one.
 if [ -x /usr/sbin/semanage ]; then
-    semanage fcontext -a -t container_file_t '/var/lib/workloads(/.*)?' 2>/dev/null || :
-    semanage fcontext -a -t svirt_var_run_t '/run/workload-vm(/.*)?' 2>/dev/null || :
+    wl_fcontext container_file_t '/var/lib/workloads(/.*)?' \
+        'rootless podman is denied access to workload home and volume dirs' \
+        '-RF /var/lib/workloads'
+    wl_fcontext svirt_var_run_t '/run/workload-vm(/.*)?' \
+        'VM workloads fail to start: "QMP socket not ready after 60s", or a virtiofsd "Permission denied" first if the VM has volumes' \
+        '-R /run/workload-vm'
 fi
 # The virtiofsd domain (ADR 006 step 3). Host-global and mandatory: once QEMU is
 # confined, virtiofs volumes stop working without it, so it is not gated on the

@@ -94,11 +94,18 @@ def _command_words(script: str) -> set[str]:
     return words
 
 
-class TestPostUpgradeWarning(unittest.TestCase):
+class _PostScriptletHarness(unittest.TestCase):
+    """Extracts %post and runs it under /bin/sh against stubs and a temp tree.
+
+    Base class, not a test case in its own right: two suites drive the same
+    scriptlet (the upgrade warning and the fcontext registration) and both need
+    it isolated from the host's policy store the same way.
+    """
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
         tmp = Path(self._tmp)
+        self._extra_env = {}
 
         self._units = tmp / "run-systemd-system"
         self._units.mkdir()
@@ -119,6 +126,28 @@ class TestPostUpgradeWarning(unittest.TestCase):
                 'echo "$(basename "$0") $*" >> "$WLCTL_STUB_LOG"\n'
                 'exit 0\n')
             stub.chmod(0o755)
+        # semanage gets a richer stub, overriding the generic one: the fcontext
+        # registration is now a three-outcome branch (added / already there /
+        # genuinely failed) and the generic always-succeeds stub can only
+        # exercise the first. WLCTL_SEMANAGE_ADD_ERR makes `-a` fail with that
+        # text on stderr; WLCTL_FCONTEXT_STORE is the file `-l` reads back, i.e.
+        # what the policy store is pretended to hold afterwards.
+        (bin_dir / "semanage").write_text(
+            '#!/bin/sh\n'
+            'echo "semanage $*" >> "$WLCTL_STUB_LOG"\n'
+            'case "$*" in\n'
+            '  *"fcontext -l"*)\n'
+            '      if [ -n "$WLCTL_FCONTEXT_STORE" ]; then\n'
+            '          cat "$WLCTL_FCONTEXT_STORE"\n'
+            '      fi\n'
+            '      exit 0 ;;\n'
+            'esac\n'
+            'if [ -n "$WLCTL_SEMANAGE_ADD_ERR" ]; then\n'
+            '    echo "$WLCTL_SEMANAGE_ADD_ERR" >&2\n'
+            '    exit 1\n'
+            'fi\n'
+            'exit 0\n')
+        (bin_dir / "semanage").chmod(0o755)
         self._bin_dir = bin_dir
 
         body = _extract_post_body()
@@ -139,6 +168,12 @@ class TestPostUpgradeWarning(unittest.TestCase):
         body = body.replace(VERSION_MACRO, NEW)
         self._script = body
 
+        # Default to a healthy policy store holding both rules, so a silent run
+        # is the baseline and a suite about something else (the upgrade
+        # warning) is not drowned in fcontext output. Tests about the
+        # registration itself override this with their own store.
+        self._fcontext_store("/var/lib/workloads(/.*)?", "/run/workload-vm(/.*)?")
+
     def tearDown(self):
         import shutil
         shutil.rmtree(self._tmp, ignore_errors=True)
@@ -152,7 +187,20 @@ class TestPostUpgradeWarning(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = f"{self._bin_dir}:{env['PATH']}"
         env["WLCTL_STUB_LOG"] = str(self._stub_log)
+        env.update(self._extra_env)
         return env
+
+    def _semanage_add_fails(self, message):
+        """Make `semanage fcontext -a` fail with `message` on stderr."""
+        self._extra_env["WLCTL_SEMANAGE_ADD_ERR"] = message
+
+    def _fcontext_store(self, *patterns):
+        """Pretend the policy store already lists `patterns`."""
+        store = Path(self._tmp) / "file_contexts.local"
+        store.write_text("".join(
+            f"{p}    all files    system_u:object_r:some_t:s0\n"
+            for p in patterns))
+        self._extra_env["WLCTL_FCONTEXT_STORE"] = str(store)
 
     def _stub_calls(self):
         if not self._stub_log.exists():
@@ -165,6 +213,9 @@ class TestPostUpgradeWarning(unittest.TestCase):
             input=self._script, text=True, env=self._env(), capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stderr
+
+
+class TestPostUpgradeWarning(_PostScriptletHarness):
 
     # ── fresh install ($1 == 1) ──────────────────────────────────────────────
 
@@ -241,9 +292,31 @@ class TestPostUpgradeWarning(unittest.TestCase):
             # Shell builtins and coreutils the stale-unit count genuinely needs.
             "if", "then", "else", "elif", "fi", "cat", "grep", "xargs", "wc",
             "basename", "echo", "exit", "printf", "test",
+            # %post's own shell function and the builtin it returns with.
+            # Neither reaches PATH, so neither needs a stub — but they do read
+            # as command words, and a function defined in the scriptlet is
+            # exactly as safe as a builtin.
+            "return", "wl_fcontext",
         }
         unknown = sorted(_command_words(self._script) - allowed)
         self.assertEqual(unknown, [], f"unstubbed command(s) in %post: {unknown}")
+
+
+class TestPostFcontextRegistration(_PostScriptletHarness):
+    """Registering the two host-global fcontext rules, and saying so when it
+    fails.
+
+    These used to be `semanage ... 2>/dev/null || :`, which threw away the only
+    evidence a rule had not taken. A host rebuild dropped the
+    /run/workload-vm(/.*)? rule, the install reported success, and the failure
+    surfaced hours later at the next boot as every VM workload timing out on
+    `QMP socket not ready after 60s` — a message with no SELinux in it at all.
+
+    The awkward part, and the reason this needs its own suite: `semanage
+    fcontext -a` *fails* on a rule that already exists, which is what every
+    reinstall and most upgrades look like. So a nonzero exit cannot mean
+    "warn", and the scriptlet has to go back and ask the store.
+    """
 
     def test_the_selinux_rules_are_actually_registered(self):
         """The flip side of stubbing: prove the branch still runs, and runs with
@@ -257,6 +330,126 @@ class TestPostUpgradeWarning(unittest.TestCase):
         self.assertTrue(
             any("semanage fcontext -a -t svirt_var_run_t" in c for c in calls),
             f"%post did not register the VM runtime socket fcontext: {calls}")
+
+    def test_a_clean_registration_says_nothing(self):
+        """The common path. An install that worked must stay quiet, or the
+        warning is noise and gets ignored when it matters."""
+        self.assertEqual(self._run("1").strip(), "")
+
+    def test_an_already_registered_rule_is_not_reported_as_a_failure(self):
+        """Reinstall and upgrade: `-a` fails, the rule is there anyway. This is
+        the majority of all runs, so getting it wrong would warn on almost
+        every transaction and train operators to ignore the message."""
+        self._semanage_add_fails("ValueError: File context for "
+                                 "/var/lib/workloads(/.*)? already defined")
+        self._fcontext_store("/var/lib/workloads(/.*)?",
+                             "/run/workload-vm(/.*)?")
+        self.assertEqual(self._run("1").strip(), "")
+
+    def test_a_rule_that_did_not_take_is_reported(self):
+        """The outage. `-a` failed and the store does not have the rule."""
+        self._semanage_add_fails("SELinux policy is not managed or store "
+                                 "cannot be accessed.")
+        self._fcontext_store()   # empty store: neither rule registered
+        stderr = self._run("1")
+        self.assertIn("could not register the SELinux fcontext rule", stderr)
+
+    def test_a_zero_exit_is_not_taken_as_evidence_the_rule_landed(self):
+        """The sharp one, and why the verdict is read from the store rather
+        than from `$?`. The host this was written for came out of a rebuild
+        missing one rule from a transaction that reported success — so a check
+        that trusts the exit status would have passed it through exactly as
+        the discarded output did.
+        """
+        self._fcontext_store()   # semanage exits 0, store is still empty
+        stderr = self._run("1")
+        self.assertIn("could not register the SELinux fcontext rule", stderr)
+        self.assertIn("/run/workload-vm(/.*)?", stderr)
+
+    def test_the_report_names_the_pattern_the_type_and_semanage_s_own_error(self):
+        """Everything needed to act, in the one place anyone will ever see it.
+        semanage's stderr especially: the reason is not reconstructable later,
+        because nothing re-runs %post."""
+        self._semanage_add_fails("cannot access the policy store")
+        self._fcontext_store()
+        stderr = self._run("1")
+        self.assertIn("/run/workload-vm(/.*)?", stderr)
+        self.assertIn("svirt_var_run_t", stderr)
+        self.assertIn("cannot access the policy store", stderr)
+
+    def test_the_report_names_the_consequence_not_just_the_rule(self):
+        """The rule name means nothing to the person reading the install log.
+        The symptom they will actually meet later is what makes the connection,
+        so each rule carries its own."""
+        self._semanage_add_fails("nope")
+        self._fcontext_store()
+        stderr = self._run("1")
+        self.assertIn("QMP socket not ready", stderr)
+        self.assertIn("rootless podman", stderr)
+
+    def test_the_vm_consequence_names_both_domains_that_fail(self):
+        """Which symptom you actually meet depends on the workload: QEMU times
+        out on the QMP socket, but virtiofsd fails earlier on its pid file, so
+        a VM with volumes never reaches QEMU. Verified by breaking a real host
+        both ways — naming only QEMU sends half the readers looking in the
+        wrong place."""
+        self._semanage_add_fails("nope")
+        self._fcontext_store()
+        stderr = self._run("1")
+        self.assertIn("QMP socket not ready", stderr)
+        self.assertIn("virtiofsd", stderr)
+
+    def test_the_report_gives_a_command_to_run(self):
+        self._semanage_add_fails("nope")
+        self._fcontext_store()
+        stderr = self._run("1")
+        self.assertIn("semanage fcontext -a -t svirt_var_run_t "
+                      "'/run/workload-vm(/.*)?'", stderr)
+        self.assertIn("restorecon -R /run/workload-vm", stderr)
+
+    def test_each_rule_gets_the_restorecon_flags_its_type_needs(self):
+        """-F is required under /var/lib/workloads, where both types are
+        customizable and a plain restorecon silently skips them; it is wrong
+        for /run/workload-vm, where neither type is. One suggestion cannot
+        serve both, and the -RF form is the one that fails invisibly."""
+        self._fcontext_store()
+        stderr = self._run("1")
+        self.assertIn("restorecon -RF /var/lib/workloads", stderr)
+        self.assertIn("restorecon -R /run/workload-vm", stderr)
+        self.assertNotIn("restorecon -RF /run/workload-vm", stderr)
+
+    def test_one_rule_failing_does_not_suppress_the_other(self):
+        """Each rule is registered independently and one can be present while
+        the other is not — exactly the state the outage host was in."""
+        self._semanage_add_fails("nope")
+        self._fcontext_store("/var/lib/workloads(/.*)?")
+        stderr = self._run("1")
+        self.assertIn("/run/workload-vm(/.*)?", stderr)
+        self.assertNotIn("/var/lib/workloads(/.*)?", stderr)
+
+    def test_the_report_goes_to_stderr_not_stdout(self):
+        """rpm folds scriptlet stdout into the transaction output where it is
+        easy to lose; stderr is what dnf surfaces and journald keeps."""
+        self._semanage_add_fails("nope")
+        self._fcontext_store()
+        proc = subprocess.run(
+            ["/bin/sh", "-s", "1"],
+            input=self._script, text=True, env=self._env(),
+            capture_output=True)
+        self.assertEqual(proc.stdout.strip(), "")
+        self.assertIn("workloadctl:", proc.stderr)
+
+    def test_a_failed_registration_cannot_fail_the_transaction(self):
+        """A missing SELinux rule is a degraded install, not a broken one. The
+        package still has to end up installed — an aborted transaction here
+        would leave the host with no workloadctl at all."""
+        self._semanage_add_fails("nope")
+        self._fcontext_store()
+        proc = subprocess.run(
+            ["/bin/sh", "-s", "1"],
+            input=self._script, text=True, env=self._env(),
+            capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 class TestPostSpecText(unittest.TestCase):

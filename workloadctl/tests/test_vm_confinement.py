@@ -21,6 +21,12 @@ ROOT = Path(__file__).resolve().parent.parent
 CIL = ROOT / "security" / "workload-vm.cil"
 SPEC = ROOT / "rpm" / "workloadctl.spec"
 
+# How %post registers the runtime socket dir's type. The rule is written with
+# the alias (svirt_var_run_t), not the real name the kernel reports, and it goes
+# through the wl_fcontext wrapper that reports a failure instead of discarding
+# it — both halves matter, so the assertion is on the whole call.
+SPEC_SOCKET_RULE = "wl_fcontext svirt_var_run_t '/run/workload-vm(/.*)?'"
+
 QEMU = "/usr/libexec/qemu-kvm"
 SAMPLE = [QEMU, "-machine", "q35", "-nographic"]
 
@@ -140,8 +146,7 @@ class TestCilModule(unittest.TestCase):
         self.assertRegex(
             self.rules,
             r"allow wlvfsd_t qemu_var_run_t \(sock_file \([^)]*create")
-        spec = SPEC.read_text()
-        self.assertIn("-t svirt_var_run_t '/run/workload-vm(/.*)?'", spec)
+        self.assertIn(SPEC_SOCKET_RULE, SPEC.read_text())
 
     def test_shared_dir_type_matches_the_per_workload_fcontext(self):
         self.assertRegex(self.rules, r"allow wlvfsd_t svirt_image_t \(dir ")
@@ -299,8 +304,7 @@ class TestSocketDirIsRelabelled(unittest.TestCase):
         self.assertLess(body.index("restorecon"), body.index("os.chown"))
 
     def test_rpm_registers_the_rule_the_relabel_resolves(self):
-        spec = SPEC.read_text()
-        self.assertIn("-t svirt_var_run_t '/run/workload-vm(/.*)?'", spec)
+        self.assertIn(SPEC_SOCKET_RULE, SPEC.read_text())
 
 
 class TestShadowedFilecon(unittest.TestCase):
