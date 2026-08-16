@@ -280,3 +280,50 @@ see [testing.md](testing.md).
 | `dac_read_search` AVC once per start, share works | `--inode-file-handles` is not `never` — §4 |
 | Guest writes land, but `ls -l` in the guest shows the wrong owner | expected: the squash is one-way — §1 |
 | Sidecar active, guest sees an empty directory | cloud-init did not mount it; check `stat -f -c %T` in the guest |
+| VM healthy, `workloadctl exec`/`shell` fail to authenticate | a share mounted at the guest home — §8 |
+
+---
+
+## 8. A share mounted at the guest home hides the login key
+
+cloud-init writes `~/.ssh/authorized_keys` in its **init** stage (`cc_users`) and
+mounts `[vm].volumes` in the **config** stage that follows (`cc_mounts`). So a
+share whose guest path *is* the login user's home — `["./home:/home/ben"]` with
+`[vm].user = "ben"` — covers the only key the CLI has, and covers it on every
+subsequent boot too, since the fstab entry mounts before sshd starts.
+
+The guest is fine. `status` is `active`, the console logs in, cloud-init reports
+`done` — and `workloadctl exec` fails authentication with nothing to point at.
+
+`seed_vm_home_share_ssh_key` in `libexec/workload-ensure-user` closes this. A
+share covering the guest home gets `.ssh/authorized_keys` written **on the host**
+with the workload's own pubkey — the same key `${WORKLOADCTL_SSH_KEY}` would have
+put in the shadowed home — before the seed ISO is built. A share mounted at
+`/home` is handled the same way, seeding `<share>/<user>/`.
+
+**It runs when `workload-<name>-setup.service` runs: `workloadctl enable`, and
+each boot.** Not on `workloadctl restart` — the setup unit is a
+`RemainAfterExit=yes` oneshot, so it stays active across a restart of the VM unit
+and does not re-run. That matters only for *healing* a share whose key was
+removed after the fact (an old backup restored over it, say): `workloadctl enable`
+fixes it, a bare restart does not. Don't reach for
+`systemctl restart workload-<name>-setup.service` instead — `Requires=`
+propagates the stop to the VM and you end up power-cycling it anyway.
+
+Three properties worth keeping:
+
+- **Additive.** Keys already in the file stay; a file that already carries ours
+  is left byte-identical. The operator's `authorized_keys` is theirs.
+- **No-follow.** This is root writing into a tree the *workload user* owns, so
+  it descends with `O_NOFOLLOW` (`_descend_nofollow`, the same walk §1's
+  provisioning uses) and opens the file `O_NOFOLLOW`, refusing hardlinks. A
+  symlink swapped in for `authorized_keys` fails the start; it never redirects
+  root's write.
+- **Fatal, not best-effort.** An unseeded share is a VM nobody can log into, so
+  a failure here stops the start rather than producing one.
+
+A share **outside** the workload tree is skipped with a warning naming the file
+to copy: the walk needs a root-owned anchor to be safe, and an operator who
+mounts a directory of their own at the guest home owns what is in it.
+
+Mounting *below* the home (`/home/ben/data`) hides nothing and is untouched.

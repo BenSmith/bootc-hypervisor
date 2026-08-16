@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import deployment
 import service_runtime
@@ -35,8 +35,8 @@ from workload_lib import (
     workload_env_dir,
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
-from vm import (VM_SOCKET_DIR, VM_GUEST_UID, find_ovmf_vars, vm_broker_env,
-                vm_proxy_env)
+from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
+                VM_GUEST_UID, find_ovmf_vars, vm_broker_env, vm_proxy_env)
 from secrets_template import substitute_template
 
 
@@ -283,6 +283,34 @@ def _provision_dir_secure(root_dir, host_path, uid, gid, mode):
         os.close(dir_fd)
 
 
+def _descend_nofollow(root_dir, parts, what: str):
+    """Open the directory at `parts` below `root_dir`, one literal component at a
+    time, never following a symlink — the non-creating half of the walk
+    `_provision_dir_secure` documents at length, factored out because more than
+    one caller needs root to reach a path inside a tree the workload user owns.
+
+    Returns the final directory fd (the CALLER closes it), or None if a
+    component was missing, not a directory, or a symlink.
+    """
+    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
+    for part in parts:
+        try:
+            child_fd = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=dir_fd)
+        except FileNotFoundError:
+            os.close(dir_fd)
+            return None
+        except OSError as exc:
+            log(f"  WARNING: refusing to {what}: unsafe path "
+                f"component {part!r} ({exc.strerror})")
+            os.close(dir_fd)
+            return None
+        os.close(dir_fd)
+        dir_fd = child_fd
+    return dir_fd
+
+
 def _chown_file_secure(root_dir, host_path, uid, gid):
     """Chown an existing regular file under `root_dir` to the workload user
     without ever following a symlink — the file counterpart of
@@ -302,21 +330,10 @@ def _chown_file_secure(root_dir, host_path, uid, gid):
         return False
     if not parts or ".." in parts:
         return False
-    dir_fd = os.open(str(root_dir), os.O_RDONLY | os.O_DIRECTORY)
+    dir_fd = _descend_nofollow(root_dir, parts[:-1], f"chown {host_path}")
+    if dir_fd is None:
+        return False
     try:
-        for part in parts[:-1]:
-            try:
-                child_fd = os.open(
-                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=dir_fd)
-            except FileNotFoundError:
-                return False
-            except OSError as exc:
-                log(f"  WARNING: refusing to chown {host_path}: unsafe path "
-                    f"component {part!r} ({exc.strerror})")
-                return False
-            os.close(dir_fd)
-            dir_fd = child_fd
         try:
             file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW,
                               dir_fd=dir_fd)
@@ -737,6 +754,163 @@ def _read_ssh_pubkey(pw) -> str:
         return ""
 
 
+def _validated_guest_user(vm_cfg) -> str:
+    """Return [vm].user, refusing anything that is not a POSIX username.
+
+    The value is interpolated unquoted into the built-in #cloud-config
+    (`- name: {guest_user}`, just above a NOPASSWD sudo grant) and is joined into
+    a host path by seed_vm_home_share_ssh_key, so both callers need the same
+    guarantee: a value carrying a newline could inject arbitrary cloud-config,
+    and one carrying a slash or '..' could aim the seed at another directory.
+    Fail closed — a bad name aborts VM provisioning.
+    """
+    guest_user = vm_cfg.get("user", VM_DEFAULT_GUEST_USER)
+    if not re.match(r'^[a-z_][a-z0-9_-]*$', guest_user) or len(guest_user) > 32:
+        raise RuntimeError(
+            f"[vm].user {guest_user!r} is not a valid POSIX username "
+            f"(^[a-z_][a-z0-9_-]*$, max 32 chars)"
+        )
+    return guest_user
+
+
+# An authorized_keys larger than this is not a real one — refuse to read it into
+# memory rather than let a workload-owned file dictate root's allocation.
+_AUTHORIZED_KEYS_MAX = 1 << 20
+
+
+def _seed_authorized_keys(root_dir, ssh_dir: Path, pubkey: str, uid, gid) -> bool:
+    """Ensure `pubkey` is present in <ssh_dir>/authorized_keys, as the workload user.
+
+    Runs as root inside a tree the workload user owns, so it reaches the file
+    through _descend_nofollow and opens it O_NOFOLLOW: a symlink swapped in for
+    authorized_keys must fail the open, never redirect root's write. Additive by
+    design — an operator's own keys in the file are kept, and a file that already
+    carries ours is left byte-identical.
+
+    Returns True if the key was written, False if it was already there.
+    Raises RuntimeError if the file cannot be reached or is not a plain file:
+    the caller has already decided the guest depends on it.
+    """
+    parts = (ssh_dir / "authorized_keys").relative_to(root_dir).parts
+    dir_fd = _descend_nofollow(root_dir, parts[:-1], f"seed {ssh_dir}")
+    if dir_fd is None:
+        raise RuntimeError(f"cannot reach {ssh_dir} safely")
+    try:
+        created = True
+        try:
+            fd = os.open("authorized_keys",
+                         os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            created = False
+            try:
+                fd = os.open("authorized_keys", os.O_RDWR | os.O_NOFOLLOW,
+                             dir_fd=dir_fd)
+            except OSError as exc:
+                # ELOOP: authorized_keys is a symlink. O_NOFOLLOW turned an
+                # arbitrary-file write by the workload user into this error.
+                raise RuntimeError(
+                    f"{ssh_dir}/authorized_keys is not a plain file "
+                    f"({exc.strerror})") from exc
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise RuntimeError(
+                    f"{ssh_dir}/authorized_keys is not a regular file")
+            # A hardlink to a file elsewhere would make this write — and the
+            # chown below — reach outside the tree.
+            if st.st_nlink != 1:
+                raise RuntimeError(
+                    f"{ssh_dir}/authorized_keys has {st.st_nlink} hardlinks")
+            if st.st_size > _AUTHORIZED_KEYS_MAX:
+                raise RuntimeError(
+                    f"{ssh_dir}/authorized_keys is {st.st_size} bytes — refusing to read")
+            existing = os.read(fd, st.st_size).decode("utf-8", "replace")
+            present = pubkey.strip() in (l.strip() for l in existing.splitlines())
+            if not present:
+                os.lseek(fd, 0, os.SEEK_END)
+                if existing and not existing.endswith("\n"):
+                    os.write(fd, b"\n")
+                os.write(fd, pubkey.strip().encode() + b"\n")
+            os.fchown(fd, uid, gid)
+            # Only force the mode when we made the file or when sshd's
+            # StrictModes would reject what is there (group/other bits): an
+            # operator's deliberate 0640 is none of our business.
+            if created or st.st_mode & 0o077:
+                os.fchmod(fd, 0o600)
+            return not present
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
+def seed_vm_home_share_ssh_key(pw, config):
+    """Put the workload's pubkey in a [vm].volumes share mounted at the guest home.
+
+    cloud-init writes ~/.ssh/authorized_keys in its *init* stage and mounts
+    [vm].volumes in the *config* stage that follows, so a share whose guest path
+    is the login user's home covers the only key the CLI has. The guest boots
+    perfectly healthy and `workloadctl exec`/`shell` fail authentication — on
+    every boot, not just the first, since the fstab entry mounts before sshd.
+
+    Seeding the share host-side is what makes such a TOML self-sufficient:
+    without it the working configuration lives in an operator's shell history,
+    and a purge, a restore onto an empty share, or the same bundle stamped on
+    another host all produce a VM nobody can log into.
+
+    Skips (with a warning) a share outside the workload tree: the no-follow walk
+    needs a root-owned anchor to be safe, and an operator who mounts a directory
+    of their own at the guest home owns what is in it.
+    """
+    vm_cfg = config.get("vm", {})
+    volumes = vm_cfg.get("volumes", [])
+    if not volumes:
+        return
+    name = config["workload"]["name"]
+    guest_home = PurePosixPath(VM_GUEST_HOME_BASE) / _validated_guest_user(vm_cfg)
+    pubkey = _read_ssh_pubkey(pw)
+    if not pubkey:
+        return  # build_cloud_init_iso raises on this; nothing to add here.
+
+    state_dir = workload_state_dir(name)
+    root_dir = workload_root_dir(name)
+    for vol_spec in volumes:
+        expanded = expand_volume_path(vol_spec, str(state_dir))
+        host_str, guest_str, _opts = parse_volume_spec(expanded)
+        if not host_str or not guest_str:
+            continue
+        guest_path = PurePosixPath(guest_str)
+        # The share covers the home when it IS the home, or contains it (a share
+        # mounted at /home). A share *below* the home hides nothing.
+        try:
+            sub = guest_home.relative_to(guest_path)
+        except ValueError:
+            continue
+
+        home_host = Path(host_str) / sub if str(sub) != "." else Path(host_str)
+        try:
+            home_host.resolve().relative_to(root_dir.resolve())
+        except ValueError:
+            log(f"  WARNING: {guest_str} shares {host_str}, which is outside "
+                f"{root_dir} — it hides the guest's authorized_keys and only you "
+                f"can seed it. Copy {Path(pw.pw_dir) / '.ssh/id_ed25519.pub'} to "
+                f"{home_host}/.ssh/authorized_keys (0600) or `workloadctl exec` "
+                f"will not be able to log in.")
+            continue
+
+        if not _provision_dir_secure(root_dir, home_host, pw.pw_uid, pw.pw_gid,
+                                     0o755):
+            raise RuntimeError(f"could not provision guest home share {home_host}")
+        ssh_dir = home_host / ".ssh"
+        if not _provision_dir_secure(root_dir, ssh_dir, pw.pw_uid, pw.pw_gid,
+                                     0o700):
+            raise RuntimeError(f"could not provision {ssh_dir}")
+        if _seed_authorized_keys(root_dir, ssh_dir, pubkey, pw.pw_uid, pw.pw_gid):
+            log(f"  Seeded SSH key into {guest_str} share: "
+                f"{ssh_dir}/authorized_keys")
+
+
 def generate_vm_host_keypair(pw, name: str):
     """Generate the VM's SSH *host* keypair if absent (S1 host-key pinning).
 
@@ -1046,16 +1220,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         log(f"  Removed legacy on-disk cloud-init seed dir: {legacy_seed_dir}")
 
     vm_cfg = config.get("vm", {})
-    guest_user = vm_cfg.get("user", "workload")
-    # guest_user is interpolated unquoted into the built-in #cloud-config
-    # (`- name: {guest_user}`, just above a NOPASSWD sudo grant). Validate it as
-    # a POSIX username so a value with a newline can't inject arbitrary
-    # cloud-config. Fail closed — a bad name aborts VM provisioning.
-    if not re.match(r'^[a-z_][a-z0-9_-]*$', guest_user) or len(guest_user) > 32:
-        raise RuntimeError(
-            f"[vm].user {guest_user!r} is not a valid POSIX username "
-            f"(^[a-z_][a-z0-9_-]*$, max 32 chars)"
-        )
+    guest_user = _validated_guest_user(vm_cfg)
     ci_cfg = vm_cfg.get("cloud_init", {})
 
     pubkey = _read_ssh_pubkey(pw)
@@ -1428,6 +1593,16 @@ def _ensure_user(name: str) -> int:
             generate_ssh_keypair(pw, name)
         except Exception as e:
             log(f"  ERROR: Failed to generate SSH keypair for {name}: {e}")
+            return 1
+
+        # Must run after the keypair (it needs the pubkey) and after the volume
+        # dirs. Fatal for the same reason those are: a share over the guest home
+        # hides the key cloud-init installs, so an unseeded share is a VM the CLI
+        # cannot log into — better to stop here than to start one.
+        try:
+            seed_vm_home_share_ssh_key(pw, config)
+        except Exception as e:
+            log(f"  ERROR: Failed to seed SSH key into the home share for {name}: {e}")
             return 1
 
         # Host keypair for SSH host-key pinning (S1) — must exist before

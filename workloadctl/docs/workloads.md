@@ -1178,6 +1178,14 @@ The sidecar itself runs as `_wl-<name>` with no capabilities, which is possible
 only because of that mapping: with no guest identity left to assume, it has
 nothing to be privileged for.
 
+**A share mounted at the guest's home is handled for you.** cloud-init writes
+`~/.ssh/authorized_keys` before it mounts volumes, so a share whose guest path is
+`/home/<[vm].user>` would hide the key `workloadctl exec` logs in with — on
+every boot, on a VM that otherwise looks perfectly healthy. `workload-ensure-user`
+seeds that key into the share host-side — at `enable` and at boot, additively, so
+keys you put there yourself survive. A share outside `/var/lib/workloads/<name>/`
+is skipped with a warning naming the file to place yourself.
+
 [vm-virtiofs.md](vm-virtiofs.md) covers the rest: what confines the sidecar, the
 SELinux rule list and how it is produced, and the three things that break a
 share (a `NoNewPrivileges=` drop-in, a stale pid file after an upgrade, and a

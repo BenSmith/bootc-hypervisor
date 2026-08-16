@@ -50,6 +50,14 @@ VM_GUEST_AGENT_PORT = "org.qemu.guest_agent.0"
 # (which on the host is owned by _wl-<name>); see generate_virtiofs_service.
 VM_GUEST_UID = 1000
 
+# The guest login account when [vm].user is unset, and where cloud-init puts its
+# home. Both halves matter to workload-ensure-user: it renders the account into
+# the built-in cloud-config AND has to recognise a [vm].volumes share mounted at
+# that home, which would otherwise hide the authorized_keys the CLI logs in with
+# (seed_vm_home_share_ssh_key; docs/vm-virtiofs.md §8).
+VM_DEFAULT_GUEST_USER = "workload"
+VM_GUEST_HOME_BASE = "/home"
+
 # --- passt networking (ADR 006) ---
 #
 # VM workloads have no bridge. passt terminates the guest's stack in userspace

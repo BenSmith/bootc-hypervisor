@@ -721,6 +721,133 @@ class TestSetupVmVolumeDirectories(unittest.TestCase):
             self.assertEqual(fchown_fds, [])
 
 
+class TestSeedVmHomeShareSshKey(unittest.TestCase):
+    """A [vm].volumes share mounted at the guest home hides the authorized_keys
+    cloud-init writes (cc_users runs in the init stage, cc_mounts in the config
+    stage that follows), so the share has to carry the key itself or the CLI
+    cannot log into a VM that is otherwise perfectly healthy.
+    """
+
+    PUBKEY = "ssh-ed25519 AAAAFAKEKEY workload-vmx@hypervisor"
+
+    def setUp(self):
+        self.mod = _load_script()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "state" / ".ssh").mkdir(parents=True)
+        (self.root / "state" / ".ssh" / "id_ed25519.pub").write_text(self.PUBKEY + "\n")
+        self.pw = _fake_pw(self.root / "state")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, volumes, user="ben", name="vmx"):
+        vm = {"volumes": volumes}
+        if user is not None:
+            vm["user"] = user
+        config = {"workload": {"name": name}, "vm": vm}
+        with mock.patch.object(self.mod, "workload_state_dir",
+                               lambda n: self.root / "state"), \
+             mock.patch.object(self.mod, "workload_data_dir",
+                               lambda n: self.root / "data"), \
+             mock.patch.object(self.mod, "workload_root_dir", lambda n: self.root), \
+             mock.patch("os.fchown"), \
+             mock.patch.object(self.mod, "log") as logged:
+            self.mod.seed_vm_home_share_ssh_key(self.pw, config)
+        return logged
+
+    def _keys(self, *parts) -> Path:
+        return self.root.joinpath(*parts) / ".ssh" / "authorized_keys"
+
+    def test_share_at_the_guest_home_is_seeded(self):
+        self._run(["./home:/home/ben"])
+        keys = self._keys("data", "home")
+        self.assertIn(self.PUBKEY, keys.read_text())
+        self.assertEqual(keys.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(keys.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_seeding_is_idempotent(self):
+        self._run(["./home:/home/ben"])
+        self._run(["./home:/home/ben"])
+        body = self._keys("data", "home").read_text()
+        self.assertEqual(body.count(self.PUBKEY), 1)
+
+    def test_operator_keys_are_kept(self):
+        # Additive, not authoritative: someone else's key in the file is theirs.
+        keys = self._keys("data", "home")
+        keys.parent.mkdir(parents=True)
+        keys.write_text("ssh-ed25519 AAAAOPERATOR someone@elsewhere")  # no newline
+        self._run(["./home:/home/ben"])
+        body = self._keys("data", "home").read_text()
+        self.assertIn("AAAAOPERATOR", body)
+        self.assertIn(self.PUBKEY, body)
+        # The missing trailing newline must not glue the two keys together.
+        self.assertEqual(len([l for l in body.splitlines() if l.strip()]), 2)
+
+    def test_share_at_home_parent_seeds_the_users_subdir(self):
+        self._run(["./homes:/home"])
+        keys = self._keys("data", "homes", "ben")
+        self.assertIn(self.PUBKEY, keys.read_text())
+        # The home dir itself must be usable by the guest user, not root-owned
+        # 0700 as a bare intermediate mkdir would leave it.
+        self.assertEqual(keys.parent.parent.stat().st_mode & 0o777, 0o755)
+
+    def test_default_user_when_vm_user_unset(self):
+        self._run(["./home:/home/workload"], user=None)
+        self.assertIn(self.PUBKEY, self._keys("data", "home").read_text())
+
+    def test_share_below_the_home_is_left_alone(self):
+        # /home/ben/data hides nothing — the home itself is still the image's.
+        self._run(["./scratch:/home/ben/data"])
+        self.assertFalse((self.root / "data" / "scratch" / ".ssh").exists())
+
+    def test_unrelated_share_is_left_alone(self):
+        self._run(["./media:/srv/media"])
+        self.assertFalse((self.root / "data" / "media" / ".ssh").exists())
+
+    def test_no_volumes_is_a_noop(self):
+        self._run([])
+
+    def test_share_outside_the_workload_tree_warns_and_skips(self):
+        with tempfile.TemporaryDirectory() as outside:
+            logged = self._run([f"{outside}:/home/ben"])
+            self.assertFalse((Path(outside) / ".ssh").exists())
+        said = " ".join(str(c) for c in logged.call_args_list)
+        self.assertIn("outside", said)
+        self.assertIn("authorized_keys", said)
+
+    def test_symlinked_authorized_keys_is_refused(self):
+        # The workload user owns this tree and root is writing into it: a
+        # symlink swapped in for authorized_keys must fail the open, never
+        # redirect the write.
+        target = self.root / "state" / "stolen"
+        ssh_dir = self.root / "data" / "home" / ".ssh"
+        ssh_dir.mkdir(parents=True)
+        (ssh_dir / "authorized_keys").symlink_to(target)
+        with self.assertRaises(RuntimeError):
+            self._run(["./home:/home/ben"])
+        self.assertFalse(target.exists())
+
+    def test_symlinked_ssh_dir_is_refused(self):
+        outside = self.root / "state" / "elsewhere"
+        outside.mkdir()
+        home_share = self.root / "data" / "home"
+        home_share.mkdir(parents=True)
+        (home_share / ".ssh").symlink_to(outside)
+        with self.assertRaises(RuntimeError):
+            self._run(["./home:/home/ben"])
+        self.assertFalse((outside / "authorized_keys").exists())
+
+    def test_invalid_vm_user_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            self._run(["./home:/home/ben"], user="ben\nroot: x")
+
+    def test_no_pubkey_yet_is_a_noop(self):
+        (self.root / "state" / ".ssh" / "id_ed25519.pub").unlink()
+        self._run(["./home:/home/ben"])
+        self.assertFalse((self.root / "data" / "home" / ".ssh").exists())
+
+
 class TestSetupVolumeDirectoriesMultiContainer(unittest.TestCase):
     """C1: multi-container workload volume dirs are created."""
 

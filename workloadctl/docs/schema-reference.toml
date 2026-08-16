@@ -161,6 +161,14 @@ name = "schema-reference"
 # Requires a shared-memory NUMA backend (auto-configured when non-empty).
 # volumes = ["/mnt/data:/mnt/data"]
 #
+# A share mounted at the guest's HOME (["./home:/home/ben"] with user = "ben")
+# is a supported special case, not an accident waiting to happen: cloud-init
+# writes ~/.ssh/authorized_keys before it mounts volumes, so the share would
+# hide the key `workloadctl exec` logs in with. workload-ensure-user seeds the
+# key into the share instead (at enable and at boot) — additively, so your own
+# keys in that authorized_keys survive. A share OUTSIDE the workload tree is skipped
+# with a warning naming the file to place yourself; see docs/vm-virtiofs.md §8.
+#
 # Optional: How many *older* system disk generations to keep for rollback,
 # in addition to the generation rotated by the current update. Each update
 # renames the live system.qcow2 to system.qcow2.gen-N (the newest rollback
