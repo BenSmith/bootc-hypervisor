@@ -377,6 +377,25 @@ NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 VM_PROXY_ADDR = "192.0.2.1"
 VM_PROXY_PORT = 3128
 
+# What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
+# declare it handles itself, suppressing the matching completeness check in
+# build_cloud_init_iso.
+SEED_PROVIDES_CHOICES = {"proxy", "mounts"}
+
+# workload-ensure-user exits with this when a custom seed fails one of the
+# contracts build_cloud_init_iso enforces (host key, proxy env, volume mounts).
+# Distinct from a plain 1 so the caller can tell "the operator's seed is wrong,
+# and the helper already said how" from "the helper broke": provisioning maps
+# it to UsageError, which keeps the CLI's bug-report banner — and the traceback
+# it prints — off an error the operator is expected to hit and can fix.
+VM_SEED_CONTRACT_EXIT = 2
+
+
+class SeedContractError(RuntimeError):
+    """A custom [vm.cloud_init].user_data_file does not satisfy a contract the
+    built-in seed would have satisfied. The message is written for the operator
+    and names the fix."""
+
 # Dummy link carrying the advertised address. Host-global and shared, created
 # on demand and never torn down by a workload stop: it is refcount-free because
 # it holds no per-workload state, costs nothing idle, and an orphan is inert.
@@ -1160,6 +1179,23 @@ def validate_vm_config(config: dict) -> list[str]:
                 errors.append(
                     f"[vm.cloud_init].user_data_file must be a string path, got {ud!r}"
                 )
+            # seed_provides opts a custom seed out of the seed-completeness
+            # checks build_cloud_init_iso applies (proxy env, virtiofs mounts).
+            # Validated against a closed set: the whole value of the check is
+            # that it fires, and a typo'd opt-out would silently disable it —
+            # which is the failure mode the check exists to prevent.
+            sp = ci.get("seed_provides", [])
+            if not isinstance(sp, list) or not all(isinstance(x, str) for x in sp):
+                errors.append(
+                    "[vm.cloud_init].seed_provides must be a list of strings"
+                )
+            else:
+                unknown = sorted(set(sp) - SEED_PROVIDES_CHOICES)
+                if unknown:
+                    errors.append(
+                        f"[vm.cloud_init].seed_provides has unknown entries "
+                        f"{unknown}; valid: {sorted(SEED_PROVIDES_CHOICES)}"
+                    )
             tv = ci.get("template_vars", {})
             if not isinstance(tv, dict):
                 errors.append("[vm.cloud_init].template_vars must be a table of strings")

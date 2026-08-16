@@ -563,6 +563,126 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         known = (self.home / ".ssh" / "vm_known_hosts").read_text()
         self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
 
+    # --- seed-completeness contract (proxy env + volume mounts) -------------
+    #
+    # Template mode emits only what the operator wrote, so a seed that omits
+    # what the TOML implies produces a VM that boots and passes every check
+    # while being quietly wrong. Both omissions are refused at build time, for
+    # the same reason as the host-key contract above.
+
+    _FILTERED_NET = {"egress": "filtered", "hosts": ["example.com"]}
+
+    def _seed(self, body: str = "") -> None:
+        (self.config_dir / "user-data").write_text("#cloud-config\n" + body)
+
+    def test_filtered_egress_seed_without_proxy_refused(self):
+        """A seed that never mentions the proxy address, on a workload whose
+        egress is hostname-filtered, leaves the guest going direct — which is
+        dropped, not refused, so every fetch hangs instead of failing."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("proxy", msg)
+        self.assertIn(self.mod.VM_PROXY_ADDR, msg)
+
+    def test_filtered_egress_seed_with_proxy_accepted(self):
+        """Naming the proxy address satisfies the check."""
+        self._seed(f"write_files:\n  - path: /etc/environment\n"
+                   f"    content: https_proxy=http://{self.mod.VM_PROXY_ADDR}:3128\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        self._run_build(cfg)
+        self.assertIn(self.mod.VM_PROXY_ADDR, self._read_user_data())
+
+    def test_open_egress_seed_without_proxy_accepted(self):
+        """With no `hosts` there is no proxy to point at, so the check must not
+        fire — the common case is a seed that rightly says nothing about it."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": {"egress": "open"}}}
+        self._run_build(cfg)
+
+    def test_declared_volume_never_mounted_refused(self):
+        """A declared volume the seed never mounts leaves the guest writing to
+        the system disk at the path the operator believes is persistent."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("home-fedora", msg)   # the virtiofs tag
+        self.assertIn("/home/fedora", msg)  # where it should have landed
+
+    def test_declared_volume_mounted_accepted(self):
+        """Referring to the tag satisfies the check."""
+        self._seed("runcmd:\n  - mount -t virtiofs home-fedora /home/fedora\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg)
+
+    def test_only_the_unmounted_volume_is_named(self):
+        """With several volumes the error names the one actually missing, not
+        merely the first declared."""
+        self._seed("runcmd:\n  - mount -t virtiofs home-fedora /home/fedora\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora", "./srv:/srv/data"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("srv-data", msg)
+        self.assertNotIn("home-fedora", msg)
+
+    def test_contract_failures_are_typed(self):
+        """Contract rejections raise SeedContractError, not a bare RuntimeError.
+
+        The type is what earns the distinct exit code in main(), which is what
+        keeps the CLI from framing an operator's fixable mistake as a crash and
+        asking them to file a bug report. A plain RuntimeError would still fail
+        the build, but with the message buried under a traceback.
+        """
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        with self.assertRaises(self.mod.SeedContractError):
+            self._run_build(cfg)
+
+    def test_seed_provides_opts_out_of_each_check(self):
+        """seed_provides is the escape hatch for a guest image that already
+        carries the configuration — without it a legitimate setup would be
+        blocked with no recourse."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
+                                     "seed_provides": ["proxy", "mounts"]},
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg)
+
+    def test_seed_provides_is_per_concern(self):
+        """Opting out of one check must not disable the other."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
+                                     "seed_provides": ["mounts"]},
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        self.assertIn("proxy", str(ctx.exception))
+
+    def test_default_mode_is_unaffected_by_the_contract(self):
+        """The checks are template-mode only: default mode derives both the
+        proxy env and the mounts itself, so the same config must build."""
+        cfg = {"vm": {"user": "fedora",
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg, name="defvm")
+        text = self._read_user_data("defvm")
+        self.assertIn(self.mod.VM_PROXY_ADDR, text)
+        self.assertIn("home-fedora", text)
+
     def test_missing_host_keypair_raises(self):
         """A missing host keypair (setup step skipped) fails the ISO build."""
         (self.home / ".ssh" / "vm_host_ed25519_key").unlink()

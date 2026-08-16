@@ -40,8 +40,11 @@ from workload_lib import (
     workload_root_dir,
 )
 from podman import Podman
-from workloadctl_core import WorkloadConfig, WorkloadManager, WorkloadUserNotFound
+from workloadctl_core import (
+    UsageError, WorkloadConfig, WorkloadManager, WorkloadUserNotFound,
+)
 from substrate import LifecycleError
+from vm import VM_SEED_CONTRACT_EXIT
 
 
 REQUIRED_EXECUTABLES = ["podman", "systemctl", "loginctl", "systemd-sysusers", "restorecon", "semodule"]
@@ -311,7 +314,19 @@ def provision_user(config: WorkloadConfig):
     subprocess.run(["systemd-sysusers", str(sysusers_file)], check=True)
 
     info("  Configuring workload user...")
-    subprocess.run(["/usr/libexec/workloadctl/workload-ensure-user", config.name], check=True)
+    # Not check=True: a seed-contract rejection is an operator error the helper
+    # has already reported in full, so surfacing it as CalledProcessError would
+    # bury that message under a traceback and the "this looks like a workloadctl
+    # bug" banner — telling the operator to file a report for something they are
+    # expected to hit and can fix themselves. Every other non-zero still raises.
+    result = subprocess.run(
+        ["/usr/libexec/workloadctl/workload-ensure-user", config.name],
+        check=False,
+    )
+    if result.returncode == VM_SEED_CONTRACT_EXIT:
+        raise UsageError("")  # message already printed by the helper
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
 class ImageTransferError(Exception):

@@ -397,6 +397,23 @@ name = "schema-reference"
 # Type: table; values must be scalars (string, int, float, bool).
 # template_vars = { REPO_URL = "https://...", VERSION = "1.2.3" }
 #
+# Optional: Declare that this seed handles a concern the built-in cloud-config
+# would otherwise have covered, suppressing the matching completeness check.
+# Type: list of strings; valid entries: "proxy", "mounts".
+# seed_provides = ["mounts"]
+#
+# Because a custom user-data replaces the built-in config rather than adding to
+# it, two things the TOML implies stop happening unless this file does them:
+# the guest's proxy environment (whenever [vm.network] sets `hosts`) and the
+# mounts for [vm].volumes. Both fail silently — filtered egress DROPS
+# unproxied traffic, so the guest hangs rather than errors; an unmounted volume
+# leaves the guest writing to the system disk at a path believed persistent,
+# which the next disk rebuild discards. Provisioning therefore refuses a seed
+# that needs either and lacks it, and names what is missing. Use seed_provides
+# only when the guest image genuinely carries the configuration already (a
+# mount baked into its own /etc/fstab, say) — it silences the check, it does
+# not satisfy the requirement.
+#
 # Substitution rules applied to the user_data_file (in order):
 #   ${SECRET:name}  - Decrypted via `systemd-creds decrypt` from
 #                     /etc/credstore.encrypted/<name> (falls back to plain

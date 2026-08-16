@@ -971,6 +971,22 @@ class TestVmCloudInit(unittest.TestCase):
         errs = validate_workload_config(self._base(template_vars={"LIST": [1, 2, 3]}))
         self.assertTrue(any("must be a scalar" in e for e in errs), errs)
 
+    def test_seed_provides_known_values_accepted(self):
+        cfg = self._base(seed_provides=["proxy", "mounts"])
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_seed_provides_unknown_value_rejected(self):
+        """A typo'd opt-out would silently disable a seed-completeness check —
+        the exact silence the check exists to prevent — so it is a hard error
+        rather than an ignored key."""
+        errs = validate_workload_config(self._base(seed_provides=["proxies"]))
+        self.assertTrue(any("seed_provides" in e and "proxies" in e
+                            for e in errs), errs)
+
+    def test_seed_provides_must_be_list_of_strings(self):
+        errs = validate_workload_config(self._base(seed_provides="proxy"))
+        self.assertTrue(any("seed_provides must be a list" in e for e in errs), errs)
+
 
 class TestSubstituteTemplate(unittest.TestCase):
     def test_substitutes_template_var(self):
