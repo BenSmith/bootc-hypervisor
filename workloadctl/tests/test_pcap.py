@@ -11,6 +11,7 @@ literal.
 import os
 import struct
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -734,6 +735,24 @@ class TestDiagnose(unittest.TestCase):
         _, ok, msg = self.check(self.config, unit_active=False, log_rules=2)
         self.assertFalse(ok)
         self.assertIn("nothing owns them", msg)
+
+    def test_the_probe_path_reads_the_bool_not_the_tuple(self):
+        """The production path takes neither argument. service_active returns
+        (active, state), and every non-empty tuple is truthy — so failing to
+        unpack it claimed a running capture on every workload on the host,
+        capture or not, on a line about writes to the filter table.
+        """
+        import cmd_diagnose
+        with mock.patch.object(cmd_diagnose, "service_active",
+                               return_value=(False, "inactive")), \
+             mock.patch.object(cmd_diagnose, "_log_rule_count", return_value=0):
+            self.assertIsNone(self.check(self.config))
+
+        with mock.patch.object(cmd_diagnose, "service_active",
+                               return_value=(True, "active")), \
+             mock.patch.object(cmd_diagnose, "_log_rule_count", return_value=1):
+            name, ok, _msg = self.check(self.config)
+            self.assertEqual((name, ok), ("capture", True))
 
 
 if __name__ == "__main__":

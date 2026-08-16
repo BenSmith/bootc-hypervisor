@@ -807,7 +807,11 @@ def capture_check(config, *, unit_active=PROBE, log_rules=PROBE
     healthy workload nothing.
     """
     if unit_active is PROBE:
-        unit_active = service_active(pcap_unit_name(config.name))
+        # Unpack: service_active returns (active, state), and a bare tuple is
+        # always truthy — which reported a running capture for every workload,
+        # capture or not. The injected-argument tests never caught it because
+        # they pass a bool and skip this line.
+        unit_active, _ = service_active(pcap_unit_name(config.name))
     if log_rules is PROBE:
         log_rules = _log_rule_count()
 
