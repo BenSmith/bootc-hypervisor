@@ -535,6 +535,17 @@ bind-mounts the host path out of *that* namespace — without it the container
 gets **EROFS on a directory it owns, on a filesystem mounted `rw`, with nothing
 logged anywhere**.
 
+**Sockets, fifos and device nodes are excluded from that second list**, even
+declared writable. They don't need it — the kernel returns `EROFS` on a
+read-only mount only for regular files, directories and symlinks, so a unix
+socket like `/run/systemd/journal/socket` stays connectable under
+`ProtectSystem=strict` — and naming one is fatal: systemd bind-mounts every
+`ReadWritePaths=` entry, targeted policy does not let `init_t` `mounton` a
+`sock_file`, and the unit dies at namespace setup with a bare `226/NAMESPACE`
+(`avc: denied { mounton } … tclass=sock_file`). A path that can't be stat'd at
+generate time — the usual case for a volume on a filesystem mounted later — is
+assumed to be a directory and kept.
+
 **A filesystem that cannot hold a label needs a mount option.** cifs, nfs, vfat
 — anything the kernel policy marks `fs_noxattr_type` — gives every inode one
 type from a `genfscon` line (`cifs_t` for cifs), and `container_t` is not

@@ -1012,6 +1012,31 @@ def _external_host_path(host_path, name):
     return resolved
 
 
+def _rw_path_is_bindable(resolved):
+    """Can `resolved` be named in ReadWritePaths= -- and does it need to be?
+
+    Both answers are no for a socket, fifo or device node, and getting this
+    wrong is fatal rather than merely wide: systemd bind-mounts every
+    ReadWritePaths= entry inside the unit's namespace, and the targeted policy
+    does not let init_t `mounton` a sock_file, so the unit dies at namespace
+    setup with a bare 226/NAMESPACE (`avc: denied { mounton } ...
+    tcontext=...:syslogd_var_run_t tclass=sock_file`). Four shipped bundles
+    mount /run/systemd/journal/socket that way.
+
+    Nor is the entry needed: the kernel's read-only-filesystem check
+    (sb_permission) returns EROFS only for S_ISREG/S_ISDIR/S_ISLNK, so
+    connecting to a unix socket or writing a fifo/device works fine under
+    ProtectSystem=strict.
+
+    An unstattable path is treated as bindable -- an out-of-tree volume on a
+    filesystem that is not mounted yet is the common case here (that is what
+    RequiresMountsFor= is for) and it is virtually always a directory.
+    """
+    if not os.path.exists(resolved):
+        return True
+    return os.path.isdir(resolved) or os.path.isfile(resolved)
+
+
 def _volume_args(container, home_dir, name):
     """--volume flags: [storage].volumes expansion, escape-warn, quoting.
 
@@ -1033,7 +1058,9 @@ def _volume_args(container, home_dir, name):
 
     A volume the operator declared `:ro` is deliberately left out: podman would
     enforce read-only in the container anyway, so adding it would widen what the
-    unit may write to buy nothing.
+    unit may write to buy nothing. So is anything that is not a directory or a
+    regular file -- see _rw_path_is_bindable, where naming it is both
+    unnecessary and fatal.
     """
     args = []
     external = []
@@ -1051,7 +1078,8 @@ def _volume_args(container, home_dir, name):
                 if resolved not in external:
                     external.append(resolved)
                 opts = parts[2].split(',') if len(parts) > 2 else []
-                if 'ro' not in opts and resolved not in external_rw:
+                if ('ro' not in opts and resolved not in external_rw
+                        and _rw_path_is_bindable(resolved)):
                     external_rw.append(resolved)
             expanded = ':'.join(dq(p) for p in parts)
         else:
