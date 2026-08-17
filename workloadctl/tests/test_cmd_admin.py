@@ -479,6 +479,11 @@ class DiagnoseVmScopeTest(unittest.TestCase):
             'image = "example.com/guest:latest"\n\n'
             '[vm.network]\nbridge = "br0"\n'
         )
+        # Both enabled: this suite asks which checks a VM gets versus a
+        # container, and a disabled workload of either substrate folds its
+        # runtime checks into one line, which would answer a different question.
+        for name in ("app", "guest"):
+            (self.tmp / name / workload_lib.ENABLED_MARKER_NAME).touch()
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
         self.manager.get_image_id.return_value = "sha256:0123456789ab"
@@ -672,6 +677,11 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
             '\n[storage]\nvolumes = ["./data:/data"]\n'
         )
+        # Enabled: the runtime half of the spine (linger, runtime dir, units,
+        # service state) only reports per-check for a workload that is supposed
+        # to be running. Disabled, those fold into one `workload_disabled` line
+        # — see tests/test_diagnose_disabled_fold.py.
+        (self.tmp / "app" / workload_lib.ENABLED_MARKER_NAME).touch()
         self.home = self.tmp / "home-app"
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.home))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
@@ -888,14 +898,19 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             "build change, which is the whole reason units_current exists",
         )
 
-    def test_service_not_active_disabled_workload(self):
-        # config.enabled is False (no marker); service_active failure fix
-        # should say "disabled" not "check logs".
+    def test_disabled_workload_gets_the_fold_not_a_service_active_failure(self):
+        """Supersedes an earlier test that pinned service_active's "Workload is
+        disabled in config" fix text. That branch is now unreachable: whenever
+        it would be chosen, the check is one of the ones folded away — so the
+        state is stated once, by the fold, instead of six times by its
+        consequences."""
+        (self.tmp / "app" / workload_lib.ENABLED_MARKER_NAME).unlink()
         code, out = self._run(json_mode=True)
         data = json.loads(out)
-        check = next(c for c in data["checks"] if c["check"] == "service_active")
-        self.assertFalse(check["passed"])
-        self.assertIn("disabled", check["fix"])
+        names = [c["check"] for c in data["checks"]]
+        self.assertNotIn("service_active", names)
+        fold = next(c for c in data["checks"] if c["check"] == "workload_disabled")
+        self.assertTrue(fold["passed"])
 
     def test_service_active_enabled_workload_hints_journalctl(self):
         (self.tmp / "app" / ".enabled").touch()

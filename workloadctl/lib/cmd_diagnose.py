@@ -1368,6 +1368,72 @@ def _check_mcs_labels(config, _check) -> None:
                f"-exec chcon -l s0 {{}} +")
 
 
+# The runtime state `disable` tears down: linger, the runtime dir it implies,
+# the per-workload SELinux module, the generated units and the service state.
+# Every one of these is *supposed* to be absent on a disabled workload, so each
+# reports its absence as a failure and a disabled workload came out of the
+# battery carrying eight findings that were all the same fact — with fixes
+# (`enable-linger`, `daemon-reload`, `workloadctl enable`) that an operator who
+# stopped the workload on purpose must not follow.
+#
+# Deliberately NOT in this list: `selinux_labels`, `subid_*`, `home_dir`,
+# `volume_paths`. Those describe on-disk state that must stay correct while the
+# workload is off — it is what the next enable builds on — so their failures are
+# real findings, not consequences. `user_session` is absent rather than
+# excluded: Check 3b only runs when linger is on, which for a disabled workload
+# it is not.
+DISABLED_CONSEQUENCE_CHECKS = (
+    "linger_enabled",
+    "runtime_dir",
+    "selinux_module",
+    "podman_session",
+    "service_file",
+    "service_enabled",
+    "service_active",
+)
+
+
+def collapse_disabled_consequences(checks: list[dict], name: str) -> list[dict]:
+    """Fold a disabled workload's expected absences into one check.
+
+    Only ever called for a workload whose enable marker is gone. Returns a new
+    list with the folded entries replaced, in place, by a single passing
+    `workload_disabled` check — passing because a workload that is off is a
+    state, not a fault, and the eight failures it used to print made the one
+    finding that *was* real (a drifted subid range, say) the ninth item in a
+    list of eight non-problems.
+
+    Only absences fold. An entry in the list that *passed* is residue — linger
+    still on, a unit still loaded after disable — which is a genuine anomaly and
+    stays visible. `podman_session` inverts that: it is the skip line emitted
+    when the workload's rootless podman cannot answer, so for a disabled
+    workload its passing form IS the absence. It cannot be here in its failing
+    form, which _podman_read only emits when the workload is enabled.
+    """
+    folded = [
+        c for c in checks
+        if c["check"] in DISABLED_CONSEQUENCE_CHECKS
+        and (not c["passed"] or c["check"] == "podman_session")
+    ]
+    if not folded:
+        return checks
+
+    folded_ids = {id(c) for c in folded}
+    kept = [c for c in checks if id(c) not in folded_ids]
+    names = ", ".join(c["check"] for c in folded)
+    summary = {
+        "check": "workload_disabled",
+        "passed": True,
+        "message": (
+            f"Workload is disabled, so its runtime state is absent as "
+            f"expected — {len(folded)} checks folded into this one: {names}. "
+            f"Run it with: sudo workloadctl enable {name}"
+        ),
+    }
+    kept.insert(checks.index(folded[0]), summary)
+    return kept
+
+
 def collect_diagnose_checks(config, manager: WorkloadManager):
     """Run the diagnose check battery and return (checks, passed).
 
@@ -1439,6 +1505,12 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                                 f"user@{config.uid}.service, then "
                                 f"sudo workloadctl restart {config.name}"))
                 else:
+                    # Emitted, then folded away by
+                    # collapse_disabled_consequences — which is why this text is
+                    # not what an operator sees for a disabled workload; the
+                    # fold names the check instead. The two layers stay
+                    # independent on purpose: this one knows only that podman
+                    # could not answer, and says so whoever is reading.
                     _check("podman_session", True,
                            f"Image and container checks skipped: "
                            f"{config.username} has no rootless podman session "
@@ -1835,9 +1907,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     if svc_active:
         _check("service_active", True, f"Service active: {service_state}")
     else:
-        fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"
-               if config.enabled else "Workload is disabled in config")
-        _check("service_active", False, f"Service not active: {service_state}", fix=fix)
+        # No disabled-workload branch here any more: when this fails on a
+        # disabled workload the check is folded into `workload_disabled`, so a
+        # fix reading "Workload is disabled in config" could never be printed.
+        _check("service_active", False, f"Service not active: {service_state}",
+               fix=f"Check logs: sudo journalctl -u {config.service_name} -n 50")
 
     # Check 10: Container(s) running. A VM workload has no container to inspect —
     # its liveness is the QEMU service's own state, already covered by Check 9,
@@ -1922,6 +1996,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                f'(acknowledged via {HOST_USERNS_OPT_IN}=true) — the '
                'per-workload isolation boundary is dissolved.')
 
+    if not config.enabled:
+        checks = collapse_disabled_consequences(checks, config.name)
+
     return checks, all(c["passed"] for c in checks)
 
 
@@ -1965,6 +2042,9 @@ def cmd_diagnose(args, manager: WorkloadManager):
         print()
         sys.exit(1)
     else:
-        print("✓ All checks passed - workload is healthy")
+        # "healthy" alone would read as "running" on a workload that is off —
+        # the same confusion the folded check exists to remove.
+        state = "" if config.enabled else " (disabled — nothing is running)"
+        print(f"✓ All checks passed - workload is healthy{state}")
         sys.exit(0)
 

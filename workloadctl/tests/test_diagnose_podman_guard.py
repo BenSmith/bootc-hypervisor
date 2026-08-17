@@ -126,8 +126,12 @@ class PodmanUnavailableTests(unittest.TestCase):
         come after — so the crash suppressed the answer."""
         checks, _ = self._collect()
         names = {c["check"] for c in checks}
-        self.assertIn("service_enabled", names)
-        self.assertIn("service_active", names)
+        # ca_trust_anchors is Check 7f — it only exists in this list if the run
+        # got past the Check 6 read that used to raise. The service checks that
+        # name the actual state run later still; for a disabled workload they
+        # arrive folded (see test_diagnose_disabled_fold).
+        self.assertIn("ca_trust_anchors", names)
+        self.assertIn("workload_disabled", names)
 
     def test_the_unanswerable_checks_are_omitted_not_passed(self):
         checks, _ = self._collect()
@@ -135,28 +139,32 @@ class PodmanUnavailableTests(unittest.TestCase):
         self.assertNotIn("image_available", names)
         self.assertNotIn("container_running", names)
 
-    def test_the_gap_is_announced(self):
+    def test_the_gap_is_announced_through_the_disabled_fold(self):
         """A skipped check that says nothing is indistinguishable from one that
         passed, which is how "I did not look" becomes "I looked and it was
-        fine"."""
+        fine". For a disabled workload the announcement arrives folded — this
+        pins that the fold carries it rather than swallowing it."""
         checks, _ = self._collect()
-        entry = self._entry(checks, "podman_session")
+        entry = self._entry(checks, "workload_disabled")
         self.assertIsNotNone(entry)
-        self.assertTrue(entry["passed"])
-        self.assertIn("disabled", entry["message"])
-
-    def test_announced_once_however_many_reads_fail(self):
-        """Two podman-backed checks fail per run; one line, not one per read."""
-        checks, _ = self._collect()
-        self.assertEqual(
-            [c["check"] for c in checks].count("podman_session"), 1)
+        self.assertIn("podman_session", entry["message"])
 
     def test_a_disabled_workload_is_not_failed_for_it(self):
         """An unreachable podman is the expected consequence of being off. A
         failure here would be a finding the operator cannot act on without
         starting a workload they deliberately stopped."""
         checks, _ = self._collect()
-        self.assertTrue(self._entry(checks, "podman_session")["passed"])
+        self.assertEqual(
+            [c["check"] for c in checks if not c["passed"] and "podman" in c["check"]],
+            [])
+
+    def test_announced_once_however_many_reads_fail(self):
+        """Two podman-backed checks fail per run; one line, not one per read.
+        Asserted on the enabled path, where the entry survives unfolded."""
+        self._enable("app")
+        checks, _ = self._collect()
+        self.assertEqual(
+            [c["check"] for c in checks].count("podman_session"), 1)
 
     def test_an_enabled_workload_is_failed_for_it(self):
         """Same exception, opposite verdict: linger is supposed to be on, so
@@ -180,7 +188,8 @@ class PodmanUnavailableTests(unittest.TestCase):
     def test_the_multi_container_shape_survives_too(self):
         """Both podman call sites are per-container in pod/bridge mode, so the
         loop must skip rather than abort — and still announce once, not twice
-        per container."""
+        per container. Enabled, so the announcement is not folded away."""
+        self._enable("pod")
         checks, _ = self._collect("pod")
         names = [c["check"] for c in checks]
         self.assertEqual(names.count("podman_session"), 1)
