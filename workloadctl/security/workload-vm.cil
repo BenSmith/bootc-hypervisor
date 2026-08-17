@@ -106,8 +106,21 @@
 ; NOTE FOR DEPLOYED HOSTS: the policy store lives in /etc, which ostree
 ; 3-way-merges, so a `bootc upgrade` does NOT deliver a changed module to a
 ; machine whose store has local modifications (the same caveat the image's
-; Containerfile records for its own CIL modules). `workloadctl diagnose` reports
-; whether this module is loaded so the gap is visible rather than silent.
+; Containerfile records for its own CIL modules). The store is in /etc because
+; the image's semanage.conf sets `store-root=/etc/selinux`; Fedora's own default
+; is /var/lib/selinux, which ostree would replace wholesale.
+;
+; This is the expected state, not a rare one: `semanage fcontext -a` rewrites
+; the store, and every `workloadctl enable` runs one. Measured on a deployed
+; host — 493 of ~639 diverged /etc paths were the policy store, this module's
+; directory among them.
+;
+; `workloadctl diagnose` therefore reports both halves: whether the module is
+; loaded, and whether the loaded copy still matches the .cil this build ships
+; (semodule keeps the source verbatim under <store>/active/modules/<prio>/, so
+; the comparison is exact). A module that is present but stale used to pass
+; every check. The fix is `semodule -i /usr/share/workloadctl/workload-vm.cil`
+; — /usr is replaced wholesale, so the shipped file is always current.
 
 ; ---------------------------------------------------------------------------
 ; Declarations
