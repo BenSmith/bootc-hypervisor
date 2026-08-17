@@ -940,6 +940,42 @@ class TestGeneratorVolumeExpansion(unittest.TestCase):
         service = self._service_for('["/mnt/a$b:/models:ro"]')
         self.assertIn('RequiresMountsFor="/mnt/a$b"', service)
 
+    def test_writable_external_volume_is_in_read_write_paths(self):
+        # ProtectSystem=strict mounts the whole hierarchy read-only inside the
+        # unit's namespace, and podman bind-mounts the host path out of that
+        # namespace -- so without naming it back the container gets EROFS on a
+        # directory it owns, on a filesystem mounted rw, with NO denial logged.
+        # Measured against a container_file_t directory owned by the workload
+        # user, so it is not about labels or ownership.
+        service = self._service_for('["/srv/media:/media:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertIn('"/srv/media"', line)
+
+    def test_external_volume_with_no_opts_defaults_to_writable(self):
+        # "host:guest" with no third field is rw in podman, so the unit has to
+        # allow it too or the default spelling is the broken one.
+        service = self._service_for('["/srv/media:/media"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertIn('"/srv/media"', line)
+
+    def test_read_only_external_volume_is_not_made_writable(self):
+        # podman enforces :ro in the container regardless, so naming it here
+        # would only widen what the unit may write.
+        service = self._service_for('["/mnt/models:/models:ro"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertNotIn("/mnt/models", line)
+
+    def test_anchored_volume_is_not_added_to_read_write_paths(self):
+        # The workload root is already there; adding the same tree again would
+        # be noise, and would differ per volume for no reason.
+        service = self._service_for('["./data:/app/data:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertEqual(line.count("/var/lib/workloads/vols"), 1)
+
 
 class TestGeneratorDevices(unittest.TestCase):
     def setUp(self):

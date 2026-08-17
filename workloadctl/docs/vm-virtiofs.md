@@ -302,6 +302,12 @@ the real unit fails**, which looks like a race and is not one. Reproduce
 through systemd (`systemd-run` is enough — PID 1 execs the labelled binary and
 the transition applies).
 
+**A container workload hits the same wall, and hides it better.** There the
+type is `container_file_t`, no policy rule is needed, and the denial is
+`dontaudit`-suppressed — a healthy unit, `Permission denied`, and no AVC unless
+you run `semodule -DB`. See
+[workloads.md](workloads.md#volumes-on-external-filesystems).
+
 ---
 
 ## 6. What was proven

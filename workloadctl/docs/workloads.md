@@ -523,6 +523,61 @@ sudo semanage permissive -d wl_<name>.process                # back to enforcing
 
 ---
 
+### Volumes on External Filesystems
+
+A `[storage].volumes` entry whose host path lives outside
+`/var/lib/workloads/<name>/` is handled for you in two ways: the unit gets a
+`RequiresMountsFor=` for it (so the container cannot start healthy over a
+not-yet-mounted directory) and, unless you declared it `:ro`, a
+`ReadWritePaths=` entry. The second one matters because `ProtectSystem=strict`
+mounts the whole hierarchy read-only inside the unit's namespace and podman
+bind-mounts the host path out of *that* namespace — without it the container
+gets **EROFS on a directory it owns, on a filesystem mounted `rw`, with nothing
+logged anywhere**.
+
+**A filesystem that cannot hold a label needs a mount option.** cifs, nfs, vfat
+— anything the kernel policy marks `fs_noxattr_type` — gives every inode one
+type from a `genfscon` line (`cifs_t` for cifs), and `container_t` is not
+allowed it. What you see is a **healthy unit** and `Permission denied` on the
+volume, and — unlike most SELinux problems — **no AVC at all**, because this
+denial is `dontaudit`-suppressed. Confirm it with `semodule -DB` (and
+`semodule -B` afterward), which turns it into:
+
+```
+avc: denied { read } comm="ls" dev="cifs"
+  scontext=…:container_t:s0:c204,c416 tcontext=…:cifs_t:s0 tclass=dir
+```
+
+`semanage fcontext` and `restorecon` cannot fix this — there are no xattrs to
+write to. Neither can podman's `:z`/`:Z`, which relabels with `chcon`: measured
+on an unlabelled cifs share, `:z` neither fixes the denial nor reports a
+problem. The label has to come from the mount:
+
+```
+//server/share  /var/mnt/share  cifs  \
+    context=system_u:object_r:container_file_t:s0,\
+    uid=_wl-<name>,gid=_wl-<name>,forceuid,forcegid,file_mode=0700,dir_mode=0700,\
+    mfsymlinks,sfu,guest  0 0
+```
+
+- **`context=`** — the type `container_t` is already granted. No extra policy
+  rule is needed on the container side; `df` inside the container works as-is.
+- **`uid=`/`file_mode=`** — the isolation, and here they are the whole of it.
+  Every container workload runs as `container_t`, and an object at `s0` is
+  dominated by *any* container's MCS category pair, so categories do not
+  separate two workloads on this volume (measured: a container at
+  `s0:c204,c416` reads a `container_file_t:s0` share without complaint). Mode
+  0700 owned by `_wl-<name>` is what keeps another workload out.
+- **`mfsymlinks,sfu`** — SMB has no native symlinks or special files for this
+  session shape; without them `ln -s` and `mkfifo` in the volume fail
+  **EOPNOTSUPP**, which is not a policy fault.
+
+The VM equivalent, the same failure with a much louder symptom, and the deeper
+mechanism are in [vm-virtiofs.md](vm-virtiofs.md) §5 — a VM workload needs
+`svirt_image_t` rather than `container_file_t`, plus one policy rule.
+
+---
+
 ### Extra UID/GID Maps
 
 When using `userns = "keep-id"` with `extra_groups`, the generator automatically maps the workload user's UID/GID and all extra group GIDs into the container's user namespace. This is needed for containers that run systemd (which needs valid UIDs/GIDs inside the namespace) while still using keep-id for host device access.
