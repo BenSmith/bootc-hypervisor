@@ -53,6 +53,7 @@ from vm import (
     NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
     VM_PROXY_PORT, vm_proxy_hosts, vm_uses_proxy,
 )
+from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
@@ -1394,6 +1395,56 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             entry["fix"] = fix
         checks.append(entry)
 
+    # The podman-backed checks below (image inventory, container liveness) run
+    # under the workload's *own* rootless podman, which needs its user manager
+    # and /run/user/<uid> up. A disabled workload has neither — disable() drops
+    # linger, and logind GCs the runtime dir — so podman exits before it can
+    # answer anything and every such read raises. Unwrapped, that aborted the
+    # whole battery at Check 6 with a traceback, discarding the dozen checks
+    # after it including the ones that would have said *why* (Checks 8/9: the
+    # workload is off). Diagnose is the first thing an operator reaches for on a
+    # workload that is not running, so that is exactly the case it must survive.
+    #
+    # podman.py's own self-heal does not cover this and should not: it is gated
+    # on linger already being enabled, because a read path must never be what
+    # turns linger on. For a disabled workload it correctly declines, so the
+    # error arrives here.
+    #
+    # A failed read *omits* its check rather than passing it — asserting an image
+    # is present in a store we could not open is the same guess ca_trust_anchors
+    # refuses to make. The omission is announced once, because a check that
+    # silently vanishes is indistinguishable from one that passed. Whether that
+    # announcement is a fault depends on enabled-ness: for a disabled workload an
+    # unreachable podman is the expected consequence of it being off; for an
+    # enabled one it is a real failure worth a fix.
+    podman_reported = False
+
+    def _podman_read(fn, *args):
+        """Run a podman read that must not abort the battery: (ok, value)."""
+        nonlocal podman_reported
+        try:
+            return True, fn(*args)
+        except PodmanError as e:
+            if not podman_reported:
+                podman_reported = True
+                # Last line, not str(e): the exception text carries the whole
+                # argv, and the operator needs the reason, not the command.
+                lines = e.stderr.strip().splitlines()
+                detail = lines[-1].strip() if lines else f"exited {e.returncode}"
+                if config.enabled:
+                    _check("podman_session", False,
+                           f"Rootless podman is not answering for "
+                           f"{config.username}: {detail}",
+                           fix=(f"Check the user manager: systemctl status "
+                                f"user@{config.uid}.service, then "
+                                f"sudo workloadctl restart {config.name}"))
+                else:
+                    _check("podman_session", True,
+                           f"Image and container checks skipped: "
+                           f"{config.username} has no rootless podman session "
+                           f"(workload disabled)")
+            return False, None
+
     # Check 1: User exists
     user_exists = manager.user_exists(config)
     if user_exists:
@@ -1647,7 +1698,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             pass
         elif config.is_multi:
             for cname, img in config.container_images():
-                iid = manager.podman(config).image_id(img)
+                ok, iid = _podman_read(manager.podman(config).image_id, img)
+                if not ok:
+                    continue
                 if iid:
                     _check(f"image_available[{cname}]", True,
                            f"Image available for {cname}: {img} ({iid[:12]})")
@@ -1656,8 +1709,10 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                            f"Image not available for {cname}: {img}",
                            fix="Image will be pulled on first start")
         else:
-            image_id = manager.get_image_id(config)
-            if image_id:
+            ok, image_id = _podman_read(manager.get_image_id, config)
+            if not ok:
+                pass  # announced by _podman_read; nothing here to assert
+            elif image_id:
                 _check("image_available", True, f"Image available: {config.image} ({image_id[:12]})")
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
@@ -1792,7 +1847,10 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         if config.is_multi:
             for cname in config.container_names():
                 pn = config.podman_container_name(cname)
-                cs = manager.podman(config).container_status(pn)
+                ok, cs = _podman_read(
+                    manager.podman(config).container_status, pn)
+                if not ok:
+                    continue
                 if cs:
                     _check(f"container_running[{cname}]", True,
                            f"Container running: {pn} ({cs})")
@@ -1801,8 +1859,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                            f"Container not running: {pn}",
                            fix=f"Check logs: sudo journalctl -u workload-{config.name}-{cname}.service -n 50")
         else:
-            container_status = manager.podman(config).container_status(config.container_name)
-            if container_status:
+            ok, container_status = _podman_read(
+                manager.podman(config).container_status, config.container_name)
+            if not ok:
+                pass  # announced by _podman_read; nothing here to assert
+            elif container_status:
                 _check("container_running", True, f"Container running: {container_status}")
             else:
                 _check("container_running", False, "Container not running",
