@@ -1857,6 +1857,69 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
         subgid_writes = [s for p, s in written if "subgid" in p]
         self.assertTrue(any("_wl-test:44:1" in s for s in subgid_writes))
 
+    def test_main_range_is_written_before_supplementary_entries(self):
+        """Order used to come out of a set, so which line landed first varied
+        per process (randomized string hashing) and therefore per host. The
+        reader no longer depends on it, but a subgid file whose first line for a
+        user is a single-GID mapping misleads anything reading it by eye."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["render", "wl-downloads"]}}
+        written = []
+        gids = {"render": 105, "wl-downloads": 966}
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam",
+                               side_effect=lambda n: types.SimpleNamespace(
+                                   gr_gid=gids[n])), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+
+        subgid_writes = [s.strip() for p, s in written if "subgid" in p]
+        self.assertEqual(
+            subgid_writes,
+            ["_wl-test:600100000:65536", "_wl-test:105:1", "_wl-test:966:1"])
+
+    def test_duplicate_extra_groups_are_written_once(self):
+        """The dedup a set gave for free, kept after the switch to a list."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["render", "video"]}}
+        written = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        # Two names, one GID — an alias pair resolves to the same entry.
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam",
+                               return_value=types.SimpleNamespace(gr_gid=105)), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+
+        subgid_writes = [s.strip() for p, s in written if "subgid" in p]
+        self.assertEqual(
+            subgid_writes, ["_wl-test:600100000:65536", "_wl-test:105:1"])
+
     def test_missing_extra_group_logs_warning_and_skips(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
         pw.pw_name = "_wl-test"

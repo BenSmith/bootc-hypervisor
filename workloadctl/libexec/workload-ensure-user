@@ -79,9 +79,16 @@ def configure_subuid_subgid(pw, config):
     subid_start, count = derived_subid_range(uid)
 
     main_entry = f"{username}:{subid_start}:{count}"
+    # Ordered, main range first — these were sets, and iterating one to build the
+    # append list put the main range after the supplementary `user:GID:1` entries
+    # about half the time (string hashing is randomized per process, so it varied
+    # per provisioning run, per host). read_subid_entry no longer cares about
+    # position, but a file whose first line for a user is a single-GID mapping is
+    # a trap for anything that reads these by eye or by `head -1`, so write them
+    # in the order they mean. Lists, not sets: the dedup below preserves order.
     # subuid only needs the main range; group GIDs belong in subgid, not subuid
-    required_uid_entries = {main_entry}
-    required_gid_entries = {main_entry}
+    required_uid_entries = [main_entry]
+    required_gid_entries = [main_entry]
 
     # Extra-group subgid entries are only needed when the container runs in its
     # own user namespace.  For userns=host the GIDs are natively available.
@@ -93,7 +100,9 @@ def configure_subuid_subgid(pw, config):
             except KeyError:
                 log(f"  WARNING: Group '{group_name}' not found, skipping subgid entry")
                 continue
-            required_gid_entries.add(f"{username}:{gid}:1")
+            gid_entry = f"{username}:{gid}:1"
+            if gid_entry not in required_gid_entries:
+                required_gid_entries.append(gid_entry)
 
     # Lock around check-then-write to handle parallel ExecStartPre. The shared
     # subid_lock() is the same SUBID_LOCK flock the allocators hold; this script
