@@ -225,11 +225,21 @@
 ; `rename` and `reparent` are on the dir line for the same reason: `mv` within a
 ; directory needs rename, and `mv` into a different one needs reparent as well.
 ; `link` on the file line is hard links.
+;
+; `setattr` and `rename` reach those three classes too, and leaving them on dir
+; and file alone was the second half of the same bug. Measured in a live guest,
+; enforcing, on the workload's own home share: `mkfifo -m600` creates the fifo
+; and then fails EPERM setting its mode; a daemon that binds a unix socket in
+; its home and chmods it (gpg-agent, tmux) fails the same way; `lutimes` and
+; `lchown` on a symlink fail, which is what `cp -a`, `rsync -a` and `tar -xp`
+; do to every symlink they copy; and `mv` on a fifo or a socket is denied
+; outright. A symlink cannot be chmod'd, but lnk_file still needs setattr —
+; the timestamp and ownership calls above are setattr on the link itself.
 (allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rename reparent rmdir search setattr write)))
 (allow wlvfsd_t svirt_image_t (file (create getattr link open read rename setattr unlink write)))
-(allow wlvfsd_t svirt_image_t (lnk_file (create getattr read rename unlink)))
-(allow wlvfsd_t svirt_image_t (fifo_file (create getattr unlink)))
-(allow wlvfsd_t svirt_image_t (sock_file (create getattr unlink)))
+(allow wlvfsd_t svirt_image_t (lnk_file (create getattr read rename setattr unlink)))
+(allow wlvfsd_t svirt_image_t (fifo_file (create getattr rename setattr unlink)))
+(allow wlvfsd_t svirt_image_t (sock_file (create getattr rename setattr unlink)))
 
 ; statfs on the backing filesystem, which the guest reaches through `df` on the
 ; mount. Read-only and about the filesystem rather than any file on it; without

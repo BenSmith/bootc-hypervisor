@@ -208,8 +208,10 @@ sudo semanage permissive -d wlvfsd_t && sudo semodule -B
 
 The workout: create/read/write/truncate/append, mkdir/rmdir, symlink
 read+create+rename+delete, hard link, FIFO and unix socket create and delete,
-chmod/chown/utimes on both files **and** directories, rename within a directory
-and across directories, statfs, a first-boot cloud-init, and a clean stop.
+chmod/chown/utimes on files, directories **and** each of the three classes below
+them (`mkfifo -m`, `chmod` on a bound unix socket, `lutimes`/`lchown` on a
+symlink), rename within a directory and across directories — of a fifo and a
+socket as well as a file — statfs, a first-boot cloud-init, and a clean stop.
 
 The classes an incomplete workout drops are predictable, and they are the ones
 below `file`:
@@ -221,6 +223,8 @@ below `file`:
 | `dir:setattr` | chmod/chown/utimes on a directory — cloud-init chowns a HOME |
 | `dir:rename`, `dir:reparent` | `mv` within a directory, and between two of them |
 | `file:link` | hard links |
+| `setattr` on the three classes | `mkfifo -m` (creates the node, then EPERMs on the mode); `chmod` on a socket a daemon just bound; `lutimes`/`lchown` on a symlink, which is what `cp -a`, `rsync -a` and `tar -xp` do to every symlink they copy |
+| `rename` on `fifo_file`, `sock_file` | `mv` on a FIFO or a socket, when the same `mv` on a file and a symlink both work |
 
 A workout of files and directories alone finds none of them, and none is
 reachable by any test that reads the rendered unit file.
