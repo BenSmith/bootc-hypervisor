@@ -48,7 +48,25 @@
 #
 #   5. To change models/config later:
 #        sudo nano /var/lib/workloads/llama-swap/data/config.yaml
-#        sudo workloadctl recreate llama-swap
+#
+#      No restart needed: the image's entrypoint runs llama-swap with
+#      `-watch-config`, so it re-reads the file and logs "reloading
+#      configuration" / "configuration reloaded" within a second or two. A
+#      model that is already loaded keeps serving; the new definitions apply to
+#      the next request that swaps.
+#
+#      BUT the edit must keep the same INODE, because config.yaml is bind
+#      mounted as a *file*, not a directory. Anything that writes a new file
+#      and renames it over the old one — `sed -i`, and the write-then-rename
+#      that many editors do by default — leaves the container reading the
+#      original inode, so the change silently never lands and llama-swap logs
+#      nothing at all. `nano` edits in place and is fine; if in doubt, write
+#      through the existing file:
+#        sudo tee /var/lib/workloads/llama-swap/data/config.yaml < new.yaml
+#
+#      `sudo workloadctl recreate llama-swap` still works and is the way to
+#      recover from an inode swap, but it also evicts whatever model is
+#      resident, which for a large one costs a full reload.
 #
 # Auth: llama-swap is allow-all by default. Since :8080 is published on the
 # host, set `apiKeys` in config.yaml if it is reachable beyond this machine.
