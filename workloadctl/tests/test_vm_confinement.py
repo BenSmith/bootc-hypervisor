@@ -214,6 +214,24 @@ class TestCilModule(unittest.TestCase):
         self.assertRegex(self.rules,
                          r"allow wlvfsd_t svirt_image_t \(file \([^)]*link")
 
+    def test_metadata_and_moves_reach_the_lesser_node_classes_too(self):
+        """setattr and rename on dir and file only passes every test above and
+        still leaves three holes an ordinary guest walks into. Measured in a
+        live guest, enforcing, on the workload's own home share: `mkfifo -m600`
+        created the fifo and then failed EPERM on the chmod; bind() + chmod on
+        a unix socket failed the same way (gpg-agent, tmux); lutimes/lchown on
+        a symlink failed, so `cp -a`, `rsync -a` and `tar -xp` error on every
+        symlink they copy; and `mv` on a fifo or socket was denied outright."""
+        for cls in ("lnk_file", "fifo_file", "sock_file"):
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \({cls} \([^)]*setattr",
+                f"{cls} metadata cannot be changed in a share")
+            self.assertRegex(
+                self.rules,
+                rf"allow wlvfsd_t svirt_image_t \({cls} \([^)]*rename",
+                f"{cls} cannot be moved within a share")
+
     def test_directory_metadata_is_settable_not_just_file_metadata(self):
         """cloud-init chowns the default user's HOME, a directory. A file-only
         version of this rule passes every file-level test and still leaves a

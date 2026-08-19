@@ -36,7 +36,9 @@ from workload_lib import (
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
 from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
-                VM_GUEST_UID, find_ovmf_vars, vm_broker_env, vm_proxy_env)
+                VM_GUEST_UID, VM_PROXY_ADDR, VM_PROXY_PORT,
+                VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
+                vm_broker_env, vm_proxy_env, vm_uses_proxy)
 from secrets_template import substitute_template
 
 
@@ -77,9 +79,16 @@ def configure_subuid_subgid(pw, config):
     subid_start, count = derived_subid_range(uid)
 
     main_entry = f"{username}:{subid_start}:{count}"
+    # Ordered, main range first — these were sets, and iterating one to build the
+    # append list put the main range after the supplementary `user:GID:1` entries
+    # about half the time (string hashing is randomized per process, so it varied
+    # per provisioning run, per host). read_subid_entry no longer cares about
+    # position, but a file whose first line for a user is a single-GID mapping is
+    # a trap for anything that reads these by eye or by `head -1`, so write them
+    # in the order they mean. Lists, not sets: the dedup below preserves order.
     # subuid only needs the main range; group GIDs belong in subgid, not subuid
-    required_uid_entries = {main_entry}
-    required_gid_entries = {main_entry}
+    required_uid_entries = [main_entry]
+    required_gid_entries = [main_entry]
 
     # Extra-group subgid entries are only needed when the container runs in its
     # own user namespace.  For userns=host the GIDs are natively available.
@@ -91,7 +100,9 @@ def configure_subuid_subgid(pw, config):
             except KeyError:
                 log(f"  WARNING: Group '{group_name}' not found, skipping subgid entry")
                 continue
-            required_gid_entries.add(f"{username}:{gid}:1")
+            gid_entry = f"{username}:{gid}:1"
+            if gid_entry not in required_gid_entries:
+                required_gid_entries.append(gid_entry)
 
     # Lock around check-then-write to handle parallel ExecStartPre. The shared
     # subid_lock() is the same SUBID_LOCK flock the allocators hold; this script
@@ -1304,7 +1315,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         via_write_files = (host_private_key.strip() in user_data_text
                            or host_key_b64 in user_data_text)
         if not via_ssh_keys and not via_write_files:
-            raise RuntimeError(
+            raise SeedContractError(
                 f"[vm.cloud_init].user_data_file for {name} does not install the "
                 f"workload's SSH host key: the CLI pins the host key "
                 f"(StrictHostKeyChecking=yes), so a custom seed must inject it. "
@@ -1320,7 +1331,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         if via_write_files and not via_ssh_keys and not re.search(
                 r"^\s*ssh_deletekeys\s*:\s*(false|no|off|0)\s*$",
                 user_data_text, re.M | re.I):
-            raise RuntimeError(
+            raise SeedContractError(
                 f"[vm.cloud_init].user_data_file for {name} installs the SSH host "
                 f"key with write_files but does not set `ssh_deletekeys: false`. "
                 f"cloud-init's ssh module runs after write_files and defaults to "
@@ -1328,6 +1339,64 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 f"would be discarded and the guest would fail host-key "
                 f"verification. Add `ssh_deletekeys: false` to the seed."
             )
+
+        # Seed-completeness contract. Default mode derives the proxy
+        # environment and the virtiofs mounts from the TOML and emits them;
+        # template mode emits nothing but what the operator wrote, so a seed
+        # that omits them yields a VM that boots, passes every check, and is
+        # quietly wrong:
+        #
+        #   - no proxy env under egress = "filtered" means every guest tool
+        #     that honours the variables goes direct instead, and direct is
+        #     DROPPED rather than refused — so it hangs for a full TCP timeout
+        #     and reads as a network fault, not a policy one;
+        #   - an unmounted volume leaves the guest writing to the system disk
+        #     at the path the operator believes is persistent, and a
+        #     generational rollback then discards it.
+        #
+        # Both are silent, so they are checked here for the same reason the
+        # host-key contract above is: provisioning is the last moment the
+        # mistake is cheap. Substring pins, matching the style of that check —
+        # they establish the seed refers to the thing at all, not that it wires
+        # it up correctly. [vm.cloud_init].seed_provides opts out per concern,
+        # for a seed that handles one of them by means we cannot see (an image
+        # with the mount already in /etc/fstab, a guest-side proxy config
+        # baked into the disk).
+        seed_provides = ci_cfg.get("seed_provides", []) or []
+
+        if (vm_uses_proxy(config) and "proxy" not in seed_provides
+                and VM_PROXY_ADDR not in user_data_text):
+            raise SeedContractError(
+                f"[vm.cloud_init].user_data_file for {name} does not configure "
+                f"the guest's proxy, but this workload has hostname-policy "
+                f"egress. A custom seed replaces the built-in cloud-config, "
+                f"which is what would normally set http_proxy/https_proxy — "
+                f"without it the guest ignores the proxy, its traffic is "
+                f"dropped rather than refused, and every fetch hangs until it "
+                f"times out. Export the proxy environment in the seed (see "
+                f"workloads/vm-base/cloud-init/user-data), pointing at "
+                f"http://{VM_PROXY_ADDR}:{VM_PROXY_PORT}, or set "
+                f"[vm.cloud_init].seed_provides = [\"proxy\"] if the guest "
+                f"image already carries that configuration."
+            )
+
+        if "mounts" not in seed_provides:
+            vm_volumes = vm_cfg.get("volumes", []) or []
+            for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
+                if tag in user_data_text:
+                    continue
+                _host, guest_path, _opts = parse_volume_spec(vol_spec)
+                raise SeedContractError(
+                    f"[vm.cloud_init].user_data_file for {name} never mounts "
+                    f"the volume {vol_spec!r} (virtiofs tag {tag!r}). A custom "
+                    f"seed replaces the built-in cloud-config, which is what "
+                    f"would normally mount it, so {guest_path} would be an "
+                    f"ordinary directory on the system disk: writes there look "
+                    f"fine, never reach the host, and are discarded by a disk "
+                    f"rebuild. Mount tag {tag!r} at {guest_path} in the seed, "
+                    f"or set [vm.cloud_init].seed_provides = [\"mounts\"] if "
+                    f"the guest image mounts it already."
+                )
     else:
         # Default mode: built-in cloud-config with SSH key + optional disks.
         # Collision-safe tags, same set the generator emits sidecar units for (B3).
@@ -1618,6 +1687,11 @@ def _ensure_user(name: str) -> int:
                 pw, config, name,
                 config_path=workload_config_path(name),
             )
+        except SeedContractError as e:
+            # The operator's seed is wrong and the message says how to fix it.
+            # A distinct exit code keeps the CLI from framing it as a crash.
+            log(f"  ERROR: {e}")
+            return VM_SEED_CONTRACT_EXIT
         except Exception as e:
             log(f"  ERROR: Failed to build cloud-init ISO for {name}: {e}")
             return 1

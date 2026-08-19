@@ -1147,6 +1147,34 @@ class TestProvisionUser(unittest.TestCase):
             self.assertIn("workload-ensure-user", ensure_user_call.args[0][0])
             self.assertEqual(ensure_user_call.args[0][1], "test-wl")
 
+    def test_seed_contract_exit_becomes_usage_error(self):
+        """A rejected custom seed is the operator's mistake, already reported in
+        full by the helper. It must surface as UsageError (exit 2, no extra
+        output) rather than CalledProcessError, which the CLI's except-ladder
+        would render as a traceback plus 'this looks like a workloadctl bug' —
+        telling the operator to file a report for something they can fix."""
+        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
+                run_mock.side_effect = [
+                    MagicMock(returncode=0),  # systemd-sysusers
+                    MagicMock(returncode=provisioning.VM_SEED_CONTRACT_EXIT),
+                ]
+                with self.assertRaises(provisioning.UsageError):
+                    provisioning.provision_user(cfg)
+
+    def test_other_ensure_user_failures_still_raise(self):
+        """Only the contract exit code is special-cased; a genuine failure of
+        the helper must keep raising, so a real bug is not silently downgraded
+        to a usage error."""
+        with _cfg(_CONTAINER_TOML, 'test-wl') as cfg:
+            with patch.object(provisioning.subprocess, 'run') as run_mock:
+                run_mock.side_effect = [
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=1, args=["workload-ensure-user"]),
+                ]
+                with self.assertRaises(provisioning.subprocess.CalledProcessError):
+                    provisioning.provision_user(cfg)
+
 
 # ── transfer_image / transfer_one_image ────────────────────────────────────
 

@@ -61,6 +61,47 @@ add set inet workload_filter wl_allow6 { typeof meta skuid . ip6 daddr . th dpor
 # chain exists to close.
 add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
 
+# Internal destinations the hostname proxy may not open a connection to.
+#
+# The proxy is exempted from the default-deny drop by control group, and that
+# exemption was destination-BLIND: tinyproxy matches the CONNECT hostname
+# against the allowlist, resolves it with the host resolver, and connects to
+# whatever comes back. tinyproxy has no notion of destination ranges and no
+# directive that could express one. So an allowlisted name that resolves into
+# RFC 1918, loopback or link-local space was reachable from a VM that reports
+# itself confined -- via a wildcard pattern over a domain someone else can
+# create records in, an allowlisted third party whose DNS is compromised, or an
+# internal name allowlisted without thinking about where it points.
+# `169.254.169.254` is the one to think about first on a cloud instance.
+#
+# This is NOT DNS rebinding: the guest never controls the resolution. The gap
+# was that nothing looked at the answer.
+#
+# Constant and host-global -- these are the same prefixes for every workload,
+# so the set holds no per-workload state and `flush set` before loading it is
+# safe. (wl_filtered and the allow sets are the opposite and are never flushed
+# here.) The whole file is one transaction, so there is no window in which the
+# set is empty while the rules below are live.
+#
+# The v6 set carries the TRANSLATION prefixes as well as the direct forms,
+# because a v6 destination can encode a v4 one: 64:ff9b::/96 and 64:ff9b:1::/48
+# are NAT64 (RFC 6052, RFC 8215) and 2002::/16 is 6to4 (RFC 3056). On a host
+# with either translation in the path, 64:ff9b::a00:5 reaches 10.0.0.5 without
+# any element of the v4 set ever being consulted. Listing the direct forms only
+# would leave the guard family-blind in exactly the way the whole rule exists
+# to prevent. Teredo (2001::/32) is deliberately NOT here: it encodes the
+# client's own public address and does not name an internal destination.
+#
+# 192.0.2.0/24 is deliberately ABSENT. That is the advertised proxy address,
+# and the guest's flow reaches tinyproxy from it -- listing it would drop the
+# proxy's replies to its own client and take hostname policy down entirely.
+add set inet workload_filter wl_internal4 { type ipv4_addr ; flags interval ; }
+add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
+flush set inet workload_filter wl_internal4
+flush set inet workload_filter wl_internal6
+add element inet workload_filter wl_internal4 { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 255.255.255.255 }
+add element inet workload_filter wl_internal6 { ::/128, ::1/128, ::ffff:0.0.0.0/96, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16, fc00::/7, fe80::/10 }
+
 add chain inet workload_filter output { type filter hook output priority 0; policy accept; }
 flush chain inet workload_filter output
 
@@ -88,6 +129,31 @@ flush chain inet workload_filter output
 # site that needs the mark for something else wants the break-glass at the top
 # of this file.
 add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta skuid or 0x40000000
+
+# The operator's explicit grants, and they are evaluated FIRST -- ahead of the
+# loopback accept and ahead of the proxy rules below -- so that `allow` is also
+# the escape hatch for the internal-destination drop. A site that genuinely
+# needs its proxy to reach an internal service names it here
+# (`allow = ["10.0.0.5:443"]`) and gets the same scoped grant the guest's own
+# direct path gets. Moving them up changes nothing for existing configs: every
+# rule they used to sit behind is also an accept.
+add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
+add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
+
+# The proxy's own name resolution, which is not guest-chosen egress: tinyproxy
+# resolves through whatever the host is configured to use, which may be a stub
+# resolver on 127.0.0.53 or a resolver on the LAN. Without this carve-out the
+# drops below break every lookup, and the symptom is a 502 from a proxy that
+# looks healthy. The residual it leaves is an internal service answering HTTP
+# on port 53, which is not a thing that exists.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg th dport 53 counter accept
+
+# The destination check the cgroup exemption did not have. `ct direction
+# original` restricts this to connections the proxy OPENS: the reply direction
+# of a connection some client made TO the proxy must never be dropped here,
+# whatever source address that client had, or hostname policy dies with it.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg ct direction original ip daddr @wl_internal4 counter drop
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg ct direction original ip6 daddr @wl_internal6 counter drop
 
 # Loopback is the workload's own control plane, not egress. Without this a
 # filtered VM is cut off from the host in two ways that both look like bugs
@@ -117,8 +183,6 @@ add rule inet workload_filter output meta skuid @wl_filtered oif lo counter acce
 # point at which a path still resolves to the id being retired.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counter accept
 
-add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
-add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
 
 # Set-guarded: a workload not in wl_filtered never reaches this rule.
 #

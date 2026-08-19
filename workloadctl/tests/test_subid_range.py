@@ -30,6 +30,10 @@ Pinned here:
 - Both check verdicts, including the boundary case that must NOT fire: the
   first workload UID's derived range starts exactly at Fedora's SUB_UID_MAX,
   which `useradd` cannot take while the entry is listed.
+- That neither check is fooled by the supplementary `user:GID:1` entries an
+  extra_groups workload also holds, whichever order they sit in — the false
+  positive that reported a correct host as drifted, and told the operator to
+  "fix" it by rewriting a mapping that was already right.
 """
 
 import unittest
@@ -164,6 +168,60 @@ class DerivedCheckTests(unittest.TestCase):
         passed, _, _ = cmd_diagnose.subid_derived_check(
             [(SUBUID, None), (SUBGID, None)], self.expected, 10005)
         self.assertTrue(passed)
+
+
+class SupplementaryEntryRegressionTests(unittest.TestCase):
+    """A workload with extra_groups holds several subid entries, and both checks
+    read them through read_subid_entry. Reproduces the live symptom end to end:
+    a media workload with `render` and a shared downloads group had its derived
+    range written last, so the reader returned `105:1` and BOTH checks failed —
+    the derived one comparing a single GID against a 65536-wide range, the
+    overlap one because 105 sits below SUB_UID_MAX. Everything on the host was
+    correct; the fix attached to the finding would have broken it.
+    """
+
+    def setUp(self):
+        self.uid = 10008
+        self.expected = derived_subid_range(self.uid)
+        self.dir = Path(self.enterContext(TemporaryDirectory()))
+
+    def _entries(self, lines):
+        path = self.dir / "subgid"
+        path.write_text("".join(f"{line}\n" for line in lines))
+        return [(str(path), workload_lib.read_subid_entry("_wl-media", path))]
+
+    def _both_checks(self, lines):
+        entries = self._entries(lines)
+        derived, _, _ = cmd_diagnose.subid_derived_check(
+            entries, self.expected, self.uid)
+        overlap, _, _ = cmd_diagnose.subid_overlap_check(entries, FEDORA_WINDOW)
+        return derived, overlap
+
+    def test_both_checks_pass_with_the_main_range_written_last(self):
+        derived, overlap = self._both_checks([
+            "_wl-media:105:1",
+            "_wl-media:966:1",
+            f"_wl-media:{self.expected[0]}:{self.expected[1]}",
+        ])
+        self.assertTrue(derived, "supplementary entry read as the main range")
+        self.assertTrue(overlap, "a group GID judged against useradd's window")
+
+    def test_both_checks_pass_with_the_main_range_written_first(self):
+        derived, overlap = self._both_checks([
+            f"_wl-media:{self.expected[0]}:{self.expected[1]}",
+            "_wl-media:105:1",
+            "_wl-media:966:1",
+        ])
+        self.assertTrue(derived)
+        self.assertTrue(overlap)
+
+    def test_real_drift_still_fails_alongside_supplementary_entries(self):
+        """The checks must not go blind to keep the false positive quiet."""
+        derived, _ = self._both_checks([
+            "_wl-media:105:1",
+            "_wl-media:200000:65536",
+        ])
+        self.assertFalse(derived)
 
 
 class OverlapCheckTests(unittest.TestCase):

@@ -100,12 +100,22 @@ another.
 
 ```
 1  meta skuid 10000-52948 ct mark set meta skuid or 0x40000000   (non-terminating)
-2  meta skuid @wl_filtered oif lo                     accept
-3  socket cgroupv2 level 2 @wl_proxy_cg               accept
-4  meta skuid . ip daddr  . th dport @wl_allow4       accept
-5  meta skuid . ip6 daddr . th dport @wl_allow6       accept
-6  meta skuid @wl_filtered                            drop
+2  meta skuid . ip daddr  . th dport @wl_allow4              accept
+3  meta skuid . ip6 daddr . th dport @wl_allow6              accept
+4  @wl_proxy_cg th dport 53                                  accept
+5  @wl_proxy_cg ct direction original ip  daddr @wl_internal4 drop
+6  @wl_proxy_cg ct direction original ip6 daddr @wl_internal6 drop
+7  meta skuid @wl_filtered oif lo                            accept
+8  socket cgroupv2 level 2 @wl_proxy_cg                      accept
+9  meta skuid @wl_filtered                                   drop
 ```
+
+(`@wl_proxy_cg` is shorthand for `socket cgroupv2 level 2 @wl_proxy_cg`.)
+
+Rules 4–6 are the destination check on rule 8, and the order among them is the
+whole design — see "What rule 8 does not say" below. Rules 2 and 3 moved above
+the loopback accept when they were added, which changes nothing for any existing
+config: every rule they used to sit behind is also an accept.
 
 ## A packet's life
 
@@ -116,14 +126,14 @@ The guest runs `curl https://api.example.com`:
 3. `inet workload_proxy` at nat hook output (priority `dstnat`, −100, so it runs
    before the filter chain) matches daddr `192.0.2.1` dport 3128, looks the
    skuid up in `wl_proxy_dest`, and DNATs to `127.128.0.4:3128`.
-4. The filter chain now sees a translated packet on `oif lo` — rule 2 accepts.
+4. The filter chain now sees a translated packet on `oif lo` — rule 7 accepts.
 5. tinyproxy sees a client connecting *from* `192.0.2.1`. The guest's packet was
    routed to that address before it was translated, so the host picked it as the
    source; omit it from the ACL and every request answers 403 while the
    listener, the redirect and the guest all look healthy. The hostname is
    fnmatched against `hosts.allow` and permitted.
 6. tinyproxy opens its own socket to `api.example.com:443` — same uid 10004, and
-   that destination is not in `wl_allow4`. What saves it is rule 3: the proxy
+   that destination is not in `wl_allow4`. What saves it is rule 8: the proxy
    runs as its workload's own user *on purpose*, so `meta skuid` cannot separate
    its traffic from the guest's, and the control group is the discriminator that
    survives the shared uid. systemd assigns it, a guest can neither enter nor
@@ -133,7 +143,7 @@ Then the two paths that don't work, which are the point:
 
 - **The guest ignores `HTTPS_PROXY` and dials `1.2.3.4:443` directly.** uid
   10004, the VM's cgroup rather than the proxy's, destination absent from
-  `wl_allow4` → rule 6. This is what makes the proxy mandatory rather than
+  `wl_allow4` → rule 9. This is what makes the proxy mandatory rather than
   advisory, and it is why `hosts` requires `egress = "filtered"`.
 - **The guest asks the proxy for a host not on the list.** 403, before any TLS
   handshake — the name comes out of the plaintext CONNECT, so there is no
@@ -148,18 +158,59 @@ from "your pattern did not reach as far as you thought". List the apex separatel
 when you want both.
 
 Widening by port instead — "let this uid reach 443 anywhere" — was the obvious
-alternative to rule 3 and is fatal: it is precisely the bypass rule 6 exists to
+alternative to rule 8 and is fatal: it is precisely the bypass rule 9 exists to
 close.
 
-Meanwhile `ssh 192.168.0.10` matches rule 4 directly and never involves the
+Meanwhile `ssh 192.168.0.10` matches rule 2 directly and never involves the
 proxy at all. That is what `allow` is for: the non-HTTP exceptions a hostname
 proxy cannot carry.
 
-## Rules 1 and 2 exist because it broke without them
+## What rule 8 does not say
+
+Rule 8 exempts the proxy by control group and says nothing about where it is
+going. For a while that was the whole of it, and it left a gap: tinyproxy
+matches the CONNECT hostname against `hosts.allow`, resolves it with the host
+resolver, and connects to whatever comes back. It has no notion of destination
+ranges and no directive that could express one. So an allowlisted name pointing
+into RFC 1918, loopback or link-local space was reachable from a VM whose
+`diagnose` output said it was confined.
+
+The guest never controls that resolution, so this is not DNS rebinding — the
+gap was that nothing looked at the answer. The ways in are ordinary: a wildcard
+over a domain where someone else can create records, an allowlisted third party
+whose DNS is compromised, an internal name allowlisted without thinking about
+where it points. On a cloud instance, `169.254.169.254`.
+
+Rules 5 and 6 are the check. Three things about them are load-bearing:
+
+- **`ct direction original`.** The drop must cover connections the proxy
+  *opens*, never the reply direction of connections made *to* it. tinyproxy's
+  client ACL admits `127.0.0.0/8` as well as the advertised address, so without
+  this a client that reached the proxy from loopback would have every reply
+  dropped, and hostname policy would fail with the proxy looking healthy.
+  `192.0.2.0/24` is likewise absent from `wl_internal4`, for the same reason on
+  the normal path: the guest's flow reaches tinyproxy *from* `192.0.2.1`.
+- **Rule 4, the DNS carve-out, comes first.** tinyproxy resolves through the
+  host's configured resolver, and that address is inside these ranges whichever
+  form it takes — `127.0.0.53` under a stub resolver, or a box on the LAN.
+  Without the carve-out every lookup fails and the proxy answers 502 while every
+  other signal looks correct. It is scoped to destination port 53, so the
+  residual is an internal service answering HTTP on port 53.
+- **Rules 2 and 3 come before both.** `allow` is the escape hatch: a site that
+  needs its proxy to reach an internal service names the address and port there,
+  and the grant is evaluated ahead of the drop. This is deliberately not a
+  proxy-specific key — the same entry opens the guest's own direct path, which
+  is the honest description of what it grants.
+
+The set contents are constant and host-global, so the skeleton `flush set`s them
+before loading, the way it flushes the chain. `wl_filtered` and the allow sets
+carry per-workload state and are never flushed here.
+
+## Rules 1 and 7 exist because it broke without them
 
 Both were added after watching a live VM fail.
 
-**Rule 2 (`oif lo`).** Without it a filtered VM is cut off from the host in two
+**Rule 7 (`oif lo`).** Without it a filtered VM is cut off from the host in two
 ways that both look like bugs elsewhere. `workloadctl exec` and `shell` hang:
 passt binds the management address `127.128.0.4:2222` as the workload user, so
 replies on that socket are output traffic owned by uid 10004 and hit this chain
@@ -191,7 +242,7 @@ says `filtered` while the uid is absent from the set describes a VM that is wide
 open, and every other signal — unit active, guest online, `status` green — looks
 correct. Likewise the proxy can be listening while the guest has no path to it.
 
-One caveat before you read a counter: the drop counter on rule 6 is **host-wide**,
+One caveat before you read a counter: the drop counter on rule 9 is **host-wide**,
 shared by every filtered VM. There is one drop rule, guarded on set membership,
 so they all accumulate on the same number. Per-workload counts would take a rule
 or a named counter per uid — exactly the machinery a single set-guarded rule was

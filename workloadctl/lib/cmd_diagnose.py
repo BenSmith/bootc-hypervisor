@@ -7,10 +7,12 @@ Where validate asks "is this config fit to enable", diagnose asks "this is
 enabled and unhappy — what is wrong with it right now".
 """
 import base64
+import bz2
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -41,7 +43,8 @@ from provisioning import (
 )
 from validation import uses_host_userns
 from vm import (
-    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
+    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
+    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE,
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
     VM_SOCKET_DIR, VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
     VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
@@ -51,6 +54,7 @@ from vm import (
     NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
     VM_PROXY_PORT, vm_proxy_hosts, vm_uses_proxy,
 )
+from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
 from substrate import service_active
 from cmd_validate import load_config_or_exit
@@ -623,6 +627,257 @@ def _selinux_module_loaded(module: str) -> bool | None:
     return module in result.stdout.split()
 
 
+# Host-global SELinux modules whose source the RPM installs, so a loaded module
+# can be compared against what the image ships. Deliberately just these two.
+#
+# The image's own modules (pasta_sandbox, container_input_devices,
+# seatd_container, extra_varrun) are compiled into the policy store at build
+# time and ship no .cil to the host -- there is nothing on the machine to
+# compare them against, so they cannot be checked here however much they have
+# the same drift problem. The udica templates belong to the udica RPM, and the
+# per-workload bundle modules are templated (`__WL_MODULE__` is substituted at
+# enable), so a byte comparison against workloads/<name>/policy.cil would report
+# every one of them as stale.
+HOST_SELINUX_MODULES = (
+    (VM_SELINUX_MODULE, VM_SELINUX_CIL),
+    ("workload-proxy", "/usr/share/workloadctl/workload-proxy.cil"),
+)
+
+# Where semodule keeps the policy store. Fedora's default is /var/lib/selinux,
+# but semanage.conf can move it with `store-root=` -- and the hypervisor image
+# sets `store-root=/etc/selinux`, which is precisely what puts the store inside
+# the tree ostree 3-way-merges and creates the drift this check reports. Both
+# layouts are live on real hosts (measured: a bootc host in /etc, a package host
+# in /var/lib), so neither can be assumed.
+SEMANAGE_CONF = Path("/etc/selinux/semanage.conf")
+SELINUX_STORE_ROOTS = (Path("/var/lib/selinux"), Path("/etc/selinux"))
+
+
+def _selinux_store_roots() -> list[Path]:
+    """Candidate policy-store roots, the configured one first."""
+    roots = []
+    try:
+        for line in SEMANAGE_CONF.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("store-root") and "=" in stripped:
+                roots.append(Path(stripped.split("=", 1)[1].strip()))
+                break
+    except OSError:
+        pass
+    for root in SELINUX_STORE_ROOTS:
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _loaded_module_source(module: str) -> bytes | None:
+    """The CIL source semodule stored for `module`, or None if unreadable.
+
+    semodule keeps the module it was handed verbatim under
+    /etc/selinux/<type>/active/modules/<priority>/<module>/cil, bzip2-compressed
+    when semanage.conf enables compression (the Fedora default) and plain
+    otherwise. Verified byte-identical to the installed .cil on a live host, so
+    an equality test against the shipped file is exact rather than heuristic.
+
+    Globbed over store root, policy type and priority instead of hardcoding
+    one path: the priority is a semodule argument, a host may carry more than
+    one policy type, and the store root itself moves (see SELINUX_STORE_ROOTS).
+    None on any failure -- the store is 0600, so an unprivileged caller lands
+    here and must be reported as "cannot tell", never as a difference.
+    """
+    matches = []
+    for root in _selinux_store_roots():
+        matches += sorted(root.glob(f"*/active/modules/*/{module}/cil"))
+    if not matches:
+        return None
+    try:
+        raw = matches[-1].read_bytes()
+    except OSError:
+        return None
+    if raw.startswith(b"BZh"):
+        try:
+            return bz2.decompress(raw)
+        except (OSError, ValueError):
+            return None
+    return raw
+
+
+SELINUXFS = Path("/sys/fs/selinux")
+
+# (allow SRC TGT (CLASS (perm perm ...))) -- the only CIL form this asks about.
+# Anything else in the module (typetransition, typeattributeset, filecon) either
+# is not an access decision or cannot be queried through the AV interface.
+_CIL_ALLOW = re.compile(
+    r"\(allow\s+([\w.]+)\s+([\w.]+)\s+\(([\w.]+)\s+\(([^()]*)\)\)\)")
+_CIL_COMMENT = re.compile(r";[^\n]*")
+
+
+def _cil_allow_rules(text: str, block_type: str | None = None):
+    """Yield (src, tgt, class, perms) for every allow rule in CIL `text`.
+
+    Comments are stripped BEFORE whitespace is collapsed, and collapsing is what
+    lets a rule wrapped across lines match at all (the shipped per-workload
+    policies wrap their longer ones). Collapsing first would let a `;` comment
+    swallow the rule on the following line.
+
+    `block_type` resolves the block-local names a per-workload policy uses: its
+    rules are written inside `(block wl_<name> …)` against a bare `process`,
+    which is really `wl_<name>.process`. `self` means the source type, so it is
+    resolved rather than skipped -- `(allow process self (process (…)))` is one
+    of the commonest rules in these bundles, and dropping it would leave the
+    check blind to most of a policy.
+    """
+    text = _CIL_COMMENT.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    for src, tgt, cls, perms in _CIL_ALLOW.findall(text):
+        if block_type is not None:
+            src = block_type if src == "process" else src
+            tgt = block_type if tgt == "process" else tgt
+        if src == "self":
+            continue
+        if tgt == "self":
+            tgt = src
+        yield src, tgt, cls, perms.split()
+
+
+def _policy_grants(src: str, tgt: str, cls: str, perms) -> bool | None:
+    """Ask the KERNEL whether the loaded policy grants src->tgt:cls {perms}.
+
+    /sys/fs/selinux/access is the access-vector interface libselinux's
+    security_compute_av() uses: write "scontext tcontext classindex request",
+    read back "allowed decided auditallow auditdeny seqno flags". It answers
+    from the policy actually in force, in ~0.4ms, with no setools dependency --
+    where `sesearch` costs ~1.75s per call, needs setools-console installed, and
+    reads rules rather than decisions.
+
+    NOTE the perms file holds a bit POSITION, not a mask: getattr on filesystem
+    reads "4" and the mask is 1 << 3. Using the value directly asks about the
+    wrong permission and quietly reports a granted rule as missing.
+
+    None when the question cannot be put (SELinux disabled, class absent from
+    this policy, context rejected). Never guesses.
+    """
+    try:
+        index = (SELINUXFS / "class" / cls / "index").read_text().strip()
+        request = 0
+        for perm in perms:
+            bit = int((SELINUXFS / "class" / cls / "perms" / perm)
+                      .read_text().strip())
+            request |= 1 << (bit - 1)
+    except (OSError, ValueError):
+        return None
+    if not request:
+        return None
+
+    # A type used as an object may be an object type (object_r) or another
+    # domain (system_r, e.g. svirt_t -> wlvfsd_t:unix_stream_socket connectto),
+    # and the right role is not derivable from the rule alone. So ask under
+    # both and take the permissive answer.
+    #
+    # Both, rather than the first the kernel accepts: an object_r context over a
+    # domain type is ACCEPTED but then fails the RBAC constraint on
+    # process:transition, so `init_t -> wlvfsd_t:process transition` came back
+    # denied on a host that plainly grants it. Type enforcement is what is being
+    # measured here; a constraint failing under a role this rule never uses is
+    # noise, and treating it as a missing rule reports every host as stale.
+    answers = []
+    for role in ("system_r", "object_r"):
+        scon = f"system_u:system_r:{src}:s0"
+        tcon = f"system_u:{role}:{tgt}:s0"
+        try:
+            with open(SELINUXFS / "access", "r+") as fh:
+                fh.write(f"{scon} {tcon} {index} {request}")
+                fh.seek(0)
+                allowed = int(fh.read().split()[0], 16)
+        except (OSError, ValueError, IndexError):
+            continue
+        answers.append((allowed & request) == request)
+    if not answers:
+        return None
+    return any(answers)
+
+
+def _selinux_module_enforced(cil_path: str) -> bool | None:
+    """Whether every allow rule in the shipped CIL is granted by live policy.
+
+    This is the question that matters and the byte comparison only approximates:
+    "are the rules this build needs actually in force?". It catches the case the
+    file comparison cannot -- ostree adopting a new module SOURCE while keeping
+    the locally-modified COMPILED policy, so the store looks current and the
+    kernel still enforces the old rule set. Nothing rebuilds policy at boot.
+
+    Deliberately not the converse test: a policy granting MORE than the shipped
+    module asks for is not stale, it is a superset (a host mid-upgrade, or one
+    carrying an extra local module), and failing it would cry wolf.
+
+    None if no rule could be evaluated at all.
+    """
+    try:
+        text = Path(cil_path).read_text()
+    except OSError:
+        return None
+    return _rules_enforced(text)
+
+
+def _rules_enforced(text: str, block_type: str | None = None) -> bool | None:
+    """Whether every queryable allow rule in `text` is granted by live policy."""
+    asked = False
+    for src, tgt, cls, perms in _cil_allow_rules(text, block_type):
+        granted = _policy_grants(src, tgt, cls, perms)
+        if granted is None:
+            continue
+        asked = True
+        if not granted:
+            return False
+    return True if asked else None
+
+
+def _workload_module_enforced(config) -> bool | None:
+    """Whether the workload's own policy module is in force, as this build
+    defines it.
+
+    The per-workload modules drift harder than the host-global ones, and in a
+    way nothing recovers from on its own: `semodule -i` at enable makes them
+    locally ADDED files in the deployment's /etc, and ostree never updates an
+    added file. So a bundle's policy.cil edit that ships in a new image is not
+    applied to an existing instance, ever, until someone re-enables it -- where
+    workload-vm at least merges when its file is pristine.
+
+    Resolved through the same chain enable uses, so a `workloadctl edit`
+    override is compared rather than the shipped default, and an instance whose
+    `selinux_policy` names another bundle is compared against that bundle.
+    """
+    if not getattr(config, "selinux_policy", None):
+        return None
+    try:
+        text = config.resolve_control_file("policy.cil").read_text()
+    except (OSError, ValueError):
+        return None
+    module = selinux_module_name(config.name)
+    return _rules_enforced(text.replace("__WL_MODULE__", module),
+                           block_type=f"{module}.process")
+
+
+def _selinux_module_current(module: str, cil_path: str) -> bool | None:
+    """Whether the loaded `module` matches the CIL the RPM ships.
+
+    None when it cannot be determined. The check exists because a `bootc
+    upgrade` does NOT deliver a changed module to a host whose policy store has
+    local modifications -- and every host that has enabled a workload has them,
+    since `semanage fcontext -a` rewrites the store. /usr is replaced wholesale
+    so the shipped .cil is always current; the loaded module is what drifts, and
+    `semodule -l` reports it as present eitherway.
+    """
+    try:
+        shipped = Path(cil_path).read_bytes()
+    except OSError:
+        return None
+    loaded = _loaded_module_source(module)
+    if loaded is None:
+        return None
+    return loaded == shipped
+
+
 def _vm_qemu_context(name: str) -> str | None:
     """SELinux context of the running QEMU for `name`, or None if not found.
 
@@ -772,6 +1027,27 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
                 f"{NFT_SET_FILTERED} — this VM is running UNFILTERED while its "
                 f"config says otherwise. Restart it to re-arm: "
                 f"systemctl restart workload-{config.name}.service")
+
+    # The internal-destination guard is host-global, but it only bears on a
+    # workload that HAS a hostname proxy -- it qualifies that proxy's cgroup
+    # exemption and nothing else. Checked here rather than trusted because the
+    # table outlives the RPM that installed it: nft state is kernel state until
+    # reboot, and the skeleton is only re-applied by a VM unit's ExecStartPre.
+    # A host upgraded to a workloadctl that ships the guard keeps the OLD chain
+    # for every VM still running from before the upgrade, and every other
+    # signal on that VM stays green while its proxy can still reach RFC 1918.
+    if (config.vm_network or {}).get("hosts"):
+        unguarded = [name for name in (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6)
+                     if not nft_set_elements(
+                         _nft_json("list", "set", *table, name))]
+        if unguarded:
+            return ("vm_egress", False,
+                    f"egress is filtered on uid {uid}, but {' and '.join(unguarded)} "
+                    f"{'is' if len(unguarded) == 1 else 'are'} missing or empty — "
+                    f"this VM's hostname proxy is NOT restricted from connecting "
+                    f"to internal addresses. The loaded table predates the guard; "
+                    f"restart to reload it: "
+                    f"systemctl restart workload-{config.name}.service")
 
     allowed = []
     for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
@@ -1114,6 +1390,72 @@ def _check_mcs_labels(config, _check) -> None:
                f"-exec chcon -l s0 {{}} +")
 
 
+# The runtime state `disable` tears down: linger, the runtime dir it implies,
+# the per-workload SELinux module, the generated units and the service state.
+# Every one of these is *supposed* to be absent on a disabled workload, so each
+# reports its absence as a failure and a disabled workload came out of the
+# battery carrying eight findings that were all the same fact — with fixes
+# (`enable-linger`, `daemon-reload`, `workloadctl enable`) that an operator who
+# stopped the workload on purpose must not follow.
+#
+# Deliberately NOT in this list: `selinux_labels`, `subid_*`, `home_dir`,
+# `volume_paths`. Those describe on-disk state that must stay correct while the
+# workload is off — it is what the next enable builds on — so their failures are
+# real findings, not consequences. `user_session` is absent rather than
+# excluded: Check 3b only runs when linger is on, which for a disabled workload
+# it is not.
+DISABLED_CONSEQUENCE_CHECKS = (
+    "linger_enabled",
+    "runtime_dir",
+    "selinux_module",
+    "podman_session",
+    "service_file",
+    "service_enabled",
+    "service_active",
+)
+
+
+def collapse_disabled_consequences(checks: list[dict], name: str) -> list[dict]:
+    """Fold a disabled workload's expected absences into one check.
+
+    Only ever called for a workload whose enable marker is gone. Returns a new
+    list with the folded entries replaced, in place, by a single passing
+    `workload_disabled` check — passing because a workload that is off is a
+    state, not a fault, and the eight failures it used to print made the one
+    finding that *was* real (a drifted subid range, say) the ninth item in a
+    list of eight non-problems.
+
+    Only absences fold. An entry in the list that *passed* is residue — linger
+    still on, a unit still loaded after disable — which is a genuine anomaly and
+    stays visible. `podman_session` inverts that: it is the skip line emitted
+    when the workload's rootless podman cannot answer, so for a disabled
+    workload its passing form IS the absence. It cannot be here in its failing
+    form, which _podman_read only emits when the workload is enabled.
+    """
+    folded = [
+        c for c in checks
+        if c["check"] in DISABLED_CONSEQUENCE_CHECKS
+        and (not c["passed"] or c["check"] == "podman_session")
+    ]
+    if not folded:
+        return checks
+
+    folded_ids = {id(c) for c in folded}
+    kept = [c for c in checks if id(c) not in folded_ids]
+    names = ", ".join(c["check"] for c in folded)
+    summary = {
+        "check": "workload_disabled",
+        "passed": True,
+        "message": (
+            f"Workload is disabled, so its runtime state is absent as "
+            f"expected — {len(folded)} checks folded into this one: {names}. "
+            f"Run it with: sudo workloadctl enable {name}"
+        ),
+    }
+    kept.insert(checks.index(folded[0]), summary)
+    return kept
+
+
 def collect_diagnose_checks(config, manager: WorkloadManager):
     """Run the diagnose check battery and return (checks, passed).
 
@@ -1140,6 +1482,62 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         if fix:
             entry["fix"] = fix
         checks.append(entry)
+
+    # The podman-backed checks below (image inventory, container liveness) run
+    # under the workload's *own* rootless podman, which needs its user manager
+    # and /run/user/<uid> up. A disabled workload has neither — disable() drops
+    # linger, and logind GCs the runtime dir — so podman exits before it can
+    # answer anything and every such read raises. Unwrapped, that aborted the
+    # whole battery at Check 6 with a traceback, discarding the dozen checks
+    # after it including the ones that would have said *why* (Checks 8/9: the
+    # workload is off). Diagnose is the first thing an operator reaches for on a
+    # workload that is not running, so that is exactly the case it must survive.
+    #
+    # podman.py's own self-heal does not cover this and should not: it is gated
+    # on linger already being enabled, because a read path must never be what
+    # turns linger on. For a disabled workload it correctly declines, so the
+    # error arrives here.
+    #
+    # A failed read *omits* its check rather than passing it — asserting an image
+    # is present in a store we could not open is the same guess ca_trust_anchors
+    # refuses to make. The omission is announced once, because a check that
+    # silently vanishes is indistinguishable from one that passed. Whether that
+    # announcement is a fault depends on enabled-ness: for a disabled workload an
+    # unreachable podman is the expected consequence of it being off; for an
+    # enabled one it is a real failure worth a fix.
+    podman_reported = False
+
+    def _podman_read(fn, *args):
+        """Run a podman read that must not abort the battery: (ok, value)."""
+        nonlocal podman_reported
+        try:
+            return True, fn(*args)
+        except PodmanError as e:
+            if not podman_reported:
+                podman_reported = True
+                # Last line, not str(e): the exception text carries the whole
+                # argv, and the operator needs the reason, not the command.
+                lines = e.stderr.strip().splitlines()
+                detail = lines[-1].strip() if lines else f"exited {e.returncode}"
+                if config.enabled:
+                    _check("podman_session", False,
+                           f"Rootless podman is not answering for "
+                           f"{config.username}: {detail}",
+                           fix=(f"Check the user manager: systemctl status "
+                                f"user@{config.uid}.service, then "
+                                f"sudo workloadctl restart {config.name}"))
+                else:
+                    # Emitted, then folded away by
+                    # collapse_disabled_consequences — which is why this text is
+                    # not what an operator sees for a disabled workload; the
+                    # fold names the check instead. The two layers stay
+                    # independent on purpose: this one knows only that podman
+                    # could not answer, and says so whoever is reading.
+                    _check("podman_session", True,
+                           f"Image and container checks skipped: "
+                           f"{config.username} has no rootless podman session "
+                           f"(workload disabled)")
+            return False, None
 
     # Check 1: User exists
     user_exists = manager.user_exists(config)
@@ -1229,10 +1627,66 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                 _check("selinux_module", True,
                        f"SELinux module loaded: {module} "
                        f"(type {selinux_type_name(config.name)})")
+                # Loaded says nothing about WHICH version is loaded, and these
+                # modules are locally-added files that no upgrade ever replaces.
+                if _workload_module_enforced(config) is False:
+                    _check("workload_selinux_module_current", False,
+                           f"{module} is loaded but does not grant everything "
+                           f"this build's policy.cil asks for, so the module "
+                           f"predates the bundle (an image upgrade never "
+                           f"replaces it -- enable installed it, so /etc owns "
+                           f"it)",
+                           fix=f"sudo workloadctl enable {config.name}")
             else:
                 _check("selinux_module", False,
                        f"SELinux module not loaded: {module}",
                        fix=f"sudo workloadctl enable {config.name}")
+
+    # Check: the host-global SELinux modules match what the image ships.
+    #
+    # `semodule -l` only answers "present", and a module that is present but
+    # OLD is the expected state after a `bootc upgrade`, not an exotic one: the
+    # policy store lives in /etc, ostree 3-way-merges /etc, and every host that
+    # has enabled a workload has a locally-modified store because `semanage
+    # fcontext -a` rewrites it. So the image's new module is silently not
+    # applied while every existing check still passes. Measured on a live host:
+    # 493 of ~639 diverged /etc paths were the policy store, the module
+    # directory itself among them.
+    #
+    # /usr is replaced wholesale, so the shipped .cil is authoritative and the
+    # loaded module is the thing that drifts.
+    # Two questions, and the order matters. "Does the live policy grant what
+    # this build's module asks for?" is the real one, answered against the
+    # kernel. The file comparison is only the fallback for when that cannot be
+    # asked, because it can be fooled in both directions: ostree may adopt a new
+    # module SOURCE while keeping the old COMPILED policy (looks current, is
+    # not), and a host whose loaded policy is a superset reads as differing
+    # while working perfectly.
+    stale = []
+    determinable = False
+    for module, cil_path in HOST_SELINUX_MODULES:
+        state = _selinux_module_enforced(cil_path)
+        how = "rules are not in force"
+        if state is None:
+            state = _selinux_module_current(module, cil_path)
+            how = "stored module differs from the shipped .cil"
+        if state is None:
+            continue
+        determinable = True
+        if not state:
+            stale.append((module, cil_path, how))
+    if determinable and stale:
+        detail = "; ".join(f"{m} ({h})" for m, _, h in stale)
+        _check("selinux_module_current", False,
+               f"host SELinux policy is behind the version this build ships: "
+               f"{detail}. A `bootc upgrade` does not replace a "
+               f"locally-modified policy store, and nothing recompiles policy "
+               f"at boot, so the image's rules can be present on disk and still "
+               f"not enforced",
+               fix="; ".join(f"sudo semodule -i {c}" for _, c, _ in stale))
+    elif determinable:
+        _check("selinux_module_current", True,
+               "Host SELinux modules match the shipped policy")
 
     # Check: NVIDIA device nodes reachable under SELinux.
     #
@@ -1338,7 +1792,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
             pass
         elif config.is_multi:
             for cname, img in config.container_images():
-                iid = manager.podman(config).image_id(img)
+                ok, iid = _podman_read(manager.podman(config).image_id, img)
+                if not ok:
+                    continue
                 if iid:
                     _check(f"image_available[{cname}]", True,
                            f"Image available for {cname}: {img} ({iid[:12]})")
@@ -1347,8 +1803,10 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                            f"Image not available for {cname}: {img}",
                            fix="Image will be pulled on first start")
         else:
-            image_id = manager.get_image_id(config)
-            if image_id:
+            ok, image_id = _podman_read(manager.get_image_id, config)
+            if not ok:
+                pass  # announced by _podman_read; nothing here to assert
+            elif image_id:
                 _check("image_available", True, f"Image available: {config.image} ({image_id[:12]})")
             else:
                 pull_policy = config.config.get("container", {}).get("pull", "missing")
@@ -1471,9 +1929,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
     if svc_active:
         _check("service_active", True, f"Service active: {service_state}")
     else:
-        fix = (f"Check logs: sudo journalctl -u {config.service_name} -n 50"
-               if config.enabled else "Workload is disabled in config")
-        _check("service_active", False, f"Service not active: {service_state}", fix=fix)
+        # No disabled-workload branch here any more: when this fails on a
+        # disabled workload the check is folded into `workload_disabled`, so a
+        # fix reading "Workload is disabled in config" could never be printed.
+        _check("service_active", False, f"Service not active: {service_state}",
+               fix=f"Check logs: sudo journalctl -u {config.service_name} -n 50")
 
     # Check 10: Container(s) running. A VM workload has no container to inspect —
     # its liveness is the QEMU service's own state, already covered by Check 9,
@@ -1483,7 +1943,10 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         if config.is_multi:
             for cname in config.container_names():
                 pn = config.podman_container_name(cname)
-                cs = manager.podman(config).container_status(pn)
+                ok, cs = _podman_read(
+                    manager.podman(config).container_status, pn)
+                if not ok:
+                    continue
                 if cs:
                     _check(f"container_running[{cname}]", True,
                            f"Container running: {pn} ({cs})")
@@ -1492,8 +1955,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                            f"Container not running: {pn}",
                            fix=f"Check logs: sudo journalctl -u workload-{config.name}-{cname}.service -n 50")
         else:
-            container_status = manager.podman(config).container_status(config.container_name)
-            if container_status:
+            ok, container_status = _podman_read(
+                manager.podman(config).container_status, config.container_name)
+            if not ok:
+                pass  # announced by _podman_read; nothing here to assert
+            elif container_status:
                 _check("container_running", True, f"Container running: {container_status}")
             else:
                 _check("container_running", False, "Container not running",
@@ -1552,6 +2018,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
                f'(acknowledged via {HOST_USERNS_OPT_IN}=true) — the '
                'per-workload isolation boundary is dissolved.')
 
+    if not config.enabled:
+        checks = collapse_disabled_consequences(checks, config.name)
+
     return checks, all(c["passed"] for c in checks)
 
 
@@ -1595,6 +2064,9 @@ def cmd_diagnose(args, manager: WorkloadManager):
         print()
         sys.exit(1)
     else:
-        print("✓ All checks passed - workload is healthy")
+        # "healthy" alone would read as "running" on a workload that is off —
+        # the same confusion the folded check exists to remove.
+        state = "" if config.enabled else " (disabled — nothing is running)"
+        print(f"✓ All checks passed - workload is healthy{state}")
         sys.exit(0)
 

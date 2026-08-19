@@ -563,6 +563,126 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         known = (self.home / ".ssh" / "vm_known_hosts").read_text()
         self.assertEqual(known, f"myvm {FAKE_HOST_PUB}\n")
 
+    # --- seed-completeness contract (proxy env + volume mounts) -------------
+    #
+    # Template mode emits only what the operator wrote, so a seed that omits
+    # what the TOML implies produces a VM that boots and passes every check
+    # while being quietly wrong. Both omissions are refused at build time, for
+    # the same reason as the host-key contract above.
+
+    _FILTERED_NET = {"egress": "filtered", "hosts": ["example.com"]}
+
+    def _seed(self, body: str = "") -> None:
+        (self.config_dir / "user-data").write_text("#cloud-config\n" + body)
+
+    def test_filtered_egress_seed_without_proxy_refused(self):
+        """A seed that never mentions the proxy address, on a workload whose
+        egress is hostname-filtered, leaves the guest going direct — which is
+        dropped, not refused, so every fetch hangs instead of failing."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("proxy", msg)
+        self.assertIn(self.mod.VM_PROXY_ADDR, msg)
+
+    def test_filtered_egress_seed_with_proxy_accepted(self):
+        """Naming the proxy address satisfies the check."""
+        self._seed(f"write_files:\n  - path: /etc/environment\n"
+                   f"    content: https_proxy=http://{self.mod.VM_PROXY_ADDR}:3128\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        self._run_build(cfg)
+        self.assertIn(self.mod.VM_PROXY_ADDR, self._read_user_data())
+
+    def test_open_egress_seed_without_proxy_accepted(self):
+        """With no `hosts` there is no proxy to point at, so the check must not
+        fire — the common case is a seed that rightly says nothing about it."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": {"egress": "open"}}}
+        self._run_build(cfg)
+
+    def test_declared_volume_never_mounted_refused(self):
+        """A declared volume the seed never mounts leaves the guest writing to
+        the system disk at the path the operator believes is persistent."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("home-fedora", msg)   # the virtiofs tag
+        self.assertIn("/home/fedora", msg)  # where it should have landed
+
+    def test_declared_volume_mounted_accepted(self):
+        """Referring to the tag satisfies the check."""
+        self._seed("runcmd:\n  - mount -t virtiofs home-fedora /home/fedora\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg)
+
+    def test_only_the_unmounted_volume_is_named(self):
+        """With several volumes the error names the one actually missing, not
+        merely the first declared."""
+        self._seed("runcmd:\n  - mount -t virtiofs home-fedora /home/fedora\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "volumes": ["./home:/home/fedora", "./srv:/srv/data"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        msg = str(ctx.exception)
+        self.assertIn("srv-data", msg)
+        self.assertNotIn("home-fedora", msg)
+
+    def test_contract_failures_are_typed(self):
+        """Contract rejections raise SeedContractError, not a bare RuntimeError.
+
+        The type is what earns the distinct exit code in main(), which is what
+        keeps the CLI from framing an operator's fixable mistake as a crash and
+        asking them to file a bug report. A plain RuntimeError would still fail
+        the build, but with the message buried under a traceback.
+        """
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        with self.assertRaises(self.mod.SeedContractError):
+            self._run_build(cfg)
+
+    def test_seed_provides_opts_out_of_each_check(self):
+        """seed_provides is the escape hatch for a guest image that already
+        carries the configuration — without it a legitimate setup would be
+        blocked with no recourse."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
+                                     "seed_provides": ["proxy", "mounts"]},
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg)
+
+    def test_seed_provides_is_per_concern(self):
+        """Opting out of one check must not disable the other."""
+        self._seed()
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
+                                     "seed_provides": ["mounts"]},
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_build(cfg)
+        self.assertIn("proxy", str(ctx.exception))
+
+    def test_default_mode_is_unaffected_by_the_contract(self):
+        """The checks are template-mode only: default mode derives both the
+        proxy env and the mounts itself, so the same config must build."""
+        cfg = {"vm": {"user": "fedora",
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
+        self._run_build(cfg, name="defvm")
+        text = self._read_user_data("defvm")
+        self.assertIn(self.mod.VM_PROXY_ADDR, text)
+        self.assertIn("home-fedora", text)
+
     def test_missing_host_keypair_raises(self):
         """A missing host keypair (setup step skipped) fails the ISO build."""
         (self.home / ".ssh" / "vm_host_ed25519_key").unlink()
@@ -1736,6 +1856,69 @@ class TestConfigureSubuidSubgidMore(unittest.TestCase):
             self.mod.configure_subuid_subgid(pw, config)
         subgid_writes = [s for p, s in written if "subgid" in p]
         self.assertTrue(any("_wl-test:44:1" in s for s in subgid_writes))
+
+    def test_main_range_is_written_before_supplementary_entries(self):
+        """Order used to come out of a set, so which line landed first varied
+        per process (randomized string hashing) and therefore per host. The
+        reader no longer depends on it, but a subgid file whose first line for a
+        user is a single-GID mapping misleads anything reading it by eye."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["render", "wl-downloads"]}}
+        written = []
+        gids = {"render": 105, "wl-downloads": 966}
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam",
+                               side_effect=lambda n: types.SimpleNamespace(
+                                   gr_gid=gids[n])), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+
+        subgid_writes = [s.strip() for p, s in written if "subgid" in p]
+        self.assertEqual(
+            subgid_writes,
+            ["_wl-test:600100000:65536", "_wl-test:105:1", "_wl-test:966:1"])
+
+    def test_duplicate_extra_groups_are_written_once(self):
+        """The dedup a set gave for free, kept after the switch to a list."""
+        pw = _fake_pw(Path("/home/_wl-test"), uid=10000)
+        pw.pw_name = "_wl-test"
+        config = {"security": {"extra_groups": ["render", "video"]}}
+        written = []
+
+        def fake_open(path, mode="r"):
+            m = mock.MagicMock()
+            m.__enter__ = lambda s: m
+            m.__exit__ = mock.MagicMock(return_value=False)
+            m.fileno = lambda: 0
+            if mode == "a":
+                m.write = lambda s: written.append((str(path), s))
+            return m
+
+        # Two names, one GID — an alias pair resolves to the same entry.
+        with mock.patch("builtins.open", side_effect=fake_open), \
+             mock.patch.object(self.mod, "subid_lock", contextlib.nullcontext), \
+             mock.patch.object(self.mod.Path, "mkdir"), \
+             mock.patch.object(self.mod.grp, "getgrnam",
+                               return_value=types.SimpleNamespace(gr_gid=105)), \
+             mock.patch.object(self.mod, "subprocess", mock.MagicMock()):
+            self.mod.configure_subuid_subgid(pw, config)
+
+        subgid_writes = [s.strip() for p, s in written if "subgid" in p]
+        self.assertEqual(
+            subgid_writes, ["_wl-test:600100000:65536", "_wl-test:105:1"])
 
     def test_missing_extra_group_logs_warning_and_skips(self):
         pw = _fake_pw(Path("/home/_wl-test"), uid=10000)

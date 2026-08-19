@@ -9,6 +9,7 @@ and test_validate_single_vm_skips_image_check locks that in.
 """
 
 import argparse
+import bz2
 import io
 import json
 import os
@@ -478,6 +479,11 @@ class DiagnoseVmScopeTest(unittest.TestCase):
             'image = "example.com/guest:latest"\n\n'
             '[vm.network]\nbridge = "br0"\n'
         )
+        # Both enabled: this suite asks which checks a VM gets versus a
+        # container, and a disabled workload of either substrate folds its
+        # runtime checks into one line, which would answer a different question.
+        for name in ("app", "guest"):
+            (self.tmp / name / workload_lib.ENABLED_MARKER_NAME).touch()
         self.manager = mock.Mock()
         self.manager.user_exists.return_value = True
         self.manager.get_image_id.return_value = "sha256:0123456789ab"
@@ -671,6 +677,11 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             '[workload]\nname = "app"\n\n[container]\nimage = "localhost/app:latest"\n'
             '\n[storage]\nvolumes = ["./data:/data"]\n'
         )
+        # Enabled: the runtime half of the spine (linger, runtime dir, units,
+        # service state) only reports per-check for a workload that is supposed
+        # to be running. Disabled, those fold into one `workload_disabled` line
+        # — see tests/test_diagnose_disabled_fold.py.
+        (self.tmp / "app" / workload_lib.ENABLED_MARKER_NAME).touch()
         self.home = self.tmp / "home-app"
         fake_pw = types.SimpleNamespace(pw_uid=10005, pw_gid=10005, pw_dir=str(self.home))
         self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
@@ -887,14 +898,19 @@ class DiagnoseUserExistsTest(unittest.TestCase):
             "build change, which is the whole reason units_current exists",
         )
 
-    def test_service_not_active_disabled_workload(self):
-        # config.enabled is False (no marker); service_active failure fix
-        # should say "disabled" not "check logs".
+    def test_disabled_workload_gets_the_fold_not_a_service_active_failure(self):
+        """Supersedes an earlier test that pinned service_active's "Workload is
+        disabled in config" fix text. That branch is now unreachable: whenever
+        it would be chosen, the check is one of the ones folded away — so the
+        state is stated once, by the fold, instead of six times by its
+        consequences."""
+        (self.tmp / "app" / workload_lib.ENABLED_MARKER_NAME).unlink()
         code, out = self._run(json_mode=True)
         data = json.loads(out)
-        check = next(c for c in data["checks"] if c["check"] == "service_active")
-        self.assertFalse(check["passed"])
-        self.assertIn("disabled", check["fix"])
+        names = [c["check"] for c in data["checks"]]
+        self.assertNotIn("service_active", names)
+        fold = next(c for c in data["checks"] if c["check"] == "workload_disabled")
+        self.assertTrue(fold["passed"])
 
     def test_service_active_enabled_workload_hints_journalctl(self):
         (self.tmp / "app" / ".enabled").touch()
@@ -2009,6 +2025,234 @@ class DiagnoseMcsLabelTest(unittest.TestCase):
         argv = self.run_mock.call_args.args[0]
         target = Path(argv[1])
         self.assertEqual(target, self.tmp / "app" / "data")
+
+
+class HostSelinuxModuleCurrentTest(unittest.TestCase):
+    """The staleness check for the host-global CIL modules.
+
+    Exists because `semodule -l` answers "present" for a module that is years
+    old: the policy store is in /etc, ostree 3-way-merges /etc, and `semanage
+    fcontext -a` (which every `enable` runs) makes the store locally modified —
+    so a `bootc upgrade` ships a new module that is never applied while every
+    other check still passes. Comparing the stored source against the shipped
+    .cil is exact: semodule keeps the file it was handed verbatim.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.store = self.tmp / "selinux"
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "SELINUX_STORE_ROOTS", (self.store,)))
+        self.enterContext(mock.patch.object(
+            cmd_diagnose, "SEMANAGE_CONF", self.tmp / "absent-semanage.conf"))
+
+    def _install(self, module, body, *, compress=True, priority="400",
+                 policy="targeted"):
+        d = self.store / policy / "active" / "modules" / priority / module
+        d.mkdir(parents=True)
+        (d / "cil").write_bytes(bz2.compress(body) if compress else body)
+        shipped = self.tmp / f"{module}.cil"
+        return shipped
+
+    def test_identical_module_is_current(self):
+        body = b"(allow a b (file (read)))\n"
+        shipped = self._install("workload-vm", body)
+        shipped.write_bytes(body)
+        self.assertIs(
+            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            True)
+
+    def test_differing_module_is_stale(self):
+        shipped = self._install("workload-vm", b"(allow a b (file (read)))\n")
+        shipped.write_bytes(b"(allow a b (file (read write)))\n")
+        self.assertIs(
+            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            False)
+
+    def test_uncompressed_store_entry_is_read(self):
+        """semanage.conf can disable module compression; the store then holds
+        plain CIL and a bz2-only reader would report every module unknown."""
+        body = b"(allow a b (file (read)))\n"
+        shipped = self._install("workload-vm", body, compress=False)
+        shipped.write_bytes(body)
+        self.assertIs(
+            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            True)
+
+    def test_priority_and_policy_type_are_not_hardcoded(self):
+        """Priority is a semodule argument and a host may carry more than one
+        policy type; a hardcoded targeted/400 silently reports "cannot tell"."""
+        body = b"(allow a b (file (read)))\n"
+        shipped = self._install("workload-vm", body,
+                                priority="450", policy="mls")
+        shipped.write_bytes(body)
+        self.assertIs(
+            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)),
+            True)
+
+    def test_module_not_in_store_is_unknown_not_stale(self):
+        """Not-loaded is a different condition with a different fix, already
+        reported elsewhere. Reporting it as a difference would send the operator
+        to the wrong remedy."""
+        shipped = self.tmp / "workload-vm.cil"
+        shipped.write_bytes(b"(allow a b (file (read)))\n")
+        self.assertIsNone(
+            cmd_diagnose._selinux_module_current("workload-vm", str(shipped)))
+
+    def test_unreadable_store_is_unknown_not_stale(self):
+        """The store is 0600. An unprivileged `diagnose` must not report every
+        module as differing."""
+        body = b"(allow a b (file (read)))\n"
+        shipped = self._install("workload-vm", body)
+        shipped.write_bytes(body)
+        with mock.patch.object(Path, "read_bytes",
+                               side_effect=PermissionError):
+            self.assertIsNone(
+                cmd_diagnose._selinux_module_current(
+                    "workload-vm", str(shipped)))
+
+    def test_missing_shipped_cil_is_unknown(self):
+        """A host without the RPM's data files has nothing to compare to."""
+        self._install("workload-vm", b"(allow a b (file (read)))\n")
+        self.assertIsNone(cmd_diagnose._selinux_module_current(
+            "workload-vm", str(self.tmp / "absent.cil")))
+
+    def test_enforced_asks_the_kernel_for_every_allow_rule(self):
+        """The parse-and-query spine: each `(allow …)` in the shipped CIL turns
+        into one access-vector question."""
+        cil = self.tmp / "m.cil"
+        cil.write_text(
+            "; a comment\n"
+            "(type wlvfsd_t)\n"
+            "(allow wlvfsd_t svirt_image_t (filesystem (getattr)))\n"
+            "(allow wlvfsd_t qemu_var_run_t (file (create getattr lock)))\n"
+            "(typetransition init_t wlvfsd_exec_t process wlvfsd_t)\n")
+        asked = []
+
+        def fake(src, tgt, cls, perms):
+            asked.append((src, tgt, cls, tuple(perms)))
+            return True
+
+        with mock.patch.object(cmd_diagnose, "_policy_grants", fake):
+            self.assertIs(cmd_diagnose._selinux_module_enforced(str(cil)), True)
+        self.assertEqual(asked, [
+            ("wlvfsd_t", "svirt_image_t", "filesystem", ("getattr",)),
+            ("wlvfsd_t", "qemu_var_run_t", "file", ("create", "getattr", "lock")),
+        ])
+
+    def test_enforced_is_false_when_any_rule_is_not_granted(self):
+        """One missing rule is the whole signal — that is what a stale module
+        looks like, since the new build's extra rule is the one absent."""
+        cil = self.tmp / "m.cil"
+        cil.write_text(
+            "(allow wlvfsd_t fs_t (filesystem (getattr)))\n"
+            "(allow wlvfsd_t svirt_image_t (filesystem (getattr)))\n")
+        with mock.patch.object(cmd_diagnose, "_policy_grants",
+                               lambda s, t, c, p: t != "svirt_image_t"):
+            self.assertIs(cmd_diagnose._selinux_module_enforced(str(cil)), False)
+
+    def test_enforced_is_unknown_when_nothing_could_be_asked(self):
+        """SELinux disabled, or a policy without these classes: an untestable
+        condition must not read as a pass."""
+        cil = self.tmp / "m.cil"
+        cil.write_text("(allow wlvfsd_t svirt_image_t (filesystem (getattr)))\n")
+        with mock.patch.object(cmd_diagnose, "_policy_grants",
+                               lambda s, t, c, p: None):
+            self.assertIsNone(cmd_diagnose._selinux_module_enforced(str(cil)))
+
+    def test_self_target_resolves_to_the_source_type(self):
+        """`self` means the source type. Resolving it rather than skipping it is
+        what keeps the per-workload check useful: `(allow process self …)` is
+        one of the commonest rules in those bundles."""
+        cil = self.tmp / "m.cil"
+        cil.write_text(
+            "(allow wlvfsd_t self (process (setcap)))\n"
+            "(allow wlvfsd_t fs_t (filesystem (getattr)))\n")
+        asked = []
+        with mock.patch.object(cmd_diagnose, "_policy_grants",
+                               lambda s, t, c, p: asked.append((s, t)) or True):
+            cmd_diagnose._selinux_module_enforced(str(cil))
+        self.assertEqual(asked, [("wlvfsd_t", "wlvfsd_t"),
+                                 ("wlvfsd_t", "fs_t")])
+
+    def test_comments_are_stripped_before_lines_are_joined(self):
+        """Rules wrap across lines in the shipped bundles, so the text has to be
+        flattened — but flattening first would let a `;` comment swallow the
+        rule beneath it, silently dropping rules from the check."""
+        cil = self.tmp / "m.cil"
+        cil.write_text(
+            "; a comment mentioning (allow bogus_t bogus2_t (file (read)))\n"
+            "(allow wlvfsd_t svirt_image_t\n"
+            "    (dir (read write)))\n")
+        rules = list(cmd_diagnose._cil_allow_rules(cil.read_text()))
+        self.assertEqual(
+            rules, [("wlvfsd_t", "svirt_image_t", "dir", ["read", "write"])])
+
+    def test_block_local_process_resolves_to_the_workload_type(self):
+        """Per-workload policies are written inside `(block wl_<name> …)`
+        against a bare `process`, which is really `wl_<name>.process`. Left
+        unresolved it is not a type, every query fails, and the check silently
+        covers nothing."""
+        text = ("(block wl_alloy\n"
+                "  (allow process syslogd_var_run_t (dir (open read)))\n"
+                "  (allow process self (process (signal)))\n)")
+        rules = list(cmd_diagnose._cil_allow_rules(
+            text, block_type="wl_alloy.process"))
+        self.assertEqual(rules, [
+            ("wl_alloy.process", "syslogd_var_run_t", "dir", ["open", "read"]),
+            ("wl_alloy.process", "wl_alloy.process", "process", ["signal"]),
+        ])
+
+    def test_perm_value_is_a_bit_position_not_a_mask(self):
+        """Measured on a live host: filesystem:getattr reads "4" and the mask is
+        1 << 3 == 8. Using the value directly asks about a different permission
+        and reports a granted rule as missing."""
+        fs = self.tmp / "selinuxfs"
+        (fs / "class" / "filesystem" / "perms").mkdir(parents=True)
+        (fs / "class" / "filesystem" / "index").write_text("5\n")
+        (fs / "class" / "filesystem" / "perms" / "getattr").write_text("4\n")
+        seen = {}
+
+        class FakeAccess(io.StringIO):
+            def write(self, data):
+                seen["query"] = data
+                return len(data)
+
+            def read(self, *a):
+                return "8 ffffffff 0 ffffffff 290 0"
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def fake_open(path, mode="r"):
+            yield FakeAccess()
+
+        with mock.patch.object(cmd_diagnose, "SELINUXFS", fs), \
+             mock.patch.object(cmd_diagnose, "open", fake_open, create=True):
+            granted = cmd_diagnose._policy_grants(
+                "wlvfsd_t", "svirt_image_t", "filesystem", ["getattr"])
+        self.assertTrue(granted)
+        self.assertTrue(seen["query"].endswith(" 5 8"),
+                        f"requested mask should be 8, got {seen['query']!r}")
+
+    def test_store_root_from_semanage_conf_is_honoured(self):
+        """Both layouts are live: Fedora's default store is /var/lib/selinux,
+        and the hypervisor image sets `store-root=/etc/selinux` — which is what
+        puts the store in ostree's merged /etc and causes the drift in the first
+        place. Measured on real hosts, one of each."""
+        moved = self.tmp / "elsewhere"
+        conf = self.tmp / "semanage.conf"
+        conf.write_text(f"# comment\nstore-root={moved}\nignore=1\n")
+        with mock.patch.object(cmd_diagnose, "SEMANAGE_CONF", conf), \
+             mock.patch.object(cmd_diagnose, "SELINUX_STORE_ROOTS", ()):
+            body = b"(allow a b (file (read)))\n"
+            d = moved / "targeted" / "active" / "modules" / "400" / "workload-vm"
+            d.mkdir(parents=True)
+            (d / "cil").write_bytes(bz2.compress(body))
+            shipped = self.tmp / "shipped.cil"
+            shipped.write_bytes(body)
+            self.assertIs(cmd_diagnose._selinux_module_current(
+                "workload-vm", str(shipped)), True)
 
 
 if __name__ == "__main__":

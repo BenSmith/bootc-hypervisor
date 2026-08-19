@@ -443,23 +443,51 @@ def subid_files() -> tuple[Path, Path]:
 def read_subid_entry(username: str, path: Path | str) -> tuple[int, int] | None:
     """Return (start, count) for username's main range in path, else None.
 
-    Only the first matching line is considered: the main range is the one
-    `username:<start>:<count>` entry: supplementary group entries added by
-    extra_groups share the username prefix but are appended after it.
+    Selected by *shape*, not position. A user can hold several entries — the
+    main range, plus one `username:<gid>:1` per extra_groups GID — and
+    `configure_subuid_subgid` gives no ordering guarantee between them across
+    hosts provisioned by older builds. Taking the first matching line was
+    therefore a coin flip, and losing it reported a supplementary single-GID
+    entry as the main range: measured on a lab host, a workload whose derived
+    range was present and correct failed both subid diagnose checks, and was
+    handed a remediation (rewrite the entry, chown state/) that would have
+    broken the mapping it was wrongly accused of having.
+
+    `count == 1` is what marks a supplementary entry; the main range is
+    SUBID_COUNT wide. Skipping count-1 entries rather than matching SUBID_COUNT
+    exactly is deliberate: a *drifted* main range is the entire point of the
+    caller, and a pre-derivation range can carry the wrong count as well as the
+    wrong start, so it must still come back for subid_derived_check to fail on.
+
+    With nothing but supplementary entries the first of them is returned rather
+    than None. The main range really is missing in that case, and returning it
+    lets subid_derived_check say so — None would drop the check silently, and
+    the presence check upstream would still call the user configured.
+
+    A malformed line for this user returns None instead of being skipped: the
+    callers are read-only reporters, and stepping over corruption to nominate
+    some later line as the main range is worse than declining to answer.
     """
+    supplementary: tuple[int, int] | None = None
     try:
         with open(path) as f:
             for line in f:
-                if line.startswith(f"{username}:"):
-                    parts = line.strip().split(":")
-                    if len(parts) == 3:
-                        try:
-                            return int(parts[1]), int(parts[2])
-                        except ValueError:
-                            return None
+                if not line.startswith(f"{username}:"):
+                    continue
+                parts = line.strip().split(":")
+                if len(parts) != 3:
+                    continue
+                try:
+                    entry = (int(parts[1]), int(parts[2]))
+                except ValueError:
+                    return None
+                if entry[1] != 1:
+                    return entry
+                if supplementary is None:
+                    supplementary = entry
     except (FileNotFoundError, PermissionError, OSError):
         return None
-    return None
+    return supplementary
 
 
 def subid_files_with_entries(username: str) -> list[Path]:

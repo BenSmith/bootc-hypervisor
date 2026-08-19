@@ -940,6 +940,75 @@ class TestGeneratorVolumeExpansion(unittest.TestCase):
         service = self._service_for('["/mnt/a$b:/models:ro"]')
         self.assertIn('RequiresMountsFor="/mnt/a$b"', service)
 
+    def test_writable_external_volume_is_in_read_write_paths(self):
+        # ProtectSystem=strict mounts the whole hierarchy read-only inside the
+        # unit's namespace, and podman bind-mounts the host path out of that
+        # namespace -- so without naming it back the container gets EROFS on a
+        # directory it owns, on a filesystem mounted rw, with NO denial logged.
+        # Measured against a container_file_t directory owned by the workload
+        # user, so it is not about labels or ownership.
+        service = self._service_for('["/srv/media:/media:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertIn('"/srv/media"', line)
+
+    def test_external_volume_with_no_opts_defaults_to_writable(self):
+        # "host:guest" with no third field is rw in podman, so the unit has to
+        # allow it too or the default spelling is the broken one.
+        service = self._service_for('["/srv/media:/media"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertIn('"/srv/media"', line)
+
+    def test_read_only_external_volume_is_not_made_writable(self):
+        # podman enforces :ro in the container regardless, so naming it here
+        # would only widen what the unit may write.
+        service = self._service_for('["/mnt/models:/models:ro"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertNotIn("/mnt/models", line)
+
+    def test_socket_volume_is_not_added_to_read_write_paths(self):
+        # systemd bind-mounts every ReadWritePaths= entry, and targeted policy
+        # denies init_t `mounton` on a sock_file -- so naming a socket kills the
+        # unit at namespace setup with a bare 226/NAMESPACE. It is not needed
+        # either: sb_permission returns EROFS only for reg/dir/lnk, so a unix
+        # socket stays connectable under ProtectSystem=strict. Four shipped
+        # bundles mount /run/systemd/journal/socket.
+        import shutil
+        import socket
+        sock_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, sock_dir)
+        sock_path = os.path.join(sock_dir, "journal.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(srv.close)
+        srv.bind(sock_path)
+
+        service = self._service_for(f'["{sock_path}:/run/journal.sock:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertNotIn(sock_path, line)
+        # Still bind-mounted into the container, and still guarded.
+        self.assertIn(f'--volume "{sock_path}"', service)
+        self.assertIn(f'RequiresMountsFor="{sock_path}"', service)
+
+    def test_absent_external_volume_is_still_made_writable(self):
+        # An out-of-tree volume whose filesystem is not mounted yet cannot be
+        # stat'd at generate time; assuming "socket" there would silently
+        # reintroduce the EROFS bug on every deferred mount.
+        service = self._service_for('["/mnt/not-mounted-yet:/data:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertIn('"/mnt/not-mounted-yet"', line)
+
+    def test_anchored_volume_is_not_added_to_read_write_paths(self):
+        # The workload root is already there; adding the same tree again would
+        # be noise, and would differ per volume for no reason.
+        service = self._service_for('["./data:/app/data:rw"]')
+        line = next(ln for ln in service.splitlines()
+                    if ln.startswith("ReadWritePaths="))
+        self.assertEqual(line.count("/var/lib/workloads/vols"), 1)
+
 
 class TestGeneratorDevices(unittest.TestCase):
     def setUp(self):

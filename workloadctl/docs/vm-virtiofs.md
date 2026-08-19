@@ -208,8 +208,10 @@ sudo semanage permissive -d wlvfsd_t && sudo semodule -B
 
 The workout: create/read/write/truncate/append, mkdir/rmdir, symlink
 read+create+rename+delete, hard link, FIFO and unix socket create and delete,
-chmod/chown/utimes on both files **and** directories, rename within a directory
-and across directories, statfs, a first-boot cloud-init, and a clean stop.
+chmod/chown/utimes on files, directories **and** each of the three classes below
+them (`mkfifo -m`, `chmod` on a bound unix socket, `lutimes`/`lchown` on a
+symlink), rename within a directory and across directories — of a fifo and a
+socket as well as a file — statfs, a first-boot cloud-init, and a clean stop.
 
 The classes an incomplete workout drops are predictable, and they are the ones
 below `file`:
@@ -221,6 +223,8 @@ below `file`:
 | `dir:setattr` | chmod/chown/utimes on a directory — cloud-init chowns a HOME |
 | `dir:rename`, `dir:reparent` | `mv` within a directory, and between two of them |
 | `file:link` | hard links |
+| `setattr` on the three classes | `mkfifo -m` (creates the node, then EPERMs on the mode); `chmod` on a socket a daemon just bound; `lutimes`/`lchown` on a symlink, which is what `cp -a`, `rsync -a` and `tar -xp` do to every symlink they copy |
+| `rename` on `fifo_file`, `sock_file` | `mv` on a FIFO or a socket, when the same `mv` on a file and a symlink both work |
 
 A workout of files and directories alone finds none of them, and none is
 reachable by any test that reads the rendered unit file.
@@ -243,6 +247,71 @@ fcontext rule on the path — `workloadctl diagnose <name>` reports the denial
 rather than leaving a share that mounts empty. See
 [workloads.md](workloads.md#virtiofs-volumes).
 
+### …and a volume that *cannot hold* a label needs a mount option
+
+An fcontext rule is the fix only for a filesystem with xattrs. A single-label
+filesystem — cifs, nfs, vfat, anything the kernel policy marks
+`fs_noxattr_type` — has nowhere to keep a per-file label, so every inode on it
+takes one type from a `genfscon` line (`genfscon cifs /` → `cifs_t`).
+`semanage fcontext` plus `restorecon` cannot change that, and running them
+looks like it worked. The label has to come from the mount:
+
+```
+//server/share  /var/mnt/agentic  cifs  \
+    context=system_u:object_r:svirt_image_t:s0,uid=_wl-<name>,gid=_wl-<name>,\
+    forceuid,forcegid,file_mode=0700,dir_mode=0700,mfsymlinks,sfu,guest  0 0
+```
+
+Three groups of options, each load-bearing:
+
+- **`context=`** gives the share the one type `wlvfsd_t` is already granted. It
+  sets the type on the **superblock** as well as on every inode, which is why
+  the module needs `filesystem getattr` on `svirt_image_t` and not only on
+  `fs_t` — without it the share reads and writes normally and `df` alone
+  returns EPERM.
+- **`uid=`/`gid=`/`forceuid`/`forcegid`/`file_mode`/`dir_mode`** are what
+  isolate the share, and on this kind of volume they are doing the work alone.
+  Every VM's sidecar is `wlvfsd_t` and the superblock is one type, so type
+  enforcement cannot tell two workloads apart here (MCS categories are unused —
+  ADR 006 §9.5). DAC is the boundary: mode 0700 owned by `_wl-<name>` means
+  another workload's user is refused.
+- **`mfsymlinks,sfu`** because SMB has no native symlinks, FIFOs or unix
+  sockets for a session like this. Without them `ln -s` and `mkfifo` in the
+  share fail with **EOPNOTSUPP**, which is not a policy fault and must not be
+  treated as one — `mfsymlinks` emulates symlinks client-side, `sfu` covers the
+  special files.
+
+**The error message for the missing label is a lie, and it is worth knowing why.**
+virtiofsd checks its shared directory with Rust's `Path::is_dir()`, which
+returns `false` on *any* stat error, so a denied `getattr` prints:
+
+```
+[ERROR virtiofsd] /var/mnt/agentic does not exist
+```
+
+on a path that is mounted and populated. Because it is a MAC denial it is
+indifferent to uid and capabilities — the identical message appears for a
+sidecar run as **root with a full capability set** — so it invites every
+explanation except the right one. Read the audit log rather than the message:
+
+```
+denied { getattr } path="/var/mnt/agentic" dev="cifs" \
+    scontext=system_u:system_r:wlvfsd_t:s0 tcontext=system_u:object_r:cifs_t:s0 tclass=dir
+```
+
+One consequence for testing: a sidecar started by hand, or wrapped in `strace`,
+execs a `bin_t` binary rather than `wlvfsd_exec_t`, so the type transition in
+§3 does not fire and the daemon runs unconfined. Such a run **succeeds where
+the real unit fails**, which looks like a race and is not one. Reproduce
+through systemd (`systemd-run` is enough — PID 1 execs the labelled binary and
+the transition applies).
+
+**A container workload hits the same wall, and hides it better.** There the
+type is `container_file_t`, no policy rule is needed, and the denial is
+`dontaudit`-suppressed — a healthy unit, `Permission denied`, and no AVC unless
+you run `semodule -DB`. See
+[workloads.md](workloads.md#volumes-on-external-filesystems).
+
 ---
 
 ## 6. What was proven
@@ -261,6 +330,12 @@ entries:
   `authorized_keys` 0600, so sshd accepted the injected key.
 - **Upgrade** — with a root-owned pid file planted, the sidecar fails to start
   without the `ExecStartPre` and starts with it.
+- **A CIFS-backed volume** (§5) — an operator-mounted SMB share served into a
+  guest. Mounted with `context=`, the whole workout above passes with zero AVCs
+  and a guest write arrives on the SMB server; mounted without it, the sidecar
+  refuses to start even as root. `df` needed the second `filesystem getattr`
+  rule, and `ln -s`/`mkfifo` needed `mfsymlinks,sfu` rather than any policy
+  change. Only DAC separates two workloads on such a volume.
 
 `tests/cli_surface/test_runtime_vm_virtiofs.py` is the standing version of the
 first four, against the `rt-vm-virtiofs` fixture. It is a runtime-rung check, so
@@ -277,6 +352,10 @@ see [testing.md](testing.md).
 | Sidecar fails `203/EXEC`, "Permission denied", binary is 0755 | `NoNewPrivileges=` or `DynamicUser=` in a drop-in — §4 |
 | `Error creating pid file … Permission denied` | stale root-owned pid file — §4 |
 | Share mounts empty; `diagnose` reports a denial | volume outside the workload tree, unlabelled — §5 |
+| Sidecar exits `<path> does not exist` on a path that *is* mounted | that check reports EACCES the same way; an unlabelable filesystem (cifs/nfs) needs `context=` — §5 |
+| Same failure as root with full capabilities; succeeds under `strace` | a MAC denial, and `strace` loses the type transition — §5 |
+| `df` in the guest returns EPERM while reads and writes work | superblock type missing from `filesystem getattr` — §5 |
+| `ln -s` / `mkfifo` fail EOPNOTSUPP (not EPERM) on a CIFS share | SMB, not policy: mount `mfsymlinks,sfu` — §5 |
 | `dac_read_search` AVC once per start, share works | `--inode-file-handles` is not `never` — §4 |
 | Guest writes land, but `ls -l` in the guest shows the wrong owner | expected: the squash is one-way — §1 |
 | Sidecar active, guest sees an empty directory | cloud-init did not mount it; check `stat -f -c %T` in the guest |

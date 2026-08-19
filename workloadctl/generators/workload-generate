@@ -1012,15 +1012,59 @@ def _external_host_path(host_path, name):
     return resolved
 
 
+def _rw_path_is_bindable(resolved):
+    """Can `resolved` be named in ReadWritePaths= -- and does it need to be?
+
+    Both answers are no for a socket, fifo or device node, and getting this
+    wrong is fatal rather than merely wide: systemd bind-mounts every
+    ReadWritePaths= entry inside the unit's namespace, and the targeted policy
+    does not let init_t `mounton` a sock_file, so the unit dies at namespace
+    setup with a bare 226/NAMESPACE (`avc: denied { mounton } ...
+    tcontext=...:syslogd_var_run_t tclass=sock_file`). Four shipped bundles
+    mount /run/systemd/journal/socket that way.
+
+    Nor is the entry needed: the kernel's read-only-filesystem check
+    (sb_permission) returns EROFS only for S_ISREG/S_ISDIR/S_ISLNK, so
+    connecting to a unix socket or writing a fifo/device works fine under
+    ProtectSystem=strict.
+
+    An unstattable path is treated as bindable -- an out-of-tree volume on a
+    filesystem that is not mounted yet is the common case here (that is what
+    RequiresMountsFor= is for) and it is virtually always a directory.
+    """
+    if not os.path.exists(resolved):
+        return True
+    return os.path.isdir(resolved) or os.path.isfile(resolved)
+
+
 def _volume_args(container, home_dir, name):
     """--volume flags: [storage].volumes expansion, escape-warn, quoting.
 
-    Returns (args, external_paths). `external_paths` are the host paths that
-    resolve outside the workload tree, deduplicated in declaration order, for
-    the caller to turn into RequiresMountsFor= -- see _unit_deps.
+    Returns (args, external_paths, external_rw_paths). `external_paths` are the
+    host paths that resolve outside the workload tree, deduplicated in
+    declaration order, for the caller to turn into RequiresMountsFor= -- see
+    _unit_deps. `external_rw_paths` is the subset of those the container may
+    write, for ReadWritePaths= -- see _hardening.
+
+    WHY THE SECOND LIST. `_hardening` sets ProtectSystem=strict, which mounts
+    the whole hierarchy read-only inside the unit's namespace, and a
+    ReadWritePaths= naming only the workload tree. podman bind-mounts the host
+    path *out of that namespace*, so an out-of-tree volume reaches the container
+    read-only however it is declared: the guest gets EROFS on a directory it
+    owns, on a filesystem that is mounted rw, with no denial logged anywhere.
+    Measured on a plain container_file_t directory owned by the workload user,
+    so it is not about labels or ownership. The virtiofs sidecar never had this
+    bug because generate_virtiofs_service names its share explicitly.
+
+    A volume the operator declared `:ro` is deliberately left out: podman would
+    enforce read-only in the container anyway, so adding it would widen what the
+    unit may write to buy nothing. So is anything that is not a directory or a
+    regular file -- see _rw_path_is_bindable, where naming it is both
+    unnecessary and fatal.
     """
     args = []
     external = []
+    external_rw = []
     for volume in container.get("storage", {}).get("volumes", []):
         expanded = expand_volume_path(volume, home_dir)
         if ':' in expanded:
@@ -1033,11 +1077,15 @@ def _volume_args(container, home_dir, name):
                         f"'{workload_root_dir(name)}'", level="warning")
                 if resolved not in external:
                     external.append(resolved)
+                opts = parts[2].split(',') if len(parts) > 2 else []
+                if ('ro' not in opts and resolved not in external_rw
+                        and _rw_path_is_bindable(resolved)):
+                    external_rw.append(resolved)
             expanded = ':'.join(dq(p) for p in parts)
         else:
             expanded = dq(expanded)
         args.append(f"--volume {expanded}")
-    return args, external
+    return args, external, external_rw
 
 
 def _env_args(container, container_name, has_secret_env_vars):
@@ -1286,14 +1334,25 @@ def _logging(svc, container_name, resources):
     svc.blank()
 
 
-def _hardening(svc, name, uid, resources):
-    """Restart/RestartSec + filesystem/socket-family hardening + default timeouts."""
+def _hardening(svc, name, uid, resources, external_rw_paths=()):
+    """Restart/RestartSec + filesystem/socket-family hardening + default timeouts.
+
+    `external_rw_paths` are writable volume host paths outside the workload tree
+    (see _volume_args). Without them ProtectSystem=strict hands podman a
+    read-only source and the container gets EROFS with nothing logged.
+    """
     svc.add("Restart", "on-failure")
     svc.add("RestartSec", "5s")
     svc.blank()
     svc.comment("Filesystem hardening: restrict writes to workload home + podman runtime")
     svc.add("ProtectSystem", "strict")
-    svc.add("ReadWritePaths", f'"{str(workload_root_dir(name))}" /run/user/{uid}')
+    rw = f'"{str(workload_root_dir(name))}" /run/user/{uid}'
+    if external_rw_paths:
+        svc.comment("Writable out-of-tree volumes: ProtectSystem=strict would")
+        svc.comment("otherwise make podman's bind source read-only (EROFS in the")
+        svc.comment("container, no denial logged).")
+        rw += " " + " ".join(uq(p) for p in external_rw_paths)
+    svc.add("ReadWritePaths", rw)
     svc.add("PrivateTmp", "yes")
     svc.comment("Socket-family hardening: deny AF_ALG (CVE-2026-31431 LPE vector) and")
     svc.comment("AF_PACKET tree-wide, covering the host _wl- podman process too. Deny-list")
@@ -1355,7 +1414,8 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
     # Expanded ahead of the [Unit] section: the host paths that land outside the
     # workload tree become RequiresMountsFor= there, and the flags themselves go
     # into podman_args further down.
-    volume_args, external_volume_paths = _volume_args(container, home_dir, name)
+    volume_args, external_volume_paths, external_rw_paths = _volume_args(
+        container, home_dir, name)
 
     unit = Unit()
     if mode == "single":
@@ -1503,7 +1563,7 @@ def generate_system_service(workload, container, user_name, uid, mode="single"):
 
     _logging(svc, container_name, resources)
 
-    _hardening(svc, name, uid, resources)
+    _hardening(svc, name, uid, resources, external_rw_paths)
 
     # [Install] only on the workload-level service: in single mode that's
     # *this* unit (it gets the multi-user.target.wants symlink); in

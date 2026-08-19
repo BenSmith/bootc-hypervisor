@@ -971,6 +971,22 @@ class TestVmCloudInit(unittest.TestCase):
         errs = validate_workload_config(self._base(template_vars={"LIST": [1, 2, 3]}))
         self.assertTrue(any("must be a scalar" in e for e in errs), errs)
 
+    def test_seed_provides_known_values_accepted(self):
+        cfg = self._base(seed_provides=["proxy", "mounts"])
+        self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_seed_provides_unknown_value_rejected(self):
+        """A typo'd opt-out would silently disable a seed-completeness check —
+        the exact silence the check exists to prevent — so it is a hard error
+        rather than an ignored key."""
+        errs = validate_workload_config(self._base(seed_provides=["proxies"]))
+        self.assertTrue(any("seed_provides" in e and "proxies" in e
+                            for e in errs), errs)
+
+    def test_seed_provides_must_be_list_of_strings(self):
+        errs = validate_workload_config(self._base(seed_provides="proxy"))
+        self.assertTrue(any("seed_provides must be a list" in e for e in errs), errs)
+
 
 class TestSubstituteTemplate(unittest.TestCase):
     def test_substitutes_template_var(self):
@@ -1865,11 +1881,42 @@ class TestSubidFileHelpers(unittest.TestCase):
         self.assertIsNone(workload_lib.read_subid_entry("_wl-a", self.subuid))
 
     def test_read_entry_takes_only_the_main_range(self):
-        # extra_groups append supplementary `user:GID:1` lines after the main
-        # range; the first match is the mapping that matters.
+        # extra_groups add supplementary `user:GID:1` lines beside the main
+        # range; only the main range is the mapping that matters.
         self.subuid.write_text("_wl-a:600100000:65536\n_wl-a:989:1\n")
         self.assertEqual(
             workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+        )
+
+    def test_read_entry_finds_the_main_range_after_supplementary_entries(self):
+        """The ordering this used to get wrong. Nothing has ever guaranteed the
+        main range is written first — it came out of a set — so on a host where
+        it landed last, diagnose read `105:1` as the mapping and failed both
+        subid checks for a workload whose range was present and correct."""
+        self.subuid.write_text(
+            "_wl-a:105:1\n_wl-a:966:1\n_wl-a:600100000:65536\n"
+        )
+        self.assertEqual(
+            workload_lib.read_subid_entry("_wl-a", self.subuid), (600100000, 65536)
+        )
+
+    def test_read_entry_returns_a_drifted_main_range_not_a_supplementary_one(self):
+        """Selecting by count != 1 rather than count == SUBID_COUNT, so a
+        pre-derivation range with the wrong width still reaches
+        subid_derived_check instead of being mistaken for a group entry and
+        dropped — silently passing the check that exists to catch it."""
+        self.subuid.write_text("_wl-a:989:1\n_wl-a:100000:10000\n")
+        self.assertEqual(
+            workload_lib.read_subid_entry("_wl-a", self.subuid), (100000, 10000)
+        )
+
+    def test_read_entry_falls_back_when_only_supplementary_entries_exist(self):
+        """No main range at all: report the first entry rather than None, so the
+        derived check fails loudly. None would omit the check entirely while
+        subid_files_with_entries still called the user configured."""
+        self.subuid.write_text("_wl-a:105:1\n_wl-a:966:1\n")
+        self.assertEqual(
+            workload_lib.read_subid_entry("_wl-a", self.subuid), (105, 1)
         )
 
     def test_prefix_match_does_not_catch_a_longer_username(self):

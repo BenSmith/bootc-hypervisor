@@ -20,7 +20,11 @@
 ; already has (/srv is var_t, for instance) and the sidecar will be denied it.
 ; That is not something this module can pre-empt without granting the union of
 ; every type on the host; `workloadctl diagnose` reporting the denial is the
-; right answer, and the fix is an fcontext rule on the operator's path.
+; right answer, and the fix is an fcontext rule on the operator's path — or, on
+; a filesystem that cannot hold a label at all (cifs, nfs: `fs_noxattr_type`,
+; one genfscon type for every inode), a `context=` mount option, since fcontext
+; has nothing to write to there. docs/vm-virtiofs.md §5 has both, and the
+; misleading error the second case produces.
 ;
 ; WHY THE VIRTIOFSD DOMAIN EXISTS
 ;
@@ -102,8 +106,21 @@
 ; NOTE FOR DEPLOYED HOSTS: the policy store lives in /etc, which ostree
 ; 3-way-merges, so a `bootc upgrade` does NOT deliver a changed module to a
 ; machine whose store has local modifications (the same caveat the image's
-; Containerfile records for its own CIL modules). `workloadctl diagnose` reports
-; whether this module is loaded so the gap is visible rather than silent.
+; Containerfile records for its own CIL modules). The store is in /etc because
+; the image's semanage.conf sets `store-root=/etc/selinux`; Fedora's own default
+; is /var/lib/selinux, which ostree would replace wholesale.
+;
+; This is the expected state, not a rare one: `semanage fcontext -a` rewrites
+; the store, and every `workloadctl enable` runs one. Measured on a deployed
+; host — 493 of ~639 diverged /etc paths were the policy store, this module's
+; directory among them.
+;
+; `workloadctl diagnose` therefore reports both halves: whether the module is
+; loaded, and whether the loaded copy still matches the .cil this build ships
+; (semodule keeps the source verbatim under <store>/active/modules/<prio>/, so
+; the comparison is exact). A module that is present but stale used to pass
+; every check. The fix is `semodule -i /usr/share/workloadctl/workload-vm.cil`
+; — /usr is replaced wholesale, so the shipped file is always current.
 
 ; ---------------------------------------------------------------------------
 ; Declarations
@@ -208,17 +225,41 @@
 ; `rename` and `reparent` are on the dir line for the same reason: `mv` within a
 ; directory needs rename, and `mv` into a different one needs reparent as well.
 ; `link` on the file line is hard links.
+;
+; `setattr` and `rename` reach those three classes too, and leaving them on dir
+; and file alone was the second half of the same bug. Measured in a live guest,
+; enforcing, on the workload's own home share: `mkfifo -m600` creates the fifo
+; and then fails EPERM setting its mode; a daemon that binds a unix socket in
+; its home and chmods it (gpg-agent, tmux) fails the same way; `lutimes` and
+; `lchown` on a symlink fail, which is what `cp -a`, `rsync -a` and `tar -xp`
+; do to every symlink they copy; and `mv` on a fifo or a socket is denied
+; outright. A symlink cannot be chmod'd, but lnk_file still needs setattr —
+; the timestamp and ownership calls above are setattr on the link itself.
 (allow wlvfsd_t svirt_image_t (dir (add_name create getattr open read remove_name rename reparent rmdir search setattr write)))
 (allow wlvfsd_t svirt_image_t (file (create getattr link open read rename setattr unlink write)))
-(allow wlvfsd_t svirt_image_t (lnk_file (create getattr read rename unlink)))
-(allow wlvfsd_t svirt_image_t (fifo_file (create getattr unlink)))
-(allow wlvfsd_t svirt_image_t (sock_file (create getattr unlink)))
+(allow wlvfsd_t svirt_image_t (lnk_file (create getattr read rename setattr unlink)))
+(allow wlvfsd_t svirt_image_t (fifo_file (create getattr rename setattr unlink)))
+(allow wlvfsd_t svirt_image_t (sock_file (create getattr rename setattr unlink)))
 
 ; statfs on the backing filesystem, which the guest reaches through `df` on the
 ; mount. Read-only and about the filesystem rather than any file on it; without
 ; it `df /mnt/share` in the guest fails with EPERM while every actual read and
 ; write succeeds, which reads as a broken mount rather than a missing rule.
+;
+; TWO TYPES, because the `filesystem` class checks the SUPERBLOCK's label, not a
+; file's. An xattr filesystem's superblock is fs_t and the files on it carry
+; their own labels, so the first rule covers every ordinary volume. A
+; single-label filesystem (cifs, nfs — anything `fs_noxattr_type`) has no
+; xattrs, so it can only be labelled by mounting it with `-o context=`, and that
+; option sets the superblock's type as well as every file's. A share mounted
+; `context=system_u:object_r:svirt_image_t:s0` therefore arrives with an
+; svirt_image_t superblock, and the fs_t rule does not reach it.
+;
+; Measured on a live cifs share: read, write, mkdir and unlink all succeed while
+; `df` alone is denied — `denied { getattr } dev="cifs" tclass=filesystem
+; tcontext=...:svirt_image_t`. See docs/vm-virtiofs.md §5 for the operator half.
 (allow wlvfsd_t fs_t (filesystem (getattr)))
+(allow wlvfsd_t svirt_image_t (filesystem (getattr)))
 
 ; /var/lib/workloads itself keeps the blanket container_file_t rule; only the
 ; per-workload subdirectory is svirt_image_t. So reaching the share means
