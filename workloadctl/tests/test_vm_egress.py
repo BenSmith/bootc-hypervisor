@@ -14,7 +14,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from vm import (
-    NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_SKELETON,
+    NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_SET_INTERNAL4,
+    NFT_SET_INTERNAL6, NFT_SET_PROXY_CG, NFT_SKELETON,
     nft_drop_counter, nft_set_elements, vm_filter_commands,
     vm_filter_delete_command, vm_owned_elements,
 )
@@ -57,12 +58,19 @@ class TestSkeleton(unittest.TestCase):
         self.assertLess(add_sets, first_rule)
 
     def test_the_drop_is_guarded_by_set_membership(self):
-        """An unguarded drop would take the whole host off the network."""
+        """An unguarded drop would take the whole host off the network.
+
+        Two sets qualify as a guard. `wl_filtered` holds workload uids;
+        `wl_proxy_cg` holds the cgroup paths of hostname-proxy units, which
+        only exist for filtered VMs. Both are empty on a host running no
+        filtered workload, which is what makes an abandoned table inert.
+        """
+        guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_PROXY_CG}")
         drops = [d for d in self.directives if d.endswith("drop")]
         self.assertTrue(drops, "no drop rule in the skeleton")
         for rule in drops:
-            self.assertIn(f"@{NFT_SET_FILTERED}", rule,
-                          f"unguarded drop rule: {rule}")
+            self.assertTrue(any(g in rule for g in guards),
+                            f"unguarded drop rule: {rule}")
 
     def test_chain_policy_is_accept(self):
         """So an abandoned table is inert rather than a host-wide outage."""
@@ -156,6 +164,117 @@ class TestSkeleton(unittest.TestCase):
                 if d.startswith("add set") and NFT_SET_FILTERED in d][0]
         self.assertNotIn("ip daddr", decl)
         self.assertNotIn("ip6 daddr", decl)
+
+
+class TestInternalDestinationGuard(unittest.TestCase):
+    """The proxy's cgroup exemption is not destination-blind.
+
+    tinyproxy matches the CONNECT hostname, resolves it with the host
+    resolver, and connects to whatever comes back; it has no directive that
+    could express a destination range. Without these rules an allowlisted name
+    resolving into RFC 1918, loopback or link-local space was reachable from a
+    VM that reports itself confined -- and the guest never controls the
+    resolution, so nothing about it looks like an attack in a log.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = [ln.strip() for ln in SKELETON.read_text().splitlines()
+                     if ln.strip().startswith("add rule")]
+        cls.text = SKELETON.read_text()
+
+    def _drops(self):
+        return [r for r in self.rules
+                if r.endswith("drop") and NFT_SET_PROXY_CG in r]
+
+    def test_one_drop_per_address_family(self):
+        """`ip daddr` matches v4 only and `ip6 daddr` v6 only, so a single
+        rule cannot cover both -- and the missing family fails open."""
+        drops = self._drops()
+        self.assertEqual(len(drops), 2, drops)
+        self.assertTrue(any(f"ip daddr @{NFT_SET_INTERNAL4}" in r for r in drops))
+        self.assertTrue(any(f"ip6 daddr @{NFT_SET_INTERNAL6}" in r for r in drops))
+
+    def test_both_sets_are_interval_sets_with_elements(self):
+        """Declared without `flags interval` a prefix is a parse error, so
+        this would fail loudly -- but only on a host, at the first VM start."""
+        for name in (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6):
+            decl = [ln for ln in self.text.splitlines()
+                    if ln.startswith("add set") and name in ln]
+            self.assertEqual(len(decl), 1, name)
+            self.assertIn("flags interval", decl[0])
+            self.assertTrue(
+                any(ln.startswith("add element") and name in ln
+                    for ln in self.text.splitlines()),
+                f"{name} is declared but never populated")
+
+    def test_the_ranges_that_matter_are_covered(self):
+        """169.254.0.0/16 carries the cloud metadata endpoint; the RFC 1918
+        blocks are the LAN the host sits on; 127/8 is every service the host
+        runs for itself."""
+        elems = [ln for ln in self.text.splitlines()
+                 if ln.startswith("add element") and NFT_SET_INTERNAL4 in ln][0]
+        for prefix in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                       "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10"):
+            self.assertIn(prefix, elems)
+        v6 = [ln for ln in self.text.splitlines()
+              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        for prefix in ("::1/128", "fc00::/7", "fe80::/10"):
+            self.assertIn(prefix, v6)
+
+    def test_the_advertised_proxy_address_is_not_blocked(self):
+        """The guest's flow reaches tinyproxy FROM 192.0.2.1, so the proxy's
+        replies are addressed to it. Listing that prefix takes hostname policy
+        down completely -- every request hangs, and the proxy logs nothing."""
+        elems = " ".join(ln for ln in self.text.splitlines()
+                         if ln.startswith("add element"))
+        self.assertNotIn("192.0.2.", elems)
+
+    def test_the_drop_only_covers_connections_the_proxy_opens(self):
+        """Without `ct direction original` this drops the reply direction of
+        connections made TO the proxy whenever the client's source address
+        falls in one of these ranges -- 127.0.0.1 being the obvious one."""
+        for rule in self._drops():
+            self.assertIn("ct direction original", rule, rule)
+
+    def test_name_resolution_is_exempted_before_the_drop(self):
+        """tinyproxy resolves through the host's configured resolver, which
+        may be a stub on 127.0.0.53 or a box on the LAN -- both inside these
+        ranges. Without the carve-out every lookup fails and the proxy returns
+        502 while looking healthy."""
+        dns = [i for i, r in enumerate(self.rules)
+               if NFT_SET_PROXY_CG in r and "th dport 53" in r
+               and r.endswith("accept")]
+        self.assertEqual(len(dns), 1, "expected one DNS carve-out rule")
+        first_drop = min(i for i, r in enumerate(self.rules)
+                         if r.endswith("drop") and NFT_SET_PROXY_CG in r)
+        self.assertLess(dns[0], first_drop,
+                        "the DNS carve-out must precede the drop")
+
+    def test_the_operator_escape_hatch_is_evaluated_first(self):
+        """`allow` is the documented way to grant an internal destination, so
+        the allow rules must sit ahead of the drops. They used to sit behind
+        the proxy's blanket accept, where moving them changes nothing: every
+        rule they passed on the way up is also an accept."""
+        first_drop = min(i for i, r in enumerate(self.rules)
+                         if r.endswith("drop") and NFT_SET_PROXY_CG in r)
+        for name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
+            idx = next(i for i, r in enumerate(self.rules) if f"@{name}" in r)
+            self.assertLess(idx, first_drop,
+                            f"@{name} is evaluated after the internal drop, "
+                            f"so `allow` cannot override it")
+
+    def test_the_blanket_proxy_accept_still_comes_last(self):
+        """The exemption that makes hostname policy work at all is unchanged;
+        these rules only carve destinations out of it, so they must precede
+        it or they never run."""
+        blanket = next(i for i, r in enumerate(self.rules)
+                       if NFT_SET_PROXY_CG in r and r.endswith("accept")
+                       and "dport" not in r)
+        for i, r in enumerate(self.rules):
+            if r.endswith("drop") and NFT_SET_PROXY_CG in r:
+                self.assertLess(i, blanket)
+
 
 
 class TestElementModel(unittest.TestCase):

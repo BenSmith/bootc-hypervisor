@@ -297,6 +297,13 @@ name = "schema-reference"
 # moment the record moved. Hostname policy belongs to the proxy; .allow is for
 # the non-HTTP exceptions a proxy cannot carry (ssh, a database, an NTP peer).
 # Each family has its own set, so v4 and v6 entries never match each other.
+#
+# It is also the escape hatch for the internal-destination guard: the hostname
+# proxy is barred from OPENING a connection into RFC 1918, loopback or
+# link-local space, so a .hosts entry that legitimately resolves to an internal
+# address needs that address named here as well. The allow rules are evaluated
+# ahead of that drop. Note what the grant actually opens — the same entry also
+# permits the guest's own direct path to that endpoint.
 # allow = ["192.168.0.10:22", "[2001:db8::1]:443"]
 #
 # Optional: hostnames this VM may reach over HTTP and HTTPS.

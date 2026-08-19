@@ -1151,7 +1151,7 @@ allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]
 
 Two things about this are easy to get wrong:
 
-- **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry.
+- **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry — and, since the proxy is barred from opening connections to internal addresses, for the internal destinations a proxied name legitimately resolves to. See [Hostname Egress Policy](#hostname-egress-policy).
 - **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses) or `.hosts` (names, through its own proxy). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Step 4 was expected to retire this rule by giving `"filtered"` an implicit allow to the proxy, and did not — a workload only gets a proxy when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
 
 `workloadctl diagnose <name>` reports whether the policy is actually in force. The case it exists for is a config that says `filtered` while the uid is absent from the set: that VM is wide open, and every other signal — unit active, guest online, `status` green — looks correct. It also prints the drop counter, which is **shared across every filtered VM** rather than per-workload; there is one drop rule, so the number is a host total.
@@ -1375,6 +1375,39 @@ Verified on a live filtered VM: with only the wildcard, `download.fedoraproject.
 is proxied and `fedoraproject.org` is refused. This is worth knowing because the
 refusal is a 403 — identical to the one an unlisted host gets, so it reads as a
 policy decision rather than a pattern that didn't reach as far as intended.
+
+**The proxy will not open a connection to an internal address.** Hostname policy
+is checked against the name; the address it resolves to was, for a while,
+unchecked — and the proxy's egress exemption is by control group, so it applied
+to every destination. An allowlisted name pointing into RFC 1918, loopback or
+link-local space was therefore reachable from a VM reporting itself confined.
+Two rules ahead of the exemption now drop connections the proxy *opens* to
+`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `100.64/10`,
+`0.0.0.0/8` and the IPv6 equivalents (`::1`, `fc00::/7`, `fe80::/10`).
+
+Nothing about this is DNS rebinding — the guest never controls the resolution.
+The realistic ways in are a wildcard over a domain where records can be created
+by someone else, an allowlisted third party whose DNS is compromised, and an
+internal name allowlisted without thinking about where it points. On a cloud
+instance, `169.254.169.254` is the one that matters.
+
+Two consequences to know:
+
+- **The proxy's own name resolution is exempt**, by destination port 53 only. It
+  has to be: tinyproxy resolves through whatever the host uses, which is inside
+  one of these ranges either way — a stub resolver on `127.0.0.53` or a box on
+  the LAN. The residual is an internal service answering HTTP on port 53.
+- **`allow` is the escape hatch.** A site that genuinely needs its proxy to reach
+  an internal service names it as an address and port, and the allow rules are
+  evaluated ahead of these drops:
+
+  ```toml
+  hosts = ["registry.internal.example.com"]
+  allow = ["10.0.0.5:443"]           # the address that name resolves to
+  ```
+
+  That grant is not proxy-specific — it is the same scoped grant the guest's own
+  direct path gets, which is the honest description of what it opens.
 
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —
 the proxy can be listening while the guest has no path to it, and every other

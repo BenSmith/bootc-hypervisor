@@ -308,6 +308,12 @@ NFT_TABLE = "inet workload_filter"
 NFT_SET_FILTERED = "wl_filtered"
 NFT_SET_ALLOW4 = "wl_allow4"
 NFT_SET_ALLOW6 = "wl_allow6"
+# Internal destination prefixes the hostname proxy may not connect OUT to. The
+# elements are constant and live in the skeleton, not here -- nothing in Python
+# manages them. The names exist so tests can name the sets and so `diagnose`
+# can report whether the guard is loaded at all.
+NFT_SET_INTERNAL4 = "wl_internal4"
+NFT_SET_INTERNAL6 = "wl_internal6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 
 

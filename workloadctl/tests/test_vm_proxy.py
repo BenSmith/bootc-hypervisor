@@ -164,17 +164,35 @@ class TestProxyEgressExemption(unittest.TestCase):
         self.assertIn("add set inet workload_filter wl_proxy_cg", self.nft)
         self.assertIn("typeof socket cgroupv2 level 2", self.nft)
 
+    def _blanket_exemption(self):
+        """The unqualified `@wl_proxy_cg accept`.
+
+        Named by shape rather than by position: the chain now also carries a
+        DNS carve-out and two internal-destination drops that match the same
+        set, and picking the first `wl_proxy_cg` rule would silently start
+        testing one of those instead.
+        """
+        return next(ln for ln in self.nft.splitlines()
+                    if ln.startswith("add rule") and "wl_proxy_cg" in ln
+                    and ln.endswith("accept") and "dport" not in ln)
+
     def test_the_exemption_is_evaluated_before_the_drop(self):
         rules = [ln for ln in self.nft.splitlines() if ln.startswith("add rule")]
-        exempt = next(i for i, ln in enumerate(rules) if "wl_proxy_cg" in ln)
-        drop = next(i for i, ln in enumerate(rules) if ln.endswith("drop"))
+        exempt = rules.index(self._blanket_exemption())
+        drop = rules.index(next(ln for ln in rules
+                                if ln.endswith("drop")
+                                and "wl_filtered" in ln))
         self.assertLess(exempt, drop)
 
     def test_the_exemption_widens_no_destination_or_port(self):
         """Widening by port instead — 'let this uid reach 443 anywhere' — is
-        the bypass the default-deny chain exists to close."""
-        rule = next(ln for ln in self.nft.splitlines()
-                    if ln.startswith("add rule") and "wl_proxy_cg" in ln)
+        the bypass the default-deny chain exists to close.
+
+        The destination *narrowing* added later lives in its own drop rules
+        ahead of this one, so this rule stays unqualified: an accept that
+        named a destination would have to enumerate the whole internet.
+        """
+        rule = self._blanket_exemption()
         for token in ("daddr", "dport", "443"):
             self.assertNotIn(token, rule)
 
