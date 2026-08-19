@@ -43,7 +43,8 @@ from provisioning import (
 )
 from validation import uses_host_userns
 from vm import (
-    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_TABLE,
+    NFT_BIN, NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED,
+    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_TABLE,
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
     VM_SOCKET_DIR, VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
     VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
@@ -1026,6 +1027,27 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
                 f"{NFT_SET_FILTERED} — this VM is running UNFILTERED while its "
                 f"config says otherwise. Restart it to re-arm: "
                 f"systemctl restart workload-{config.name}.service")
+
+    # The internal-destination guard is host-global, but it only bears on a
+    # workload that HAS a hostname proxy -- it qualifies that proxy's cgroup
+    # exemption and nothing else. Checked here rather than trusted because the
+    # table outlives the RPM that installed it: nft state is kernel state until
+    # reboot, and the skeleton is only re-applied by a VM unit's ExecStartPre.
+    # A host upgraded to a workloadctl that ships the guard keeps the OLD chain
+    # for every VM still running from before the upgrade, and every other
+    # signal on that VM stays green while its proxy can still reach RFC 1918.
+    if (config.vm_network or {}).get("hosts"):
+        unguarded = [name for name in (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6)
+                     if not nft_set_elements(
+                         _nft_json("list", "set", *table, name))]
+        if unguarded:
+            return ("vm_egress", False,
+                    f"egress is filtered on uid {uid}, but {' and '.join(unguarded)} "
+                    f"{'is' if len(unguarded) == 1 else 'are'} missing or empty — "
+                    f"this VM's hostname proxy is NOT restricted from connecting "
+                    f"to internal addresses. The loaded table predates the guard; "
+                    f"restart to reload it: "
+                    f"systemctl restart workload-{config.name}.service")
 
     allowed = []
     for set_name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):

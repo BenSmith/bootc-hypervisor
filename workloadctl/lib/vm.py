@@ -310,8 +310,10 @@ NFT_SET_ALLOW4 = "wl_allow4"
 NFT_SET_ALLOW6 = "wl_allow6"
 # Internal destination prefixes the hostname proxy may not connect OUT to. The
 # elements are constant and live in the skeleton, not here -- nothing in Python
-# manages them. The names exist so tests can name the sets and so `diagnose`
-# can report whether the guard is loaded at all.
+# manages them. The names exist so tests can name the sets and so
+# `vm_egress_check` can tell a loaded guard from a table that predates it,
+# which it cannot infer from wl_filtered membership: nft state is kernel state
+# until reboot, so a VM started before an upgrade keeps the older chain.
 NFT_SET_INTERNAL4 = "wl_internal4"
 NFT_SET_INTERNAL6 = "wl_internal6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"

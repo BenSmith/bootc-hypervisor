@@ -83,6 +83,15 @@ add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
 # here.) The whole file is one transaction, so there is no window in which the
 # set is empty while the rules below are live.
 #
+# The v6 set carries the TRANSLATION prefixes as well as the direct forms,
+# because a v6 destination can encode a v4 one: 64:ff9b::/96 and 64:ff9b:1::/48
+# are NAT64 (RFC 6052, RFC 8215) and 2002::/16 is 6to4 (RFC 3056). On a host
+# with either translation in the path, 64:ff9b::a00:5 reaches 10.0.0.5 without
+# any element of the v4 set ever being consulted. Listing the direct forms only
+# would leave the guard family-blind in exactly the way the whole rule exists
+# to prevent. Teredo (2001::/32) is deliberately NOT here: it encodes the
+# client's own public address and does not name an internal destination.
+#
 # 192.0.2.0/24 is deliberately ABSENT. That is the advertised proxy address,
 # and the guest's flow reaches tinyproxy from it -- listing it would drop the
 # proxy's replies to its own client and take hostname policy down entirely.
@@ -91,7 +100,7 @@ add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
 flush set inet workload_filter wl_internal4
 flush set inet workload_filter wl_internal6
 add element inet workload_filter wl_internal4 { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 255.255.255.255 }
-add element inet workload_filter wl_internal6 { ::/128, ::1/128, ::ffff:0.0.0.0/96, fc00::/7, fe80::/10 }
+add element inet workload_filter wl_internal6 { ::/128, ::1/128, ::ffff:0.0.0.0/96, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16, fc00::/7, fe80::/10 }
 
 add chain inet workload_filter output { type filter hook output priority 0; policy accept; }
 flush chain inet workload_filter output

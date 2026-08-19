@@ -222,6 +222,27 @@ class TestInternalDestinationGuard(unittest.TestCase):
         for prefix in ("::1/128", "fc00::/7", "fe80::/10"):
             self.assertIn(prefix, v6)
 
+    def test_v6_covers_the_prefixes_that_encode_a_v4_destination(self):
+        """A v6 destination can name a v4 one. With NAT64 or 6to4 in the path,
+        64:ff9b::a00:5 reaches 10.0.0.5 without any element of the v4 set being
+        consulted, so listing only the direct v6 forms leaves the guard
+        family-blind in exactly the way it exists to prevent."""
+        v6 = [ln for ln in self.text.splitlines()
+              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        for prefix in ("::ffff:0.0.0.0/96",   # v4-mapped
+                       "64:ff9b::/96",        # NAT64, well-known (RFC 6052)
+                       "64:ff9b:1::/48",      # NAT64, local-use (RFC 8215)
+                       "2002::/16"):          # 6to4 (RFC 3056)
+            self.assertIn(prefix, v6)
+
+    def test_teredo_is_not_blocked(self):
+        """2001::/32 encodes the client's own public address, not a destination
+        inside the host's network, so blocking it would deny traffic the guard
+        has no claim on."""
+        v6 = [ln for ln in self.text.splitlines()
+              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        self.assertNotIn("2001::/32", v6)
+
     def test_the_advertised_proxy_address_is_not_blocked(self):
         """The guest's flow reaches tinyproxy FROM 192.0.2.1, so the proxy's
         replies are addressed to it. Listing that prefix takes hostname policy
@@ -561,12 +582,15 @@ class TestEgressDiagnose(unittest.TestCase):
         import cmd_diagnose
         self.mod = cmd_diagnose
 
-    def _config(self, egress="filtered", bridge=None, uid=10001):
+    def _config(self, egress="filtered", bridge=None, uid=10001, hosts=None):
+        net = {} if egress is None else {"egress": egress}
+        if hosts:
+            net["hosts"] = hosts
         return SimpleNamespace(
-            name="vm1", uid=uid, vm_bridge=bridge,
-            vm_network={} if egress is None else {"egress": egress})
+            name="vm1", uid=uid, vm_bridge=bridge, vm_network=net)
 
-    def _nft(self, *, table=True, armed=True, allow=(), dropped=None):
+    def _nft(self, *, table=True, armed=True, allow=(), dropped=None,
+             guard=True):
         """Stub _nft_json: model the host's nft state as data."""
         def fake(*args):
             if not table:
@@ -578,6 +602,9 @@ class TestEgressDiagnose(unittest.TestCase):
                 if name == NFT_SET_ALLOW4:
                     return {"nftables": [{"set": {"elem": [
                         {"concat": [10001, a, p]} for a, p in allow]}}]}
+                if name in (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6):
+                    return {"nftables": [{"set": {
+                        "elem": ["10.0.0.0/8"] if guard else []}}]}
                 return {"nftables": [{"set": {"elem": []}}]}
             rule = {"expr": [{"counter": {"packets": dropped or 0, "bytes": 0}},
                              {"drop": None}]}
@@ -619,6 +646,32 @@ class TestEgressDiagnose(unittest.TestCase):
     def test_open_and_not_armed_passes(self):
         with self._nft(armed=False):
             _, passed, _ = self.mod.vm_egress_check(self._config(egress="open"))
+        self.assertTrue(passed)
+
+    def test_hostname_policy_without_the_guard_fails(self):
+        """The table outlives the RPM. A VM started before an upgrade keeps the
+        older chain, so its proxy is still destination-blind while every other
+        signal -- unit active, uid armed, allow entries present -- is green."""
+        with self._nft(guard=False):
+            _, passed, msg = self.mod.vm_egress_check(
+                self._config(hosts=["api.example.com"]))
+        self.assertFalse(passed)
+        self.assertIn(NFT_SET_INTERNAL4, msg)
+        self.assertIn("restart", msg)
+
+    def test_hostname_policy_with_the_guard_passes(self):
+        with self._nft(guard=True, dropped=0):
+            _, passed, msg = self.mod.vm_egress_check(
+                self._config(hosts=["api.example.com"]))
+        self.assertTrue(passed)
+        self.assertIn("egress filtered", msg)
+
+    def test_no_hostname_policy_does_not_require_the_guard(self):
+        """The guard only qualifies the proxy's exemption. A VM with no `hosts`
+        has no proxy, so an older table is not a finding for it -- reporting one
+        would send an operator after an irrelevant restart."""
+        with self._nft(guard=False, allow=[("10.0.0.1", 22)], dropped=0):
+            _, passed, _ = self.mod.vm_egress_check(self._config())
         self.assertTrue(passed)
 
     def test_bridged_vm_is_skipped_entirely(self):
