@@ -276,3 +276,83 @@ class ValidateSingleBuildTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValidateSingleInlinedSecretsTest(unittest.TestCase):
+    """validate_single flags credential-shaped literals typed into a config.
+
+    The mirror of the credentials check: that one asks whether the credstore
+    holds what the config references, this one asks whether someone skipped the
+    credstore. Nothing sets a mode on /etc/workloads.d/*/workload.toml, so a
+    pasted key is world-readable on the host.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        self.credstore = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(cmd_validate, "CREDSTORE_DIR", self.credstore))
+
+    def _checks(self, name, toml):
+        (self.tmp / name).mkdir()
+        (self.tmp / name / "workload.toml").write_text(toml)
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = False
+        manager.get_all_configs.return_value = []
+        result = cmd_validate.validate_single(config, manager, json_mode=True)
+        return [c for c in result["checks"] if c["check"] == "inlined_secrets"]
+
+    def test_clean_config_passes(self):
+        checks = self._checks(
+            "clitest-noinline",
+            '[workload]\nname = "clitest-noinline"\n\n'
+            '[container]\nimage = "x:latest"\n'
+            '[container.environment]\nTOKEN = "${SECRET:gh-token}"\n',
+        )
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0]["passed"])
+
+    def test_pasted_key_warns_and_names_the_path(self):
+        checks = self._checks(
+            "clitest-inline",
+            '[workload]\nname = "clitest-inline"\n\n'
+            '[container]\nimage = "x:latest"\n'
+            '[container.environment]\nGITHUB_TOKEN = "ghp_' + "a" * 36 + '"\n',
+        )
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(checks[0]["passed"])
+        # A warning, not an error: the check is a prefix heuristic, and blocking
+        # enable on a guess is how a check gets routed around.
+        self.assertEqual(checks[0]["severity"], "warning")
+        self.assertIn("container.environment.GITHUB_TOKEN", checks[0]["message"])
+        self.assertIn("GitHub token", checks[0]["message"])
+
+    def test_message_never_carries_the_value(self):
+        """validate output gets pasted into issues and chat, so a check whose
+        point is 'this secret is in the wrong place' must not copy it into a
+        second wrong place."""
+        secret = "ghp_" + "b" * 36
+        checks = self._checks(
+            "clitest-inline-quiet",
+            '[workload]\nname = "clitest-inline-quiet"\n\n'
+            '[container]\nimage = "x:latest"\n'
+            '[container.environment]\nGITHUB_TOKEN = "' + secret + '"\n',
+        )
+        self.assertFalse(checks[0]["passed"])
+        for field in checks[0].values():
+            self.assertNotIn(secret, str(field))
+
+    def test_vm_placeholder_is_exempt(self):
+        """The fake credential a sandboxed guest holds is key-shaped on purpose;
+        flagging it would fire on every correct credential-backed workload."""
+        checks = self._checks(
+            "clitest-placeholder",
+            '[workload]\nname = "clitest-placeholder"\n\n'
+            '[vm]\nmemory = "2G"\n\n'
+            '[[vm.network.policy]]\nhost = "api.github.com"\n'
+            'credential = "gh-token"\n'
+            'placeholder = "ghp_' + "0" * 36 + '"\n',
+        )
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0]["passed"])
