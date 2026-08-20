@@ -104,15 +104,28 @@ the guest emits, rather than only requests to one endpoint.
    allowlist can therefore be verified to different standards, decided in
    different files.
 
-8. **Per-workload instances are generated drop-ins over the shipped unit, and
-   workloadctl owns their lifecycle.** A template unit cannot carry a variable
-   number of `LoadCredentialEncrypted=` lines, so the generator writes one
-   drop-in per workload naming that workload's material under
-   `/etc/agent-broker/<workload>/`, and the instance is started and stopped with
-   the workload rather than enabled by hand. This reverses the boundary
-   `docs/schema-reference.toml` states today — "workloadctl provides
-   reachability only. It does not run the broker or know what a credential is" —
-   in both halves, deliberately. See *Rationale*.
+8. **Per-workload instances are generated units, and workloadctl owns their
+   lifecycle.** A template unit cannot carry a variable number of
+   `LoadCredentialEncrypted=` lines — one workload with three providers needs
+   three, the next needs one — so the generator writes a full unit per workload,
+   `workload-<name>-broker.service`, exactly as it already writes
+   `workload-<name>-setup.service` and the rest. The instance is started and
+   stopped with the workload rather than enabled by hand.
+
+   *Corrected 2026-08-20.* This decision previously said "generated drop-ins
+   over the shipped unit", which is not realisable: a drop-in attaches to a
+   unit, and `agent-broker.service` is a single non-templated unit, so
+   `agent-broker.service.d/` overrides that one service rather than producing
+   one instance per workload. The variable-directive argument is sound and
+   rules out a template; what it leaves is the mechanism this project already
+   uses everywhere else. Two things follow for free — the instance lands in
+   `workload_run_files()`, so `PartOf=` and ordering work the way every other
+   workload unit's does instead of being special-cased, and `drift` covers it
+   as an ordinary run-file with no extra machinery.
+
+   This reverses the boundary `docs/schema-reference.toml` states today —
+   "workloadctl provides reachability only. It does not run the broker or know
+   what a credential is" — in both halves, deliberately. See *Rationale*.
 
 9. **The `credential` name in `workload.toml` is the authority, and nothing
    travels on the wire.** The broker's `(workload, Host)` table must contain a

@@ -298,6 +298,87 @@ class TestInternalDestinationGuard(unittest.TestCase):
 
 
 
+class TestRuleOrderIsPinned(unittest.TestCase):
+    """The output chain's rule ORDER is the enforcement, so it is pinned as a
+    sequence rather than probed rule by rule.
+
+    Every other test here asserts that some rule exists and precedes some other
+    rule. That catches a deletion and misses an insertion: a new rule dropped
+    into the wrong position satisfies every pairwise check while changing what
+    the chain does. This test fails on any change to the sequence, so extending
+    the chain means updating EXPECTED deliberately and saying why in the commit.
+
+    It exists because of two findings measured on a live host that no functional
+    test can see. Both are recorded in
+    docs/adr/008-transparent-egress-inspection.md:
+
+      - the guard for the inspector's listener range must sit between the
+        per-workload accept and the loopback accept, or one workload reaches
+        another's inspector -- admitted by the loopback accept, which is safe
+        only while every host-local address a filtered uid can reach is in
+        127/8;
+      - the drops around it must carry `ct direction original`, or they also
+        drop the inspector's own REPLY traffic, which takes every inspected
+        connection down while the ruleset still reads correctly.
+
+    Neither is visible in a packet trace of a passing test, and the second was
+    credited to the wrong qualifier for three days because the rig that measured
+    it ran its listener as root rather than as the workload uid.
+    """
+
+    # (label, required substrings) in the order they must appear.
+    EXPECTED = [
+        ("ct mark attribution",   ("ct mark set", "meta skuid 10000-52948")),
+        ("operator allow v4",     ("@wl_allow4", "accept")),
+        ("operator allow v6",     ("@wl_allow6", "accept")),
+        ("proxy name resolution", ("@wl_proxy_cg", "th dport 53", "accept")),
+        ("proxy internal drop v4", ("@wl_proxy_cg", "ct direction original",
+                                    "@wl_internal4", "drop")),
+        ("proxy internal drop v6", ("@wl_proxy_cg", "ct direction original",
+                                    "@wl_internal6", "drop")),
+        ("loopback accept",       ("@wl_filtered", "oif lo", "accept")),
+        ("proxy egress",          ("@wl_proxy_cg", "accept")),
+        ("default drop",          ("@wl_filtered", "counter drop")),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = [ln.strip() for ln in SKELETON.read_text().splitlines()
+                     if ln.strip().startswith("add rule inet workload_filter output")]
+
+    def test_the_chain_matches_the_pinned_sequence(self):
+        self.assertEqual(
+            len(self.rules), len(self.EXPECTED),
+            "the output chain gained or lost a rule. Rule order is the "
+            "enforcement here, so update EXPECTED with the new rule in its "
+            "intended position rather than appending it:\n  "
+            + "\n  ".join(self.rules))
+        for rule, (label, required) in zip(self.rules, self.EXPECTED):
+            for token in required:
+                self.assertIn(token, rule, f"rule {label!r} lost {token!r}: {rule}")
+
+    def test_every_destination_drop_is_qualified_to_the_original_direction(self):
+        """A drop that does not say `ct direction original` also drops replies.
+
+        The internal-destination drops carry it today for the reason the file
+        states -- the reply direction of a connection made TO the proxy must
+        never be dropped. The same applies to every future drop keyed on a
+        DESTINATION, and it is the property whose absence takes the whole
+        workload down rather than opening a hole. Drops keyed on membership
+        alone (the default drop) are exempt: they are the fallthrough, and a
+        reply that reaches them was already refused by everything above.
+        """
+        for rule in self.rules:
+            if not rule.endswith("drop"):
+                continue
+            if "daddr" not in rule:
+                continue          # membership-only fallthrough
+            self.assertIn(
+                "ct direction original", rule,
+                "a destination-keyed drop without `ct direction original` "
+                f"also drops the reply leg of established connections: {rule}")
+
+
 class TestElementModel(unittest.TestCase):
     def test_uid_alone_goes_in_the_membership_set(self):
         cmds = vm_filter_commands(10001, [], "add")

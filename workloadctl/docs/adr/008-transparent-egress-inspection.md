@@ -75,6 +75,27 @@ is a per-workload selector the guest cannot forge (ADR 006).
    *Rationale* — this is the one conclusion here that was overturned by
    measurement rather than reached by argument.
 
+9. **The guest's resolver is ours, and it synthesises rather than forwards.**
+   passt already directs the guest's queries wherever `--dns-host` names, so a
+   per-workload responder answers every `A`/`AAAA` — for any name, on a list or
+   not — with that workload's own inspector address, and answers every other
+   type, `HTTPS`/`SVCB` included, with `NODATA` rather than `REFUSED`: the
+   guest's resolver list has one entry, so `REFUSED` costs a timeout per lookup
+   where `NODATA` fails fast. **No query the guest emits leaves the host.** From inside the guest DNS works normally, which is what distinguishes
+   this from `resolver = "none"`; what changes is that the real lookup is the
+   inspector's, performed host-side for a name already checked against the
+   allowlist.
+
+10. **An allowlisted name that resolves into private address space is refused,
+    with one narrow declared exemption.** The hostname proxy gained this check
+    on 2026-08-19 — it dials whatever an allowlisted name resolves to, so a
+    wildcard or a compromised zone reaches RFC 1918, loopback or link-local
+    space from a VM that reports itself confined. The inspector has the
+    identical shape and inherits the check, sharing the proxy's cgroup-keyed
+    rules rather than growing parallel ones. The exemption names a host and
+    carries a written `reason`, and exempts the *destination* check alone: the
+    host stays inspected and its method and path policy still apply.
+
 ## Rationale
 
 **Transparency is the whole point, and it costs the ECH-immune posture.**
@@ -86,22 +107,53 @@ reaches nothing. The trade is deliberate. A guest that declines its proxy
 configuration is a certainty; ECH is one `dnf install` away but not present in
 the base image's toolchain.
 
-What replaces that immunity is narrower and needs no guest cooperation. ECH's
-prerequisite is an ECHConfig carried in an HTTPS/SVCB record, and the guest's
-DNS already runs through the host — passt forwards its queries to the host
-resolver as the workload uid, which is one of the two reasons
-`nftables/workload-filter.nft` accepts that uid's loopback traffic. Stripping
-`ech=` from those answers leaves a client with nothing to encrypt to, so it
-sends a plaintext SNI. The plumbing for that already exists: passt takes
-`--dns-host`, and `libexec/workload-vm-netdev` already derives and sets it per
-workload, so what is missing is the filter at the far end and not a way to reach
-it. It has to cover both address families for the same reason decision 6 does —
-a workload whose v4 DNS is filtered and whose v6 DNS is not can fetch its
-ECHConfig over v6. A guest that *hardcodes* a config — they are public data
-— defeats the stripping and is not defeated by anything else, but it fails
-closed: the cover name is on no list, so the connection is denied. The
-`encrypted_client_hello` tripwire covers that residue and is an alarm rather
-than instrumentation.
+What replaces that immunity needs no guest cooperation, and it is decision 9.
+ECH's prerequisite is an ECHConfig carried in an HTTPS/SVCB record, and the
+guest's DNS already runs through the host — passt forwards its queries to the
+address `--dns-host` names, which `libexec/workload-vm-netdev` already derives
+and sets per workload. So what is missing is the responder at the far end, not a
+way to reach it.
+
+An earlier draft had that responder *forward* the query and delete the `ech=`
+parameter from the answer. Synthesising instead — answering locally, forwarding
+nothing — is strictly stronger and smaller. It removes ECH at its source rather
+than editing it out of a reply, so there is no hostile wire format to parse and
+no obligation to preserve every other parameter byte-for-byte. It removes DNS as
+an exfiltration channel: a compromised agent encoding data in query names
+reaches an attacker's authoritative nameserver on any network that resolves
+recursively, and here there is no upstream query to carry it. And it means the
+responder needs no egress of its own, so the host's `/etc/resolv.conf` — a stub
+resolver on loopback or a nameserver on the LAN, which the output chain treats
+very differently — stops mattering to a filtered guest.
+
+It is available only because decision 1's redirect already made the guest's
+answer irrelevant: the inspector connects to the name it authorised, never to
+the address the guest was given, so that address never had to be true. It has to
+cover both address families for the same reason decision 6 does — a workload
+whose v4 DNS is synthesised while its v6 DNS still reaches the host resolver has
+an open resolver over v6, which returns both the ECHConfig and the channel. The
+cost is a destination reached by *name* on a port other than 80 or 443 — an SSH
+forge, an internal registry, a Kubernetes API. Nothing in the rules blocks
+these; the synthesised answer simply sends them to a port the inspector does not
+serve, and an operator cannot route around it by writing the address, because
+such a service's certificate is issued for its name. So an `allow` entry may be
+written by name, resolved host-side once at start and answered from a static map
+rather than synthesised. That widens nothing — the name comes from a list the
+operator wrote — and it leaves the connection uninspected and end to end, which
+is what `allow` has always meant.
+
+Two residues, and they are the same residue. A guest that *hardcodes* an
+ECHConfig — they are public data — skips DNS entirely and is not defeated by
+this, but it fails closed: the cover name is on no list, so the connection is
+denied, and the `encrypted_client_hello` tripwire covers it as an alarm rather
+than instrumentation. And a wildcard over a domain in which anyone can create
+records hands the exfiltration channel back, since the guest picks the label,
+the allowlist authorises it, and the inspector's own lookup carries it to a
+nameserver the attacker controls. Neither is closed by anything here. Nor is the
+larger channel next to them: an allowlisted host permitting `POST` with no path
+restriction carries unlimited data in a body, where a query name carries tens of
+bytes. Method and path policy is where exfiltration is managed; this is the
+cheap structural win beside it.
 
 **Inverting the default converts a partial failure into a total one, so the
 exemption path has to be good.** Under splice-by-default a client that cannot
@@ -125,10 +177,35 @@ An inspector on a routable host-local range has no such property: measured
 2026-08-16, one workload reached another's listener on the first try, admitted
 by that same rule. The design therefore carries an explicit guard on the
 listener range, ordered between the per-workload accept and the shipped `oif lo`
-rule, and qualified on the workload uid — unqualified, it also drops the
-inspector's own reply traffic on a self-dial and stops host tooling probing a
-listener at all. Both errors are invisible to every functional test, which is
-why they are asserted by rendering tests rather than trusted.
+rule, and carrying **two** qualifiers that do different jobs.
+
+`meta skuid @wl_filtered` keeps host tooling out of the rule, so `diagnose` can
+still probe a listener. `ct direction original` keeps the *inspector's own
+replies* out of it — and that one is the difference between this design working
+and not working at all. The inspector runs as the workload uid, so its replies
+are output traffic from a filtered uid addressed to whatever the peer's address
+is; whenever that address is inside the listener range the reply is dropped and
+the connection hangs with its SYN already accepted. Under decision 9 that is not
+an edge case but the normal path, since a synthesised answer means every
+connection is addressed to the inspector's own address from that same address.
+Measured 2026-08-19; the same qualifier and the same reasoning already appear on
+the internal-destination drops in `nftables/workload-filter.nft`.
+
+The reply itself is accepted by a rule of its own —
+`meta skuid @wl_filtered ct direction reply accept`, placed first in the chain.
+Measured four ways: without it the reply leg is carried by the shipped
+`oif lo accept`, which exists for management SSH and DNS and whose tracked
+justification this design already falsifies; with it that rule drops to zero
+packets and can be removed without effect. `ct direction reply` rather than
+`ct state established` because the guest's outbound data is already accepted on
+its own tuple, and the broader form silently converts the per-workload accept's
+counter from packets to connections.
+
+An earlier revision credited the uid qualifier alone, because the rig it was
+measured on ran the listener as root and never exercised a filtered uid's reply
+path. Both errors are invisible to every functional test — one silently opens
+cross-workload reach, the other silently takes the workload down — which is why
+they are asserted by rendering tests rather than trusted.
 
 **Termination makes refusals expensive, and the guest picks the hostnames.**
 Under `CONNECT` a denial cost a plaintext 403 and no crypto. Transparently there
@@ -155,18 +232,42 @@ prevents today. ADR 007 records the chaining decision that follows.
   exists for.
 - Method and URL path become expressible, and `Host`-binding closes true CDN
   fronting — unclosable while spliced, because the header is inside the TLS a
-  spliced connection deliberately does not open.
+  spliced connection deliberately does not open. It closes it on every
+  terminated host: `http/1.1` is the ALPN default, and a host offered h2 is one
+  named in `[[vm.network.http2]]`, where `:authority` is HPACK-encoded and goes
+  unread. Those hosts and spliced hosts are the exceptions, and both are a line
+  of TOML carrying a reason.
 - A denied host becomes a message the client prints rather than a hang
   indistinguishable from a network fault.
 - Every weakening is a line of TOML carrying a reason somebody had to type.
+- DNS stops being an open channel out of a confined guest: no name the guest
+  composes leaves the host, so query-name exfiltration has nothing to ride on
+  (decision 9). Narrowed, not closed — see *Rationale* for the two residues.
+- An allowlisted name can no longer be used to reach inside the host's own
+  network by accident or by a compromised zone, and permitting one that is
+  *meant* to resolve inside is a declared line rather than a blanket bypass
+  (decision 10).
 
 **Given up.**
 
-- *End-to-end TLS.* The guest can no longer detect a MITM by inspecting the real
-  chain; that responsibility moves entirely to the inspector's upstream leg,
-  which must verify fully and fail distinguishably. Getting this wrong converts
-  a policy engine into a way to strip TLS validation from the whole guest.
-- *ECH immunity.* No immune posture remains, only the tripwire.
+- *End-to-end TLS.* Not the guest's ability to notice *us* — interception is the
+  point, and a guest that notices can do nothing about it. What is given up is
+  the guest's ability to validate the **origin**: it now checks a chain we
+  minted, so a third party between the inspector and the origin is something the
+  guest cannot see. That validation does not disappear, it moves — the
+  inspector's upstream leg must verify fully and fail distinguishably. Getting
+  this wrong converts a policy engine into a way to strip TLS validation from the
+  whole guest.
+- *ECH immunity.* No posture immune by construction remains. Decision 9 denies
+  every client an ECHConfig, which covers the case that would actually happen —
+  a client enabling ECH because the site published one — and leaves the
+  hardcoded-config case to fail closed under the tripwire.
+- *A TLS service reachable only by address.* With no name there is no SNI, so
+  the inspector cannot authorise it, and an `allow` element on 443 is a
+  validation error. Named services on other ports are covered by writing the
+  `allow` entry by name; a nameless one is not, and `egress = "open"` is the
+  answer for a workload that needs one. Mutual TLS is a related case with a
+  different answer: it runs on 443, so its path is `splice` rather than `allow`.
 - *A small attack surface.* A process parsing hostile guest input while holding
   plaintext and a CA key is new, and it sits on the path for all HTTP and HTTPS
   rather than a named few. This cost is paid in full as soon as any host is
