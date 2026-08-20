@@ -24,7 +24,7 @@ from validation import (
     validate_workload_config,
     validate_workload_name,
 )
-from secrets_template import auto_detect_credentials
+from secrets_template import auto_detect_credentials, find_inlined_secrets
 from workloadctl_core import (
     WorkloadConfig,
     WorkloadManager,
@@ -108,6 +108,34 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
                     "severity": "ok",
                     "message": f"Credentials present: {', '.join(sorted(demanded))}"
                 })
+
+    # Inlined secrets — the mirror of the check above. That one asks "does the
+    # credstore hold what this config references"; this one asks "did someone
+    # skip the credstore and type the key in". Nothing sets a mode on
+    # /etc/workloads.d/*/workload.toml, so it carries root's umask and is
+    # normally world-readable: a pasted key is exposed to every uid on the host,
+    # other workloads' users included. A warning rather than an error because it
+    # is a prefix heuristic — it cannot be sure, and blocking `enable` on a
+    # guess is how a check gets routed around.
+    inlined = find_inlined_secrets(config.config)
+    if inlined:
+        for where, kind in inlined:
+            checks.append({
+                "check": "inlined_secrets",
+                "passed": False,
+                "severity": "warning",
+                # The path, never the value: validate output gets pasted around.
+                "message": f"Possible {kind} inlined at {where}",
+                "fix": "sudo workloadctl secret create <name>, then reference it as ${SECRET:<name>}",
+            })
+            warnings += 1
+    else:
+        checks.append({
+            "check": "inlined_secrets",
+            "passed": True,
+            "severity": "ok",
+            "message": "No credential-shaped literals in config"
+        })
 
     username_len = len(config.username)
     if username_len >= 32:

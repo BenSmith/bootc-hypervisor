@@ -209,3 +209,77 @@ def resolve_secret_env_vars(config: dict, creds_dir: str) -> dict[str, str]:
         resolved[key] = _ENV_SECRET_REF.sub(_sub, value_str)
 
     return resolved
+
+
+# --- Inlined-secret detection ---
+
+# Provider key prefixes, as `validate` sees them in a config someone typed a
+# literal into. These are the same shapes the providers' own leak scanners look
+# for: a fixed prefix exists precisely so a key is recognizable on sight, and
+# that is exactly what makes a cheap check worthwhile here.
+#
+# HIGH PRECISION ONLY. A false positive blocks nothing (this is a warning), but
+# it trains an operator to ignore the check, so every pattern carries a length
+# or charset tail rather than matching a bare prefix. `sk-` on its own, for
+# instance, is far too short to claim.
+_INLINE_SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("GitHub token", re.compile(r'\bgh[pousr]_[A-Za-z0-9]{36,}')),
+    ("GitHub fine-grained PAT", re.compile(r'\bgithub_pat_[A-Za-z0-9_]{22,}')),
+    ("GitLab PAT", re.compile(r'\bglpat-[A-Za-z0-9_-]{20,}')),
+    ("Anthropic API key", re.compile(r'\bsk-ant-[A-Za-z0-9_-]{20,}')),
+    ("OpenAI API key", re.compile(r'\bsk-(?:proj-)?[A-Za-z0-9]{32,}')),
+    ("Stripe secret key", re.compile(r'\b[sr]k_live_[A-Za-z0-9]{20,}')),
+    ("AWS access key id", re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b')),
+    ("Slack token", re.compile(r'\bxox[baprs]-[A-Za-z0-9-]{10,}')),
+    ("Google API key", re.compile(r'\bAIza[A-Za-z0-9_-]{35}')),
+    ("private key", re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----')),
+]
+
+# Keys whose value is a credential-shaped string ON PURPOSE. `placeholder` is
+# the fake credential a sandboxed VM guest holds so its client library's local
+# shape check passes; the real one never leaves the broker. It is the one
+# key-shaped literal that belongs in a workload.toml, so flagging it would make
+# this check fire on every correctly-written credential-backed workload.
+_INLINE_SECRET_EXEMPT_KEYS = frozenset({"placeholder"})
+
+
+def find_inlined_secrets(config: dict) -> list[tuple[str, str]]:
+    """Find values that look like real provider credentials typed into a config.
+
+    Returns (dotted_path, kind) pairs — e.g.
+    ("container.environment.GITHUB_TOKEN", "GitHub token"). Sorted, so callers
+    render stably.
+
+    NEVER returns the matched value. `validate` output is pasted into issues and
+    chat, so a check whose whole point is "this secret is in the wrong place"
+    must not copy it into a second wrong place. The path is what an operator
+    needs to act, and the path is not itself sensitive.
+
+    A heuristic by construction: it recognizes the well-known prefixes and
+    nothing else, so a clean result is not a guarantee that a config holds no
+    secrets. It exists to catch the mistake at the moment it is made, which is
+    the point at which it is still cheap to undo.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _walk(node, path: str):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _INLINE_SECRET_EXEMPT_KEYS:
+                    continue
+                _walk(value, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                _walk(value, f"{path}[{i}]")
+        elif isinstance(node, str):
+            # A ${SECRET:name} reference is the correct spelling, not a finding —
+            # and it can't match anyway, but skipping it keeps the intent legible.
+            if SECRET_PATTERN.search(node):
+                return
+            for kind, pattern in _INLINE_SECRET_PATTERNS:
+                if pattern.search(node):
+                    found.append((path, kind))
+                    return
+
+    _walk(config, "")
+    return sorted(found)
