@@ -129,9 +129,15 @@ very differently — stops mattering to a filtered guest.
 It is available only because decision 1's redirect already made the guest's
 answer irrelevant: the inspector connects to the name it authorised, never to
 the address the guest was given, so that address never had to be true. It has to
-cover both address families for the same reason decision 6 does — a workload
-whose v4 DNS is synthesised while its v6 DNS still reaches the host resolver has
-an open resolver over v6, which returns both the ECHConfig and the channel. The
+say something about both address families, though not for the reason first
+recorded here: leaving IPv6 unsaid lets passt advertise the host's own v6
+nameserver from its `resolv.conf` scan, and that is **not** an open resolver —
+with no v6 `--dns-forward` nothing is intercepted, and the guest's query to that
+address is ordinary egress meeting the default deny. What it costs is the
+failure shape, a full retry schedule per lookup on the family clients try first,
+presenting as broken DNS; pointing IPv6 at the guest's own loopback makes it an
+immediate local refusal instead. The synthesised answers are symmetric either
+way, because record type is independent of transport. The
 cost is a destination reached by *name* on a port other than 80 or 443 — an SSH
 forge, an internal registry, a Kubernetes API. Nothing in the rules blocks
 these; the synthesised answer simply sends them to a port the inspector does not
@@ -192,11 +198,18 @@ Measured 2026-08-19; the same qualifier and the same reasoning already appear on
 the internal-destination drops in `nftables/workload-filter.nft`.
 
 The reply itself is accepted by a rule of its own —
-`meta skuid @wl_filtered ct direction reply accept`, placed first in the chain.
-Measured four ways: without it the reply leg is carried by the shipped
-`oif lo accept`, which exists for management SSH and DNS and whose tracked
-justification this design already falsifies; with it that rule drops to zero
-packets and can be removed without effect. `ct direction reply` rather than
+`meta skuid @wl_filtered ct direction reply accept`, placed first among the
+chain's *terminating* rules. Not first outright: the chain's first rule is a
+**non-terminating** `ct mark set`, and that mark is the whole of inbound capture
+attribution, since nftables has no input-side uid match. An accept ahead of it
+would terminate the chain for every reply-direction packet a filtered workload
+emits — which is the first output packet of every connection opened *toward* the
+guest, so management SSH and every published port would go unmarked and
+`workloadctl pcap -Q in` would return nothing for filtered VMs with no error
+anywhere. Measured four ways: without the reply rule the reply leg is carried by
+the shipped `oif lo accept`, which exists for management SSH and DNS and whose
+tracked justification this design already falsifies; with it that rule drops to
+zero packets and can be removed without effect. `ct direction reply` rather than
 `ct state established` because the guest's outbound data is already accepted on
 its own tuple, and the broader form silently converts the per-workload accept's
 counter from packets to connections.
@@ -236,7 +249,10 @@ prevents today. ADR 007 records the chaining decision that follows.
   terminated host: `http/1.1` is the ALPN default, and a host offered h2 is one
   named in `[[vm.network.http2]]`, where `:authority` is HPACK-encoded and goes
   unread. Those hosts and spliced hosts are the exceptions, and both are a line
-  of TOML carrying a reason.
+  of TOML carrying a reason. That the exceptions are only those two rests on
+  refusing what does not speak HTTP/1.1 rather than on the ALPN offer: an ALPN
+  mismatch does not fail a TLS handshake, so the offer binds cooperating clients
+  and nothing else (see *Given up*).
 - A denied host becomes a message the client prints rather than a hang
   indistinguishable from a network fault.
 - Every weakening is a line of TOML carrying a reason somebody had to type.
@@ -262,6 +278,16 @@ prevents today. ADR 007 records the chaining decision that follows.
   every client an ECHConfig, which covers the case that would actually happen —
   a client enabling ECH because the site published one — and leaves the
   hardcoded-config case to fail closed under the tripwire.
+- *Transparent support for anything on 443 that is not HTTP.* A terminating
+  proxy has to decide what to do with a session it cannot parse, and relaying it
+  opaquely — the compatible answer, and the one first recorded here — is a policy
+  opt-out the guest selects by sending different first bytes, since offering
+  `http/1.1` alone does not stop it speaking h2 or anything else. So such a
+  connection is closed, with a log line naming the host, and the remedy is
+  `splice`: a host that does not speak HTTP gains nothing from termination but a
+  CA requirement and a plaintext copy, where splicing gives it back end-to-end
+  TLS for one line and a written reason. The cost is that websockets over a
+  tunnel, gRPC and plain TLS services break until somebody writes that line.
 - *A TLS service reachable only by address.* With no name there is no SNI, so
   the inspector cannot authorise it, and an `allow` element on 443 is a
   validation error. Named services on other ports are covered by writing the
@@ -290,8 +316,20 @@ literal and which needs rewriting rather than editing; and ADR 006's
 become false at the same moment, so they are corrected with the change that
 breaks each rather than in one sweep.
 
-**Not decided here.** Whether `Host`-binding must cover HTTP/2 relayed hosts
-(closing it needs an HPACK decoder); behaviour on redirects and protocol
-upgrades; what the inspector may log, given `Authorization` headers are visible
-on every host; TLS on non-standard ports; and the SELinux domain for a
-network-facing process holding a private key.
+**Not decided here.** Whether `Host`-binding must cover HTTP/2 relayed hosts —
+closing it needs an HPACK decoder, and inverting the ALPN default (above) turned
+this from a hole to close into a capability worth buying, since an h2 host is now
+one an operator named with a reason.
+
+**Decided after this record was first written, and noted so its absence is not
+read as an open question.** Behaviour on redirects (pass through, log both host
+names — the guest opens a new connection that is checked on its own merits) and
+on protocol upgrades (police the request as ordinary HTTP, relay opaquely after
+the `101`); what the inspector may log — redaction by default, applied at the
+point of capture rather than of formatting, with bodies never logged; TLS on
+non-standard ports, deferred with a stated condition, since a *named* service on
+another port is reached through an `allow` entry written by name and nobody has
+yet needed method or path policy on one; and the SELinux domain, which turned out
+to be a harvest rather than a decision — shipped Fedora policy already entrypoints
+a `#!` script into a private domain on the script's own label, which is the
+mechanism a Python entrypoint needs.
