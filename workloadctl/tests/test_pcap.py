@@ -32,11 +32,16 @@ from pcap import (
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def vm_config(name="fj", uid=10003, bridge=None):
+def vm_config(name="fj", uid=10003, bridge=None, egress=None):
+    """`egress` left None means the key is absent, which is `filtered` -- so the
+    default VM here is an INSPECTED one, the same as on a real host."""
+    net = {} if bridge is None else {"bridge": bridge}
+    if egress is not None:
+        net["egress"] = egress
     return SimpleNamespace(
         name=name, uid=uid, is_vm=True, vm_bridge=bridge,
         vm_network={} if bridge is None else {"bridge": bridge},
-        config={"vm": {"network": {}}},
+        config={"vm": {"network": net}},
         get_network_mode=lambda: "pasta")
 
 
@@ -71,6 +76,41 @@ class TestVantages(unittest.TestCase):
         self.assertFalse(vantages[VANTAGE_HOST].available)
         self.assertIn("bridge", vantages[VANTAGE_HOST].detail)
         self.assertTrue(vantages[VANTAGE_GUEST].available)
+
+    def test_an_inspected_vm_is_told_the_host_capture_shows_a_redirect(self):
+        """The claim that died when the inspector landed.
+
+        The capture chain renders at priority -10 and `dstnat` at -100, so the
+        redirect has already happened: every 80/443 flow in the file carries
+        the inspector's own address, not the host the guest asked for. The
+        detail string is the ONLY place an operator is told what the vantage
+        means, and nothing else fails when it is wrong -- the capture succeeds
+        and is quietly misread.
+        """
+        host = {v.name: v for v in pcap_vantages(vm_config())}[VANTAGE_HOST]
+        self.assertTrue(host.available)
+        self.assertIn("REDIRECTED", host.detail)
+        self.assertNotIn("the traffic as it leaves this machine, after passt",
+                         host.detail)
+        # The name survives where the address does not, and that is the part
+        # an operator needs in order to still get an answer out of the file.
+        self.assertIn("SNI", host.detail)
+
+    def test_an_uninspected_vm_keeps_the_original_promise(self):
+        """`egress = "open"` means no redirect, so the old wording is still
+        exactly true and must not be replaced with a warning about one."""
+        host = {v.name: v
+                for v in pcap_vantages(vm_config(egress="open"))}[VANTAGE_HOST]
+        self.assertIn("as it leaves this machine, after passt", host.detail)
+        self.assertNotIn("REDIRECTED", host.detail)
+
+    def test_the_doubling_is_stated_where_the_vantage_is_explained(self):
+        """Measured 2x (tests/manual/input_chain_rig.py): both host-side log
+        rules write to one nflog group and a host-local packet crosses both
+        hooks. An operator sizing a capture or counting packets reads this
+        string and nothing else."""
+        host = {v.name: v for v in pcap_vantages(vm_config())}[VANTAGE_HOST]
+        self.assertIn("twice", host.detail)
 
     def test_a_host_network_container_has_no_guest_vantage(self):
         """Measured on podman 5.8.4: its netns inode is identical to the

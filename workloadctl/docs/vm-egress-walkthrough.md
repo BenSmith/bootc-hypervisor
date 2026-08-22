@@ -218,10 +218,44 @@ replies on that socket are output traffic owned by uid 10004 and hit this chain
 whenever the host runs a stub resolver, because passt sends the forwarded query
 to `127.0.0.53` as the same uid.
 
-Accepting it widens nothing. passt runs with `--map-host-loopback none`, so no
-guest-chosen destination translates to host loopback; the only loopback traffic
-passt originates is replies on sockets it already bound, and the DNS forward. A
-guest packet aimed at `127.0.0.1` never leaves the guest's own stack.
+Accepting it widened nothing *when it was written*, and the reasoning still
+holds for the case it was written about: passt runs with
+`--map-host-loopback none`, so no guest-chosen destination translates to host
+loopback; the only loopback traffic passt originates is replies on sockets it
+already bound, and the DNS forward. A guest packet aimed at `127.0.0.1` never
+leaves the guest's own stack.
+
+**That argument rests on every host-local address a filtered uid can reach
+being inside `127/8`, and it stopped being true when the transparent inspector
+landed.** The inspector listens on a routable-looking address per workload in
+`198.18.0.0/16` (and its IPv6 twin in `2001:2::/48`), on the shared
+`workload-proxy` dummy link — deliberately not loopback, because guest traffic
+re-originated toward a remote address cannot be DNATed into `127/8` without a
+host-wide sysctl. Those addresses are host-local, so a filtered uid's packet to
+one of them leaves on `lo` and rule 7 accepts it, exactly as it accepts the
+management address.
+
+The rule stays as it is; the guard goes **in front of it**. Two things bound
+what rule 7 now admits, and neither is rule 7:
+
+- an `input` chain drops anything addressed to a listener plane that arrives on
+  any interface other than `lo`, so the planes are reachable only from this
+  host. Measured, both families, in `tests/manual/input_chain_rig.py`;
+- the output chain carries per-uid guards ahead of rule 7 so that one
+  workload's uid cannot reach *another* workload's plane — the addresses are
+  derived from the uid, so they are guessable by construction. This was
+  measured, not assumed: workload B reached A's listener on the first try
+  before the guard existed. A blanket range guard catches whatever the
+  per-workload rules do not.
+
+One promise behind that ordering is still owed and is worth knowing about:
+validation does not yet refuse an `allow` entry *inside* the listener ranges,
+and such an entry would be accepted ahead of the guard that exists to refuse
+exactly it. The ordering is correct; the invariant it assumes is not yet
+enforced in the tree.
+
+Read rule 7 as "the host's own loopback path is not the place policy is
+enforced", not as "nothing routable is reachable here".
 
 **Rule 1 (`ct mark`)** is not policy at all — it is what lets a capture
 attribute *inbound* packets to a workload, since nftables has no input-side uid

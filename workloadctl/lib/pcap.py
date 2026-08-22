@@ -25,7 +25,7 @@ import shutil
 import struct
 from dataclasses import dataclass, field
 
-from vm import NFT_BIN, NFT_TABLE, vm_nflog_group
+from vm import NFT_BIN, NFT_TABLE, vm_nflog_group, vm_uses_inspect
 from workload_lib import UID_MIN
 
 
@@ -92,7 +92,7 @@ QEMU_MAXLEN_UNLIMITED = 65536
 # So the rule counts what the kernel matched, and teardown compares that against
 # the packets actually in the file. That comparison is the only signal there is.
 LOSS_NOTE = ("nflog can drop under load and does not report it; the rule "
-             "counter is compared against the file on stop")
+             "counters are summed and compared against the file on stop")
 
 
 @dataclass
@@ -119,12 +119,28 @@ def pcap_vantages(config) -> list[Vantage]:
     """
     if config.is_vm:
         bridged = config.vm_bridge is not None
+        # An inspected VM's 80/443 never leaves this machine on the flow the
+        # capture shows. The capture chain renders at priority -10 and `dstnat`
+        # is -100, so the redirect has already happened: the destination in the
+        # file is this workload's own inspector plane, not the host the guest
+        # asked for. Saying "as it leaves this machine" there is not a rounding
+        # error -- it is the one place an operator is told what the vantage
+        # means, and nothing else fails when it is wrong.
+        inspected = vm_uses_inspect(config.config)
         return [
             Vantage(
                 VANTAGE_HOST, not bridged,
                 ("the traffic as it leaves this machine, after passt "
                  "re-originated it onto host sockets owned by this "
                  "workload. " + LOSS_NOTE)
+                if not bridged and not inspected else
+                ("this workload's HTTP and HTTPS as REDIRECTED, not as it "
+                 "leaves this machine: the capture hook runs after dstnat, so "
+                 "every 80/443 flow carries the inspector's address as its "
+                 "destination and the host the guest asked for appears only "
+                 "in the TLS SNI or the HTTP request line, both inside the "
+                 "snaplen. Everything else is post-passt as usual. Each "
+                 "packet also appears twice, once per hook. " + LOSS_NOTE)
                 if not bridged else
                 f"unavailable: [vm.network].bridge = {config.vm_bridge!r}, so "
                 f"the guest sends from its own LAN address and no host socket "
