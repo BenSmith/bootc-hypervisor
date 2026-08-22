@@ -55,6 +55,9 @@ from vm import (
     vm_owned_elements,
     NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
     VM_PROXY_PORT, vm_proxy_hosts, vm_uses_proxy,
+    NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, VM_INSPECT_PORT_CLEARTEXT,
+    VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+    vm_inspect_address, vm_uses_inspect,
 )
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
@@ -1252,6 +1255,159 @@ def _proxy_address_present() -> bool:
     return result.returncode == 0 and VM_PROXY_ADDR in result.stdout
 
 
+def _map_key_uid(elem) -> str | None:
+    """The leading uid of one nft map element, whatever shape nft rendered it in.
+
+    Three shapes reach here and only one of them is the obvious dict:
+
+        [{"concat": [10001, 80]}, {"concat": ["198.18.1.1", 8080]}]   # nft 1.1.6
+        {"elem": {"key": {"concat": [10001, 80]}}}                    # counted
+        "10001 . 80 : 198.18.1.1 . 8080"                              # fixture
+
+    vm_owned_elements handles a *set*'s concat and would return nothing for the
+    first of these, because a map element is a two-item [key, value] list and
+    not a dict with "concat" at the top. That exact mismatch already reported a
+    working proxy redirect as missing once (see _proxy_map_keys); the inspect
+    maps are keyed the same way, so reading them with the set helper would
+    report every inspected VM as uninspected — a false alarm on every host.
+    """
+    key = elem
+    if isinstance(elem, dict) and "elem" in elem:
+        inner = elem["elem"]
+        key = inner.get("key", inner) if isinstance(inner, dict) else inner
+    if isinstance(key, list) and key:
+        key = key[0]
+    if isinstance(key, dict) and "concat" in key:
+        parts = key["concat"]
+        return str(parts[0]) if parts else None
+    if isinstance(key, (int, str)):
+        return str(key).split(":")[0].split(".")[0].strip() or None
+    return None
+
+
+def _host_has_v6_route() -> bool:
+    """Whether this host can route off-link IPv6 at all."""
+    try:
+        result = subprocess.run(["/usr/sbin/ip", "-6", "route", "show", "default"],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True          # unknown: do not manufacture a warning
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
+                     socket_active=PROBE, v6_route=PROBE
+                     ) -> tuple[str, bool, str] | None:
+    """Report whether a VM's egress is actually being redirected to its inspector.
+
+    Returns None for workloads the redirect does not apply to (not a VM,
+    bridged, or unfiltered egress), so no line is emitted.
+
+    Inspection is default-on for every filtered VM, which is what makes its
+    absence hard to see: unlike the hostname proxy, nothing in the config asked
+    for it, so there is no declaration for an operator to compare reality
+    against. A guest whose uid is missing from the inspect maps reaches the
+    internet directly, at full speed, with the unit active, `status` green, and
+    `vm_egress` reporting the VM correctly filtered — because it *is* filtered.
+    It is simply not being looked at. That is the failure this exists for, and
+    no other line in `diagnose` would notice it.
+
+    The socket is checked separately from the maps because the two fail in
+    opposite directions and an operator reading one symptom must not be sent
+    after the other. Maps missing: traffic leaves uninspected and nothing
+    breaks. Socket down with the maps armed: traffic is redirected at a host
+    address where nothing accepts, so the guest's HTTP and HTTPS die while its
+    DNS, SSH and everything else keep working — which reads as a broken guest,
+    not a broken host.
+
+    Observations are injectable (PROBE sentinel) so the verdict logic is
+    testable without a live host.
+    """
+    if not vm_uses_inspect(config.config):
+        return None
+    try:
+        uid = config.uid
+    except Exception:
+        return None                      # no user yet; check 1 reports it
+
+    unit = f"workload-{config.name}-inspect.socket"
+    restart = f"systemctl restart {unit}"
+
+    if elements4 is PROBE:
+        elements4 = _inspect_map_elements(NFT_MAP_INSPECT4)
+    if elements6 is PROBE:
+        elements6 = _inspect_map_elements(NFT_MAP_INSPECT6)
+
+    if elements4 is None or elements6 is None:
+        return ("vm_inspect", False,
+                f"egress inspection is on for this VM but the "
+                f"{NFT_PROXY_TABLE} table is absent, so nothing redirects this "
+                f"guest's traffic to its inspector — it is reaching the "
+                f"internet directly. Rebuilt on the next start: {restart}")
+
+    armed4 = str(uid) in {_map_key_uid(e) for e in elements4}
+    armed6 = str(uid) in {_map_key_uid(e) for e in elements6}
+
+    if not armed4 and not armed6:
+        return ("vm_inspect", False,
+                f"egress inspection is on for this VM but uid {uid} is in "
+                f"neither {NFT_MAP_INSPECT4} nor {NFT_MAP_INSPECT6}, so its "
+                f"traffic to ports {VM_INSPECT_ORIG_CLEARTEXT}/{VM_INSPECT_ORIG_TLS} "
+                f"is not redirected — this "
+                f"guest is reaching the internet uninspected while every other "
+                f"signal reads correct. Re-arm it: {restart}")
+
+    if armed4 != armed6:
+        # Half-armed is worse than not armed, because the half that works is
+        # what an operator checks. A v4 probe passes, the journal fills with
+        # lines, and the guest's v6 traffic leaves unseen the whole time.
+        missing, present = ((NFT_MAP_INSPECT6, NFT_MAP_INSPECT4) if armed4
+                            else (NFT_MAP_INSPECT4, NFT_MAP_INSPECT6))
+        family = "IPv6" if armed4 else "IPv4"
+        return ("vm_inspect", False,
+                f"uid {uid} is in {present} but not {missing}, so this guest's "
+                f"{family} egress is NOT inspected while its other family is. "
+                f"A probe on the armed family passes and shows nothing wrong. "
+                f"Re-arm both: {restart}")
+
+    if socket_active is PROBE:
+        socket_active = service_active(unit)
+
+    if not socket_active:
+        return ("vm_inspect", False,
+                f"uid {uid} is redirected to the inspector, but {unit} is not "
+                f"listening — this guest's HTTP and HTTPS are being sent to a "
+                f"host address where nothing accepts, while its DNS and SSH "
+                f"keep working. Start it: {restart}")
+
+    addr = vm_inspect_address(uid)
+    tail = ""
+    if v6_route is PROBE:
+        v6_route = _host_has_v6_route()
+    if not v6_route:
+        # Not a fault, and deliberately not a failure: a correctly armed v6
+        # redirect produces no journal lines on a host with no IPv6 uplink,
+        # because a locally re-originated packet loses its routing lookup
+        # before it ever reaches the nat hook. Said here because the silence is
+        # otherwise read as the v6 redirect being broken -- it cost a debugging
+        # session on the rig that way.
+        tail = ("; note this host has no IPv6 default route, so the v6 "
+                "redirect will log nothing — the guest's v6 connections fail "
+                "at the routing lookup, before nftables sees them")
+
+    return ("vm_inspect", True,
+            f"egress inspected on both families: uid {uid} redirected to "
+            f"{addr.v4}/[{addr.v6}] ports {VM_INSPECT_PORT_CLEARTEXT} "
+            f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls), {unit} listening"
+            f"{tail}")
+
+
+def _inspect_map_elements(map_name):
+    """Elements of one inspect map, or None if the table could not be read."""
+    payload = _nft_json("list", "map", *NFT_PROXY_TABLE.split(), map_name)
+    return None if payload is None else nft_set_elements(payload)
+
+
 def subid_derived_check(
     entries: list[tuple[str, tuple[int, int] | None]],
     expected: tuple[int, int],
@@ -1914,6 +2070,9 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         proxy_result = vm_proxy_check(config)
         if proxy_result:
             _check(*proxy_result)
+        inspect_result = vm_inspect_check(config)
+        if inspect_result:
+            _check(*inspect_result)
 
     # Not gated on is_vm: the host-side vantage works on every substrate,
     # because `meta skuid` does not care what produced the socket.

@@ -1144,3 +1144,169 @@ class TestConntrackOccupancy(unittest.TestCase):
         interpretation is added only when it is the answer."""
         self.assertLess(34 / 262144, CONNTRACK_PRESSURE)
         self.assertGreaterEqual(250000 / 262144, CONNTRACK_PRESSURE)
+
+
+class TestInspectDiagnose(unittest.TestCase):
+    """`diagnose`'s inspector check.
+
+    The failure it exists for is the mirror of the egress check's, and harder
+    to see: inspection is default-on, so nothing in the config declares it and
+    there is no stated intent for an operator to compare reality against. A
+    guest missing from the inspect maps reaches the internet directly with the
+    unit active, `status` green, and `vm_egress` correctly reporting the VM
+    filtered — because it is filtered. It is just not being looked at.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+
+    def _config(self, egress="filtered", bridge=None, uid=10001, is_vm=True):
+        net = {} if egress is None else {"egress": egress}
+        cfg = {"vm": {}} if is_vm else {"container": {}}
+        if is_vm:
+            cfg["vm"]["network"] = dict(net)
+            if bridge:
+                cfg["vm"]["network"]["bridge"] = bridge
+        return SimpleNamespace(name="vm1", uid=uid, vm_bridge=bridge,
+                               vm_network=net, config=cfg)
+
+    def _elem(self, uid, port):
+        """One map element in the shape nft 1.1.6 actually renders."""
+        return [{"concat": [uid, port]},
+                {"concat": ["198.18.1.1", 8080]}]
+
+    def _run(self, **kw):
+        kw.setdefault("socket_active", True)
+        kw.setdefault("v6_route", True)
+        return self.mod.vm_inspect_check(self._config(), **kw)
+
+    # --- applicability ---
+
+    def test_a_container_gets_no_line(self):
+        cfg = self._config(is_vm=False)
+        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+
+    def test_a_bridged_vm_gets_no_line(self):
+        # No host socket in the data path, so there is no uid to key on.
+        cfg = self._config(bridge="br0")
+        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+
+    def test_an_unfiltered_vm_gets_no_line(self):
+        cfg = self._config(egress="unfiltered")
+        self.assertIsNone(self.mod.vm_inspect_check(cfg))
+
+    # --- verdicts ---
+
+    def test_an_absent_table_fails_and_says_traffic_is_leaving_uninspected(self):
+        ok, passed, msg = self._run(elements4=None, elements6=None)
+        self.assertEqual(ok, "vm_inspect")
+        self.assertFalse(passed)
+        self.assertIn("reaching the internet directly", msg)
+
+    def test_a_uid_in_neither_map_fails(self):
+        _, passed, msg = self._run(elements4=[self._elem(10002, 80)],
+                                   elements6=[self._elem(10002, 80)])
+        self.assertFalse(passed)
+        self.assertIn("uninspected", msg)
+        self.assertIn("workload-vm1-inspect.socket", msg)
+
+    def test_half_armed_is_a_failure_naming_the_missing_family(self):
+        # The half that works is the half an operator probes: a v4 check passes
+        # and the journal fills with lines while v6 leaves unseen.
+        _, passed, msg = self._run(elements4=[self._elem(10001, 80)],
+                                   elements6=[])
+        self.assertFalse(passed)
+        self.assertIn("IPv6", msg)
+        self.assertIn(NFT_MAP_INSPECT6, msg)
+
+    def test_half_armed_the_other_way_names_ipv4(self):
+        _, passed, msg = self._run(elements4=[],
+                                   elements6=[self._elem(10001, 80)])
+        self.assertFalse(passed)
+        self.assertIn("IPv4", msg)
+        self.assertIn(NFT_MAP_INSPECT4, msg)
+
+    def test_armed_maps_with_a_dead_socket_fail_and_name_the_symptom(self):
+        # The opposite failure direction from missing maps, and it must not be
+        # confused with it: here the guest breaks rather than leaks.
+        _, passed, msg = self._run(elements4=[self._elem(10001, 80)],
+                                   elements6=[self._elem(10001, 80)],
+                                   socket_active=False)
+        self.assertFalse(passed)
+        self.assertIn("nothing accepts", msg)
+        self.assertIn("DNS and SSH", msg)
+
+    def test_fully_armed_passes(self):
+        _, passed, msg = self._run(elements4=[self._elem(10001, 80)],
+                                   elements6=[self._elem(10001, 80)])
+        self.assertTrue(passed)
+        self.assertIn("both families", msg)
+
+    def test_a_host_with_no_v6_route_still_passes_but_says_so(self):
+        # A correctly armed v6 redirect logs nothing on such a host: the packet
+        # loses its routing lookup before the nat hook. Silence there is not a
+        # fault, and reporting it as one sends the operator after a working
+        # ruleset.
+        _, passed, msg = self._run(elements4=[self._elem(10001, 80)],
+                                   elements6=[self._elem(10001, 80)],
+                                   v6_route=False)
+        self.assertTrue(passed)
+        self.assertIn("no IPv6 default route", msg)
+        self.assertIn("before nftables", msg)
+
+    def test_no_user_yet_gets_no_line(self):
+        # Generation precedes user creation, so a first `enable` reaches this
+        # before _wl-vm1 exists. Check 1 already reports that; a second line
+        # saying the redirect is missing would be noise blaming the wrong step.
+        class NoUser:
+            name = "vm1"
+            vm_bridge = None
+            vm_network = {"egress": "filtered"}
+            config = {"vm": {"network": {"egress": "filtered"}}}
+
+            @property
+            def uid(self):
+                raise KeyError("_wl-vm1")
+
+        self.assertIsNone(self.mod.vm_inspect_check(NoUser()))
+
+
+class TestInspectMapKeyShapes(unittest.TestCase):
+    """The map-element reader accepts every shape nft renders.
+
+    This is not defensive padding. A map element is a two-item [key, value]
+    list, not a dict with "concat" at the top, so reading the inspect maps with
+    the *set* helper (vm_owned_elements) returns nothing and reports every
+    inspected VM as uninspected — a false alarm on every host. That exact
+    mismatch already shipped once against the proxy map.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.uid_of = cmd_diagnose._map_key_uid
+
+    def test_the_nft_list_shape(self):
+        self.assertEqual(
+            self.uid_of([{"concat": [10001, 80]},
+                         {"concat": ["198.18.1.1", 8080]}]), "10001")
+
+    def test_the_counted_elem_shape(self):
+        self.assertEqual(
+            self.uid_of({"elem": {"key": {"concat": [10001, 443]}}}), "10001")
+
+    def test_the_flat_fixture_string(self):
+        self.assertEqual(
+            self.uid_of("10001 . 80 : 198.18.1.1 . 8080"), "10001")
+
+    def test_a_shape_it_cannot_read_returns_none_rather_than_guessing(self):
+        self.assertIsNone(self.uid_of({"unexpected": True}))
+
+    def test_the_set_helper_would_have_missed_the_real_shape(self):
+        # Pins the reason this helper exists at all: if this ever starts
+        # returning the uid, the two readers have converged and the extra
+        # helper can go.
+        from vm import vm_owned_elements
+        self.assertEqual(
+            vm_owned_elements(10001, [[{"concat": [10001, 80]},
+                                       {"concat": ["198.18.1.1", 8080]}]]), [])

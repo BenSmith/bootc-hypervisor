@@ -164,6 +164,99 @@ class TestCeiling(unittest.TestCase):
         self.assertTrue(ceiling.admit())
 
 
+class TestThreadStartFailure(unittest.TestCase):
+    """A slot admitted for a thread that never started has to come back.
+
+    The admission happens before the thread exists, so if Thread.start() raises
+    the slot is held by nothing. Nothing ever returns it: _serve's release only
+    runs for a thread that ran. Each failure therefore lowers the effective
+    ceiling for the life of the process, and the condition that causes it —
+    the process being unable to get another thread — is precisely a connection
+    storm, so the listener degrades to refusing everything at exactly the
+    moment the ceiling is supposed to be doing its job, while still reporting
+    itself active.
+    """
+
+    def _listener_that_cannot_start_threads(self, out, limit=1):
+        mod = _mod()
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        listener = mod.Listener([_listener_with(local)], out, limit=limit)
+        return mod, listener, local
+
+    def test_a_thread_that_cannot_start_gives_its_slot_back(self):
+        out = io.StringIO()
+        mod, listener, local = self._listener_that_cannot_start_threads(out)
+        boom = unittest.mock.Mock(side_effect=RuntimeError("can't start new thread"))
+        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+            thread.return_value.start = boom
+            for _ in range(5):
+                listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                                 _listener_with(local))
+        # Five failures against a ceiling of one. Without the release, the
+        # first would consume the only slot and the other four would be
+        # refused by the cap instead — so the ceiling still having a free slot
+        # is what proves the give-back.
+        self.assertTrue(listener._ceiling.admit())
+
+    def test_the_connection_is_closed_and_the_reason_is_logged(self):
+        out = io.StringIO()
+        mod, listener, local = self._listener_that_cannot_start_threads(out)
+        conn = _mock_conn()
+        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+            thread.return_value.start = unittest.mock.Mock(
+                side_effect=RuntimeError("can't start new thread"))
+            listener._handle(conn, ("192.0.2.1", 1024), _listener_with(local))
+        text = out.getvalue()
+        self.assertIn("rejected", text)
+        self.assertIn("cannot start thread", text)
+        # Closed, not leaked: an unserved connection the guest holds open is
+        # an fd this process never gets back.
+        conn.close.assert_called()
+
+    def test_a_failed_start_counts_as_a_rejection(self):
+        out = io.StringIO()
+        mod, listener, local = self._listener_that_cannot_start_threads(out)
+        with unittest.mock.patch.object(mod.threading, "Thread") as thread:
+            thread.return_value.start = unittest.mock.Mock(
+                side_effect=RuntimeError("can't start new thread"))
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+        # The guest saw a closed connection, same as a cap hit. A tally that
+        # counted only cap hits would report zero here and understate it.
+        self.assertEqual(listener.rejected, 1)
+
+
+class TestRejectionTally(unittest.TestCase):
+    """The count is surfaced, because a ceiling nobody can read is
+    indistinguishable from one that never fires."""
+
+    def test_the_shutdown_line_names_the_count(self):
+        mod = _mod()
+        out = io.StringIO()
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        listener = mod.Listener([_listener_with(local)], out, limit=0)
+        for _ in range(3):
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+        listener.log_summary()
+        self.assertIn("stopped: 3 connection(s) rejected", out.getvalue())
+
+    def test_a_quiet_run_still_reports_its_zero(self):
+        # The zero is the useful reading: it separates "the ceiling never
+        # fired" from "nothing was logged about it".
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [_listener_with(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))], out)
+        listener.log_summary()
+        self.assertIn("stopped: 0 connection(s) rejected", out.getvalue())
+
+    def test_the_summary_is_emitted_when_the_accept_loop_ends(self):
+        # Wired into main's finally, so a SIGTERM shutdown reports it.
+        src = Path(_mod().__file__).read_text()
+        self.assertIn("listener.log_summary()", src)
+
+
 class TestSocketActivation(unittest.TestCase):
     """The process takes its sockets from the .socket unit, and fails loudly
     if not: a fallback bind would move the bind back into the workload SELinux

@@ -46,10 +46,20 @@ element is armed by the inspector's own unit, not this helper: an element
 resolves to a cgroup id at add time and systemd makes a fresh cgroup on
 every start, so the add belongs to the unit that owns the cgroup, and the
 remove to its ExecStopPost — "the only point at which a path still resolves
-to the id being retired". T5 wires those builders in. A premise owed by that
-same wiring: during rung 1 the workload's tinyproxy cgroup must be in
-wl_inspect_cg as well — its upstream CONNECT leg is tcp dport 443 from the
-same uid and would otherwise be redirected into a listener that only logs.
+to the id being retired". T5 wires those builders in.
+
+That wiring owed one more premise, and it is now paid: during rung 1 the
+workload's tinyproxy cgroup must be in wl_inspect_cg as well — its upstream
+CONNECT leg is tcp dport 443 from the same uid and would otherwise be
+redirected into a listener that only logs. `vm_proxy_cgroup_inspect_command`
+builds that element and the *proxy* unit arms it, not this helper, for the
+same cgroup-id reason as the rest: the id only exists once the proxy has
+started. So a filtered VM with a hostname policy has two cgroups exempt from
+the redirect, armed by two different units, and neither unit can arm the
+other's. Proven end to end rather than argued: proxied HTTPS through a real
+guest returns 200 with the inspector enforcing (tests/manual/inspect_rig.py),
+which is the only check that exercises the exemption at all — every other
+probe in that rig would pass with it missing.
 
 EXIT CODES
 

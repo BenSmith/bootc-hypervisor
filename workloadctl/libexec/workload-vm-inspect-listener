@@ -166,9 +166,19 @@ class Ceiling:
             self._held += 1
             return True
 
-    def release(self):
+    def release(self, *, refused=False):
+        """Give a slot back.
+
+        `refused` marks the give-back as a connection that was admitted but
+        never served, so the tally counts every turned-away connection and not
+        only the ones the cap itself turned away. Both reach the guest the same
+        way — a closed connection — so a total that counted just one of them
+        would understate what the guest saw.
+        """
         with self._lock:
             self._held -= 1
+            if refused:
+                self.rejected += 1
 
 
 class Listener:
@@ -226,9 +236,25 @@ class Listener:
             return
         # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
         # accept loop does not wait on the connections it already took.
-        threading.Thread(
-            target=self._serve, args=(conn, peer, local, plane),
-            daemon=True).start()
+        #
+        # The slot is admitted before the thread exists, so the failure to
+        # start one has to give it back here. Thread.start() raises RuntimeError
+        # when the process cannot get another thread — exactly the condition a
+        # connection storm produces, and exactly when the ceiling matters. A
+        # leaked slot is never returned by anything: _serve's release only runs
+        # for a thread that ran, so each failure lowers the effective ceiling
+        # permanently and the listener degrades to refusing every connection
+        # while still reporting itself active.
+        try:
+            threading.Thread(
+                target=self._serve, args=(conn, peer, local, plane),
+                daemon=True).start()
+        except RuntimeError as exc:
+            self._ceiling.release(refused=True)
+            self._log(
+                f"rejected plane={plane} local={_fmt(local)} "
+                f"peer={_fmt(peer)} reason='cannot start thread: {exc}'")
+            conn.close()
 
     def _serve(self, conn, peer, local, plane):
         try:
@@ -239,6 +265,26 @@ class Listener:
         finally:
             conn.close()
             self._ceiling.release()
+
+    @property
+    def rejected(self) -> int:
+        """How many connections this process turned away.
+
+        A ceiling nobody can read is indistinguishable from one that never
+        fires: the guest sees closed connections either way, and the operator
+        has no way to tell a listener that refused 40,000 connections from one
+        that was never reached. Reported on shutdown by `log_summary`.
+        """
+        return self._ceiling.rejected
+
+    def log_summary(self):
+        """One line, at shutdown, naming what was refused.
+
+        Emitted unconditionally — a zero is the useful reading most of the
+        time, because it is what distinguishes "the ceiling never fired" from
+        "nothing was logged about it".
+        """
+        self._log(f"stopped: {self.rejected} connection(s) rejected")
 
     def _log(self, line):
         print(line, file=self._out, flush=True)
@@ -255,6 +301,7 @@ def main():
     try:
         listener.accept_loop()
     finally:
+        listener.log_summary()
         listener.close()
     return 0
 
