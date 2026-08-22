@@ -2122,7 +2122,13 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     ):
         svc.add("ExecStartPre",
                 "+" + " ".join(dq(a) for a in cmd))
-    svc.add("ExecStart", VM_INSPECT_LISTENER_BIN)
+    # The workload name is an argument, not something the listener derives.
+    # It is socket-activated with four identically-named fds, so there is
+    # nothing on the socket to recover it from, and the alternative -- reading
+    # it back out of getpwuid(geteuid()) -- would make the listener's identity
+    # depend on the _wl- naming convention instead of on the unit it was
+    # generated for. It is what the listener resolves its policy path from.
+    svc.add("ExecStart", f"{VM_INSPECT_LISTENER_BIN} {dq(name)}")
     # Remove both exemptions on stop, kill and failure. ExecStopPost so a
     # killed or failed inspector still withdraws them; `-+` tolerant because
     # the elements are legitimately absent when the start failed before

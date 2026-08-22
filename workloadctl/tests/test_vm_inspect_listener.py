@@ -9,13 +9,20 @@ that the installed path agrees with the constant the unit's ExecStart reads.
 """
 
 import io
+import json
 import os
+import shutil
+import socket
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
 from tests import load_script
-from vm import VM_INSPECT_LISTENER_BIN, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
+from vm import (
+    VM_INSPECT_LISTENER_BIN, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
+    vm_hostname_match, vm_inspect_policy,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER_FILE = ROOT / "libexec" / "workload-vm-inspect-listener"
@@ -88,10 +95,17 @@ class TestPlaneDetection(unittest.TestCase):
         self.assertIsNone(mod.plane_for_port(9999))
 
     def test_the_plane_in_the_logged_line_comes_from_getsockname(self):
-        local = ("198.18.0.1", VM_INSPECT_PORT_TLS)
+        """Driven on the cleartext plane, which is the one still log-only.
+
+        The TLS plane now reads bytes off the socket, so a mock connection
+        cannot stand in for one; TestTlsPlane drives that side over a real
+        socketpair. The property under test is the same either way -- the
+        plane in the line is the accepting port, not the fd name.
+        """
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
         log = _serve_line(local)
-        self.assertIn("plane=tls", log)
-        self.assertIn(f"local=198.18.0.1:{VM_INSPECT_PORT_TLS}", log)
+        self.assertIn("plane=cleartext", log)
+        self.assertIn(f"local=198.18.0.1:{VM_INSPECT_PORT_CLEARTEXT}", log)
         self.assertIn("peer=192.0.2.1:1024", log)
 
 
@@ -320,6 +334,319 @@ class TestInstalledPath(unittest.TestCase):
         source = LISTENER_FILE.read_text()
         self.assertNotIn("8080", source)
         self.assertNotIn("8443", source)
+
+
+# --- rung 2: the TLS plane ---
+
+
+def _hello_bytes(extensions=b"", *, server_name="example.com"):
+    """A ClientHello, wrapped in one TLS record.
+
+    Built by hand rather than taken from a capture so each test can state the
+    one thing it varies -- a GREASE extension, an oversized block, a name in a
+    different case -- against an otherwise ordinary hello.
+    """
+    ext = b""
+    if server_name is not None:
+        host = server_name.encode()
+        entry = b"\x00" + len(host).to_bytes(2, "big") + host
+        sni = len(entry).to_bytes(2, "big") + entry
+        ext += b"\x00\x00" + len(sni).to_bytes(2, "big") + sni
+    ext += extensions
+    body = (
+        b"\x03\x03"                    # legacy_version
+        + b"\xaa" * 32                  # random
+        + b"\x00"                      # legacy_session_id (empty)
+        + b"\x00\x02\x13\x01"         # cipher_suites
+        + b"\x01\x00"                  # legacy_compression_methods
+        + len(ext).to_bytes(2, "big") + ext
+    )
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
+
+
+def _grease_extension(value=0x0a0a):
+    """One GREASE extension (RFC 8701), which every ECH-capable client sends
+    with no ECH config at all."""
+    return value.to_bytes(2, "big") + b"\x00\x00"
+
+
+class TestClientHelloParser(unittest.TestCase):
+    """Enough of RFC 8446 §4.1.2 to read a name, and nothing more."""
+
+    def test_a_plain_hello_yields_its_server_name(self):
+        mod = _mod()
+        raw = _hello_bytes()
+        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        self.assertEqual(hello.server_name, "example.com")
+
+    def test_a_grease_hello_parses(self):
+        """GREASE gets no special case and must not need one: a reserved
+        extension type is a well-formed extension, skipped by its length like
+        any other. Code that enumerated the reserved values could get the list
+        wrong; code that ignores them cannot."""
+        mod = _mod()
+        raw = _hello_bytes(_grease_extension() + _grease_extension(0x1a1a))
+        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        self.assertEqual(hello.server_name, "example.com")
+        self.assertIn(0x0a0a, hello.extensions)
+
+    def test_a_three_hundred_byte_extension_block_parses(self):
+        """A hello with a large extension block -- a post-quantum key share is
+        the case that made this ordinary -- must parse, and must parse when it
+        spans more than one TLS record."""
+        mod = _mod()
+        big = b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300
+        raw = _hello_bytes(big)
+        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        self.assertEqual(hello.server_name, "example.com")
+
+    def test_a_hello_split_across_reads_is_reassembled(self):
+        """The peek must not assume one recv is one record: TCP is a stream,
+        and a hello that arrives in two segments is the common case for the
+        large ones above."""
+        mod = _mod()
+        raw = _hello_bytes(b"\x00\x2a" + (300).to_bytes(2, "big") + b"\x00" * 300)
+        sock = _FakeSocket([raw[:20], raw[20:100], raw[100:]])
+        got, hello = mod.read_client_hello(sock)
+        self.assertEqual(hello.server_name, "example.com")
+        self.assertEqual(got, raw)
+
+    def test_a_hello_with_no_sni_reads_but_names_nothing(self):
+        """Legal TLS, and simply unallowlistable: there is no name to match."""
+        mod = _mod()
+        raw = _hello_bytes(server_name=None)
+        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        self.assertIsNone(hello.server_name)
+
+    def test_a_truncated_length_is_refused_not_silently_short(self):
+        """Every length in a ClientHello is written by the peer. Python's
+        slicing returns a short result rather than raising, so a parser that
+        sliced would accept a field the peer said was longer than it sent."""
+        mod = _mod()
+        raw = _hello_bytes()
+        # Keep the record header honest, cut the body.
+        cut = raw[:5] + raw[5:20]
+        cut = cut[:3] + (15).to_bytes(2, "big") + cut[5:]
+        with self.assertRaises(mod.HelloUnreadable):
+            mod.read_client_hello(_FakeSocket([cut]))
+
+    def test_a_non_handshake_first_byte_is_refused(self):
+        mod = _mod()
+        with self.assertRaises(mod.HelloUnreadable):
+            mod.read_client_hello(_FakeSocket([b"GET / HTTP/1.1\r\n\r\n"]))
+
+    def test_an_oversized_hello_is_refused_rather_than_buffered(self):
+        """The read loop is driven by lengths the guest writes, so it needs a
+        bound that is not one of them."""
+        mod = _mod()
+        raw = b"\x16\x03\x01" + (60000).to_bytes(2, "big")
+        with self.assertRaises(mod.HelloUnreadable):
+            mod.read_client_hello(_FakeSocket([raw]), max_bytes=1024)
+
+
+class _FakeSocket:
+    """A socket that yields a fixed script of reads. Returns b"" when spent,
+    which is what a real socket does at EOF."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def recv(self, _n):
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+class TestHostnameMatching(unittest.TestCase):
+    """One matcher, shared with the cleartext plane and with tinyproxy's list."""
+
+    def test_a_name_differing_only_in_case_matches(self):
+        """DNS is case-insensitive and fnmatchcase is not, which is exactly
+        why both sides are normalised before it is called."""
+        self.assertTrue(vm_hostname_match("EXAMPLE.COM", ["example.com"]))
+        self.assertTrue(vm_hostname_match("example.com", ["Example.COM"]))
+
+    def test_a_trailing_root_dot_matches(self):
+        """`example.com.` and `example.com` are the same name; a guest that
+        writes either spelling gets the same decision, or the spelling is the
+        bypass."""
+        self.assertTrue(vm_hostname_match("example.com.", ["example.com"]))
+
+    def test_the_apex_trap_is_preserved(self):
+        """`*.example.com` does not authorise `example.com`. Documented in
+        three tracked files and matched this way by tinyproxy today: widening
+        it here would silently grant every existing config a destination its
+        operator did not write down."""
+        self.assertFalse(vm_hostname_match("example.com", ["*.example.com"]))
+        self.assertTrue(vm_hostname_match("a.example.com", ["*.example.com"]))
+
+    def test_an_empty_list_authorises_nothing(self):
+        self.assertFalse(vm_hostname_match("example.com", []))
+
+
+class TestPolicyLoading(unittest.TestCase):
+    """The lists are read once, at start, out of the runtime directory."""
+
+    def _write(self, doc):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "inspect.json")
+        with open(path, "w") as f:
+            f.write(doc)
+        return path
+
+    def test_the_document_the_helper_writes_is_the_one_the_listener_reads(self):
+        """The two halves are tested against each other, not against a literal:
+        a listener reading a key the helper does not write is a policy that
+        loads clean and authorises nothing."""
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy(
+            {"hosts": ["example.com"], "tls": "splice"})))
+        policy = mod.load_policy(path)
+        self.assertEqual(policy.hosts, ("example.com",))
+        self.assertEqual(policy.tls, "splice")
+
+    def test_a_missing_document_is_an_error_not_an_empty_policy(self):
+        """An empty `hosts` list is a legal configuration, so a listener that
+        fell back to one could not tell "the operator allowed nothing" from
+        "the file was not there" -- and would enforce the strictest reading of
+        a policy it never read while reporting itself healthy."""
+        mod = _mod()
+        with self.assertRaises(OSError):
+            mod.load_policy("/nonexistent/inspect.json")
+
+    def test_a_malformed_document_is_an_error(self):
+        mod = _mod()
+        with self.assertRaises(ValueError):
+            mod.load_policy(self._write("[]"))
+        with self.assertRaises(ValueError):
+            mod.load_policy(self._write('{"hosts": "example.com"}'))
+
+    def test_main_refuses_without_a_workload_name(self):
+        """argv[1] is how the listener knows which policy is its own; without
+        it there is nothing on four identically-named fds to recover it from."""
+        mod = _mod()
+        self.assertEqual(mod.main(["x"]), 2)
+
+
+class TestTlsPlane(unittest.TestCase):
+    """Peek, match, splice -- driven over real sockets, because the plane now
+    reads and writes bytes and a mock cannot stand in for one."""
+
+    def _listener(self, hosts):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+        return mod, listener, out
+
+    def _client(self, payload):
+        """A connected socketpair with `payload` already queued from the guest
+        side. Returns the end the listener is given."""
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(payload)
+        ours.settimeout(2.0)
+        return ours, guest
+
+    def test_an_unreadable_hello_is_a_distinct_reason_from_a_name_miss(self):
+        """Both fail the guest's connection identically. An operator with one
+        bucket for the two cannot tell a guest reaching for a host it may not
+        have from a guest speaking something that is not TLS at the TLS port,
+        which is the tunnelling signature."""
+        mod, listener, out = self._listener(["example.com"])
+        conn, _ = self._client(b"GET / HTTP/1.1\r\n\r\n")
+        listener._serve_tls(conn, "plane=tls")
+        unreadable = out.getvalue()
+
+        mod, listener, out = self._listener(["allowed.example"])
+        conn, _ = self._client(_hello_bytes(server_name="denied.example"))
+        listener._serve_tls(conn, "plane=tls")
+        miss = out.getvalue()
+
+        self.assertIn("no readable name", unreadable)
+        self.assertIn("not allowlisted", miss)
+        self.assertNotIn("not allowlisted", unreadable)
+        self.assertNotIn("no readable name", miss)
+
+    def test_a_hello_with_no_name_is_a_no_readable_name_drop(self):
+        _, listener, out = self._listener(["example.com"])
+        conn, _ = self._client(_hello_bytes(server_name=None))
+        listener._serve_tls(conn, "plane=tls")
+        self.assertIn("no readable name", out.getvalue())
+
+    def test_an_unlisted_name_never_reaches_an_upstream(self):
+        """The drop is the point: a connection that got as far as dialling
+        upstream has already told the network which host the guest wanted."""
+        _, listener, out = self._listener(["allowed.example"])
+        conn, _ = self._client(_hello_bytes(server_name="denied.example"))
+        with unittest.mock.patch.object(socket, "create_connection") as dial:
+            listener._serve_tls(conn, "plane=tls")
+        dial.assert_not_called()
+        self.assertIn("host=denied.example", out.getvalue())
+
+    def test_the_bytes_replayed_upstream_are_the_bytes_read(self):
+        """The splice property, and the only test that holds it.
+
+        A ClientHello re-serialised from a parse is a different ClientHello --
+        different extension order, different GREASE, a different fingerprint --
+        so the server would complete a handshake with a client that is not the
+        guest. Byte-identical is the whole claim of `tls = "splice"`.
+        """
+        mod, listener, _ = self._listener(["example.com"])
+        raw = _hello_bytes(_grease_extension())
+        conn, guest = self._client(raw)
+        upstream, far = socket.socketpair()
+        self.addCleanup(upstream.close)
+        self.addCleanup(far.close)
+        with unittest.mock.patch.object(
+                socket, "create_connection", return_value=upstream) as dial:
+            # Close the guest end after the hello so the relay ends promptly;
+            # the assertion is about what reached the far side first.
+            guest.shutdown(socket.SHUT_WR)
+            listener._serve_tls(conn, "plane=tls")
+        far.settimeout(2.0)
+        self.assertEqual(far.recv(len(raw)), raw)
+        self.assertEqual(dial.call_args.args[0], ("example.com", 443))
+
+    def test_the_upstream_is_dialled_by_name_not_by_address(self):
+        """§7.4. The address the guest aimed at is this inspector's own
+        listener -- the redirect already rewrote it -- so resolving the
+        authorised name here is what makes the destination the one the policy
+        named rather than one the guest chose."""
+        _, listener, _ = self._listener(["*.example.com"])
+        conn, guest = self._client(_hello_bytes(server_name="a.example.com"))
+        guest.shutdown(socket.SHUT_WR)
+        upstream, far = socket.socketpair()
+        self.addCleanup(upstream.close)
+        self.addCleanup(far.close)
+        with unittest.mock.patch.object(
+                socket, "create_connection", return_value=upstream) as dial:
+            listener._serve_tls(conn, "plane=tls")
+        host, port = dial.call_args.args[0]
+        self.assertEqual(host, "a.example.com")
+        self.assertEqual(port, 443)
+
+    def test_an_unreachable_upstream_is_its_own_reason(self):
+        _, listener, out = self._listener(["example.com"])
+        conn, _ = self._client(_hello_bytes())
+        with unittest.mock.patch.object(
+                socket, "create_connection",
+                side_effect=OSError("Name or service not known")):
+            listener._serve_tls(conn, "plane=tls")
+        self.assertIn("upstream unreachable", out.getvalue())
+        self.assertNotIn("not allowlisted", out.getvalue())
+
+
+class TestCleartextPlaneUnchanged(unittest.TestCase):
+    """Port 80 is still log-only; tinyproxy filters it by name today, so this
+    unit neither regressed it nor took it over. T4b does."""
+
+    def test_the_cleartext_plane_still_only_logs(self):
+        log = _serve_line(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))
+        self.assertIn("plane=cleartext", log)
+        self.assertNotIn("drop", log)
+        self.assertNotIn("splice", log)
 
 
 if __name__ == "__main__":

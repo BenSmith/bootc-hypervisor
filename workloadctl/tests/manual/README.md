@@ -130,7 +130,10 @@ no `hosts`, so the guest has no proxy variables at all and its dial to 80/443
 is DNAT'd onto the listener — the rung's actual claim. The `proxy` arm has
 `hosts`, so tinyproxy runs and its upstream `CONNECT` leg is `tcp dport 443`
 from the same uid; without the `wl_inspect_cg` exemption that leg is redirected
-into a listener that only logs and every proxied HTTPS request hangs. **That
+into the inspector — which, from rung 2, terminates it: the proxy's connection
+to its own upstream is answered by the listener it was dialling past, and every
+proxied HTTPS request fails. (When the rig was first green the listener only
+logged, so the same failure presented as a hang.) **That
 exemption has no unit test that can see it fail** — the element resolves a
 cgroup id at add time, so nothing static can tell an armed one from a missing
 one. The single-line difference between the arms is what makes a failure

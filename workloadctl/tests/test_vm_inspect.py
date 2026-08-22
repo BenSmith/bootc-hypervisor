@@ -21,7 +21,8 @@ from vm import (
     vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
     vm_inspect_element_commands, vm_inspect_link_address_commands,
     vm_inspect_link_delete_commands, vm_inspect_map_elements,
-    vm_inspect_self_elements,
+    vm_inspect_policy, vm_inspect_policy_path, vm_inspect_self_elements,
+    vm_proxy_hosts, vm_proxy_runtime_dir, VM_TLS_DEFAULT,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -350,6 +351,58 @@ class TestHelperArmsBothTables(unittest.TestCase):
         # check=True" and a substring search would match that.
         self.assertNotIn("run(argv, check=True)", down)
         self.assertIn("except ValueError", down)
+
+    def test_up_writes_the_policy_before_it_arms_the_redirect(self):
+        """The listener is socket-activated, so the guest's first dial can
+        start it the instant the redirect exists. A policy written after the
+        arming is a window in which the listener starts, cannot read its
+        lists, and fails -- on a connection the guest already made.
+        """
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertIn("write_policy(name)", up)
+        self.assertLess(up.index("write_policy(name)"),
+                        up.index("vm_inspect_element_commands"))
+
+    def test_the_policy_is_written_group_readable_and_not_world_readable(self):
+        """The listener runs as _wl-<name> and must read it; 0640 rather than
+        0644 keeps one workload's policy from being enumerable by another,
+        exactly as the proxy's generated files are."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        write = source[source.index("def write_policy("):source.index("def up(")]
+        self.assertIn("0o640", write)
+        self.assertIn("os.replace(tmp, path)", write)
+
+
+class TestPolicyDocument(unittest.TestCase):
+    """What `hosts` means to the inspector, and what `internal` does not."""
+
+    def test_the_hosts_list_is_the_one_tinyproxy_is_given(self):
+        """At this rung the two enforce the same patterns by two mechanisms.
+        Generating them from one source is what keeps a redirected connection
+        and a proxied one making the same decision about the same name."""
+        net = {"hosts": ["*.example.com", "git.local"]}
+        self.assertEqual(vm_inspect_policy(net)["hosts"], vm_proxy_hosts(net))
+
+    def test_internal_hosts_are_not_added_to_the_allowlist(self):
+        """An `internal` entry names a host that is ALREADY on a list --
+        validation refuses one that is not -- and what it excepts is the
+        inspector's upstream leg from the internal drop. Adding it here would
+        make it a second, quieter way to authorise a name."""
+        net = {"hosts": ["git.local"],
+               "internal": [{"host": "git.local", "reason": "the forge"}]}
+        self.assertEqual(vm_inspect_policy(net)["hosts"], ["git.local"])
+
+    def test_the_tls_mode_travels_with_the_lists(self):
+        self.assertEqual(vm_inspect_policy({})["tls"], VM_TLS_DEFAULT)
+        self.assertEqual(vm_inspect_policy({"tls": "splice"})["tls"], "splice")
+
+    def test_the_policy_path_is_in_the_workloads_runtime_dir(self):
+        """The same directory tinyproxy.conf is written into, and for the same
+        reason: /run does not exist when the boot generator runs, so writing at
+        start is what makes an edited list apply on a plain restart."""
+        self.assertEqual(vm_inspect_policy_path("web"),
+                         f"{vm_proxy_runtime_dir('web')}/inspect.json")
 
 
 if __name__ == "__main__":

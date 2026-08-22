@@ -34,6 +34,15 @@ what it sees, and a stopped workload's listener address is a line nobody can
 explain. Removal tolerates "Cannot assign requested address" for the same
 reason the add tolerates "assigned".
 
+WHAT ELSE IS WRITTEN HERE
+
+The inspector's policy document, /run/workload-vm/<name>/inspect.json. It is
+written here rather than by the generator for the reason workload-vm-proxy
+writes tinyproxy.conf here: /run does not exist at generate time, and writing
+at start is what makes an edited `hosts` list take effect on a plain restart.
+The listener reads it once, at start, and holds it for the life of the process
+— which is why the inspect service is PartOf= the VM.
+
 WHAT IS ARMED HERE THAT IS NOT KEYED ON A PORT
 
 The `wl_internal_ok4/6` destination exemptions ([[vm.network.internal]]). Their
@@ -80,6 +89,8 @@ VM itself looks healthy. `down` is tolerant: its elements are legitimately
 absent whenever the start failed before installing them, and the stop must
 not block.
 """
+import json
+import os
 import pwd
 import subprocess
 import sys
@@ -90,6 +101,7 @@ from vm import (
     NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
     ensure_advertised_interface, vm_inspect_element_commands,
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
+    vm_inspect_policy, vm_inspect_policy_path,
     vm_internal_hosts, vm_internal_ok_commands, vm_internal_resolve,
     vm_uses_inspect,
 )
@@ -127,6 +139,28 @@ def inspection_applies(net: dict) -> bool:
     return vm_uses_inspect({"vm": {"network": net}})
 
 
+def write_policy(name: str) -> str:
+    """Write the inspector's policy document. Returns its path.
+
+    Root-owned and 0640 with the workload's group, exactly as the proxy's
+    generated files are: the listener runs as _wl-<name> and needs to read it,
+    and 0640 rather than 0644 keeps one workload's policy from being
+    enumerable by another. Replaced rather than truncated in place, because a
+    restart racing a rewrite would otherwise read a half-written document and
+    fail its start over a file that is about to be complete.
+    """
+    path = vm_inspect_policy_path(name)
+    net = network_config(name)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(vm_inspect_policy(net), f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, path)
+    return path
+
+
 def up(name: str) -> int:
     net = network_config(name)
     if not inspection_applies(net):
@@ -137,6 +171,12 @@ def up(name: str) -> int:
         return 0
 
     uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+
+    # Before anything is armed: the listener is socket-activated, so the guest's
+    # first dial can start it the instant the redirect exists, and a listener
+    # that started ahead of its policy would fail its start rather than read a
+    # stale one -- but it would fail it on a connection the guest already made.
+    write_policy(name)
 
     ensure_advertised_interface(run)
     # Both skeletons, for the reason in the module docstring: the DNAT maps
@@ -180,7 +220,8 @@ def up(name: str) -> int:
     for argv in vm_internal_ok_commands(uid, addresses, "add"):
         run(argv, check=True)
 
-    log(f"  Inspector redirect armed for uid {uid}")
+    log(f"  Inspector redirect armed for uid {uid}, "
+        f"{len(net.get('hosts', []) or [])} host pattern(s)")
     if hosts:
         log(f"  Internal exemptions armed for {len(hosts)} host(s): "
             f"{', '.join(hosts)} -> {', '.join(str(a) for a in addresses)}")

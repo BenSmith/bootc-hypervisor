@@ -261,9 +261,19 @@ class TestGeneratedService(unittest.TestCase):
         self.assertEqual(sum("wl_proxy_cg" in ln for ln in post), 1)
 
     def test_execstart_is_the_listener_binary(self):
-        """The listener does not exist yet (T5b); that is the expected end
-        state of this unit of work."""
         self.assertIn(f"ExecStart={VM_INSPECT_LISTENER_BIN}", self.unit)
+
+    def test_execstart_names_the_workload(self):
+        """The listener resolves its policy path from argv[1].
+
+        Socket activation gives it four identically-named fds and no way to
+        recover which workload it serves, so an ExecStart that dropped the
+        argument produces a listener that cannot find inspect.json -- which
+        fails its start, but only on the guest's first dial, long after the
+        generator ran.
+        """
+        self.assertIn(f'ExecStart={VM_INSPECT_LISTENER_BIN} {dq("web")}',
+                      self.unit)
 
     def test_partof_the_vm(self):
         """PartOf= is what makes the service actually stop with the VM, which

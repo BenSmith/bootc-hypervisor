@@ -720,6 +720,78 @@ def vm_proxy_filter_file(hosts: list[str]) -> str:
     return "".join(f"{host}\n" for host in hosts)
 
 
+# --- The inspector's policy document (§7.7.1, §13) ---
+#
+# The listener is socket-activated and long-lived, so it reads its lists once,
+# at start, out of the workload's runtime directory — the same place and the
+# same moment as tinyproxy's generated config, and for the same reason: /run
+# does not exist when the boot generator runs, and writing at start is what
+# makes an edited list take effect on a plain `systemctl restart` with no
+# regeneration. §13 states that recovery property, and the inspect service's
+# PartOf= on the VM is what enforces it; a listener that held its lists in a
+# file written at generate time would keep enforcing the previous boot's policy.
+#
+# JSON rather than a bare line-per-pattern file like hosts.allow, because this
+# document carries a mode as well as a list and will carry more of both.
+VM_INSPECT_POLICY_FILE = "inspect.json"
+
+
+def vm_inspect_policy_path(name: str) -> str:
+    """Where one workload's inspector reads its lists from."""
+    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_POLICY_FILE}"
+
+
+def vm_inspect_policy(net: dict) -> dict:
+    """The inspector's policy document for one workload.
+
+    `hosts` is the same list tinyproxy is given, deliberately: at this rung the
+    two enforce the same patterns by two mechanisms, and generating them from
+    one source is what keeps a redirected connection and a proxied one making
+    the same decision. `internal` names are NOT added here — an `internal`
+    entry names a host that is already on a list (validation refuses one that is
+    not), and it excepts the inspector's *upstream* leg from the internal drop
+    rather than authorising a name.
+    """
+    return {
+        "tls": net.get("tls", VM_TLS_DEFAULT),
+        "hosts": vm_proxy_hosts(net),
+    }
+
+
+def vm_normalise_hostname(host: str) -> str:
+    """A hostname in the one form every match in this design is made against.
+
+    Lowercased and stripped of a single trailing root dot. Both halves matter:
+    DNS names are case-insensitive, and `example.com.` and `example.com` are the
+    same name — a guest that writes either spelling must get the same decision,
+    or the spelling becomes the bypass.
+    """
+    host = host.strip().lower()
+    return host[:-1] if host.endswith(".") and host != "." else host
+
+
+def vm_hostname_match(host: str, patterns) -> bool:
+    """Whether a hostname is authorised by a list of fnmatch patterns.
+
+    `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`. The plain form normalises its
+    arguments through os.path.normcase, which is a no-op on Linux and lowercases
+    on other platforms — so it is case-insensitive only by accident of platform,
+    and the operators' patterns are the ones tinyproxy already matches. Both
+    sides are normalised here instead, which is the same answer everywhere.
+
+    The apex trap is preserved, not fixed: `*.example.com` does not authorise
+    `example.com`. That is fnmatch's behaviour, it is what tinyproxy does with
+    the same list today, and three tracked files document it. A rung that
+    quietly widened it would silently grant every existing config a destination
+    its operator did not write down.
+    """
+    host = vm_normalise_hostname(host)
+    if not host:
+        return False
+    return any(fnmatch.fnmatchcase(host, vm_normalise_hostname(p))
+               for p in patterns)
+
+
 def vm_proxy_element(uid: int, listen_addr: str) -> str:
     """This workload's element in the uid -> listener map."""
     return f"{uid} : {listen_addr} . {VM_PROXY_PORT}"

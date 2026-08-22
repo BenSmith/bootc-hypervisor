@@ -1,15 +1,33 @@
 #!/usr/bin/python3
 """
-workload-vm-inspect-listener: the socket-activated listener, rung 1 of the
-transparent egress inspector (the inspector design, §7.7.1).
+workload-vm-inspect-listener: the socket-activated listener, the transparent
+egress inspector (the inspector design, §7.7.1).
 
-It only logs. A connection arrives, one line is written to the journal, the
-connection is closed. That is the whole of rung 1's claim: no ClientHello
-peek, no hostname matching, no upstream connection, no resolver, no policy
-file. Rung 2 adds the peek and the policy; this program is the shape it rides
-in — the socket, the concurrency, and the timeout discipline — built and
-tested first, so a later rung changes what a connection does, not how the
-process holds it.
+Rung 1 built the shape — the socket, the concurrency, the timeout discipline —
+and only logged. Rung 2's TLS plane is here: a connection on 443 has its
+ClientHello read, its server name matched against this workload's `hosts`, and
+is then SPLICED byte-exact to that name's real host, or closed. The cleartext
+plane still only logs; it is the next unit.
+
+NOTHING IS DECRYPTED
+
+There is no CA until rung 3, so `tls = "splice"` is the only mode and the peek
+is deliberately non-committal: the bytes read to find the name are the bytes
+replayed upstream, verbatim, headers included. A ClientHello reconstructed from
+a parse is a different ClientHello — different extension order, different
+GREASE, a different JA3 — so the raw buffer is what travels and the parse is
+only ever consulted for a decision.
+
+WHERE THE POLICY COMES FROM
+
+/run/workload-vm/<name>/inspect.json, written by `workload-vm-inspect up` (the
+socket unit's ExecStartPre) and read HERE once, at start. The workload name is
+argv[1]: this process is socket-activated with four identical fd names, so
+there is nothing on the socket to derive it from, and deriving it from getpwuid
+would make the listener's identity depend on a naming convention rather than on
+what the unit was generated for. A policy that cannot be read is a failed
+start, never an empty allowlist — an empty allowlist is a listener that refuses
+everything while reporting itself healthy.
 
 WHY IT NEVER BINDS
 
@@ -45,21 +63,29 @@ ThreadingMixIn sets them, so a SIGTERM that stops the accept loop does not
 wait on the connections it already took.
 
 Every accepted socket gets an explicit timeout before it is touched, none of
-them the stdlib default. This rung reads no bytes, so the number is only ever
-a ceiling on a socket nobody reads; it is set anyway so rung 2's peek inherits
-a stated value rather than blocking forever.
+them the stdlib default. Two numbers, not one: CONNECTION_TIMEOUT bounds the
+handshake peek, and a spliced connection is then moved to RELAY_IDLE_TIMEOUT.
+They cannot be the same number — a peek that waited as long as a long-lived
+tunnel is idle gives a guest a cheap way to pin all 128 slots, and a tunnel
+held to the peek's timeout is cut mid-download every time the far end pauses.
 """
 
+import json
 import os
 import selectors
 import signal
 import socket
 import sys
 import threading
+from typing import NamedTuple
 
 sys.dont_write_bytecode = True
 
-from vm import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
+from vm import (
+    VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
+    VM_TLS_DEFAULT, vm_hostname_match, vm_inspect_policy_path,
+    vm_normalise_hostname,
+)
 
 
 # --- concurrency and timeout, module-local ---
@@ -75,11 +101,30 @@ from vm import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
 # is refused, not queued.
 MAX_CONNECTIONS = 128
 
-# The timeout set on every accepted socket, in seconds. This rung reads no
-# bytes, so it is only a ceiling on a socket nobody reads; the point of setting
-# it now is that rung 2's peek inherits a stated number rather than blocking
-# forever.
+# The timeout on an accepted socket up to and including the decision, in
+# seconds. It bounds the ClientHello peek and the upstream connect, which are
+# the only reads made before a connection is either spliced or closed. Short on
+# purpose: a connection that has not said what it wants is holding one of
+# MAX_CONNECTIONS slots for nothing.
 CONNECTION_TIMEOUT = 5.0
+
+# The timeout both sockets carry once a connection is spliced, in seconds. It is
+# an IDLE bound, not a lifetime: the relay loop rearms it on every direction of
+# traffic, so a long download is fine and a tunnel nobody is using is not. It
+# must be larger than CONNECTION_TIMEOUT — see the docstring for why the two
+# cannot be one number.
+RELAY_IDLE_TIMEOUT = 120.0
+
+# The buffer size the relay moves in each direction, in bytes.
+RELAY_CHUNK = 65536
+
+# The ceiling on how much is read looking for a complete ClientHello, in bytes.
+# A real one is a few hundred bytes; post-quantum key shares push it over a
+# single TCP segment but nowhere near this. The bound exists because the read
+# loop is otherwise driven by lengths the GUEST writes: without it, a peer that
+# opens a record and dribbles it holds a slot and grows a buffer for as long as
+# the idle timeout allows.
+CLIENTHELLO_MAX = 16384
 
 # How often the accept loop wakes to look for a stop, in seconds. select() is a
 # blocking call that a SIGTERM cannot make return (PEP 475 retries it), so the
@@ -144,6 +189,229 @@ def _fmt(addr):
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+# --- the policy document ---
+
+
+class Policy(NamedTuple):
+    """One workload's inspection lists, as read at start.
+
+    `hosts` is a tuple, not a list, because nothing may edit it after load: the
+    recovery contract is that an edited list applies on a RESTART, and a
+    listener that could mutate its own policy would make the restart optional
+    and the running policy unknowable from the file.
+    """
+
+    tls: str
+    hosts: tuple
+
+    @property
+    def summary(self) -> str:
+        return f"tls={self.tls} hosts={len(self.hosts)}"
+
+
+def load_policy(path):
+    """Read the policy document, or raise.
+
+    Deliberately without a default: a missing or unreadable document must fail
+    the start. The tempting fallback — an empty policy — is the worst of the
+    options, because an empty `hosts` list is a valid configuration (a workload
+    reachable only through `allow`), so the listener could not tell "the
+    operator allowed nothing" from "the file was not there" and would enforce
+    the strictest reading of a policy it never read.
+    """
+    with open(path) as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path}: expected a JSON object, got {type(doc).__name__}")
+    hosts = doc.get("hosts") or []
+    if not isinstance(hosts, list):
+        raise ValueError(f"{path}: 'hosts' is not a list")
+    return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts))
+
+
+# --- the ClientHello peek ---
+#
+# Enough of RFC 8446 §4.1.2 to read the server name and see which extensions are
+# present, and no more. It is not a TLS implementation and must not become one:
+# every field it does not need is skipped by its length, so an extension shape
+# it has never seen costs it nothing.
+
+TLS_HANDSHAKE = 0x16
+TLS_CLIENT_HELLO = 0x01
+TLS_EXT_SERVER_NAME = 0x0000
+TLS_SNI_HOST_NAME = 0x00
+
+
+class HelloUnreadable(Exception):
+    """The first bytes are not a ClientHello this can read a name out of.
+
+    A DISTINCT condition from "the name is not allowlisted", and the two must
+    stay distinguishable in the log and (from T6) in the counters. They fail the
+    connection identically, so an operator with one bucket for both cannot tell
+    a guest reaching for a host it may not have from a guest speaking something
+    that is not TLS on the TLS port — which is the tunnelling signature.
+    """
+
+
+class ClientHello(NamedTuple):
+    """What the peek extracts. `server_name` is None when the hello carries no
+    SNI extension at all, which is legal TLS and simply unallowlistable here.
+
+    `extensions` is every extension type in wire order, GREASE values included.
+    Nothing in this unit reads it; the ECH tripwire does, and recording it in
+    the parse rather than re-walking the buffer later is what keeps there being
+    one parser.
+    """
+
+    server_name: str
+    extensions: tuple
+
+
+class _Reader:
+    """A length-checked cursor over a byte string.
+
+    Every field in a ClientHello is preceded by a length the PEER wrote, so
+    every read here is bounds-checked and a short one raises HelloUnreadable
+    rather than returning a truncated field. Slicing past the end of a bytes
+    object in Python returns a short result silently, which for a parser driven
+    by attacker-supplied lengths is the whole bug class.
+    """
+
+    def __init__(self, buf):
+        self._buf = buf
+        self._pos = 0
+
+    def remaining(self) -> int:
+        return len(self._buf) - self._pos
+
+    def take(self, n: int) -> bytes:
+        if n < 0 or self.remaining() < n:
+            raise HelloUnreadable(
+                f"a length field claims {n} bytes with {self.remaining()} left")
+        out = self._buf[self._pos:self._pos + n]
+        self._pos += n
+        return out
+
+    def u8(self) -> int:
+        return self.take(1)[0]
+
+    def u16(self) -> int:
+        return int.from_bytes(self.take(2), "big")
+
+
+def _parse_server_name(data: bytes):
+    """The first host_name in a server_name extension, or None.
+
+    Non-ASCII is refused rather than decoded: a name on the wire is punycode by
+    RFC 6066, so bytes that are not ASCII are either a different encoding of a
+    name — which would match a pattern differently from the way it was written
+    — or not a name at all.
+    """
+    r = _Reader(data)
+    entries = _Reader(r.take(r.u16()))
+    while entries.remaining():
+        kind = entries.u8()
+        value = entries.take(entries.u16())
+        if kind == TLS_SNI_HOST_NAME:
+            try:
+                return value.decode("ascii")
+            except UnicodeDecodeError:
+                raise HelloUnreadable(
+                    "the server_name is not ASCII, so it is not a name as "
+                    "RFC 6066 puts one on the wire") from None
+    return None
+
+
+def parse_client_hello(msg: bytes) -> ClientHello:
+    """Parse a ClientHello handshake body (the 4-byte header already stripped).
+
+    GREASE (RFC 8701) needs no handling of its own and gets none: a GREASE
+    extension is a well-formed extension with a reserved type, so it is skipped
+    by its length like any other. Code that special-cased it would be code that
+    could get the list of reserved values wrong.
+
+    An ECH ClientHello parses like any other and yields the name it carries —
+    the cover name from the ECHConfig. That name is matched against the lists
+    exactly like a cleartext one; the tripwire keys on the ECH EXTENSION being
+    present, never on an absent or unexpected name, because an ECH hello has a
+    perfectly ordinary-looking one.
+    """
+    r = _Reader(msg)
+    r.take(2)              # legacy_version
+    r.take(32)             # random
+    r.take(r.u8())         # legacy_session_id
+    r.take(r.u16())        # cipher_suites
+    r.take(r.u8())         # legacy_compression_methods
+    if r.remaining() == 0:
+        # Legal, and pre-TLS1.3 only: a hello with no extension block has no
+        # SNI and so no name to match. Not an error — it is a readable hello
+        # that names nothing, which the caller reports as such.
+        return ClientHello(None, ())
+    exts = _Reader(r.take(r.u16()))
+    name = None
+    seen = []
+    while exts.remaining():
+        etype = exts.u16()
+        data = exts.take(exts.u16())
+        seen.append(etype)
+        if etype == TLS_EXT_SERVER_NAME and name is None:
+            name = _parse_server_name(data)
+    return ClientHello(name, tuple(seen))
+
+
+def read_client_hello(conn, max_bytes=CLIENTHELLO_MAX):
+    """Read until a whole ClientHello is in hand. Returns (raw, hello).
+
+    `raw` is every byte read off the socket, record headers included and
+    unmodified — that is what gets replayed upstream, and it is returned rather
+    than rebuilt because a re-serialised hello is a different hello. It may run
+    slightly past the end of the ClientHello if the peer coalesced more into the
+    same segment; replaying the surplus is correct, since it is the guest's own
+    next bytes in order.
+
+    The handshake message is reassembled across records: a large hello (a
+    post-quantum key share, say) legitimately spans more than one TLS record,
+    and a parser that read only the first record would fail exactly the clients
+    that are becoming the common case.
+    """
+    raw = b""
+    pos = 0          # how much of `raw` has been consumed as complete records
+    body = b""       # handshake bytes, record framing stripped
+    want = None      # the handshake message length, once its header is in hand
+    while True:
+        raw = _recv_at_least(conn, raw, pos + 5, max_bytes)
+        if raw[pos] != TLS_HANDSHAKE:
+            raise HelloUnreadable(
+                f"record type 0x{raw[pos]:02x} is not a TLS handshake record")
+        length = int.from_bytes(raw[pos + 3:pos + 5], "big")
+        raw = _recv_at_least(conn, raw, pos + 5 + length, max_bytes)
+        body += raw[pos + 5:pos + 5 + length]
+        pos += 5 + length
+        if want is None and len(body) >= 4:
+            if body[0] != TLS_CLIENT_HELLO:
+                raise HelloUnreadable(
+                    f"handshake type 0x{body[0]:02x} is not a ClientHello")
+            want = int.from_bytes(body[1:4], "big")
+        if want is not None and len(body) >= 4 + want:
+            return raw, parse_client_hello(body[4:4 + want])
+
+
+def _recv_at_least(conn, raw, n, max_bytes):
+    """Read until `raw` holds at least n bytes, or fail closed."""
+    while len(raw) < n:
+        if n > max_bytes:
+            raise HelloUnreadable(
+                f"a ClientHello over {max_bytes} bytes is not one we read")
+        try:
+            chunk = conn.recv(RELAY_CHUNK)
+        except OSError as exc:
+            raise HelloUnreadable(f"read failed: {exc}") from None
+        if not chunk:
+            raise HelloUnreadable("the connection closed mid-ClientHello")
+        raw += chunk
+    return raw
+
+
 class Ceiling:
     """Bounded, per-process: admit up to `limit` live connections, refuse the
     rest. Refuse, not queue — a connection over the cap is turned away
@@ -182,13 +450,18 @@ class Ceiling:
 
 
 class Listener:
-    """Accept on the inherited listeners and log one line per connection."""
+    """Accept on the inherited listeners and act on each connection by plane."""
 
-    def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS):
+    def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS, policy=None):
         self._sockets = list(sockets)
         self._out = out if out is not None else sys.stdout
         self._ceiling = Ceiling(limit)
         self._stop = threading.Event()
+        # An empty policy is a legal configuration and NOT a default: main()
+        # will not construct a Listener without one. The fallback exists so the
+        # rung-1 tests that only exercise the shape need not invent a policy.
+        self._policy = policy if policy is not None else Policy(
+            tls=VM_TLS_DEFAULT, hosts=())
 
     def stop(self):
         """Ask the accept loop to end; called from the SIGTERM handler."""
@@ -257,14 +530,97 @@ class Listener:
             conn.close()
 
     def _serve(self, conn, peer, local, plane):
+        where = f"plane={plane} local={_fmt(local)} peer={_fmt(peer)}"
         try:
-            self._log(
-                f"plane={plane} local={_fmt(local)} peer={_fmt(peer)}")
+            if plane == "tls":
+                self._serve_tls(conn, where)
+            else:
+                # The cleartext plane still only logs. Port 80 is redirected
+                # here already and tinyproxy filters it by name today, so this
+                # is not a hole this unit opened -- it is the half of the
+                # redirect the next unit takes over.
+                self._log(where)
         except OSError:
             pass
         finally:
             conn.close()
             self._ceiling.release()
+
+    def _serve_tls(self, conn, where):
+        """Peek, match, and either splice byte-exact or close.
+
+        The three outcomes are logged with THREE distinct reasons, not two:
+        a hello that could not be read, a name that is on no list, and an
+        upstream that could not be reached fail the guest's connection
+        identically, and an operator who cannot tell them apart cannot tell a
+        policy decision from a broken resolver from something speaking a
+        non-TLS protocol at the TLS port.
+        """
+        try:
+            raw, hello = read_client_hello(conn)
+        except HelloUnreadable as exc:
+            self._log(f"drop {where} reason='no readable name: {exc}'")
+            return
+        if not hello.server_name:
+            self._log(f"drop {where} reason='no readable name: the "
+                      f"ClientHello carries no server_name extension'")
+            return
+        host = vm_normalise_hostname(hello.server_name)
+        if not vm_hostname_match(host, self._policy.hosts):
+            self._log(f"drop {where} host={host} reason='not allowlisted'")
+            return
+        # Dial the NAME, never an address (§7.4). The address the guest aimed
+        # at is this inspector's own listener anyway -- the redirect already
+        # rewrote it -- so there is nothing to forward even if forwarding one
+        # were wanted, and resolving here is what makes the destination the one
+        # the policy authorised rather than one the guest chose.
+        try:
+            upstream = socket.create_connection(
+                (host, VM_INSPECT_ORIG_TLS), timeout=CONNECTION_TIMEOUT)
+        except OSError as exc:
+            self._log(f"drop {where} host={host} reason='upstream "
+                      f"unreachable: {exc}'")
+            return
+        try:
+            # The buffered hello, unmodified and before anything else. This is
+            # the splice property: the server sees the guest's own ClientHello,
+            # so the handshake it completes is with the guest, and this process
+            # never holds a key to it.
+            upstream.sendall(raw)
+            self._log(f"splice {where} host={host}")
+            self._relay(conn, upstream)
+        finally:
+            upstream.close()
+
+    def _relay(self, client, upstream):
+        """Move bytes both ways until either side closes or goes idle.
+
+        Both sockets are moved off the handshake timeout onto the idle one
+        first: up to here the numbers bounded a decision, and from here they
+        bound a tunnel.
+        """
+        for s in (client, upstream):
+            s.settimeout(RELAY_IDLE_TIMEOUT)
+        sel = selectors.DefaultSelector()
+        sel.register(client, selectors.EVENT_READ, upstream)
+        sel.register(upstream, selectors.EVENT_READ, client)
+        try:
+            while True:
+                events = sel.select(timeout=RELAY_IDLE_TIMEOUT)
+                if not events:
+                    return                      # idle: nothing either way
+                for key, _ in events:
+                    data = key.fileobj.recv(RELAY_CHUNK)
+                    if not data:
+                        # A close in either direction ends the whole splice.
+                        # Half-close forwarding would be more faithful to TCP,
+                        # but it also keeps a slot and a thread alive on a
+                        # direction the guest has already abandoned; the
+                        # ceiling is the reason to prefer the simpler end.
+                        return
+                    key.data.sendall(data)
+        finally:
+            sel.close()
 
     @property
     def rejected(self) -> int:
@@ -290,13 +646,27 @@ class Listener:
         print(line, file=self._out, flush=True)
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    if len(argv) != 2:
+        print(f"usage: {argv[0]} <workload-name>", file=sys.stderr)
+        return 2
+    policy_path = vm_inspect_policy_path(argv[1])
+    try:
+        policy = load_policy(policy_path)
+    except (OSError, ValueError) as exc:
+        # Loud, and before the sockets are touched. See load_policy: there is
+        # no empty-policy fallback, because it is indistinguishable from a
+        # legitimate empty allowlist.
+        print(f"error: could not read {policy_path}: {exc}", file=sys.stderr)
+        return 1
     try:
         sockets = inherited_listening_sockets()
     except NotSocketActivated as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    listener = Listener(sockets)
+    listener = Listener(sockets, policy=policy)
+    print(f"policy loaded from {policy_path}: {policy.summary}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
     try:
         listener.accept_loop()
