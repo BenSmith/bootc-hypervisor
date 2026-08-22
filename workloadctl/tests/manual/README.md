@@ -79,6 +79,44 @@ are meaningful. Two worth knowing in advance:
 
 Host-side logs are in `/var/lib/broker-rig/{broker,stub}.log`.
 
+## inspect_rig.py — does a guest with no proxy variables land in the inspector?
+
+Rung 1's headline claim, and the one thing about it that only a real boot can
+show. Needs a KVM host with the workloadctl RPM installed; it boots two
+throwaway VM workloads and probes them from inside, then purges them.
+
+```bash
+sudo python3 tests/manual/inspect_rig.py
+```
+
+**Two guests, differing in one config line.** The `plain` arm is filtered with
+no `hosts`, so the guest has no proxy variables at all and its dial to 80/443
+is DNAT'd onto the listener — the rung's actual claim. The `proxy` arm has
+`hosts`, so tinyproxy runs and its upstream `CONNECT` leg is `tcp dport 443`
+from the same uid; without the `wl_inspect_cg` exemption that leg is redirected
+into a listener that only logs and every proxied HTTPS request hangs. **That
+exemption has no unit test that can see it fail** — the element resolves a
+cgroup id at add time, so nothing static can tell an armed one from a missing
+one. The single-line difference between the arms is what makes a failure
+attributable to one half or the other.
+
+**What only a real boot showed.** Both defects this rig found were ordering
+against user creation, and both passed every unit test. The generator called
+`getpwnam` for `_wl-<name>` having only just written the sysusers config, so on
+a *first* enable the user did not exist, the `KeyError` hit the per-workload
+`try/except`, and the workload got **no VM units at all** — the existing test
+mocked `getpwnam`, which is precisely what hid it. And the inspect socket had no
+`After=workload-<name>-setup.service`, so it raced user creation and usually
+won. A mock of the thing that is missing at boot cannot see the failure.
+
+On a host with no IPv6 uplink the rig installs a temporary route to the probe
+address over the inspector's dummy link and removes it afterwards; without it
+the v6 probes die at the routing lookup, before nftables is consulted, which
+looks like a redirect defect and is not.
+
+Last green 2026-08-22, 17 assertions, on a bare-metal Fedora 44 KVM host, after
+the two ordering defects above were fixed.
+
 ## input_chain_rig.py — the two rung-1 measurements no unit test can make
 
 Both concern packets crossing a real kernel hook, which is why `just test`
