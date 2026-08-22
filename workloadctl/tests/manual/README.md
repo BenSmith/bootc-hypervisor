@@ -79,6 +79,42 @@ are meaningful. Two worth knowing in advance:
 
 Host-side logs are in `/var/lib/broker-rig/{broker,stub}.log`.
 
+## self_dial_rig.py — does the wrong-port counter count, and does `diagnose` say so?
+
+Needs root and a host with at least one workload uid; **no KVM and no VM**,
+everything happens in a throwaway network namespace. Install the RPM first — it
+reads the installed skeleton and imports the installed modules.
+
+```bash
+sudo python3 tests/manual/self_dial_rig.py
+```
+
+Three things have to hold and only the first has a unit test: the parser reads
+the element shape a counted set renders, the kernel increments that element on
+the dropped packet, and `diagnose` gets from the host's nft to the printed
+line. The second is why this exists — `meta skuid` cannot be exercised without
+a process that really owns the uid, so nothing under `just test` can send the
+packet, and a counter that never increments looks exactly like a guest that
+never self-dialled. The third is the seam, and every part of this rung that
+shipped inert shipped inert at a seam.
+
+**The element shape is the trap.** A set carrying `counter` renders its
+elements wrapped, `{"elem": {"val": {"concat": [...]}, "counter": {...}}}`,
+where an uncounted set renders them bare. `vm_owned_elements` matches the bare
+shape and so finds nothing at all in these sets. The rig reads a real
+incremented counter through the real reader, which is the only way to know the
+wrapped path was taken rather than assumed.
+
+**Two controls carry the rig.** A dial to a *served* port must not be counted —
+a self rule that caught those would drop every guest's own inspector traffic,
+which is the failure the rule ordering exists to avoid. And a *root* dial to
+the same address and port must not be counted: without that one, every other
+assertion still passes against a rule that has lost `meta skuid` and is
+dropping the address for everyone, host tooling included. Absent and zero are
+also held apart — an unarmed element reads as absent, not as zero.
+
+Last green 2026-08-22, 11 assertions, on a bare-metal Fedora 44 host.
+
 ## inspect_rig.py — does a guest with no proxy variables land in the inspector?
 
 Rung 1's headline claim, and the one thing about it that only a real boot can
