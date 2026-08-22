@@ -401,9 +401,12 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """The exemption that makes hostname policy work at all is unchanged;
         these rules only carve destinations out of it, so they must precede
         it or they never run."""
+        # By shape, and the shape is "cgroup and nothing else": the chain now
+        # also carries two internal EXEMPTIONS that are cgroup accepts with a
+        # set key, and matching one of those would test the wrong rule.
         blanket = next(i for i, r in enumerate(self.rules)
                        if NFT_SET_PROXY_CG in r and r.endswith("accept")
-                       and "dport" not in r)
+                       and "dport" not in r and "daddr" not in r)
         for i, r in enumerate(self.rules):
             if r.endswith("drop") and NFT_SET_PROXY_CG in r:
                 self.assertLess(i, blanket)
@@ -457,6 +460,10 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         ("inspector range guard v4", ("@wl_filtered", "ct direction original", "198.18.0.0/16", "drop")),
         ("inspector range guard v6", ("@wl_filtered", "ct direction original", "2001:2::/48", "drop")),
         ("proxy name resolution",   ("@wl_proxy_cg", "th dport 53", "accept")),
+        ("internal exemption v4",   ("@wl_proxy_cg", "@wl_internal_ok4",
+                                    "ct direction original", "accept")),
+        ("internal exemption v6",   ("@wl_proxy_cg", "@wl_internal_ok6",
+                                    "ct direction original", "accept")),
         ("proxy internal drop v4",  ("@wl_proxy_cg", "ct direction original",
                                     "@wl_internal4", "drop")),
         ("proxy internal drop v6",  ("@wl_proxy_cg", "ct direction original",
@@ -2032,3 +2039,171 @@ class TestReservedPlanes(unittest.TestCase):
         self.assertIsNone(vm_reserved_plane("2001:db8::1", 8443))
         self.assertIsNotNone(vm_reserved_plane("2001:2::c612:100", 8443))
         self.assertIsNotNone(vm_reserved_plane("198.18.1.4", 8443))
+
+
+class TestInternalOkAccept(unittest.TestCase):
+    """The `internal` exemption: the accept ahead of the internal drop (T3).
+
+    A per-workload accept keyed on (uid, address) and carrying NO PORT. The
+    missing port is safe only because of the cgroup match on the rule, and the
+    ordering is only useful because the accept precedes the drop it excepts --
+    so both are asserted, and both would otherwise fail silently.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = [ln.strip() for ln in SKELETON.read_text().splitlines()
+                     if ln.strip().startswith("add rule inet workload_filter "
+                                              "output")]
+
+    def _index(self, needle):
+        matches = [i for i, r in enumerate(self.rules) if needle in r]
+        self.assertEqual(len(matches), 1, f"expected one rule with {needle!r}, "
+                                          f"got {len(matches)}")
+        return matches[0]
+
+    def test_the_sets_are_declared(self):
+        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
+        text = SKELETON.read_text()
+        for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
+            self.assertIn(f"add set inet workload_filter {name} ", text)
+
+    def test_a_rule_reaches_each_set_by_name(self):
+        """Declaration is not wiring.
+
+        A set declared and referenced by nothing is indistinguishable from one
+        whose rule drifted to a different name: the skeleton loads, the helper
+        arms elements, and the accept never fires.
+        """
+        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6
+        for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
+            self.assertTrue(any(f"@{name}" in r for r in self.rules),
+                            f"no rule consults @{name}")
+
+    def test_the_accept_carries_the_inspector_cgroup_match(self):
+        """The whole of what makes a portless accept safe.
+
+        The set key holds a uid and an address and no port. The uid is shared
+        between the guest and the inspector -- which is why the drops here are
+        keyed on the cgroup in the first place -- so without this match the
+        very same element is an all-ports grant from the GUEST to a LAN
+        address. Dropping the match leaves a rule that still parses, still
+        matches, and means something else entirely.
+        """
+        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6, NFT_SET_PROXY_CG
+        for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
+            rule = self.rules[self._index(f"@{name}")]
+            self.assertIn(f"socket cgroupv2 level 2 @{NFT_SET_PROXY_CG}", rule)
+            self.assertIn("ct direction original", rule)
+
+    def test_the_accept_precedes_the_drop_it_excepts(self):
+        """Sequence position, not mere presence.
+
+        An accept after the drop it excepts is a rule that never fires, and
+        every other signal -- the set exists, the element is armed, the rule is
+        in the chain -- reads exactly as it does when it works.
+        """
+        from vm import (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
+                        NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)
+        for ok, drop in ((NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL4),
+                         (NFT_SET_INTERNAL_OK6, NFT_SET_INTERNAL6)):
+            self.assertLess(self._index(f"@{ok}"), self._index(f"@{drop}"),
+                            f"@{ok} must be consulted before @{drop}")
+
+    def test_the_prefixes_match_what_the_skeleton_actually_arms(self):
+        """The duplication this refusal rests on.
+
+        VM_INTERNAL_PREFIXES* exist so the arming path can refuse an address
+        the drop would never have caught. A range added to the .nft and not
+        here makes that refusal wrong in the permissive direction, and nothing
+        else would notice.
+        """
+        from vm import (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6,
+                        VM_INTERNAL_PREFIXES4, VM_INTERNAL_PREFIXES6)
+        text = SKELETON.read_text()
+        for set_name, prefixes in ((NFT_SET_INTERNAL4, VM_INTERNAL_PREFIXES4),
+                                   (NFT_SET_INTERNAL6, VM_INTERNAL_PREFIXES6)):
+            line = only(self, [ln for ln in text.splitlines()
+                               if ln.startswith(f"add element inet "
+                                                f"workload_filter {set_name}")],
+                        f"{set_name} element line")
+            armed = {p.strip() for p in
+                     line.split("{", 1)[1].rsplit("}", 1)[0].split(",")}
+            self.assertEqual(armed, set(prefixes))
+
+
+class TestInternalOkElements(unittest.TestCase):
+    """The element model and the refusal on the arming path."""
+
+    def _addrs(self, *specs):
+        return [ipaddress.ip_address(s) for s in specs]
+
+    def test_elements_split_by_family_and_carry_no_port(self):
+        from vm import (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
+                        vm_internal_ok_elements)
+        elements = vm_internal_ok_elements(
+            10001, self._addrs("192.168.0.10", "fd00::10"))
+        self.assertEqual(elements[NFT_SET_INTERNAL_OK4], ["10001 . 192.168.0.10"])
+        self.assertEqual(elements[NFT_SET_INTERNAL_OK6], ["10001 . fd00::10"])
+
+    def test_an_empty_family_produces_no_command(self):
+        from vm import NFT_SET_INTERNAL_OK6, vm_internal_ok_commands
+        cmds = vm_internal_ok_commands(10001, self._addrs("192.168.0.10"), "add")
+        self.assertEqual(len(cmds), 1)
+        self.assertNotIn(NFT_SET_INTERNAL_OK6, cmds[0])
+
+    def test_delete_mirrors_add(self):
+        from vm import vm_internal_ok_commands
+        addrs = self._addrs("192.168.0.10", "fd00::10")
+        add = vm_internal_ok_commands(10001, addrs, "add")
+        delete = vm_internal_ok_commands(10001, addrs, "delete")
+        self.assertEqual([c[-1] for c in add], [c[-1] for c in delete])
+        self.assertTrue(all(c[1] == "delete" for c in delete))
+
+    def test_a_public_address_is_refused(self):
+        """The mirror of the `allow` listener-range refusal.
+
+        An exemption for an address the drop would never have caught excepts
+        nothing and only widens what the inspector may open -- an operator's
+        belief about where a name points, written down and wrong.
+        """
+        from vm import vm_internal_ok_elements
+        for spec in ("93.184.216.34", "2606:2800::1"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(ValueError) as caught:
+                    vm_internal_ok_elements(10001, self._addrs(spec))
+                self.assertIn("never have fired", str(caught.exception))
+
+    def test_every_private_family_is_accepted(self):
+        from vm import vm_internal_ok_elements
+        for spec in ("10.0.0.5", "192.168.0.10", "172.16.0.1", "169.254.169.254",
+                     "fd00::10", "fe80::1"):
+            with self.subTest(spec=spec):
+                self.assertTrue(vm_internal_ok_elements(10001, self._addrs(spec)))
+
+    def test_hosts_are_read_shape_tolerantly(self):
+        """Validation already refused a malformed entry.
+
+        This runs at VM start, where raising on a typo turns it into a workload
+        that does not boot -- long after the error was reportable.
+        """
+        from vm import vm_internal_hosts
+        self.assertEqual(
+            vm_internal_hosts({"internal": [{"host": "git.local", "reason": "r"},
+                                            {"reason": "no host"},
+                                            "a bare string",
+                                            {"host": "  "}]}),
+            ["git.local"])
+        self.assertEqual(vm_internal_hosts({}), [])
+        self.assertEqual(vm_internal_hosts({"internal": "not a list"}), [])
+
+    def test_an_unresolvable_internal_name_raises_naming_the_failure(self):
+        from vm import vm_internal_resolve
+        with mock.patch("socket.getaddrinfo", side_effect=OSError("nope")):
+            with self.assertRaises(ValueError) as caught:
+                vm_internal_resolve("git.local")
+        message = str(caught.exception)
+        self.assertIn("git.local", message)
+        # It must name the failure the operator will actually see, which is a
+        # refusal on the allowlisted host -- not "an element is missing".
+        self.assertIn("internal-destination drop", message)

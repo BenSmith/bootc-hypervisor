@@ -34,11 +34,22 @@ what it sees, and a stopped workload's listener address is a line nobody can
 explain. Removal tolerates "Cannot assign requested address" for the same
 reason the add tolerates "assigned".
 
-WHAT IS NOT ARMED HERE
+WHAT IS ARMED HERE THAT IS NOT KEYED ON A PORT
 
-The `wl_internal_ok4/6` destination exemptions read a workload config key
-that does not exist in this tree, so there is nothing to read and nothing is
-invented.
+The `wl_internal_ok4/6` destination exemptions ([[vm.network.internal]]). Their
+key is (uid, address) and carries no port, because the exemption is about where
+a name resolves to rather than about a service. The rule consulting them
+carries the inspector's cgroup match, and THAT is what makes the missing port
+safe -- without it the same element is an all-ports grant from the guest to a
+LAN address, since the uid is shared between the guest and the inspector.
+
+The names are resolved here, once, at start. An unresolvable one fails the
+start rather than arming nothing: an element that silently did not arm leaves
+the host refused by the very drop the entry existed to except, and the guest
+sees `403 <host> resolves to an internal address` on the one destination the
+operator wrote the entry for.
+
+WHAT IS NOT ARMED HERE
 
 The cgroup elements in wl_proxy_cg (inet workload_filter) and wl_inspect_cg
 (inet workload_proxy). The builders for both live in lib/vm.py, but the
@@ -79,6 +90,7 @@ from vm import (
     NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
     ensure_advertised_interface, vm_inspect_element_commands,
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
+    vm_internal_hosts, vm_internal_ok_commands, vm_internal_resolve,
     vm_uses_inspect,
 )
 from workload_lib import workload_config_path
@@ -155,7 +167,23 @@ def up(name: str) -> int:
     for argv in vm_inspect_element_commands(uid, "add"):
         run(argv, check=True)
 
+    # The `internal` exemptions, resolved here and armed per address. Purged
+    # first for the same reason the six above are: an edited config that
+    # dropped a host would otherwise leave its element behind, and the element
+    # outliving the config line is the shape a stale exemption takes.
+    hosts = vm_internal_hosts(net)
+    addresses = []
+    for host in hosts:
+        addresses.extend(vm_internal_resolve(host))
+    for argv in vm_internal_ok_commands(uid, addresses, "delete"):
+        run(argv)
+    for argv in vm_internal_ok_commands(uid, addresses, "add"):
+        run(argv, check=True)
+
     log(f"  Inspector redirect armed for uid {uid}")
+    if hosts:
+        log(f"  Internal exemptions armed for {len(hosts)} host(s): "
+            f"{', '.join(hosts)} -> {', '.join(str(a) for a in addresses)}")
     return 0
 
 
@@ -170,6 +198,24 @@ def down(name: str) -> int:
     # arming, so these are not check=True.
     for argv in vm_inspect_element_commands(uid, "delete"):
         run(argv)
+
+    # The `internal` exemptions. Torn down by re-reading the config and
+    # resolving again, which is the only handle we have -- and it is why this
+    # tolerates both a failed resolve and a missing element. A name that stopped
+    # resolving between start and stop must not block the stop; the elements it
+    # armed are per-workload and die with the reboot at the latest.
+    try:
+        net = network_config(name)
+        addresses = []
+        for host in vm_internal_hosts(net):
+            try:
+                addresses.extend(vm_internal_resolve(host))
+            except ValueError:
+                continue
+        for argv in vm_internal_ok_commands(uid, addresses, "delete"):
+            run(argv)
+    except (OSError, ValueError) as e:
+        log(f"  WARNING: could not clear internal exemptions: {e}")
 
     # The per-workload addresses only. The link and the advertised address are
     # shared and stay. Tolerate the address being absent: a start that died

@@ -118,6 +118,24 @@ add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
 # proxy's replies to its own client and take hostname policy down entirely.
 add set inet workload_filter wl_internal4 { type ipv4_addr ; flags interval ; }
 add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
+
+# The per-workload exceptions to those drops: an allowlisted name that is
+# SUPPOSED to resolve into private space ([[vm.network.internal]]). A homelab
+# forge on the LAN is the case — without this the guest gets
+# `403 <host> resolves to an internal address` on the one host the operator
+# meant to reach, which is a confinement working exactly as designed against
+# the operator's stated intent.
+#
+# NOT named wl_internal4/6-something: those names are taken, by the interval
+# sets above holding the private RANGES the drop matches. An exemption set
+# named for what it excepts reads as the same thing inverted, in a file where
+# the two sit ten lines apart.
+#
+# Per-workload state, so these are never flushed here — the same contract
+# wl_inspect_dst and the allow sets have, and the opposite of the interval sets
+# above. The helper that arms the redirect arms these.
+add set inet workload_filter wl_internal_ok4 { typeof meta skuid . ip  daddr ; }
+add set inet workload_filter wl_internal_ok6 { typeof meta skuid . ip6 daddr ; }
 flush set inet workload_filter wl_internal4
 flush set inet workload_filter wl_internal6
 add element inet workload_filter wl_internal4 { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 255.255.255.255 }
@@ -187,12 +205,12 @@ add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow
 # of the guards below, so only the wrong-port residue reaches the per-workload
 # counter: a self-dial to a served port is never counted as a cross-workload
 # attempt. The `allow` rules sit ahead of these on purpose — the escape hatch
-# — and that ordering depends on an invariant that is OWED, not yet enforced:
-# validation must refuse an `allow` entry inside the listener ranges
-# (198.18.0.0/16 and 2001:2::/48), where it would otherwise be accepted ahead
-# of the guard that exists to refuse exactly it. Until that lands, an operator
-# can arm such an element and it will beat the guard — the ordering is
-# correct, the promise behind it is not yet in the tree.
+# — and that ordering rests on an invariant that IS now enforced: validation
+# refuses an `allow` entry inside the listener ranges (198.18.0.0/16 and
+# 2001:2::/48), where it would otherwise be accepted ahead of the guard that
+# exists to refuse exactly it. Refused in the schema and again in the helper
+# that arms the element, in both families, including an entry written as a name
+# that RESOLVES into a plane — see vm_allow_reserved_reason in lib/vm.py.
 add rule inet workload_filter output meta skuid . ip  daddr . th dport @wl_inspect_dst  accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_inspect_dst6 accept
 
@@ -237,6 +255,25 @@ add rule inet workload_filter output meta skuid @wl_filtered ct direction origin
 # looks healthy. The residual it leaves is an internal service answering HTTP
 # on port 53, which is not a thing that exists.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg th dport 53 counter accept
+
+# The per-workload exceptions, ahead of the drops they except.
+#
+# THE CGROUP MATCH ON THESE TWO RULES IS THE WHOLE OF WHAT MAKES THEM SAFE, and
+# it is invisible when omitted. The set key holds a uid and an address and NO
+# PORT — deliberately, because the exemption is about where a name resolves to,
+# not about a service. Without `socket cgroupv2 level 2 @wl_proxy_cg` the very
+# same element becomes an all-ports grant from the GUEST to a LAN address: the
+# uid is shared between the guest and the inspector, which is the reason the
+# drops below are keyed on the cgroup rather than the uid in the first place.
+# With it, the accept reaches only connections the INSPECTOR opens, and the uid
+# inside the set key is what scopes an element to one workload.
+#
+# So the discriminator is the drop's, exactly: cgroup for "who opened it", uid
+# for "whose element is it", `ct direction original` for "not a reply to
+# somebody dialling in". A test asserts the cgroup match is on the rule, because
+# dropping it leaves a passing accept that quietly means something else.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg meta skuid . ip  daddr @wl_internal_ok4 ct direction original counter accept
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg meta skuid . ip6 daddr @wl_internal_ok6 ct direction original counter accept
 
 # The destination check the cgroup exemption did not have. `ct direction
 # original` restricts this to connections the proxy OPENS: the reply direction

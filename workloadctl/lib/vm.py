@@ -437,6 +437,29 @@ NFT_SET_ALLOW6 = "wl_allow6"
 # until reboot, so a VM started before an upgrade keeps the older chain.
 NFT_SET_INTERNAL4 = "wl_internal4"
 NFT_SET_INTERNAL6 = "wl_internal6"
+# The per-workload exceptions to those drops -- [[vm.network.internal]]. Per
+# workload, so unlike the interval sets above these ARE managed from Python and
+# are never flushed by the skeleton.
+NFT_SET_INTERNAL_OK4 = "wl_internal_ok4"
+NFT_SET_INTERNAL_OK6 = "wl_internal_ok6"
+
+# The private ranges the skeleton's internal drop matches on, restated here so
+# the arming path can refuse an element the drop would never have caught.
+#
+# Duplicating them is the lesser evil and the test is what makes it safe:
+# tests/test_vm_egress.py asserts these against the elements the .nft actually
+# arms, so a range added on one side and not the other fails rather than
+# silently making the refusal wrong. Parsing the .nft at runtime was the
+# alternative and it puts a parser on the start path of every VM to answer a
+# question about a constant.
+VM_INTERNAL_PREFIXES4 = (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "255.255.255.255",
+)
+VM_INTERNAL_PREFIXES6 = (
+    "::/128", "::1/128", "::ffff:0.0.0.0/96", "64:ff9b::/96",
+    "64:ff9b:1::/48", "2002::/16", "fc00::/7", "fe80::/10",
+)
 # The inspector's listener-plane guard sets (§7.2/§7.2.1/§7.2.3). Elements are
 # per workload and are armed by the same script that arms the DNAT maps, not
 # by the filter helper: the dst sets hold the TRANSLATED tuple, which only the
@@ -847,6 +870,120 @@ def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
             commands.append([NFT_BIN, action, "element", *table.split(),
                              set_name, "{ " + ", ".join(entries) + " }"])
     return commands
+
+
+def vm_internal_reserved_reason(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Why this address may not be armed as an `internal` exemption, or None.
+
+    The mirror of vm_allow_reserved_reason, and the same shape of foot-gun seen
+    from the other side: arm only addresses the internal drop would actually
+    have caught. An element for a public address excepts a drop that was never
+    going to fire on it, so the accept it installs is pure widening -- it grants
+    the inspector an all-ports path to an address for no reason anybody reading
+    the config could reconstruct.
+
+    It is not a hole (the accept is still cgroup-scoped to the inspector), which
+    is what makes it a refusal rather than a panic. But an exemption that
+    excepts nothing is an operator's belief about where a name points, written
+    down and wrong, and the failure it produces later is the interesting one:
+    the name moves into private space, the drop starts firing, and the element
+    that was supposed to cover it is for the old address.
+    """
+    prefixes = (VM_INTERNAL_PREFIXES4 if addr.version == 4
+                else VM_INTERNAL_PREFIXES6)
+    for prefix in prefixes:
+        if addr in ipaddress.ip_network(prefix):
+            return None
+    return (f"{addr} is not in any range the internal-destination drop matches "
+            f"({', '.join(prefixes)}), so an exemption for it excepts a drop "
+            f"that would never have fired -- it only widens what the inspector "
+            f"may open. An `internal` entry is for a name that resolves into "
+            f"PRIVATE space; this one does not")
+
+
+def vm_internal_ok_elements(
+        uid: int,
+        addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+) -> dict[str, list[str]]:
+    """Map set name -> element expressions for one workload's `internal` hosts.
+
+    Keyed on (uid, address) and carrying NO PORT: the exemption is about where
+    a name resolves to, not about a service. What keeps that safe is the cgroup
+    match on the rule consulting these sets -- see the comment block on it in
+    workload-filter.nft. Read them together or the missing port reads as an
+    oversight.
+
+    Returns only non-empty sets, like vm_filter_elements, so a caller emits one
+    command per family that has entries.
+    """
+    v4: list[str] = []
+    v6: list[str] = []
+    for addr in addresses:
+        reserved = vm_internal_reserved_reason(addr)
+        if reserved:
+            raise ValueError(f"[vm.network].internal: {reserved}")
+        (v6 if addr.version == 6 else v4).append(f"{uid} . {addr}")
+    elements: dict[str, list[str]] = {}
+    if v4:
+        elements[NFT_SET_INTERNAL_OK4] = v4
+    if v6:
+        elements[NFT_SET_INTERNAL_OK6] = v6
+    return elements
+
+
+def vm_internal_ok_commands(
+        uid: int,
+        addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+        action: str,
+) -> list[list[str]]:
+    """argv lists that arm ("add") or disarm ("delete") the exemptions."""
+    if action not in ("add", "delete"):
+        raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
+    return [[NFT_BIN, action, "element", *NFT_TABLE.split(), set_name,
+             "{ " + ", ".join(entries) + " }"]
+            for set_name, entries in vm_internal_ok_elements(uid, addresses).items()]
+
+
+def vm_internal_hosts(net: dict) -> list[str]:
+    """The host names in [[vm.network.internal]], in file order.
+
+    Shape-tolerant on purpose: this runs at VM start, where validation has
+    already refused a malformed entry, and a helper that raised on one would
+    turn an operator's typo into a workload that does not boot.
+    """
+    entries = net.get("internal", [])
+    if not isinstance(entries, list):
+        return []
+    return [e["host"].strip() for e in entries
+            if isinstance(e, dict) and isinstance(e.get("host"), str)
+            and e["host"].strip()]
+
+
+def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve one `internal` host, or raise ValueError naming it.
+
+    Separate from vm_allow_resolve despite the identical mechanics, because the
+    two fail differently and the message is the whole value: an unresolvable
+    `allow` name leaves a service unreachable, while an unresolvable `internal`
+    name leaves an allowlisted host refused by a drop the entry existed to
+    except -- which surfaces as a 403 naming an internal address, not as a
+    missing element.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(
+            f"[vm.network].internal names {host!r}, which does not resolve on "
+            f"this host ({exc}). The exemption is armed per ADDRESS, so an "
+            f"unresolvable name arms nothing and the host stays refused by the "
+            f"internal-destination drop the entry existed to except") from None
+    seen: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr not in seen:
+            seen.append(addr)
+    return seen
 
 
 def vm_inspect_cgroup(name: str) -> str:

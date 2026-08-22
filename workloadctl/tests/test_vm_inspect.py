@@ -320,6 +320,37 @@ class TestHelperArmsBothTables(unittest.TestCase):
         self.assertNotIn('"link", "del"', down)
         self.assertNotIn("VM_PROXY_ADDR", down)
 
+    def test_up_arms_the_internal_exemptions_after_the_skeleton(self):
+        """Same ordering property as the six above, for the same reason.
+
+        An element add against a table that does not exist yet fails the start,
+        and the internal_ok sets live in the filter table the skeleton creates.
+        """
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertIn("vm_internal_ok_commands", up)
+        self.assertLess(up.index("NFT_SKELETON"),
+                        up.index("vm_internal_ok_commands"))
+        self.assertLess(up.index('vm_internal_ok_commands(uid, addresses, "delete")'),
+                        up.index('vm_internal_ok_commands(uid, addresses, "add")'),
+                        "purge before arming, or an edited config leaves a "
+                        "dropped host's element behind")
+
+    def test_down_clears_the_internal_exemptions_and_tolerates_absence(self):
+        """`up` fails loudly, `down` tolerates everything.
+
+        A name that stopped resolving between start and stop must not block the
+        stop -- and the elements it armed are per-workload and die with the
+        reboot at the latest.
+        """
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        down = source[source.index("def down("):source.index("def main(")]
+        self.assertIn('vm_internal_ok_commands(uid, addresses, "delete")', down)
+        # The calls, not the prose -- the comment above them says "not
+        # check=True" and a substring search would match that.
+        self.assertNotIn("run(argv, check=True)", down)
+        self.assertIn("except ValueError", down)
+
 
 if __name__ == "__main__":
     unittest.main()

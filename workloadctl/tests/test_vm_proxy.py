@@ -184,13 +184,16 @@ class TestProxyEgressExemption(unittest.TestCase):
         """The unqualified `@wl_proxy_cg accept`.
 
         Named by shape rather than by position: the chain now also carries a
-        DNS carve-out and two internal-destination drops that match the same
-        set, and picking the first `wl_proxy_cg` rule would silently start
-        testing one of those instead.
+        DNS carve-out, two internal-destination drops and two internal
+        EXEMPTIONS that match the same set, and picking the first
+        `wl_proxy_cg` rule would silently start testing one of those instead.
+        The blanket rule is the one with no destination and no port -- which
+        is exactly what makes it the blanket one.
         """
         matches = [ln for ln in self.nft.splitlines()
                    if ln.startswith("add rule") and "wl_proxy_cg" in ln
-                   and ln.endswith("accept") and "dport" not in ln]
+                   and ln.endswith("accept") and "dport" not in ln
+                   and "daddr" not in ln]
         # next() would take the first of however many match; the shape is
         # supposed to be unique, so a second one is a change this test must
         # report rather than silently pick between.
