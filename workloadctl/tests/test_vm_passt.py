@@ -157,7 +157,8 @@ class TestNetworkValidation(unittest.TestCase):
     def test_an_explicit_decision_either_way_is_valid(self):
         self.assertEqual(validate_vm_network({"egress": "open"}), [])
         self.assertEqual(
-            validate_vm_network({"allow": ["192.168.0.10:22"]}), [])
+            validate_vm_network({"allow": [{"address": "192.168.0.10:22",
+                                            "reason": "backup target"}]}), [])
 
     def test_ports_may_not_bind_the_management_range(self):
         # 127.128.0.0/9 carries the per-workload management addresses passt
@@ -197,36 +198,43 @@ class TestNetworkValidation(unittest.TestCase):
     def test_egress_enum(self):
         self.assertEqual(
             validate_vm_network({"egress": "filtered",
-                                 "allow": ["10.0.0.1:22"]}), [])
+                                 "allow": [{"address": "10.0.0.1:22",
+                                            "reason": "ssh"}]}), [])
         self.assertTrue(any(
             "must be one of" in e
             for e in validate_vm_network({"egress": "strict"})))
 
-    def test_allow_entries_must_be_addresses_not_hostnames(self):
-        # The allowlist becomes elements of a set keyed on ip/ip6 daddr. A
-        # hostname would have to be resolved once at unit start and would then
-        # be silently wrong for the life of the VM the moment the record moved.
-        errs = validate_vm_network({"allow": ["git.example:22"]})
-        self.assertTrue(any("Addresses only" in e for e in errs), errs)
+    def test_allow_accepts_a_name_now_that_we_serve_the_resolver(self):
+        # Names were forbidden here while the record could move underneath us.
+        # The guest's resolver is a static map we serve, so the host-side answer
+        # and the guest-side answer come from the same place.
+        self.assertEqual(
+            validate_vm_network({"allow": [{"address": "git.local:2222",
+                                            "reason": "forge over SSH"}]}), [])
 
     def test_allow_accepts_both_families(self):
         self.assertEqual(
-            validate_vm_network({"allow": ["10.0.0.1:22",
-                                           "[2001:db8::1]:443"]}), [])
+            validate_vm_network({"allow": [
+                {"address": "10.0.0.1:22", "reason": "ssh"},
+                {"address": "[2001:db8::1]:8443", "reason": "api"}]}), [])
 
     def test_allow_rejects_a_bare_v6_address_without_brackets(self):
         # Unbracketed, the final ':' before the port is ambiguous with the
-        # address's own colons.
-        self.assertTrue(validate_vm_network({"allow": ["2001:db8::1:22"]}))
+        # address's own colons -- and it is not a name either, so neither form
+        # takes it.
+        self.assertTrue(validate_vm_network(
+            {"allow": [{"address": "2001:db8::1:22", "reason": "r"}]}))
 
     def test_allow_port_range(self):
-        self.assertTrue(any("out of range" in e for e in
-                            validate_vm_network({"allow": ["10.0.0.1:70000"]})))
+        self.assertTrue(any("out of range" in e for e in validate_vm_network(
+            {"allow": [{"address": "10.0.0.1:70000", "reason": "r"}]})))
 
     def test_egress_keys_are_rejected_alongside_a_bridge(self):
         # A bridged guest sends from its own LAN address, so no host socket
         # carries the workload uid and there is nothing for the filter to match.
-        for key, value in (("egress", "filtered"), ("allow", ["10.0.0.1:22"])):
+        for key, value in (("egress", "filtered"),
+                           ("allow", [{"address": "10.0.0.1:22",
+                                       "reason": "ssh"}])):
             errs = validate_vm_network({"bridge": "br0", key: value})
             self.assertTrue(any("no effect with .bridge" in e for e in errs),
                             f"{key}: {errs}")

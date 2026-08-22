@@ -32,4 +32,7 @@ rollback_keep = 1
 
 [vm.network]
 egress = "filtered"
-allow = ["1.1.1.1:53"]
+
+[[vm.network.allow]]
+address = "1.1.1.1:53"
+reason  = "the fixture's one reachable destination; nothing dials it"

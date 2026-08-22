@@ -31,6 +31,17 @@ from vm import (
 )
 from workload_lib import UID_MAX, UID_MIN
 
+
+def allow_entry(address, reason="a test bypass, written down"):
+    """One [[vm.network.allow]] table.
+
+    A helper rather than a literal at each site because `reason` is required
+    and carries no meaning in these tests -- what they are about is the
+    address. The tests that ARE about the reason build the dict themselves.
+    """
+    return {"address": address, "reason": reason}
+
+
 def only(case, matches, what):
     """The single line matching a filter, asserting that there is exactly one.
 
@@ -629,28 +640,30 @@ class TestElementModel(unittest.TestCase):
 
     def test_entries_are_split_by_family(self):
         cmds = vm_filter_commands(
-            10001, ["192.168.0.10:22", "[2001:db8::1]:443"], "add")
+            10001, [allow_entry("192.168.0.10:22"),
+                    allow_entry("[2001:db8::1]:8443")], "add")
         by_set = {c[5]: c[-1] for c in cmds}
         self.assertIn("192.168.0.10", by_set[NFT_SET_ALLOW4])
         self.assertNotIn("192.168.0.10", by_set[NFT_SET_ALLOW6])
         self.assertIn("2001:db8::1", by_set[NFT_SET_ALLOW6])
 
     def test_empty_family_produces_no_command(self):
-        cmds = vm_filter_commands(10001, ["192.168.0.10:22"], "add")
+        cmds = vm_filter_commands(10001, [allow_entry("192.168.0.10:22")], "add")
         self.assertNotIn(NFT_SET_ALLOW6, [c[5] for c in cmds])
 
     def test_all_entries_for_a_set_go_in_one_transaction(self):
         """One nft invocation is one atomic transaction, so a VM is never
         left in wl_filtered holding only part of its allowlist."""
         cmds = vm_filter_commands(
-            10001, ["10.0.0.1:22", "10.0.0.2:22", "10.0.0.3:22"], "add")
+            10001, [allow_entry(f"10.0.0.{n}:22") for n in (1, 2, 3)], "add")
         allow4 = [c for c in cmds if c[5] == NFT_SET_ALLOW4]
         self.assertEqual(len(allow4), 1, "one command per set, not per entry")
         for addr in ("10.0.0.1", "10.0.0.2", "10.0.0.3"):
             self.assertIn(addr, allow4[0][-1])
 
     def test_delete_mirrors_add(self):
-        args = (10001, ["10.0.0.1:22", "[2001:db8::1]:443"])
+        args = (10001, [allow_entry("10.0.0.1:22"),
+                        allow_entry("[2001:db8::1]:8443")])
         add = vm_filter_commands(*args, "add")
         delete = vm_filter_commands(*args, "delete")
         self.assertEqual([c[5] for c in add], [c[5] for c in delete])
@@ -876,13 +889,13 @@ class TestFilterHelper(unittest.TestCase):
         return [c for c in self.calls if len(c) > 1 and c[1] == "delete"]
 
     def test_up_applies_the_skeleton_before_touching_elements(self):
-        self._net(egress="filtered", allow=["10.0.0.1:22"])
+        self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         self.mod.up("vm1")
         self.assertIn("-f", self.calls[0])
         self.assertIn(NFT_SKELETON, self.calls[0])
 
     def test_up_arms_the_uid_and_its_allowlist(self):
-        self._net(egress="filtered", allow=["10.0.0.1:22"])
+        self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         self.mod.up("vm1")
         armed = " ".join(" ".join(c) for c in self._adds())
         self.assertIn(NFT_SET_FILTERED, armed)
@@ -911,7 +924,7 @@ class TestFilterHelper(unittest.TestCase):
             NFT_SET_ALLOW4: [{"concat": [10001, "1.1.1.1", 22]},
                              {"concat": [10001, "2.2.2.2", 443]}],
         }
-        self._net(egress="filtered", allow=["2.2.2.2:443"])
+        self._net(egress="filtered", allow=[allow_entry("2.2.2.2:8443")])
         self.mod.up("vm1")
         cleared = " ".join(" ".join(c) for c in self._deletes())
         self.assertIn("1.1.1.1", cleared,
@@ -919,7 +932,7 @@ class TestFilterHelper(unittest.TestCase):
 
     def test_up_never_clears_a_sibling_workloads_elements(self):
         self.listing = {NFT_SET_ALLOW4: [{"concat": [10002, "9.9.9.9", 22]}]}
-        self._net(egress="filtered", allow=["10.0.0.1:22"])
+        self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         self.mod.up("vm1")
         self.assertNotIn("9.9.9.9",
                          " ".join(" ".join(c) for c in self._deletes()))
@@ -928,13 +941,13 @@ class TestFilterHelper(unittest.TestCase):
         """A filtered VM that failed to arm must not start: it would run wide
         open while its config claims confinement."""
         self.rc[("/usr/sbin/nft", "-f", NFT_SKELETON)] = 1
-        self._net(egress="filtered", allow=["10.0.0.1:22"])
+        self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         with self.assertRaises(subprocess.CalledProcessError):
             self.mod.up("vm1")
 
     def test_up_fails_when_an_element_cannot_be_added(self):
         self.rc[("/usr/sbin/nft", "add", "element")] = 1
-        self._net(egress="filtered", allow=["10.0.0.1:22"])
+        self._net(egress="filtered", allow=[allow_entry("10.0.0.1:22")])
         with self.assertRaises(subprocess.CalledProcessError):
             self.mod.up("vm1")
 
@@ -1366,13 +1379,13 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
     def test_a_v4_listener_address_is_refused(self):
         addr = vm_inspect_address(10000)
         with self.assertRaises(ValueError) as caught:
-            parse_vm_allow(f"{addr.v4}:8080")
+            parse_vm_allow(allow_entry(f"{addr.v4}:8080"))
         self.assertIn("listener range", str(caught.exception))
 
     def test_a_v6_listener_address_is_refused(self):
         addr = vm_inspect_address(10000)
         with self.assertRaises(ValueError) as caught:
-            parse_vm_allow(f"[{addr.v6}]:8443")
+            parse_vm_allow(allow_entry(f"[{addr.v6}]:8443"))
         self.assertIn("listener range", str(caught.exception))
 
     def test_any_address_in_the_range_is_refused_not_just_an_allocated_one(self):
@@ -1384,21 +1397,21 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
         workloads exist.
         """
         with self.assertRaises(ValueError):
-            parse_vm_allow("198.18.200.1:443")
+            parse_vm_allow(allow_entry("198.18.200.1:8443"))
         with self.assertRaises(ValueError):
-            parse_vm_allow("[2001:2::dead:beef]:443")
+            parse_vm_allow(allow_entry("[2001:2::dead:beef]:8443"))
 
     def test_the_refusal_names_the_range_and_a_remedy(self):
         with self.assertRaises(ValueError) as caught:
-            parse_vm_allow("198.18.1.0:9999")
+            parse_vm_allow(allow_entry("198.18.1.0:9999"))
         message = str(caught.exception)
         self.assertIn("198.18.0.0/16", message)
         self.assertIn("inspector", message)
 
     def test_ordinary_addresses_still_parse(self):
-        for spec in ("192.168.0.10:22", "10.0.0.1:5432", "[2001:db8::1]:443"):
+        for spec in ("192.168.0.10:22", "10.0.0.1:5432", "[2001:db8::1]:8443"):
             with self.subTest(spec=spec):
-                parse_vm_allow(spec)
+                parse_vm_allow(allow_entry(spec))
 
     def test_the_neighbouring_benchmark_half_is_not_refused(self):
         """198.18.0.0/15 is the benchmark reservation; only our /16 is ours.
@@ -1407,7 +1420,7 @@ class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
         and the boundary is one bit -- exactly the kind of range a later edit
         widens by accident.
         """
-        parse_vm_allow("198.19.0.1:443")
+        parse_vm_allow(allow_entry("198.19.0.1:8443"))
 
     def test_the_reason_helper_answers_none_for_a_public_address(self):
         self.assertIsNone(
@@ -1440,13 +1453,13 @@ class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
     def test_validation_reports_it_as_an_allow_error(self):
         from vm import _validate_egress
         errors = _validate_egress({"egress": "filtered",
-                                   "allow": ["198.18.1.0:8080"]})
+                                   "allow": [allow_entry("198.18.1.0:8080")]})
         self.assertTrue(any("listener range" in e for e in errors), errors)
         self.assertTrue(any("[vm.network].allow" in e for e in errors), errors)
 
     def test_the_arming_path_refuses_rather_than_installing_the_element(self):
         with self.assertRaises(ValueError):
-            vm_filter_commands(10001, ["198.18.1.0:8080"], "add")
+            vm_filter_commands(10001, [allow_entry("198.18.1.0:8080")], "add")
 
     def test_a_valid_entry_beside_a_refused_one_does_not_rescue_it(self):
         """One bad entry fails the whole arm rather than arming the rest.
@@ -1456,7 +1469,8 @@ class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
         nothing saying so.
         """
         with self.assertRaises(ValueError):
-            vm_filter_commands(10001, ["10.0.0.1:22", "198.18.1.0:8080"], "add")
+            vm_filter_commands(10001, [allow_entry("10.0.0.1:22"),
+                                      allow_entry("198.18.1.0:8080")], "add")
 
 
 class TestElementCounterParsing(unittest.TestCase):
@@ -1591,3 +1605,311 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
         _name, ok, _detail = self._line((4000, 240000))
         self.assertTrue(ok)
 
+
+
+class TestRung2Schema(unittest.TestCase):
+    """The rung 2 schema: `tls`, `internal`, and `allow` as a reasoned table.
+
+    Nothing here changes runtime behaviour -- T3 arms what `internal` means and
+    the inspector is what reads `tls`. What these pin is the set of configs the
+    host will accept, which is the only thing standing between an operator's
+    stated intent and a system that quietly does something else.
+    """
+
+    def _egress(self, net):
+        from vm import _validate_egress
+        return _validate_egress(net)
+
+    # --- tls ---
+
+    def test_tls_inspect_names_the_rung_rather_than_listing_valid_values(self):
+        """The refusal has to say WHEN, not just "no".
+
+        `inspect` is the word for a property -- the connection is decrypted and
+        the request is read. A key that accepted it and spliced would be a
+        config claiming a property it does not have, and an "unknown value"
+        error would read as a typo rather than as work that has not landed.
+        """
+        errors = self._egress({"hosts": ["github.com"], "tls": "inspect"})
+        self.assertTrue(errors)
+        message = " ".join(errors)
+        self.assertIn("rung 3", message)
+        self.assertNotIn("must be one of", message)
+
+    def test_an_unknown_tls_value_still_lists_what_is_valid(self):
+        errors = self._egress({"hosts": ["github.com"], "tls": "terminate"})
+        self.assertTrue(any("must be one of" in e for e in errors), errors)
+
+    def test_tls_splice_is_accepted_and_is_the_default(self):
+        from vm import VM_TLS_DEFAULT, VM_TLS_MODES
+        self.assertEqual(VM_TLS_DEFAULT, "splice")
+        self.assertIn(VM_TLS_DEFAULT, VM_TLS_MODES)
+        self.assertEqual(self._egress({"hosts": ["github.com"],
+                                       "tls": "splice"}), [])
+        self.assertEqual(self._egress({"hosts": ["github.com"]}), [])
+
+    def test_tls_is_refused_under_open_rather_than_ignored(self):
+        errors = self._egress({"egress": "open", "tls": "splice"})
+        self.assertTrue(any("no effect" in e and "tls" in e for e in errors),
+                        errors)
+
+    def test_tls_is_refused_alongside_a_bridge(self):
+        errors = self._egress({"bridge": "br0", "tls": "splice"})
+        self.assertTrue(any("no effect with .bridge" in e for e in errors),
+                        errors)
+
+    # --- internal ---
+
+    def test_an_internal_host_on_no_list_is_refused(self):
+        """The dead entry fails in the direction nobody notices in time.
+
+        An ignored `internal` line produces `403 <host> resolves to an internal
+        address` on the one host the entry existed to permit -- which is the
+        failure the key was added to remove, arrived at by writing the key.
+        """
+        errors = self._egress({
+            "hosts": ["github.com"],
+            "internal": [{"host": "git.local", "reason": "the forge"}]})
+        self.assertTrue(any("on no list" in e for e in errors), errors)
+
+    def test_an_internal_host_the_allowlist_covers_is_accepted(self):
+        self.assertEqual(self._egress({
+            "hosts": ["git.local"],
+            "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
+
+    def test_a_wildcard_in_hosts_covers_an_internal_entry(self):
+        self.assertEqual(self._egress({
+            "hosts": ["*.local"],
+            "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
+
+    def test_internal_requires_a_reason(self):
+        errors = self._egress({"hosts": ["git.local"],
+                               "internal": [{"host": "git.local"}]})
+        self.assertTrue(any("reason" in e for e in errors), errors)
+
+    def test_internal_is_refused_under_open(self):
+        errors = self._egress({
+            "egress": "open",
+            "internal": [{"host": "git.local", "reason": "the forge"}]})
+        self.assertTrue(any("no effect" in e and "internal" in e
+                            for e in errors), errors)
+
+    def test_internal_is_NOT_refused_under_splice(self):
+        """The asymmetry a later tidy for symmetry would delete.
+
+        The internal-destination check lives on the inspector's UPSTREAM leg,
+        which a spliced connection still has -- so a spliced host can resolve
+        into private space and still needs the exemption. If this test ever
+        fails because someone made `internal` behave like `policy` will, the
+        exemption was taken away from exactly the workloads that need it.
+        """
+        self.assertEqual(self._egress({
+            "hosts": ["git.local"],
+            "tls": "splice",
+            "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
+
+    # --- allow ---
+
+    def test_a_bare_string_allow_is_refused_by_shape(self):
+        """Refused, not accepted for compatibility.
+
+        Premise 3 leaves nothing deployed to migrate, so a second accepted
+        shape would exist only to let the two drift. The message names what to
+        type, because this is the one error reachable by having written a
+        correct config for the previous release.
+        """
+        errors = self._egress({"allow": ["192.168.0.10:22"]})
+        self.assertTrue(errors)
+        message = " ".join(errors)
+        self.assertIn("[[vm.network.allow]]", message)
+        self.assertIn("reason", message)
+
+    def test_allow_requires_a_reason(self):
+        errors = self._egress({"allow": [{"address": "192.168.0.10:22"}]})
+        self.assertTrue(any("reason" in e for e in errors), errors)
+
+    def test_allow_refuses_a_key_it_does_not_know(self):
+        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+                                          "reason": "r", "host": "x"}]})
+        self.assertTrue(any("unknown key" in e for e in errors), errors)
+
+    def test_an_allow_on_443_is_refused_with_tls_absent(self):
+        """The case the design's own wording would have let through.
+
+        §3 words this as an error "under tls = 'inspect'". The redirect keys on
+        the workload uid and the ORIGINAL port and reads nothing else -- not
+        `tls`, not the destination -- so the element is intercepted whatever
+        `tls` says, and `egress = "filtered"` is the real condition.
+        """
+        for port in (80, 443):
+            with self.subTest(port=port):
+                errors = self._egress({
+                    "hosts": ["github.com"],
+                    "allow": [allow_entry(f"192.168.0.10:{port}")]})
+                self.assertTrue(any("redirected" in e for e in errors), errors)
+
+    def test_the_80_443_refusal_reaches_the_name_form_too(self):
+        errors = self._egress({"hosts": ["github.com"],
+                               "allow": [allow_entry("git.local:443")]})
+        self.assertTrue(any("redirected" in e for e in errors), errors)
+
+    def test_an_allow_on_443_is_not_refused_when_nothing_redirects(self):
+        # Under 'open' there is no redirect keyed on this uid, so the entry is
+        # simply an address and a port.
+        self.assertEqual(self._egress({
+            "egress": "open",
+            "allow": [allow_entry("192.168.0.10:443")]}), [])
+
+    def test_a_name_is_legal_and_is_not_resolved_by_validation(self):
+        """Validation runs where the name may not resolve at all.
+
+        An operator edits a config on one host and deploys it to another; a
+        resolution failure at edit time would be a refusal that has nothing to
+        do with whether the config is right. The arming path resolves.
+        """
+        self.assertEqual(self._egress({
+            "allow": [allow_entry("git.local:2222")]}), [])
+
+    def test_a_name_that_also_appears_in_hosts_is_legal(self):
+        """The natural thing to guess wrong.
+
+        Forbidding it would forbid the combination the shipped forge needs:
+        HTTPS to the forge through the inspector, git-over-SSH to the same name
+        on 2222 through the filter chain. It costs nothing, because the
+        redirect is keyed on uid and port alone.
+        """
+        self.assertEqual(self._egress({
+            "hosts": ["git.local"],
+            "internal": [{"host": "git.local", "reason": "the forge"}],
+            "allow": [allow_entry("git.local:2222")]}), [])
+
+    # --- resolver = "none" ---
+
+    def test_resolver_none_beside_a_host_list_is_an_error(self):
+        for net in ({"hosts": ["github.com"]},
+                    {"hosts": ["git.local"],
+                     "internal": [{"host": "git.local", "reason": "r"}]},
+                    {"allow": [allow_entry("git.local:2222")]}):
+            with self.subTest(net=sorted(net)):
+                errors = self._egress({**net, "resolver": "none"})
+                self.assertTrue(any("resolver = 'none'" in e for e in errors),
+                                errors)
+
+    def test_resolver_none_with_address_only_allow_is_valid(self):
+        """The one coherent configuration, which is why it is not an error.
+
+        A workload whose destinations are all address-keyed reaches them
+        through the filter chain without touching the inspector and needs no
+        DNS at all. It gets the warning below instead.
+        """
+        self.assertEqual(self._egress({
+            "resolver": "none",
+            "allow": [allow_entry("192.168.0.10:22")]}), [])
+
+
+class TestRung2Warnings(unittest.TestCase):
+    """Warnings, not errors -- each is a coherent thing to have meant.
+
+    Which is exactly why silence would be wrong: nothing else in the tool would
+    ever report any of them.
+    """
+
+    def _warn(self, net):
+        from vm import vm_network_warnings
+        return vm_network_warnings(net)
+
+    def test_a_registration_domain_wildcard_warns_wherever_it_appears(self):
+        for net in ({"hosts": ["*.github.io"]},
+                    {"internal": [{"host": "*.pages.dev", "reason": "r"}]}):
+            with self.subTest(net=sorted(net)):
+                self.assertTrue(any("register a label" in w
+                                    for w in self._warn(net)), net)
+
+    def test_it_is_never_an_error(self):
+        """The list cannot be exhaustive.
+
+        A stale copy shipped in an RPM that hard-fails a valid config is worse
+        than a line of output -- the operator cannot edit the RPM.
+        """
+        from vm import _validate_egress
+        self.assertEqual(_validate_egress({"hosts": ["*.github.io"]}), [])
+
+    def test_a_named_host_under_such_a_parent_does_not_warn(self):
+        # `pages.github.io` names one site; only a wildcard lets the guest pick.
+        self.assertEqual(self._warn({"hosts": ["pages.github.io"]}), [])
+
+    def test_resolver_none_warns_on_the_configuration_that_is_valid(self):
+        warnings = self._warn({"resolver": "none",
+                               "allow": [allow_entry("192.168.0.10:22")]})
+        self.assertTrue(any("only .allow entries written by address" in w
+                            for w in warnings), warnings)
+
+    def test_an_allow_on_53_warns_that_synthesis_is_bypassed(self):
+        warnings = self._warn({"allow": [allow_entry("192.168.0.53:53")]})
+        self.assertTrue(any("ECHConfig" in w for w in warnings), warnings)
+
+    def test_a_bridged_vm_gets_none_of_them(self):
+        # Nothing of ours is in that guest's path; none of these apply.
+        self.assertEqual(self._warn({"bridge": "br0",
+                                     "hosts": ["*.github.io"]}), [])
+
+    def test_validate_surfaces_them_for_a_vm(self):
+        """The channel, not just the function.
+
+        collect_config_warnings returned early for every VM before this rung,
+        so a warning that existed and was never reached would look identical to
+        one that never fired.
+        """
+        from validation import collect_config_warnings
+        warnings = collect_config_warnings({
+            "workload": {"name": "vm1"},
+            "vm": {"image": "x", "network": {"hosts": ["*.github.io"]}}})
+        self.assertTrue(any("register a label" in w for w in warnings),
+                        warnings)
+
+
+class TestAllowNameResolution(unittest.TestCase):
+    """The arming path resolves an `allow` name, once, at start."""
+
+    def _resolve(self, answers):
+        return mock.patch(
+            "socket.getaddrinfo",
+            return_value=[(0, 0, 0, "", (a, 0)) for a in answers])
+
+    def test_every_address_a_name_answers_with_is_armed(self):
+        """Not just the first.
+
+        A dual-stack forge answers with both families; arming half of it is the
+        works-until-it-doesn't failure the both-families-or-neither rule exists
+        to stop -- and the half that survives is the one clients try first.
+        """
+        with self._resolve(["192.168.0.10", "2001:db8::10"]):
+            cmds = vm_filter_commands(
+                10001, [allow_entry("git.local:2222")], "add")
+        by_set = {c[5]: c[-1] for c in cmds}
+        self.assertIn("192.168.0.10 . 2222", by_set[NFT_SET_ALLOW4])
+        self.assertIn("2001:db8::10 . 2222", by_set[NFT_SET_ALLOW6])
+
+    def test_a_name_that_does_not_resolve_is_an_error_not_an_empty_arm(self):
+        """`allow` is the only path to a named service on an unredirected port.
+
+        An element that failed to arm does not present as a refusal -- it
+        presents as the guest hanging against the default-deny drop, with the
+        workload started and `diagnose` clean.
+        """
+        with mock.patch("socket.getaddrinfo", side_effect=OSError("no such host")):
+            with self.assertRaises(ValueError) as caught:
+                vm_filter_commands(10001, [allow_entry("git.local:2222")], "add")
+        self.assertIn("git.local", str(caught.exception))
+
+    def test_a_name_resolving_into_the_listener_plane_is_refused(self):
+        """The refusal parse_vm_allow cannot make, because it does not resolve.
+
+        Without this the name form reaches around the address form's refusal
+        and arms an accept for another workload's inspector -- which then
+        applies that workload's allowlist and re-originates as its uid.
+        """
+        with self._resolve(["198.18.1.0"]):
+            with self.assertRaises(ValueError) as caught:
+                vm_filter_commands(10001, [allow_entry("evil.local:2222")], "add")
+        self.assertIn("listener range", str(caught.exception))

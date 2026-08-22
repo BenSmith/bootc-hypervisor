@@ -25,7 +25,7 @@ from workload_lib import (
     infer_workload_mode,
     normalize_containers,
 )
-from vm import validate_vm_config
+from vm import validate_vm_config, vm_network_warnings
 
 
 def validate_container_name(name: str):
@@ -341,8 +341,12 @@ def collect_config_warnings(config: dict, known_workload_names=None) -> list[str
                     warnings.append(
                         f"[workload].{key} references unknown workload {dep!r}")
 
-    # The remaining checks are container-topology specific; VMs don't use them.
+    # The remaining checks are container-topology specific; VMs don't use them —
+    # but [vm.network] has warnings of its own, and this is the channel that
+    # surfaces them at edit/deploy time rather than in the generator's kmsg.
     if infer_workload_kind(config) == "vm":
+        warnings.extend(
+            vm_network_warnings(config.get("vm", {}).get("network", {})))
         return warnings
     try:
         mode = infer_workload_mode(config)

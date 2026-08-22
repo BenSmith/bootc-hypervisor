@@ -37,11 +37,15 @@ user = "fedora"
 # mirrors whose addresses are neither stable nor enumerable.
 #
 # Once you know what the guest actually talks to, tighten it. The allowlist
-# holds addresses and ports only — a hostname would be resolved once at start
-# and then be silently wrong the moment the record moved, which is why
-# hostname policy belongs to a proxy instead:
+# is for the destinations hostname policy cannot carry — ssh, a database, an
+# NTP peer — and each entry carries the reason it skips inspection. Ports 80
+# and 443 are refused there: they are redirected into the inspector before the
+# filter chain consults the list, so name those hosts in `hosts` instead:
 #
 #   egress = "filtered"
-#   allow  = ["192.168.0.10:22"]
+#
+#   [[vm.network.allow]]
+#   address = "192.168.0.10:22"
+#   reason  = "backup target; SSH, not proxyable"
 #
 egress = "open"

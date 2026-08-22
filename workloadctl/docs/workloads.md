@@ -1146,12 +1146,16 @@ Because passt re-originates guest traffic as host sockets owned by `_wl-<name>`,
 ```toml
 [vm.network]
 egress = "filtered"
-allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]
+
+[[vm.network.allow]]
+address = "192.168.0.10:22"
+reason  = "backup target; SSH, not proxyable"
 ```
 
 Two things about this are easy to get wrong:
 
-- **`allow` takes addresses and ports, never hostnames.** The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, which has no representation for a name. Accepting one would mean resolving it once at unit start and pinning that answer for the life of the VM — silently wrong the moment the record moves, and wrong permissively if the address is later reassigned. Hostname policy is the proxy's job; `allow` is for the non-HTTP exceptions a proxy cannot carry — and, since the proxy is barred from opening connections to internal addresses, for the internal destinations a proxied name legitimately resolves to. See [Hostname Egress Policy](#hostname-egress-policy).
+- **`allow` is a table, and every entry carries a `reason`.** The bare-string form (`allow = ["192.168.0.10:22"]`) is refused, with an error naming the shape to write instead. The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, so an entry written as a **name** is resolved on the host once at start — legal now that the guest's resolver is a static map served host-side, where before a moved record left the element silently wrong for the life of the VM. A name that does not resolve at start is an error, not an unarmed element: `allow` is the only path to a named service on an unredirected port, so a failure to arm presents as a hang rather than a refusal.
+- **Ports 80 and 443 are refused in `allow`.** They are redirected into the workload's egress inspector before the filter chain consults the list, so the element would be armed and never matched while the config read as if the destination were exempt. The redirect keys on the workload uid and the port alone, so this holds for a name exactly as for an address. Name those hosts in `.hosts`. See [Hostname Egress Policy](#hostname-egress-policy).
 - **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses) or `.hosts` (names, through its own proxy). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Step 4 was expected to retire this rule by giving `"filtered"` an implicit allow to the proxy, and did not — a workload only gets a proxy when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
 
 `workloadctl diagnose <name>` reports whether the policy is actually in force. The case it exists for is a config that says `filtered` while the uid is absent from the set: that VM is wide open, and every other signal — unit active, guest online, `status` green — looks correct. It also prints the drop counter, which is **shared across every filtered VM** rather than per-workload; there is one drop rule, so the number is a host total.
@@ -1320,7 +1324,10 @@ it allowlists the *name*, with no interception and no CA:
 [vm.network]
 egress = "filtered"
 hosts  = ["example.com", "*.fedoraproject.org"]
-allow  = ["192.168.0.10:22"]      # non-HTTP exceptions only
+
+[[vm.network.allow]]              # non-HTTP exceptions only; not 80 or 443
+address = "192.168.0.10:22"
+reason  = "backup target; SSH, not proxyable"
 ```
 
 Resolving names into addresses at rule-install time is the alternative, and it
@@ -1397,16 +1404,25 @@ Two consequences to know:
   has to be: tinyproxy resolves through whatever the host uses, which is inside
   one of these ranges either way — a stub resolver on `127.0.0.53` or a box on
   the LAN. The residual is an internal service answering HTTP on port 53.
-- **`allow` is the escape hatch.** A site that genuinely needs its proxy to reach
-  an internal service names it as an address and port, and the allow rules are
-  evaluated ahead of these drops:
+- **`internal` is the escape hatch, for a name reached over HTTP or HTTPS.** An
+  allowlisted host that is *supposed* to resolve into private space is named
+  there, with the reason it may:
 
   ```toml
   hosts = ["registry.internal.example.com"]
-  allow = ["10.0.0.5:443"]           # the address that name resolves to
+
+  [[vm.network.internal]]
+  host   = "registry.internal.example.com"
+  reason = "the site's own registry; on the LAN by design"
   ```
 
-  That grant is not proxy-specific — it is the same scoped grant the guest's own
+  An entry naming a host that `hosts` does not allowlist is an error — the guest
+  is refused before the exception is ever reached, which is the failure the key
+  exists to remove.
+- **`allow` is the escape hatch on every other port.** A site that needs an
+  internal service on a port no redirect touches names it as an address (or a
+  name) and a port, and the allow rules are evaluated ahead of these drops. That
+  grant is not proxy-specific — it is the same scoped grant the guest's own
   direct path gets, which is the honest description of what it opens.
 
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —

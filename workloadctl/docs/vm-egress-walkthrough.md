@@ -18,7 +18,11 @@ egress = "filtered"                                    # the default; stated for
 hosts  = ["*.fedoraproject.org", "api.example.com"]    # HTTP/HTTPS, by name;
                                                        # the wildcard excludes
                                                        # the bare apex — see below
-allow  = ["192.168.0.10:22"]                           # everything else, by address
+
+[[vm.network.allow]]                                   # everything else, by
+address = "192.168.0.10:22"                            # address or by name,
+reason  = "backup target; SSH, not proxyable"          # on a port that is
+                                                       # not 80 or 443
 ```
 
 ## The fact everything rests on

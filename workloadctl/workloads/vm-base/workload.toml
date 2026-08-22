@@ -34,17 +34,22 @@ user = "fedora"
 #
 #   egress = "filtered"
 #   hosts  = ["example.com", "*.fedoraproject.org"]     # HTTP/HTTPS, by name
-#   allow  = ["192.168.0.10:22", "[2001:db8::1]:443"]   # the rest, by address
 #
-# `hosts` gives this workload its own proxy, which reads the name out of
-# `CONNECT host:443` before any TLS handshake — no interception, no CA. It
-# requires egress = "filtered", because the drop is what leaves a guest that
-# ignores HTTPS_PROXY nowhere else to go.
-# `allow` becomes nftables elements keyed on the destination address, so it
-# takes addresses and ports only: a hostname there would be resolved once at
-# start and then be silently wrong the moment the record moved. Setting
-# neither, with egress = "filtered", is a validation error rather than a VM
-# that boots and can reach nothing.
+#   [[vm.network.allow]]                                # the rest, by address
+#   address = "192.168.0.10:22"                         # or by name, with a
+#   reason  = "backup target; SSH, not proxyable"       # port that is not
+#                                                       # 80 or 443
+#
+# `hosts` is matched against the name the guest states — the SNI of a
+# redirected HTTPS connection — with no decryption and no CA. It requires
+# egress = "filtered", because the drop is what leaves a guest that ignores
+# the allowlist nowhere else to go.
+# `allow` becomes nftables elements keyed on the destination address, and
+# carries the reason the destination skips inspection. 80 and 443 are refused
+# there: they are redirected into the inspector before the filter chain
+# consults it, so the entry would be armed and never matched. Setting neither
+# list, with egress = "filtered", is a validation error rather than a VM that
+# boots and can reach nothing.
 #
 # For THIS bundle: the proxy environment is injected only into the built-in
 # cloud-config, and vm-base supplies its own user_data_file below. If you set

@@ -9,10 +9,12 @@ on its own.
 Installed to /usr/libexec/workloadctl/vm.py.
 """
 
+import fnmatch
 import hashlib
 import ipaddress
 import os
 import re
+import socket
 from pathlib import Path
 from typing import NamedTuple
 
@@ -388,6 +390,29 @@ def parse_vm_port(spec: str) -> tuple[str | None, int, int, str]:
 VM_EGRESS_MODES = ("filtered", "open")
 VM_EGRESS_DEFAULT = "filtered"
 
+# What a filtered workload's redirected TLS connections get. `splice` is the
+# whole of rung 2: the inspector reads the ClientHello's SNI, matches it against
+# `hosts`, and then replays those exact bytes upstream — nothing is decrypted
+# and no CA exists. `inspect` is named here rather than merely absent from the
+# accepted set, so the refusal can say WHEN it arrives instead of listing valid
+# values: a config asking for inspection is asking for a property, and a key
+# that accepted the word and quietly spliced would be a config claiming a
+# property it does not have.
+VM_TLS_MODES = ("splice",)
+VM_TLS_DEFAULT = "splice"
+VM_TLS_UNBUILT = {"inspect": "rung 3, with the CA the guest has to trust"}
+
+# Parents anyone can register a label under, where a wildcard in a host list
+# authorises a name the *guest* chooses. Warning-only, deliberately: the list
+# cannot be exhaustive, and a stale copy shipped in an RPM that hard-fails a
+# valid config is worse than a line of output.
+VM_REGISTRATION_DOMAIN_PARENTS = (
+    "github.io", "gitlab.io", "pages.dev", "workers.dev", "netlify.app",
+    "vercel.app", "herokuapp.com", "azurewebsites.net", "cloudfront.net",
+    "web.app", "firebaseapp.com", "blogspot.com", "wordpress.com",
+    "s3.amazonaws.com", "r2.dev", "ngrok.io", "trycloudflare.com",
+)
+
 # The uid-keyed egress layer (ADR 006 §4). One table shared by every VM;
 # units manage set *elements* only, never rules.
 NFT_BIN = "/usr/sbin/nft"
@@ -436,8 +461,28 @@ def vm_filter_elements(uid: int, allow: list[str]) -> dict[str, list[str]]:
     v4: list[str] = []
     v6: list[str] = []
     for spec in allow:
-        addr, port = parse_vm_allow(spec)
-        (v6 if addr.version == 6 else v4).append(f"{uid} . {addr} . {port}")
+        entry = parse_vm_allow(spec)
+        if entry.address is not None:
+            addresses = [entry.address]
+        else:
+            # The one resolution in the whole allow path, host-side and once at
+            # start (§9). Every address the name answers with is armed, not just
+            # the first: a dual-stack forge answers with both families, and
+            # arming half of it is the "works until it doesn't" failure the
+            # both-families-or-neither rule exists to stop.
+            addresses = vm_allow_resolve(entry.host)
+        for addr in addresses:
+            # The listener-plane refusal, applied on this side of the
+            # resolution too. parse_vm_allow cannot make it for a name -- it
+            # deliberately does not resolve -- so a name pointed at another
+            # workload's inspector would otherwise arm the exact element the
+            # address form is refused for.
+            reserved = vm_allow_reserved_reason(addr)
+            if reserved:
+                where = f"{entry.host!r} resolves there — " if entry.host else ""
+                raise ValueError(f"[vm.network].allow: {where}{reserved}")
+            (v6 if addr.version == 6 else v4).append(
+                f"{uid} . {addr} . {entry.port}")
     if v4:
         elements[NFT_SET_ALLOW4] = v4
     if v6:
@@ -1277,15 +1322,52 @@ def vm_filter_commands(uid: int, allow: list[str],
                          "{ " + ", ".join(entries) + " }"])
     return commands
 
-# `<addr>:<port>` or `[<v6addr>]:<port>`. Addresses only, never hostnames: the
-# allowlist becomes elements of an nftables set keyed on `ip daddr`/`ip6 daddr`,
-# so a name would have to be resolved at unit start and would then be silently
-# wrong for the life of the VM whenever the record changed. Hostname policy is
-# the proxy's job (ADR 006 §4.4), and `allow` is for the non-HTTP exceptions
-# the proxy cannot carry.
-VM_ALLOW_RE = re.compile(
+# --- `allow`: the address-scoped bypass, now a table with a reason ---
+#
+# Rung 2 widens `allow` from a bare `<addr>:<port>` string into a table carrying
+# `address` and a required `reason` — the shape every other bypass in this
+# schema has (`internal` below; `splice` and `http2` from rung 3). The bare
+# string is refused rather than accepted alongside it, because premise 3 — no
+# shipped release in which a guest can still choose the old terms — means there
+# is no deployed config to migrate: a compatibility path would exist only to let
+# the two shapes drift.
+#
+# The target is `<addr>:<port>` (`[<v6addr>]:<port>` for IPv6) **or a name with
+# a port** (`git.local:2222`), resolved host-side once at start. Names were
+# forbidden here for a real reason — a record that moved left the element
+# silently wrong for the life of the VM — and what retires it is that the
+# guest's own resolver is now a static map we serve (the inspector design, §9),
+# so the host-side answer and the guest-side answer come from the same place.
+VM_ALLOW_ADDR_RE = re.compile(
     r"^(?:\[(?P<v6>[0-9a-fA-F:]+)\]|(?P<v4>\d{1,3}(?:\.\d{1,3}){3})):"
     r"(?P<port>\d+)$")
+
+# The name form. Deliberately narrow — hostname labels and a port, no scheme, no
+# path, no userinfo, and no fnmatch metacharacters: an `allow` name is resolved,
+# not matched, so a pattern here has nothing to expand against.
+#
+# One label. Loose at the tail on purpose — a trailing hyphen is not a legal
+# label and this accepts it, because the check that matters is the resolution
+# the arming path performs, and a regex that rejected `git.local-` while
+# accepting `git.local` bought nothing an operator would ever notice.
+_ALLOW_LABEL = r"[A-Za-z0-9][A-Za-z0-9_-]*"
+VM_ALLOW_NAME_RE = re.compile(
+    rf"^(?P<host>{_ALLOW_LABEL}(?:\.{_ALLOW_LABEL})*):(?P<port>\d+)$")
+
+
+class VmAllowEntry(NamedTuple):
+    """One parsed [[vm.network.allow]] entry.
+
+    Exactly one of `address` and `host` is set: an entry either names an
+    address, armed as written, or a name, which the arming path resolves once at
+    start. The two are kept apart rather than resolved here so that validation —
+    which runs long before the VM starts, and on hosts that may not resolve the
+    name at all — can still refuse a malformed entry.
+    """
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address | None
+    host: str | None
+    port: int
+    reason: str
 
 
 def vm_allow_reserved_reason(
@@ -1323,33 +1405,131 @@ def vm_allow_reserved_reason(
             f"through the inspector by name instead")
 
 
-def parse_vm_allow(spec: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
-    """Parse one [vm.network].allow entry into (address, port).
+def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
+    """Parse one [[vm.network.allow]] table into a VmAllowEntry.
 
     Raises ValueError with an operator-readable message.
+
+    `filtered` says whether the workload owning this entry is under
+    `egress = "filtered"`, which is the one condition the 80/443 refusal below
+    depends on. It defaults to True because both callers that matter are that
+    case: validation of a filtered workload, and the arming path, which runs
+    for no other kind.
     """
-    match = VM_ALLOW_RE.match(spec.strip())
-    if not match:
+    if isinstance(entry, str):
+        # Named for what to type, not for what is wrong: this is the only error
+        # in the file an operator hits by having written a *correct* config for
+        # the previous release.
         raise ValueError(
-            f"{spec!r} is not '<addr>:<port>' (IPv6 as '[addr]:port'). "
-            f"Addresses only — hostname policy belongs to the proxy")
-    try:
-        addr = ipaddress.ip_address(match.group("v6") or match.group("v4"))
-    except ValueError:
-        raise ValueError(f"{spec!r} does not contain a valid IP address") from None
+            f"{entry!r} is the old bare-string form. `allow` is now a table "
+            f"carrying the reason for the bypass:\n"
+            f"    [[vm.network.allow]]\n"
+            f"    address = \"{entry}\"\n"
+            f"    reason  = \"why this destination skips inspection\"")
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"entries are [[vm.network.allow]] tables with `address` and "
+            f"`reason`, got {entry!r}")
+    unknown = sorted(set(entry) - {"address", "reason"})
+    if unknown:
+        raise ValueError(
+            f"unknown key(s) {', '.join(unknown)}; an allow entry carries "
+            f"`address` and `reason` only")
+    spec = entry.get("address")
+    if not isinstance(spec, str) or not spec.strip():
+        raise ValueError(
+            f"`address` must be '<addr>:<port>' ('[addr]:port' for IPv6) or "
+            f"'<name>:<port>', got {spec!r}")
+    spec = spec.strip()
+    reason = entry.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        # Required, like every other bypass in this schema. The entry is a hole
+        # somebody opened deliberately, and the person who has to decide whether
+        # it is still needed is not the person who wrote it.
+        raise ValueError(
+            f"{spec!r} has no `reason`; every bypass in this schema carries "
+            f"one, because the operator who later has to decide whether the "
+            f"hole is still needed is not the one who opened it")
+
+    addr = host = None
+    match = VM_ALLOW_ADDR_RE.match(spec)
+    if match:
+        try:
+            addr = ipaddress.ip_address(match.group("v6") or match.group("v4"))
+        except ValueError:
+            raise ValueError(
+                f"{spec!r} does not contain a valid IP address") from None
+    else:
+        match = VM_ALLOW_NAME_RE.match(spec)
+        if not match:
+            raise ValueError(
+                f"{spec!r} is not '<addr>:<port>' (IPv6 as '[addr]:port') or "
+                f"'<name>:<port>'")
+        host = match.group("host")
     port = int(match.group("port"))
     if not 1 <= port <= 65535:
         raise ValueError(f"{spec!r}: port {port} out of range 1-65535")
+
+    # 80 and 443 are redirected into this workload's inspector before the filter
+    # chain consults `allow` at all, so an element here is armed and never
+    # matched -- and the operator believes a destination is exempt from
+    # inspection when it is not.
+    #
+    # The design words this as an error "under tls = 'inspect'". That qualifier
+    # is wrong: the redirect rules key on the uid and the ORIGINAL port and read
+    # nothing else -- not `tls`, not the destination -- so the entry is
+    # intercepted whatever `tls` says, and it is intercepted for the name form
+    # exactly as for the address form, since a name resolves to an address that
+    # is redirected anyway. `egress = "filtered"` is the real condition, because
+    # that is what puts the workload in the redirect's key at all.
+    if filtered and port in (VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS):
+        raise ValueError(
+            f"{spec!r}: port {port} is redirected into this workload's egress "
+            f"inspector before `allow` is consulted, so the element would be "
+            f"armed and never matched. The redirect keys on the workload uid "
+            f"and the port alone. Allowlist the hostname in .hosts, which is "
+            f"where 80 and 443 are decided")
+
     # Checked here rather than beside the schema, because this is the single
     # funnel every allow entry passes through: `_validate_egress` calls it for
     # the operator-facing error and `vm_filter_elements` calls it on the arming
     # path, so the refusal cannot be reached around by a config that never met
     # validation. The design asks for it "in the helper as well as the schema";
     # one funnel is how both get it without two copies that can drift.
-    reserved = vm_allow_reserved_reason(addr)
-    if reserved:
-        raise ValueError(f"{spec!r}: {reserved}")
-    return addr, port
+    #
+    # The name form is checked where it is resolved (vm_filter_elements), not
+    # here: this function deliberately does not resolve.
+    if addr is not None:
+        reserved = vm_allow_reserved_reason(addr)
+        if reserved:
+            raise ValueError(f"{spec!r}: {reserved}")
+    return VmAllowEntry(address=addr, host=host, port=port,
+                        reason=reason.strip())
+
+
+def vm_allow_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve an `allow` entry's name, or raise ValueError naming it.
+
+    A failure is an error and never a silently unarmed element. `allow` is the
+    only path to a named service on a port no redirect touches, so an element
+    that failed to arm does not present as a refusal -- it presents as the
+    guest hanging against a default-deny drop, which is the failure mode that
+    costs an operator an evening.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(
+            f"[vm.network].allow names {host!r}, which does not resolve on "
+            f"this host ({exc}). An `allow` name is resolved here once at "
+            f"start, so an unresolvable one arms nothing and the guest hangs "
+            f"against the default-deny drop instead of being refused") from None
+    seen: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr not in seen:
+            seen.append(addr)
+    return seen
 
 
 def _validate_egress(net: dict) -> list[str]:
@@ -1376,19 +1556,17 @@ def _validate_egress(net: dict) -> list[str]:
         egress = VM_EGRESS_DEFAULT
 
     allow = net.get("allow", [])
+    allow_entries: list[VmAllowEntry] = []
     if not isinstance(allow, list):
         errors.append(
-            f"[vm.network].allow must be an array of '<addr>:<port>' strings, "
-            f"got {type(allow).__name__}")
+            f"[vm.network].allow must be an array of [[vm.network.allow]] "
+            f"tables, got {type(allow).__name__}")
         allow = []
     else:
         for spec in allow:
-            if not isinstance(spec, str):
-                errors.append(
-                    f"[vm.network].allow entries must be strings, got {spec!r}")
-                continue
             try:
-                parse_vm_allow(spec)
+                allow_entries.append(
+                    parse_vm_allow(spec, filtered=egress == "filtered"))
             except ValueError as e:
                 errors.append(f"[vm.network].allow: {e}")
 
@@ -1403,10 +1581,77 @@ def _validate_egress(net: dict) -> list[str]:
             errors.extend(f"[vm.network].hosts: {e}"
                           for e in _validate_proxy_host(pattern))
 
+    tls = net.get("tls")
+    if tls is not None:
+        if tls in VM_TLS_UNBUILT:
+            errors.append(
+                f"[vm.network].tls = {tls!r} is not built yet — it lands in "
+                f"{VM_TLS_UNBUILT[tls]}. Accepting the word now would splice "
+                f"the connection while the config claimed it was inspected, "
+                f"which is the misreported confinement this layer exists to "
+                f"prevent. Use tls = 'splice' (the default) until then.")
+        elif tls not in VM_TLS_MODES:
+            errors.append(
+                f"[vm.network].tls must be one of "
+                f"{', '.join(repr(m) for m in VM_TLS_MODES)}, got {tls!r}")
+
+    internal = net.get("internal", [])
+    internal_hosts: list[str] = []
+    if not isinstance(internal, list):
+        errors.append(
+            f"[vm.network].internal must be an array of "
+            f"[[vm.network.internal]] tables, got {type(internal).__name__}")
+        internal = []
+    else:
+        for item in internal:
+            if not isinstance(item, dict):
+                errors.append(
+                    f"[vm.network].internal entries are tables with `host` and "
+                    f"`reason`, got {item!r}")
+                continue
+            unknown = sorted(set(item) - {"host", "reason"})
+            if unknown:
+                errors.append(
+                    f"[vm.network].internal: unknown key(s) "
+                    f"{', '.join(unknown)}; an entry carries `host` and "
+                    f"`reason` only")
+            if "host" not in item:
+                errors.append(
+                    f"[vm.network].internal: entry {item!r} has no `host`")
+                continue
+            host = item.get("host")
+            problems = _validate_proxy_host(host)
+            if problems:
+                errors.extend(f"[vm.network].internal: {p}" for p in problems)
+                continue
+            host = host.strip()
+            internal_hosts.append(host)
+            if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+                errors.append(
+                    f"[vm.network].internal: {host!r} has no `reason`; it is a "
+                    f"bypass of the internal-destination drop and carries one "
+                    f"like `allow` does")
+            # A dead entry here fails in the direction nobody notices until the
+            # host is needed: the guest gets `403 <host> resolves to an internal
+            # address` on the one destination the entry existed to permit. An
+            # error, for the same reason an `allow` element that arms nothing is.
+            if not any(host == pattern or fnmatch.fnmatch(host, pattern)
+                       for pattern in hosts if isinstance(pattern, str)):
+                errors.append(
+                    f"[vm.network].internal: {host!r} is on no list — nothing "
+                    f"in .hosts allowlists it, so the entry excepts a "
+                    f"destination the guest is refused before the exception is "
+                    f"reached. Add it to .hosts, or drop this entry")
+    # NOT rejected under `tls = "splice"`, unlike `policy` will be, and the
+    # asymmetry is deliberate rather than an oversight: the internal-destination
+    # check lives on the inspector's UPSTREAM leg, which a spliced connection
+    # still has. A later pass tidying these rules for symmetry would take the
+    # exemption away from exactly the workloads that need it.
+
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
-        for key in ("egress", "allow"):
+        for key in ("egress", "allow", "tls", "internal"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -1448,6 +1693,50 @@ def _validate_egress(net: dict) -> list[str]:
             "the hostname allowlist enforceable, or drop .hosts to run "
             "unfiltered without a proxy.")
 
+    # `tls` and `internal` describe what happens to a redirected connection, and
+    # under 'open' nothing is redirected. Refused rather than ignored, for the
+    # same reason .hosts is: a key accepted and then not applied is a config
+    # that reports a confinement it does not have.
+    if egress != "filtered":
+        for key in ("tls", "internal"):
+            if key in net:
+                errors.append(
+                    f"[vm.network].{key} has no effect with .egress = "
+                    f"{egress!r} — nothing is redirected into the egress "
+                    f"inspector, so there is no intercepted connection for it "
+                    f"to describe. Set egress = 'filtered' to use it.")
+
+    # `resolver = "none"` kept its meaning and lost its coherence. Under the old
+    # proxy posture a guest that could not resolve simply named hosts in a
+    # CONNECT, which is why it was ECH-immune. Under a transparent redirect the
+    # same guest can only dial literals, which reach the inspector with no name
+    # to match and are dropped — so every name-based destination is unreachable
+    # while the workload starts clean and reports healthy.
+    #
+    # An error only where the config itself contradicts it. A workload whose
+    # destinations are all address-keyed `allow` elements needs no DNS, reaches
+    # them through the filter chain without touching the inspector, and is
+    # entitled to say so — that case is the warning in vm_network_warnings.
+    if egress == "filtered" and net.get("resolver") == "none":
+        named = []
+        if hosts:
+            named.append(".hosts")
+        if internal_hosts:
+            named.append(".internal")
+        if any(e.host for e in allow_entries):
+            # An `allow` entry written by name is in the same position: its
+            # answer comes from the static map the responder serves, and
+            # "none" is what turns the responder off.
+            named.append("an .allow entry written by name")
+        if named:
+            errors.append(
+                f"[vm.network].resolver = 'none' with {', '.join(named)} set — "
+                f"a guest that cannot resolve can only dial literals, which "
+                f"reach the inspector with no name and are dropped, so every "
+                f"host named there is unreachable. Drop resolver = 'none', or "
+                f"drop the host lists and reach the destinations as .allow "
+                f"entries by address.")
+
     return errors
 
 
@@ -1480,6 +1769,82 @@ def _validate_proxy_host(pattern) -> list[str]:
     if not _PROXY_HOST_RE.match(text):
         return [f"{pattern!r} is not a hostname or fnmatch pattern"]
     return []
+
+
+def _registration_domain_parent(pattern: str) -> str | None:
+    """The registration-domain parent this pattern wildcards under, or None.
+
+    Only a leading `*.` counts. `*.github.io` lets the GUEST pick the label, so
+    the allowlist authorises a name it never saw and the inspector's own
+    upstream lookup carries it to a nameserver somebody else controls — which
+    is both the exfiltration channel §9's synthesis removes and the route by
+    which an allowlisted name points inside the LAN. `pages.github.io` names one
+    site and is fine.
+    """
+    if not pattern.startswith("*."):
+        return None
+    parent = pattern[2:]
+    return parent if parent in VM_REGISTRATION_DOMAIN_PARENTS else None
+
+
+def vm_network_warnings(net: dict) -> list[str]:
+    """Non-fatal [vm.network] warnings, as message strings.
+
+    The counterpart to validate_vm_network's errors, surfaced by
+    `validate` through validation.collect_config_warnings. Everything here is a
+    coherent thing to have written on purpose — which is exactly why silence
+    would be wrong, since nothing else would ever report it.
+    """
+    warnings: list[str] = []
+    if not isinstance(net, dict) or "bridge" in net:
+        return warnings
+    egress = net.get("egress", VM_EGRESS_DEFAULT)
+
+    for key in ("hosts", "internal"):
+        entries = net.get(key, [])
+        if not isinstance(entries, list):
+            continue
+        for item in entries:
+            pattern = item.get("host") if isinstance(item, dict) else item
+            if not isinstance(pattern, str):
+                continue
+            parent = _registration_domain_parent(pattern.strip())
+            if parent:
+                warnings.append(
+                    f"[vm.network].{key} pattern {pattern!r} wildcards under "
+                    f"{parent}, where anyone can register a label — the guest "
+                    f"picks the name, the allowlist authorises it, and the "
+                    f"lookup reaches a nameserver somebody else controls. "
+                    f"Name the hosts you need instead, if you can.")
+
+    if egress == "filtered" and net.get("resolver") == "none":
+        # The coherent case: address-keyed `allow` elements only, reached
+        # through the filter chain without touching the inspector. Warned
+        # anyway, because the same file read six months later looks like a
+        # workload that simply lost DNS.
+        warnings.append(
+            "[vm.network].resolver = 'none' on a filtered workload: no "
+            "hostname is resolvable, so only .allow entries written by "
+            "address work. A guest that cannot resolve can only dial "
+            "literals, and a literal reaches the inspector with no name to "
+            "match and is dropped.")
+
+    allow = net.get("allow", [])
+    if isinstance(allow, list):
+        for item in allow:
+            if not isinstance(item, dict):
+                continue
+            spec = item.get("address")
+            if not isinstance(spec, str) or not spec.strip().endswith(":53"):
+                continue
+            warnings.append(
+                f"[vm.network].allow {spec.strip()!r} is a resolver the guest "
+                f"can choose for itself, past the synthesising responder — "
+                f"which returns both the ECHConfig that hides the name from "
+                f"the inspector and the DNS exfiltration channel synthesis "
+                f"exists to remove.")
+
+    return warnings
 
 
 def _in_management_range(addr: str) -> bool:
