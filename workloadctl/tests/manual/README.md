@@ -150,8 +150,16 @@ address over the inspector's dummy link and removes it afterwards; without it
 the v6 probes die at the routing lookup, before nftables is consulted, which
 looks like a redirect defect and is not.
 
-Last green 2026-08-22, 17 assertions, on a bare-metal Fedora 44 KVM host, after
-the two ordering defects above were fixed.
+On a host with no IPv6 uplink the temporary route makes the guest's v6 source
+address come off the `workload-proxy` link, which carries every workload's
+listener address — so the listener logs a `peer=` that is some *other*
+workload's plane. It is an artifact of the rig's own route, not a policy
+finding: the guards match on destination, and a host with a real v6 uplink
+sources from a global address. Worth recognising rather than re-investigating.
+
+Last green 2026-08-22, 17 assertions, on a bare-metal Fedora 44 KVM host —
+re-run after rung 1's two closing items landed, so it covers the tree as it
+stands and not only the state the two ordering defects were fixed in.
 
 ## input_chain_rig.py — the two rung-1 measurements no unit test can make
 
