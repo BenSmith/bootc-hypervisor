@@ -196,3 +196,64 @@ Every packet a socket sent is captured twice; bare ACKs the kernel emits on its
 own behalf appear once, because there is no owner for `meta skuid` to match.
 
 Last green 2026-08-22, 12 assertions, on a bare-metal Fedora 44 host.
+
+## splice_rig.py — does a real TLS session survive the splice?
+
+Rung 2's T4a claim, and the half of it the unit suite cannot reach. Needs root
+and the installed RPM; **no KVM and no VM** — a throwaway network namespace, a
+real TLS origin, and the real listener process started the way the socket unit
+starts it.
+
+```bash
+sudo python3 tests/manual/splice_rig.py
+```
+
+**What the unit tests already hold, and what they cannot.** That the parser
+reads a name, and that the buffer replayed upstream is byte-identical to the
+one read, are unit tests — the second against a hand-built ClientHello. What no
+byte comparison can establish is that a *real* client and a *real* server
+complete a handshake through the splice. A hello that is subtly re-serialised —
+a reordered extension block, a dropped GREASE value, a rebuilt record header —
+still reads as "close enough" in a diff and still fails a real handshake.
+
+**The certificate is the honest question.** The rig's client verifies nothing,
+so a wrong certificate reaches the assertion instead of being refused before it
+can be looked at, and the assertion compares what the client was handed against
+the origin's own DER. If anything between the two terminated the session, that
+one check fails and every other check in the rig still passes.
+
+**"The upstream saw nobody" is an assertion, not an aside.** The first version
+of this rig reported a denied name completing a handshake — an apparent policy
+bypass. It was the rig: its own `dup2(fd, 3)` had clobbered the origin's
+listening socket, so the parent raced the listener for the guest's connections
+and answered them itself. A false pass in that direction is indistinguishable
+from a real bypass, so the origin counts its connections and the denied probe
+asserts the count did not move.
+
+**Three drop reasons, checked at runtime rather than in the source.** A name on
+no list, an allowlisted name that does not resolve (`nx.invalid`), and bytes
+that are not TLS each produce their own line. An operator with one bucket for
+the three cannot tell a policy decision from a broken resolver from something
+speaking a non-TLS protocol at the TLS port, which is the tunnelling signature.
+
+**Two controls.** The cleartext plane must still only log — tinyproxy filters
+port 80 by name today, and a listener that quietly started terminating it would
+break that with no test failing. And a listener whose policy document is
+missing must fail its start rather than fall back to an empty allowlist: an
+empty `hosts` is a legal configuration, so the fallback could not tell "the
+operator allowed nothing" from "the file was not there".
+
+It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
+path already exists, since it would be a real workload's policy. Teardown
+removes the namespace and the directory.
+
+**Not yet run on a host.** All 15 assertions are green as of 2026-08-22, but
+under `unshare -rn` in a dev container rather than through the `ip netns`
+wrapper this file's `main()` uses — that container cannot create a named
+namespace. So the probes, the listener, the origin and the policy path are all
+proven; the outer setup and teardown are not. Run it on a KVM host and replace
+this paragraph with the usual line.
+
+Verified by breaking the splice on purpose — replaying the buffer without its
+record header — which fails the four handshake assertions and leaves the other
+eleven green.
