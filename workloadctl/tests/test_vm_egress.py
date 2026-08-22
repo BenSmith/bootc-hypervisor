@@ -1913,3 +1913,122 @@ class TestAllowNameResolution(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 vm_filter_commands(10001, [allow_entry("evil.local:2222")], "add")
         self.assertIn("listener range", str(caught.exception))
+
+
+class TestReservedPlanes(unittest.TestCase):
+    """`ports` may not bind any plane this design owns (T2).
+
+    The check was one `in VM_MGMT_NETWORK` with a docstring committing to v4,
+    written when there was one plane and it was v4. Two listener planes arrived
+    and one of them is v6, so `198.18.1.4:8443:22` validated and 2001:2::/48
+    was not checked at all -- and either gap produces a cross-workload denial
+    of service on a security control, or one workload receiving another's
+    intercepted traffic, with nothing logged for either.
+    """
+
+    def _ports(self, spec):
+        from vm import validate_vm_network
+        return [e for e in validate_vm_network({"egress": "open",
+                                                "ports": [spec]})
+                if "ports" in e]
+
+    def test_the_list_holds_every_plane_and_both_families(self):
+        """Pins the LIST, not its first entry.
+
+        A test naming one plane passes unchanged while a second is added and
+        left unenforced, which is exactly how the v6 listener plane went
+        unchecked -- so what is asserted here is the membership of the
+        collection the check reads.
+        """
+        from vm import (VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
+                        VM_MGMT_NETWORK, VM_RESERVED_PLANES)
+        networks = [p.network for p in VM_RESERVED_PLANES]
+        self.assertIn(VM_MGMT_NETWORK, networks)
+        self.assertIn(VM_INSPECT_NETWORK, networks)
+        self.assertIn(VM_INSPECT_ADDR6_PREFIX, networks)
+        self.assertTrue(any(n.version == 6 for n in networks),
+                        "a v6 plane exists and must be one of these")
+
+    def test_the_broker_plane_is_the_broker_s_own_listener(self):
+        """Cross-file, like tests/test_vm_broker.py and for the same reason.
+
+        The broker is not a range: it is one socket on an address operators
+        publish on freely. If the plane and the listener ever disagree, the
+        reservation protects an address nothing listens on while the real
+        listener is bindable from a config key.
+        """
+        from vm import (VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT,
+                        VM_RESERVED_PLANES)
+        scoped = [p for p in VM_RESERVED_PLANES if p.port is not None]
+        self.assertEqual(len(scoped), 1, "one port-scoped plane, the broker")
+        self.assertEqual(str(scoped[0].network.network_address),
+                         VM_BROKER_LISTEN_ADDR)
+        self.assertEqual(scoped[0].port, VM_BROKER_LISTEN_PORT)
+
+    def test_each_plane_is_refused(self):
+        for spec in ("127.128.0.3:2222:22",
+                     "198.18.1.4:8443:22",
+                     "[2001:2::c612:100]:8443:22",
+                     "127.0.0.1:8081:80"):
+            with self.subTest(spec=spec):
+                self.assertTrue(self._ports(spec), spec)
+
+    def test_the_v6_listener_plane_is_refused(self):
+        """Called out on its own because it was unreachable by construction.
+
+        The address is parsed and compared against a v4 network, which answers
+        False for every v6 address -- a check that reads as passing while
+        testing nothing.
+        """
+        errors = self._ports("[2001:2::c612:100]:8443:22")
+        self.assertTrue(any("2001:2::/48" in e for e in errors), errors)
+
+    def test_the_message_names_what_would_collide_not_just_the_range(self):
+        """Four planes, four sentences.
+
+        A collision with a management address, an inspector, a broker and (from
+        T5a) a responder are four different problems with four different
+        remedies. One recited range for all of them tells an operator the rule
+        and not what they broke.
+        """
+        mgmt = " ".join(self._ports("127.128.0.3:2222:22"))
+        inspect = " ".join(self._ports("198.18.1.4:8443:22"))
+        broker = " ".join(self._ports("127.0.0.1:8081:80"))
+        self.assertIn("workloadctl exec", mgmt)
+        self.assertIn("inspector", inspect)
+        self.assertIn("credential", broker)
+        self.assertNotEqual(mgmt, inspect)
+        self.assertNotEqual(inspect, broker)
+
+    def test_the_broker_refusal_is_scoped_to_its_port(self):
+        """127.0.0.1 stays a normal thing to publish on.
+
+        A plane that took the whole address would refuse most of what `ports`
+        is for, which is how a reservation gets narrowed back out again.
+        """
+        self.assertEqual(self._ports("127.0.0.1:8080:80"), [])
+        self.assertEqual(self._ports("127.0.0.1:9000:9000"), [])
+
+    def test_ordinary_addresses_are_untouched(self):
+        for spec in ("192.168.0.5:8080:80", "[2001:db8::1]:8080:80",
+                     "198.19.0.1:8080:80"):
+            with self.subTest(spec=spec):
+                self.assertEqual(self._ports(spec), [])
+
+    def test_the_helper_answers_none_off_plane_and_the_plane_on_it(self):
+        from vm import VM_MGMT_NETWORK, vm_reserved_plane
+        self.assertIsNone(vm_reserved_plane("192.168.0.5", 8080))
+        self.assertIsNone(vm_reserved_plane("not-an-address", 8080))
+        self.assertEqual(vm_reserved_plane("127.128.0.3", 2222).network,
+                         VM_MGMT_NETWORK)
+
+    def test_a_v4_plane_never_matches_a_v6_address_and_back(self):
+        """Each family is judged against its own plane.
+
+        A comparison that crossed families would raise, or worse, answer False
+        for everything and read as a passing test.
+        """
+        from vm import vm_reserved_plane
+        self.assertIsNone(vm_reserved_plane("2001:db8::1", 8443))
+        self.assertIsNotNone(vm_reserved_plane("2001:2::c612:100", 8443))
+        self.assertIsNotNone(vm_reserved_plane("198.18.1.4", 8443))

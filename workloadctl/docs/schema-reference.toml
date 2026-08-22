@@ -242,10 +242,19 @@ name = "schema-reference"
 # managed-bridge VMs had no port publishing at all. Ignored (and rejected by
 # validate) when .bridge is set, since a bridged guest has its own address.
 #
-# A bind address in 127.128.0.0/9 is rejected: that range carries the
-# per-workload management addresses `exec` and `shell` reach a guest on, and
-# publishing into it would collide with whichever workload owns that address,
-# with start order deciding the winner. 127.0.0.1 and the rest of 127/8 are fine.
+# REJECTED: a bind address in a plane this design owns. There are four, and the
+# error names which one and what would collide with it:
+#   127.128.0.0/9   the per-workload management addresses `exec` and `shell`
+#                   reach a guest on. The rest of 127/8, 127.0.0.1 included, is
+#                   a normal thing to publish on.
+#   198.18.0.0/16   the egress inspector's IPv4 listener plane, where every
+#   2001:2::/48     filtered VM's redirected 80 and 443 land, and its IPv6 twin
+#                   carrying the same numbers.
+#   127.0.0.1:8081  the credential broker's listener — one socket, not a range,
+#                   so only that port on that address is refused.
+# In every case the collision is decided by start order and reported by neither
+# side: the loser fails to bind, which surfaces as the address being missing
+# rather than as a conflict, and the winner serves a plane it does not own.
 # ports = ["8080:80", "5353:53/udp", "127.0.0.1:9090:9090"]
 #
 # Optional: Pin this VM's outbound traffic to one host interface.

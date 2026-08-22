@@ -144,6 +144,14 @@ VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 # start order deciding the winner. The host-key pin stops that short of a session
 # in the wrong guest, but a plane documented as never configurable should not be
 # reachable from a config key.
+#
+# It is /9 rather than the /16 the management addresses actually occupy, and the
+# extra bits are load-bearing rather than slack: everything else this design
+# hangs on loopback is carved out of the same range (§9's synthesising responder
+# is next), so a narrowing pass that "tidied" this to 127.128.0.0/16 would take
+# the reservation away from planes that never had one of their own. The
+# reservation is enforced through VM_RESERVED_PLANES, which is where a new plane
+# is added — not by widening or narrowing this.
 VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
 
 # Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.
@@ -1847,16 +1855,91 @@ def vm_network_warnings(net: dict) -> list[str]:
     return warnings
 
 
-def _in_management_range(addr: str) -> bool:
-    """Whether a bind address falls inside the reserved management range.
+class ReservedPlane(NamedTuple):
+    """One host-side plane a [vm.network].ports entry may not bind into.
 
-    IPv6 and unparseable addresses answer False: the range is v4-only, and
-    parse_vm_port has already rejected anything malformed.
+    `port` is None for a plane that owns a whole address range on every port,
+    and a number for one that owns a single socket on an address operators
+    otherwise use freely. The distinction is not cosmetic: 127.0.0.1:8080 is a
+    normal thing to publish on and the management range is not a normal thing
+    to publish on at all, so a check that treated the broker's address the way
+    it treats the management range would refuse most of what `ports` is for.
+
+    `what` is a sentence, not a label, because the four collisions want four
+    different explanations and reciting the range explains none of them.
+    """
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network
+    port: int | None
+    what: str
+
+
+# Every plane `ports` may not bind, in both families.
+#
+# Before rung 1 there was one plane and the check was a single `in
+# VM_MGMT_NETWORK` with a docstring committing to v4. Rung 1 added two listener
+# planes and one of them is v6, so `ports = ["198.18.1.4:8443:22"]` validated
+# and 2001:2::/48 was not checked at all by construction. Either produces one of
+# two outcomes with nothing logged for either: a cross-workload denial of
+# service on a security control (the inspector fails to bind, and the
+# fail-at-bind path reports it as the address being missing), or workload B
+# receiving workload A's intercepted traffic. Start order decides which.
+#
+# A list, so the answer to "is this reserved" is one lookup that a new plane
+# joins rather than a chain of ifs each new plane has to remember to extend.
+VM_RESERVED_PLANES = (
+    ReservedPlane(
+        VM_MGMT_NETWORK, None,
+        "the per-workload management addresses `workloadctl exec` and `shell` "
+        "reach a guest's sshd on. Publishing here puts a guest port where "
+        "another workload's control plane belongs, and start order decides "
+        "which of the two gets the bind"),
+    ReservedPlane(
+        VM_INSPECT_NETWORK, None,
+        "the egress inspector's IPv4 listener plane. Every filtered VM's "
+        "redirected 80 and 443 land on an address in it, so publishing here "
+        "either takes the bind another workload's inspector needs — which "
+        "fails as the address being missing, not as a conflict — or hands this "
+        "guest another workload's intercepted traffic"),
+    ReservedPlane(
+        VM_INSPECT_ADDR6_PREFIX, None,
+        "the egress inspector's IPv6 listener plane, the v6 twin of "
+        "198.18.0.0/16 carrying the same numbers. Refusing one family and not "
+        "the other refuses half of every address, and the half left open is "
+        "the one clients try first"),
+    ReservedPlane(
+        ipaddress.ip_network(f"{VM_BROKER_LISTEN_ADDR}/32"),
+        VM_BROKER_LISTEN_PORT,
+        "the credential broker's listener, where the uid of the connecting "
+        "socket is what selects a caller's credentials. Publishing a guest "
+        "port there is a guest answering in a credential boundary's place, "
+        "decided by start order"),
+)
+
+
+def vm_reserved_plane(addr: str, port: int | None = None) -> ReservedPlane | None:
+    """The reserved plane this bind address and port fall in, or None.
+
+    Both families. The v4-only version this replaces was correct when there was
+    one plane and it was v4; it stopped being correct the moment a v6 plane
+    existed, and it said so in a docstring rather than in a failing test —
+    which is why the planes are a list now and this reads it.
+
+    An unparseable address answers None: parse_vm_port has already rejected
+    anything malformed, so there is nothing here to report.
     """
     try:
-        return ipaddress.ip_address(addr) in VM_MGMT_NETWORK
+        address = ipaddress.ip_address(addr)
     except (ValueError, TypeError):
-        return False
+        return None
+    for plane in VM_RESERVED_PLANES:
+        if address.version != plane.network.version:
+            continue
+        if address not in plane.network:
+            continue
+        if plane.port is not None and port != plane.port:
+            continue
+        return plane
+    return None
 
 
 def validate_vm_network(net: dict) -> list[str]:
@@ -1895,18 +1978,25 @@ def validate_vm_network(net: dict) -> list[str]:
                 errors.append(f"[vm.network].ports entries must be strings, got {spec!r}")
                 continue
             try:
-                bind_addr, _host, _guest, _proto = parse_vm_port(spec)
+                bind_addr, host_port, _guest, _proto = parse_vm_port(spec)
             except ValueError as e:
                 errors.append(f"[vm.network].ports: {e}")
                 continue
-            if bind_addr and _in_management_range(bind_addr):
+            plane = vm_reserved_plane(bind_addr, host_port) if bind_addr else None
+            if plane:
+                # The remedy follows the plane's shape: a range-scoped plane is
+                # not somewhere to publish at all, while a port-scoped one is a
+                # single socket on an address that is otherwise fine.
+                if plane.port is None:
+                    where = f"binds into {plane.network}, which carries"
+                    remedy = ("Bind 127.0.0.1, a LAN address, or omit the "
+                              "address to publish on all of them")
+                else:
+                    where = f"binds {bind_addr}:{plane.port}, which is"
+                    remedy = "Publish on another host port"
                 errors.append(
-                    f"[vm.network].ports: {spec!r} binds into "
-                    f"{VM_MGMT_NETWORK}, reserved for the management addresses "
-                    f"`workloadctl exec` and `shell` reach a guest on — it would "
-                    f"collide with whichever workload owns that address, decided "
-                    f"by start order. Bind 127.0.0.1, a LAN address, or omit the "
-                    f"address to publish on all of them")
+                    f"[vm.network].ports: {spec!r} {where} {plane.what}. "
+                    f"{remedy}")
     if ports and "bridge" in net:
         # passt publishes ports by binding host sockets; a bridged guest has its
         # own LAN address and nothing of ours is in its data path to bind them.
