@@ -1,0 +1,190 @@
+#!/usr/bin/python3
+"""
+workload-vm-inspect: arm or retire one VM's transparent egress inspection.
+
+Usage: workload-vm-inspect <up|down> <name>
+
+`up` runs as the inspector unit's ExecStartPre, `down` as its ExecStopPost.
+This is the first thing in the work that writes to the kernel: everything
+before it produced files. `up` writes to TWO tables — the DNAT maps in
+inet workload_proxy and the guard sets in inet workload_filter — and arming
+one and not the other leaves a workload that looks configured and reaches
+nothing. `down` removes the per-workload elements, the per-workload listener
+addresses, and the cgroup exemptions, and nothing else.
+
+WHY BOTH SKELETONS ARE APPLIED EVERY START
+
+`nft add element` into a table that does not exist fails, and a host that has
+never started a filtered VM has no table of either kind. Applying both at
+start makes an RPM upgrade self-heal on the next start instead of the next
+reboot: a rebuild that changes a skeleton's object layout is picked up by the
+next workload start, not left to a reboot the operator will never think to
+do. workload-vm-proxy applies both for the same reason; this one touches both
+tables, so it needs both.
+
+WHAT IS NEVER TORN DOWN
+
+The shared advertised address 192.0.2.1 and the dummy link itself. Both are
+host-global and shared: two concurrent VM starts race for them, which is why
+ensure_advertised_interface tolerates "already exists" rather than taking a
+lock, and refcounting is what ADR 006 deleted along with the managed bridge.
+The per-workload /32 and /128 ARE removed on stop, so that an address on the
+link means an inspector that is supposed to be running — `diagnose` reports
+what it sees, and a stopped workload's listener address is a line nobody can
+explain. Removal tolerates "Cannot assign requested address" for the same
+reason the add tolerates "assigned".
+
+WHAT IS NOT ARMED HERE
+
+The `wl_internal_ok4/6` destination exemptions read a workload config key
+that does not exist in this tree, so there is nothing to read and nothing is
+invented.
+
+The cgroup elements in wl_proxy_cg (inet workload_filter) and wl_inspect_cg
+(inet workload_proxy). The builders for both live in lib/vm.py, but the
+element is armed by the inspector's own unit, not this helper: an element
+resolves to a cgroup id at add time and systemd makes a fresh cgroup on
+every start, so the add belongs to the unit that owns the cgroup, and the
+remove to its ExecStopPost — "the only point at which a path still resolves
+to the id being retired". T5 wires those builders in. A premise owed by that
+same wiring: during rung 1 the workload's tinyproxy cgroup must be in
+wl_inspect_cg as well — its upstream CONNECT leg is tcp dport 443 from the
+same uid and would otherwise be redirected into a listener that only logs.
+
+EXIT CODES
+
+`up` fails loudly, on the same reasoning as workload-vm-proxy: an inspector
+whose redirect did not install leaves the guest reaching nothing while the
+VM itself looks healthy. `down` is tolerant: its elements are legitimately
+absent whenever the start failed before installing them, and the stop must
+not block.
+"""
+import pwd
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+from vm import (
+    NFT_BIN, NFT_PROXY_SKELETON, NFT_SKELETON,
+    ensure_advertised_interface, vm_inspect_element_commands,
+    vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
+    vm_uses_inspect,
+)
+from workload_lib import workload_config_path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - 3.11+ everywhere we ship
+    tomllib = None
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def run(argv, check=False):
+    return subprocess.run(argv, capture_output=True, text=True, check=check,
+                          timeout=30)
+
+
+def network_config(name: str) -> dict:
+    with open(workload_config_path(name), "rb") as f:
+        config = tomllib.load(f)
+    return config.get("vm", {}).get("network", {}) or {}
+
+
+def inspection_applies(net: dict) -> bool:
+    """Whether this workload's egress is redirected into an inspector.
+
+    Delegates to vm.vm_uses_inspect, the single source of the predicate that
+    also gates the generator's inspect socket/service units: re-stating the
+    not-bridged-and-filtered rule here would let the helper and the generator
+    disagree about which workloads have an inspector at all.
+    """
+    return vm_uses_inspect({"vm": {"network": net}})
+
+
+def up(name: str) -> int:
+    net = network_config(name)
+    if not inspection_applies(net):
+        # The unit should not have been generated at all; treat it as a no-op
+        # rather than a failure so an edited config that sets `egress = "open"`
+        # stops cleanly instead of blocking the workload's start.
+        log(f"  {name} is not inspected; nothing to arm")
+        return 0
+
+    uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+
+    ensure_advertised_interface(run)
+    # Both skeletons, for the reason in the module docstring: the DNAT maps
+    # live in the proxy table, the guard sets in the filter table, and this
+    # unit starts Before= the VM whose prestart would otherwise be the first
+    # to create one of them.
+    run([NFT_BIN, "-f", NFT_PROXY_SKELETON], check=True)
+    run([NFT_BIN, "-f", NFT_SKELETON], check=True)
+
+    # The per-workload listener addresses, both families, v6 nodad. A
+    # duplicate "Address already assigned" is tolerated for the reason
+    # ensure_advertised_interface's add is: a down that raced a fast restart
+    # has not removed them yet.
+    v4_add, v6_add = vm_inspect_link_address_commands(uid)
+    for argv in (v4_add, v6_add):
+        result = run(argv)
+        if result.returncode != 0 and "xist" not in result.stderr \
+                and "assigned" not in result.stderr:
+            raise RuntimeError(f"could not add listener address: "
+                               f"{result.stderr.strip()}")
+
+    # Six elements, both tables, for the reason vm_inspect_element_commands's
+    # docstring carries: arming one table and not the other leaves a workload
+    # that looks configured and reaches nothing. Purge before adding, because
+    # `add element` on an existing key does not overwrite a stale one.
+    for argv in vm_inspect_element_commands(uid, "delete"):
+        run(argv)
+    for argv in vm_inspect_element_commands(uid, "add"):
+        run(argv, check=True)
+
+    log(f"  Inspector redirect armed for uid {uid}")
+    return 0
+
+
+def down(name: str) -> int:
+    try:
+        uid = pwd.getpwnam(f"_wl-{name}").pw_uid
+    except KeyError:
+        return 0
+    # The values are part of the delete commands but nft matches on the key,
+    # so a stale listener address here still removes the right elements. A
+    # missing element is the expected state when the start failed before
+    # arming, so these are not check=True.
+    for argv in vm_inspect_element_commands(uid, "delete"):
+        run(argv)
+
+    # The per-workload addresses only. The link and the advertised address are
+    # shared and stay. Tolerate the address being absent: a start that died
+    # before adding it left nothing to remove.
+    v4_del, v6_del = vm_inspect_link_delete_commands(uid)
+    for argv in (v4_del, v6_del):
+        result = run(argv)
+        if result.returncode != 0 \
+                and "Cannot assign requested address" not in result.stderr:
+            log(f"  WARNING: could not remove listener address: "
+                f"{result.stderr.strip()}")
+    return 0
+
+
+def main(argv):
+    if len(argv) != 3 or argv[1] not in ("up", "down"):
+        print(f"usage: {argv[0]} <up|down> <name>", file=sys.stderr)
+        return 2
+    action, name = argv[1], argv[2]
+    return up(name) if action == "up" else down(name)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1 if len(sys.argv) > 1 and sys.argv[1] == "up" else 0)

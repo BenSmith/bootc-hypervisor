@@ -1,0 +1,162 @@
+; workload-inspect — an SELinux domain for the per-workload egress inspector.
+;
+; WHY THIS IS NOT AN EXTENSION OF workload-proxy.cil
+;
+; wlproxy_t is defined by two things the inspector does not share: the binary it
+; entrypoints (/usr/bin/tinyproxy) and a filesystem boundary drawn at
+; /run/workload-vm/<name>. The inspector is a Python script in
+; /usr/libexec/workloadctl and its sockets are opened by init, so nothing about
+; the shape transfers. It gets its own module, and the two are expected to
+; diverge further, not converge.
+;
+; THE ENTRYPOINT IS A SCRIPT, AND THAT WORKS
+;
+; Retyping the interpreter is out of the question — /usr/bin/python3 is every
+; workloadctl entrypoint and most of the host besides. Labelling the *script* is
+; the answer, and shipped Fedora policy already runs that shape:
+; /usr/libexec/openssh/sshd-keygen is a #!/usr/bin/bash script carrying
+; sshd_keygen_exec_t, with both halves present — a type_transition on the
+; script's own label and an entrypoint allow on it. The interpreter is
+; incidental; what the domain needs from it is execute_no_trans.
+;
+; ONE FILE, NOT A GLOB
+;
+; The filecon names a single path. /usr/libexec/workloadctl holds the helpers
+; too, and workload-vm-inspect runs *privileged* from the socket unit's
+; ExecStartPre=+. A glob over that directory would make every helper an
+; entrypoint into this domain — the same class of silent over-reach as the
+; /usr/sbin symlink trap workload-proxy.cil documents, and in the same
+; direction, since nothing would fail. Everything under libexec/ is bin_t
+; today, and bin_t carries both exec_type and entry_type, which is exactly why
+; the retype is necessary rather than a bin_t:file entrypoint.
+;
+; SOCKET ACTIVATION DOES NOT MOVE THE BIND OUT OF THE DOMAIN
+;
+; The design predicted it would: the sockets are opened by init, so the domain
+; should need no port label at all. Measured, it needs two. systemd's
+; (sd-listen) both CREATES and BINDS a socket unit's sockets in the *service's*
+; domain, so the denials are
+;
+;   avc: denied { create } scontext=init_t tcontext=wlinspect_t
+;   avc: denied { name_bind } scontext=wlinspect_t tcontext=http_cache_port_t
+;
+; — one rule pointing each way, and neither is the "inherit an init_t socket"
+; rule that was expected. Both surface as the socket unit failing to start,
+; taking the VM ordered after it down with a bare dependency error.
+;
+; A THIRD RULE IS DONTAUDIT'D, AND A PLAIN ENFORCING HARVEST CANNOT SEE IT
+;
+; systemd creates the socket in a forked (sd-listen) helper and passes the fd
+; back to PID 1 over a socketpair, so init_t also needs `read write` on the
+; wlinspect_t socket. That denial is dontaudit'd in shipped policy: with it
+; missing the audit log is EMPTY and the unit fails with
+;
+;   Failed to receive listening socket (198.18.1.1:8080):
+;     Channel number out of range
+;
+; which is receive_one_fd() reporting -ECHRNG for a control message that
+; carried no descriptor. Nothing in that names SELinux. It was found by
+; running `semodule -DB` to disable dontaudit rules and starting the unit
+; again; re-derive it that way, because four enforcing iterations without
+; that step converge on a module that is still one rule short.
+;
+; THE TWO PLANES CARRY DIFFERENT PORT LABELS
+;
+; Read from `semanage port -l` rather than guessed, which is why
+; workload-proxy.cil's squid_port_t comment exists:
+;
+;   8080 (cleartext) -> http_cache_port_t
+;   8443 (tls)       -> http_port_t
+;
+; Granting one and not the other yields a half-working inspector — one plane
+; binds, the other does not — and the plane that fails is whichever the reader
+; did not think about. Both, or the pair is wrong.
+;
+; HARVESTING
+;
+; Derived by enforcing iterations against a real guest dialling the listener,
+; not by a single permissive pass. A permissive run gets further here than it
+; does for tinyproxy — Python reaches its imports and its inherited socket
+; before it needs anything else — but the accept path is still a gate behind a
+; gate, so the last rules only appear once the earlier ones are granted.
+; tests/manual/inspect_rig.py is the run that exercises it.
+;
+; FOUR RESIDUAL DENIALS ARE DELIBERATELY NOT GRANTED
+;
+; A green run with dontaudit disabled still logs these, and the run is green
+; WITH them denied — so each would widen the domain for nothing:
+;
+;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
+;     whether its stdout is a tty. The answer is "no" either way.
+;   search on cert_t (/etc/pki)                           import machinery
+;   search on container_file_t (/var/lib/workloads)       walking past the
+;     workload state tree it must not read
+;
+; The last two are the boundary working. wlproxy_t is a separate domain from
+; svirt_t precisely so that the component terminating guest input cannot reach
+; the workload's disks and state; granting `search` here because it appears in
+; a log would be the first step back across that line, and nothing would fail
+; to tell anyone. Re-check them if the listener ever gains a reason to read a
+; certificate — §6 puts the CA in a subdirectory with its OWN label for this
+; reason, and that is the rule to add then, not these.
+
+(type wlinspect_t)
+(typeattributeset domain (wlinspect_t))
+(roletype system_r wlinspect_t)
+
+; roletype before the filecon, or semodule rejects the module with
+; "Type wlinspect_exec_t is invalid for role object_r".
+(type wlinspect_exec_t)
+(roletype object_r wlinspect_exec_t)
+(typeattributeset file_type (wlinspect_exec_t))
+(typeattributeset exec_type (wlinspect_exec_t))
+(typeattributeset entry_type (wlinspect_exec_t))
+(filecon "/usr/libexec/workloadctl/workload-vm-inspect-listener" file (system_u object_r wlinspect_exec_t ((s0) (s0))))
+
+; Straight out of systemd, like wlproxy_t and unlike QEMU: the module declares
+; the transition itself, so the unit's ExecStart is the plain script path.
+(typetransition init_t wlinspect_exec_t process wlinspect_t)
+(allow init_t wlinspect_exec_t (file (getattr open read execute map)))
+(allow init_t wlinspect_t (process (transition siginh)))
+(allow wlinspect_t wlinspect_exec_t (file (entrypoint execute map getattr ioctl open read)))
+
+; The interpreter. execute_no_trans is granted on the attribute, not on a
+; literal bin_t: shipped policy grants sshd_keygen_t the same permission on
+; base_ro_file_type, of which bin_t (/usr/bin/python3.14) and lib_t are both
+; members. Naming bin_t alone would work for the interpreter and miss
+; everything else the attribute covers.
+;
+; Reading the stdlib is NOT an addition: `allow domain base_ro_file_type:file
+; { getattr ioctl lock open read }` already applies to every domain, and
+; /usr/lib64/python3.14/** is lib_t. Bytecode writes stay absent because every
+; entrypoint sets sys.dont_write_bytecode.
+(allow wlinspect_t base_ro_file_type (file (execute execute_no_trans map)))
+
+; stdout/stderr to the journal — the log line per connection is the whole of
+; this rung's output.
+(allow wlinspect_t init_t (unix_stream_socket (read write)))
+
+; The inherited listening sockets, and this is the rule the design guessed
+; wrong. The guess was that the fds carry init_t and the domain needs
+; `wlinspect_t init_t:tcp_socket accept read write`. Measured: systemd creates
+; a socket unit's sockets ALREADY LABELLED for the service's domain, so the
+; denial is on the other side of the arrow —
+;
+;   avc: denied { create } comm="(sd-listen)"
+;     scontext=…init_t tcontext=…wlinspect_t tclass=tcp_socket
+;
+; — init_t creating a wlinspect_t socket. Nothing about it is visible from the
+; inspector's side: the process never starts, the socket unit fails, and the
+; VM that is ordered after it fails with a bare dependency error. The domain
+; then uses those same sockets as `self`, which is the rule below.
+(allow init_t wlinspect_t (tcp_socket (bind create getattr getopt listen read setopt shutdown write)))
+
+; The two listener ports, both labels, for the reason in the header. node_bind
+; covers binding to the workload's own listener address rather than a wildcard.
+(allow wlinspect_t http_cache_port_t (tcp_socket (name_bind)))
+(allow wlinspect_t http_port_t (tcp_socket (name_bind)))
+(allow wlinspect_t node_t (tcp_socket (node_bind)))
+
+; The listening sockets as the domain sees them, plus the accepted connections,
+; which carry the same label.
+(allow wlinspect_t self (tcp_socket (accept bind getattr getopt ioctl listen read setopt shutdown write)))

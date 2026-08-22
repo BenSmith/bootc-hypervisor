@@ -120,6 +120,10 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-proxy \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-proxy
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect-listener \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect-listener
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-broker \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-broker
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
@@ -192,6 +196,9 @@ install -Dpm 0644 %{_sourcedir}/security/workload-vm.cil \
 # The tinyproxy domain, host-global for the same reasons.
 install -Dpm 0644 %{_sourcedir}/security/workload-proxy.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-proxy.cil
+
+install -Dpm 0644 %{_sourcedir}/security/workload-inspect.cil \
+    %{buildroot}%{_datadir}/workloadctl/workload-inspect.cil
 
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
@@ -377,6 +384,15 @@ if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-proxy.cil 
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
     fi
 fi
+# The egress inspector's domain, on the same terms. The filecon names ONE file
+# under /usr/libexec/workloadctl, not the directory: the other helpers there
+# include workload-vm-inspect, which runs privileged, and a glob would make
+# every one of them an entrypoint into this domain (see the module header).
+if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.cil ]; then
+    if semodule -i %{_datadir}/workloadctl/workload-inspect.cil 2>/dev/null; then
+        restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
+    fi
+fi
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -440,6 +456,8 @@ if [ $1 -eq 0 ]; then
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
         semodule -r workload-proxy 2>/dev/null || :
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
+        semodule -r workload-inspect 2>/dev/null || :
+        restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
     fi
 fi
 
@@ -460,6 +478,8 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
 %{_libexecdir}/workloadctl/workload-vm-proxy
+%{_libexecdir}/workloadctl/workload-vm-inspect
+%{_libexecdir}/workloadctl/workload-vm-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-broker
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown

@@ -76,8 +76,11 @@ try:
     from vm import (
         VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
         VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_PROXY_BIN, VM_PROXY_SLICE,
+        VM_INSPECT_LISTENER_BIN, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
         vm_mac_address, vm_management_address, parse_vm_port,
         find_ovmf_code, parse_memory_mib, vm_proxy_env, vm_uses_proxy,
+        vm_uses_inspect, vm_inspect_address, vm_inspect_cgroup_command,
+        vm_inspect_cgroup_filter_command,
     )
     from validation import valid_userns_mode, validate_workload_config
     from secrets_template import (
@@ -1949,6 +1952,202 @@ def generate_vm_proxy_service(config, user_name: str) -> str:
     return unit.render()
 
 
+def generate_vm_inspect_socket(config, user_name: str, uid: int) -> str:
+    """Generate the socket unit for one VM's transparent egress inspector.
+
+    The listener is a systemd socket unit, not a process that opens its own
+    socket: the VM must not be able to start before the listener exists, and a
+    `.socket` ordered `Before=` the VM makes early connections queue in the
+    kernel rather than be refused. The four ListenStream= lines are the whole
+    of what the socket binds — both families, both the cleartext and the TLS
+    listener port — so a guest dial to 80 or one to 443 is translated onto a
+    port that is already bound before the VM's first packet can arrive.
+    """
+    name = config["workload"]["name"]
+    # The uid is passed in, never looked up. On a first enable this runs
+    # BEFORE systemd-sysusers has created _wl-<name> -- the generator has only
+    # just written the sysusers config -- so a getpwnam here raises KeyError
+    # and takes the whole VM workload down with it. The caller already holds
+    # the allocated uid; that is the only value that exists this early.
+    addr = vm_inspect_address(uid)
+
+    unit = Unit()
+    unit.comment(f"egress inspector socket for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Transparent egress inspection socket for {name}")
+    # Ordered after the setup service, exactly as the proxy sidecar is, and for
+    # the reason generate_setup_service's docstring gives: the user must be
+    # resolvable before any ExecStartPre runs. This socket's ExecStartPre calls
+    # workload-vm-inspect up, whose second statement is a getpwnam of
+    # _wl-<name>, and the user does not exist until setup.service has run --
+    # creation is deferred to it and /run is tmpfs, so nothing survives a boot
+    # to pre-create it. The VM unit's After= orders the VM behind all of its
+    # prerequisites but does NOT order them against each other, so without this
+    # the socket and setup.service start concurrently and the socket usually
+    # wins: getpwnam raises, ExecStartPre fails, the socket fails, and the VM's
+    # Requires= on the socket means the VM does not boot at all.
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # The VM is the hard prerequisite, not the other way round: an inspector
+    # with no guest behind it is a listener that logs nothing. PartOf= so the
+    # socket stops with the VM (its ExecStopPost is what removes the armed
+    # addresses and elements — a socket that outlived the VM would leave a
+    # redirect pointing at a listener with nothing behind it).
+    u.set("Before", f"workload-{name}.service")
+    u.set("PartOf", f"workload-{name}.service")
+
+    sock = unit.section("Socket")
+    # The address-add lives on the SOCKET unit, not the service, because the
+    # socket binds its ListenStream= when the socket unit starts — which is
+    # before the service ever runs. An ExecStartPre on the service is too late
+    # by one unit: the DNAT target address would not exist when the bind is
+    # attempted. `+` runs it as root; not `-` — an address that failed to add
+    # leaves a socket bound to nothing that no guest can reach.
+    sock.add("ExecStartPre",
+             f"+/usr/libexec/workloadctl/workload-vm-inspect up {dq(name)}")
+    # Tolerant, unlike the prestart: the elements and addresses are
+    # legitimately absent whenever the start failed before arming them, so the
+    # stop must not block. The shared dummy link and the advertised address are
+    # never torn down — the helper does not touch them, for the reason its
+    # own docstring gives.
+    sock.add("ExecStopPost",
+             f"-+/usr/libexec/workloadctl/workload-vm-inspect down {dq(name)}")
+    # Four listener ports, both families, cleartext and TLS. The values come
+    # from the T4 derivation (vm_inspect_address) and the port constants —
+    # never a literal. The v6 form brackets the address so it is not parsed as
+    # the scope-id separator.
+    sock.add("ListenStream", f"{addr.v4}:{VM_INSPECT_PORT_CLEARTEXT}")
+    sock.add("ListenStream", f"{addr.v4}:{VM_INSPECT_PORT_TLS}")
+    sock.add("ListenStream", f"[{addr.v6}]:{VM_INSPECT_PORT_CLEARTEXT}")
+    sock.add("ListenStream", f"[{addr.v6}]:{VM_INSPECT_PORT_TLS}")
+    # One service instance, not one per connection: the listener is a single
+    # long-lived process, and Accept=no is what makes the trigger limit below
+    # the meaningful knob. Set explicitly rather than inherited.
+    sock.set("Accept", "no")
+    # Accept=no silently lowers systemd's trigger-limit default to 20 per 2s
+    # (not 200), and hitting it fails the socket unit PERMANENTLY until it is
+    # restarted — reachable by exactly the inspector-fails-to-start case this
+    # unit of work deliberately creates. Set both explicitly, so a failed
+    # start is a transient slowdown the service's own Restart= recovers from,
+    # not an outage that needs an operator.
+    sock.set("TriggerLimitIntervalSec", "2s")
+    sock.set("TriggerLimitBurst", "200")
+    # Deliberately NOT FreeBind=yes. FreeBind would bind an address that does
+    # not exist, which converts a loud failure (the socket unit fails, the VM's
+    # hard prerequisite fails, the operator gets a message naming the unit)
+    # into a silent blackhole (everything starts, the guest reaches nothing,
+    # diagnose says healthy): a DNAT whose target is on no interface is dropped
+    # by the kernel regardless of whether anything bound it. Fail at bind.
+    # The address-add above is the mechanism; there is no belt worth adding
+    # behind it.
+
+    return unit.render()
+
+
+def generate_vm_inspect_service(config, user_name: str) -> str:
+    """Generate the service unit for one VM's transparent egress inspector.
+
+    Socket-activated by the matching .socket: the kernel hands the listener its
+    accepted connection when the guest first dials. It runs as _wl-<name> so
+    the inspector's own traffic carries the workload's uid, which is what the
+    two cgroup exemptions below key on.
+
+    The two cgroup elements are armed and removed HERE, not by the socket's
+    helper: an element resolves to a cgroup id at add time and systemd makes a
+    fresh cgroup on every start, so the add belongs to the unit that owns the
+    cgroup (its ExecStartPre) and the remove to the point at which the path
+    still resolves to the id being retired (its ExecStopPost). At the moment the
+    socket's ExecStartPre runs, the service has not started and its cgroup does
+    not exist, so the socket cannot arm these. Both or neither: the redirect
+    exemption (wl_inspect_cg, proxy table) without the egress exemption
+    (wl_proxy_cg, filter table) is an inspector that redirects its own dials
+    into itself; the egress exemption without the redirect exemption is one
+    whose upstream traffic is caught by the default-deny drop. Both missing is
+    both failures at once.
+    """
+    name = config["workload"]["name"]
+
+    unit = Unit()
+    unit.comment(f"egress inspector service for {name}")
+    unit.comment(GENERATED_BY)
+
+    u = unit.section("Unit")
+    u.set("Description", f"Transparent egress inspector for {name}")
+    # The same ordering as the socket, for the same reason one step later: this
+    # unit carries User=_wl-<name>, which systemd must resolve before it can
+    # execute anything. Socket activation means it starts long after boot in
+    # practice, so this is the lower-risk half of the pair -- but leaving the
+    # two asymmetric would invite a reader to conclude the socket's ordering
+    # was the accident.
+    u.set("Requires", f"workload-{name}-setup.service")
+    u.set("After", f"workload-{name}-setup.service")
+    # Before= the VM is the socket's job, not this service's: the service is
+    # pulled in by the socket (which the ladder orders Before= the VM), so a
+    # Before= here would be redundant and would misstate who owns the
+    # ordering. What this unit owns is that it STOPS with the VM.
+    # PartOf=, not Requires= in the other direction: a socket-activated process
+    # that survived a VM restart would hold the previous inspect.json in memory
+    # and keep enforcing it while the VM runs the new one. PartOf= is what
+    # makes the service actually stop with the VM, which is what makes the
+    # recovery path (an edited list applies on a plain restart) work.
+    u.set("PartOf", f"workload-{name}.service")
+
+    svc = unit.section("Service")
+    # Socket activation: no Type= is needed; systemd considers the unit active
+    # the instant the process it execs is running, and the listener has no
+    # readiness protocol the generator would otherwise have to wait on.
+    svc.set("User", user_name)
+    svc.set("Group", user_name)
+    # Pinned, NOT taken from [resources].slice, for the same reason the proxy
+    # unit pins it: the two cgroup exemptions are `socket cgroupv2 level 2`
+    # matches, so the cgroup path has to be exactly two components — a nested
+    # custom slice would deepen it and both matches would silently stop firing,
+    # dropping the inspector's own traffic (the redirect side into itself, the
+    # egress side into the default-deny drop). The inspector is not the
+    # payload; resource control belongs on the VM.
+    svc.set("Slice", VM_PROXY_SLICE)
+    # Arm BOTH cgroup exemptions before the listener starts. `+` runs them as
+    # root (nft needs the capability); not `-` — an exemption that failed to
+    # install leaves a healthy-looking inspector that reaches nothing or dials
+    # into itself. Both lines, always: one missing is one of the two failures
+    # the docstring names. Each argv token is quoted with dq (the systemd-Exec
+    # literal-token helper), not a bare join: the `inet workload_proxy` table
+    # and the cgroup path each carry a space that a bare join would split, and
+    # dq is the repo's own quoting for Exec lines, not shell quoting.
+    for cmd in (
+        vm_inspect_cgroup_command(name, "add"),
+        vm_inspect_cgroup_filter_command(name, "add"),
+    ):
+        svc.add("ExecStartPre",
+                "+" + " ".join(dq(a) for a in cmd))
+    svc.add("ExecStart", VM_INSPECT_LISTENER_BIN)
+    # Remove both exemptions on stop, kill and failure. ExecStopPost so a
+    # killed or failed inspector still withdraws them; `-+` tolerant because
+    # the elements are legitimately absent when the start failed before
+    # arming them. Both lines, always: a leftover element points at a cgroup
+    # id that nothing else holds and would arm the next process systemd places
+    # in a same-named path.
+    for cmd in (
+        vm_inspect_cgroup_command(name, "delete"),
+        vm_inspect_cgroup_filter_command(name, "delete"),
+    ):
+        svc.add("ExecStopPost",
+                "-+" + " ".join(dq(a) for a in cmd))
+    svc.blank()
+    svc.add("StandardOutput", "journal")
+    svc.add("StandardError", "journal")
+    svc.blank()
+    # The socket's trigger limit is a transient slowdown by design; the service
+    # still needs its own restart policy so a failed listener that the socket
+    # re-triggers actually comes back rather than the socket giving up.
+    svc.add("Restart", "on-failure")
+    svc.add("RestartSec", "5s")
+
+    return unit.render()
+
+
 def generate_vm_build_service(config, user_name) -> str:
     """Generate the oneshot build service that creates system.qcow2."""
     name = config["workload"]["name"]
@@ -2025,6 +2224,18 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     # and cannot do its job — the misreported-confinement failure again.
     if vm_uses_proxy(config):
         prereqs.append(f"workload-{name}-proxy.service")
+    # Same reasoning as the proxy line: a filtered VM whose inspector socket
+    # is not bound reaches nothing on 80 or 443 while the VM itself looks
+    # healthy — the misreported-confinement failure again. Requires=, not
+    # Wants=, so a failed ExecStartPre — the nft arming — stops the VM from
+    # booting rather than booting it unprotected. And the ordering is now
+    # stated twice, from both ends: the socket's
+    # Before=workload-<name>.service AND this After=. That is deliberate, not
+    # redundant: Before= orders the socket ahead of the VM, and this After=
+    # is what makes the VM's own start wait for it — a later reader who
+    # deletes either side leaves only the other direction's ordering.
+    if vm_uses_inspect(config):
+        prereqs.append(f"workload-{name}-inspect.socket")
     prereqs_str = " ".join(prereqs)
 
     has_data_disk = bool(vm_cfg.get("data_disk_size"))
@@ -2362,6 +2573,22 @@ def generate_vm_workload(config, user_name: str, uid: int):
     if proxy_dests and vm_uses_proxy(config):
         proxy_dests[0].write_text(generate_vm_proxy_service(config, user_name))
         log_msg("  Created hostname-policy proxy service")
+
+    # Transparent egress inspection socket + service, when egress is filtered
+    # (not bridged). The socket binds and arms the redirect before the VM can
+    # start; the service is socket-activated and owns the inspector process and
+    # its cgroup exemptions.
+    uses_inspect = vm_uses_inspect(config)
+    if uses_inspect:
+        socket_dests = paths.get(("unit", "inspect-socket"), [])
+        if socket_dests:
+            socket_dests[0].write_text(
+                generate_vm_inspect_socket(config, user_name, uid))
+            log_msg("  Created egress inspector socket")
+        inspect_dests = paths.get(("unit", "inspect"), [])
+        if inspect_dests:
+            inspect_dests[0].write_text(generate_vm_inspect_service(config, user_name))
+            log_msg("  Created egress inspector service")
 
     # virtiofsd sidecar services — collision-safe tags, same order/set as the
     # VM service's chardevs and the purge/cloud-init sites (B3).

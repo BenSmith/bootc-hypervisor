@@ -270,6 +270,13 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # unit is always listed so the destructive view can unlink it,
                 # and emitted only when [vm.network].hosts is set.
                 'workload-forge-proxy.service',
+                # Superset semantics, like the proxy: the inspector socket and
+                # service are always listed so the destructive view can unlink
+                # them, emitted only when egress inspection applies (not
+                # bridged, egress filtered). This fixture is egress = "open",
+                # so both are listed-but-not-emitted here.
+                'workload-forge-inspect.socket',
+                'workload-forge-inspect.service',
                 # no pod/net (VM branch); no virtiofs units (no vm.volumes)
             })
 

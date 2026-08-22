@@ -14,6 +14,7 @@ import ipaddress
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from workload_lib import UID_MAX, UID_MIN, parse_volume_spec
 
@@ -60,6 +61,60 @@ VM_GUEST_HOME_BASE = "/home"
 
 # --- passt networking (ADR 006) ---
 #
+# The inspector's listening addresses. The inspector cannot live on the
+# workload's management address in 127/8: guest traffic is re-originated by
+# passt toward a REMOTE address, so a DNAT to 127/8 is martian at the default
+# and the packets vanish — making it work needs net.ipv4.conf.*.route_localnet=
+# 1, a host-wide loosening of martian filtering. Instead the inspector binds a
+# uid-derived address on the shared `workload-proxy` dummy link, in
+# 198.18.0.0/16 (RFC 2544 benchmarking space, not routable), with an IPv6 twin
+# in 2001:2::/48 (RFC 5180, the exact v6 counterpart). The address is on a
+# dummy link and therefore local, so no sysctl is involved. The offset
+# arithmetic is the same vm_management_address uses against 127.128.0.0.
+#
+# The base is 198.18.1.0 rather than 198.18.0.0 for the reason NFLOG_GROUP_BASE
+# is 1000 rather than 0: a bare offset lands the *first* workload allocated on
+# any host on the range's own network address, which is the value everything
+# else defaults to. Harmless while each address is a /32 and a latent
+# confusion the day anyone assigns or matches the range as a /16.
+VM_INSPECT_ADDR_BASE = 0xC6120100  # 198.18.1.0
+
+# The whole reservation, not just the allocated part — the range the filter's
+# guards name. 42,949 workloads fit inside the /16's 65,536, so uniqueness is
+# inherited from the uid allocator exactly as vm_management_address's is.
+VM_INSPECT_NETWORK = ipaddress.ip_network("198.18.0.0/16")
+
+# The v6 twin's prefix. The v4 address is embedded in its low 32 bits, so one
+# derivation feeds both families and the two listener addresses carry the same
+# number — an address in a log or a .nft element says which workload it is.
+#
+# No base/reservation split here the way the v4 side has: the v6 is derived by
+# OR-ing the v4 into this prefix, so it inherits both the base offset and the
+# whole-range boundary from the v4 and one prefix plays both roles.
+VM_INSPECT_ADDR6_PREFIX = ipaddress.ip_network("2001:2::/48")
+
+# The two listener ports, selected by the redirected connection's ORIGINAL port
+# via the DNAT map rather than recovered by the inspector: a guest dial to 80
+# lands here cleartext (the Host header carries the name) and one to 443 here
+# under TLS (the SNI in the ClientHello). The socket that accepted the
+# connection tells the inspector which it is, so SO_ORIGINAL_DST is not needed.
+VM_INSPECT_PORT_CLEARTEXT = 8080
+VM_INSPECT_PORT_TLS = 8443
+
+# The two ORIGINAL ports the redirect matches and the map keys on: a guest dial
+# to 80 or one to 443. Fixed by the redirect rules in workload-proxy.nft; they
+# never appear in an element value, which is why the constants live beside the
+# listener ports they select. 443 is spelled rather than aliased to
+# VM_PROXY_PORT_HTTPS: that constant is tinyproxy's CONNECT restriction, and an
+# alias would tie the redirect's key to a policy directive of a service it
+# replaces (rung 2).
+VM_INSPECT_ORIG_CLEARTEXT = 80
+VM_INSPECT_ORIG_TLS = 443
+
+# The inspector's listener binary, the socket unit's ExecStart. It does not
+# exist yet (T5b); naming it here keeps the unit and the RPM one place apart.
+VM_INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-inspect-listener"
+
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
 # and re-originates its traffic as ordinary host sockets owned by the workload's
 # own uid, so THE WORKLOAD UID IS THE NETWORK IDENTITY — unforgeable by the
@@ -160,6 +215,39 @@ def vm_management_address(uid: int) -> str:
             f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
             f"no management address is derivable for it")
     return str(ipaddress.IPv4Address(VM_MGMT_ADDR_BASE + (uid - UID_MIN)))
+
+
+class VmInspectAddress(NamedTuple):
+    """The inspector's listening addresses for one workload, one field per family.
+
+    Both fields are str, the shape the .nft elements want.
+    """
+    v4: str
+    v6: str
+
+
+def vm_inspect_address(uid: int) -> VmInspectAddress:
+    """The inspector's listening addresses, (IPv4, IPv6), for this workload.
+
+    The transparent redirect rewrites a guest dial to 80 or 443 onto these. They
+    are not loopback (unlike vm_management_address): the inspector binds them on
+    the shared `workload-proxy` dummy link, in 198.18.0.0/16 and 2001:2::/48,
+    because guest traffic re-originated by passt toward a remote address cannot
+    be DNATed to 127/8 without a host-wide sysctl. The v6 twin embeds the v4
+    address in its low 32 bits, so the two carry the same number.
+
+    Derived from the uid, so uniqueness is inherited from the uid allocator:
+    no registry, no allocation step, and no collision. uid 10000 -> 198.18.1.0 /
+    2001:2::c612:100.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no inspector address is derivable for it")
+    v4 = ipaddress.IPv4Address(VM_INSPECT_ADDR_BASE + (uid - UID_MIN))
+    v6 = ipaddress.IPv6Address(
+        int(VM_INSPECT_ADDR6_PREFIX.network_address) | int(v4))
+    return VmInspectAddress(str(v4), str(v6))
 
 
 def vm_nflog_group(uid: int) -> int:
@@ -316,6 +404,18 @@ NFT_SET_ALLOW6 = "wl_allow6"
 # until reboot, so a VM started before an upgrade keeps the older chain.
 NFT_SET_INTERNAL4 = "wl_internal4"
 NFT_SET_INTERNAL6 = "wl_internal6"
+# The inspector's listener-plane guard sets (§7.2/§7.2.1/§7.2.3). Elements are
+# per workload and are armed by the same script that arms the DNAT maps, not
+# by the filter helper: the dst sets hold the TRANSLATED tuple, which only the
+# redirect's installer knows. The self sets carry a per-element counter —
+# the load-bearing half, since it is what attributes a wrong-port self-dial to
+# its workload instead of the range guard's shared number. None of the four
+# is flushed in the skeleton; the two that hold per-workload state are never
+# emptied by it.
+NFT_SET_INSPECT_DST = "wl_inspect_dst"
+NFT_SET_INSPECT_DST6 = "wl_inspect_dst6"
+NFT_SET_INSPECT_SELF = "wl_inspect_self"
+NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 
 
@@ -428,6 +528,17 @@ NFT_PROXY_SKELETON = "/usr/share/workloadctl/workload-proxy.nft"
 NFT_PROXY_TABLE = "inet workload_proxy"
 NFT_PROXY_MAP = "wl_proxy_dest"
 
+# The transparent redirect's objects (§7.1). The two maps carry one element per
+# workload per redirected port, keyed uid . original port -> (listener address,
+# listener port), one map per family because `dnat ip` and `dnat ip6` are
+# different translations in the inet family; the set exempts the processes that
+# re-originate workload-uid traffic so their own dials are not translated into
+# the listener they are dialing past. All three live in table
+# inet workload_proxy and are declared in workload-proxy.nft.
+NFT_MAP_INSPECT4 = "wl_inspect4"
+NFT_MAP_INSPECT6 = "wl_inspect6"
+NFT_SET_INSPECT_CG = "wl_inspect_cg"
+
 # tinyproxy's own client ACL. It must name the advertised address, not just
 # loopback: the guest's packet is routed to 192.0.2.1 before it is translated,
 # so the host picks that same address as the source and the proxy sees a client
@@ -462,6 +573,34 @@ def vm_uses_proxy(config: dict) -> bool:
     if not isinstance(net, dict) or net.get("bridge"):
         return False
     return bool(vm_proxy_hosts(net))
+
+
+def vm_uses_inspect(config: dict) -> bool:
+    """Whether this workload's egress is redirected into an inspector.
+
+    The single source of the predicate that decides whether the inspect
+    socket/service units exist at all: not bridged (a bridged guest has no
+    host socket in its data path, so there is no uid to key the redirect on)
+    and `egress` filtered (an unfiltered VM would be the one the redirect
+    breaks — its dial to a port-443 service it is allowed to reach would be
+    translated into a listener that only logs). `workload-vm-inspect`'s
+    inspection_applies delegates here rather than re-stating it, so the
+    generator and the helper cannot drift apart.
+
+    A workload with no [vm] section is not a VM and is never inspected. That is
+    tested here rather than left to the callers: every caller happens to be
+    behind a VM-only branch today, so a container config reaching this returned
+    True and nothing noticed. A predicate documented as the single source of a
+    decision has to be right standing alone, or the next caller inherits a bug
+    that reads as correct at its own call site.
+    """
+    if "vm" not in config:
+        return False
+    vm_cfg = config.get("vm", {}) or {}
+    net = vm_cfg.get("network", {}) or {}
+    if not isinstance(net, dict) or net.get("bridge"):
+        return False
+    return net.get("egress", VM_EGRESS_DEFAULT) == "filtered"
 
 
 def vm_proxy_runtime_dir(name: str) -> str:
@@ -530,6 +669,179 @@ def vm_proxy_cgroup_command(name: str, action: str) -> list[str]:
     """
     return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_PROXY_CG,
             '{ "' + vm_proxy_cgroup(name) + '" }']
+
+
+def vm_proxy_cgroup_inspect_command(name: str, action: str) -> list[str]:
+    """`nft add|delete element` putting one proxy's cgroup into the *nat* return set.
+
+    The missing corner of the table vm_proxy_cgroup_command fills: same cgroup
+    as that one, but in the *proxy* table's wl_inspect_cg — the opposite of
+    vm_proxy_cgroup_command, the twin of vm_inspect_cgroup_command, whose other
+    member names the proxy unit rather than the inspector's.
+
+    wl_inspect_cg's name misleads: it is not "the inspector's cgroup". It is
+    every workload-uid process that *re-originates* guest traffic rather than
+    emitting it — during rung 1 there are two, the inspector and tinyproxy's
+    upstream CONNECT leg. That leg is `tcp dport 443` from the workload uid, so
+    without this element the transparent redirect rewrites it into the
+    inspector's listener, and every proxied HTTPS request on every filtered VM
+    breaks. Rung 2 removes tinyproxy and with it this element.
+
+    The proxy unit's start applies both skeletons, so the table exists before
+    the add; its ExecStopPost removes it, for the same cgroup-id reason the
+    sibling delete in the filter table is owed by that unit's stop.
+    """
+    return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(),
+            NFT_SET_INSPECT_CG, '{ "' + vm_proxy_cgroup(name) + '" }']
+
+
+# --- The transparent redirect's per-workload elements (§7.1, §7.2) ---
+#
+# Six objects, two per family, are what makes a redirected guest connection
+# actually reach a working listener and nothing else: the two DNAT map elements
+# (the redirect itself), the two accept-set elements (the redirected connection
+# is admitted by its TRANSLATED tuple, because the filter hook runs after
+# dstnat) and the two wrong-port drop-set elements (the per-element counter is
+# what gives the guard its per-workload attribution). The maps live in
+# inet workload_proxy, the sets in inet workload_filter: a helper that arms one
+# table and not the other leaves a workload that looks configured and reaches
+# nothing, so the builder returns both families' commands in one shape.
+
+def vm_inspect_map_elements(uid: int) -> dict[str, list[str]]:
+    """The DNAT map elements for one workload, map name -> element strings.
+
+    Two per family, one per redirected port: the concatenated key is uid .
+    ORIGINAL port, so the map itself selects the listener port and the socket
+    that accepted the connection tells the inspector whether it is TLS or
+    cleartext. The value is (listener address, listener port); the advertised
+    address never appears in an element, for the reason
+    vm_broker_element's carries.
+    """
+    addr = vm_inspect_address(uid)
+    return {
+        NFT_MAP_INSPECT4: [
+            f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {addr.v4} . {VM_INSPECT_PORT_CLEARTEXT}",
+            f"{uid} . {VM_INSPECT_ORIG_TLS} : {addr.v4} . {VM_INSPECT_PORT_TLS}",
+        ],
+        NFT_MAP_INSPECT6: [
+            f"{uid} . {VM_INSPECT_ORIG_CLEARTEXT} : {addr.v6} . {VM_INSPECT_PORT_CLEARTEXT}",
+            f"{uid} . {VM_INSPECT_ORIG_TLS} : {addr.v6} . {VM_INSPECT_PORT_TLS}",
+        ],
+    }
+
+
+def vm_inspect_dst_elements(uid: int) -> dict[str, list[str]]:
+    """The accept-set elements, holding the TRANSLATED tuple.
+
+    Same shape as the maps but keyed on the destination the filter chain sees,
+    which is the DNAT-rewritten one: an element naming the original 80/443 would
+    match nothing (measured; §7.2) and the redirected connection would fall
+    through to the default drop.
+    """
+    addr = vm_inspect_address(uid)
+    return {
+        NFT_SET_INSPECT_DST: [
+            f"{uid} . {addr.v4} . {VM_INSPECT_PORT_CLEARTEXT}",
+            f"{uid} . {addr.v4} . {VM_INSPECT_PORT_TLS}",
+        ],
+        NFT_SET_INSPECT_DST6: [
+            f"{uid} . {addr.v6} . {VM_INSPECT_PORT_CLEARTEXT}",
+            f"{uid} . {addr.v6} . {VM_INSPECT_PORT_TLS}",
+        ],
+    }
+
+
+def vm_inspect_self_elements(uid: int) -> dict[str, list[str]]:
+    """The wrong-port drop-set elements, one per family.
+
+    Keyed on uid and listener address with NO port: their whole purpose is to
+    catch dials to ports nothing serves, and naming a port would make exactly
+    those unreachable. The rule is already in the skeleton; the element is per
+    workload and is armed here, and it is what gives the guard's counter its
+    per-workload attribution.
+    """
+    addr = vm_inspect_address(uid)
+    return {
+        NFT_SET_INSPECT_SELF: [f"{uid} . {addr.v4}"],
+        NFT_SET_INSPECT_SELF6: [f"{uid} . {addr.v6}"],
+    }
+
+
+def vm_inspect_element_commands(uid: int, action: str) -> list[list[str]]:
+    """argv lists arming ("add") or disarming ("delete") all six elements.
+
+    Two families, three objects each, in a fixed order: both DNAT maps (in
+    inet workload_proxy), both accept sets and both wrong-port sets (in inet
+    workload_filter). One argv per object, because an object's elements belong
+    to one table and one transaction, and the six span two tables.
+
+    A helper that arms one table and not the other leaves a workload that looks
+    configured and reaches nothing: the redirect without the accept set drops
+    the redirected connection, the accept set without the redirect never
+    matches. Both tables or neither, which is why the caller runs every argv it
+    gets and fails the start if any one of them does not.
+    """
+    if action not in ("add", "delete"):
+        raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
+    commands = []
+    groups = (
+        (NFT_PROXY_TABLE, vm_inspect_map_elements(uid)),
+        (NFT_TABLE, vm_inspect_dst_elements(uid)),
+        (NFT_TABLE, vm_inspect_self_elements(uid)),
+    )
+    for table, elements in groups:
+        for set_name, entries in elements.items():
+            commands.append([NFT_BIN, action, "element", *table.split(),
+                             set_name, "{ " + ", ".join(entries) + " }"])
+    return commands
+
+
+def vm_inspect_cgroup(name: str) -> str:
+    """The control group path of one workload's inspector unit.
+
+    Follows vm_proxy_cgroup's shape: the pinned slice plus the unit name, so
+    the path is always two components and the rule's `level 2` is exact. The
+    element resolves a *path*, so the unit name here must match the service
+    unit the inspector actually runs as — a service named -inspect with a
+    cgroup element naming -inspector is a `return` rule that matches nothing
+    and an inspector whose own egress is dropped. The premise it rests on is
+    wired by T5: the service unit is named workload-<name>-inspect.service and
+    pins Slice=workloads.slice, which is what makes this path exact.
+    """
+    return f"{VM_PROXY_SLICE}/workload-{name}-inspect.service"
+
+
+def vm_inspect_cgroup_command(name: str, action: str) -> list[str]:
+    """`nft add|delete element` for one inspector's redirect exemption.
+
+    The element lives in the *proxy* table, not the filter table — the
+    opposite of vm_proxy_cgroup_command. Backwards, it fails only at load
+    time with `did you mean set 'wl_proxy_cg' in table inet
+    'workload_filter'?`: nftables sets are table-scoped, and wl_inspect_cg is
+    declared in workload-proxy.nft next to the `return` rule it feeds.
+
+    Armed by the inspector's own unit (ExecStartPre adds, ExecStopPost
+    removes), which T5 wires in: an element resolves to a cgroup id at add
+    time and systemd makes a fresh cgroup on every start, so the add belongs
+    to the unit that owns the cgroup, not to the arming helper.
+    """
+    return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(),
+            NFT_SET_INSPECT_CG, '{ "' + vm_inspect_cgroup(name) + '" }']
+
+
+def vm_inspect_cgroup_filter_command(name: str, action: str) -> list[str]:
+    """`nft add|delete element` for one inspector's egress exemption.
+
+    The twin of vm_inspect_cgroup_command in the *filter* table: the
+    inspector runs as _wl-<name>, a filtered uid, so without its cgroup in
+    wl_proxy_cg its own upstream connections hit the default-deny drop and it
+    reaches nothing. The twin is owed by the same unit's start and stop as
+    vm_inspect_cgroup_command's: a helper that does one of the two and not
+    the other produces an inspector that either reaches nothing (this one
+    missing) or redirects its own dials into itself (the other missing).
+    """
+    return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_PROXY_CG,
+            '{ "' + vm_inspect_cgroup(name) + '" }']
 
 
 def vm_proxy_env(config: dict) -> dict[str, str]:
@@ -644,8 +956,8 @@ def ensure_advertised_interface(run) -> None:
     """Create the dummy link carrying the advertised address, idempotently.
 
     `run(argv)` is injected rather than imported so this module stays free of
-    subprocess; the proxy and broker helpers each pass their own. They both need
-    this and neither can import the other -- libexec entrypoints have no
+    subprocess; the proxy, broker and inspect helpers each pass their own. They
+    all need this and none can import the other -- libexec entrypoints have no
     extension, so they are not importable.
 
     Both steps tolerate "already exists" because two VMs starting concurrently
@@ -677,6 +989,42 @@ def ensure_advertised_interface(run) -> None:
     if result.returncode != 0:
         raise RuntimeError(
             f"could not bring up {VM_PROXY_IFACE}: {result.stderr.strip()}")
+
+
+def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
+    """The `ip addr` argvs putting this workload's inspector addresses on the
+    shared dummy link, (v4, v6).
+
+    Both families or neither: the redirect is dual-stack from the first rung,
+    and the address is on a dummy link and therefore local, so neither add
+    touches a route or a sysctl.
+
+    The v6 add carries `nodad`. A dummy link runs no DAD at all (measured
+    2026-08-19: 0/5 tentative, 5/5 immediate binds), so the flag changes
+    nothing today; it states the intent and stays correct if the address ever
+    moves to a link type that does run DAD, where it would otherwise sit
+    tentative through the router-solicitation window and the inspector's first
+    connection on that family would time out.
+    """
+    addr = vm_inspect_address(uid)
+    v4 = [IP_BIN, "addr", "add", f"{addr.v4}/32", "dev", VM_PROXY_IFACE]
+    v6 = [IP_BIN, "addr", "add", f"{addr.v6}/128", "dev", VM_PROXY_IFACE,
+          "nodad"]
+    return v4, v6
+
+
+def vm_inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
+    """The `ip addr del` argvs removing them again, (v4, v6).
+
+    The per-workload addresses are removed on stop (unlike the shared link and
+    the advertised address, which are never): an address on the link means an
+    inspector that is supposed to be running, and a stopped workload leaving
+    its listener address behind is exactly what `diagnose` cannot explain.
+    """
+    addr = vm_inspect_address(uid)
+    v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", VM_PROXY_IFACE]
+    v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", VM_PROXY_IFACE]
+    return v4, v6
 
 
 # --- SELinux confinement (ADR 006 step 3) ---
@@ -816,6 +1164,51 @@ def nft_drop_counter(payload) -> tuple[int, int] | None:
                 counter = expr["counter"]
                 return (counter.get("packets", 0), counter.get("bytes", 0))
     return None
+
+
+CONNTRACK_COUNT_PATH = "/proc/sys/net/netfilter/nf_conntrack_count"
+CONNTRACK_MAX_PATH = "/proc/sys/net/netfilter/nf_conntrack_max"
+
+# At and above this fraction the table is close enough to full to be the
+# explanation for transfers dying part-way. Not a hard threshold in the kernel
+# -- there is none; entries are refused once the table is full and there is no
+# warning before that -- so this is the point at which the number stops being
+# background and starts being an answer.
+CONNTRACK_PRESSURE = 0.9
+
+
+def conntrack_occupancy(count_path=CONNTRACK_COUNT_PATH,
+                        max_path=CONNTRACK_MAX_PATH) -> tuple[int, int] | None:
+    """(count, max) from the kernel's conntrack table, or None if unreadable.
+
+    Host-wide, and not the inspector's to report -- it is here because the
+    egress guard's correctness DEPENDS on conntrack state. A reply is only
+    distinguishable from a fresh connection because an entry exists, so an
+    exhausted table reclassifies the inspector's replies as `direction
+    original` and drops them mid-connection.
+
+    What makes it worth reading at all is that nothing else moves when it
+    happens: the accept counters are unchanged, the guard counter climbs for a
+    reason that looks like the cross-workload case it was written for, and
+    inside the guest it presents as transfers dying part-way. Nothing in the
+    chain rescues it either -- the guards sit ahead of the shipped `oif lo
+    accept`, so a reclassified reply is dropped several rules before the one
+    rule that would have taken it on interface alone.
+
+    None rather than an exception on every failure: the module is not loaded
+    until something uses conntrack, and a missing figure must never turn a
+    diagnose line into a traceback.
+    """
+    try:
+        with open(count_path) as f:
+            count = int(f.read().strip())
+        with open(max_path) as f:
+            maximum = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    if maximum <= 0:
+        return None
+    return (count, maximum)
 
 
 def vm_filter_delete_command(set_name: str, entries: list[str]) -> list[str]:

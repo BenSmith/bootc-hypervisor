@@ -38,6 +38,25 @@ add table inet workload_proxy
 # the address so the advertised port and the listen port are free to differ.
 add map inet workload_proxy wl_proxy_dest { type uid : ipv4_addr . inet_service ; }
 
+# The transparent redirect's targets: uid . original port -> (inspector
+# listener, listener port), so a redirected dial to 80 lands on the cleartext
+# listener and one to 443 on the TLS one. One map per family because `dnat ip`
+# and `dnat ip6` are different translations in the inet family.
+add map inet workload_proxy wl_inspect4 { type uid . inet_service : ipv4_addr . inet_service ; }
+add map inet workload_proxy wl_inspect6 { type uid . inet_service : ipv6_addr . inet_service ; }
+
+# The processes that RE-ORIGINATE workload-uid traffic -- the inspector, and
+# during rung 1 tinyproxy's upstream CONNECT leg -- rather than the guest's
+# traffic arriving through passt. Their own dials to 80/443 must not be
+# translated, or they loop into the listener they are dialing past.
+#
+# Declared in THIS table rather than reusing workload_filter's wl_proxy_cg
+# because nftables sets are table-scoped: the cross-table reference is a load
+# error ("No such file or directory ... did you mean set 'wl_proxy_cg' in
+# table inet 'workload_filter'?"), not a style error. The proxy sidecar adds
+# and removes an element here as well as in wl_proxy_cg.
+add set inet workload_proxy wl_inspect_cg { typeof socket cgroupv2 level 2 ; }
+
 add chain inet workload_proxy proxy_dnat { type nat hook output priority dstnat; policy accept; }
 flush chain inet workload_proxy proxy_dnat
 
@@ -55,3 +74,22 @@ flush chain inet workload_proxy proxy_dnat
 # VM_PROXY_ADDR / VM_PROXY_PORT in lib/vm.py; tests/test_vm_proxy.py asserts
 # that rather than trusting it.
 add rule inet workload_proxy proxy_dnat ip daddr 192.0.2.1 tcp dport 3128 counter dnat ip to meta skuid map @wl_proxy_dest
+
+# The cgroup return sits immediately above the two transparent DNAT rules
+# that follow, which is all it needs to be ahead of: rule order is the
+# loop prevention. The set's members re-originate traffic as the workload's
+# own uid, and without it their own dials to 443 are translated into the
+# listener they are trying to reach past. It does not need to run before the
+# 3128 rule above: that rule matches only a dial to the advertised literal,
+# which the set's members never make -- the guest dials it, and the guest is
+# not in the set.
+add rule inet workload_proxy proxy_dnat socket cgroupv2 level 2 @wl_inspect_cg return
+
+# The transparent redirect itself, both families from the start: a v4-only
+# redirect sends dual-stack traffic out over v6 untranslated, into the default
+# drop, which surfaces as a timeout rather than a policy decision. No `meta
+# skuid` predicate of its own: the map lookup IS the predicate, a uid absent
+# from the map is not translated, and no element exists for uids that have no
+# inspector.
+add rule inet workload_proxy proxy_dnat meta nfproto ipv4 tcp dport { 80, 443 } dnat ip to meta skuid . tcp dport map @wl_inspect4
+add rule inet workload_proxy proxy_dnat meta nfproto ipv6 tcp dport { 80, 443 } dnat ip6 to meta skuid . tcp dport map @wl_inspect6

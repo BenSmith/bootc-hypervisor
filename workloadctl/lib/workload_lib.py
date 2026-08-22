@@ -849,7 +849,7 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # Lazy import: workloadctl_core imports this module, so a top-level import
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
-    from vm import vm_uses_proxy  # same circularity: vm imports this module
+    from vm import vm_uses_inspect, vm_uses_proxy  # same circularity: vm imports this module
 
     run = RUN_SYSTEMD_SYSTEM
     env = workload_env_dir()
@@ -878,6 +878,21 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-proxy.service", "unit", "proxy",
             vm_uses_proxy(config.config),
+        ))
+        # Superset semantics, like -pod/-net for containers and the proxy above:
+        # always listed so the removable view unlinks them, emitted only when
+        # egress inspection applies (not bridged, egress filtered). The socket
+        # unit owns the arming — it binds its ListenStream= before the service
+        # ever runs — and the service owns the process and its cgroup
+        # exemptions.
+        uses_inspect = vm_uses_inspect(config.config)
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-inspect.socket", "unit", "inspect-socket",
+            uses_inspect,
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-inspect.service", "unit", "inspect",
+            uses_inspect,
         ))
     else:
         # cgroup-placement drop-in (containers only). Keyed by the workload UID
@@ -958,6 +973,7 @@ class RunTreeScan:
 # test_run_tree_scans_cover_run_files pins this to workload_run_files' tree kinds.
 RUN_TREE_SCANS: list[RunTreeScan] = [
     RunTreeScan("unit", "workload-*.service", content=True, name_filtered=True),
+    RunTreeScan("unit", "workload-*.socket", content=True, name_filtered=True),
     RunTreeScan("sysusers", "workload-*.conf", content=True, name_filtered=True),
     RunTreeScan(
         "wants-symlink",

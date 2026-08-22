@@ -1,0 +1,263 @@
+#!/usr/bin/python3
+"""
+workload-vm-inspect-listener: the socket-activated listener, rung 1 of the
+transparent egress inspector (the inspector design, §7.7.1).
+
+It only logs. A connection arrives, one line is written to the journal, the
+connection is closed. That is the whole of rung 1's claim: no ClientHello
+peek, no hostname matching, no upstream connection, no resolver, no policy
+file. Rung 2 adds the peek and the policy; this program is the shape it rides
+in — the socket, the concurrency, and the timeout discipline — built and
+tested first, so a later rung changes what a connection does, not how the
+process holds it.
+
+WHY IT NEVER BINDS
+
+It is socket-activated: the .socket unit (T5a) binds the four listeners and
+hands them in as inherited fds. This process recovers them from LISTEN_PID /
+LISTEN_FDS and accepts on them; it opens no socket of its own. That is not
+defensiveness — socket activation is what moves the bind out of the workload
+SELinux domain and into an inherited fd. A fallback that bound the ports
+itself when the activation environment was missing would silently undo that:
+it would run as the workload user, in the workload domain, and bind the very
+listener a guest is redirected into. So a missing environment is a loud
+failure, never a second path.
+
+WHY THE PLANE COMES FROM getsockname, NOT LISTEN_FDNAMES
+
+The socket unit runs with Accept=no, under which systemd names every
+activated fd after the unit — all four carry the same LISTEN_FDNAMES entry, so
+the name cannot tell the cleartext listener from the TLS one. The local port
+of the inherited fd can, and it is the honest source of it: a guest dial to 80
+is translated onto VM_INSPECT_PORT_CLEARTEXT, one to 443 onto
+VM_INSPECT_PORT_TLS, and the socket that accepted the connection knows which
+it is. §7.1 uses exactly this property to justify never calling
+SO_ORIGINAL_DST; a regression that started reading the port from anywhere
+else quietly reintroduces the need for it.
+
+CONCURRENCY AND TIMEOUTS (the shape, per §7.7.1)
+
+One thread per connection, with a ceiling, and reject above it — do not queue.
+An unbounded accept queue turns a guest's connection storm into memory growth
+in a process that, from rung 2, holds a CA key; a refused connection is a fast,
+countable failure instead. The threads are daemons, as the broker's
+ThreadingMixIn sets them, so a SIGTERM that stops the accept loop does not
+wait on the connections it already took.
+
+Every accepted socket gets an explicit timeout before it is touched, none of
+them the stdlib default. This rung reads no bytes, so the number is only ever
+a ceiling on a socket nobody reads; it is set anyway so rung 2's peek inherits
+a stated value rather than blocking forever.
+"""
+
+import os
+import selectors
+import signal
+import socket
+import sys
+import threading
+
+sys.dont_write_bytecode = True
+
+from vm import VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS
+
+
+# --- concurrency and timeout, module-local ---
+#
+# Nothing else in the tree reads these, and vm.py holds only what two programs
+# must agree on — the ports and the binary path — so the knobs live here,
+# beside the loop that spends them.
+
+# The ceiling on simultaneously-handled connections. Sized well above a guest's
+# legitimate concurrency (a browser is a handful of connections per origin,
+# plus a few parallel downloads). The cost of being generous is bounded; the
+# cost of being tight is a workload that reaches nothing. Past it a connection
+# is refused, not queued.
+MAX_CONNECTIONS = 128
+
+# The timeout set on every accepted socket, in seconds. This rung reads no
+# bytes, so it is only a ceiling on a socket nobody reads; the point of setting
+# it now is that rung 2's peek inherits a stated number rather than blocking
+# forever.
+CONNECTION_TIMEOUT = 5.0
+
+# How often the accept loop wakes to look for a stop, in seconds. select() is a
+# blocking call that a SIGTERM cannot make return (PEP 475 retries it), so the
+# loop polls on a short interval and checks the stop flag.
+_ACCEPT_POLL = 0.1
+
+
+class NotSocketActivated(Exception):
+    """The process was not handed its listeners by the socket unit."""
+
+
+def inherited_listening_sockets():
+    """Recover the listening sockets systemd passed in, or fail loudly.
+
+    Reads LISTEN_PID and LISTEN_FDS; the fds are 3 .. 3+LISTEN_FDS.
+    socket.socket(fileno=fd) recovers each one's family and type from the fd on
+    Linux, so this does not have to be told which of the four is which.
+    """
+    listen_pid = os.environ.get("LISTEN_PID")
+    listen_fds = os.environ.get("LISTEN_FDS")
+    missing = [name for name, value in (("LISTEN_PID", listen_pid),
+                                        ("LISTEN_FDS", listen_fds))
+               if value is None]
+    if missing:
+        raise NotSocketActivated(
+            "this program is socket-activated and never binds: it takes its "
+            f"listening sockets from the .socket unit, but {', '.join(missing)} "
+            "is not set. It refuses to open a socket of its own, because a "
+            "fallback bind would move the bind out of the inherited fd and "
+            "back into the workload SELinux domain")
+    if listen_pid != str(os.getpid()):
+        raise NotSocketActivated(
+            f"LISTEN_PID={listen_pid} is not this process ({os.getpid()}); "
+            "the activation environment belongs to another process, so the "
+            "inherited fds would not be ours to accept")
+    try:
+        count = int(listen_fds)
+    except ValueError:
+        raise NotSocketActivated(
+            f"LISTEN_FDS={listen_fds!r} is not an integer") from None
+    return [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+
+
+def plane_for_port(port):
+    """Map an accepting port to the plane it carries, or None.
+
+    The port comes from getsockname() on the inherited listener (see the module
+    docstring for why it is not the fd name). Only the two ports the socket
+    unit binds are recognisable; anything else is not one of our listeners, and
+    naming it a plane would be a guess.
+    """
+    if port == VM_INSPECT_PORT_CLEARTEXT:
+        return "cleartext"
+    if port == VM_INSPECT_PORT_TLS:
+        return "tls"
+    return None
+
+
+def _fmt(addr):
+    """host:port, bracketing the host for the IPv6 listeners."""
+    host, port = addr[0], addr[1]
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+class Ceiling:
+    """Bounded, per-process: admit up to `limit` live connections, refuse the
+    rest. Refuse, not queue — a connection over the cap is turned away
+    immediately rather than held in an unbounded accept queue, which is what
+    turns a guest's connection storm into memory growth.
+    """
+
+    def __init__(self, limit):
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._held = 0
+        self.rejected = 0
+
+    def admit(self):
+        """Count a connection against the ceiling, or refuse it."""
+        with self._lock:
+            if self._held >= self._limit:
+                self.rejected += 1
+                return False
+            self._held += 1
+            return True
+
+    def release(self):
+        with self._lock:
+            self._held -= 1
+
+
+class Listener:
+    """Accept on the inherited listeners and log one line per connection."""
+
+    def __init__(self, sockets, out=None, limit=MAX_CONNECTIONS):
+        self._sockets = list(sockets)
+        self._out = out if out is not None else sys.stdout
+        self._ceiling = Ceiling(limit)
+        self._stop = threading.Event()
+
+    def stop(self):
+        """Ask the accept loop to end; called from the SIGTERM handler."""
+        self._stop.set()
+
+    def close(self):
+        for s in self._sockets:
+            s.close()
+
+    def accept_loop(self):
+        sel = selectors.DefaultSelector()
+        for s in self._sockets:
+            sel.register(s, selectors.EVENT_READ)
+        try:
+            while not self._stop.is_set():
+                try:
+                    events = sel.select(timeout=_ACCEPT_POLL)
+                except InterruptedError:
+                    continue
+                for key, _ in events:
+                    try:
+                        conn, peer = key.fileobj.accept()
+                    except OSError:
+                        continue
+                    self._handle(conn, peer, key.fileobj)
+        finally:
+            sel.close()
+
+    def _handle(self, conn, peer, listen_sock):
+        # Set the timeout before doing anything with the accepted socket —
+        # admitted or not. This rung reads no bytes, so it only bounds a
+        # socket nobody reads; rung 2's peek inherits the number instead of
+        # blocking forever.
+        conn.settimeout(CONNECTION_TIMEOUT)
+        # The accepting port, from getsockname() on the inherited fd — the fd
+        # name cannot distinguish the planes under Accept=no (module docstring).
+        local = listen_sock.getsockname()
+        plane = plane_for_port(local[1])
+        if not self._ceiling.admit():
+            # Reject rather than queue: close now, count it, spawn no thread.
+            self._log(
+                f"rejected plane={plane} local={_fmt(local)} "
+                f"peer={_fmt(peer)} reason='connection ceiling reached'")
+            conn.close()
+            return
+        # Daemon, as the broker's ThreadingMixIn: a SIGTERM that stops the
+        # accept loop does not wait on the connections it already took.
+        threading.Thread(
+            target=self._serve, args=(conn, peer, local, plane),
+            daemon=True).start()
+
+    def _serve(self, conn, peer, local, plane):
+        try:
+            self._log(
+                f"plane={plane} local={_fmt(local)} peer={_fmt(peer)}")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            self._ceiling.release()
+
+    def _log(self, line):
+        print(line, file=self._out, flush=True)
+
+
+def main():
+    try:
+        sockets = inherited_listening_sockets()
+    except NotSocketActivated as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    listener = Listener(sockets)
+    signal.signal(signal.SIGTERM, lambda *_args: listener.stop())
+    try:
+        listener.accept_loop()
+    finally:
+        listener.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -190,7 +190,9 @@ class TestPostunScriptlet(unittest.TestCase):
             ["semodule -r workload-vm",
              "restorecon /usr/libexec/virtiofsd",
              "semodule -r workload-proxy",
-             "restorecon /usr/bin/tinyproxy"])
+             "restorecon /usr/bin/tinyproxy",
+             "semodule -r workload-inspect",
+             "restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener"])
 
     def test_upgrade_is_a_noop(self):
         # An admin's own bridge allow-list is never touched at any $1, and

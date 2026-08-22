@@ -14,12 +14,14 @@ from types import SimpleNamespace
 
 from vm import (
     NFT_PROXY_MAP, NFT_PROXY_SKELETON, NFT_PROXY_TABLE, NFT_SET_PROXY_CG,
+    NFT_SET_INSPECT_CG,
     VM_BROKER_ENV_VAR, vm_broker_env,
     VM_PROXY_ADDR, VM_PROXY_BIN, VM_PROXY_IFACE, VM_PROXY_PORT,
     VM_PROXY_PORT_HTTPS, vm_management_address, vm_proxy_config,
     vm_proxy_element, vm_proxy_env, vm_proxy_filter_file, vm_proxy_hosts,
     vm_proxy_cgroup, vm_proxy_cgroup_command, VM_PROXY_SLICE,
-    vm_proxy_map_command, vm_proxy_runtime_dir, vm_uses_proxy,
+    vm_proxy_cgroup_inspect_command, vm_proxy_map_command,
+    vm_proxy_runtime_dir, vm_uses_proxy, vm_uses_inspect,
     validate_vm_network,
 )
 
@@ -177,11 +179,17 @@ class TestProxyEgressExemption(unittest.TestCase):
                     and ln.endswith("accept") and "dport" not in ln)
 
     def test_the_exemption_is_evaluated_before_the_drop(self):
+        # Against the default deny, not the first `wl_filtered` drop: the
+        # inspector's range guards also carry `wl_filtered` and sit ahead of
+        # the blanket accept on purpose (§7.2.5), while the exemption only
+        # has to outrun the membership-only fallthrough, which is what the
+        # old "first wl_filtered drop" happened to be.
         rules = [ln for ln in self.nft.splitlines() if ln.startswith("add rule")]
         exempt = rules.index(self._blanket_exemption())
         drop = rules.index(next(ln for ln in rules
                                 if ln.endswith("drop")
-                                and "wl_filtered" in ln))
+                                and "wl_filtered" in ln
+                                and "daddr" not in ln))
         self.assertLess(exempt, drop)
 
     def test_the_exemption_widens_no_destination_or_port(self):
@@ -220,6 +228,95 @@ class TestProxyEgressExemption(unittest.TestCase):
         would silently stop firing, dropping the proxy's own traffic."""
         self.assertEqual(VM_PROXY_SLICE, "workloads.slice")
         self.assertEqual(vm_proxy_cgroup("web").count("/"), 1)
+
+
+class TestProxyNatReturnExemption(unittest.TestCase):
+    """tinyproxy's cgroup in wl_inspect_cg, for as long as tinyproxy exists.
+
+    Its upstream CONNECT leg is `tcp dport 443` from the workload uid, so the
+    transparent redirect's DNAT catches it and rewrites it into a listener
+    that only logs: without this element every proxied HTTPS request on every
+    filtered VM breaks, which is exactly what deferring premise 3's deletion
+    was supposed to protect against. wl_inspect_cg's name misleads — it is
+    every workload-uid process that re-originates guest traffic, and during
+    rung 1 there are two: the inspector and the proxy.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import load_script
+        cls.source = (ROOT / "libexec" / "workload-vm-proxy").read_text()
+        cls.gen = load_script("generators/workload-generate")
+        cls.config = {
+            "workload": {"name": "web"},
+            "vm": {"memory": "2048", "network": {"hosts": ["example.com"],
+                                                 "egress": "filtered"}},
+        }
+
+    def test_the_builder_crosses_into_the_nat_return_set(self):
+        """The missing corner of the table: same cgroup as
+        vm_proxy_cgroup_command, but in the proxy table's wl_inspect_cg —
+        the opposite of that one, the twin of vm_inspect_cgroup_command,
+        whose other member names the proxy unit rather than the inspector's.
+        """
+        argv = vm_proxy_cgroup_inspect_command("web", "add")
+        self.assertEqual(argv[1:3], ["add", "element"])
+        self.assertEqual(argv[3:5], NFT_PROXY_TABLE.split())
+        self.assertIn(NFT_SET_INSPECT_CG, argv)
+        self.assertIn(vm_proxy_cgroup("web"), argv[-1])
+
+    def test_the_helper_arms_the_element_on_up(self):
+        """In the proxy unit's own start, beside its filter-table exemption —
+        and only for an inspected workload: for an open-egress one the
+        element would be inert, and every other element in this design is
+        gated, so the asymmetry would read as a bug."""
+        up = cls_body(self.source, "def up")
+        self.assertIn("vm_proxy_cgroup_inspect_command", up)
+        # delete-then-add, as the filter-table pair above it: an element
+        # resolves to a cgroup id at add time and the previous start's is
+        # retired by `down`, so the add must not fail on a reused id.
+        cg = up[up.index("vm_proxy_cgroup_inspect_command"):]
+        self.assertLess(cg.index('"delete"'), cg.index('"add"'))
+        # Gated, and only in the start's own body, not the early return.
+        self.assertLess(up.index("vm_uses_inspect"),
+                        up.index("vm_proxy_cgroup_inspect_command"))
+        self.assertLess(up.index("vm_proxy_cgroup_inspect_command"),
+                        up.index('log(f"  Proxy for'))
+
+    def test_the_helper_removes_the_element_on_down(self):
+        down = cls_body(self.source, "def down")
+        self.assertIn("vm_proxy_cgroup_inspect_command", down)
+        self.assertIn('"delete"', down[down.index(
+            "vm_proxy_cgroup_inspect_command"):])
+
+    def test_the_table_exists_before_the_add(self):
+        """`add element` into a table that does not exist fails, and a fresh
+        host has no proxy table: the skeleton apply is what creates it, so it
+        must run before the element lands in it."""
+        up = cls_body(self.source, "def up")
+        self.assertIn("vm_proxy_cgroup_inspect_command", up)
+        self.assertLess(up.index("NFT_PROXY_SKELETON"),
+                        up.index("vm_proxy_cgroup_inspect_command"))
+
+    def test_an_inspected_proxy_vm_requires_the_inspect_socket(self):
+        """The wiring that makes this element reachable at all: without the
+        socket bound the redirect's arming never happens. An inspected VM
+        that carried a proxy without the socket would reach nothing on 443
+        while looking healthy."""
+        unit = self.gen.generate_vm_service(self.config, "_wl-web", 10005)
+        self.assertIn("workload-web-inspect.socket", unit)
+
+    def test_an_open_egress_proxy_vm_does_not(self):
+        """The negative half of the gate, from the unit side: an open-egress
+        workload gets no socket, no redirect, and therefore no element —
+        so neither the Requires= nor the arming may appear."""
+        config = {"workload": {"name": "web"},
+                  "vm": {"memory": "2048",
+                         "network": {"hosts": ["example.com"],
+                                     "egress": "open"}}}
+        self.assertFalse(vm_uses_inspect(config))
+        unit = self.gen.generate_vm_service(config, "_wl-web", 10005)
+        self.assertNotIn("workload-web-inspect.socket", unit)
 
 
 class TestInterfaceProvisioning(unittest.TestCase):

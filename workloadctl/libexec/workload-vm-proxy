@@ -5,9 +5,10 @@ workload-vm-proxy: provision or retire one VM's hostname-policy proxy.
 Usage: workload-vm-proxy <up|down> <name>
 
 `up` runs as the proxy unit's ExecStartPre, `down` as its ExecStopPost. Between
-them they own three things: the shared advertised endpoint (a dummy interface
+them they own four things: the shared advertised endpoint (a dummy interface
 and an nftables nat chain), this workload's element in the uid -> listener map,
-and the instance's generated tinyproxy config.
+the proxy's own cgroup in BOTH exemption sets, and the instance's generated
+tinyproxy config.
 
 WHY THE CONFIG IS WRITTEN HERE AND NOT BY THE GENERATOR
 
@@ -47,8 +48,10 @@ from vm import (
     NFT_BIN, NFT_PROXY_MAP, NFT_PROXY_SKELETON, NFT_PROXY_TABLE, NFT_SKELETON,
     VM_PROXY_ADDR, VM_PROXY_PORT,
     ensure_advertised_interface, vm_management_address,
-    vm_proxy_cgroup_command, vm_proxy_config, vm_proxy_filter_file,
+    vm_proxy_cgroup_command, vm_proxy_cgroup_inspect_command,
+    vm_proxy_config, vm_proxy_filter_file,
     vm_proxy_hosts, vm_proxy_map_command, vm_proxy_runtime_dir, vm_uses_proxy,
+    vm_uses_inspect,
 )
 from workload_lib import workload_config_path
 
@@ -141,6 +144,20 @@ def up(name: str) -> int:
     run(vm_proxy_cgroup_command(name, "delete"))
     run(vm_proxy_cgroup_command(name, "add"), check=True)
 
+    # The same cgroup in the nat table's return set, for as long as tinyproxy
+    # exists: its upstream CONNECT leg is `tcp dport 443` from the workload
+    # uid, and without this element the transparent redirect rewrites it into
+    # the inspector's listener — every proxied request on every filtered VM
+    # breaks. Gated on inspection because only an inspected workload has a
+    # redirect that could catch the proxy: for an open-egress one the element
+    # would be inert, and every other element in this design is gated, so the
+    # asymmetry would read as a bug. Both skeletons were applied above, so the
+    # proxy table exists for this add. delete-then-add for the same cgroup-id
+    # reason as the filter-table pair above.
+    if vm_uses_inspect(config):
+        run(vm_proxy_cgroup_inspect_command(name, "delete"))
+        run(vm_proxy_cgroup_inspect_command(name, "add"), check=True)
+
     log(f"  Proxy for uid {uid} on {listen_addr}:{VM_PROXY_PORT}, "
         f"{len(hosts)} host pattern{'' if len(hosts) == 1 else 's'}, "
         f"reached as {VM_PROXY_ADDR}:{VM_PROXY_PORT}")
@@ -156,6 +173,16 @@ def down(name: str) -> int:
     # stale listen address here still removes the right element.
     run(vm_proxy_map_command(uid, vm_management_address(uid), "delete"))
     run(vm_proxy_cgroup_command(name, "delete"))
+    # The nat return-set element, for the reason the add above carries. The
+    # config still exists when down runs — purge deletes the workload root
+    # only after teardown — so the same gate as the add can be read here.
+    try:
+        if vm_uses_inspect(load_config(name)):
+            run(vm_proxy_cgroup_inspect_command(name, "delete"))
+    except FileNotFoundError:
+        # A start that died before arming left nothing to remove; down stays
+        # tolerant for the same reason as the deletes above.
+        pass
     return 0
 
 

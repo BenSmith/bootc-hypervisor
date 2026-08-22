@@ -48,6 +48,8 @@ from vm import (
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
     VM_SOCKET_DIR, VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
     VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
+    CONNTRACK_PRESSURE,
+    conntrack_occupancy,
     nft_drop_counter,
     nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
     vm_owned_elements,
@@ -1063,6 +1065,24 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
     if dropped is not None:
         tail = (f"; {dropped[0]} packets dropped across all filtered VMs "
                 f"(the counter is shared, not per-workload)")
+
+    # Conntrack occupancy, also host-wide. The guard rules distinguish a reply
+    # from a fresh connection by conntrack state alone, so an exhausted table
+    # reclassifies replies as `direction original` and drops them mid-transfer
+    # -- and nothing else moves when it does: the accept counters are
+    # unchanged and the guard counter climbs for what looks like the
+    # cross-workload case. Reported always, because an operator reading this
+    # line after "downloads keep dying" has no other path from the symptom to
+    # the cause. The interpretation is added only under pressure, so a healthy
+    # host gets a number and not a warning.
+    ct = conntrack_occupancy()
+    if ct is not None:
+        count, maximum = ct
+        tail += f"; conntrack {count}/{maximum}"
+        if count >= maximum * CONNTRACK_PRESSURE:
+            tail += (" — near capacity, which drops established replies "
+                     "mid-connection and presents inside the guest as "
+                     "transfers dying part-way")
     return ("vm_egress", True,
             f"egress filtered on uid {uid} with {len(allowed)} allow "
             f"entr{'y' if len(allowed) == 1 else 'ies'}{tail}")

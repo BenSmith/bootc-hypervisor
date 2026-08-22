@@ -6,6 +6,10 @@ tests/test_generator_workload_filter.py, which is about the generator's
 `--workload` narrowing flag and has nothing to do with nftables.
 """
 
+import os
+import shutil
+import tempfile
+import ipaddress
 import json
 import subprocess
 import unittest
@@ -14,14 +18,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from vm import (
-    NFT_SET_ALLOW4, NFT_SET_ALLOW6, NFT_SET_FILTERED, NFT_SET_INTERNAL4,
-    NFT_SET_INTERNAL6, NFT_SET_PROXY_CG, NFT_SKELETON,
+    NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
+    NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
+    NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
+    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_PROXY_CG, NFT_SKELETON,
+    VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
+    VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
+    CONNTRACK_PRESSURE, conntrack_occupancy,
     nft_drop_counter, nft_set_elements, vm_filter_commands,
-    vm_filter_delete_command, vm_owned_elements,
+    vm_filter_delete_command, vm_inspect_address, vm_owned_elements,
 )
 from workload_lib import UID_MAX, UID_MIN
 
 SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-filter.nft"
+PROXY_SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-proxy.nft"
 
 
 class TestSkeleton(unittest.TestCase):
@@ -60,22 +70,42 @@ class TestSkeleton(unittest.TestCase):
     def test_the_drop_is_guarded_by_set_membership(self):
         """An unguarded drop would take the whole host off the network.
 
-        Two sets qualify as a guard. `wl_filtered` holds workload uids;
-        `wl_proxy_cg` holds the cgroup paths of hostname-proxy units, which
-        only exist for filtered VMs. Both are empty on a host running no
-        filtered workload, which is what makes an abandoned table inert.
+        The qualifying sets hold only per-workload state. `wl_filtered` holds
+        workload uids; `wl_proxy_cg` holds the cgroup paths of hostname-proxy
+        units, which only exist for filtered VMs; `wl_inspect_self`/`self6`
+        hold one element per armed workload. All are empty on a host running
+        no filtered workload, which is what makes an abandoned table inert.
         """
-        guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_PROXY_CG}")
-        drops = [d for d in self.directives if d.endswith("drop")]
+        guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_PROXY_CG}",
+                  f"@{NFT_SET_INSPECT_SELF}", f"@{NFT_SET_INSPECT_SELF6}")
+        # The output chain only. The input chain's drops are deliberately
+        # unguarded on any set — there is no uid on the input path — and are
+        # bounded by destination plus `iif != lo` instead (§7.2.6).
+        drops = [d for d in self.directives
+                 if d.endswith("drop")
+                 and d.startswith("add rule inet workload_filter output")]
         self.assertTrue(drops, "no drop rule in the skeleton")
         for rule in drops:
             self.assertTrue(any(g in rule for g in guards),
                             f"unguarded drop rule: {rule}")
 
     def test_chain_policy_is_accept(self):
-        """So an abandoned table is inert rather than a host-wide outage."""
-        chain = [d for d in self.directives if d.startswith("add chain")][0]
-        self.assertIn("policy accept", chain)
+        """So an abandoned table is inert rather than a host-wide outage.
+
+        The asymmetry is the point, and it is why this is EVERY chain in the
+        skeleton rather than the first: an abandoned OUTPUT chain is inert —
+        accept policy, a set-guarded drop, and an empty wl_filtered match
+        nothing. A default-deny INPUT chain is a host-wide outage: the input
+        chain runs at priority 0, ahead of firewalld's filter_INPUT at
+        filter+10, so it would silently take over input policy for every
+        service on the machine, and nothing would be reported — just every
+        service unreachable. §7.2.6 records it as the one direction where
+        getting it wrong is unrecoverable.
+        """
+        chains = [d for d in self.directives if d.startswith("add chain")]
+        self.assertTrue(chains, "no chain declared in the skeleton")
+        for chain in chains:
+            self.assertIn("policy accept", chain)
 
     def test_ct_mark_rule_is_present_and_non_terminating(self):
         """Design 13 step 2 calls this out: nothing reads the mark until step
@@ -164,6 +194,43 @@ class TestSkeleton(unittest.TestCase):
                 if d.startswith("add set") and NFT_SET_FILTERED in d][0]
         self.assertNotIn("ip daddr", decl)
         self.assertNotIn("ip6 daddr", decl)
+
+    def test_the_inspect_sets_are_declared_with_their_constant_names(self):
+        """The skeleton spells these names literally so it stays applicable
+        with a bare `nft -f`; a rename on either side is a set no rule ever
+        reads, which looks like the guard being off rather than a bug. Both
+        families or neither, for the same reason the allow sets split.
+
+        The shapes are checked by their own tokens because they differ in the
+        one way that matters: the self sets carry the per-element `counter`
+        (diagnose attributes a wrong-port self-dial to its workload off it,
+        which the range guard's shared number cannot), and the dst sets do not
+        — a counter on the dst sets would count connections, not self-dials,
+        and a counterless self set would render back as the wrong shape.
+        """
+        for name in (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+                     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+            decls = [d for d in self.directives
+                     if d.startswith("add set") and d.split()[4] == name]
+            self.assertEqual(len(decls), 1, name)
+            self.assertIn("typeof meta skuid", decls[0], name)
+        for name in (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6):
+            decl = [d for d in self.directives
+                    if d.startswith("add set") and d.split()[4] == name][0]
+            self.assertIn("th dport", decl)
+            self.assertNotIn("counter", decl)
+        for name in (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+            decl = [d for d in self.directives
+                    if d.startswith("add set") and d.split()[4] == name][0]
+            self.assertIn("counter", decl)
+            self.assertNotIn("th dport", decl)
+
+    def test_the_inspect_rules_reference_the_sets_by_their_constants(self):
+        """A declaration a rule never reads is a guard that is off while the
+        ruleset reads correctly."""
+        for name in (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6,
+                     NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+            self.assertIn(f"@{name}", self.text)
 
 
 class TestInternalDestinationGuard(unittest.TestCase):
@@ -326,19 +393,33 @@ class TestRuleOrderIsPinned(unittest.TestCase):
     it ran its listener as root rather than as the workload uid.
     """
 
-    # (label, required substrings) in the order they must appear.
+    # (label, required substrings) in the order they must appear — the
+    # output chain of §7.2.5 with rules 12 and 13 not yet shipped. Rule 18, the
+    # counted HTTP/3 drop, IS shipped: it is attribution only — it counts
+    # packets the default deny below it would have dropped anyway — and its
+    # position in the pin is the point: in place between the proxy egress
+    # accept and the default drop, it reads as attribution; anywhere else it
+    # reads as policy, and this test is what keeps it there.
     EXPECTED = [
-        ("ct mark attribution",   ("ct mark set", "meta skuid 10000-52948")),
-        ("operator allow v4",     ("@wl_allow4", "accept")),
-        ("operator allow v6",     ("@wl_allow6", "accept")),
-        ("proxy name resolution", ("@wl_proxy_cg", "th dport 53", "accept")),
-        ("proxy internal drop v4", ("@wl_proxy_cg", "ct direction original",
+        ("ct mark attribution",     ("ct mark set", "meta skuid 10000-52948")),
+        ("inspector reply accept",  ("@wl_filtered", "ct direction reply", "accept")),
+        ("operator allow v4",       ("@wl_allow4", "accept")),
+        ("operator allow v6",       ("@wl_allow6", "accept")),
+        ("inspector redirect accept v4", ("@wl_inspect_dst", "accept")),
+        ("inspector redirect accept v6", ("@wl_inspect_dst6", "accept")),
+        ("inspector self drop v4",  ("@wl_inspect_self", "ct direction original", "drop")),
+        ("inspector self drop v6",  ("@wl_inspect_self6", "ct direction original", "drop")),
+        ("inspector range guard v4", ("@wl_filtered", "ct direction original", "198.18.0.0/16", "drop")),
+        ("inspector range guard v6", ("@wl_filtered", "ct direction original", "2001:2::/48", "drop")),
+        ("proxy name resolution",   ("@wl_proxy_cg", "th dport 53", "accept")),
+        ("proxy internal drop v4",  ("@wl_proxy_cg", "ct direction original",
                                     "@wl_internal4", "drop")),
-        ("proxy internal drop v6", ("@wl_proxy_cg", "ct direction original",
+        ("proxy internal drop v6",  ("@wl_proxy_cg", "ct direction original",
                                     "@wl_internal6", "drop")),
-        ("loopback accept",       ("@wl_filtered", "oif lo", "accept")),
-        ("proxy egress",          ("@wl_proxy_cg", "accept")),
-        ("default drop",          ("@wl_filtered", "counter drop")),
+        ("loopback accept",         ("@wl_filtered", "oif lo", "accept")),
+        ("proxy egress",            ("@wl_proxy_cg", "accept")),
+        ("HTTP/3 counted drop",     ("@wl_filtered", "udp dport 443", "counter drop")),
+        ("default drop",            ("@wl_filtered", "counter drop")),
     ]
 
     @classmethod
@@ -377,6 +458,131 @@ class TestRuleOrderIsPinned(unittest.TestCase):
                 "ct direction original", rule,
                 "a destination-keyed drop without `ct direction original` "
                 f"also drops the reply leg of established connections: {rule}")
+
+
+class TestInputChain(unittest.TestCase):
+    """The input chain of §7.2.6, asserted by PROPERTIES rather than pinned as
+    a sequence, and that distinction is the point.
+
+    The output chain is pinned as an ordered sequence because order IS the
+    enforcement there: an inserted rule satisfies every pairwise check while
+    changing what the chain does. This chain has two rules and no ordering to
+    get wrong — neither rule's meaning depends on the other, and there is no
+    accept below a drop that an insert could slip in front of. What it can
+    get wrong is its SHAPE, and §7.2.6 names four independent ways a
+    plausible-looking version of it is wrong. Each of the four is a test here,
+    plus one negative test for the absence of a qualifier no plausible-looking
+    version should carry, and one for the `counter` §11 reads the off-box
+    arrivals figure off.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directives = [ln.strip() for ln in SKELETON.read_text().splitlines()
+                          if ln.strip() and not ln.strip().startswith("#")]
+        cls.input_rules = [d for d in cls.directives
+                           if d.startswith("add rule inet workload_filter input")]
+
+    def test_the_chain_exists_and_is_hooked_at_input_priority_0(self):
+        """Presence. §7.2.6's first named failure is a version of this design
+        with no input chain at all: the output rules above assume it, and its
+        absence fails open on both planes."""
+        decls = [d for d in self.directives
+                 if d.startswith("add chain")
+                 and " inet workload_filter input " in d]
+        self.assertEqual(len(decls), 1, f"expected exactly one input chain: {decls}")
+        decl = decls[0]
+        self.assertIn("hook input", decl)
+        self.assertIn("priority 0", decl)
+
+    def test_both_families_are_dropped(self):
+        """Both families, or neither.
+
+        A v4-only input chain leaves the plane clients try FIRST wide open —
+        happy-eyeballs dials the v6 address before the v4 one — and nothing
+        about the v4 half's behaviour would say so. The failure is silent in
+        the direction that matters, which is why the split is asserted rather
+        than inferred from the v4 rule's existence.
+        """
+        self.assertEqual(len(self.input_rules), 2, self.input_rules)
+        self.assertTrue(
+            any("ip  daddr 198.18.0.0/16" in r and r.endswith("drop")
+                for r in self.input_rules),
+            "no v4 drop covering 198.18.0.0/16")
+        self.assertTrue(
+            any("ip6 daddr 2001:2::/48" in r and r.endswith("drop")
+                for r in self.input_rules),
+            "no v6 drop covering 2001:2::/48")
+
+    def test_the_policy_is_accept_and_the_chain_holds_only_drops(self):
+        """The one direction where getting it wrong is unrecoverable.
+
+        This is not a host firewall and must never grow into one. firewalld
+        runs filter_INPUT at filter+10 and this chain at priority 0 runs
+        AHEAD of it, so a default-deny input chain of ours silently takes
+        over policy for every service on the machine — a far larger blast
+        radius than the thing being fixed, with nothing reported, just every
+        service unreachable. The chain removes one class of destination and
+        does nothing else; it holds only drops, and none of them accepts.
+        """
+        decl = [d for d in self.directives
+                if d.startswith("add chain")
+                and " inet workload_filter input " in d][0]
+        self.assertIn("policy accept", decl)
+        self.assertTrue(self.input_rules, "the input chain is empty")
+        for rule in self.input_rules:
+            self.assertIn("drop", rule)
+            for verdict in ("accept", "reject", "return", "goto", "jump"):
+                self.assertNotIn(f" {verdict}", rule,
+                                 f"the input chain holds only drops: {rule}")
+
+    def test_the_loopback_exemption_is_on_both_drops(self):
+        """`iif != lo` is the entire exemption, and it is the load-bearing
+        detail.
+
+        Everything legitimate on these planes is host-local: the guest's
+        redirected connection is re-originated by passt as a host socket, so
+        it arrives on lo; so does the inspector's reply; so does `diagnose`
+        probing a listener as root. A drop missing the exemption takes every
+        inspected connection down rather than opening anything — the safe
+        direction, and it presents as the whole design being inert. Both
+        drops must carry it, because a single missing one is the whole
+        failure.
+        """
+        for rule in self.input_rules:
+            self.assertIn("iif != lo", rule,
+                          f"a drop without the loopback exemption breaks "
+                          f"host-local traffic on these planes: {rule}")
+
+    def test_both_drops_are_counted(self):
+        """§11's off-box-arrivals figure IS these two counters, and it is the
+        one figure in that list with no benign reading: the listener planes
+        are reachable from off the host only because the weak host model
+        delivers them, so a non-zero value is an attack or a misrouted
+        network. Drop the `counter` and the rule still drops -- the evidence
+        is simply gone, and nothing anywhere else in the ruleset records that
+        the packet ever arrived."""
+        for line in self.input_rules:
+            self.assertIn("counter", line, line)
+
+    def test_the_drops_carry_no_ct_direction_qualifier(self):
+        """The absence is asserted, and it is a test, because the temptation
+        to add one is cargo-culted from the output chain.
+
+        Every drop in the output chain carries `ct direction original`
+        because the inspector's replies are OUTPUT traffic from a filtered
+        uid, and a drop without the qualifier takes every inspected
+        connection down. On the input path there is no such thing: a packet
+        arriving FROM the inspector is on lo and is already exempted by
+        interface. Adding the qualifier there would WEAKEN the rule rather
+        than tighten it — an attacker's packet is original-direction on its
+        own connection and would still be caught, but a packet that merely
+        LOOKED like a reply would no longer be.
+        """
+        for rule in self.input_rules:
+            self.assertNotIn("ct direction", rule,
+                             f"a ct direction qualifier on an input drop "
+                             f"would let a forged reply through: {rule}")
 
 
 class TestElementModel(unittest.TestCase):
@@ -453,6 +659,83 @@ class TestOwnedElements(unittest.TestCase):
         self.assertEqual(argv[1:3], ["delete", "element"])
         self.assertEqual(
             argv[-1], "{ 10001 . 1.1.1.1 . 22, 10001 . 2.2.2.2 . 443 }")
+
+
+class TestInspectorAddresses(unittest.TestCase):
+    """The inspector's listening addresses, derived from the uid.
+
+    Like the management address and nflog group, these are tested against
+    spelled-out values rather than the formula: the DNAT map carries them, so a
+    silent drift points every redirected connection at the wrong workload.
+    """
+
+    def test_v4_addresses_are_spelled_out(self):
+        self.assertEqual(vm_inspect_address(10000).v4, "198.18.1.0")
+        self.assertEqual(vm_inspect_address(10004).v4, "198.18.1.4")
+        self.assertEqual(vm_inspect_address(10005).v4, "198.18.1.5")
+        self.assertEqual(vm_inspect_address(UID_MAX).v4, "198.18.168.196")
+
+    def test_v6_twin_embeds_the_v4(self):
+        # 2001:2::198.18.1.4 is a legal literal spelling the same address
+        # 2001:2::c612:104; the kernel prints the canonical form, so the value
+        # is asserted against that, and the readability is a property of what
+        # we write, not of the output.
+        self.assertEqual(vm_inspect_address(10000).v6, "2001:2::c612:100")
+        self.assertEqual(vm_inspect_address(10004).v6, "2001:2::c612:104")
+        self.assertEqual(
+            str(ipaddress.IPv6Address("2001:2::198.18.1.4")),
+            vm_inspect_address(10004).v6)
+
+    def test_the_first_workload_is_not_on_the_range_network_address(self):
+        # A bare offset would put the first workload allocated on any host on
+        # 198.18.0.0, the range's own network address — the value everything
+        # else defaults to. The base is 198.18.1.0 so it is not.
+        self.assertNotEqual(vm_inspect_address(UID_MIN).v4, "198.18.0.0")
+
+    def test_the_whole_uid_range_fits_its_targets(self):
+        v4, v6 = vm_inspect_address(UID_MAX)
+        self.assertIn(ipaddress.ip_address(v4), VM_INSPECT_NETWORK)
+        self.assertIn(ipaddress.ip_address(v6), VM_INSPECT_ADDR6_PREFIX)
+
+    def test_out_of_range_uids_raise_rather_than_wrap(self):
+        for uid in (0, 999, UID_MIN - 1, UID_MAX + 1):
+            with self.assertRaises(ValueError):
+                vm_inspect_address(uid)
+
+    def test_listener_ports_are_unprivileged(self):
+        # The inspector binds as the workload user, not root, so both ports
+        # have to stay above net.ipv4.ip_unprivileged_port_start (1024).
+        self.assertGreater(VM_INSPECT_PORT_CLEARTEXT, 1024)
+        self.assertGreater(VM_INSPECT_PORT_TLS, 1024)
+
+
+class TestProxySkeletonNamesAgree(unittest.TestCase):
+    """The transparent redirect's objects and the constants that name them.
+
+    workload-proxy.nft spells wl_inspect4 / wl_inspect6 / wl_inspect_cg
+    literally so the file stays applicable with a bare `nft -f`; the DNAT map
+    and the cgroup `return` carry those same names. A rename on either side
+    leaves the other pointing at a set or map that does not exist — which looks
+    exactly like the redirect being off rather than a bug, so the file is read
+    and checked against the constants rather than trusted, the way
+    test_vm_broker.py does for VM_BROKER_LISTEN_ADDR.
+    """
+
+    def test_the_skeleton_declares_each_object_with_its_constant_name(self):
+        text = PROXY_SKELETON.read_text()
+        self.assertIn(f"add map inet workload_proxy {NFT_MAP_INSPECT4}", text)
+        self.assertIn(f"add map inet workload_proxy {NFT_MAP_INSPECT6}", text)
+        self.assertIn(
+            f"add set inet workload_proxy {NFT_SET_INSPECT_CG}", text)
+
+    def test_the_rules_reference_each_object_by_its_constant_name(self):
+        """The declaration is not enough: a rule must reach the object by the
+        same name, and a drift between the two is a map or set that no rule
+        ever reads."""
+        text = PROXY_SKELETON.read_text()
+        self.assertIn(f"@{NFT_SET_INSPECT_CG} return", text)
+        self.assertIn(f"map @{NFT_MAP_INSPECT4}", text)
+        self.assertIn(f"map @{NFT_MAP_INSPECT6}", text)
 
 
 class TestUnitWiring(unittest.TestCase):
@@ -802,3 +1085,62 @@ class TestDropCounterParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConntrackOccupancy(unittest.TestCase):
+    """§11's conntrack figure. It is not the inspector's to report and it is
+    read here anyway, because the egress guard's correctness depends on
+    conntrack state: a reply is only distinguishable from a fresh connection
+    because an entry exists, so an exhausted table reclassifies the
+    inspector's replies as `direction original` and drops them mid-connection.
+
+    The reason it needs a producer at all is that nothing else moves when it
+    happens. The accept counters are unchanged and the guard counter climbs
+    for a reason that looks exactly like the cross-workload case it was
+    written for, so without this number an operator has no path from
+    "downloads keep dying" to the cause.
+    """
+
+    def _paths(self, count, maximum):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        c, m = os.path.join(d, "count"), os.path.join(d, "max")
+        with open(c, "w") as f:
+            f.write(f"{count}\n")
+        with open(m, "w") as f:
+            f.write(f"{maximum}\n")
+        return c, m
+
+    def test_reads_both_figures(self):
+        c, m = self._paths(1234, 262144)
+        self.assertEqual(conntrack_occupancy(c, m), (1234, 262144))
+
+    def test_an_unloaded_module_is_none_not_an_exception(self):
+        """The conntrack module is not loaded until something uses it, so the
+        files are legitimately absent. A missing figure must never turn a
+        diagnose line into a traceback."""
+        self.assertIsNone(
+            conntrack_occupancy("/nonexistent/count", "/nonexistent/max"))
+
+    def test_garbage_is_none_not_a_crash(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        c, m = os.path.join(d, "c"), os.path.join(d, "m")
+        with open(c, "w") as f:
+            f.write("not a number\n")
+        with open(m, "w") as f:
+            f.write("262144\n")
+        self.assertIsNone(conntrack_occupancy(c, m))
+
+    def test_a_zero_maximum_is_none_rather_than_a_division_by_zero(self):
+        """The pressure test divides by it. Zero is not a real kernel value,
+        which is exactly why nothing downstream would guard against it."""
+        c, m = self._paths(0, 0)
+        self.assertIsNone(conntrack_occupancy(c, m))
+
+    def test_the_pressure_threshold_leaves_a_healthy_host_unremarked(self):
+        """A number, not a warning, is what a healthy host gets: the figure is
+        reported always so that it is there when someone looks, and the
+        interpretation is added only when it is the answer."""
+        self.assertLess(34 / 262144, CONNTRACK_PRESSURE)
+        self.assertGreaterEqual(250000 / 262144, CONNTRACK_PRESSURE)

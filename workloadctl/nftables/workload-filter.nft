@@ -43,6 +43,27 @@ add set inet workload_filter wl_filtered { typeof meta skuid ; }
 add set inet workload_filter wl_allow4 { typeof meta skuid . ip daddr . th dport ; }
 add set inet workload_filter wl_allow6 { typeof meta skuid . ip6 daddr . th dport ; }
 
+# The inspector's listener planes (198.18.0.0/16 / 2001:2::/48) are ordinary
+# host-local ranges, not 127/8, so they have none of the protection the
+# management addresses got for free. Two rules each, one per family.
+#
+# The dst sets exempt the REDIRECTED connection: the filter chain runs after
+# nat dstnat and sees the rewritten destination, so the element is the
+# translated tuple (uid . listener address . listener port) armed by the same
+# script that arms the DNAT maps. The tuple is the predicate — a uid with no
+# element gets no match — exactly as the allow sets above use it.
+add set inet workload_filter wl_inspect_dst  { typeof meta skuid . ip  daddr . th dport ; }
+add set inet workload_filter wl_inspect_dst6 { typeof meta skuid . ip6 daddr . th dport ; }
+
+# The self sets arm the wrong-port guard per workload, and the per-element
+# `counter` is load-bearing: one element per workload, incremented only by that
+# workload's own dials to a port the inspector does not serve, which is what
+# `diagnose` reports. The same packet is indistinguishable from a
+# cross-workload attempt on the range guard's shared counter, and the
+# wrong-port self-dial is the case that will actually happen.
+add set inet workload_filter wl_inspect_self  { typeof meta skuid . ip  daddr ; counter ; }
+add set inet workload_filter wl_inspect_self6 { typeof meta skuid . ip6 daddr ; counter ; }
+
 # The hostname-policy proxies, by control group (ADR 006 §4.4). Each proxy runs
 # as its workload's own user *on purpose*, so `meta skuid` cannot tell the
 # proxy's traffic from the guest's — and under default-deny that means the drop
@@ -130,6 +151,26 @@ flush chain inet workload_filter output
 # of this file.
 add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta skuid or 0x40000000
 
+# The reply leg of every connection a filtered uid has, taken off the loopback
+# accept and given a rule of its own. It must sit after the mark rule above —
+# which is non-terminating on purpose, since it is all of inbound capture
+# attribution — and ahead of EVERY terminating rule: an accept here stops
+# evaluation for every reply-direction packet, so the mark must have run first
+# or `pcap -Q in` is silently empty for filtered VMs, and no destination-keyed
+# drop below may see a reply.
+#
+# `ct direction reply`, not `ct state established`: the guest's own outbound
+# data is already accepted by the tuple sets below, so only the reply direction
+# needs a rule at all. Measured: `established` first takes the accept sets' own
+# counters from counting traffic to counting connections, while `reply` leaves
+# every other counter reading exactly as it did.
+#
+# It widens more than inspected replies — the reply direction of every
+# connection a filtered uid has, including inbound ones whose replies leave on
+# a non-loopback interface — which is very likely an improvement and is named
+# here rather than absorbed silently into a rule justified by something else.
+add rule inet workload_filter output meta skuid @wl_filtered ct direction reply accept
+
 # The operator's explicit grants, and they are evaluated FIRST -- ahead of the
 # loopback accept and ahead of the proxy rules below -- so that `allow` is also
 # the escape hatch for the internal-destination drop. A site that genuinely
@@ -139,6 +180,55 @@ add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta sku
 # rule they used to sit behind is also an accept.
 add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
+
+# The redirected connections, admitted by their TRANSLATED tuple — the filter
+# hook sees the DNAT-rewritten destination, and an element naming the original
+# does not match (measured; §7.2). The served ports are admitted here, ahead
+# of the guards below, so only the wrong-port residue reaches the per-workload
+# counter: a self-dial to a served port is never counted as a cross-workload
+# attempt. The `allow` rules sit ahead of these on purpose — the escape hatch
+# — and that ordering depends on an invariant that is OWED, not yet enforced:
+# validation must refuse an `allow` entry inside the listener ranges
+# (198.18.0.0/16 and 2001:2::/48), where it would otherwise be accepted ahead
+# of the guard that exists to refuse exactly it. Until that lands, an operator
+# can arm such an element and it will beat the guard — the ordering is
+# correct, the promise behind it is not yet in the tree.
+add rule inet workload_filter output meta skuid . ip  daddr . th dport @wl_inspect_dst  accept
+add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_inspect_dst6 accept
+
+# The cross-workload guard, split per workload. 198.18.0.0/16 is an ordinary
+# host-local range: a guest dialling another workload's listener address gets
+# its packet re-originated by passt, and because the destination is local it
+# leaves on lo — where the loopback accept below would admit it. Measured:
+# workload B reached A's listener on the first try. The hole is on the
+# listener ports (8080, 8443) and on nothing else, because the redirect
+# rewrites 80 and 443 before the filter hook sees them — which is also why
+# this is the rule that catches the §9 wrong-port self-dial, and why the
+# served ports must be admitted above first.
+#
+# The per-workload counter is what lets `diagnose` say "this guest dialled its
+# own listener on a port nothing serves" rather than report a shared number.
+add rule inet workload_filter output meta skuid . ip  daddr @wl_inspect_self  ct direction original drop
+add rule inet workload_filter output meta skuid . ip6 daddr @wl_inspect_self6 ct direction original drop
+
+# The range guard: anything left after the per-workload rules is a
+# cross-workload attempt, on the shared counter where attribution is not
+# needed. Both qualifiers are load-bearing and for different halves:
+# `meta skuid @wl_filtered` keeps host tooling out of the rule so
+# `diagnose`/`doctor` can still probe a listener as root; `ct direction
+# original` keeps the inspector's own replies out of it — the inspector runs
+# as _wl-<name>, so its replies are output traffic from a filtered uid,
+# and once the resolver synthesises, every connection's reply is addressed
+# back into the range. Without the qualifier, every inspected connection
+# hangs with the SYN already accepted. Measured: the qualified form works,
+# the unqualified one does not.
+add rule inet workload_filter output meta skuid @wl_filtered ct direction original ip  daddr 198.18.0.0/16 drop
+
+# The v6 twin. A v4-only guard leaves the same hole open on the path clients
+# try first: one workload reaching another's v6 listener, admitted by the
+# loopback accept exactly as measured on v4. ip daddr matches v4 only and
+# ip6 daddr v6 only, so the split is the same one the allow sets carry.
+add rule inet workload_filter output meta skuid @wl_filtered ct direction original ip6 daddr 2001:2::/48 drop
 
 # The proxy's own name resolution, which is not guest-chosen egress: tinyproxy
 # resolves through whatever the host is configured to use, which may be a stub
@@ -183,6 +273,32 @@ add rule inet workload_filter output meta skuid @wl_filtered oif lo counter acce
 # point at which a path still resolves to the id being retired.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counter accept
 
+# HTTP/3, which is dropped and must not be dropped silently. The redirect
+# keys on `tcp dport`, so QUIC — HTTP/3, UDP 443 — is never redirected: it
+# is in no allow set, it is not `oif lo`, and it is not in the proxy cgroup,
+# so it meets the default deny below and is dropped. That disposition is
+# right and it arrives the wrong way — silently, on the shared counter
+# everything else lands on — so it gets a counted drop of its own.
+#
+# The position is the whole argument: it is a pure attribution split rather
+# than a policy change, because it sits IMMEDIATELY AHEAD of the default deny
+# and every packet it counts was already being dropped by the rule below it.
+# After the `allow` accepts, so a UDP destination an operator deliberately
+# allowed is unaffected; after the reply accept, so it carries no `ct
+# direction` qualifier and needs none.
+#
+# One line, not a v4/v6 pair: `udp dport` is family-agnostic and @wl_filtered
+# is a bare uid set, so one rule serves both families. The range guards above
+# are split per family because `ip daddr` matches v4 only; there is nothing
+# to split here.
+#
+# The reading: a non-zero count is NORMAL and is not an alarm. A client that
+# tries h3 and falls back — most of them, and all the ones with a
+# happy-eyeballs timer — presents as "some sites are slow for no reason
+# anyone can find", and this counter is the difference between finding that
+# in a minute and never finding it.
+add rule inet workload_filter output meta skuid @wl_filtered udp dport 443 counter drop
+
 
 # Set-guarded: a workload not in wl_filtered never reaches this rule.
 #
@@ -194,3 +310,51 @@ add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counte
 # sibling's dropped traffic to the workload being diagnosed would send an
 # operator after the wrong VM.
 add rule inet workload_filter output meta skuid @wl_filtered counter drop
+
+# --- The input half of the inspector's listener planes ---
+#
+# 127/8 is protected inbound by the kernel, unconditionally: a packet arriving
+# on a non-loopback interface with a 127/8 destination is martian and dies
+# before any hook of ours sees it. An address on the workload-proxy dummy link
+# has none of it — Linux uses the weak host model, so anything that can put a
+# frame in front of this host reaches whatever listens there, and the
+# connection has no output leg (the side all the rules above live on) until
+# the inspector replies, by which point it is established.
+#
+# `policy accept`, and this chain holds ONLY drops. This is not a host
+# firewall and must never grow into one: firewalld runs filter_INPUT at
+# filter+10, this chain at 0 runs ahead of it, so a default-deny here would
+# silently take over input policy for every service on the machine. The chain
+# removes one class of destination and does nothing else.
+#
+# Keyed on the destination, not on a uid — there is no uid on the input path
+# (the same absence that forces `pcap_input_rule()` onto the `ct mark`) and
+# none is needed: no legitimate party reaches these addresses from off-box,
+# whoever they are.
+#
+# `iif != lo` is the entire exemption, and it is the load-bearing detail.
+# Everything legitimate on these planes is host-local: the guest's redirected
+# connection, the inspector's reply and `diagnose` probing as root all arrive
+# on lo. Getting it wrong takes every inspected connection down rather than
+# opening anything — the safe direction, and it presents as the whole design
+# being inert.
+#
+# No `ct direction` qualifier, unlike every drop in the output chain. Those
+# need one because the inspector's replies are OUTPUT traffic from a filtered
+# uid; here a packet arriving from the inspector is on lo and is exempted by
+# interface already. Adding the qualifier would weaken the rule rather than
+# tighten it: an attacker's packet is original-direction on its own connection
+# and would still be caught, but one that merely LOOKED like a reply would
+# not be.
+#
+# Both families or neither: a v4-only input chain leaves the plane clients
+# reach first wide open, and nothing about the v4 half's behaviour would say
+# so.
+#
+# The counter is the one unambiguous number in the egress set: the wrong-port
+# self-dial is usually an operator one `allow` line from a working config, but
+# a packet counted here has no benign reading at all.
+add chain inet workload_filter input { type filter hook input priority 0; policy accept; }
+flush chain inet workload_filter input
+add rule inet workload_filter input iif != lo ip  daddr 198.18.0.0/16 counter drop
+add rule inet workload_filter input iif != lo ip6 daddr 2001:2::/48    counter drop
