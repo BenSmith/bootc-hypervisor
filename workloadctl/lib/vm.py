@@ -1166,6 +1166,48 @@ def nft_drop_counter(payload) -> tuple[int, int] | None:
     return None
 
 
+def nft_element_counter(payload, uid: int) -> tuple[int, int] | None:
+    """(packets, bytes) on the element of a counted set belonging to `uid`.
+
+    Unlike `nft_drop_counter`, which reads a rule and is therefore host-wide
+    across every filtered workload, this reads one *element* and so is
+    attributable to the workload that owns it -- which is the entire reason
+    the wrong-port sets carry `counter` as a set flag.
+
+    A counted set renders its elements differently from an uncounted one, and
+    that difference is the trap here. Without the flag an element is
+    `{"concat": [...]}`; with it, it is wrapped:
+
+        {"elem": {"val": {"concat": [10000, "198.18.1.0"]},
+                  "counter": {"packets": 12, "bytes": 720}}}
+
+    So `vm_owned_elements`, which matches the unwrapped shape, finds nothing in
+    these sets and would report a workload with 12 dropped self-dials as having
+    none. Verified against nft 1.1.6 rather than assumed.
+
+    None means the element is absent -- the workload's inspector has never been
+    armed -- which is a different statement from a counter reading zero, and
+    the caller must not collapse the two: zero is "armed and never hit", the
+    healthy reading, while None on a workload that claims inspection is a
+    missing guard.
+    """
+    for elem in nft_set_elements(payload):
+        if not isinstance(elem, dict):
+            continue
+        inner = elem.get("elem")
+        if not isinstance(inner, dict):
+            continue
+        val = inner.get("val")
+        parts = val.get("concat") if isinstance(val, dict) else None
+        if not parts or parts[0] != uid:
+            continue
+        counter = inner.get("counter")
+        if not isinstance(counter, dict):
+            return None
+        return (counter.get("packets", 0), counter.get("bytes", 0))
+    return None
+
+
 CONNTRACK_COUNT_PATH = "/proc/sys/net/netfilter/nf_conntrack_count"
 CONNTRACK_MAX_PATH = "/proc/sys/net/netfilter/nf_conntrack_max"
 
@@ -1246,6 +1288,41 @@ VM_ALLOW_RE = re.compile(
     r"(?P<port>\d+)$")
 
 
+def vm_allow_reserved_reason(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Why this address may not appear in `allow`, or None if it may.
+
+    The inspector's listener planes are the one destination range an `allow`
+    entry must never name. `allow` is evaluated *first* in the filter chain,
+    deliberately -- it is also the escape hatch for the internal-destination
+    drop -- which puts it ahead of the guard rule whose whole job is to stop
+    one workload reaching another workload's inspector. An element here is
+    therefore not a bypass of the guard so much as a replacement for it: the
+    connection is accepted, lands on a policy point that applies someone
+    else's allowlist, and is re-originated as someone else's uid.
+
+    It takes an operator to write one, which makes this a foot-gun rather than
+    a hole -- and a refusal is what lets the chain keep `allow` at the front
+    (HLD detail §3, §7.2.5).
+
+    Both families, because the planes are derived from one number: refusing the
+    v4 and not the v6 refuses half of every address, and the half that survives
+    is the one clients try first.
+    """
+    if isinstance(addr, ipaddress.IPv4Address):
+        network = VM_INSPECT_NETWORK
+    else:
+        network = VM_INSPECT_ADDR6_PREFIX
+    if addr not in network:
+        return None
+    return (f"{addr} is inside {network}, the egress inspector's own listener "
+            f"range. `allow` is matched ahead of the rule that stops one "
+            f"workload reaching another's inspector, so an entry here lands on "
+            f"a policy point enforcing a different workload's allowlist and "
+            f"re-originates as a different workload's uid. Reach the service "
+            f"through the inspector by name instead")
+
+
 def parse_vm_allow(spec: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
     """Parse one [vm.network].allow entry into (address, port).
 
@@ -1263,6 +1340,15 @@ def parse_vm_allow(spec: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Add
     port = int(match.group("port"))
     if not 1 <= port <= 65535:
         raise ValueError(f"{spec!r}: port {port} out of range 1-65535")
+    # Checked here rather than beside the schema, because this is the single
+    # funnel every allow entry passes through: `_validate_egress` calls it for
+    # the operator-facing error and `vm_filter_elements` calls it on the arming
+    # path, so the refusal cannot be reached around by a config that never met
+    # validation. The design asks for it "in the helper as well as the schema";
+    # one funnel is how both get it without two copies that can drift.
+    reserved = vm_allow_reserved_reason(addr)
+    if reserved:
+        raise ValueError(f"{spec!r}: {reserved}")
     return addr, port
 
 

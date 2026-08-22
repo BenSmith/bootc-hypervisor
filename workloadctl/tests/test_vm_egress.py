@@ -25,7 +25,8 @@ from vm import (
     VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     CONNTRACK_PRESSURE, conntrack_occupancy,
-    nft_drop_counter, nft_set_elements, vm_filter_commands,
+    nft_drop_counter, nft_element_counter, nft_set_elements,
+    parse_vm_allow, vm_allow_reserved_reason, vm_filter_commands,
     vm_filter_delete_command, vm_inspect_address, vm_owned_elements,
 )
 from workload_lib import UID_MAX, UID_MIN
@@ -1213,6 +1214,10 @@ class TestInspectDiagnose(unittest.TestCase):
     def _run(self, **kw):
         kw.setdefault("socket_active", True)
         kw.setdefault("v6_route", True)
+        # Injected rather than probed so no test shells out to nft. None is
+        # the reading on a host where the set cannot be read, which is what
+        # every test that is not about this counter should see.
+        kw.setdefault("self_dials", None)
         return self.mod.vm_inspect_check(self._config(), **kw)
 
     # --- applicability ---
@@ -1344,3 +1349,245 @@ class TestInspectMapKeyShapes(unittest.TestCase):
         self.assertEqual(
             vm_owned_elements(10001, [[{"concat": [10001, 80]},
                                        {"concat": ["198.18.1.1", 8080]}]]), [])
+
+
+class TestAllowMayNotNameTheListenerRange(unittest.TestCase):
+    """An `allow` entry inside the inspector's planes is refused (HLD §3).
+
+    `allow` is matched ahead of the guard that stops one workload reaching
+    another's inspector, so nothing downstream catches such an entry: it is
+    accepted, lands on a policy point enforcing a different workload's
+    allowlist, and re-originates as a different workload's uid. The refusal is
+    the only thing standing between that config line and cross-workload
+    inspection, which is why it is tested on both the schema path an operator
+    meets and the arming path a live start takes.
+    """
+
+    def test_a_v4_listener_address_is_refused(self):
+        addr = vm_inspect_address(10000)
+        with self.assertRaises(ValueError) as caught:
+            parse_vm_allow(f"{addr.v4}:8080")
+        self.assertIn("listener range", str(caught.exception))
+
+    def test_a_v6_listener_address_is_refused(self):
+        addr = vm_inspect_address(10000)
+        with self.assertRaises(ValueError) as caught:
+            parse_vm_allow(f"[{addr.v6}]:8443")
+        self.assertIn("listener range", str(caught.exception))
+
+    def test_any_address_in_the_range_is_refused_not_just_an_allocated_one(self):
+        """The whole reservation, not the addresses uids happen to map to.
+
+        A guard that refused only allocated addresses would accept
+        198.18.200.1 today and refuse it the day a workload is created that
+        maps to it -- a validation rule whose answer depends on which other
+        workloads exist.
+        """
+        with self.assertRaises(ValueError):
+            parse_vm_allow("198.18.200.1:443")
+        with self.assertRaises(ValueError):
+            parse_vm_allow("[2001:2::dead:beef]:443")
+
+    def test_the_refusal_names_the_range_and_a_remedy(self):
+        with self.assertRaises(ValueError) as caught:
+            parse_vm_allow("198.18.1.0:9999")
+        message = str(caught.exception)
+        self.assertIn("198.18.0.0/16", message)
+        self.assertIn("inspector", message)
+
+    def test_ordinary_addresses_still_parse(self):
+        for spec in ("192.168.0.10:22", "10.0.0.1:5432", "[2001:db8::1]:443"):
+            with self.subTest(spec=spec):
+                parse_vm_allow(spec)
+
+    def test_the_neighbouring_benchmark_half_is_not_refused(self):
+        """198.18.0.0/15 is the benchmark reservation; only our /16 is ours.
+
+        Refusing the whole /15 would take addresses this design never claimed,
+        and the boundary is one bit -- exactly the kind of range a later edit
+        widens by accident.
+        """
+        parse_vm_allow("198.19.0.1:443")
+
+    def test_the_reason_helper_answers_none_for_a_public_address(self):
+        self.assertIsNone(
+            vm_allow_reserved_reason(ipaddress.ip_address("93.184.216.34")))
+        self.assertIsNone(
+            vm_allow_reserved_reason(ipaddress.ip_address("2606:2800::1")))
+
+    def test_a_v4_plane_address_does_not_refuse_the_v6_family_and_back(self):
+        """Each family is judged against its own plane.
+
+        The planes are derived from one number, so a check that compared an
+        address against the wrong family's network would answer False for
+        everything and read as a passing test.
+        """
+        self.assertIsNone(
+            vm_allow_reserved_reason(ipaddress.ip_address("2001:db8::1")))
+        self.assertIsNotNone(
+            vm_allow_reserved_reason(ipaddress.ip_address("198.18.1.0")))
+
+
+class TestListenerRangeRefusalReachesBothPaths(unittest.TestCase):
+    """The schema path and the arming path both refuse (HLD §3: "in the
+    helper as well as the schema").
+
+    They are separate tests because they fail separately: validation runs when
+    an operator writes the file, and the arming path runs on every start
+    including one whose config predates the rule.
+    """
+
+    def test_validation_reports_it_as_an_allow_error(self):
+        from vm import _validate_egress
+        errors = _validate_egress({"egress": "filtered",
+                                   "allow": ["198.18.1.0:8080"]})
+        self.assertTrue(any("listener range" in e for e in errors), errors)
+        self.assertTrue(any("[vm.network].allow" in e for e in errors), errors)
+
+    def test_the_arming_path_refuses_rather_than_installing_the_element(self):
+        with self.assertRaises(ValueError):
+            vm_filter_commands(10001, ["198.18.1.0:8080"], "add")
+
+    def test_a_valid_entry_beside_a_refused_one_does_not_rescue_it(self):
+        """One bad entry fails the whole arm rather than arming the rest.
+
+        A partial arm is the worst outcome available: the workload starts,
+        `diagnose` shows allow entries, and the refused one is missing with
+        nothing saying so.
+        """
+        with self.assertRaises(ValueError):
+            vm_filter_commands(10001, ["10.0.0.1:22", "198.18.1.0:8080"], "add")
+
+
+class TestElementCounterParsing(unittest.TestCase):
+    """nft_element_counter -- the per-element shape a counted set renders.
+
+    The shape differs from an uncounted set's, and reading the uncounted shape
+    against a counted set silently yields nothing. Fixtures are the literal
+    output of nft 1.1.6, not a guess at it.
+    """
+
+    def _counted(self, uid, addr, packets, byte_count):
+        return {"nftables": [
+            {"metainfo": {}},
+            {"set": {"name": NFT_SET_INSPECT_SELF,
+                     "elem": [{"elem": {
+                         "val": {"concat": [uid, addr]},
+                         "counter": {"packets": packets,
+                                     "bytes": byte_count}}}]}}]}
+
+    def test_it_reads_the_wrapped_element_shape(self):
+        doc = self._counted(10000, "198.18.1.0", 12, 720)
+        self.assertEqual(nft_element_counter(doc, 10000), (12, 720))
+
+    def test_another_workloads_element_is_not_this_workloads_count(self):
+        """The attribution is the whole point of a per-element counter.
+
+        Matching on anything but the first component would report a sibling's
+        self-dials as this guest's, which is precisely what the host-wide drop
+        counter already does and what this exists to improve on.
+        """
+        doc = self._counted(10002, "198.18.3.0", 12, 720)
+        self.assertIsNone(nft_element_counter(doc, 10000))
+
+    def test_absent_is_none_and_zero_is_zero(self):
+        """None and (0, 0) are different findings and must not collapse.
+
+        Zero is armed and never hit -- the healthy reading. None on a workload
+        that claims inspection means the guard was never armed, which is a
+        missing drop rather than an unused one.
+        """
+        self.assertEqual(
+            nft_element_counter(self._counted(10000, "198.18.1.0", 0, 0), 10000),
+            (0, 0))
+        self.assertIsNone(nft_element_counter(
+            {"nftables": [{"set": {"name": NFT_SET_INSPECT_SELF, "elem": []}}]},
+            10000))
+
+    def test_an_uncounted_element_yields_none_rather_than_a_wrong_number(self):
+        """A set that lost its `counter` flag renders the unwrapped shape."""
+        doc = {"nftables": [
+            {"set": {"name": NFT_SET_INSPECT_SELF,
+                     "elem": [{"concat": [10000, "198.18.1.0"]}]}}]}
+        self.assertIsNone(nft_element_counter(doc, 10000))
+
+    def test_the_skeleton_still_declares_the_counter_flag(self):
+        """Without the flag every reading above is None on a live host.
+
+        The parser cannot tell a set that was never hit from one that cannot
+        count, so the flag is asserted where it is declared.
+        """
+        text = SKELETON.read_text()
+        for set_name in (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+            # `set_name in line` would match wl_inspect_self against the
+            # wl_inspect_self6 declaration too: one name is a prefix of the
+            # other, and the substring test picks up both.
+            line = only(self, [l for l in text.splitlines()
+                               if l.split()[:1] == ["add"]
+                               and f" {set_name} " in l],
+                        f"declaration of {set_name}")
+            self.assertIn("counter", line)
+
+
+class TestSelfDialCounterIsReported(unittest.TestCase):
+    """`diagnose` names the wrong-port self-dial drops (HLD §11).
+
+    The guard drops two different things on two different counters, and this
+    is the one that will actually happen: a guest dialling its own listener
+    address on a port the inspector does not serve. Inside the guest that is a
+    hang, not an error, and every other line of `diagnose` passes — so the
+    counter is the only path from the symptom to the cause.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+
+    def _line(self, self_dials):
+        cfg = SimpleNamespace(
+            name="vm1", uid=10001, vm_bridge=None,
+            vm_network={"egress": "filtered"},
+            config={"vm": {"network": {"egress": "filtered"}}})
+        elems = [{"concat": [10001, 80]}, {"concat": [10001, 443]}]
+        return self.mod.vm_inspect_check(
+            cfg, elements4=elems, elements6=elems, socket_active=True,
+            v6_route=True, self_dials=self_dials)
+
+    def test_a_nonzero_count_is_named_with_its_remedy(self):
+        name, ok, detail = self._line((12, 720))
+        self.assertTrue(ok, detail)
+        self.assertIn("12 packet(s)", detail)
+        self.assertIn("allow", detail)
+
+    def test_zero_says_nothing(self):
+        """The healthy reading is silence, unlike the conntrack figure.
+
+        Conntrack's number is itself the answer to "why do transfers die
+        part-way", so it is printed always. A zero here answers nothing and
+        would only add noise to every passing line on the host.
+        """
+        _name, ok, detail = self._line((0, 0))
+        self.assertTrue(ok)
+        self.assertNotIn("packet(s) dropped dialling", detail)
+
+    def test_an_unreadable_counter_says_nothing_rather_than_zero(self):
+        """None must not be rendered as a count.
+
+        A set that could not be read is not a workload with no self-dials, and
+        printing "0 packets dropped" for it would state a measurement that was
+        never taken.
+        """
+        _name, ok, detail = self._line(None)
+        self.assertTrue(ok)
+        self.assertNotIn("packet(s) dropped dialling", detail)
+
+    def test_it_does_not_turn_a_healthy_workload_into_a_failure(self):
+        """Advisory, not a verdict.
+
+        A self-dial is an operator's misconfiguration one `allow` line from
+        working, not a broken inspector, and failing the check would make
+        `diagnose` red on a host whose confinement is doing exactly its job.
+        """
+        _name, ok, _detail = self._line((4000, 240000))
+        self.assertTrue(ok)
+

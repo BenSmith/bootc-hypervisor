@@ -50,12 +50,13 @@ from vm import (
     VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
     CONNTRACK_PRESSURE,
     conntrack_occupancy,
-    nft_drop_counter,
+    nft_drop_counter, nft_element_counter,
     nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
     vm_owned_elements,
     NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
     VM_PROXY_PORT, vm_proxy_hosts, vm_uses_proxy,
-    NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, VM_INSPECT_PORT_CLEARTEXT,
+    NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
+    NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
     vm_inspect_address, vm_uses_inspect,
 )
@@ -1296,7 +1297,7 @@ def _host_has_v6_route() -> bool:
 
 
 def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
-                     socket_active=PROBE, v6_route=PROBE
+                     socket_active=PROBE, v6_route=PROBE, self_dials=PROBE
                      ) -> tuple[str, bool, str] | None:
     """Report whether a VM's egress is actually being redirected to its inspector.
 
@@ -1395,11 +1396,54 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                 "redirect will log nothing — the guest's v6 connections fail "
                 "at the routing lookup, before nftables sees them")
 
+    # The wrong-port self-dial counter, per workload and armed per workload,
+    # which is what separates it from every other counter this command reports.
+    # A guest that dials its own listener address on a port the inspector does
+    # not serve is dropped by the self guard -- and inside the guest that is a
+    # hang, not an error, with `status` green and every other line here
+    # passing. Under a synthesising resolver it is the signature of a guest
+    # handed a synthetic answer for a service on a non-80/443 port
+    # (`git.local:2222`, `registry.local:5000`), which is an operator one
+    # `allow` line from a working config with nothing telling them so.
+    #
+    # Reported only when non-zero. Zero is the healthy reading and says
+    # nothing an operator can act on, unlike the conntrack figure above, where
+    # the number itself is the answer to "why do transfers die part-way".
+    if self_dials is PROBE:
+        self_dials = _inspect_self_counter(uid)
+    if self_dials and self_dials[0]:
+        tail += (f"; {self_dials[0]} packet(s) dropped dialling this guest's "
+                 f"own listener on a port nothing serves — if the guest "
+                 f"expects a service there, it needs a [vm.network].allow "
+                 f"entry for the real address, not the listener's")
+
     return ("vm_inspect", True,
             f"egress inspected on both families: uid {uid} redirected to "
             f"{addr.v4}/[{addr.v6}] ports {VM_INSPECT_PORT_CLEARTEXT} "
             f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls), {unit} listening"
             f"{tail}")
+
+
+def _inspect_self_counter(uid):
+    """(packets, bytes) of this uid's wrong-port self-dial drops, or None.
+
+    Sums the two families, because the guest chose one of them and which one
+    is not the operator's question -- a v6-only client and a v4-only client
+    dialling the same wrong port are the same mistake, and reporting them on
+    separate lines would ask the reader to add up two numbers to learn one
+    thing. None only when neither family's element could be read at all.
+    """
+    total = None
+    for set_name in (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
+        payload = _nft_json("list", "set", *NFT_TABLE.split(), set_name)
+        if payload is None:
+            continue
+        counter = nft_element_counter(payload, uid)
+        if counter is None:
+            continue
+        total = (0, 0) if total is None else total
+        total = (total[0] + counter[0], total[1] + counter[1])
+    return total
 
 
 def _inspect_map_elements(map_name):

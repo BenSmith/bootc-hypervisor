@@ -248,11 +248,13 @@ what rule 7 now admits, and neither is rule 7:
   before the guard existed. A blanket range guard catches whatever the
   per-workload rules do not.
 
-One promise behind that ordering is still owed and is worth knowing about:
-validation does not yet refuse an `allow` entry *inside* the listener ranges,
-and such an entry would be accepted ahead of the guard that exists to refuse
-exactly it. The ordering is correct; the invariant it assumes is not yet
-enforced in the tree.
+The invariant behind that ordering is enforced rather than assumed: an `allow`
+entry naming an address inside a listener range is refused, in both families,
+by `validate` and again by the helper that arms the element. It has to be, and
+not merely be documented as a bad idea — `allow` is matched *ahead of* the
+guard rule, so such an entry would not bypass that guard so much as replace it,
+landing the connection on a policy point that enforces a different workload's
+allowlist and re-originates as a different workload's uid.
 
 Read rule 7 as "the host's own loopback path is not the place policy is
 enforced", not as "nothing routable is reachable here".

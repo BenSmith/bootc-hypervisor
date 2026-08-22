@@ -304,6 +304,16 @@ name = "schema-reference"
 # address needs that address named here as well. The allow rules are evaluated
 # ahead of that drop. Note what the grant actually opens — the same entry also
 # permits the guest's own direct path to that endpoint.
+#
+# REFUSED: an address inside the egress inspector's listener ranges,
+# 198.18.0.0/16 or 2001:2::/48. Those planes carry every filtered VM's own
+# inspector, and .allow is matched AHEAD of the rule that stops one workload
+# reaching another's — so such an entry does not bypass that guard so much as
+# replace it: the connection is accepted, lands on a policy point enforcing a
+# different workload's allowlist, and leaves the host as a different
+# workload's uid. Refused by `validate` and refused again when the element is
+# armed, in both families. To reach a service the inspector is redirecting,
+# name the real address, not the listener's.
 # allow = ["192.168.0.10:22", "[2001:db8::1]:443"]
 #
 # Optional: hostnames this VM may reach over HTTP and HTTPS.
