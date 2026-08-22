@@ -141,13 +141,27 @@ class TestRedirect(unittest.TestCase):
         accepted by the skeleton's `oif lo` rule."""
         self.assertIn("hook output priority dstnat", self.nft)
 
-    def test_there_is_no_skuid_predicate_on_the_rule(self):
+    def test_no_dnat_rule_carries_a_skuid_membership_predicate(self):
         """The map lookup IS the predicate: a uid absent from the map produces
-        no match, and the packet goes to an address where nothing listens."""
-        rule = [ln for ln in self.nft.splitlines()
-                if ln.startswith("add rule")][0]
-        self.assertNotIn("meta skuid @", rule)
-        self.assertIn("meta skuid map @", rule)
+        no match, and the packet goes to an address where nothing listens.
+
+        Asserted over EVERY dnat rule rather than the first. This test indexed
+        `[0]` when proxy_dnat held one rule; T2 added three more, and it went
+        on checking the 3128 rule alone while the two inspect DNATs it was
+        written to cover went unasserted. Nothing failed -- the chain simply
+        grew out from under the assertion.
+
+        The cgroup `return` at the top is excluded on purpose: it has no dnat
+        and reads `@wl_inspect_cg` as set membership, which is the correct
+        shape for a rule that decides whether to translate at all.
+        """
+        dnat = [ln for ln in self.nft.splitlines()
+                if ln.startswith("add rule") and " dnat " in ln]
+        self.assertGreaterEqual(len(dnat), 3, dnat)
+        for rule in dnat:
+            self.assertNotIn("meta skuid @", rule, rule)
+            self.assertIn("meta skuid", rule, rule)
+            self.assertIn("map @", rule, rule)
 
 
 class TestProxyEgressExemption(unittest.TestCase):
@@ -174,9 +188,14 @@ class TestProxyEgressExemption(unittest.TestCase):
         set, and picking the first `wl_proxy_cg` rule would silently start
         testing one of those instead.
         """
-        return next(ln for ln in self.nft.splitlines()
-                    if ln.startswith("add rule") and "wl_proxy_cg" in ln
-                    and ln.endswith("accept") and "dport" not in ln)
+        matches = [ln for ln in self.nft.splitlines()
+                   if ln.startswith("add rule") and "wl_proxy_cg" in ln
+                   and ln.endswith("accept") and "dport" not in ln]
+        # next() would take the first of however many match; the shape is
+        # supposed to be unique, so a second one is a change this test must
+        # report rather than silently pick between.
+        assert len(matches) == 1, f"expected one blanket exemption: {matches}"
+        return matches[0]
 
     def test_the_exemption_is_evaluated_before_the_drop(self):
         # Against the default deny, not the first `wl_filtered` drop: the

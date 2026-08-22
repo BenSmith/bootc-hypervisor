@@ -30,6 +30,25 @@ from vm import (
 )
 from workload_lib import UID_MAX, UID_MIN
 
+def only(case, matches, what):
+    """The single line matching a filter, asserting that there is exactly one.
+
+    Taking `[0]` off a filtered list is total coverage only while the thing
+    filtered for is unique. When a second one arrives the test keeps checking
+    the first and nothing reports it. The skeleton holds exactly the kind of
+    collection that happens to: one `add element` line per set today, freely
+    splittable across two tomorrow because nft accepts both spellings.
+
+    The direction it fails in is what makes it worth a helper rather than a
+    convention. An `assertIn` narrowed this way weakens; an `assertNotIn`
+    starts passing while the thing it forbids is present on the line it no
+    longer reads.
+    """
+    case.assertEqual(len(matches), 1,
+                     f"expected exactly one {what}, got {len(matches)}: {matches}")
+    return matches[0]
+
+
 SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-filter.nft"
 PROXY_SKELETON = Path(__file__).resolve().parent.parent / "nftables" / "workload-proxy.nft"
 
@@ -139,7 +158,8 @@ class TestSkeleton(unittest.TestCase):
         The range must be the whole of what lib/workload_lib.py allocates, or
         workloads at one end of it are unattributable.
         """
-        rule = [d for d in self.directives if "ct mark set" in d][0]
+        rule = only(self, [d for d in self.directives if "ct mark set" in d],
+                    "ct mark set rule")
         self.assertNotIn(
             f"@{NFT_SET_FILTERED}", rule,
             "the mark is guarded on set membership, so unfiltered workloads "
@@ -190,8 +210,9 @@ class TestSkeleton(unittest.TestCase):
             self.assertIn(keyword, decl[0])
 
     def test_membership_set_is_family_agnostic(self):
-        decl = [d for d in self.directives
-                if d.startswith("add set") and NFT_SET_FILTERED in d][0]
+        decl = only(self, [d for d in self.directives
+                           if d.startswith("add set") and NFT_SET_FILTERED in d],
+                    f"declaration of {NFT_SET_FILTERED}")
         self.assertNotIn("ip daddr", decl)
         self.assertNotIn("ip6 daddr", decl)
 
@@ -215,13 +236,17 @@ class TestSkeleton(unittest.TestCase):
             self.assertEqual(len(decls), 1, name)
             self.assertIn("typeof meta skuid", decls[0], name)
         for name in (NFT_SET_INSPECT_DST, NFT_SET_INSPECT_DST6):
-            decl = [d for d in self.directives
-                    if d.startswith("add set") and d.split()[4] == name][0]
+            decl = only(self, [d for d in self.directives
+                               if d.startswith("add set")
+                               and d.split()[4] == name],
+                        f"declaration of {name}")
             self.assertIn("th dport", decl)
             self.assertNotIn("counter", decl)
         for name in (NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6):
-            decl = [d for d in self.directives
-                    if d.startswith("add set") and d.split()[4] == name][0]
+            decl = only(self, [d for d in self.directives
+                               if d.startswith("add set")
+                               and d.split()[4] == name],
+                        f"declaration of {name}")
             self.assertIn("counter", decl)
             self.assertNotIn("th dport", decl)
 
@@ -279,13 +304,17 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """169.254.0.0/16 carries the cloud metadata endpoint; the RFC 1918
         blocks are the LAN the host sits on; 127/8 is every service the host
         runs for itself."""
-        elems = [ln for ln in self.text.splitlines()
-                 if ln.startswith("add element") and NFT_SET_INTERNAL4 in ln][0]
+        elems = only(self, [ln for ln in self.text.splitlines()
+                            if ln.startswith("add element")
+                            and NFT_SET_INTERNAL4 in ln],
+                     f"element line for {NFT_SET_INTERNAL4}")
         for prefix in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
                        "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10"):
             self.assertIn(prefix, elems)
-        v6 = [ln for ln in self.text.splitlines()
-              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        v6 = only(self, [ln for ln in self.text.splitlines()
+                         if ln.startswith("add element")
+                         and NFT_SET_INTERNAL6 in ln],
+                  f"element line for {NFT_SET_INTERNAL6}")
         for prefix in ("::1/128", "fc00::/7", "fe80::/10"):
             self.assertIn(prefix, v6)
 
@@ -294,8 +323,10 @@ class TestInternalDestinationGuard(unittest.TestCase):
         64:ff9b::a00:5 reaches 10.0.0.5 without any element of the v4 set being
         consulted, so listing only the direct v6 forms leaves the guard
         family-blind in exactly the way it exists to prevent."""
-        v6 = [ln for ln in self.text.splitlines()
-              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        v6 = only(self, [ln for ln in self.text.splitlines()
+                         if ln.startswith("add element")
+                         and NFT_SET_INTERNAL6 in ln],
+                  f"element line for {NFT_SET_INTERNAL6}")
         for prefix in ("::ffff:0.0.0.0/96",   # v4-mapped
                        "64:ff9b::/96",        # NAT64, well-known (RFC 6052)
                        "64:ff9b:1::/48",      # NAT64, local-use (RFC 8215)
@@ -306,8 +337,10 @@ class TestInternalDestinationGuard(unittest.TestCase):
         """2001::/32 encodes the client's own public address, not a destination
         inside the host's network, so blocking it would deny traffic the guard
         has no claim on."""
-        v6 = [ln for ln in self.text.splitlines()
-              if ln.startswith("add element") and NFT_SET_INTERNAL6 in ln][0]
+        v6 = only(self, [ln for ln in self.text.splitlines()
+                         if ln.startswith("add element")
+                         and NFT_SET_INTERNAL6 in ln],
+                  f"element line for {NFT_SET_INTERNAL6}")
         self.assertNotIn("2001::/32", v6)
 
     def test_the_advertised_proxy_address_is_not_blocked(self):
@@ -525,9 +558,10 @@ class TestInputChain(unittest.TestCase):
         service unreachable. The chain removes one class of destination and
         does nothing else; it holds only drops, and none of them accepts.
         """
-        decl = [d for d in self.directives
-                if d.startswith("add chain")
-                and " inet workload_filter input " in d][0]
+        decl = only(self, [d for d in self.directives
+                           if d.startswith("add chain")
+                           and " inet workload_filter input " in d],
+                    "input chain declaration")
         self.assertIn("policy accept", decl)
         self.assertTrue(self.input_rules, "the input chain is empty")
         for rule in self.input_rules:
