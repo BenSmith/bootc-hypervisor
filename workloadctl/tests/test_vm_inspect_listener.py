@@ -45,8 +45,16 @@ def _mod():
 
 
 def _mock_conn():
-    """A stand-in for an accepted socket: records settimeout and close."""
-    return unittest.mock.MagicMock()
+    """A stand-in for an accepted socket: records settimeout and close.
+
+    Its recv answers b"" -- a peer that closed without sending anything. The
+    planes both read now, so a mock that answered a MagicMock to recv would
+    raise inside the daemon thread _handle spawns, where nothing would fail a
+    test and everything would print a traceback.
+    """
+    m = unittest.mock.MagicMock()
+    m.recv.return_value = b""
+    return m
 
 
 def _listener_with(local):
@@ -56,19 +64,28 @@ def _listener_with(local):
     return m
 
 
-def _serve_line(local, peer=("192.0.2.1", 1024)):
-    """The admitted connection's log line, driven synchronously through _serve.
+def _serve_line(test, local, peer=("192.0.2.1", 1024)):
+    """One connection's log line, driven synchronously through _serve.
 
     _handle spawns a daemon thread for an admitted connection, which would make
     an assertion on the buffer a race; _serve is what that thread calls, so
     driving it directly is the same line, deterministically.
+
+    Both planes read bytes now, so the connection is a real socketpair carrying
+    one request the empty policy refuses -- the refusal is what produces the
+    line whose plane, local and peer are under test.
     """
     mod = _mod()
     out = io.StringIO()
     listener = mod.Listener([_listener_with(local)], out)
-    conn = _mock_conn()
+    ours, guest = socket.socketpair()
+    test.addCleanup(ours.close)
+    test.addCleanup(guest.close)
+    ours.settimeout(2.0)
+    guest.sendall(b"GET / HTTP/1.1\r\nHost: nobody.example\r\n\r\n")
+    guest.shutdown(socket.SHUT_WR)
     plane = mod.plane_for_port(local[1])
-    listener._serve(conn, peer, local, plane)
+    listener._serve(ours, peer, local, plane)
     return out.getvalue()
 
 
@@ -95,15 +112,15 @@ class TestPlaneDetection(unittest.TestCase):
         self.assertIsNone(mod.plane_for_port(9999))
 
     def test_the_plane_in_the_logged_line_comes_from_getsockname(self):
-        """Driven on the cleartext plane, which is the one still log-only.
+        """Driven on the cleartext plane over a real connection.
 
-        The TLS plane now reads bytes off the socket, so a mock connection
-        cannot stand in for one; TestTlsPlane drives that side over a real
-        socketpair. The property under test is the same either way -- the
-        plane in the line is the accepting port, not the fd name.
+        Both planes read bytes off the socket now, so the line comes from a
+        request the policy refuses rather than from the bare accept. The
+        property under test is unchanged -- the plane in the line is the
+        accepting port, not the fd name.
         """
         local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
-        log = _serve_line(local)
+        log = _serve_line(self, local)
         self.assertIn("plane=cleartext", log)
         self.assertIn(f"local=198.18.0.1:{VM_INSPECT_PORT_CLEARTEXT}", log)
         self.assertIn("peer=192.0.2.1:1024", log)
@@ -112,8 +129,9 @@ class TestPlaneDetection(unittest.TestCase):
 class TestExplicitTimeout(unittest.TestCase):
     """Every accepted socket gets a stated timeout, none of them the default.
 
-    This rung reads no bytes, so the number only bounds a socket nobody reads;
-    it is set anyway so rung 2's peek inherits a value rather than blocking.
+    It is set before anything touches the socket -- before the ceiling is even
+    consulted -- so the peek and the request head both inherit it rather than
+    blocking on a guest that says nothing.
     """
 
     def test_the_accepted_socket_is_set_to_the_stated_timeout(self):
@@ -638,15 +656,448 @@ class TestTlsPlane(unittest.TestCase):
         self.assertNotIn("not allowlisted", out.getvalue())
 
 
-class TestCleartextPlaneUnchanged(unittest.TestCase):
-    """Port 80 is still log-only; tinyproxy filters it by name today, so this
-    unit neither regressed it nor took it over. T4b does."""
+_OK = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
 
-    def test_the_cleartext_plane_still_only_logs(self):
-        log = _serve_line(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))
-        self.assertIn("plane=cleartext", log)
-        self.assertNotIn("drop", log)
-        self.assertNotIn("splice", log)
+
+class _CleartextRig(unittest.TestCase):
+    """Drives one guest connection through the cleartext plane over real
+    sockets. A mock cannot stand in for a socket here: the whole unit is about
+    where one message ends and the next begins in a byte stream.
+    """
+
+    def _pair(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        a.settimeout(2.0)
+        b.settimeout(2.0)
+        return a, b
+
+    def _run(self, hosts, request_bytes, responses=()):
+        """Serve `request_bytes` under a policy of `hosts`.
+
+        Returns (log, what the guest was sent, [(dialled address, bytes the
+        upstream received)]). Each dialled upstream is a socketpair whose far
+        end is pre-loaded with the matching entry of `responses`, so the
+        response is already waiting when the relay comes to read it.
+        """
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+        ours, guest = self._pair()
+        guest.sendall(request_bytes)
+        guest.shutdown(socket.SHUT_WR)
+        dialled = []
+
+        def dial(addr, timeout=None):
+            near, far = self._pair()
+            index = len(dialled)
+            if index < len(responses):
+                far.sendall(responses[index])
+            dialled.append((addr, far))
+            return near
+
+        # The relay moves an upstream onto RELAY_IDLE_TIMEOUT, which is a
+        # tunnel bound and two minutes long. A test whose upstream is silent
+        # would wait all of it, so the rig shortens both numbers -- one place,
+        # not a sleep-shaped constant in every case.
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=dial), \
+                unittest.mock.patch.object(mod, "RELAY_IDLE_TIMEOUT", 2.0), \
+                unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 2.0):
+            listener._serve_cleartext(ours, "plane=cleartext")
+        ours.close()
+        return (out.getvalue(), _read_all(guest),
+                [(addr, _read_all(far)) for addr, far in dialled])
+
+
+def _read_all(sock):
+    out = b""
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return out
+            out += chunk
+    except (TimeoutError, OSError):
+        return out
+
+
+class TestCleartextAuthorisation(unittest.TestCase):
+    """The name that authorises, and the answer a refusal gets.
+
+    Unlike 443 a denial is speakable here -- there is no session for the guest
+    to be inside -- so a refused request gets a real 403 naming the host rather
+    than a connection that closed for reasons it cannot see.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def test_an_allowlisted_host_is_relayed_to_an_upstream_dialled_by_name(self):
+        log, got, ups = self._run(["a.example"],
+                                  b"GET /p HTTP/1.1\r\nHost: a.example\r\n\r\n",
+                                  [_OK])
+        self.assertEqual([addr for addr, _ in ups], [("a.example", 80)])
+        self.assertIn(b"GET /p HTTP/1.1", ups[0][1])
+        self.assertIn(b"HTTP/1.1 200 OK", got)
+        self.assertIn("forward", log)
+
+    def test_an_unlisted_host_gets_a_403_naming_it_and_no_upstream(self):
+        log, got, ups = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: denied.example\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn(b"HTTP/1.1 403 Forbidden", got)
+        self.assertIn(b"denied.example", got)
+        self.assertIn("host=denied.example reason='not allowlisted'", log)
+
+    def test_the_matcher_is_the_one_the_tls_plane_uses(self):
+        """One matcher, not two. The apex trap has to be preserved here for
+        the same reason it is preserved there: `*.example.com` does not
+        authorise `example.com`, that is what tinyproxy does with the same list
+        today, and a plane that widened it would grant every existing config a
+        destination its operator did not write down."""
+        _, got, ups = self._run(
+            ["*.example.com"], b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn(b"403", got)
+        _, _, ups = self._run(
+            ["*.example.com"],
+            b"GET / HTTP/1.1\r\nHost: A.Example.Com.:80\r\n\r\n", [_OK])
+        self.assertEqual([addr for addr, _ in ups], [("a.example.com", 80)])
+
+    def test_an_absolute_form_target_does_not_reach_upstream_unnormalised(self):
+        """Legal HTTP/1.1, and one line of guest input. It moves the
+        authorising name out of the Host header -- which RFC 9110 then says to
+        ignore -- so a plane that read Host and forwarded the target verbatim
+        would authorise one host and fetch from another."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"GET http://a.example/p?q=1 HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+            [_OK])
+        self.assertEqual([addr for addr, _ in ups], [("a.example", 80)])
+        sent = ups[0][1]
+        self.assertIn(b"GET /p?q=1 HTTP/1.1\r\n", sent)
+        self.assertNotIn(b"http://", sent)
+        self.assertIn(b"Host: a.example\r\n", sent)
+        self.assertNotIn(b"evil.example", sent)
+
+    def test_the_absolute_form_authority_is_what_is_authorised(self):
+        """The other direction of the same trap: a Host header naming an
+        allowlisted host does not authorise an absolute-form target that names
+        another one."""
+        log, got, ups = self._run(
+            ["a.example"],
+            b"GET http://denied.example/ HTTP/1.1\r\nHost: a.example\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("host=denied.example", log)
+        self.assertIn(b"403", got)
+
+    def test_a_request_with_no_authorising_name_is_not_a_policy_decision(self):
+        """A name that could not be read and a name that was refused fail the
+        request identically. An operator with one bucket for the two cannot
+        tell a guest reaching for a host it may not have from a guest speaking
+        something that is not HTTP at the HTTP port."""
+        log, got, ups = self._run(["a.example"], b"GET / HTTP/1.1\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("unreadable request", log)
+        self.assertNotIn("not allowlisted", log)
+        self.assertIn(b"400 Bad Request", got)
+
+    def test_connect_is_refused(self):
+        """This listener is transparent: a guest that reaches it believes it
+        is talking to an origin and has no proxy to tunnel through, so a
+        CONNECT is a guest trying to make one out of it."""
+        log, got, ups = self._run(
+            ["a.example"], b"CONNECT a.example:443 HTTP/1.1\r\n"
+                           b"Host: a.example:443\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("CONNECT", log)
+        self.assertIn(b"400", got)
+
+
+class TestCleartextFraming(unittest.TestCase):
+    """Every case here is a request-smuggling class, and every one of them is
+    REFUSED rather than resolved. Where two readings of a message are possible
+    this plane declines the message: a relay that picks one guesses, the origin
+    behind it guesses too, and a request smuggles through the gap.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def test_content_length_and_transfer_encoding_together_are_refused(self):
+        log, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\nContent-Length: 5\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\nhello")
+        self.assertEqual(ups, [])
+        self.assertIn("both Content-Length and Transfer-Encoding", log)
+        self.assertIn(b"400", got)
+
+    def test_two_content_length_headers_are_refused_even_when_they_agree(self):
+        """Refused whether or not they agree: accepting the agreeing case
+        makes the disagreeing one the path nothing exercises."""
+        log, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\nContent-Length: 5\r\n"
+            b"Content-Length: 5\r\n\r\nhello")
+        self.assertEqual(ups, [])
+        self.assertIn("Content-Length headers", log)
+        self.assertIn(b"400", got)
+
+    def test_a_transfer_encoding_that_is_not_a_single_chunked_is_refused(self):
+        log, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Transfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("is not a single 'chunked'", log)
+
+    def test_an_obs_fold_continuation_line_is_refused(self):
+        """A folded line lets a header hide inside another header's value,
+        which is a disagreement between parsers about how many headers there
+        are."""
+        log, _, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\nX-Thing: one\r\n"
+            b"\tContent-Length: 5\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("obs-fold", log)
+
+    def test_the_framing_emitted_upstream_is_the_one_we_computed(self):
+        """Not the guest's headers forwarded verbatim: two parsers cannot
+        disagree about a length one of them wrote. The chunk extension is
+        dropped for the same reason -- it is a field the guest writes after the
+        head has been authorised."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\n\r\n",
+            [_OK])
+        sent = ups[0][1]
+        self.assertIn(b"Transfer-Encoding: chunked\r\n", sent)
+        self.assertIn(b"5\r\nhello\r\n0\r\n\r\n", sent)
+        self.assertNotIn(b"ext=1", sent)
+
+    def test_the_guests_framing_headers_are_not_forwarded_alongside_ours(self):
+        """The one that a "drop Host and forward the rest" relay passes every
+        other test with. Emitting our computed framing is only half the rule --
+        the guest's own framing headers have to be GONE, or the origin sees two
+        of them and is back to choosing which one says where the body ends."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\nContent-Length: 5\r\n"
+            b"Connection: keep-alive\r\nProxy-Connection: keep-alive\r\n"
+            b"X-Thing: kept\r\n\r\nhello",
+            [_OK])
+        head = ups[0][1].split(b"\r\n\r\n", 1)[0].lower()
+        self.assertEqual(head.count(b"content-length:"), 1)
+        self.assertEqual(head.count(b"transfer-encoding:"), 0)
+        self.assertEqual(head.count(b"connection:"), 1)
+        self.assertEqual(head.count(b"proxy-connection:"), 0)
+        self.assertIn(b"x-thing: kept", head)
+
+    def test_a_chunked_request_carries_exactly_one_framing_header_upstream(self):
+        _, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            [_OK])
+        head = ups[0][1].split(b"\r\n\r\n", 1)[0].lower()
+        self.assertEqual(head.count(b"transfer-encoding:"), 1)
+        self.assertEqual(head.count(b"content-length:"), 0)
+
+    def test_a_head_response_body_is_not_waited_for(self):
+        """A HEAD response carries a Content-Length describing a body it does
+        not send. A relay that read the header before the status would block on
+        bytes that are never coming -- which presents as a hung guest, not as a
+        failure."""
+        _, got, ups = self._run(
+            ["a.example"],
+            b"HEAD / HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /second HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + _OK])
+        self.assertIn(b"GET /second", ups[0][1])
+        self.assertIn(b"Content-Length: 100", got)
+
+
+class TestCleartextPerRequest(unittest.TestCase):
+    """One connection, many requests, each authorised on its own.
+
+    A decision taken once at the front of a connection authorises everything
+    behind the first name, and the framing that says where one request ends is
+    written by the guest -- so these two properties are the unit.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def test_a_pipelined_second_host_gets_its_own_decision(self):
+        log, got, ups = self._run(
+            ["a.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: denied.example\r\n\r\n",
+            [_OK])
+        self.assertEqual([addr for addr, _ in ups], [("a.example", 80)])
+        self.assertNotIn(b"/two", ups[0][1])
+        self.assertIn("forward", log)
+        self.assertIn("host=denied.example reason='not allowlisted'", log)
+        self.assertIn(b"200 OK", got)
+        self.assertIn(b"403 Forbidden", got)
+
+    def test_two_allowed_hosts_get_two_upstreams(self):
+        """Upstreams are keyed by the authorised NAME, never by the client
+        connection: no request is ever sent down one an earlier request
+        chose."""
+        _, _, ups = self._run(
+            ["*.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: b.example\r\n\r\n",
+            [_OK, _OK])
+        self.assertEqual([addr for addr, _ in ups],
+                         [("a.example", 80), ("b.example", 80)])
+        self.assertIn(b"/one", ups[0][1])
+        self.assertNotIn(b"/two", ups[0][1])
+        self.assertIn(b"/two", ups[1][1])
+
+    def test_a_second_host_is_never_sent_down_the_first_ones_upstream(self):
+        """The bypass this keying exists to prevent: a connection reused
+        across names sends a request the policy authorised for ONE host to a
+        host it authorised for another."""
+        _, _, ups = self._run(
+            ["*.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: b.example\r\n\r\n",
+            [_OK, _OK])
+        for (addr, sent) in ups:
+            for line in sent.split(b"\r\n"):
+                if line.lower().startswith(b"host:"):
+                    self.assertEqual(
+                        line.split(b" ", 1)[1].decode(), addr[0],
+                        "a request reached an upstream dialled for another name")
+
+    def test_the_same_host_twice_reuses_one_upstream(self):
+        _, _, ups = self._run(
+            ["a.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [_OK + _OK])
+        self.assertEqual(len(ups), 1)
+        self.assertIn(b"/one", ups[0][1])
+        self.assertIn(b"/two", ups[0][1])
+
+    def test_a_403_does_not_leave_the_next_request_read_out_of_the_body(self):
+        """The bypass through the error path, which is the path every test
+        exercises least. A refusal answered without draining leaves the reader
+        positioned inside the refused request's body -- so the guest writes its
+        next request THERE, and it is read as a request rather than as data."""
+        smuggled = b"GET /smuggled HTTP/1.1\r\nHost: a.example\r\n\r\n"
+        request = (b"POST / HTTP/1.1\r\nHost: denied.example\r\n"
+                   b"Content-Length: %d\r\n\r\n" % len(smuggled)) + smuggled
+        request += b"GET /real HTTP/1.1\r\nHost: a.example\r\n\r\n"
+        log, got, ups = self._run(["a.example"], request, [_OK])
+        self.assertEqual(len(ups), 1)
+        self.assertIn(b"GET /real", ups[0][1])
+        self.assertNotIn(b"/smuggled", ups[0][1])
+        self.assertIn(b"403 Forbidden", got)
+        self.assertIn(b"200 OK", got)
+
+    def test_a_body_over_the_drain_ceiling_closes_the_connection_instead(self):
+        """Draining is a service to the connection, not an obligation: a guest
+        that answers a refusal with more than the ceiling gets the connection
+        closed rather than the courtesy of having it all read."""
+        mod = _mod()
+        _, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: denied.example\r\nContent-Length: %d\r\n"
+            b"\r\n" % (mod.DRAIN_MAX + 1))
+        self.assertEqual(ups, [])
+        self.assertIn(b"403 Forbidden", got)
+        self.assertIn(b"Connection: close", got)
+
+
+class TestCleartextExpectContinue(unittest.TestCase):
+    """`Expect: 100-continue` is answered AFTER policy, never before.
+
+    The natural implementation answers it while reading the head, which grants
+    a continue on a request that is about to be refused -- the guest then sends
+    a body nobody will read, on a connection about to close.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def test_a_refused_request_is_never_told_to_continue(self):
+        log, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: denied.example\r\nContent-Length: 5\r\n"
+            b"Expect: 100-continue\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertNotIn(b"100 Continue", got)
+        self.assertIn(b"403 Forbidden", got)
+
+    def test_a_refused_expect_closes_rather_than_pretending_to_drain(self):
+        """The one refusal that cannot be drained: the guest is waiting for a
+        continue policy has just decided not to give, so there is no body to
+        read to the end of and the connection cannot be trusted to start the
+        next request cleanly."""
+        _, got, _ = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: denied.example\r\nContent-Length: 5\r\n"
+            b"Expect: 100-continue\r\n\r\n")
+        self.assertIn(b"Connection: close", got)
+
+    def test_an_authorised_request_is_told_to_continue(self):
+        """And the Expect is not forwarded: waiting for the origin's own
+        interim answer would mean reading the response before the body had been
+        sent, and the two waits deadlock."""
+        _, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\nContent-Length: 5\r\n"
+            b"Expect: 100-continue\r\n\r\nhello",
+            [_OK])
+        self.assertIn(b"100 Continue", got)
+        self.assertIn(b"hello", ups[0][1])
+        self.assertNotIn(b"Expect", ups[0][1])
+
+    def test_an_expectation_we_cannot_honour_is_refused(self):
+        log, got, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\nExpect: other\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("cannot honour", log)
+
+
+class TestCleartextUpstreamFailure(unittest.TestCase):
+    """An unreachable upstream is its own reason, as it is on the TLS plane.
+
+    Three outcomes, three reasons: a request that could not be read, a name on
+    no list, and a host that could not be reached fail the guest identically,
+    and an operator with one bucket for them cannot tell a policy decision from
+    a broken resolver.
+    """
+
+    _pair = _CleartextRig._pair
+
+    def test_an_unreachable_upstream_is_not_reported_as_a_policy_decision(self):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=("a.example",)))
+        ours, guest = self._pair()
+        guest.sendall(b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n")
+        guest.shutdown(socket.SHUT_WR)
+        with unittest.mock.patch.object(
+                socket, "create_connection",
+                side_effect=OSError("Name or service not known")):
+            listener._serve_cleartext(ours, "plane=cleartext")
+        ours.close()
+        log, got = out.getvalue(), _read_all(guest)
+        self.assertIn("upstream unreachable", log)
+        self.assertNotIn("not allowlisted", log)
+        self.assertIn(b"502 Bad Gateway", got)
 
 
 if __name__ == "__main__":

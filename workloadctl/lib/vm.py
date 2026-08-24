@@ -659,7 +659,8 @@ def vm_uses_inspect(config: dict) -> bool:
     host socket in its data path, so there is no uid to key the redirect on)
     and `egress` filtered (an unfiltered VM would be the one the redirect
     breaks — its dial to a port-443 service it is allowed to reach would be
-    translated into a listener that only logs). `workload-vm-inspect`'s
+    translated into a listener that would refuse it, having no policy naming
+    it). `workload-vm-inspect`'s
     inspection_applies delegates here rather than re-stating it, so the
     generator and the helper cannot drift apart.
 

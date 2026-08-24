@@ -7,7 +7,9 @@ Rung 1 built the shape — the socket, the concurrency, the timeout discipline �
 and only logged. Rung 2's TLS plane is here: a connection on 443 has its
 ClientHello read, its server name matched against this workload's `hosts`, and
 is then SPLICED byte-exact to that name's real host, or closed. The cleartext
-plane still only logs; it is the next unit.
+plane authorises EVERY REQUEST on a connection by its Host header, through the
+same matcher, and relays only the ones that pass -- a name on no list gets a
+real 403 naming it, which is an answer 443 cannot give.
 
 NOTHING IS DECRYPTED
 
@@ -82,7 +84,7 @@ from typing import NamedTuple
 sys.dont_write_bytecode = True
 
 from vm import (
-    VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
+    VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     VM_TLS_DEFAULT, vm_hostname_match, vm_inspect_policy_path,
     vm_normalise_hostname,
 )
@@ -412,6 +414,471 @@ def _recv_at_least(conn, raw, n, max_bytes):
     return raw
 
 
+# --- the cleartext plane ---
+#
+# Port 80, authorised per REQUEST rather than per connection. tinyproxy filters
+# cleartext by name today and this unit takes that over, so the properties it
+# has to keep are its properties: a name that is on no list gets a real 403
+# naming it, and nothing reaches an upstream the policy did not authorise.
+#
+# The whole of the danger here is that ONE connection carries MANY requests,
+# each of which may name a different host, and the framing that says where one
+# request ends is written by the guest. Every refusal below exists because the
+# alternative is a request the guest smuggled past the authorisation of the one
+# in front of it.
+#
+# NOT normalised here, deliberately: percent-decoding, dot-segment resolution,
+# duplicate-slash collapsing, the query string, a trailing `/`, `;params`. That
+# is the normalisation half of the design's §7.6.1 and it lands with `paths` at
+# rung 4, where there is a path rule for it to matter to. What lands HERE is
+# the half that matters with only a `hosts` list: the request target's FORM,
+# because an absolute-form target moves the authorising name out of the Host
+# header, and the framing, because framing is how a second request hides inside
+# a first.
+
+# The ceiling on a request or response head (request line plus headers), in
+# bytes. Like CLIENTHELLO_MAX it exists because the read is otherwise driven by
+# a peer that can simply never send the blank line.
+MESSAGE_HEAD_MAX = 32768
+
+# The ceiling on one chunk-size line, in bytes. A chunk header is a handful of
+# hex digits; anything approaching this is a peer dribbling a line to hold a
+# slot.
+CHUNK_LINE_MAX = 4096
+
+# How much of a refused request's body is read and discarded before the 403, in
+# bytes. Past it the connection is closed instead: draining exists so the NEXT
+# request is read from where a request starts, and a guest that answers a
+# refusal with a gigabyte gets the connection closed rather than the service of
+# having it read. See _drain_or_close.
+DRAIN_MAX = 1 << 20
+
+# The methods whose responses carry no body whatever the headers say. HEAD is
+# the one that matters: a HEAD response legitimately carries Content-Length
+# describing a body it does not send, and a relay that believed it would block
+# forever on bytes that are not coming.
+_BODYLESS_STATUSES = frozenset((204, 304))
+
+# RFC 9110 §5.6.2 tchar. A header name outside this set is refused rather than
+# sanitised: every byte in it is a byte some other parser might treat as a
+# delimiter.
+_TOKEN_CHARS = frozenset(
+    "!#$%&'*+-.^_`|~0123456789"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+# Headers we never forward: hop-by-hop ones (RFC 9110 §7.6.1's connection
+# header field list), plus the two framing headers, which are re-emitted from
+# what we computed, plus Host, which is re-emitted as the name we authorised.
+_NOT_FORWARDED = frozenset((
+    "host", "content-length", "transfer-encoding", "connection",
+    "proxy-connection", "keep-alive", "te", "trailer", "upgrade", "expect",
+))
+
+
+class RequestUnreadable(Exception):
+    """The guest's bytes are not a request we will act on.
+
+    Every raise is a REFUSAL and not a repair. Where two readings of a message
+    are possible, this design does not pick one: it declines the message. A
+    proxy that resolves an ambiguity guesses, the origin behind it guesses too,
+    and a request smuggles through the gap between the two guesses.
+    """
+
+
+class Framing(NamedTuple):
+    """Where a message body ends. `length` is meaningful only for "length"."""
+
+    kind: str          # "none" | "length" | "chunked" | "close"
+    length: int = 0
+
+
+class Request(NamedTuple):
+    """One request head, parsed and normalised to the form we will emit."""
+
+    method: str
+    target: str        # always origin-form by the time this exists
+    version: str
+    authority: str     # what our Host header will say, port included
+    host: str          # the normalised name the policy is matched against
+    headers: tuple     # (name, value) as the guest wrote them
+    framing: Framing
+    expects_continue: bool
+    wants_close: bool
+
+
+class _Stream:
+    """A socket plus the bytes already read past the end of the last message.
+
+    Pipelining is the reason this exists rather than a bare socket: the read
+    that finishes one request's head routinely carries the beginning of the
+    next, and a reader that dropped that surplus would lose the very request
+    whose independent authorisation is the point of this unit.
+    """
+
+    def __init__(self, sock):
+        self.sock = sock
+        self._buf = b""
+        self.eof = False
+
+    def _fill(self):
+        try:
+            chunk = self.sock.recv(RELAY_CHUNK)
+        except OSError as exc:
+            raise RequestUnreadable(f"read failed: {exc}") from None
+        if not chunk:
+            self.eof = True
+            return False
+        self._buf += chunk
+        return True
+
+    def read_head(self, max_bytes=MESSAGE_HEAD_MAX):
+        """A whole message head, or b"" if the peer closed cleanly first.
+
+        The terminator is CRLFCRLF and only that. A bare-LF head is refused by
+        never being found, because bare-LF line endings are precisely what two
+        parsers disagree about: accept them here and a request the origin reads
+        as one message can be read as two.
+        """
+        while True:
+            idx = self._buf.find(b"\r\n\r\n")
+            if idx != -1:
+                head, self._buf = self._buf[:idx + 4], self._buf[idx + 4:]
+                return head
+            if len(self._buf) > max_bytes:
+                raise RequestUnreadable(
+                    f"a message head over {max_bytes} bytes is not one we read")
+            if not self._fill():
+                if not self._buf:
+                    return b""
+                raise RequestUnreadable("the connection closed mid-head")
+
+    def read_exactly(self, n):
+        while len(self._buf) < n:
+            if not self._fill():
+                raise RequestUnreadable("the connection closed mid-body")
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def read_line(self, max_bytes=CHUNK_LINE_MAX):
+        """One CRLF-terminated line, returned without its CRLF."""
+        while True:
+            idx = self._buf.find(b"\r\n")
+            if idx != -1:
+                line, self._buf = self._buf[:idx], self._buf[idx + 2:]
+                return line
+            if len(self._buf) > max_bytes:
+                raise RequestUnreadable(
+                    f"a line over {max_bytes} bytes is not one we read")
+            if not self._fill():
+                raise RequestUnreadable("the connection closed mid-line")
+
+    def read_some(self):
+        if self._buf:
+            out, self._buf = self._buf, b""
+            return out
+        if not self._fill():
+            return b""
+        out, self._buf = self._buf, b""
+        return out
+
+
+def _split_head(head):
+    """(start line, [(name, value)]) from a message head, or raise.
+
+    Refusals, in order of how they are used against a proxy: non-ASCII, which
+    is a second encoding of a name or a header; obs-fold continuation lines,
+    which let a header hide inside another's value; and whitespace before the
+    colon, which some parsers accept as part of the name and others as the end
+    of it.
+    """
+    try:
+        text = head[:-4].decode("ascii")
+    except UnicodeDecodeError:
+        raise RequestUnreadable(
+            "the head is not ASCII, so it is not one every parser on this "
+            "path would read the same way") from None
+    lines = text.split("\r\n")
+    headers = []
+    for line in lines[1:]:
+        if line[:1] in (" ", "\t"):
+            raise RequestUnreadable(
+                "an obs-fold continuation line lets a header hide inside "
+                "another header's value")
+        name, sep, value = line.partition(":")
+        if not sep:
+            raise RequestUnreadable(f"header line {line!r} has no colon")
+        if not name or any(c not in _TOKEN_CHARS for c in name):
+            raise RequestUnreadable(
+                f"header name {name!r} is not a token")
+        headers.append((name.lower(), value.strip(" \t")))
+    return lines[0], tuple(headers)
+
+
+def _get_all(headers, name):
+    return [v for n, v in headers if n == name]
+
+
+def normalise_target(method, target):
+    """(origin-form target, authority or None) for a request target, or raise.
+
+    Absolute-form is legal HTTP/1.1 and moves the authorising name OUT of the
+    Host header, which RFC 9110 §7.2 then says to ignore. Left alone, that one
+    line of guest input defeats both the Host read that authorises here and the
+    `paths` match arriving at rung 4. So it is normalised to origin-form and
+    its authority becomes the name we authorise -- or the request is refused.
+    """
+    if method == "CONNECT":
+        raise RequestUnreadable(
+            "CONNECT on the cleartext plane: this listener is transparent, so "
+            "a guest reaching it believes it is talking to an origin and has "
+            "no proxy to tunnel through")
+    if target.startswith("/"):
+        return target, None
+    if target == "*":
+        raise RequestUnreadable(
+            "an asterisk-form target names no resource to authorise")
+    scheme, sep, rest = target.partition("://")
+    if not sep or scheme.lower() != "http":
+        raise RequestUnreadable(
+            f"request target {target!r} is neither origin-form nor an http "
+            "absolute-form URI")
+    slash = rest.find("/")
+    authority, path = (rest[:slash], rest[slash:]) if slash != -1 else (rest, "/")
+    if "@" in authority:
+        raise RequestUnreadable(
+            "userinfo in the request target: parsers disagree about where the "
+            "host in it begins, which is the whole of its use here")
+    if not authority:
+        raise RequestUnreadable("an absolute-form target with no authority")
+    return path, authority
+
+
+def host_from_authority(authority):
+    """The normalised name in an authority, its port dropped, or raise."""
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end == -1:
+            raise RequestUnreadable(
+                f"authority {authority!r} opens a bracketed literal and never "
+                "closes it")
+        host, rest = authority[:end + 1], authority[end + 1:]
+        if rest and not rest.startswith(":"):
+            raise RequestUnreadable(
+                f"authority {authority!r} has trailing bytes after its "
+                "bracketed literal")
+    elif authority.count(":") > 1:
+        raise RequestUnreadable(
+            f"authority {authority!r} has several colons and no brackets, so "
+            "where its port begins is a guess")
+    else:
+        host = authority.partition(":")[0]
+    host = vm_normalise_hostname(host)
+    if not host:
+        raise RequestUnreadable(f"authority {authority!r} names no host")
+    return host
+
+
+def request_framing(headers):
+    """Where the request body ends, by refusal rather than by preference.
+
+    Every branch here is a smuggling class. Both headers present is the classic
+    one -- one parser reads the length, the next reads the chunks, and the
+    bytes between the two readings are a second request. This does not resolve
+    it in favour of either; it declines the message.
+    """
+    lengths = _get_all(headers, "content-length")
+    encodings = _get_all(headers, "transfer-encoding")
+    if lengths and encodings:
+        raise RequestUnreadable(
+            "both Content-Length and Transfer-Encoding: which of the two says "
+            "where the body ends is exactly what a smuggled request lives in")
+    if encodings:
+        if len(encodings) > 1 or encodings[0].strip().lower() != "chunked":
+            raise RequestUnreadable(
+                f"Transfer-Encoding {', '.join(encodings)!r} is not a single "
+                "'chunked', and this relay implements no other coding")
+        return Framing("chunked")
+    if lengths:
+        if len(lengths) > 1:
+            raise RequestUnreadable(
+                f"{len(lengths)} Content-Length headers: duplicates are "
+                "refused whether or not they agree, because agreeing today "
+                "makes the disagreeing case the untested path")
+        value = lengths[0]
+        if not value.isdigit():
+            raise RequestUnreadable(
+                f"Content-Length {value!r} is not a plain decimal count")
+        return Framing("length", int(value))
+    return Framing("none")
+
+
+def parse_request(head):
+    """A Request from a request head, normalised and framed, or raise."""
+    start, headers = _split_head(head)
+    parts = start.split(" ")
+    if len(parts) != 3:
+        raise RequestUnreadable(
+            f"request line {start!r} is not three space-separated fields")
+    method, target, version = parts
+    if version not in ("HTTP/1.1", "HTTP/1.0"):
+        raise RequestUnreadable(f"{version!r} is not a version we relay")
+    if not method or any(c not in _TOKEN_CHARS for c in method):
+        raise RequestUnreadable(f"method {method!r} is not a token")
+    target, authority = normalise_target(method, target)
+    if authority is None:
+        hosts = _get_all(headers, "host")
+        if len(hosts) != 1:
+            raise RequestUnreadable(
+                f"{len(hosts)} Host headers: with no absolute-form authority "
+                "there is exactly one name that could authorise this request")
+        authority = hosts[0]
+    authority = authority.strip().lower()
+    host = host_from_authority(authority)
+    connection = ",".join(_get_all(headers, "connection")).lower()
+    tokens = {t.strip() for t in connection.split(",")}
+    wants_close = "close" in tokens or (
+        version == "HTTP/1.0" and "keep-alive" not in tokens)
+    expects = [v.strip().lower() for v in _get_all(headers, "expect")]
+    if expects and expects != ["100-continue"]:
+        raise RequestUnreadable(
+            f"Expect {', '.join(expects)!r} is an expectation this relay "
+            "cannot honour")
+    return Request(
+        method=method, target=target, version=version, authority=authority,
+        host=host, headers=headers, framing=request_framing(headers),
+        expects_continue=bool(expects) and version == "HTTP/1.1",
+        wants_close=wants_close)
+
+
+def rebuild_request(req):
+    """The bytes we send upstream: OUR framing, and the name we authorised.
+
+    Not the guest's head forwarded verbatim. Two parsers cannot disagree about
+    a length one of them wrote, so the framing headers are dropped and re-
+    emitted from the Framing we computed, and Host is re-emitted as the
+    authority that was actually matched -- which for an absolute-form request
+    is not what the guest's Host header said.
+    """
+    lines = [f"{req.method} {req.target} HTTP/1.1",
+             f"Host: {req.authority}"]
+    lines += [f"{name}: {value}" for name, value in req.headers
+              if name not in _NOT_FORWARDED]
+    if req.framing.kind == "length":
+        lines.append(f"Content-Length: {req.framing.length}")
+    elif req.framing.kind == "chunked":
+        lines.append("Transfer-Encoding: chunked")
+    lines.append("Connection: keep-alive")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
+def response_framing(status, method, headers):
+    """Where a response body ends.
+
+    The status and the request method come first and the headers second, in
+    that order, because a HEAD response and a 304 both carry a Content-Length
+    describing a body they do not send -- a relay that read the header before
+    the status blocks forever on bytes that are never coming.
+    """
+    if method == "HEAD" or status in _BODYLESS_STATUSES or 100 <= status < 200:
+        return Framing("none")
+    encodings = _get_all(headers, "transfer-encoding")
+    lengths = _get_all(headers, "content-length")
+    if encodings and lengths:
+        raise RequestUnreadable(
+            "the origin framed its response both ways at once")
+    if encodings:
+        if len(encodings) > 1 or encodings[0].strip().lower() != "chunked":
+            raise RequestUnreadable(
+                f"response Transfer-Encoding {', '.join(encodings)!r} is not a "
+                "single 'chunked'")
+        return Framing("chunked")
+    if lengths:
+        if len(lengths) > 1 or not lengths[0].isdigit():
+            raise RequestUnreadable(
+                "the origin's Content-Length is duplicated or not a count")
+        return Framing("length", int(lengths[0]))
+    # No framing header at all: the body ends when the connection does, and
+    # this connection is therefore not reusable.
+    return Framing("close")
+
+
+def copy_chunked(src, dst):
+    """Relay a chunked body, re-emitting each chunk header ourselves.
+
+    Chunk extensions are dropped and trailers are dropped rather than
+    forwarded: both are fields the guest writes after the head has been
+    authorised, and neither is worth a second parser on this path.
+    """
+    while True:
+        line = src.read_line()
+        size_field = line.split(b";", 1)[0].strip()
+        if not size_field or any(c not in b"0123456789abcdefABCDEF"
+                                 for c in size_field):
+            raise RequestUnreadable(
+                f"chunk size {size_field!r} is not plain hex")
+        size = int(size_field, 16)
+        if size == 0:
+            while src.read_line():
+                pass                      # trailers, read and discarded
+            dst.sendall(b"0\r\n\r\n")
+            return
+        data = src.read_exactly(size)
+        if src.read_exactly(2) != b"\r\n":
+            raise RequestUnreadable("a chunk is not CRLF-terminated")
+        dst.sendall(b"%x\r\n" % size + data + b"\r\n")
+
+
+def copy_body(src, dst, framing):
+    """Relay a body of the given framing. `dst` may be None to discard it."""
+    if framing.kind == "none":
+        return
+    if framing.kind == "chunked":
+        copy_chunked(src, _Discard() if dst is None else dst)
+        return
+    if framing.kind == "close":
+        while True:
+            data = src.read_some()
+            if not data:
+                return
+            if dst is not None:
+                dst.sendall(data)
+        return
+    left = framing.length
+    while left:
+        data = src.read_exactly(min(left, RELAY_CHUNK))
+        left -= len(data)
+        if dst is not None:
+            dst.sendall(data)
+
+
+class _Discard:
+    """A bounded sink for a body being drained rather than relayed.
+
+    Bounded because a chunked body has no length to check in advance: the
+    ceiling has to be spent as the bytes arrive, or a guest answers a refusal
+    with an endless body and the drain becomes the denial of service.
+    """
+
+    def __init__(self, limit=DRAIN_MAX):
+        self._left = limit
+
+    def sendall(self, data):
+        self._left -= len(data)
+        if self._left < 0:
+            raise RequestUnreadable(
+                f"a refused body over the {DRAIN_MAX}-byte drain ceiling")
+
+
+def http_response(status, reason, body_text, *, close):
+    body = body_text.encode()
+    head = (f"HTTP/1.1 {status} {reason}\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: {'close' if close else 'keep-alive'}\r\n"
+            "\r\n")
+    return head.encode("ascii") + body
+
+
 class Ceiling:
     """Bounded, per-process: admit up to `limit` live connections, refuse the
     rest. Refuse, not queue — a connection over the cap is turned away
@@ -492,9 +959,9 @@ class Listener:
 
     def _handle(self, conn, peer, listen_sock):
         # Set the timeout before doing anything with the accepted socket —
-        # admitted or not. This rung reads no bytes, so it only bounds a
-        # socket nobody reads; rung 2's peek inherits the number instead of
-        # blocking forever.
+        # admitted or not, and before the ceiling is consulted. Both planes
+        # read as their first act, so this is the number that bounds a guest
+        # that connects and then says nothing.
         conn.settimeout(CONNECTION_TIMEOUT)
         # The accepting port, from getsockname() on the inherited fd — the fd
         # name cannot distinguish the planes under Accept=no (module docstring).
@@ -535,12 +1002,8 @@ class Listener:
             if plane == "tls":
                 self._serve_tls(conn, where)
             else:
-                # The cleartext plane still only logs. Port 80 is redirected
-                # here already and tinyproxy filters it by name today, so this
-                # is not a hole this unit opened -- it is the half of the
-                # redirect the next unit takes over.
-                self._log(where)
-        except OSError:
+                self._serve_cleartext(conn, where)
+        except (OSError, RequestUnreadable):
             pass
         finally:
             conn.close()
@@ -591,6 +1054,173 @@ class Listener:
             self._relay(conn, upstream)
         finally:
             upstream.close()
+
+    def _serve_cleartext(self, conn, where):
+        """Authorise every request on this connection, and relay the ones that
+        pass.
+
+        Per REQUEST, not per connection. One connection carries many requests,
+        each free to name a different host, so a decision taken once at the
+        front of it would authorise everything behind the first name -- and
+        the framing that says where one request ends is written by the guest.
+
+        The upstreams are keyed by the AUTHORISED NAME and outlive the request
+        that opened them, so a second request for the same name reuses one and
+        a second request for a different name gets its own. No request is ever
+        sent down an upstream an earlier one chose.
+        """
+        client = _Stream(conn)
+        upstreams = {}
+        try:
+            while self._serve_one_request(client, conn, where, upstreams):
+                pass
+        finally:
+            for up in upstreams.values():
+                up.sock.close()
+
+    def _serve_one_request(self, client, conn, where, upstreams):
+        """One request, start to finish. True to stay on the connection."""
+        try:
+            head = client.read_head()
+        except RequestUnreadable as exc:
+            self._log(f"drop {where} reason='unreadable request: {exc}'")
+            return False
+        if not head:
+            return False                # the guest closed between requests
+        try:
+            req = parse_request(head)
+        except RequestUnreadable as exc:
+            # No 403 here and no host in the line: this is not a policy
+            # decision, and reporting it as one would put a name we could not
+            # read into the same bucket as a name we refused.
+            self._log(f"drop {where} reason='unreadable request: {exc}'")
+            self._answer(conn, 400, "Bad Request", str(exc), close=True)
+            return False
+        if not vm_hostname_match(req.host, self._policy.hosts):
+            # A denial IS speakable on 80, unlike 443 -- there is no session to
+            # be inside, so the guest gets a real answer naming the host rather
+            # than a connection that closed for reasons it cannot see.
+            self._log(f"drop {where} host={req.host} reason='not allowlisted'")
+            return self._refuse(
+                client, conn, req, 403, "Forbidden",
+                f"{req.host} is not on this workload's egress allowlist")
+        try:
+            up = self._upstream_for(req.host, upstreams)
+        except OSError as exc:
+            self._log(f"drop {where} host={req.host} "
+                      f"reason='upstream unreachable: {exc}'")
+            return self._refuse(client, conn, req, 502, "Bad Gateway",
+                                f"{req.host} could not be reached: {exc}")
+        try:
+            up.sock.sendall(rebuild_request(req))
+            if req.expects_continue:
+                # AFTER policy, and by us. The natural implementation answers a
+                # continue while reading the head, which grants it on a request
+                # about to be refused. Expect is not forwarded upstream either:
+                # waiting for the origin's own interim answer means reading the
+                # response before the body has been sent, and the two waits
+                # deadlock.
+                conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            copy_body(client, up.sock, req.framing)
+            self._log(f"forward {where} host={req.host} method={req.method}")
+            return self._relay_response(up, conn, req)
+        except (RequestUnreadable, OSError) as exc:
+            self._log(f"drop {where} host={req.host} "
+                      f"reason='relay failed: {exc}'")
+            return False
+
+    def _upstream_for(self, host, upstreams):
+        """The connection to an authorised name, opened once and reused.
+
+        Dialled by NAME (§7.4), like the TLS plane: the address the guest aimed
+        at is this inspector's own listener, so resolving the authorised name
+        here is what makes the destination the one the policy named.
+        """
+        up = upstreams.get(host)
+        if up is None:
+            sock = socket.create_connection(
+                (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
+            sock.settimeout(RELAY_IDLE_TIMEOUT)
+            up = _Stream(sock)
+            upstreams[host] = up
+        return up
+
+    def _relay_response(self, up, conn, req):
+        """Relay one response. True if the connection may carry another.
+
+        The head goes across verbatim, which is not the rule the REQUEST
+        direction follows -- there the framing we emit is the framing we
+        computed. The asymmetry is the point: the framing being defended
+        against is the GUEST's, and this head was written by the host its
+        policy authorised. It is parsed all the same, because where the body
+        ends is what says whether the next request can be read from here.
+        """
+        while True:
+            head = up.read_head()
+            if not head:
+                raise RequestUnreadable("the upstream closed before answering")
+            start, headers = _split_head(head)
+            fields = start.split(" ")
+            if len(fields) < 2 or not fields[1].isdigit():
+                raise RequestUnreadable(
+                    f"status line {start!r} is not one we read")
+            status = int(fields[1])
+            framing = response_framing(status, req.method, headers)
+            conn.sendall(head)
+            if 100 <= status < 200:
+                continue                # interim; the real response follows
+            break
+        copy_body(up, conn, framing)
+        # An origin that ends its connection ends the guest's too, rather than
+        # this quietly opening a replacement: the guest asked one question and
+        # got one answer, and a reopen would hide a flapping upstream behind a
+        # connection that looks healthy.
+        closing = framing.kind == "close" or "close" in {
+            t.strip() for v in _get_all(headers, "connection")
+            for t in v.lower().split(",")}
+        return not closing and not req.wants_close
+
+    def _refuse(self, client, conn, req, status, reason, text):
+        """Answer a request we will not relay. True if the connection lives.
+
+        The body is drained BEFORE the answer, or the connection is closed.
+        Answering without draining leaves the next request read out of the
+        middle of this one's body -- the same smuggle, arriving through the
+        error path, which is the path every test exercises least.
+
+        `Expect: 100-continue` is the case that cannot be drained: the guest is
+        waiting for a continue that policy has just decided not to give, so
+        there is no body to read to the end of. That connection is closed.
+        """
+        keep = not req.wants_close and not req.expects_continue
+        if keep:
+            keep = self._drain(client, req.framing)
+        self._answer(conn, status, reason, text, close=not keep)
+        return keep
+
+    def _drain(self, client, framing):
+        """Read a refused request's body to its end. False if it was too much.
+
+        Draining is a service to the connection, not an obligation: a guest
+        that answers a refusal with a gigabyte gets the connection closed
+        rather than the courtesy of having it all read.
+        """
+        if framing.kind == "none":
+            return True
+        if framing.kind == "length" and framing.length > DRAIN_MAX:
+            return False
+        try:
+            copy_body(client, None, framing)
+        except (RequestUnreadable, OSError):
+            return False
+        return True
+
+    def _answer(self, conn, status, reason, text, *, close):
+        try:
+            conn.sendall(http_response(
+                status, reason, f"workloadctl: {text}\n", close=close))
+        except OSError:
+            pass
 
     def _relay(self, client, upstream):
         """Move bytes both ways until either side closes or goes idle.

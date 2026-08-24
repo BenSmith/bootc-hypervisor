@@ -197,12 +197,12 @@ own behalf appear once, because there is no owner for `meta skuid` to match.
 
 Last green 2026-08-22, 12 assertions, on a bare-metal Fedora 44 host.
 
-## splice_rig.py — does a real TLS session survive the splice?
+## splice_rig.py — does a real session survive the splice, and a real request get authorised?
 
-Rung 2's T4a claim, and the half of it the unit suite cannot reach. Needs root
-and the installed RPM; **no KVM and no VM** — a throwaway network namespace, a
-real TLS origin, and the real listener process started the way the socket unit
-starts it.
+Rung 2's T4a and T4b claims, and the halves of them the unit suite cannot
+reach. Needs root and the installed RPM; **no KVM and no VM** — a throwaway
+network namespace, a real TLS origin and a real HTTP origin, and the real
+listener process started the way the socket unit starts it.
 
 ```bash
 sudo python3 tests/manual/splice_rig.py
@@ -236,23 +236,26 @@ that are not TLS each produce their own line. An operator with one bucket for
 the three cannot tell a policy decision from a broken resolver from something
 speaking a non-TLS protocol at the TLS port, which is the tunnelling signature.
 
-**Two controls.** The cleartext plane must still only log — tinyproxy filters
-port 80 by name today, and a listener that quietly started terminating it would
-break that with no test failing. And a listener whose policy document is
-missing must fail its start rather than fall back to an empty allowlist: an
-empty `hosts` is a legal configuration, so the fallback could not tell "the
-operator allowed nothing" from "the file was not there".
+**The cleartext plane, from the origin's side.** The unit tests drive it over a
+socketpair they own, so they read the bytes this process wrote. What they
+cannot do is have an *origin* report what arrived — and that is where two of
+T4b's claims live: the head reaching the origin is the one we composed (our
+framing, our `Host`, hop-by-hop headers gone) rather than the guest's forwarded
+on, and the refused request reached nobody at all. Two names are sent down
+**one** connection, because a per-connection decision would send the second
+request to the first one's upstream and nothing outside would look wrong.
+
+**One control.** A listener whose policy document is missing must fail its
+start rather than fall back to an empty allowlist: an empty `hosts` is a legal
+configuration, so the fallback could not tell "the operator allowed nothing"
+from "the file was not there".
 
 It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
 path already exists, since it would be a real workload's policy. Teardown
 removes the namespace and the directory.
 
-**Not yet run on a host.** All 15 assertions are green as of 2026-08-22, but
-under `unshare -rn` in a dev container rather than through the `ip netns`
-wrapper this file's `main()` uses — that container cannot create a named
-namespace. So the probes, the listener, the origin and the policy path are all
-proven; the outer setup and teardown are not. Run it on a KVM host and replace
-this paragraph with the usual line.
+Last green 2026-08-24, 22 assertions, on a bare-metal Fedora 44 host against
+the installed RPM.
 
 Verified by breaking the splice on purpose — replaying the buffer without its
 record header — which fails the four handshake assertions and leaves the other

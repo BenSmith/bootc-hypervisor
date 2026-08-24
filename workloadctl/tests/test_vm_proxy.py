@@ -256,8 +256,8 @@ class TestProxyNatReturnExemption(unittest.TestCase):
     """tinyproxy's cgroup in wl_inspect_cg, for as long as tinyproxy exists.
 
     Its upstream CONNECT leg is `tcp dport 443` from the workload uid, so the
-    transparent redirect's DNAT catches it and rewrites it into a listener
-    that only logs: without this element every proxied HTTPS request on every
+    transparent redirect's DNAT catches it and rewrites it into the listener it
+    was dialling past: without this element every proxied HTTPS request on every
     filtered VM breaks, which is exactly what deferring premise 3's deletion
     was supposed to protect against. wl_inspect_cg's name misleads — it is
     every workload-uid process that re-originates guest traffic, and during

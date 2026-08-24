@@ -1,6 +1,7 @@
 #!/usr/bin/python3
-"""Does a real TLS session survive the splice, and is the far end the one the
-policy named? (the inspector design ss7.7.1, HLD rung 2 T4a)
+"""Does a real TLS session survive the splice, and does a real HTTP request get
+authorised by the name it carries? (the inspector design ss7.7.1, rung 2 T4a
+and T4b)
 
 `tls = "splice"` claims two things at once, and a unit test can only reach the
 first. It claims the bytes replayed upstream are the bytes read -- which
@@ -22,6 +23,10 @@ WHAT THE UNIT TESTS CANNOT REACH, AND WHY THIS EXISTS
                                                                    it saw nobody)
   5. the installed listener starts from an inherited fd, at the
      installed policy path, under the installed module set        (needs the RPM)
+  6. two requests on ONE connection get two decisions, and the
+     head the origin receives is the one we composed              (needs an
+                                                                   origin that
+                                                                   can report)
 
 3 is the reason this is worth writing. A hello that is subtly re-serialised --
 a reordered extension block, a dropped GREASE value, a rebuilt record header --
@@ -38,10 +43,17 @@ answered them itself. That false pass is exactly what a real bypass looks like
 from outside, which is why "the upstream saw nobody" is an assertion here and
 not an aside.
 
+T4b adds a second question the unit tests cannot ask. They drive the cleartext
+plane over a socketpair they own, so they can read what was written; they
+cannot have an ORIGIN report what arrived. The head that reaches the origin is
+where "the framing we send upstream is the one we computed, not the guest's"
+becomes an observation instead of an inspection of our own buffer -- and the
+refused request reaching NOBODY is the same class of claim as 4 above.
+
 Run as root. Everything happens in a throwaway network namespace -- no host
-interface, address or route is touched -- but it binds 443 and reads the
-installed listener, so it is a host rig and not a `just test` case. It needs
-NO KVM and no VM.
+interface, address or route is touched -- but it binds 80 and 443 in it and
+reads the installed listener, so it is a host rig and not a `just test` case.
+It needs NO KVM and no VM.
 
     sudo python3 tests/manual/splice_rig.py
 """
@@ -74,6 +86,7 @@ NAME = "wlspl"
 PORT_TLS = 8443            # VM_INSPECT_PORT_TLS
 PORT_CLEARTEXT = 8080      # VM_INSPECT_PORT_CLEARTEXT
 ORIGIN_PORT = 443          # VM_INSPECT_ORIG_TLS
+ORIGIN_PLAIN_PORT = 80     # VM_INSPECT_ORIG_CLEARTEXT
 POLICY = f"/run/workload-vm/{NAME}/inspect.json"
 
 ALLOWED = "localhost"      # resolves everywhere, and to the origin below
@@ -145,6 +158,59 @@ class Origin:
         """The origin's certificate in DER, to compare against what the client
         was actually handed."""
         return ssl.PEM_cert_to_DER_cert(open(self.cert).read())
+
+
+class PlainOrigin:
+    """A plain HTTP origin on 127.0.0.1:80, recording the heads it was sent.
+
+    Separate from Origin, and not a second port on it: the cleartext plane
+    dials the same NAME at a different port speaking a different protocol, and
+    what has to be recorded is different too. The heads are what makes "the
+    framing sent upstream is the one we computed" visible from OUTSIDE the
+    listener process -- a unit test reads the bytes off a socketpair it owns,
+    which is not the same as an origin reporting what arrived.
+    """
+
+    def __init__(self):
+        self.connections = 0
+        self.heads = []
+        self._sock = socket.socket()
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", ORIGIN_PLAIN_PORT))
+        self._sock.listen(8)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            threading.Thread(target=self._serve, args=(conn,),
+                             daemon=True).start()
+
+    def _serve(self, conn):
+        # Keep-alive, and one response per request: the per-request claim is
+        # about several requests on ONE connection, so an origin that answered
+        # once and closed would make the second decision untestable.
+        conn.settimeout(5.0)
+        buf = b""
+        try:
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                head, buf = buf.split(b"\r\n\r\n", 1)
+                self.heads.append(head)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n"
+                             b"\r\nFROM-ORIGIN")
+        except OSError:
+            pass
+        finally:
+            conn.close()
 
 
 # --- the listener, started the way systemd starts it ---
@@ -262,20 +328,86 @@ def probe(origin, log):
            "no readable name: record type" in tail
            and tail.count("not allowlisted") == 1)
 
-    # 5. the control that says this unit did not quietly take port 80 over.
-    #    tinyproxy filters cleartext by name today; a listener that started
-    #    terminating 80 would break that with no test failing.
-    before = origin.connections
-    raw = socket.create_connection(("127.0.0.1", PORT_CLEARTEXT), timeout=5)
-    raw.sendall(b"GET / HTTP/1.1\r\nHost: %s\r\n\r\n" % ALLOWED.encode())
-    time.sleep(0.5)
-    raw.close()
-    tail = logtext()
-    record("the cleartext plane still only logs", "plane=cleartext" in tail
-           and "drop plane=cleartext" not in tail
-           and "splice plane=cleartext" not in tail)
-    record("and dials no upstream of its own", origin.connections == before,
-           f"{origin.connections - before} unexpected connection(s)")
+
+
+def read_until_quiet(conn, timeout=1.5):
+    """Everything the guest is sent, up to a lull or a close.
+
+    A lull and not a length: several of these probes expect TWO responses on
+    one connection and one expects a close, so a reader that stopped at the
+    first complete message would see the same thing in every case.
+    """
+    conn.settimeout(timeout)
+    out = b""
+    try:
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return out
+            out += chunk
+    except (TimeoutError, OSError):
+        return out
+
+
+def probe_cleartext(plain, origin, log):
+    """The T4b claim, through the installed listener and a real origin.
+
+    The unit tests drive `_serve_cleartext` over a socketpair they own. What
+    they cannot do is have an ORIGIN report what arrived: that the head it was
+    sent is the one this process composed rather than the guest's, and that the
+    refused request reached nobody at all.
+    """
+    def logtext():
+        log.flush(); log.seek(0)
+        return log.read()
+
+    # 5. one connection, two names, two decisions. The whole of T4b's shape:
+    #    a per-CONNECTION decision would send the second request to the first
+    #    request's upstream, and nothing outside would look wrong.
+    before_plain, before_tls = plain.connections, origin.connections
+    conn = socket.create_connection(("127.0.0.1", PORT_CLEARTEXT), timeout=5)
+    conn.sendall(b"GET /one HTTP/1.1\r\nHost: %s\r\n\r\n"
+                 b"GET /two HTTP/1.1\r\nHost: %s\r\n\r\n"
+                 % (ALLOWED.encode(), DENIED.encode()))
+    got = read_until_quiet(conn)
+    conn.close()
+    record("an allowlisted Host is relayed to a real origin",
+           b"FROM-ORIGIN" in got and plain.connections == before_plain + 1,
+           f"{plain.connections - before_plain} origin connection(s)")
+    record("a Host on no list gets a 403 that names it",
+           b"403" in got and DENIED.encode() in got, repr(got[-80:]))
+    record("both decisions were taken on the one connection",
+           got.count(b"HTTP/1.1 ") == 2
+           and got.index(b"200") < got.index(b"403"),
+           f"{got.count(b'HTTP/1.1 ')} response(s)")
+    record("the refused request reached no origin at all",
+           plain.connections == before_plain + 1
+           and all(b"/two" not in h for h in plain.heads),
+           f"heads={[h.split(b' ')[1] for h in plain.heads]}")
+    record("the origin was sent OUR head, not the guest's",
+           any(h.startswith(b"GET /one HTTP/1.1") and b"Connection: keep-alive"
+               in h for h in plain.heads),
+           repr(plain.heads[-1:]))
+    record("and the cleartext plane dialled no TLS upstream",
+           origin.connections == before_tls,
+           f"{origin.connections - before_tls} unexpected TLS connection(s)")
+
+    # 6. the smuggling refusal, end to end: two framings at once is declined
+    #    rather than resolved, and nothing reaches the origin.
+    before_plain = plain.connections
+    conn = socket.create_connection(("127.0.0.1", PORT_CLEARTEXT), timeout=5)
+    conn.sendall(b"POST /smuggle HTTP/1.1\r\nHost: %s\r\n"
+                 b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n"
+                 b"\r\nhello" % ALLOWED.encode())
+    got = read_until_quiet(conn)
+    conn.close()
+    record("a request framed both ways at once is refused, not resolved",
+           b"400" in got, repr(got[:40]))
+    record("and it reached no origin", plain.connections == before_plain,
+           f"{plain.connections - before_plain} unexpected connection(s)")
+    record("the refusal is not reported as a policy decision",
+           "unreadable request" in logtext()
+           and logtext().count("not allowlisted") == 2)
 
 
 def probe_no_policy(tmp):
@@ -322,6 +454,7 @@ def inner():
             json.dump({"tls": "splice", "hosts": [ALLOWED, UNREACHABLE]}, f)
 
         origin = Origin(tmp)
+        plain = PlainOrigin()
         proc, log, socks = start_listener(tmp, logpath)
         time.sleep(1.5)
         if proc.poll() is not None:
@@ -333,6 +466,7 @@ def inner():
                "policy at the installed path", True)
         try:
             probe(origin, log)
+            probe_cleartext(plain, origin, log)
         finally:
             proc.terminate()
             try:
@@ -363,7 +497,7 @@ def main(argv):
         return 1 if failed else 0
 
     if os.geteuid() != 0:
-        sys.exit("run as root: this needs a netns and binds 443 in it")
+        sys.exit("run as root: this needs a netns and binds 80 and 443 in it")
     if not os.path.exists(LISTENER):
         sys.exit(f"{LISTENER} is missing -- install the workloadctl RPM first")
     if not shutil.which("openssl"):

@@ -11,13 +11,14 @@ Rung 1's claim has two halves that fail independently, and a single guest
 proves neither on its own:
 
   plain  filtered, no `hosts`   the guest has NO proxy variables. Its dial to
-                                80/443 is DNAT'd onto the listener, which only
-                                logs. This is the rung's headline claim.
+                                80/443 is DNAT'd onto the listener. This is
+                                the rung's headline claim.
   proxy  filtered, with `hosts` the guest has tinyproxy. Its upstream CONNECT
                                 leg is tcp dport 443 from the same uid, so
                                 without the wl_inspect_cg exemption it would be
-                                redirected into a listener that only logs and
-                                every proxied HTTPS request would hang. That
+                                redirected into the listener it was dialling
+                                past, and every proxied HTTPS request would
+                                fail. That
                                 exemption has no unit test that can see it fail
                                 -- it is a cgroup id resolved at add time.
 
@@ -223,8 +224,8 @@ def guards():
     # The tinyproxy exemption: only the proxy arm should have a cgroup element.
     # One element per inspector whose service has started (each arms its own
     # on ExecStartPre), plus the proxy workload's tinyproxy cgroup -- which is
-    # the one that matters: without it the CONNECT leg is redirected into a
-    # listener that only logs.
+    # the one that matters: without it the CONNECT leg is redirected into the
+    # listener it was dialling past.
     cg = set_elements("workload_proxy", "wl_inspect_cg")
     n = len(cg or [])
     record("wl_inspect_cg carries at least the proxy workload's cgroup",
