@@ -254,7 +254,7 @@ It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
 path already exists, since it would be a real workload's policy. Teardown
 removes the namespace and the directory.
 
-Last green 2026-08-24, 22 assertions, on a bare-metal Fedora 44 host against
+Last green 2026-08-24, 24 assertions, on a bare-metal Fedora 44 host against
 the installed RPM.
 
 Verified by breaking the splice on purpose — replaying the buffer without its

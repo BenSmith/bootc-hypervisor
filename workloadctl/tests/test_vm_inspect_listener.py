@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -695,7 +696,16 @@ class _CleartextRig(unittest.TestCase):
             index = len(dialled)
             if index < len(responses):
                 far.sendall(responses[index])
-            dialled.append((addr, far))
+            # Drained CONCURRENTLY, not after the fact. The relay sends a
+            # request body upstream before it reads the response, so an
+            # upstream nobody is reading fills its socket buffer and the send
+            # blocks -- which is a property of this rig's socketpair, not of
+            # the listener, but it caps every body the rig can carry at one
+            # buffer and looks exactly like a relay defect.
+            buf = bytearray()
+            pump = threading.Thread(target=_pump, args=(far, buf), daemon=True)
+            pump.start()
+            dialled.append((addr, buf, pump))
             return near
 
         # The relay moves an upstream onto RELAY_IDLE_TIMEOUT, which is a
@@ -708,8 +718,21 @@ class _CleartextRig(unittest.TestCase):
                 unittest.mock.patch.object(mod, "CONNECTION_TIMEOUT", 2.0):
             listener._serve_cleartext(ours, "plane=cleartext")
         ours.close()
+        for _, _, pump in dialled:
+            pump.join(timeout=3.0)
         return (out.getvalue(), _read_all(guest),
-                [(addr, _read_all(far)) for addr, far in dialled])
+                [(addr, bytes(buf)) for addr, buf, _ in dialled])
+
+
+def _pump(sock, buf):
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+    except (TimeoutError, OSError):
+        return
 
 
 def _read_all(sock):
@@ -794,6 +817,35 @@ class TestCleartextAuthorisation(unittest.TestCase):
         self.assertIn("host=denied.example", log)
         self.assertIn(b"403", got)
 
+    def test_an_authority_naming_another_port_is_refused(self):
+        """This plane is reached by a redirect keyed on `tcp dport 80` and it
+        dials port 80. Ignoring the port would mean authorising and dialling
+        one thing while telling the origin another, which is how a vhost
+        decision gets made on a port nobody connected to."""
+        log, _, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example:8080\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("only ever reaches port 80", log)
+
+    def test_the_port_is_dropped_from_the_host_we_emit(self):
+        _, _, ups = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example:80\r\n\r\n",
+            [_OK])
+        self.assertIn(b"Host: a.example\r\n", ups[0][1])
+
+    def test_the_guests_own_version_goes_upstream(self):
+        """Speaking 1.1 upstream for a 1.0 guest invites a chunked response,
+        and the response head is relayed verbatim -- so a client that has never
+        heard of chunked would be handed a chunked body."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.0\r\nHost: a.example\r\n\r\n",
+            [b"HTTP/1.0 200 OK\r\n\r\nhi"])
+        head = ups[0][1].split(b"\r\n\r\n", 1)[0]
+        self.assertIn(b"GET / HTTP/1.0\r\n", head)
+        self.assertIn(b"Connection: close", head)
+
     def test_a_request_with_no_authorising_name_is_not_a_policy_decision(self):
         """A name that could not be read and a name that was refused fail the
         request identically. An operator with one bucket for the two cannot
@@ -865,6 +917,93 @@ class TestCleartextFraming(unittest.TestCase):
             b"\tContent-Length: 5\r\n\r\n")
         self.assertEqual(ups, [])
         self.assertIn("obs-fold", log)
+
+    def test_a_bare_lf_in_a_header_value_never_reaches_upstream(self):
+        """The head is framed on CRLF, so a lone LF inside a value survives the
+        split and travels upstream inside the field it was written in. An
+        origin that accepts bare-LF line endings -- many do -- reads it as the
+        start of a line, which makes it a whole second request line smuggled
+        past the authorisation of the one in front of it, wearing our own Host
+        header."""
+        log, got, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\n"
+            b"X-T: v\nGET /admin HTTP/1.1\nHost: a.example\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("control character", log)
+        self.assertIn(b"400", got)
+
+    def test_a_bare_lf_in_the_request_target_never_reaches_upstream(self):
+        log, _, ups = self._run(
+            ["a.example"],
+            b"GET /a\nX-Evil: 1 HTTP/1.1\r\nHost: a.example\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("control character", log)
+
+    def test_a_nul_in_a_header_value_is_refused(self):
+        log, _, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\nX-T: a\x00b\r\n\r\n")
+        self.assertEqual(ups, [])
+        self.assertIn("control character", log)
+
+    def test_a_tab_inside_a_header_value_is_still_legal(self):
+        """The control-character refusal must not take valid OWS with it: a
+        HTAB inside a value is legal and a relay that refused it would reject
+        ordinary traffic."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\nX-T: a\tb\r\n\r\n",
+            [_OK])
+        self.assertEqual(len(ups), 1)
+
+    def test_one_declared_chunk_does_not_set_this_processs_footprint(self):
+        """The chunk size is a hex number the PEER writes. Reading a whole
+        chunk before forwarding any of it lets one line of guest input decide
+        how much memory this process holds -- beside the workloads, on their
+        host. The bytes are relayed in bounded pieces instead."""
+        mod = _mod()
+        # Bigger than one RELAY_CHUNK, so the relay loop must iterate, and
+        # small enough to fit the rig's socketpair -- the rig writes the whole
+        # request before serving it, which is itself why a real large-body case
+        # belongs to splice_rig and not here.
+        body = b"A" * (mod.RELAY_CHUNK + 1000)
+        # The assertion is about MEMORY, so it is made where memory is spent:
+        # the largest single read. Asserting on the bytes that arrive cannot
+        # tell a streamed chunk from a buffered one -- the same bytes arrive
+        # either way, which is exactly why this property survives a test that
+        # only reads the socket.
+        reads = []
+        original = mod._Stream.read_exactly
+
+        def recording(self, n):
+            reads.append(n)
+            return original(self, n)
+
+        with unittest.mock.patch.object(
+                mod._Stream, "read_exactly", recording):
+            _, _, ups = self._run(
+                ["a.example"],
+                b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+                b"%x\r\n" % len(body) + body + b"\r\n0\r\n\r\n",
+                [_OK])
+        sent = ups[0][1]
+        self.assertIn(b"%x\r\n" % len(body), sent)
+        self.assertIn(body, sent)
+        self.assertLessEqual(max(reads), mod.RELAY_CHUNK,
+                             "a chunk was read whole before any of it moved")
+
+    def test_more_trailers_than_the_ceiling_is_refused(self):
+        mod = _mod()
+        trailers = b"".join(b"X-T%d: v\r\n" % i
+                            for i in range(mod.MAX_TRAILER_LINES + 2))
+        log, _, ups = self._run(
+            ["a.example"],
+            b"POST / HTTP/1.1\r\nHost: a.example\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n0\r\n" + trailers
+            + b"\r\n", [_OK])
+        self.assertIn("trailer lines", log)
 
     def test_the_framing_emitted_upstream_is_the_one_we_computed(self):
         """Not the guest's headers forwarded verbatim: two parsers cannot

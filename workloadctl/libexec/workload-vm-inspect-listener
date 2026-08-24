@@ -459,6 +459,11 @@ DRAIN_MAX = 1 << 20
 # forever on bytes that are not coming.
 _BODYLESS_STATUSES = frozenset((204, 304))
 
+# The ceiling on trailer lines after a zero chunk. Trailers are read and
+# discarded, and "read until a blank line" is a loop a guest drives: without a
+# bound it can hold a slot writing well-formed lines forever.
+MAX_TRAILER_LINES = 64
+
 # RFC 9110 §5.6.2 tchar. A header name outside this set is refused rather than
 # sanitised: every byte in it is a byte some other parser might treat as a
 # delimiter.
@@ -582,14 +587,41 @@ class _Stream:
         return out
 
 
+def _reject_controls(text, what, *, tab_ok):
+    """Refuse a control character in a field we will re-emit.
+
+    THE BARE LF IS THE ONE THAT MATTERS. This head was framed on CRLF, so a
+    lone \\n inside a header value or a request target survives the split and
+    travels upstream inside the field it was written in -- and an origin that
+    accepts bare-LF line endings, which many do, reads it as the start of a
+    line. That is a whole second request line, smuggled past the per-request
+    authorisation this plane exists to apply, with our own Host header standing
+    in front of it.
+
+    So it is refused, not stripped: a field with a line ending inside it has no
+    reading both ends are guaranteed to share, and rewriting one into something
+    harmless would be picking a reading. NUL, CR and the rest go with it for
+    the same reason.
+    """
+    for ch in text:
+        if ch == "\t" and tab_ok:
+            continue
+        if ch < " " or ch == "\x7f":
+            raise RequestUnreadable(
+                f"{what} carries the control character {ch!r}: a field with a "
+                "line ending inside it is read as one field here and as two by "
+                "anything that accepts bare LF")
+
+
 def _split_head(head):
     """(start line, [(name, value)]) from a message head, or raise.
 
     Refusals, in order of how they are used against a proxy: non-ASCII, which
-    is a second encoding of a name or a header; obs-fold continuation lines,
-    which let a header hide inside another's value; and whitespace before the
-    colon, which some parsers accept as part of the name and others as the end
-    of it.
+    is a second encoding of a name or a header; a control character in any
+    field, which is a line ending that only one end of the path will see;
+    obs-fold continuation lines, which let a header hide inside another's
+    value; and whitespace before the colon, which some parsers accept as part
+    of the name and others as the end of it.
     """
     try:
         text = head[:-4].decode("ascii")
@@ -598,8 +630,10 @@ def _split_head(head):
             "the head is not ASCII, so it is not one every parser on this "
             "path would read the same way") from None
     lines = text.split("\r\n")
+    _reject_controls(lines[0], "the start line", tab_ok=False)
     headers = []
     for line in lines[1:]:
+        _reject_controls(line, "a header line", tab_ok=True)
         if line[:1] in (" ", "\t"):
             raise RequestUnreadable(
                 "an obs-fold continuation line lets a header hide inside "
@@ -653,8 +687,15 @@ def normalise_target(method, target):
     return path, authority
 
 
+class Authority(NamedTuple):
+    """An authority split into the name policy matches and the port it named."""
+
+    host: str
+    port: str          # "" when the authority carried none
+
+
 def host_from_authority(authority):
-    """The normalised name in an authority, its port dropped, or raise."""
+    """The name and port in an authority, or raise."""
     if authority.startswith("["):
         end = authority.find("]")
         if end == -1:
@@ -666,16 +707,27 @@ def host_from_authority(authority):
             raise RequestUnreadable(
                 f"authority {authority!r} has trailing bytes after its "
                 "bracketed literal")
+        port = rest[1:]
     elif authority.count(":") > 1:
         raise RequestUnreadable(
             f"authority {authority!r} has several colons and no brackets, so "
             "where its port begins is a guess")
     else:
-        host = authority.partition(":")[0]
+        host, _, port = authority.partition(":")
     host = vm_normalise_hostname(host)
     if not host:
         raise RequestUnreadable(f"authority {authority!r} names no host")
-    return host
+    # This plane is reached by a redirect keyed on `tcp dport 80` and it dials
+    # port 80, so an authority naming any other port describes a destination
+    # that is not the one either end is on. Refused rather than ignored: the
+    # alternative is authorising and dialling one thing while telling the
+    # origin another, which is how a vhost decision gets made on a port nobody
+    # connected to.
+    if port not in ("", str(VM_INSPECT_ORIG_CLEARTEXT)):
+        raise RequestUnreadable(
+            f"authority {authority!r} names port {port!r}, but this plane "
+            f"only ever reaches port {VM_INSPECT_ORIG_CLEARTEXT}")
+    return Authority(host, port)
 
 
 def request_framing(headers):
@@ -732,8 +784,10 @@ def parse_request(head):
                 f"{len(hosts)} Host headers: with no absolute-form authority "
                 "there is exactly one name that could authorise this request")
         authority = hosts[0]
-    authority = authority.strip().lower()
-    host = host_from_authority(authority)
+    # The port is dropped from what we emit: it is either absent or the port we
+    # are on, so the canonical spelling is the bare name -- and the name is
+    # what was authorised.
+    host = host_from_authority(authority.strip().lower()).host
     connection = ",".join(_get_all(headers, "connection")).lower()
     tokens = {t.strip() for t in connection.split(",")}
     wants_close = "close" in tokens or (
@@ -744,7 +798,7 @@ def parse_request(head):
             f"Expect {', '.join(expects)!r} is an expectation this relay "
             "cannot honour")
     return Request(
-        method=method, target=target, version=version, authority=authority,
+        method=method, target=target, version=version, authority=host,
         host=host, headers=headers, framing=request_framing(headers),
         expects_continue=bool(expects) and version == "HTTP/1.1",
         wants_close=wants_close)
@@ -759,7 +813,7 @@ def rebuild_request(req):
     authority that was actually matched -- which for an absolute-form request
     is not what the guest's Host header said.
     """
-    lines = [f"{req.method} {req.target} HTTP/1.1",
+    lines = [f"{req.method} {req.target} {req.version}",
              f"Host: {req.authority}"]
     lines += [f"{name}: {value}" for name, value in req.headers
               if name not in _NOT_FORWARDED]
@@ -767,7 +821,14 @@ def rebuild_request(req):
         lines.append(f"Content-Length: {req.framing.length}")
     elif req.framing.kind == "chunked":
         lines.append("Transfer-Encoding: chunked")
-    lines.append("Connection: keep-alive")
+    # The guest's own version goes upstream, and an HTTP/1.0 request is not
+    # offered keep-alive. Speaking 1.1 upstream on a 1.0 guest's behalf invites
+    # a `Transfer-Encoding: chunked` response, and the head is relayed
+    # verbatim -- so a client that has never heard of chunked would be handed
+    # a chunked body. The version is the one field that decides that, so it is
+    # the guest's.
+    lines.append("Connection: close" if req.version == "HTTP/1.0"
+                 else "Connection: keep-alive")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
 
 
@@ -818,14 +879,28 @@ def copy_chunked(src, dst):
                 f"chunk size {size_field!r} is not plain hex")
         size = int(size_field, 16)
         if size == 0:
-            while src.read_line():
-                pass                      # trailers, read and discarded
+            for _ in range(MAX_TRAILER_LINES):
+                if not src.read_line():
+                    break
+            else:
+                raise RequestUnreadable(
+                    f"more than {MAX_TRAILER_LINES} trailer lines")
             dst.sendall(b"0\r\n\r\n")
             return
-        data = src.read_exactly(size)
+        # Streamed, never `read_exactly(size)`. The size is a hex number the
+        # PEER writes, so reading a whole chunk into memory before forwarding
+        # any of it lets one declared chunk set this process's footprint -- and
+        # this process runs beside the workloads on the same host. The chunk
+        # header goes out first and the bytes follow it in bounded pieces.
+        dst.sendall(b"%x\r\n" % size)
+        left = size
+        while left:
+            piece = src.read_exactly(min(left, RELAY_CHUNK))
+            dst.sendall(piece)
+            left -= len(piece)
         if src.read_exactly(2) != b"\r\n":
             raise RequestUnreadable("a chunk is not CRLF-terminated")
-        dst.sendall(b"%x\r\n" % size + data + b"\r\n")
+        dst.sendall(b"\r\n")
 
 
 def copy_body(src, dst, framing):
@@ -1121,6 +1196,14 @@ class Listener:
                 # response before the body has been sent, and the two waits
                 # deadlock.
                 conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            # The body goes up before the response comes back, in that order
+            # and not multiplexed. An origin that answers WITHOUT reading the
+            # body it was sent -- an early 413, a redirect -- stops draining,
+            # this send blocks, and the connection dies on RELAY_IDLE_TIMEOUT
+            # rather than on the answer that was already waiting. Named rather
+            # than fixed: full duplex here means a second thread or a state
+            # machine per connection, and the failure is bounded, loud and rare
+            # where a half-built pump would be none of the three.
             copy_body(client, up.sock, req.framing)
             self._log(f"forward {where} host={req.host} method={req.method}")
             return self._relay_response(up, conn, req)

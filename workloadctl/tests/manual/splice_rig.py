@@ -410,6 +410,31 @@ def probe_cleartext(plain, origin, log):
            and logtext().count("not allowlisted") == 2)
 
 
+def probe_lf_smuggle(plain, log):
+    """The bare LF, checked where it would actually land: at the origin.
+
+    The head is framed on CRLF, so a lone LF inside a header value survives the
+    split and travels upstream inside the field it was written in. An origin
+    that accepts bare-LF line endings -- many do -- reads it as the start of a
+    line, and what follows is a whole second request line that never passed
+    policy, arriving behind our own Host header. The unit test reads our
+    buffer; this reads the ORIGIN's, which is the side the smuggle is aimed at.
+    """
+    before = plain.connections
+    conn = socket.create_connection(("127.0.0.1", PORT_CLEARTEXT), timeout=5)
+    conn.sendall(b"GET /one HTTP/1.1\r\nHost: %s\r\n"
+                 b"X-T: v\nGET /smuggled HTTP/1.1\nHost: %s\r\n\r\n"
+                 % (ALLOWED.encode(), ALLOWED.encode()))
+    got = read_until_quiet(conn)
+    conn.close()
+    record("a bare LF in a header value is refused, not forwarded",
+           b"400" in got, repr(got[:40]))
+    record("and the origin was never sent the line hiding in it",
+           plain.connections == before
+           and all(b"/smuggled" not in h for h in plain.heads),
+           f"{plain.connections - before} connection(s)")
+
+
 def probe_no_policy(tmp):
     """The control for 5: a listener with no policy fails LOUDLY.
 
@@ -467,6 +492,7 @@ def inner():
         try:
             probe(origin, log)
             probe_cleartext(plain, origin, log)
+            probe_lf_smuggle(plain, log)
         finally:
             proc.terminate()
             try:
