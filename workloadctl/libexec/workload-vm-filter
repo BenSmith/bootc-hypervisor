@@ -36,6 +36,8 @@ is tolerant: its element is legitimately absent whenever the start failed
 before arming, or an operator used the break-glass `nft delete table`.
 """
 import json
+import os
+import pwd
 import subprocess
 import sys
 
@@ -43,7 +45,9 @@ sys.dont_write_bytecode = True
 
 from vm import (
     NFT_BIN, NFT_SETS, NFT_SKELETON, NFT_TABLE, VM_EGRESS_DEFAULT,
-    vm_filter_commands, vm_filter_delete_command, vm_owned_elements,
+    vm_allow_resolved, vm_filter_commands, vm_filter_delete_command,
+    vm_owned_elements, vm_resolve_policy, vm_resolve_policy_path,
+    vm_uses_resolve,
 )
 from workload_lib import workload_config_path
 
@@ -72,6 +76,38 @@ def network_config(name: str) -> dict:
     with open(workload_config_path(name), "rb") as f:
         config = tomllib.load(f)
     return config.get("vm", {}).get("network", {}) or {}
+
+
+def write_resolve_policy(name: str, net: dict, uid: int, resolved) -> str:
+    """Write the responder's answer document. Returns its path.
+
+    Written HERE, next to the arming, and from the SAME `resolved` the elements
+    were built from. The responder answers named `allow` destinations with the
+    addresses that are in the nftables set; a second, independent resolution is
+    the same name asked twice, and a round-robin or short-TTL record answering
+    differently the second time sends the guest to an address the set does not
+    hold -- which is a hang against the default-deny drop, not a refusal.
+
+    Root-owned and 0640 with the workload's group, exactly as the inspector's
+    policy is: the responder runs as _wl-<name> and needs to read it, and 0640
+    keeps one workload's answers from being enumerable by another. Replaced
+    rather than truncated in place, so a responder starting alongside a rewrite
+    cannot read a half-written document.
+
+    Ordering is inherited rather than declared: this runs as an ExecStartPre of
+    the VM, and the responder is socket-activated by a guest query, which cannot
+    happen before the VM it comes from is running.
+    """
+    path = vm_resolve_policy_path(name)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(vm_resolve_policy(net, uid, resolved), f, indent=2,
+                  sort_keys=True)
+        f.write("\n")
+    os.chown(tmp, 0, pwd.getpwnam(f"_wl-{name}").pw_gid)
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, path)
+    return path
 
 
 def purge(uid: int) -> int:
@@ -127,10 +163,21 @@ def up(name: str) -> int:
         return 0
 
     allow = net.get("allow", [])
-    for argv in vm_filter_commands(uid, allow, "add"):
+    # One resolution, two consumers. See write_resolve_policy for what a second
+    # one costs, and vm_allow_resolved for why it is a function of its own.
+    resolved = vm_allow_resolved(allow)
+    for argv in vm_filter_commands(uid, allow, "add", resolved):
         run(argv, check=True)
     log(f"  Filtered uid {uid} with {len(allow)} allow entr"
         f"{'y' if len(allow) == 1 else 'ies'}")
+
+    if vm_uses_resolve({"vm": {"network": net}}):
+        # Not tolerant: a responder with no answer document fails its start, and
+        # it fails it on a query the guest has already made. The guest has
+        # exactly one nameserver, so that is the whole of DNS for it -- better
+        # to fail the VM's start here, where the message names this helper.
+        path = write_resolve_policy(name, net, uid, resolved)
+        log(f"  Wrote {path}")
     return 0
 
 

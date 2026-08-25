@@ -475,8 +475,20 @@ NFT_SET_INSPECT_SELF6 = "wl_inspect_self6"
 NFT_SKELETON = "/usr/share/workloadctl/workload-filter.nft"
 
 
-def vm_filter_elements(uid: int, allow: list[str]) -> dict[str, list[str]]:
+def vm_filter_elements(uid: int, allow: list[str],
+                       resolved=None) -> dict[str, list[str]]:
     """Map set name -> element expressions for one workload.
+
+    `resolved` is the output of vm_allow_resolved for this same `allow`, when
+    the caller has one. It exists because the synthesising responder answers
+    named `allow` destinations with the addresses that were ARMED, and a second
+    independent resolution is a different question asked of the same name: a
+    round-robin or a short-TTL record can answer differently a millisecond
+    later, and the guest is then sent to an address that is not in the set --
+    which presents as the guest hanging against the default-deny drop, not as a
+    refusal. Passing one resolution to both consumers is what makes the
+    host-side answer and the guest-side answer the same answer. Omitted, this
+    resolves for itself, so every existing caller is unchanged.
 
     Returns only non-empty sets, so a caller can emit one `nft add element`
     per set and skip the rest. `wl_filtered` carries the bare uid — membership
@@ -491,17 +503,9 @@ def vm_filter_elements(uid: int, allow: list[str]) -> dict[str, list[str]]:
     elements: dict[str, list[str]] = {NFT_SET_FILTERED: [str(uid)]}
     v4: list[str] = []
     v6: list[str] = []
-    for spec in allow:
-        entry = parse_vm_allow(spec)
-        if entry.address is not None:
-            addresses = [entry.address]
-        else:
-            # The one resolution in the whole allow path, host-side and once at
-            # start (§9). Every address the name answers with is armed, not just
-            # the first: a dual-stack forge answers with both families, and
-            # arming half of it is the "works until it doesn't" failure the
-            # both-families-or-neither rule exists to stop.
-            addresses = vm_allow_resolve(entry.host)
+    if resolved is None:
+        resolved = vm_allow_resolved(allow)
+    for entry, addresses in resolved:
         for addr in addresses:
             # The listener-plane refusal, applied on this side of the
             # resolution too. parse_vm_allow cannot make it for a name -- it
@@ -1526,8 +1530,8 @@ def vm_filter_delete_command(set_name: str, entries: list[str]) -> list[str]:
             "{ " + ", ".join(entries) + " }"]
 
 
-def vm_filter_commands(uid: int, allow: list[str],
-                       action: str) -> list[list[str]]:
+def vm_filter_commands(uid: int, allow: list[str], action: str,
+                       resolved=None) -> list[list[str]]:
     """argv lists that arm ("add") or disarm ("delete") one workload.
 
     Elements for a set go in a single command: nft applies each invocation as
@@ -1539,7 +1543,7 @@ def vm_filter_commands(uid: int, allow: list[str],
         raise ValueError(f"action must be 'add' or 'delete', got {action!r}")
     table = NFT_TABLE.split()
     commands = []
-    for set_name, entries in vm_filter_elements(uid, allow).items():
+    for set_name, entries in vm_filter_elements(uid, allow, resolved).items():
         commands.append([NFT_BIN, action, "element", *table, set_name,
                          "{ " + ", ".join(entries) + " }"])
     return commands
@@ -1752,6 +1756,159 @@ def vm_allow_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Ad
         if addr not in seen:
             seen.append(addr)
     return seen
+
+
+def vm_allow_resolved(allow):
+    """Parse and resolve every `allow` entry once. [(VmAllowEntry, [addr...])].
+
+    The single resolution the whole allow path gets, host-side and once at
+    start (§9). Every address a name answers with is kept, not just the first:
+    a dual-stack forge answers with both families, and taking half of it is the
+    "works until it doesn't" failure the both-families-or-neither rule exists to
+    stop.
+
+    It is a function of its own rather than a loop inside vm_filter_elements
+    because two consumers need the SAME answer -- the nftables elements and the
+    responder's static map. See vm_filter_elements for what a second resolution
+    costs.
+    """
+    out = []
+    for spec in allow:
+        entry = parse_vm_allow(spec)
+        if entry.address is not None:
+            addresses = [entry.address]
+        else:
+            addresses = vm_allow_resolve(entry.host)
+        out.append((entry, addresses))
+    return out
+
+
+# --- §9: the synthesising responder ---
+#
+# The guest's only nameserver. Every A/AAAA, for any name, is answered with this
+# workload's inspector address; everything else is NODATA. NOTHING IS FORWARDED
+# -- there is no upstream socket in the program at all, which is what makes DNS
+# exfiltration absent rather than filtered, and is the property to check first if
+# anyone ever "adds a fallback".
+#
+# Base of the per-workload responder addresses. 127.130.0.0, by the same offset
+# arithmetic vm_management_address uses against 127.128.0.0 -- and deliberately
+# inside VM_MGMT_NETWORK (127.128.0.0/9), which is why there is no new
+# ReservedPlane for it: the /9 was cut wide precisely so the planes hung on
+# loopback after the management one would inherit the reservation rather than
+# each need their own. `ports` already cannot bind here.
+#
+# Loopback and not the 198.18.0.0/16 advertised link, because the guest must not
+# reach the responder directly: 127/8 is unreachable from the guest by
+# construction (ADR 006 -- passt re-originates guest traffic as host sockets, and
+# the guest's own 127/8 is its own), so the ONLY path to it is passt's
+# --dns-forward interception. A responder on a reachable address is a resolver
+# every other workload on the host can query.
+VM_RESOLVE_ADDR_BASE = 0x7F820000  # 127.130.0.0
+
+# Port 53, on the workload's own address. Fixed and never configurable, for the
+# reason the management SSH port is: it is not a service an operator publishes,
+# it is where passt is told to forward.
+VM_RESOLVE_PORT = 53
+
+# The one stated TTL. Long, because the inspector's address never moves: there
+# is no upstream truth for a short TTL to track, and a long one collapses a
+# guest's repeat lookups into its own cache instead of a syscall per request.
+#
+# Not a library default, and not "as large as the field allows" either: a TTL
+# past a stub's own cache ceiling is silently clamped, and a stated constant
+# that is not the constant in effect is worse than a smaller one that is.
+VM_RESOLVE_TTL = 3600
+
+VM_RESOLVE_POLICY_FILE = "resolve.json"
+VM_RESOLVE_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-resolve"
+
+
+def vm_resolve_address(uid: int) -> str:
+    """The workload's own loopback address for its synthesising responder.
+
+    Derived from the uid, so uniqueness is inherited from the uid allocator:
+    no registry, no allocation step, and no collision. uid 10000 -> 127.130.0.0,
+    uid 10003 -> 127.130.0.3.
+
+    There is no address-add helper to go with this, and writing one is the trap.
+    The kernel treats all of 127/8 as local on `lo`, so binding 127.130.1.4
+    succeeds with nothing assigned (verified 2026-08-19): a `workload-vm-resolve
+    up` twin adding a /32 would be a no-op, and worse, it would invent an
+    address whose absence the inspector's fail-at-bind argument would then
+    appear to depend on.
+    """
+    if uid < UID_MIN or uid > UID_MAX:
+        raise ValueError(
+            f"UID {uid} is outside the workload range {UID_MIN}-{UID_MAX}; "
+            f"no responder address is derivable for it")
+    return str(ipaddress.IPv4Address(VM_RESOLVE_ADDR_BASE + (uid - UID_MIN)))
+
+
+def vm_resolve_policy_path(name: str) -> str:
+    """Where one workload's responder reads its answers from."""
+    return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_POLICY_FILE}"
+
+
+def vm_uses_resolve(config: dict) -> bool:
+    """Whether this workload gets a synthesising responder.
+
+    Everything vm_uses_inspect requires (a VM, not bridged, filtered) plus
+    `resolver` not being "none". One knob, one meaning, in both places: a
+    responder under `egress = "open"` would answer every name with an inspector
+    address that nothing redirects to, and one under `resolver = "none"` would
+    be a nameserver for a guest that asked for no nameserver -- and passt is
+    told about it in the same breath, so a disagreement here is a guest pointed
+    at a port with nothing behind it.
+    """
+    if not vm_uses_inspect(config):
+        return False
+    net = (config.get("vm", {}) or {}).get("network", {}) or {}
+    return net.get("resolver", "host") != "none"
+
+
+def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
+    """The responder's answer document for one workload.
+
+    `address`/`address6` are the inspector's, not the responder's: every
+    synthesised A/AAAA points the guest at the listener its 80 and 443 are
+    redirected to anyway, so a guest that ignores the redirect and one that does
+    not both arrive at the same place.
+
+    `static` is the `allow`-by-name map, and it lands WITH the responder rather
+    than after it. Without it a synthesised answer sends every named non-80/443
+    destination -- an SSH forge, a registry, an internal API -- to a port the
+    inspector does not serve, which presents as a healthy-looking hang rather
+    than as a refusal. The map wins over synthesis, which costs nothing on 80
+    and 443 because the redirect is keyed on uid and port alone; a name in both
+    `hosts` and `allow` is therefore legal.
+
+    Addresses come from `resolved` when the caller has one, so the map holds the
+    addresses that were ARMED -- see vm_filter_elements for why a second
+    resolution is a different question.
+    """
+    inspect = vm_inspect_address(uid)
+    if resolved is None:
+        resolved = vm_allow_resolved(net.get("allow", []) or [])
+    static: dict[str, list[str]] = {}
+    for entry, addresses in resolved:
+        if entry.host is None:
+            continue
+        # Normalised on the way in, so the responder's lookup is one dict hit
+        # against a name already in the form every match in this design is made
+        # against -- and two spellings of one name cannot become two entries.
+        key = vm_normalise_hostname(entry.host)
+        for addr in addresses:
+            text = str(addr)
+            if text not in static.setdefault(key, []):
+                static[key].append(text)
+    return {
+        "address": inspect.v4,
+        "address6": inspect.v6,
+        "ttl": VM_RESOLVE_TTL,
+        "static": static,
+    }
+
 
 
 def _validate_egress(net: dict) -> list[str]:

@@ -1,11 +1,16 @@
 """The inspector's socket and service units, from the generator.
 
-These are the two units that T5a wires in. Every assertion here is a silent
-hole if it regresses: a property that is wrong produces a unit that looks
-configured and then either reaches nothing or redirects into itself, and no
-functional test would catch it because the listener program does not exist
-yet (T5b). The values are asserted from the same T4 constants the generator
-reads, so a drift between the constant and the rendered unit is a failure.
+Every assertion here is a silent hole if it regresses: a property that is wrong
+produces a unit that looks configured and then either reaches nothing or
+redirects into itself. The values are asserted from the same constants the
+generator reads, so a drift between the constant and the rendered unit is a
+failure.
+
+These were written before the listener program existed, when no functional test
+could have caught any of it. It exists now (libexec/workload-vm-inspect-listener,
+tests/test_vm_inspect_listener.py), which is why the unit numbers the original
+docstring cited are gone: rung 2 reuses those labels for different work, and a
+stale "T5a" reads as a live forward reference to it.
 """
 
 import unittest
@@ -363,8 +368,11 @@ class TestGeneratorWiring(unittest.TestCase):
         which is what makes the VM's start wait for the bind."""
         for net in ({}, {"egress": "filtered"}):
             requires = self._vm_unit_requires(net)
-            self.assertTrue(
-                requires.endswith("workload-web-inspect.socket"), requires)
+            # assertIn, not endswith: the responder's socket joined the same
+            # list behind this one, and a position assertion would have made
+            # every future prerequisite look like a regression of this one.
+            self.assertIn("workload-web-inspect.socket", requires.split(),
+                          requires)
 
     def test_open_egress_vm_does_not_require_the_inspect_socket(self):
         """An unfiltered VM would be the workload the redirect breaks, so it

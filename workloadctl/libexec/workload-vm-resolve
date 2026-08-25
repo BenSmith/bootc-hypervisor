@@ -1,0 +1,477 @@
+#!/usr/bin/python3
+"""
+workload-vm-resolve: one filtered VM's synthesising DNS responder.
+
+Usage: workload-vm-resolve <name>   (socket-activated; never binds its own)
+
+WHAT IT IS
+
+The guest's only nameserver. Every A/AAAA, for any name, is answered with this
+workload's inspector address, so the guest's connect() lands on the listener its
+80 and 443 are redirected to anyway. Every other query type is NODATA.
+
+NOTHING IS FORWARDED. There is no upstream socket in this program -- no
+connect(), no getaddrinfo(), no resolver library call anywhere in it. That is
+what makes DNS exfiltration ABSENT rather than filtered: a guest cannot tunnel
+data out through a nameserver that never speaks to anything. It is also the
+first property to check if anyone ever "adds a fallback for names we don't
+serve"; there are no names we don't serve.
+
+WHY NOT DNSMASQ
+
+This is the obvious question and it has a real answer, because dnsmasq does
+exactly this feature in about eight lines of config:
+
+    port=53 / listen-address=<responder addr> / bind-interfaces
+    no-resolv / no-poll
+    address=/#/<inspector addr>        # synthesise every name
+    host-record=<name>,<addr>          # the allow-by-name static map
+
+It is battle-tested where this is not, it handles EDNS0, TCP framing,
+truncation and 0x20 randomisation for free, and running one per workload is the
+same shape as the tinyproxy this design already runs per workload. The reason
+it is not used here is narrower than "not invented here":
+
+  * THE PROPERTY IS NEGATIVE. tinyproxy's job is positive -- allow these hosts
+    -- so a misconfiguration is visible and tends toward refusing traffic. This
+    program's job is "never speaks upstream", and dnsmasq's DEFAULT is to
+    forward. The security property would then be carried by the ABSENCE of
+    configuration: a /etc/dnsmasq.d drop-in, a changed packaging default, or an
+    operator adding `server=` for a reasonable-looking purpose reopens the
+    exfiltration channel silently, and nothing fails. Here it is a property of
+    the source text, and tests/test_vm_resolve.py asserts it by parsing this
+    file and rejecting any call that could reach a nameserver.
+  * PORT 53 AS A NON-ROOT USER. dnsmasq binds its own socket, so running it as
+    _wl-<name> needs CAP_NET_BIND_SERVICE on a per-workload daemon parsing
+    guest-controlled input, or a high port and another redirect rule. The
+    inherited fd avoids both.
+  * ADR 006 ALREADY DELETED IT. dnsmasq went with the managed bridge; passt
+    serves the guest DHCP. Re-adding a per-workload dnsmasq is a reversal that
+    belongs in an ADR, not in an implementation choice.
+
+The cost of that decision is this file's wire parser, and it is paid down where
+it can be: build_answer is a pure bytes -> bytes function with no I/O behind it,
+so TestFuzz feeds it garbage in bulk. It has already found one defect class
+(a name ending exactly at the message boundary), which is pinned as its own
+test.
+
+WHY A SOCKET UNIT, AND WHAT IT DOES NOT BORROW
+
+One reason only: port 53 is privileged and this runs as _wl-<name>. It borrows
+nothing else from the inspector's socket unit (§7.7) -- no address-add helper,
+no FreeBind= question, no teardown that makes an address mean a running
+process. The kernel treats all of 127/8 as local on `lo`, so the responder's
+address needs no assignment and adding one would be a no-op that later reads as
+load-bearing.
+
+RESPONSE CODES: NODATA, NEVER REFUSED
+
+HTTPS/SVCB, TXT, PTR, MX, SRV and everything else get NOERROR with an empty
+answer section. Not REFUSED: the guest's resolver list has exactly one entry, so
+there is no second nameserver for a fallback to reach. REFUSED reads to a stub
+as "this server is broken, try another", and with nothing to try it costs a full
+retry schedule per lookup -- which presents as "DNS is slow in this guest" and
+points at everything except this file.
+
+EDNS0
+
+A query carrying OPT gets a well-formed answer WITHOUT an OPT of our own. That
+is a decision, not an oversight: systemd-resolved (the actual client on Fedora
+Cloud) reads a missing OPT as no EDNS0 support and downgrades once, which costs
+one round trip on the first query of a connection and nothing after. The shape
+to avoid is a malformed or truncated OPT echoed back, which is what makes a stub
+mark a server bad -- with nowhere to fall back to.
+
+STATED LIMIT: no SOA is emitted with a NODATA answer, so a stub cannot
+negative-cache one. Repeat MX/TXT lookups therefore reach us every time. They
+are answered from memory with no I/O; the cost is a syscall, not a timeout.
+"""
+import json
+import os
+import selectors
+import socket
+import struct
+import sys
+
+sys.dont_write_bytecode = True
+
+from vm import VM_RESOLVE_TTL, vm_normalise_hostname, vm_resolve_policy_path
+
+# Header flags and fields, by name rather than by magic number at the use site.
+FLAG_QR = 0x8000
+FLAG_AA = 0x0400
+FLAG_TC = 0x0200
+FLAG_RD = 0x0100
+FLAG_RA = 0x0080
+OPCODE_MASK = 0x7800
+OPCODE_QUERY = 0
+
+RCODE_NOERROR = 0
+RCODE_FORMERR = 1
+RCODE_NOTIMP = 4
+
+TYPE_A = 1
+TYPE_AAAA = 28
+CLASS_IN = 1
+
+HEADER = struct.Struct("!HHHHHH")
+HEADER_LEN = HEADER.size
+
+# The classic UDP answer budget. Nothing we emit approaches it -- a synthesised
+# answer is one record -- but a static map entry for a name with many addresses
+# could, and silently dropping records is the failure this bound exists to turn
+# into a visible one. See build_answer: what does not fit is dropped WITH the
+# truncate bit set, which sends the client to the TCP listener we also serve.
+UDP_BUDGET = 512
+
+# Bound on one TCP message, which carries its own 16-bit length prefix. A query
+# is a question and an optional OPT; anything near the maximum is not one.
+TCP_MAX = 4096
+
+# How long a TCP peer may hold a connection open with nothing on it. Clients
+# reuse connections (RFC 7766) so this is not one query per connection, but an
+# idle one must not pin a slot forever.
+TCP_IDLE_TIMEOUT = 10.0
+
+
+class Malformed(Exception):
+    """The query could not be parsed far enough to answer it."""
+
+
+class NotSocketActivated(Exception):
+    """LISTEN_FDS/LISTEN_PID did not describe sockets that are ours."""
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+# --- the answer document ---
+
+
+class Policy:
+    """One workload's answers, as read at start.
+
+    Read once. The recovery contract is the inspector's: an edited config
+    applies on a RESTART, and the unit is PartOf= the VM, so a VM restart is
+    what re-reads it. Re-reading per query would make the guest's view of policy
+    depend on when it asked.
+    """
+
+    def __init__(self, document):
+        self.address = document["address"]
+        self.address6 = document["address6"]
+        self.ttl = int(document.get("ttl", VM_RESOLVE_TTL))
+        static = document.get("static") or {}
+        # Normalised on the way in as well as on the way out. The writer already
+        # normalises, and doing it here too means a hand-edited policy file
+        # cannot introduce a name that never matches anything.
+        self.static = {
+            vm_normalise_hostname(name): tuple(addrs)
+            for name, addrs in static.items()
+        }
+
+    def answers(self, name, qtype):
+        """The addresses to answer `name`/`qtype` with, and where they came from.
+
+        Returns (addresses, source). An empty tuple means NODATA.
+
+        The static map WINS over synthesis, and it wins completely: a name in
+        the map is answered only from the map, so a map entry with v4 addresses
+        and no v6 gets NODATA for AAAA rather than the synthesised inspector
+        address. Falling back to synthesis there would send the guest to a
+        listener that does not serve the port it wanted, which is a hang and not
+        a refusal -- the exact failure the map exists to prevent.
+        """
+        want6 = qtype == TYPE_AAAA
+        entry = self.static.get(name)
+        if entry is not None:
+            picked = tuple(a for a in entry if (":" in a) == want6)
+            return picked, "static"
+        return (self.address6 if want6 else self.address,), "synthesised"
+
+
+def load_policy(path):
+    with open(path) as f:
+        return Policy(json.load(f))
+
+
+# --- the wire ---
+
+
+def read_name(msg, offset):
+    """Read a QNAME. Returns (name, next_offset).
+
+    Compression pointers are refused rather than followed. A pointer in a
+    QUESTION section is malformed -- there is nothing earlier in the message for
+    it to point at -- and following one is how a parser is walked into a loop by
+    a peer that controls every byte.
+    """
+    labels = []
+    while True:
+        if offset >= len(msg):
+            raise Malformed("name runs past the end of the message")
+        length = msg[offset]
+        offset += 1
+        if length == 0:
+            break
+        if length & 0xC0:
+            raise Malformed("compression pointer in the question section")
+        end = offset + length
+        if end > len(msg):
+            raise Malformed("label runs past the end of the message")
+        labels.append(msg[offset:end])
+        offset = end
+    try:
+        name = ".".join(l.decode("ascii") for l in labels)
+    except UnicodeDecodeError:
+        raise Malformed("non-ASCII label") from None
+    return vm_normalise_hostname(name), offset
+
+
+def encode_name(name):
+    """Encode a name as length-prefixed labels. Empty name is the root."""
+    out = bytearray()
+    for label in name.split(".") if name else []:
+        raw = label.encode("ascii")
+        out.append(len(raw))
+        out += raw
+    out.append(0)
+    return bytes(out)
+
+
+def pack_address(text):
+    """Wire form of an address literal, without a name-resolution call.
+
+    inet_pton, never getaddrinfo: this program must contain no call that could
+    consult a resolver, and getaddrinfo on a literal is still that call.
+    """
+    if ":" in text:
+        return socket.inet_pton(socket.AF_INET6, text)
+    return socket.inet_pton(socket.AF_INET, text)
+
+
+def build_answer(query, policy, budget=None):
+    """Build the response to one query. Returns the full message bytes.
+
+    `budget` bounds the message for UDP; None means unbounded (TCP).
+    """
+    if len(query) < HEADER_LEN:
+        raise Malformed("shorter than a DNS header")
+    ident, flags, qdcount, _an, _ns, _ar = HEADER.unpack(query[:HEADER_LEN])
+
+    # Echo the opcode back, and preserve RD. RA is set because from the client's
+    # point of view recursion IS available -- every name is answered here, with
+    # no referral and no "ask someone else" -- and a stub that sees RD honoured
+    # with RA clear can decide the server is not usable for recursion and stop
+    # asking it, which with a one-entry resolver list is the whole of DNS.
+    opcode = flags & OPCODE_MASK
+    base = FLAG_QR | opcode | FLAG_AA | FLAG_RA | (flags & FLAG_RD)
+
+    if opcode != (OPCODE_QUERY << 11):
+        # NOTIMP, not NODATA: an UPDATE or a NOTIFY is not a question about a
+        # name, so there is no empty answer that means anything. No stub sends
+        # one; this is here so an odd one gets a defined reply.
+        return HEADER.pack(ident, base | RCODE_NOTIMP, 0, 0, 0, 0)
+    if qdcount != 1:
+        return HEADER.pack(ident, base | RCODE_FORMERR, 0, 0, 0, 0)
+
+    name, offset = read_name(query, HEADER_LEN)
+    if offset + 4 > len(query):
+        raise Malformed("question is missing its type and class")
+    qtype, qclass = struct.unpack("!HH", query[offset:offset + 4])
+    question = query[HEADER_LEN:offset + 4]
+
+    # No OPT of our own is emitted, for the reason the module docstring gives.
+    # The query's OPT is simply not read: everything past the question is
+    # ignored, which is well-formed behaviour for a server with no EDNS0
+    # options to honour, and is the shape that cannot echo a malformed one.
+
+    if qclass != CLASS_IN or qtype not in (TYPE_A, TYPE_AAAA):
+        # NODATA: NOERROR, this question echoed, no records. Every type that is
+        # not an address -- HTTPS, SVCB, TXT, PTR, MX, SRV, and a CHAOS-class
+        # version.bind -- lands here.
+        return HEADER.pack(ident, base | RCODE_NOERROR, 1, 0, 0, 0) + question
+
+    addresses, source = policy.answers(name, qtype)
+
+    records = bytearray()
+    count = 0
+    truncated = False
+    header_and_question = HEADER_LEN + len(question)
+    for text in addresses:
+        rdata = pack_address(text)
+        # 0xC00C: the answer's NAME as a pointer to the question's, which is at
+        # offset 12 in every message we build. Standard, and it keeps a
+        # multi-address answer inside the UDP budget that a repeated name would
+        # not.
+        record = struct.pack("!HHHIH", 0xC00C, qtype, CLASS_IN,
+                             policy.ttl, len(rdata)) + rdata
+        if budget is not None and \
+                header_and_question + len(records) + len(record) > budget:
+            truncated = True
+            break
+        records += record
+        count += 1
+
+    flags_out = base | RCODE_NOERROR | (FLAG_TC if truncated else 0)
+    log(f"  {name or '.'} {'AAAA' if qtype == TYPE_AAAA else 'A'} -> "
+        f"{source}: {count} record(s)"
+        + (" (truncated; retry over TCP)" if truncated else ""))
+    return (HEADER.pack(ident, flags_out, 1, count, 0, 0) + question
+            + bytes(records))
+
+
+def error_response(query, rcode):
+    """A minimal header-only reply, for a query too malformed to echo.
+
+    Best-effort on the id: if there are not even two bytes, there is nothing to
+    reply to and the caller drops it instead.
+    """
+    ident = struct.unpack("!H", query[:2])[0]
+    return HEADER.pack(ident, FLAG_QR | rcode, 0, 0, 0, 0)
+
+
+# --- socket activation ---
+
+
+def inherited_listening_sockets():
+    """Recover the sockets systemd passed in, or fail loudly.
+
+    Reads LISTEN_PID and LISTEN_FDS; the fds are 3 .. 3+LISTEN_FDS.
+    socket.socket(fileno=fd) recovers each one's family and type from the fd on
+    Linux, so this does not have to be told which is the datagram one.
+    """
+    listen_pid = os.environ.get("LISTEN_PID")
+    listen_fds = os.environ.get("LISTEN_FDS")
+    missing = [n for n, v in (("LISTEN_PID", listen_pid),
+                              ("LISTEN_FDS", listen_fds)) if v is None]
+    if missing:
+        raise NotSocketActivated(
+            "this program is socket-activated and never binds: it takes its "
+            f"sockets from the .socket unit, but {', '.join(missing)} is not "
+            "set. It refuses to open a socket of its own -- port 53 is "
+            "privileged and this process is not, so a fallback bind would be a "
+            "listener on some other port that nothing forwards to")
+    if listen_pid != str(os.getpid()):
+        raise NotSocketActivated(
+            f"LISTEN_PID={listen_pid} is not this process ({os.getpid()}); "
+            "the activation environment belongs to another process, so the "
+            "inherited fds would not be ours to read")
+    try:
+        count = int(listen_fds)
+    except ValueError:
+        raise NotSocketActivated(
+            f"LISTEN_FDS={listen_fds!r} is not an integer") from None
+    return [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+
+
+# --- the serve loop ---
+
+
+def serve_datagram(sock, policy):
+    try:
+        query, peer = sock.recvfrom(UDP_BUDGET * 4)
+    except OSError as exc:
+        log(f"  WARNING: recvfrom failed: {exc}")
+        return
+    try:
+        reply = build_answer(query, policy, budget=UDP_BUDGET)
+    except Malformed as exc:
+        if len(query) < 2:
+            return
+        log(f"  malformed query from {peer}: {exc}")
+        reply = error_response(query, RCODE_FORMERR)
+    try:
+        sock.sendto(reply, peer)
+    except OSError as exc:
+        log(f"  WARNING: sendto failed: {exc}")
+
+
+def serve_stream(listener, policy):
+    """Answer on one accepted TCP connection, then close it.
+
+    Handled inline rather than in a thread: answers come from memory with no
+    I/O behind them, so a query cannot block on anything, and the only way to
+    hold the loop is to send nothing -- which the idle timeout ends.
+    """
+    try:
+        conn, _peer = listener.accept()
+    except OSError as exc:
+        log(f"  WARNING: accept failed: {exc}")
+        return
+    with conn:
+        conn.settimeout(TCP_IDLE_TIMEOUT)
+        try:
+            while True:
+                prefix = recv_exactly(conn, 2)
+                if prefix is None:
+                    return
+                length = struct.unpack("!H", prefix)[0]
+                if length > TCP_MAX:
+                    return
+                query = recv_exactly(conn, length)
+                if query is None:
+                    return
+                try:
+                    # No budget: TCP is where a truncated UDP answer is retried,
+                    # so bounding it here would be the same answer twice.
+                    reply = build_answer(query, policy)
+                except Malformed as exc:
+                    if len(query) < 2:
+                        return
+                    log(f"  malformed TCP query: {exc}")
+                    reply = error_response(query, RCODE_FORMERR)
+                conn.sendall(struct.pack("!H", len(reply)) + reply)
+        except (OSError, struct.error):
+            return
+
+
+def recv_exactly(conn, count):
+    """Read exactly `count` bytes, or None if the peer stopped sending."""
+    chunks = bytearray()
+    while len(chunks) < count:
+        chunk = conn.recv(count - len(chunks))
+        if not chunk:
+            return None
+        chunks += chunk
+    return bytes(chunks)
+
+
+def serve(sockets, policy):
+    selector = selectors.DefaultSelector()
+    for sock in sockets:
+        sock.setblocking(True)
+        selector.register(sock, selectors.EVENT_READ)
+    while True:
+        for key, _events in selector.select():
+            sock = key.fileobj
+            if sock.type == socket.SOCK_DGRAM:
+                serve_datagram(sock, policy)
+            else:
+                serve_stream(sock, policy)
+
+
+def main(argv):
+    if len(argv) != 2:
+        print(f"usage: {argv[0]} <name>", file=sys.stderr)
+        return 2
+    name = argv[1]
+    sockets = inherited_listening_sockets()
+    if not sockets:
+        raise NotSocketActivated("LISTEN_FDS=0: no sockets were passed")
+    policy = load_policy(vm_resolve_policy_path(name))
+    log(f"  responder for {name}: {len(sockets)} socket(s), "
+        f"{len(policy.static)} static name(s), ttl {policy.ttl}s")
+    serve(sockets, policy)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1)

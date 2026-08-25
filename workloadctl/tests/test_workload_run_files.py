@@ -149,6 +149,30 @@ memory = "2G"
 system_disk_size = "10G"
 """
 
+# A FILTERED VM — the default posture, and the one that gets an egress
+# inspector and a synthesising responder. VM_TOML above is deliberately
+# `egress = "open"`, so on its own it exercises only the listed-but-not-emitted
+# half of the superset contract: every inspect/resolve unit is absent from the
+# emitted view for it whether the predicate works or not.
+VM_FILTERED_TOML = """\
+[workload]
+name = "{name}"
+
+[vm.network]
+egress = "filtered"
+hosts = ["example.com"]
+
+[vm]
+cloud_image_url = "https://example.com/img.qcow2"
+cloud_image_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+memory = "2G"
+system_disk_size = "10G"
+"""
+
+# The same VM with the resolver switched off: inspector yes, responder no.
+VM_NO_RESOLVER_TOML = VM_FILTERED_TOML.replace(
+    'hosts = ["example.com"]', 'hosts = ["example.com"]\nresolver = "none"')
+
 # A VM that references *another* workload and rides the shared bridge — the
 # adversarial input for the boundary contract. The excluded set (generate/bridge/
 # dnsmasq/cross-refs) must never appear in this workload's owned files.
@@ -277,6 +301,13 @@ class TestCurrentDestructiveGolden(unittest.TestCase):
                 # so both are listed-but-not-emitted here.
                 'workload-forge-inspect.socket',
                 'workload-forge-inspect.service',
+                # And the responder, on the same superset terms one predicate
+                # further in: everything the inspector needs plus `resolver`
+                # not being "none". Listed so a workload that switches the
+                # knob off has its stale units unlinked rather than left
+                # behind answering for a guest told to ask nobody.
+                'workload-forge-resolve.socket',
+                'workload-forge-resolve.service',
                 # no pod/net (VM branch); no virtiofs units (no vm.volumes)
             })
 
@@ -330,6 +361,43 @@ class TestRunFilesMembership(unittest.TestCase):
             self.assertIn('workload-forge-build.service', got)
             self.assertNotIn('workload-forge-pod.service', got)
             self.assertNotIn('workload-forge-net.service', got)
+
+    def test_a_filtered_vm_emits_the_inspector_and_the_responder(self):
+        """The emitted half of the superset contract, which `egress = "open"`
+        fixtures cannot reach: for an open VM every one of these is absent
+        whether the predicate works or not."""
+        with _Config(VM_FILTERED_TOML, 'forge') as config:
+            got = self._emitted_rel(config)
+            self.assertIn('workload-forge-inspect.socket', got)
+            self.assertIn('workload-forge-inspect.service', got)
+            self.assertIn('workload-forge-resolve.socket', got)
+            self.assertIn('workload-forge-resolve.service', got)
+
+    def test_resolver_none_emits_the_inspector_but_no_responder(self):
+        """One knob, one meaning. The responder's predicate is the inspector's
+        plus this one, so a VM that keeps inspection and drops the resolver is
+        the case that tells the two predicates apart -- and it is the case a
+        single `uses_inspect` for both would silently get wrong."""
+        with _Config(VM_NO_RESOLVER_TOML, 'forge') as config:
+            got = self._emitted_rel(config)
+            self.assertIn('workload-forge-inspect.socket', got)
+            self.assertNotIn('workload-forge-resolve.socket', got)
+            self.assertNotIn('workload-forge-resolve.service', got)
+
+    def test_an_open_vm_emits_neither(self):
+        with _Config(VM_TOML, 'forge') as config:
+            got = self._emitted_rel(config)
+            self.assertNotIn('workload-forge-inspect.socket', got)
+            self.assertNotIn('workload-forge-resolve.socket', got)
+
+    def test_the_responder_units_stay_listed_for_removal(self):
+        """Superset semantics: emitted or not, the destructive view names them,
+        so a workload that switches `resolver` off has its stale units unlinked
+        rather than left behind answering for a guest told to ask nobody."""
+        with _Config(VM_NO_RESOLVER_TOML, 'forge') as config:
+            listed = _rel(rf.path for rf in workload_run_files(config))
+            self.assertIn('workload-forge-resolve.socket', listed)
+            self.assertIn('workload-forge-resolve.service', listed)
 
     def test_dropin_emitted_when_user_exists(self):
         # The parity oracle can't exercise the cgroup drop-in (its fixtures have no

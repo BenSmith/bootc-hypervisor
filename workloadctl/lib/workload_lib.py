@@ -849,7 +849,9 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
     # Lazy import: workloadctl_core imports this module, so a top-level import
     # would be circular.
     from workloadctl_core import WorkloadUserNotFound
-    from vm import vm_uses_inspect, vm_uses_proxy  # same circularity: vm imports this module
+    from vm import (  # same circularity: vm imports this module
+        vm_uses_inspect, vm_uses_proxy, vm_uses_resolve,
+    )
 
     run = RUN_SYSTEMD_SYSTEM
     env = workload_env_dir()
@@ -893,6 +895,20 @@ def workload_run_files(config) -> list[WorkloadRunFile]:
         files.append(WorkloadRunFile(
             run / f"workload-{name}-inspect.service", "unit", "inspect",
             uses_inspect,
+        ))
+        # The synthesising responder, on the same superset terms one predicate
+        # further in: everything the inspector needs, plus `resolver` not being
+        # "none". Listed unconditionally so a workload that switches the knob
+        # off has its stale units unlinked rather than left behind answering
+        # for a guest that was told to ask nobody.
+        uses_resolve = vm_uses_resolve(config.config)
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-resolve.socket", "unit", "resolve-socket",
+            uses_resolve,
+        ))
+        files.append(WorkloadRunFile(
+            run / f"workload-{name}-resolve.service", "unit", "resolve",
+            uses_resolve,
         ))
     else:
         # cgroup-placement drop-in (containers only). Keyed by the workload UID

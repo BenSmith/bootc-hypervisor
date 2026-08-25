@@ -43,7 +43,7 @@ _workload_ctl_completion() {
         containers=$(systemctl list-unit-files --no-legend "workload-${wl}-*.service" 2>/dev/null \
             | awk '{print $1}' \
             | sed -E "s/^workload-${wl}-//;s/\\.service$//" \
-            | grep -Ev '^(setup|pod|net|build|proxy|inspect|virtiofs-.*)$')
+            | grep -Ev '^(setup|pod|net|build|proxy|inspect|resolve|virtiofs-.*)$')
         if [[ -z "$containers" ]]; then
             return
         fi

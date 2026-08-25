@@ -124,6 +124,8 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect-listener \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect-listener
+install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-resolve \
+    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-resolve
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-broker \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-broker
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-notify \
@@ -480,6 +482,7 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-proxy
 %{_libexecdir}/workloadctl/workload-vm-inspect
 %{_libexecdir}/workloadctl/workload-vm-inspect-listener
+%{_libexecdir}/workloadctl/workload-vm-resolve
 %{_libexecdir}/workloadctl/workload-vm-broker
 %{_libexecdir}/workloadctl/workload-vm-qmp
 %{_libexecdir}/workloadctl/workload-vm-shutdown

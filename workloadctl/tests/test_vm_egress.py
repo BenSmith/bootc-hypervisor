@@ -881,6 +881,28 @@ class TestFilterHelper(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self._patch("workload_uid", lambda name: 10001)
 
+        # The responder's answer document is written by this helper, from the
+        # same resolution the elements were armed from. Redirected into a
+        # tmpdir rather than stubbed out: the write is part of `up`, and a
+        # stub here would make every assertion below true of a helper that
+        # never wrote one. The ownership call is what actually needs root, so
+        # only that is faked.
+        import tempfile
+        self.policy_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.policy_dir, True)
+        self.policy_path = os.path.join(self.policy_dir, "resolve.json")
+        self._patch("vm_resolve_policy_path", lambda name: self.policy_path)
+        self._patch("pwd", SimpleNamespace(
+            getpwnam=lambda n: SimpleNamespace(pw_uid=10001, pw_gid=10001)))
+        self.chowned = []
+        self._patch("os", SimpleNamespace(
+            chown=lambda p, u, g: self.chowned.append((p, u, g)),
+            chmod=os.chmod, replace=os.replace))
+
+    def _resolve_document(self):
+        with open(self.policy_path) as f:
+            return json.load(f)
+
     def _patch(self, attr, value):
         p = mock.patch.object(self.mod, attr, value)
         p.start()
@@ -891,6 +913,63 @@ class TestFilterHelper(unittest.TestCase):
 
     def _adds(self):
         return [c for c in self.calls if len(c) > 1 and c[1] == "add"]
+
+    # --- the responder's answer document, written here ---
+
+    def test_up_writes_the_responder_document(self):
+        """The responder is socket-activated by a guest query, and the guest
+        cannot query before the VM it comes from is running -- which is after
+        this ExecStartPre. Ordering is inherited rather than declared, so the
+        thing to assert is that the write happens at all."""
+        from vm import VM_RESOLVE_TTL, vm_inspect_address
+        self._net(egress="filtered", allow=[])
+        self.mod.up("vm1")
+        doc = self._resolve_document()
+        self.assertEqual(doc["address"], vm_inspect_address(10001).v4)
+        self.assertEqual(doc["address6"], vm_inspect_address(10001).v6)
+        self.assertEqual(doc["ttl"], VM_RESOLVE_TTL)
+
+    def test_the_document_is_readable_only_by_the_workload(self):
+        """0640 with the workload's group, like the inspector's policy: the
+        responder runs as _wl-<name> and must read it, and one workload's
+        answers are not another's to enumerate."""
+        self._net(egress="filtered", allow=[])
+        self.mod.up("vm1")
+        self.assertEqual(os.stat(self.policy_path).st_mode & 0o777, 0o640)
+        self.assertEqual(self.chowned, [(self.policy_path + ".tmp", 0, 10001)])
+
+    def test_a_named_allow_entry_reaches_the_document(self):
+        """And it reaches it from the SAME resolution the elements were armed
+        from -- here one stub answers once, and both consumers read it."""
+        entry = SimpleNamespace(address=None, host="git.local", port=2222,
+                                reason="forge")
+        resolved = [(entry, [ipaddress.IPv4Address("192.0.2.9")])]
+        self._patch("vm_allow_resolved", lambda allow: resolved)
+        self._net(egress="filtered",
+                  allow=[{"address": "git.local:2222", "reason": "forge"}])
+        self.mod.up("vm1")
+        self.assertEqual(self._resolve_document()["static"],
+                         {"git.local": ["192.0.2.9"]})
+        armed = [c for c in self._adds() if c[-2] == "wl_allow4"]
+        self.assertIn("192.0.2.9", armed[0][-1])
+
+    def test_resolver_none_writes_no_document(self):
+        """One knob, one meaning. A guest told to ask nobody gets no
+        responder unit, so a document for one would be a file nothing reads
+        holding a policy nobody applied."""
+        self._net(egress="filtered", allow=[], resolver="none")
+        self.mod.up("vm1")
+        self.assertFalse(os.path.exists(self.policy_path))
+
+    def test_open_egress_writes_no_document(self):
+        self._net(egress="open", allow=[])
+        self.mod.up("vm1")
+        self.assertFalse(os.path.exists(self.policy_path))
+
+    def test_a_bridged_vm_writes_no_document(self):
+        self._net(bridge="br0", allow=[])
+        self.mod.up("vm1")
+        self.assertFalse(os.path.exists(self.policy_path))
 
     def _deletes(self):
         return [c for c in self.calls if len(c) > 1 and c[1] == "delete"]
