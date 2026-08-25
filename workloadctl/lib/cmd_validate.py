@@ -18,7 +18,11 @@ from workload_lib import (
     GENERATOR_OWNED_DIRECTIVES,
 )
 from provisioning import shadowed_filecon_paths
-from vm import parse_memory_mib, vm_mac_address, vm_mac_collisions
+from vm import (
+    parse_memory_mib, vm_internal_hosts, vm_internal_reserved_reason,
+    vm_internal_resolve, vm_mac_address, vm_mac_collisions,
+    vm_uses_inspect,
+)
 from validation import (
     collect_config_warnings,
     validate_workload_config,
@@ -481,6 +485,53 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
             "message": msg,
         })
         warnings += 1
+
+    # [[vm.network.internal]] names are resolved at VM START, by the inspect
+    # socket's ExecStartPre, and one that does not resolve there fails that
+    # prestart -- which the VM Requires=, so the guest does not boot. That is
+    # deliberate (see workload-vm-inspect's internal_failure), but it means a
+    # name that is merely wrong costs the whole workload at the worst moment,
+    # on a host where the operator is not watching.
+    #
+    # So resolve them here too, where the answer is free and the fix is an
+    # edit. A WARNING and not an error, in both directions: DNS at validate
+    # time is not DNS at boot time, so a name that fails here may well be fine
+    # then (a resolver still coming up, a split-horizon zone), and a name that
+    # passes here can fail then. This says "this entry would stop the guest
+    # booting right now", which is worth knowing and is not a verdict.
+    if config.config.get("vm") and vm_uses_inspect(config.config):
+        net = config.config.get("vm", {}).get("network", {}) or {}
+        for host in vm_internal_hosts(net):
+            problem = None
+            try:
+                addresses = vm_internal_resolve(host)
+            except ValueError as e:
+                problem = str(e)
+            else:
+                # Resolving is half of it: the exemption is armed only for
+                # addresses the internal drop would actually match, and a name
+                # that answers with a public address is refused at start by
+                # vm_internal_ok_elements rather than here.
+                for addr in addresses:
+                    reserved = vm_internal_reserved_reason(addr)
+                    if reserved:
+                        problem = f"[vm.network].internal: {reserved}"
+                        break
+            if problem:
+                checks.append({
+                    "check": "vm_internal_unresolvable",
+                    "passed": False,
+                    "severity": "warning",
+                    "message": f"[[vm.network.internal]] names {host!r}, which "
+                               f"cannot be armed on this host right now, and "
+                               f"that fails the VM's start rather than only the "
+                               f"exemption: {problem}",
+                    "fix": f"Make {host} resolve to a private address on the "
+                           f"VM host, or remove the entry (it authorises "
+                           f"nothing on its own; the guest simply loses reach "
+                           f"to that host).",
+                })
+                warnings += 1
 
     # VM MACs are hash-derived with no allocation registry, so distinct names
     # can rarely collide on the shared bridge — two guests fighting one address.

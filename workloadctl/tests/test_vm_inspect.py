@@ -418,3 +418,64 @@ class TestPolicyDocument(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheInternalFailureSaysWhatItCosts(unittest.TestCase):
+    """An `internal` name that cannot be armed stops the guest booting.
+
+    That is the intended behaviour -- an exemption that silently did not arm
+    leaves the guest refused by the very drop the entry existed to except --
+    but the operator meets it as two facts one unit apart: a VM that will not
+    start, and, on the socket unit, an error about DNS. The message has to
+    carry the join itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import load_script
+        cls.mod = load_script("libexec/workload-vm-inspect")
+
+    def _message(self):
+        return self.mod.internal_failure(
+            "forge", "git.local",
+            ValueError("[vm.network].internal names 'git.local', which does "
+                       "not resolve on this host"))
+
+    def test_it_keeps_the_underlying_cause(self):
+        self.assertIn("does not resolve on this host", self._message())
+
+    def test_it_names_the_unit_that_will_not_start(self):
+        """Not just "the VM": the operator needs the string to look for."""
+        self.assertIn("workload-forge.service", self._message())
+
+    def test_it_says_the_guest_will_not_boot(self):
+        message = self._message()
+        self.assertIn("fatal to the START", message)
+        self.assertIn("will not boot", message)
+
+    def test_it_offers_removing_the_entry_as_a_way_out(self):
+        """The other remedy -- fix DNS -- may not be available to the person
+        reading this at 3am. Removing the entry always is, and it is safe to
+        recommend because `internal` authorises nothing on its own."""
+        message = self._message()
+        self.assertIn("[[vm.network.internal]]", message)
+        self.assertIn("authorises nothing", message)
+
+    def test_both_arming_failures_are_told_the_same_way(self):
+        """A name that does not resolve and a name that resolves to a public
+        address fail at different call sites and cost exactly the same thing,
+        so neither may be the one that reaches the journal bare."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertEqual(up.count("internal_failure("), 2)
+        self.assertIn("vm_internal_resolve(host)", up)
+        self.assertIn("vm_internal_ok_commands(uid, addresses, \"add\")", up)
+
+    def test_the_start_still_fails(self):
+        """Loud, not lenient. Skipping the host would put the workload up
+        looking configured with the one destination it was written for
+        refused."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertIn("raise ValueError(internal_failure(", up)
+        self.assertNotIn("continue", up)

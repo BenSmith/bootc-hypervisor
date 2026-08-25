@@ -11,6 +11,7 @@ and test_validate_single_vm_skips_image_check locks that in.
 import argparse
 import bz2
 import io
+import ipaddress
 import json
 import os
 import subprocess
@@ -2257,3 +2258,113 @@ class HostSelinuxModuleCurrentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValidateSingleVmInternalReachabilityTest(unittest.TestCase):
+    """`validate` warns about an [[vm.network.internal]] entry that could not
+    be armed right now.
+
+    The entry is resolved for real at VM start, by the inspect socket's
+    ExecStartPre, and a failure there is fatal to the guest -- the VM
+    Requires= that socket. Deliberately so: an exemption that silently did not
+    arm leaves the guest refused by the very drop the entry existed to except.
+    But it means a typo costs the whole workload at boot, on a host nobody is
+    watching, so the same lookup is done here where it is free.
+
+    A warning and never an error, in both directions: DNS at validate time is
+    not DNS at boot time. A name that fails here may resolve then, and one
+    that passes here may fail then.
+    """
+
+    def _result(self, name, *, egress="filtered", internal=True, resolve=None):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(workload_lib, "WORKLOAD_CONFIG_DIR", self.tmp))
+        (self.tmp / name).mkdir()
+        checksum = "0" * 64
+        entry = ""
+        if internal:
+            entry = ('\n[[vm.network.internal]]\nhost = "git.local"\n'
+                     'reason = "the forge"\n')
+        (self.tmp / name / "workload.toml").write_text(f"""
+[workload]
+name = "{name}"
+
+[vm.network]
+egress = "{egress}"
+hosts = ["git.local"]
+{entry}
+[vm]
+cloud_image_url = "https://example.invalid/f.qcow2"
+cloud_image_checksum = "sha256:{checksum}"
+vcpus = 1
+memory = "1024M"
+system_disk_size = "10G"
+user = "workload"
+""")
+        fake_pw = types.SimpleNamespace(
+            pw_uid=10001, pw_gid=10001, pw_dir=str(self.tmp / "home"))
+        self.enterContext(mock.patch("pwd.getpwnam", lambda n: fake_pw))
+        fake_proc = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        self.enterContext(mock.patch("subprocess.run", lambda *a, **k: fake_proc))
+        if resolve is not None:
+            self.enterContext(mock.patch.object(
+                cmd_validate, "vm_internal_resolve", resolve))
+        config = WorkloadConfig(name)
+        manager = mock.Mock(spec=WorkloadManager)
+        manager.user_exists.return_value = True
+        manager.get_all_configs.return_value = []
+        pod = mock.Mock()
+        pod.container_status.return_value = ""
+        pod.image_id.return_value = ""
+        manager.podman.return_value = pod
+        return cmd_validate.validate_single(config, manager, json_mode=True)
+
+    @staticmethod
+    def _checks(result):
+        return [c for c in result["checks"]
+                if c["check"] == "vm_internal_unresolvable"]
+
+    def _raise(self, host):
+        raise ValueError(f"[vm.network].internal names {host!r}, which does "
+                         f"not resolve on this host")
+
+    def test_an_unresolvable_name_warns_and_does_not_fail(self):
+        result = self._result("clitest-vmint-dns", resolve=self._raise)
+
+        found = self._checks(result)
+        self.assertTrue(found, "expected a vm_internal_unresolvable check")
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("git.local", found[0]["message"])
+        self.assertTrue(result["passed"])
+
+    def test_the_warning_says_it_costs_the_whole_start(self):
+        """Not "this exemption will not arm" -- that is the part an operator
+        can already read off the config."""
+        result = self._result("clitest-vmint-says", resolve=self._raise)
+
+        self.assertIn("fails the VM's start", self._checks(result)[0]["message"])
+
+    def test_a_name_resolving_to_a_public_address_warns_too(self):
+        """Resolving is only half of it: the exemption is armed only for
+        addresses the internal drop would ever match, so a public answer is
+        refused at start just as an unresolvable name is."""
+        result = self._result(
+            "clitest-vmint-public",
+            resolve=lambda host: [ipaddress.ip_address("93.184.216.34")])
+
+        found = self._checks(result)
+        self.assertTrue(found)
+        self.assertIn("93.184.216.34", found[0]["message"])
+
+    def test_a_private_answer_is_quiet(self):
+        result = self._result(
+            "clitest-vmint-ok",
+            resolve=lambda host: [ipaddress.ip_address("192.168.0.157")])
+
+        self.assertFalse(self._checks(result))
+
+    def test_a_workload_with_no_internal_entries_is_quiet(self):
+        result = self._result("clitest-vmint-none", internal=False,
+                              resolve=self._raise)
+
+        self.assertFalse(self._checks(result))

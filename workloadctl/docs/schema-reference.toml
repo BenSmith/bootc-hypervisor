@@ -465,6 +465,18 @@ name = "schema-reference"
 # git-over-SSH to the same forge is port 2222, which no redirect touches; that
 # half is an [[vm.network.allow]] entry written by name, not this key.
 #
+# THE NAME IS RESOLVED AT VM START, AND A FAILURE THERE STOPS THE GUEST. The
+# exemption is armed per ADDRESS, so a name that does not resolve on the VM
+# host -- or that answers with a public address, which the internal drop would
+# never have matched -- arms nothing, and arming nothing silently would leave
+# the guest refused by the very drop this entry exists to except. So it fails
+# the start instead: this runs as the inspect socket's ExecStartPre and the VM
+# Requires= that socket. The error says so in those words rather than leaving
+# you to join a DNS message on one unit to a VM that will not boot on another.
+# `workloadctl validate` resolves the same names and WARNS, so the common case
+# is caught at edit time; it is a warning and not an error because DNS at
+# validate time is not DNS at boot time.
+#
 # [[vm.network.internal]]
 # host   = "git.local"
 # reason = "homelab forge; clone and API over HTTPS"

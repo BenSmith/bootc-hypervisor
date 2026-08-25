@@ -58,6 +58,13 @@ the host refused by the very drop the entry existed to except, and the guest
 sees `403 <host> resolves to an internal address` on the one destination the
 operator wrote the entry for.
 
+That failure is fatal to the whole guest, not to the exemption -- this is the
+socket's ExecStartPre and the VM Requires= the socket -- so the error says so
+itself rather than leaving an operator to connect a DNS message on one unit to
+a VM that will not start on another. `workloadctl validate` warns about the
+same entry before it can do that, at edit time, where the fix is cheap. See
+internal_failure.
+
 WHAT IS NOT ARMED HERE
 
 The cgroup elements in wl_proxy_cg (inet workload_filter) and wl_inspect_cg
@@ -162,6 +169,35 @@ def write_policy(name: str) -> str:
     return path
 
 
+def internal_failure(name: str, host: str, cause: Exception) -> str:
+    """Why an `internal` entry could not be armed, AND what it costs.
+
+    The cause alone is a true statement about an exemption, and an operator
+    reading it in the journal has to work out the rest: this runs as the
+    inspect socket's ExecStartPre, the socket is Requires= of the VM, and so a
+    name that stopped resolving does not degrade the guest's egress -- it stops
+    the guest booting. Failing loudly is deliberate (an exemption that silently
+    did not arm leaves the guest refused by the very drop the entry existed to
+    except), but a fatal failure that does not say it is fatal is the worst of
+    both: the operator sees a VM that will not start and an error about DNS,
+    one unit away from each other.
+
+    So the message states the blast radius and both ways out. Removing the
+    entry is a real option and cheap to describe, because `internal`
+    authorises nothing on its own -- see vm_inspect_policy. It costs exactly
+    this host's reachability from this guest.
+    """
+    return (f"{cause}\n"
+            f"  This is fatal to the START, not only to the exemption: it runs "
+            f"as the inspect socket's ExecStartPre and workload-{name}.service "
+            f"Requires= that socket, so the guest will not boot while it "
+            f"stands.\n"
+            f"  Either make {host} resolve on this host, or drop the "
+            f"[[vm.network.internal]] entry naming it -- the entry authorises "
+            f"nothing by itself, so dropping it costs only this guest's reach "
+            f"to that host, and the guest boots.")
+
+
 def up(name: str) -> int:
     net = network_config(name)
     if not inspection_applies(net):
@@ -221,10 +257,19 @@ def up(name: str) -> int:
     hosts = vm_internal_hosts(net)
     addresses = []
     for host in hosts:
-        addresses.extend(vm_internal_resolve(host))
+        try:
+            addresses.extend(vm_internal_resolve(host))
+        except ValueError as e:
+            raise ValueError(internal_failure(name, host, e)) from None
     for argv in vm_internal_ok_commands(uid, addresses, "delete"):
         run(argv)
-    for argv in vm_internal_ok_commands(uid, addresses, "add"):
+    try:
+        add_commands = vm_internal_ok_commands(uid, addresses, "add")
+    except ValueError as e:
+        # A name that resolved, to an address the internal drop would never
+        # match. Same consequence as an unresolvable one, so the same telling.
+        raise ValueError(internal_failure(name, ", ".join(hosts), e)) from None
+    for argv in add_commands:
         run(argv, check=True)
 
     log(f"  Inspector redirect armed for uid {uid}, "
