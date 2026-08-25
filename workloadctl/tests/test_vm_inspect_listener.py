@@ -1256,6 +1256,56 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertIn(b"/one", ups[0][1])
         self.assertIn(b"/two", ups[0][1])
 
+    def test_distinct_hosts_past_the_cap_evict_the_least_recently_used(self):
+        """The upstream map is bounded, and a wildcard policy is why.
+
+        `hosts = ["*.example"]` makes every distinct subdomain a name the
+        guest may open a socket for, and the map outlives the request that
+        opened it -- so without a ceiling a guest pipelines a1, a2, ... down
+        one connection and opens sockets until the process is out of file
+        descriptors, every one of them a host socket owned by the workload
+        uid. Past the cap the oldest is closed; a name that comes back is
+        redialled, which is a round trip rather than a refusal.
+        """
+        mod = _mod()
+        request = b"".join(
+            b"GET /%s HTTP/1.1\r\nHost: %s.example\r\n\r\n" % (h, h)
+            for h in (b"a", b"b", b"c", b"a"))
+        with unittest.mock.patch.object(mod, "UPSTREAMS_MAX", 2):
+            _, got, ups = self._run(["*.example"], request, [_OK] * 4)
+        # Four dials for four requests: a was evicted when c arrived, so the
+        # second a.example is a fresh socket rather than the first one reused.
+        self.assertEqual([addr for addr, _ in ups],
+                         [("a.example", 80), ("b.example", 80),
+                          ("c.example", 80), ("a.example", 80)])
+        self.assertIn(b"/a ", ups[0][1])
+        self.assertNotIn(b"/a ", ups[1][1])
+        self.assertIn(b"/a ", ups[3][1])
+        self.assertEqual(got.count(b"200 OK"), 4,
+                         "eviction must cost a redial, never a request")
+
+    def test_a_host_still_within_the_cap_is_reused_not_redialled(self):
+        """The eviction is least-recently-USED, not least-recently-opened: a
+        name the guest keeps returning to stays young and stays open."""
+        mod = _mod()
+        request = b"".join(
+            b"GET /%s HTTP/1.1\r\nHost: %s.example\r\n\r\n" % (h, h)
+            for h in (b"a", b"b", b"a", b"c", b"a"))
+        with unittest.mock.patch.object(mod, "UPSTREAMS_MAX", 2):
+            _, got, ups = self._run(
+                ["*.example"], request, [_OK + _OK + _OK, _OK, _OK])
+        # a is touched before every eviction, so it is never the oldest: three
+        # dials for three names, and b is the one that goes.
+        self.assertEqual([addr for addr, _ in ups],
+                         [("a.example", 80), ("b.example", 80),
+                          ("c.example", 80)])
+        self.assertEqual(got.count(b"200 OK"), 5)
+
+    def test_the_cap_is_generous_enough_for_an_honest_connection(self):
+        """A bound low enough to evict a real client's working set would trade
+        a fd leak for a redial on every request."""
+        self.assertGreaterEqual(_mod().UPSTREAMS_MAX, 4)
+
     def test_a_403_does_not_leave_the_next_request_read_out_of_the_body(self):
         """The bypass through the error path, which is the path every test
         exercises least. A refusal answered without draining leaves the reader
@@ -1475,6 +1525,83 @@ class TestCleartextExpectContinue(unittest.TestCase):
             b"POST / HTTP/1.1\r\nHost: a.example\r\nExpect: other\r\n\r\n")
         self.assertEqual(ups, [])
         self.assertIn("cannot honour", log)
+
+
+class TestResponseHeadLeniency(unittest.TestCase):
+    """The relay must not be stricter than the web it relays.
+
+    The head coming BACK was written by an origin this workload's own policy
+    authorised, and it is relayed to the guest verbatim; the only reason to
+    parse it is to find where the body ends. Parsing it with the guest-hardening
+    request parser made real, ordinary responses fail as `relay failed` -- a
+    dead connection on a request the policy allowed, which reads to an operator
+    as the inspector being broken.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def _relay(self, response):
+        return self._run(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [response])
+
+    def test_a_non_ascii_byte_in_a_header_is_relayed(self):
+        """A filename with an accent in it, which is the everyday case: raw
+        UTF-8 in Content-Disposition is emitted by real servers and is not a
+        second encoding of anything."""
+        head = ("HTTP/1.1 200 OK\r\n"
+                "Content-Disposition: attachment; filename=\"caf\u00e9.pdf\"\r\n"
+                "Content-Length: 2\r\n\r\n").encode("utf-8") + b"hi"
+        log, got, _ = self._relay(head)
+        self.assertNotIn("relay failed", log)
+        self.assertIn(b"200 OK", got)
+        self.assertIn("caf\u00e9.pdf".encode("utf-8"), got)
+        self.assertTrue(got.endswith(b"hi"))
+
+    def test_an_obs_fold_continuation_is_relayed_not_refused(self):
+        """Deprecated, still emitted. It folds into the value it continues
+        rather than aborting the exchange."""
+        head = (b"HTTP/1.1 200 OK\r\n"
+                b"X-Note: first\r\n\tsecond\r\n"
+                b"Content-Length: 2\r\n\r\nhi")
+        log, got, _ = self._relay(head)
+        self.assertNotIn("relay failed", log)
+        self.assertIn(b"200 OK", got)
+        self.assertTrue(got.endswith(b"hi"))
+
+    def test_a_header_name_outside_tchar_is_dropped_not_fatal(self):
+        """No framing header has a name like that, and the line is relayed
+        verbatim either way -- so it cannot change where the body ends."""
+        head = (b"HTTP/1.1 200 OK\r\n"
+                b"X Bad Name: whatever\r\n"
+                b"Content-Length: 2\r\n\r\nhi")
+        log, got, _ = self._relay(head)
+        self.assertNotIn("relay failed", log)
+        self.assertIn(b"X Bad Name: whatever", got)
+        self.assertTrue(got.endswith(b"hi"))
+
+    def test_the_framing_headers_are_still_read_strictly(self):
+        """Leniency is about fields that do not frame the message. An origin
+        that frames a response two ways at once is still refused: guessing
+        which one it meant is how a relay loses track of where the body ends.
+        """
+        head = (b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: 2\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\nhi")
+        log, _, _ = self._relay(head)
+        self.assertIn("relay failed", log)
+
+    def test_a_bare_newline_in_the_head_is_still_refused(self):
+        """The one defect leniency must not cover: a bare LF changes where a
+        MESSAGE ends, not where a field does, and the head is relayed to the
+        guest verbatim."""
+        head = (b"HTTP/1.1 200 OK\r\n"
+                b"X-Note: a\nX-Smuggled: b\r\n"
+                b"Content-Length: 2\r\n\r\nhi")
+        log, _, _ = self._relay(head)
+        self.assertIn("relay failed", log)
 
 
 class TestInterimResponses(unittest.TestCase):

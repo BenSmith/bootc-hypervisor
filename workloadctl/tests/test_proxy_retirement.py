@@ -147,9 +147,12 @@ class TestTheRetiredEndpoint(unittest.TestCase):
         It was written for tinyproxy's name resolution and reads like the
         proxy's, so deleting it with the proxy is the obvious mistake. The
         inspector resolves host-side on every connection it authorises,
-        permanently, and the responder resolves the names it synthesises for --
-        so removing this drops every lookup both of them make, and hostname
-        policy dies on the rung that was meant to strengthen it.
+        permanently -- so removing this drops every lookup it makes, and
+        hostname policy dies on the rung that was meant to strengthen it.
+
+        The synthesising responder is NOT a second beneficiary, though the
+        comments here used to say so: it answers from memory and looks nothing
+        up. See TestGeneratedUnits in tests/test_vm_resolve.py.
         """
         text = (ROOT / "nftables" / "workload-filter.nft").read_text()
         carve = [ln for ln in text.splitlines()
@@ -157,8 +160,8 @@ class TestTheRetiredEndpoint(unittest.TestCase):
                  and "th dport 53" in ln and ln.rstrip().endswith("accept")]
         self.assertEqual(len(carve), 1, (
             "the port-53 carve-out for wl_egress_cg is missing. The inspector "
-            "and the responder both resolve host-side; without it every "
-            "lookup they make is dropped."))
+            "resolves host-side on every connection it authorises; without "
+            "it every lookup it makes is dropped."))
 
 
 class TestTheGuestIsToldNothing(unittest.TestCase):

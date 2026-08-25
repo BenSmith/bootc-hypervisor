@@ -78,7 +78,7 @@ try:
         VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_SIDECAR_SLICE,
         VM_INSPECT_LISTENER_BIN, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
         vm_mac_address, vm_management_address, parse_vm_port,
-        find_ovmf_code, parse_memory_mib, vm_ca_env,
+        find_ovmf_code, parse_memory_mib,
         vm_uses_inspect, vm_inspect_address, vm_inspect_cgroup_command,
         vm_inspect_cgroup_filter_command,
         VM_SOCKET_DIR,

@@ -20,6 +20,8 @@ import shutil
 import socket
 import struct
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -838,6 +840,154 @@ class TestOnTheWire(unittest.TestCase):
                          [["192.0.2.9"], [self.inspect.v4]])
 
 
+class TestTcpDoesNotHoldTheLoop(unittest.TestCase):
+    """A TCP peer must not be able to stop UDP from being answered.
+
+    This process is the guest's only nameserver and one loop serves both
+    transports, so a TCP connection handled on that loop is a wedge of every
+    lookup in the guest -- and, from the host, indistinguishable from a
+    responder that has died, because the status file stops being written too.
+    The three properties below are what make that impossible: the accept loop
+    hands the connection off, a connection has a lifetime and not just an idle
+    timeout, and there is a ceiling on how many exist.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _module()
+        cls.policy = _policy(cls.mod, static={"git.local": ["192.0.2.9"]})
+
+    def _listener(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        return listener, listener.getsockname()
+
+    def test_a_silent_peer_does_not_hold_the_accept_loop(self):
+        """The regression in one assertion. A client that connects and sends
+        NOTHING used to hold serve_stream for the whole idle timeout; now the
+        call returns as soon as it has handed the socket over."""
+        listener, address = self._listener()
+        with socket.create_connection(address, timeout=5) as client:
+            started = time.monotonic()
+            self.mod.serve_stream(listener, self.policy)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, self.mod.TCP_IDLE_TIMEOUT / 2,
+                            "the accept loop waited on the connection")
+            self.assertTrue(client.fileno() >= 0)
+
+    def test_a_dribbling_peer_is_ended_by_the_lifetime_not_the_idle_bound(self):
+        """settimeout() is per recv, so a peer that keeps sending is never
+        idle. The lifetime is the bound that ends it, and it is checked before
+        every recv rather than once per message -- otherwise a peer choosing a
+        4096-byte length spends the idle timeout per byte."""
+        near, far = socket.socketpair()
+        self.addCleanup(far.close)
+        payload = query("git.local", TYPE_A)
+        # A length prefix promising more than will ever arrive.
+        far.sendall(struct.pack("!H", len(payload) + 64) + payload)
+        started = time.monotonic()
+        self.mod.handle_stream(near, self.policy,
+                               deadline=time.monotonic() + 0.3)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 5.0,
+                        "the deadline did not end a peer that was mid-message")
+        self.assertGreaterEqual(elapsed, 0.2)
+
+    def test_the_lifetime_is_a_lifetime_and_not_an_idle_timeout(self):
+        """A peer pipelining well-formed queries forever is never idle. It
+        gets answered until the deadline and then closed."""
+        near, far = socket.socketpair()
+        self.addCleanup(far.close)
+        payload = query("git.local", TYPE_A)
+        far.sendall((struct.pack("!H", len(payload)) + payload) * 50)
+        self.mod.handle_stream(near, self.policy,
+                               deadline=time.monotonic() + 0.3)
+        # It answered at least one, and it stopped: the assertion is that the
+        # call returned at all, which a peer with more to send would never
+        # have allowed under an idle-only bound.
+        self.assertTrue(far.recv(2))
+
+    def test_connections_past_the_ceiling_are_closed_not_queued(self):
+        """A DNS client that loses a TCP attempt retries, and UDP -- how
+        essentially every lookup arrives -- is unaffected. Queueing them is
+        what turns a ceiling back into a wedge."""
+        listener, address = self._listener()
+        slots = self.mod._TcpSlots(limit=1)
+        clients = []
+        for _ in range(2):
+            client = socket.create_connection(address, timeout=5)
+            self.addCleanup(client.close)
+            clients.append(client)
+            self.mod.serve_stream(listener, self.policy, slots=slots)
+        # The second was refused: nothing was ever read from it, and it sees
+        # the close rather than an answer.
+        payload = query("git.local", TYPE_A)
+        clients[1].sendall(struct.pack("!H", len(payload)) + payload)
+        clients[1].settimeout(5)
+        self.assertEqual(clients[1].recv(4096), b"",
+                         "a refused connection must be closed, not queued")
+        # The first still works, so the ceiling refused the right one.
+        clients[0].settimeout(5)
+        clients[0].sendall(struct.pack("!H", len(payload)) + payload)
+        length = struct.unpack("!H", clients[0].recv(2))[0]
+        self.assertEqual(Reply(clients[0].recv(length)).addresses(),
+                         ["192.0.2.9"])
+
+    def test_a_finished_connection_gives_its_slot_back(self):
+        """A slot leaked per connection lowers the ceiling for the life of the
+        process, and the responder degrades to refusing everything while still
+        reporting itself up."""
+        listener, address = self._listener()
+        slots = self.mod._TcpSlots(limit=1)
+        for _ in range(3):
+            with socket.create_connection(address, timeout=5) as client:
+                self.mod.serve_stream(listener, self.policy, slots=slots)
+                payload = query("git.local", TYPE_A)
+                client.sendall(struct.pack("!H", len(payload)) + payload)
+                client.settimeout(5)
+                length = struct.unpack("!H", client.recv(2))[0]
+                self.assertEqual(Reply(client.recv(length)).addresses(),
+                                 ["192.0.2.9"])
+            # The worker notices the close and releases; give it a moment.
+            for _ in range(50):
+                if slots.take():
+                    slots.give_back()
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("the slot was never given back")
+
+    def test_counters_are_taken_under_a_lock(self):
+        """The observations are made from connection threads now, so the
+        counter object owes BoundedCounts the lock its docstring asks its
+        callers for -- and owes it to the snapshot too, since a status file
+        assembled mid-observation reports figures that do not add up."""
+        counters = self.mod.Counters()
+        errors = []
+
+        def hammer():
+            try:
+                for _ in range(2000):
+                    counters.record_answer("a.example", "synth", 1, False)
+                    counters.record_malformed()
+                    counters.snapshot()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(errors, [])
+        snapshot = counters.snapshot()
+        self.assertEqual(snapshot["queries"]["synthesised"], 8000)
+        self.assertEqual(snapshot["queries"]["malformed"], 8000)
+        self.assertEqual(snapshot["unlisted"], 8000)
+
+
 class TestFuzz(unittest.TestCase):
     """Arbitrary bytes in, a reply or a Malformed out. Never anything else.
 
@@ -1042,6 +1192,35 @@ class TestGeneratedUnits(unittest.TestCase):
     def test_the_socket_stops_with_the_vm(self):
         self.assertIn("PartOf=workload-web.service", self.socket_unit.splitlines())
         self.assertIn("Before=workload-web.service", self.socket_unit.splitlines())
+
+    def test_the_service_arms_no_cgroup_exemption(self):
+        """The responder is NOT a member of wl_egress_cg, and the nft file must
+        not say it is.
+
+        Three tracked comments claimed the set held two members per workload,
+        the inspector and the responder. Nothing arms the second: there is no
+        vm_resolve_cgroup, and this unit emits no nft command at all. The claim
+        was harmless -- the responder originates nothing, so it needs no
+        exemption -- and that is exactly what made it dangerous to leave
+        standing: the next change that gives the responder an outbound socket
+        would have it dropped by the default deny, with three comments
+        asserting that cannot happen.
+        """
+        import vm
+        self.assertNotIn("wl_egress_cg", self.service)
+        self.assertNotIn("wl_inspect_cg", self.service)
+        self.assertNotIn("nft", self.service)
+        self.assertFalse(hasattr(vm, "vm_resolve_cgroup"), (
+            "a vm_resolve_cgroup exists now, so the responder may be armed "
+            "into wl_egress_cg -- update the nft comments this test guards"))
+
+    def test_the_nft_comments_do_not_claim_the_responder_is_exempted(self):
+        """The other half: the assertion above is about the generator, and the
+        false statement was in the kernel policy's comments."""
+        text = (Path(__file__).resolve().parent.parent
+                / "nftables" / "workload-filter.nft").read_text()
+        self.assertNotIn("Both are in this set", text)
+        self.assertNotIn("two members", text)
 
     def test_the_service_runs_as_the_workload_user(self):
         self.assertIn("User=_wl-web", self.service.splitlines())

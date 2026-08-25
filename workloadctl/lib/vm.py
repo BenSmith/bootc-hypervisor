@@ -629,10 +629,13 @@ VM_ADVERTISED_IFACE = "workload-proxy"
 #
 # Named wl_egress_cg, not wl_proxy_cg. Through rung 1 its one member was the
 # per-workload tinyproxy and the name was accurate; rung 2 deleted that service
-# and left the set holding two members that are not proxies at all. Its twin in
-# the nat table, wl_inspect_cg, exempts the same processes from the REDIRECT;
-# this one exempts them from the DROP. A process needs both or it either
-# reaches nothing or loops into the listener it is dialling past.
+# and left the set holding a member that is not a proxy at all -- the egress
+# inspector, and only it. The synthesising responder is not a second member:
+# it answers from memory and opens no socket, so there is no vm_resolve_cgroup
+# and nothing arms one. Its twin in the nat table, wl_inspect_cg, exempts the
+# same process from the REDIRECT; this one exempts it from the DROP. A process
+# needs both or it either reaches nothing or loops into the listener it is
+# dialling past.
 #
 # The slice is pinned rather than taken from [resources].slice so the cgroup
 # path is always exactly two components and the rule's `level 2` is exact.

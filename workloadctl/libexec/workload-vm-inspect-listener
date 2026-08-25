@@ -141,6 +141,20 @@ RELAY_CHUNK = 65536
 # connection, and one of MAX_CONNECTIONS slots, with interim heads alone.
 INTERIM_MAX = 32
 
+# How many upstream connections one client connection may hold open at once.
+# The map that caches them is keyed by authorised host, and until this bound
+# existed it was the one guest-driven collection in this file without a
+# ceiling: with a wildcard pattern (`hosts = ["*.example.com"]`) a guest can
+# pipeline a1.example.com, a2.example.com, ... down a single connection and
+# open a socket per name, times MAX_CONNECTIONS admitted connections, until
+# the process is out of file descriptors -- and every one of those sockets is
+# a host socket owned by the workload uid. Reuse is what the map is for, and
+# reuse is a property of the few names a real client actually alternates
+# between; past this many the least recently used is closed, which costs a
+# redial rather than an error. Eight is well above any honest fan-out on one
+# connection and far below anything that threatens the fd table.
+UPSTREAMS_MAX = 8
+
 # The ceiling on how much is read looking for a complete ClientHello, in bytes.
 # A real one is a few hundred bytes; post-quantum key shares push it over a
 # single TCP segment but nowhere near this. The bound exists because the read
@@ -757,6 +771,49 @@ def _split_head(head):
         if not name or any(c not in _TOKEN_CHARS for c in name):
             raise RequestUnreadable(
                 f"header name {name!r} is not a token")
+        headers.append((name.lower(), value.strip(" \t")))
+    return lines[0], tuple(headers)
+
+
+def _split_response_head(head):
+    """(status line, [(name, value)]) from a RESPONSE head. Lenient by design.
+
+    The strict parser above is a defence against the GUEST's framing: every
+    refusal in it names a way one message can be read as two by two parsers on
+    the path. This head was written by an origin the workload's own policy
+    authorised, and it is relayed to the guest VERBATIM -- so the reason to
+    parse it at all is narrow: to learn where the body ends, which is what says
+    whether the next request can be read from this connection.
+
+    Applying the request parser here made the listener stricter than the web.
+    A raw UTF-8 byte in a filename (`Content-Disposition: attachment;
+    filename="cafe\u0301.pdf"`), a folded header, a header name with a byte
+    outside tchar: each is something real servers emit, none of them changes
+    where the body ends, and each aborted an authorised exchange as
+    `relay failed` -- a dead connection on a request the policy allowed.
+
+    So: latin-1, which cannot fail and preserves every byte's identity for the
+    lowercase framing-name comparison; obs-fold joined into the value it
+    continues, as RFC 7230 §3.2.4 says to treat it; and a line whose name is
+    not a token dropped rather than raised on, since no framing header has a
+    name like that and the line is relayed regardless. Control characters are
+    still refused: a bare CR or LF inside a head is the one defect here that
+    changes where a MESSAGE ends rather than where a field does.
+    """
+    text = head[:-4].decode("latin-1")
+    lines = text.split("\r\n")
+    _reject_controls(lines[0], "the status line", tab_ok=False)
+    headers = []
+    for line in lines[1:]:
+        _reject_controls(line, "a response header line", tab_ok=True)
+        if line[:1] in (" ", "\t"):
+            if headers:
+                name, value = headers[-1]
+                headers[-1] = (name, (value + " " + line.strip(" \t")).strip())
+            continue
+        name, sep, value = line.partition(":")
+        if not sep or not name or any(c not in _TOKEN_CHARS for c in name):
+            continue
         headers.append((name.lower(), value.strip(" \t")))
     return lines[0], tuple(headers)
 
@@ -1650,14 +1707,31 @@ class Listener:
         Dialled by NAME (§7.4), like the TLS plane: the address the guest aimed
         at is this inspector's own listener, so resolving the authorised name
         here is what makes the destination the one the policy named.
+
+        Bounded at UPSTREAMS_MAX and evicted least-recently-used, because the
+        set of names is the guest's to choose: a wildcard pattern makes every
+        distinct subdomain a new socket, and the map outlives the request that
+        opened it. Eviction is not a refusal -- the evicted name is redialled
+        if it comes back -- so the bound costs a round trip in the pathological
+        case and nothing at all in the honest one. `upstreams` is an ordinary
+        dict, which preserves insertion order, and a hit reinserts to move the
+        entry to the young end.
         """
-        up = upstreams.get(host)
+        up = upstreams.pop(host, None)
         if up is None:
             sock = socket.create_connection(
                 (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
             sock.settimeout(RELAY_IDLE_TIMEOUT)
             up = _Stream(sock)
-            upstreams[host] = up
+        upstreams[host] = up
+        while len(upstreams) > UPSTREAMS_MAX:
+            # The oldest entry, and never the one just returned: the dict holds
+            # at least two here, and `host` is the last key inserted.
+            oldest = next(iter(upstreams))
+            try:
+                upstreams.pop(oldest).sock.close()
+            except OSError:
+                pass
         return up
 
     def _relay_response(self, up, conn, req):
@@ -1668,14 +1742,17 @@ class Listener:
         computed. The asymmetry is the point: the framing being defended
         against is the GUEST's, and this head was written by the host its
         policy authorised. It is parsed all the same, because where the body
-        ends is what says whether the next request can be read from here.
+        ends is what says whether the next request can be read from here --
+        but by _split_response_head, which is lenient where the request parser
+        refuses, so that being stricter than the web cannot turn an authorised
+        request into a dead connection.
         """
         interim = 0
         while True:
             head = up.read_head()
             if not head:
                 raise RequestUnreadable("the upstream closed before answering")
-            start, headers = _split_head(head)
+            start, headers = _split_response_head(head)
             fields = start.split(" ")
             if len(fields) < 2 or not fields[1].isdigit():
                 raise RequestUnreadable(

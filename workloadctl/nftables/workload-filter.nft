@@ -64,19 +64,27 @@ add set inet workload_filter wl_inspect_dst6 { typeof meta skuid . ip6 daddr . t
 add set inet workload_filter wl_inspect_self  { typeof meta skuid . ip  daddr ; counter ; }
 add set inet workload_filter wl_inspect_self6 { typeof meta skuid . ip6 daddr ; counter ; }
 
-# The host-side processes that RE-ORIGINATE a workload's egress, by control
-# group: the egress inspector and the synthesising responder. Each runs as its
-# workload's own user *on purpose*, so `meta skuid` cannot tell their traffic
-# from the guest's — and under default-deny that means the drop below catches
-# them too, leaving hostname policy permitting nothing at all. Observed on a
-# live VM under the retired proxy, and equally true of the inspector: the
-# guest's connection reaches it, it resolves the host, and its outbound SYN is
-# dropped.
+# The host-side process that RE-ORIGINATES a workload's egress, by control
+# group: the egress inspector. It runs as its workload's own user *on purpose*,
+# so `meta skuid` cannot tell its traffic from the guest's — and under
+# default-deny that means the drop below catches it too, leaving hostname
+# policy permitting nothing at all. Observed on a live VM under the retired
+# proxy, and equally true of the inspector: the guest's connection reaches it,
+# it resolves the host, and its outbound SYN is dropped.
 #
-# Named wl_egress_cg, not wl_proxy_cg. Through rung 1 the set held exactly one
-# member per workload, that workload's tinyproxy, and the old name was
-# accurate. Rung 2 deleted tinyproxy and left the set holding two members that
-# are not proxies at all.
+# ONE MEMBER PER WORKLOAD, and the synthesising responder is deliberately NOT
+# the second. It originates nothing: every answer it gives is built from memory
+# — synthesised to the inspector's address, or read out of the static map its
+# config named — so it opens no socket for this set to exempt. Its replies to
+# the guest are `ct direction reply` and `oif lo`, both accepted above. If it
+# ever gains an outbound socket it must be added here AND to wl_inspect_cg in
+# the other table, or it will be dropped by the default deny with no rule
+# naming it; nothing in the tree arms it today, and there is no
+# vm_resolve_cgroup to arm it with.
+#
+# Named wl_egress_cg, not wl_proxy_cg. Through rung 1 that one member was the
+# workload's tinyproxy and the old name was accurate. Rung 2 deleted tinyproxy
+# and left the set holding a member that is not a proxy at all.
 #
 # The control group is the discriminator that survives the shared uid. It is
 # assigned by systemd, is not something a guest can enter or forge, and is
@@ -270,8 +278,9 @@ add rule inet workload_filter output meta skuid @wl_filtered ct direction origin
 #
 # THIS CARVE-OUT SURVIVED RUNG 2 AND HAD TO. It was written for tinyproxy, and
 # deleting it with tinyproxy is the obvious mistake: the inspector resolves
-# host-side on every connection it authorises, permanently, and the responder
-# resolves the names it synthesises answers for. Both are in this set.
+# host-side on every connection it authorises, permanently. It is the one
+# member of the set — the synthesising responder looks nothing up, which is
+# why it is not here; see the set's own comment above.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg th dport 53 counter accept
 
 # The per-workload exceptions, ahead of the drops they except.

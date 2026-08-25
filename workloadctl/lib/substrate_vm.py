@@ -817,14 +817,35 @@ class VMSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"clear egress filter elements: {e}")
 
-            # There is no second helper to call for the redirect. The proxy's
-            # uid-keyed map element needed one here, because a stale element
-            # would have been inherited by whatever workload was issued that
-            # uid next and would have pointed it at the old workload's hostname
-            # policy. The inspector's elements are keyed the same way, but they
-            # are armed and withdrawn by the socket and service units' own
-            # Exec*Post -- workload-vm-filter down above clears what survives a
-            # unit that never got to stop.
+            # The redirect needs its own helper. workload-vm-filter's purge
+            # iterates NFT_SETS alone -- wl_filtered and the two allow sets --
+            # so it does not touch a single object the inspector owns: the
+            # wl_inspect4/6 DNAT maps (a different table entirely), the
+            # wl_inspect_dst/dst6 and wl_inspect_self/self6 guards, the
+            # wl_internal_ok4/6 exemptions, or the per-workload listener
+            # address on the dummy link.
+            #
+            # Those are normally withdrawn by the inspect units' own
+            # ExecStopPost, and normally that is enough. It is not enough here,
+            # because purge also deletes the user: if the stop path never ran
+            # (a hard kill, a failed stop, units unlinked before stop) the
+            # elements survive keyed on a uid get_next_uid will hand out again,
+            # and the next workload issued it -- one with `egress = "open"` and
+            # no inspector at all -- has its 80/443 DNATed into a listener that
+            # does not exist. It black-holes silently: vm_inspect_check returns
+            # None for an unfiltered VM, so `status`, `vm_egress` and
+            # `vm_inspect` all read correct while nothing reaches the network.
+            #
+            # Idempotent and best-effort, exactly like the filter sweep above:
+            # `down` tolerates every element already being gone, which is the
+            # expected state whenever the units did stop cleanly.
+            try:
+                subprocess.run(
+                    ["/usr/libexec/workloadctl/workload-vm-inspect",
+                     "down", self.config.name],
+                    capture_output=True, timeout=30, check=False)
+            except Exception as e:
+                failures.append(f"clear inspect redirect elements: {e}")
 
         return failures
 
@@ -838,7 +859,9 @@ class VMSubstrate(Substrate):
             lines.append(
                 "clear egress filter elements from inet workload_filter")
             lines.append(
-                "clear proxy redirect element from inet workload_proxy")
+                "clear inspect redirect elements from inet workload_proxy")
             lines.append(
-                "clear proxy egress exemption from inet workload_filter")
+                "clear inspect guard and internal exemption elements "
+                "from inet workload_filter")
+            lines.append("remove the inspector's listener address")
         return lines

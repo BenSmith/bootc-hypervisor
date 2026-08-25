@@ -1367,6 +1367,71 @@ class TestCapabilityMatrix(unittest.TestCase):
                 substrate.teardown(purge=True)
                 self.assertFalse(sock_dir.exists())
 
+    def test_vm_teardown_purge_sweeps_both_helpers(self):
+        """Purge must call the inspect helper as well as the filter helper.
+
+        The two sweep disjoint objects. workload-vm-filter's purge iterates
+        NFT_SETS alone; every object the redirect owns -- the DNAT maps in the
+        other table, the guard sets, the internal exemptions, the listener
+        address -- is workload-vm-inspect's. Purge deletes the user, so a stale
+        redirect element is inherited by whatever workload gets that uid next
+        and black-holes its 80/443 with every status read reporting healthy.
+        """
+        config = self._vm_config()
+        manager = MagicMock()
+        manager.get_all_configs.return_value = []
+        substrate = VMSubstrate(config, manager)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / config.name).mkdir()
+            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+                 patch.object(_vm_mod.subprocess, 'run',
+                              MagicMock()) as run:
+                self.assertEqual(substrate.teardown(purge=True), [])
+        helpers = {}
+        for call in run.call_args_list:
+            argv = call.args[0]
+            helpers[Path(argv[0]).name] = argv[1:]
+        self.assertEqual(helpers.get('workload-vm-filter'),
+                         ['down', config.name])
+        self.assertEqual(helpers.get('workload-vm-inspect'),
+                         ['down', config.name])
+
+    def test_vm_teardown_leaves_nft_alone_without_purge(self):
+        """Neither helper runs on a plain disable: the units' own stop path
+        owns the elements while the uid still belongs to this workload."""
+        config = self._vm_config()
+        manager = MagicMock()
+        manager.get_all_configs.return_value = []
+        substrate = VMSubstrate(config, manager)
+        with patch.object(_vm_mod.subprocess, 'run', MagicMock()) as run:
+            self.assertEqual(substrate.teardown(purge=False), [])
+        run.assert_not_called()
+
+    def test_vm_teardown_reports_inspect_sweep_failure_without_raising(self):
+        """A helper that cannot be run is collected, not raised, and does not
+        skip the rest -- the filter sweep still happens."""
+        config = self._vm_config()
+        manager = MagicMock()
+        manager.get_all_configs.return_value = []
+        substrate = VMSubstrate(config, manager)
+
+        def _run(argv, **kwargs):
+            if Path(argv[0]).name == 'workload-vm-inspect':
+                raise OSError('nft is missing')
+            return MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / config.name).mkdir()
+            with patch.object(_vm_mod, 'VM_SOCKET_DIR', Path(tmp)), \
+                 patch.object(_vm_mod.subprocess, 'run',
+                              MagicMock(side_effect=_run)) as run:
+                failures = substrate.teardown(purge=True)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('inspect', failures[0])
+        self.assertIn('nft is missing', failures[0])
+        self.assertIn('workload-vm-filter',
+                      [Path(c.args[0][0]).name for c in run.call_args_list])
+
     def test_vm_teardown_plan_mirrors_what_purge_removes(self):
         config = self._vm_config()
         manager = MagicMock()

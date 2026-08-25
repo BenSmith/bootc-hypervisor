@@ -94,6 +94,7 @@ import signal
 import socket
 import struct
 import sys
+import threading
 import time
 
 sys.dont_write_bytecode = True
@@ -139,6 +140,19 @@ TCP_MAX = 4096
 # reuse connections (RFC 7766) so this is not one query per connection, but an
 # idle one must not pin a slot forever.
 TCP_IDLE_TIMEOUT = 10.0
+
+# The total wall-clock a single TCP connection may live, in seconds. The idle
+# timeout alone does not bound one: settimeout() applies per recv, so a peer
+# that sends a byte every nine seconds, or that pipelines queries forever, is
+# never idle and never ends. Answers come from memory, so a real client is done
+# in milliseconds and this is only ever spent by something that is not one.
+TCP_LIFETIME = 30.0
+
+# How many TCP connections may be in flight at once. Past it a connection is
+# closed at accept rather than queued: a DNS client that loses a TCP attempt
+# retries, and UDP -- which is how essentially every lookup arrives -- is not
+# affected either way.
+TCP_MAX_CONNECTIONS = 16
 
 # How long the accept loop blocks before checking the clock and the stop flag.
 _SELECT_POLL = 0.5
@@ -311,6 +325,13 @@ class Counters:
     """
 
     def __init__(self, top_n: int = STATUS_TOP_N):
+        # TCP connections are answered on their own threads (see serve_stream),
+        # so every observation and the snapshot that reads them back are taken
+        # under one lock. BoundedCounts documents that its callers owe it this;
+        # the read is in here too, because a status file assembled from a
+        # half-applied observation reports figures that do not add up and is
+        # worse than one written a tick later.
+        self._lock = threading.Lock()
         self.synthesised = 0
         self.static = 0
         self.nodata = 0
@@ -323,15 +344,16 @@ class Counters:
 
     def record_answer(self, name: str, source: str, count: int,
                       on_a_list: bool) -> None:
-        if source == "static":
-            self.static += 1
-        elif count:
-            self.synthesised += 1
-        else:
-            self.nodata += 1
-        if not on_a_list:
-            self.unlisted += 1
-            self.unlisted_names.add(name or ".")
+        with self._lock:
+            if source == "static":
+                self.static += 1
+            elif count:
+                self.synthesised += 1
+            else:
+                self.nodata += 1
+            if not on_a_list:
+                self.unlisted += 1
+                self.unlisted_names.add(name or ".")
 
     def record_nodata(self) -> None:
         """A question that was never about an address.
@@ -342,22 +364,25 @@ class Counters:
         it as unlisted too would double every ordinary miss and drown the
         signal the unlisted figure exists to carry.
         """
-        self.nodata += 1
+        with self._lock:
+            self.nodata += 1
 
     def record_malformed(self) -> None:
-        self.malformed += 1
+        with self._lock:
+            self.malformed += 1
 
     def snapshot(self) -> dict:
-        return {
-            "queries": {
-                "synthesised": self.synthesised,
-                "static": self.static,
-                "nodata": self.nodata,
-                "malformed": self.malformed,
-            },
-            "unlisted": self.unlisted,
-            "unlisted_names": self.unlisted_names.snapshot(),
-        }
+        with self._lock:
+            return {
+                "queries": {
+                    "synthesised": self.synthesised,
+                    "static": self.static,
+                    "nodata": self.nodata,
+                    "malformed": self.malformed,
+                },
+                "unlisted": self.unlisted,
+                "unlisted_names": self.unlisted_names.snapshot(),
+            }
 
 
 def build_answer(query, policy, budget=None, counters=None):
@@ -508,30 +533,112 @@ def serve_datagram(sock, policy, counters=None):
         log(f"  WARNING: sendto failed: {exc}")
 
 
-def serve_stream(listener, policy, counters=None):
-    """Answer on one accepted TCP connection, then close it.
+class _TcpSlots:
+    """How many TCP connections are being answered right now.
 
-    Handled inline rather than in a thread: answers come from memory with no
-    I/O behind them, so a query cannot block on anything, and the only way to
-    hold the loop is to send nothing -- which the idle timeout ends.
+    A plain counter under a lock rather than a BoundedSemaphore, because the
+    figure is wanted for the log line that reports a refusal as well as for the
+    decision itself.
+    """
+
+    def __init__(self, limit=TCP_MAX_CONNECTIONS):
+        self._limit = limit
+        self._live = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._live >= self._limit:
+                return False
+            self._live += 1
+            return True
+
+    def give_back(self) -> None:
+        with self._lock:
+            self._live -= 1
+
+
+def serve_stream(listener, policy, counters=None, slots=None):
+    """Accept one TCP connection and answer it off the accept loop.
+
+    NOT inline, which is what this used to be. The argument for inline was that
+    answers come from memory, so a query cannot block on anything -- true, and
+    beside the point: the loop is held by the READ, not by the answer. This
+    process is the guest's only nameserver and the same loop serves UDP, so
+    every second one TCP peer holds it is a second in which nothing in the
+    guest can resolve anything and the status file stops being written. And a
+    peer holds it easily: settimeout() bounds a single recv, so a client
+    dribbling one byte inside the idle timeout, or pipelining queries forever
+    (RFC 7766 reuse is deliberately supported), never trips it. That is a
+    guest-local wedge of the guest's own DNS, which is bad enough -- but it is
+    also indistinguishable, from the host, from a responder that has died.
+
+    So the accept loop does exactly one thing: it takes the connection and
+    hands it to a thread. TCP_MAX_CONNECTIONS bounds how many exist, and
+    TCP_LIFETIME bounds how long each lives -- the two bounds the inline
+    version had no way to express.
     """
     try:
         conn, _peer = listener.accept()
     except OSError as exc:
         log(f"  WARNING: accept failed: {exc}")
         return
+    if slots is None:
+        slots = _TCP_SLOTS
+    if not slots.take():
+        # Closed, not queued. See TCP_MAX_CONNECTIONS.
+        log("  WARNING: TCP connection refused: "
+            f"more than {TCP_MAX_CONNECTIONS} already in flight")
+        conn.close()
+        return
+    # Daemon: a SIGTERM that ends the accept loop does not wait on connections
+    # it already took. The slot is taken before the thread exists, so a thread
+    # that cannot be started has to give it back here -- a leaked slot is never
+    # returned by anything, and each one lowers the effective ceiling for the
+    # life of the process.
+    try:
+        threading.Thread(target=_answer_stream,
+                         args=(conn, policy, counters, slots),
+                         daemon=True).start()
+    except RuntimeError as exc:
+        slots.give_back()
+        log(f"  WARNING: TCP connection refused: cannot start thread: {exc}")
+        conn.close()
+
+
+def _answer_stream(conn, policy, counters=None, slots=None):
+    """Answer every query on one connection until it ends or runs out of time."""
+    try:
+        handle_stream(conn, policy, counters)
+    finally:
+        if slots is not None:
+            slots.give_back()
+
+
+def handle_stream(conn, policy, counters=None, deadline=None):
+    """Answer queries on an accepted TCP connection, then close it.
+
+    `deadline` is a monotonic instant, defaulting to TCP_LIFETIME from now. It
+    is a LIFETIME, not an idle bound: the idle bound is per recv and a peer
+    that keeps sending is never idle. Each recv gets whichever of the two is
+    nearer, so an ordinary client is bounded by idleness and only a peer still
+    talking at the deadline is cut off by it.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + TCP_LIFETIME
     with conn:
-        conn.settimeout(TCP_IDLE_TIMEOUT)
         try:
             while True:
-                prefix = recv_exactly(conn, 2)
+                prefix = recv_exactly(conn, 2, deadline)
                 if prefix is None:
                     return
                 length = struct.unpack("!H", prefix)[0]
                 if length > TCP_MAX:
                     return
-                query = recv_exactly(conn, length)
+                query = recv_exactly(conn, length, deadline)
                 if query is None:
+                    return
+                if not _arm(conn, deadline):
                     return
                 try:
                     # No budget: TCP is where a truncated UDP answer is retried,
@@ -549,15 +656,45 @@ def serve_stream(listener, policy, counters=None):
             return
 
 
-def recv_exactly(conn, count):
-    """Read exactly `count` bytes, or None if the peer stopped sending."""
+def _arm(conn, deadline):
+    """Set the socket's timeout for the next read. False if time is up.
+
+    The send is armed by the same number the read before it set, which is what
+    keeps a peer that has stopped READING from holding the connection past the
+    deadline too.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        log(f"  TCP connection closed after {TCP_LIFETIME:.0f}s")
+        return False
+    conn.settimeout(min(TCP_IDLE_TIMEOUT, remaining))
+    return True
+
+
+def recv_exactly(conn, count, deadline=None):
+    """Read exactly `count` bytes, or None if the peer stopped sending.
+
+    The deadline is checked before EVERY recv, not once per message. A recv
+    that returns a single byte rearms the idle timeout, so a peer dribbling one
+    byte per recv would otherwise spend TCP_IDLE_TIMEOUT per byte of a message
+    it chose the length of -- hours, out of a bound that reads like ten
+    seconds. None means no lifetime, which is what a caller reading from a
+    socket it already bounded another way passes.
+    """
     chunks = bytearray()
     while len(chunks) < count:
+        if deadline is not None and not _arm(conn, deadline):
+            return None
         chunk = conn.recv(count - len(chunks))
         if not chunk:
             return None
         chunks += chunk
     return bytes(chunks)
+
+
+# One ceiling for the process, shared by every call into serve_stream. The
+# tests pass their own; nothing else needs to.
+_TCP_SLOTS = _TcpSlots()
 
 
 def serve(sockets, policy, counters=None, status_path=None, stop=None):
