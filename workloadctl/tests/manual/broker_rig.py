@@ -319,12 +319,23 @@ def toml_for(arm):
         # path crosses the filter chain, and an `open` arm would not show that
         # the loopback exemption is what lets it through.
         'egress = "filtered"',
-        f'allow = ["{DNS_ALLOW}"]',
     ]
+    # Every [vm.network] scalar first: the [[vm.network.allow]] table below
+    # ends that section, and TOML will not let it be reopened -- a scalar
+    # written after it is read as a key of the allow ENTRY instead.
     if arm.proxy:
         lines.append(f'hosts = ["{PROXY_HOST}"]')
     if arm.broker:
         lines.append("broker = true")
+    # The table form, not the bare string rung 2 retired. A rig carrying a
+    # retired spelling fails at enable with no VM ever booted, which looks
+    # nothing like the thing under test.
+    lines += [
+        "",
+        "[[vm.network.allow]]",
+        f'address = "{DNS_ALLOW}"',
+        'reason  = "the rig\'s guests need a resolver to reach at all"',
+    ]
     return "\n".join(lines) + "\n"
 
 

@@ -160,9 +160,86 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-Last green 2026-08-22, 17 assertions, on a bare-metal Fedora 44 KVM host —
-re-run after rung 1's two closing items landed, so it covers the tree as it
-stands and not only the state the two ordering defects were fixed in.
+**Last green 2026-08-25, 31 assertions**, on a bare-metal Fedora 44 KVM host
+with `semodule -DB` in effect. That run is what closed the two SELinux findings
+below; both were real, and neither was visible from `just test`.
+
+**Status files.** Both producers keep counters and write them into the VM's
+runtime directory, and that write is guaranteed never to raise: a failure is a
+journal warning and nothing else. So a confined domain with no grant on that
+directory produces precisely what a working one produces — green suite, green
+rig, no file. `status_files()` therefore looks for the file itself, checks the
+stamp is fresh rather than merely present, and dials again to confirm the
+counters *move* (a file written once at startup and never again is a producer
+whose every later write is failing). **What the first run actually found was worse than that.** The
+module carried NO `qemu_var_run_t` rules, so the listener could not read its own
+policy document — `Permission denied: /run/workload-vm/<name>/inspect.json` —
+exited 1, and the socket unit restart-looped. Every guest dial to 80/443 timed
+out. That is a rung-2 regression, not a T6 one: the policy file arrived and the
+grant did not, so on an enforcing host the transparent path had never worked.
+Loud, at least, unlike the status write. Note that no sibling grant includes
+`rename`, which `os.replace` needs — copying `workload-proxy.cil`'s block
+verbatim gives a half-grant that reaches the replace and fails there.
+
+**Domains.** `workload-vm-inspect-listener` has a filecon and a
+`type_transition` and should be `wlinspect_t`. `workload-vm-resolve` has
+neither, so it entrypoints `bin_t` from `init_t` with nothing to retype it and
+runs in PID 1's own domain — a process terminating guest-supplied DNS packets,
+outside the boundary `wlinspect_t` exists to draw. Measured on the host, it ran as
+`unconfined_service_t` — a process parsing guest-supplied DNS wire format,
+unconfined for as long as it had existed, with nothing anywhere failing.
+`security/workload-resolve.cil` now supplies `wlresolve_t`. On a permissive
+host every check in this group passes trivially, so the rig says so out loud
+rather than reporting a green it has not earned.
+
+Two things the rig got wrong on its first run, both fixed, both worth knowing
+before trusting a result here. It waited seconds for a status tick when
+`STATUS_INTERVAL` is 30s, so it kept reading the pre-loop write — zeros,
+freshly stamped, identical to a broken counter. And it demanded the status file
+be ABSENT after a restart, which fails a correct system: the inspect service is
+`PartOf=workload-<name>.service`, so a VM restart restarts the producer, which
+comes straight back up and writes a fresh snapshot with no dial needed. The
+property that actually matters is that the previous instance's COUNTS cannot
+survive, so the check now makes drops non-zero first and then asserts the
+post-restart file is absent or all-zero.
+
+**Stale status across a restart.** The runtime directory is
+`RuntimeDirectoryPreserve=yes` (so a restart does not yank the qmp and console
+sockets out from under the sidecars) and both producers are socket-activated,
+so after a restart the file on disk belongs to the previous boot with no
+process running to correct it. `written_at` cannot tell that apart from a live
+producer idle since the same moment. The arming helpers clear it, and this is
+the only check that can see that wiring — it needs a real preserved directory
+surviving a real restart. It asserts *before* anything dials the restarted
+guest, because one dial recreates the file for an innocent reason and the check
+would pass either way.
+
+### Harvesting the missing policy
+
+Do the `semodule -DB` pass *first*, not after several enforcing iterations.
+`workload-inspect.cil`'s own header records a rule that was invisible to four
+enforcing runs because shipped policy dontaudits it, and whose only symptom was
+a systemd error message naming no SELinux concept at all.
+
+```bash
+sudo semodule -DB                        # disable dontaudit, rebuild
+sudo python3 tests/manual/inspect_rig.py # provoke the denials
+sudo semodule -B                         # restore dontaudit when done
+```
+
+Read the denials out of `/var/log/audit/audit.log` directly. `ausearch -ts
+boot` has been observed reporting zero records on a host whose log plainly
+contains hundreds, so the rig itself remembers a byte offset into the file
+rather than asking `ausearch` for a time range. An empty result from
+`audit_denials()` means "nothing in the audited set" and is not proof the
+domain is complete.
+
+The rig's own config decayed, too: it emitted `allow = ["1.1.1.1:53"]`, the
+bare-string form rung 2 retired, and died at `enable` with no VM ever booted —
+a surface indistinguishable at a glance from the SELinux findings above. Only
+the generator's error message told them apart. `tests/test_manual_rig_configs.py`
+now parses and validates the TOML every rig generates, so that class of decay
+fails in `just test` rather than on a hardware trip.
 
 ## input_chain_rig.py — the two rung-1 measurements no unit test can make
 

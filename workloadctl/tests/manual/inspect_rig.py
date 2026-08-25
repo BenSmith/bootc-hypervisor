@@ -31,6 +31,35 @@ The inspect socket is ordered after workload-<name>-setup.service, which is
 what creates _wl-<name>. The generator computes the listener address from that
 user's uid, so a socket that starts before setup fails to resolve the user and
 takes the VM down with it. Every unit test passes with that ordering missing.
+
+WHAT THE STATUS-FILE CHECKS ARE FOR
+
+The counters both producers keep are written to a file in the VM's
+RuntimeDirectory, and the write is guaranteed never to raise -- a failure is a
+journal warning, nothing more. That guarantee is deliberate (a diagnostic must
+not take down the thing it is observing) and it means a confined domain with no
+grant on that directory produces exactly what a working one produces: a green
+suite, a green rig, and no file. The only way to tell those apart is to look for
+the file, which is what status_files() does.
+
+The stale-file check is the other half. The run directory is declared
+RuntimeDirectoryPreserve=yes so a restart does not yank the qmp and console
+sockets out from under the sidecars, and both producers are socket-activated --
+so after a restart the file on disk belongs to the PREVIOUS boot and no process
+is running to correct it. `written_at` cannot disambiguate: a file from a
+previous boot and a live process idle since that moment are the same file. The
+arming helpers clear it, and restart_clears_status() is the only check that can
+see that wiring, because it needs a real preserved directory surviving a real
+restart.
+
+WHAT THE DOMAIN CHECKS ARE FOR
+
+workload-vm-inspect-listener carries a filecon and a type_transition, so it
+should be wlinspect_t. workload-vm-resolve carries neither, so it entrypoints
+bin_t from init_t with nothing to retype it and runs in PID 1's own domain --
+a process terminating guest-supplied DNS packets, unconfined by the boundary
+wlinspect_t exists to draw. domains() states the expectation and lets the host
+answer; until a wlresolve_t module ships, that check failing IS the finding.
 """
 
 import argparse
@@ -67,6 +96,44 @@ PROBE_V6 = "2606:2800:220:1:248:1893:25c8:1946"
 # again; a host that already routes the prefix is left alone.
 PROBE_V6_NET = "2606:2800:220::/48"
 INSPECT_LINK = "workload-proxy"
+
+# Spelled out rather than imported from lib/vm.py, for the reason above the
+# port constants: a rig that computes both sides from one constant cannot
+# notice them drifting apart.
+VM_RUN_DIR = "/run/workload-vm"
+INSPECT_STATUS = "inspect-status.json"
+RESOLVE_STATUS = "resolve-status.json"
+
+# A name the responder will be asked for. It need not resolve to anything real
+# -- what is under test is that the query reaches the responder and moves its
+# counters, not what the answer says.
+RESOLVE_PROBE = "rig-probe.example.net"
+
+AUDIT_LOG = "/var/log/audit/audit.log"
+
+# The listener's STATUS_INTERVAL, spelled out for the usual reason. The file is
+# written once before the accept loop and then on this cadence, so a check that
+# dials and reads a few seconds later reads the PRE-LOOP write: zeros, freshly
+# stamped, indistinguishable from a producer whose counting is broken. The
+# first run of these checks failed exactly that way and the defect was the
+# rig's.
+STATUS_INTERVAL = 30.0
+STATUS_SETTLE = STATUS_INTERVAL + 6
+
+# Denials the inspect module documents as deliberately NOT granted: Python
+# probing whether stdout is a tty, and two `search` denials that are the domain
+# boundary working (it must not read the workload's certs or state tree).
+# Excluded by tcontext so that a NEW denial still fails the check -- filtering
+# on "any denial" would make this assertion permanently red and therefore
+# ignored.
+EXPECTED_DENIAL_TCONTEXTS = ("init_t", "cert_t", "container_file_t")
+
+# The domain each producer is expected to run in. wlresolve_t does not exist
+# yet; naming it here is the assertion, not a description of the host.
+EXPECTED_DOMAINS = {
+    "inspect": "wlinspect_t",
+    "resolve": "wlresolve_t",
+}
 
 
 @dataclass(frozen=True)
@@ -131,10 +198,26 @@ def toml_for(arm):
         "",
         "[vm.network]",
         'egress = "filtered"',
-        f'allow = ["{DNS_ALLOW}"]',
     ]
+    # Every [vm.network] scalar first: the [[vm.network.allow]] table below
+    # closes that section, and TOML will not let it be reopened.
+    #
+    # Only the proxy arm gets `hosts`, and it is not a naming accident: `hosts`
+    # is what vm_uses_proxy() keys on, so setting it on the plain arm does not
+    # give that arm an allowlist -- it stops being the plain arm. Measured, by
+    # doing it: six proxy variables appeared in the guest, the forwards returned
+    # 200 through tinyproxy, and the inspector never activated at all.
     if arm.proxy:
         lines.append(f'hosts = ["{PROXY_HOST}"]')
+    # The table form, not the bare string rung 2 retired. A rig carrying a
+    # retired spelling fails at enable with no VM ever booted, which looks
+    # nothing like the thing under test.
+    lines += [
+        "",
+        "[[vm.network.allow]]",
+        f'address = "{DNS_ALLOW}"',
+        'reason  = "the rig\'s guests need a resolver to reach at all"',
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -308,6 +391,277 @@ def probes():
     record(f"{p}: proxied HTTPS still works through the inspector", ok,
            parse_probe(r))
 
+    # THE ALLOWED PATH, and until this was written nothing had ever walked it.
+    # Every event this rig produced was a drop -- {"dropped": 5, "forwarded": 0,
+    # "spliced": 0} on a 31/31 run -- because the plain arm's allowlist is empty
+    # by construction and the proxy arm's traffic is exempted by wl_inspect_cg
+    # before the inspector sees it. So the inspector's forward and splice legs
+    # had never executed under SELinux, and the module grants those sockets
+    # neither `create` nor `connect` nor name_connect on any port.
+    #
+    # The one configuration that reaches them is a guest which IGNORES the proxy
+    # variables and dials an allowlisted host directly -- which is not a corner
+    # case, it is the adversarial case the whole rung exists for. lib/vm.py's
+    # validator says it outright: "the drop is what makes the allowlist binding
+    # -- it leaves a guest that ignores HTTPS_PROXY nowhere else to go". A guest
+    # that cooperates proves nothing about that.
+    unset = "env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "\
+            "-u no_proxy -u NO_PROXY "
+    for label, scheme, plane in (("cleartext forward", "http", "cleartext"),
+                                 ("tls splice", "https", "tls")):
+        mark = time.strftime("%Y-%m-%d %H:%M:%S")
+        time.sleep(1.2)
+        r = guest(p, f"{unset}curl -sS -m 25 -o /dev/null -w '%{{http_code}}' "
+                     f"{scheme}://{PROXY_HOST}/ ; echo ' rc='$?", timeout=60)
+        ok = r.returncode == 0 and r.stdout.strip()[:3] in ("200", "301", "302")
+        time.sleep(2)
+        log = journal_since(p, mark)
+        record(f"{p}: {label} of an allowlisted host, proxy bypassed", ok,
+               parse_probe(r) + "  | "
+               + (log.strip().splitlines() or ["<no journal line>"])[-1])
+
+
+def status_path(name, filename):
+    return Path(VM_RUN_DIR) / name / filename
+
+
+def read_status(name, filename):
+    """The parsed status document, or a string saying why there isn't one.
+
+    Returns (doc_or_None, detail). A missing file is the interesting failure
+    and gets its own detail string, because on an enforcing host with no
+    qemu_var_run_t grant for the producer's domain that is EXACTLY what a
+    denied write looks like from here -- the code catches OSError and logs.
+    """
+    p = status_path(name, filename)
+    if not p.exists():
+        return None, f"{p} does not exist"
+    try:
+        return json.loads(p.read_text()), str(p)
+    except (OSError, ValueError) as exc:
+        return None, f"{p} unreadable/unparseable: {exc}"
+
+
+def audit_mark():
+    """A byte offset into the audit log, or None if it cannot be read.
+
+    An offset rather than a timestamp on purpose: `ausearch -ts boot` is known
+    to report zero records on a host whose audit.log plainly contains hundreds,
+    so this rig reads the file directly and remembers where it started.
+    """
+    try:
+        return Path(AUDIT_LOG).stat().st_size
+    except OSError:
+        return None
+
+
+def audit_denials(mark, needles):
+    """Denials logged since `mark` mentioning any of `needles`.
+
+    NOT proof of absence when it comes back empty. systemd's own policy
+    dontaudits rules these domains genuinely need -- the inspect module's
+    header records one that was found only by running `semodule -DB` and
+    retrying, having survived four enforcing iterations invisibly. Treat an
+    empty list as "nothing in the audited set", and do the -DB pass by hand
+    before concluding a domain is complete.
+    """
+    if mark is None:
+        return []
+    try:
+        with open(AUDIT_LOG, "rb") as f:
+            f.seek(mark)
+            blob = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    out = []
+    for ln in blob.splitlines():
+        if "denied" not in ln or not any(n in ln for n in needles):
+            continue
+        tctx = ""
+        for tok in ln.split():
+            if tok.startswith("tcontext="):
+                tctx = tok
+        if any(f":{t}:" in tctx for t in EXPECTED_DENIAL_TCONTEXTS):
+            continue
+        out.append(ln)
+    return out
+
+
+def selinux_mode():
+    r = run(["getenforce"], check=False)
+    return (r.stdout or "").strip() or "unknown"
+
+
+def unit_label(unit):
+    """The SELinux label of a unit's main process, or a reason there isn't one.
+
+    Asked of systemd rather than found by scanning `ps`, because both producers
+    are socket-activated: a scan races their lifetime and reports "no such
+    process" for a unit that is merely between states, which reads as a policy
+    finding and is not. MainPID=0 is reported as the unit's own state, so a
+    restart-looping service says so instead of masquerading as a mislabelled
+    one.
+    """
+    pid = unit_prop(unit, "MainPID")
+    if not pid or pid == "0":
+        return None, (f"no main process (ActiveState="
+                      f"{unit_prop(unit, 'ActiveState')}/"
+                      f"{unit_prop(unit, 'SubState')})")
+    try:
+        return Path(f"/proc/{pid}/attr/current").read_text().strip("\x00\n"), None
+    except OSError as exc:
+        return None, f"pid {pid}: {exc}"
+
+
+def domains():
+    """Which domain does each producer actually run in?
+
+    Only meaningful with both producers running, so this is called after the
+    probes have activated them.
+    """
+    say("== domains ==")
+    mode = selinux_mode()
+    record("SELinux is enforcing", mode == "Enforcing", mode)
+    if mode != "Enforcing":
+        # Said plainly rather than skipped silently: every domain check below
+        # passes trivially on a permissive host, and a green run there proves
+        # nothing about the policy.
+        say("  (permissive/disabled: the domain and denial checks below cannot"
+            " fail, and a green result here is not evidence)")
+
+    plain = "wlri-plain"
+    for kind, expected in sorted(EXPECTED_DOMAINS.items()):
+        unit = f"workload-{plain}-{kind}.service"
+        label, why = unit_label(unit)
+        if label is None:
+            record(f"{unit}: has a running main process", False, why)
+            continue
+        # The label is user:role:type:level; the type is what the module names.
+        parts = label.split(":")
+        dom = parts[2] if len(parts) > 2 else label
+        record(f"{unit}: runs as {expected}", dom == expected,
+               f"{label} (type={dom})")
+
+
+def status_files(mark):
+    """Do the counters reach disk, do they carry real figures, and do they move?
+
+    Returns the inspector's pre-restart dispositions, which restart_clears_status
+    needs in order to recognise the previous instance's numbers.
+    """
+    say("== status files ==")
+    plain = "wlri-plain"
+
+    # A DNS query, to give the responder something to count. The name need not
+    # resolve; reaching the responder is the whole of the requirement.
+    guest(plain, f"getent hosts {RESOLVE_PROBE} >/dev/null 2>&1 || true",
+          timeout=40)
+    # And a dial the inspector must refuse, so `dropped` has something in it.
+    guest(plain, f"curl -sS -m 10 -o /dev/null http://{PROBE_V4}:{ORIG_CLEARTEXT}/"
+                 " || true", timeout=40)
+
+    # The wait is the point, not politeness: anything shorter reads the
+    # pre-loop write and reports zeros as a counting failure.
+    say(f"  waiting {STATUS_SETTLE:.0f}s for a status tick ...")
+    time.sleep(STATUS_SETTLE)
+
+    dispositions = None
+    for filename, producer in ((INSPECT_STATUS, "inspector"),
+                               (RESOLVE_STATUS, "responder")):
+        doc, detail = read_status(plain, filename)
+        record(f"{plain}: {producer} wrote its status file",
+               doc is not None, detail)
+        if doc is None:
+            continue
+        stamp = doc.get("written_at")
+        # Plausible, not merely present: `0` or a string would be a
+        # serialisation bug that a presence check waves through.
+        fresh = (isinstance(stamp, (int, float))
+                 and abs(time.time() - stamp) < 3600)
+        record(f"{plain}: {producer} status is stamped and fresh", fresh,
+               f"written_at={stamp!r}")
+
+    doc, detail = read_status(plain, INSPECT_STATUS)
+    if doc is not None:
+        dispositions = doc.get("dispositions") or {}
+        # The refused dial above must appear. A file full of zeros after real
+        # traffic is a producer writing its startup snapshot and nothing more,
+        # which is what a broken counter and a broken flush both look like.
+        record(f"{plain}: inspector counted the refused dial",
+               dispositions.get("dropped", 0) > 0, json.dumps(dispositions))
+        reasons = doc.get("drop_reasons") or {}
+        # And the reason map has to reconcile with it -- the two are written
+        # from one snapshot under one lock, so a disagreement is a real defect
+        # and not a sampling artifact.
+        record(f"{plain}: drop reasons reconcile with the drop total",
+               sum(reasons.values()) == dispositions.get("dropped", 0),
+               f"sum={sum(reasons.values())} dropped="
+               f"{dispositions.get('dropped')} {reasons}")
+
+    denials = audit_denials(mark, ("wlinspect_t", "wlresolve_t"))
+    # Named separately from the file checks: a missing file WITH denials is a
+    # policy gap, a missing file without them is something else, and the two
+    # want different next steps.
+    record("no unexpected denials for the producer domains", not denials,
+           "none beyond the documented residuals" if not denials
+           else f"{len(denials)}: {denials[0][:200]}")
+    return dispositions
+
+
+def restart_clears_status(before):
+    """Can the previous instance's figures survive into a new instance?
+
+    NOT "is the file absent after a restart". The inspect service is
+    PartOf=workload-<name>.service, so a VM restart restarts it too -- it comes
+    straight back up and writes its pre-loop snapshot, with no dial needed and
+    no ordering guarantee against the arming helper that clears the file. A
+    file is therefore expected to be there, and demanding absence fails a
+    correct system. What must NOT survive is the previous instance's COUNTS,
+    which is the whole of what clear_status is for and is unambiguous: a fresh
+    instance reads zero, and the pre-restart snapshot did not.
+    """
+    say("== stale status across a restart ==")
+    plain = "wlri-plain"
+
+    if not before or not before.get("dropped"):
+        record(f"{plain}: pre-restart counters are non-zero", False,
+               f"nothing to distinguish a stale file from a fresh one: {before}")
+        return
+    record(f"{plain}: pre-restart counters are non-zero", True, json.dumps(before))
+
+    run(["workloadctl", "restart", plain], timeout=300)
+    # No dial, no query, no exec: an exec would give a fresh instance real
+    # traffic to count and blur the distinction being drawn.
+    time.sleep(5)
+
+    for filename, producer in ((INSPECT_STATUS, "inspector"),
+                               (RESOLVE_STATUS, "responder")):
+        p = status_path(plain, filename)
+        if not p.exists():
+            record(f"{plain}: {producer} shows no previous-instance counters",
+                   True, "file absent")
+            continue
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError) as exc:
+            record(f"{plain}: {producer} shows no previous-instance counters",
+                   False, f"unreadable: {exc}")
+            continue
+        counts = doc.get("dispositions") or doc.get("queries") or {}
+        carried = [k for k, v in counts.items() if isinstance(v, int) and v]
+        record(f"{plain}: {producer} shows no previous-instance counters",
+               not carried,
+               "all zero" if not carried
+               else f"CARRIED {carried} from before the restart: {counts}")
+
+    # And the directory is genuinely preserved -- otherwise "all zero" could be
+    # systemd having wiped the tree, which would prove nothing about the
+    # arming helpers.
+    d = Path(VM_RUN_DIR) / plain
+    others = sorted(x.name for x in d.iterdir()) if d.is_dir() else []
+    record(f"{plain}: the run directory survived the restart",
+           bool(others), f"contains {others}")
+
 
 def teardown():
     say("== teardown ==")
@@ -331,7 +685,13 @@ def main():
         if not args.no_deploy:
             deploy()
         guards()
+        mark = audit_mark()
         probes()
+        # After the probes, so both producers have been socket-activated and
+        # have something to report. Before the restart, which clears them.
+        domains()
+        before = status_files(mark)
+        restart_clears_status(before)
     finally:
         if not args.keep:
             teardown()
