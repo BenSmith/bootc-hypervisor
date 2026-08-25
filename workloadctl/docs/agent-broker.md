@@ -513,3 +513,10 @@ kernel tables, the broker against a real upstream — which is what let two
 defects live in the *combinations*: a client recording the address it dialled
 rather than the one the broker is bound to, and a guest with both a proxy and a
 broker sending its broker request through the proxy.
+
+The second of those two is now structurally impossible rather than fixed. The
+per-workload proxy was retired on 2026-08-25 (ADR 008): a filtered guest is no
+longer told to route anything, so there is nothing for a broker request to be
+routed *through*, and the `NO_PROXY` entry that held the two apart is gone with
+it. The rig assertion that forced the old path is kept above as the record of
+what it caught.

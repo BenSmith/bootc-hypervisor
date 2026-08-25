@@ -1120,9 +1120,13 @@ This is why there is no longer a firewalld zone: on the two addresses that matte
 
 #### DNS
 
-passt intercepts the guest's DNS and forwards it to the host's resolver, so the guest is never told a real resolver address. The advertised address and the resolver behind it are derived from the host at unit start by `workload-vm-netdev` — the generator runs before the network is up, so it cannot compute them.
+passt intercepts the guest's DNS, so the guest is never told a real resolver address. Where the query goes then depends on `egress`, and the two cases are not variations of one thing.
 
-Two things follow. On a host running a stub resolver, the query is made *by the host*, which means guest DNS is invisible to uid-keyed egress policy; log at the host resolver rather than expecting to filter it. And `[vm.network].resolver = "none"` gives the guest no resolver at all — the only setting that closes DNS tunnelling, at the cost of breaking anything not proxy-aware, including cloud-init and package installs.
+**`egress = "filtered"` — the query reaches this workload's own synthesising responder and stops there.** Every A/AAAA, for any name, is answered with the workload's inspector address; everything else is NODATA. **Nothing is forwarded** — there is no upstream socket in the responder at all — so no query the guest emits ever leaves the host, and the host's own resolver never sees it. That is what makes DNS exfiltration *absent* rather than filtered, and it is the property to check first if anyone ever proposes "just add a fallback".
+
+**`egress = "open"` (and any `bridge` VM) — forwarded to the host's resolver**, as before. The advertised address and the resolver behind it are derived from the host at unit start by `workload-vm-netdev` — the generator runs before the network is up, so it cannot compute them. On a host running a stub resolver the query is then made *by the host*, which means guest DNS is invisible to uid-keyed egress policy; log at the host resolver rather than expecting to filter it.
+
+`[vm.network].resolver = "none"` gives the guest no resolver at all. It **kept its meaning and lost its coherence**: under the retired forward proxy a guest that could not resolve named hosts in a `CONNECT` instead, which is what made it immune to encrypted SNI, but under a transparent redirect the same guest can only dial literals — and a literal reaches the inspector with no name to match and is dropped. It is also no longer what closes DNS tunnelling; synthesis already did that. `validate` errors if it is set alongside `.hosts`, `.internal`, or an `.allow` entry written by name, and warns even in the one coherent case (a workload reaching only address-keyed `allow` entries).
 
 #### Published ports
 
@@ -1149,14 +1153,14 @@ egress = "filtered"
 
 [[vm.network.allow]]
 address = "192.168.0.10:22"
-reason  = "backup target; SSH, not proxyable"
+reason  = "backup target; SSH, so hostname policy cannot carry it"
 ```
 
 Two things about this are easy to get wrong:
 
 - **`allow` is a table, and every entry carries a `reason`.** The bare-string form (`allow = ["192.168.0.10:22"]`) is refused, with an error naming the shape to write instead. The entries become elements of a set keyed on `ip daddr` / `ip6 daddr`, so an entry written as a **name** is resolved on the host once at start — legal now that the guest's resolver is a static map served host-side, where before a moved record left the element silently wrong for the life of the VM. A name that does not resolve at start is an error, not an unarmed element: `allow` is the only path to a named service on an unredirected port, so a failure to arm presents as a hang rather than a refusal.
 - **Ports 80 and 443 are refused in `allow`.** They are redirected into the workload's egress inspector before the filter chain consults the list, so the element would be armed and never matched while the config read as if the destination were exempt. The redirect keys on the workload uid and the port alone, so this holds for a name exactly as for an address. Name those hosts in `.hosts`. See [Hostname Egress Policy](#hostname-egress-policy).
-- **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses) or `.hosts` (names, through its own proxy). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Step 4 was expected to retire this rule by giving `"filtered"` an implicit allow to the proxy, and did not — a workload only gets a proxy when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
+- **`egress` has to be stated.** It defaults to `"filtered"`, and a filtered VM needs somewhere to go: either `.allow` (addresses and unredirected ports) or `.hosts` (names over HTTP/HTTPS, through its own egress inspector). `"filtered"` with neither is a validation error rather than a VM that boots and can reach nothing. Say `egress = "open"` for a VM that should not be filtered; the shipped bundles do, with their reasons inline. Hostname policy was twice expected to retire this rule by giving `"filtered"` an implicit allow, and has not: a workload gets an inspector only when `hosts` is non-empty, so a bare `[vm.network]` still describes a VM that can reach nothing.
 
 `workloadctl diagnose <name>` reports whether the policy is actually in force. The case it exists for is a config that says `filtered` while the uid is absent from the set: that VM is wide open, and every other signal — unit active, guest online, `status` green — looks correct. It also prints the drop counter, which is **shared across every filtered VM** rather than per-workload; there is one drop rule, so the number is a host total.
 
@@ -1306,19 +1310,24 @@ sudo semodule -i /usr/share/workloadctl/workload-vm.cil
 sudo restorecon /usr/libexec/virtiofsd
 ```
 
-The same caveat applies to the proxy's domain, which ships alongside it:
+The same caveat applies to the two egress-inspection domains, which ship
+alongside it:
 
 ```bash
-sudo semodule -i /usr/share/workloadctl/workload-proxy.cil
-sudo restorecon /usr/bin/tinyproxy
+sudo semodule -i /usr/share/workloadctl/workload-inspect.cil
+sudo semodule -i /usr/share/workloadctl/workload-resolve.cil
 ```
+
+Neither has a binary to relabel — both listeners live in workloadctl's own
+private libexec directory and are entered from their units, not from a file
+context on a system path.
 
 ### Hostname Egress Policy
 
 Kernel rules match addresses; policy is usually written about names.
-`[vm.network].hosts` closes that gap by giving the workload its own HTTP forward
-proxy, which reads `CONNECT host:443` in plaintext before any TLS handshake — so
-it allowlists the *name*, with no interception and no CA:
+`[vm.network].hosts` closes that gap with a **transparent egress inspector**: a
+per-workload listener the guest's own traffic is redirected into, which reads
+the name the guest asked for and matches it against the list.
 
 ```toml
 [vm.network]
@@ -1327,45 +1336,60 @@ hosts  = ["example.com", "*.fedoraproject.org"]
 
 [[vm.network.allow]]              # non-HTTP exceptions only; not 80 or 443
 address = "192.168.0.10:22"
-reason  = "backup target; SSH, not proxyable"
+reason  = "backup target; SSH, so hostname policy cannot carry it"
 ```
 
 Resolving names into addresses at rule-install time is the alternative, and it
 is worse in three ways: it races DNS, it breaks on CDN churn, and it opens
-everything sharing an address.
+everything sharing an address. Enforcement here is at the **name**, on every
+connection.
+
+**The guest is told nothing, and cannot opt out.** This is the difference from
+what shipped through rung 1, which was a per-workload tinyproxy the guest was
+*configured* to use through `http_proxy`/`https_proxy` at an advertised literal.
+That design's weakness was never the filtering — it was the configuring. A proxy
+is advisory: a process free to ignore the variables simply did not use it, and
+the default-deny chain could only turn that into a *failure*, never into a
+filtered request. Every language runtime, static binary and vendored HTTP client
+was one more place the variables had to be honoured. A redirect has no such
+surface. If you are carrying an older guest or seed forward, **delete its proxy
+exports** — they name an endpoint where nothing listens, and they do not degrade
+gracefully: a client that honours them fails outright while every client that
+ignores them works, so the guest ends up half broken in a way that looks like a
+flaky network.
 
 How it fits together:
 
-- One **tinyproxy instance per workload**, running as `_wl-<name>`, listening on
-  the workload's own management address — which no guest can reach.
-- Every guest is told the same proxy address, **`192.0.2.1:3128`** on a
-  dedicated `workload-proxy` dummy link, and an nftables redirect keyed on the
-  workload uid decides which instance it lands on. Cross-workload proxy access
-  is therefore structurally unavailable rather than denied by rule.
-- The endpoint is an **IP literal**, so the proxy path has no DNS dependency —
-  which matters, because DNS is what a compromised guest would attack to escape
-  hostname policy.
-- CONNECT is permitted to **443 only**. Anything else belongs in `allow`.
+- One **inspector per workload** (`workload-<name>-inspect.service`), running as
+  `_wl-<name>`, **socket-activated**: it starts when the guest first dials and
+  stops with the VM. It listens on an address on a dedicated `workload-proxy`
+  dummy link that no guest can reach.
+- An nftables **DNAT keyed on the workload uid** sends TCP 80 and 443 to *that
+  workload's* listener. Cross-workload reach is therefore structurally
+  unavailable rather than denied by rule: there is no address a guest could
+  dial to land on someone else's inspector.
+- **HTTP** is matched on the `Host` header, read before anything is forwarded —
+  a match is forwarded, a miss is answered `403`. **HTTPS** is matched on the
+  SNI in the ClientHello and then **spliced**: the same bytes are replayed
+  upstream, nothing is decrypted, and no CA goes into the guest. See
+  `[vm.network].tls`.
+- A connection carrying **no readable name** is dropped rather than guessed at —
+  a literal dialled with no `Host` header, or a non-TLS byte stream on 443, has
+  nothing to match a pattern against.
+- Only **80 and 443** are redirected. Anything else belongs in `allow`.
 
-**The proxy is advisory on its own; the default-deny chain is what binds it.** A
-guest process free to ignore `HTTPS_PROXY` does — and is then dropped by the
-kernel, because `egress = "filtered"` permits nothing the allowlists do not name.
-Verified: a guest that bypasses the proxy entirely cannot reach an allowlisted
-host.
+**`hosts` still requires `egress = "filtered"`**, and `validate` rejects the pair
+otherwise — but for a different reason than it had under the proxy. Under
+`"open"` nothing is redirected at all: the guest dials 443 and the packet leaves,
+so the list would be read by a process no connection ever reaches while the
+workload looked configured. It joins `hosts` with `bridge` (a bridged guest
+sends from its own LAN address, with no host socket for the uid to key on) and
+`hosts = ["*"]` (`egress = "open"` spelled so nobody notices in review).
 
-Which is why **`hosts` requires `egress = "filtered"`**, and `validate` rejects
-the pair otherwise. Under `"open"` there is no drop, so the allowlist would bind
-only the guests that choose to be bound — while still standing up a daemon that
-parses guest-controlled HTTP, with its own SELinux domain and an egress
-exemption the guest's uid does not get. That is attack surface bought for a
-control that does not hold, so the combination is refused rather than built. It
-joins `hosts` with `bridge` (no uid in that guest's path) and `hosts = ["*"]`
-(`egress = "open"` spelled so nobody notices in review).
-
-**Only the built-in cloud-config sets the guest's proxy environment.** A
-workload supplying its own `[vm.cloud_init].user_data_file` owns its guest
-configuration; set `http_proxy`/`https_proxy` to `http://192.0.2.1:3128`
-yourself, or the guest will simply be dropped by the filter.
+**Nothing is asked of a custom seed.** A workload supplying its own
+`[vm.cloud_init].user_data_file` used to have to set the proxy environment
+itself or be dropped by the filter. There is no guest-side half any more, so a
+hand-written seed and the built-in one are filtered identically.
 
 Patterns match the hostname only, so a scheme, a path or a port in a `hosts`
 entry is a validation error rather than a pattern that silently matches nothing.
@@ -1379,17 +1403,23 @@ hosts = ["fedoraproject.org", "*.fedoraproject.org"]
 ```
 
 Verified on a live filtered VM: with only the wildcard, `download.fedoraproject.org`
-is proxied and `fedoraproject.org` is refused. This is worth knowing because the
+is reached and `fedoraproject.org` is refused. This is worth knowing because the
 refusal is a 403 — identical to the one an unlisted host gets, so it reads as a
 policy decision rather than a pattern that didn't reach as far as intended.
 
-**The proxy will not open a connection to an internal address.** Hostname policy
-is checked against the name; the address it resolves to was, for a while,
-unchecked — and the proxy's egress exemption is by control group, so it applied
-to every destination. An allowlisted name pointing into RFC 1918, loopback or
-link-local space was therefore reachable from a VM reporting itself confined.
-Two rules ahead of the exemption now drop connections the proxy *opens* to
-`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `100.64/10`,
+**Unlisted names do not resolve.** Under a filtered workload the guest's only
+nameserver is this workload's synthesising responder, which answers for the
+names policy knows about. That is a second, earlier refusal than the
+inspector's 403, and it is why a guest probing for an unlisted host sees a
+lookup failure rather than a connection that gets as far as being denied.
+
+**The inspector will not open a connection to an internal address.** Hostname
+policy is checked against the name; the address it resolves to was, for a while,
+unchecked — and the re-originator's egress exemption is by control group, so it
+applied to every destination. An allowlisted name pointing into RFC 1918,
+loopback or link-local space was therefore reachable from a VM reporting itself
+confined. Two rules ahead of the exemption now drop connections the inspector
+*opens* to `10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `100.64/10`,
 `0.0.0.0/8` and the IPv6 equivalents (`::1`, `fc00::/7`, `fe80::/10`).
 
 Nothing about this is DNS rebinding — the guest never controls the resolution.
@@ -1400,10 +1430,14 @@ instance, `169.254.169.254` is the one that matters.
 
 Two consequences to know:
 
-- **The proxy's own name resolution is exempt**, by destination port 53 only. It
-  has to be: tinyproxy resolves through whatever the host uses, which is inside
+- **Host-side name resolution is exempt**, by destination port 53 only. It has
+  to be: the inspector resolves through whatever the host uses, which is inside
   one of these ranges either way — a stub resolver on `127.0.0.53` or a box on
-  the LAN. The residual is an internal service answering HTTP on port 53.
+  the LAN. This carve-out was written for the retired proxy and **had to
+  survive** it: the inspector resolves on every connection it authorises, and
+  the responder resolves the names it synthesises for, so removing it with the
+  proxy would have dropped every lookup both of them make. The residual is an
+  internal service answering HTTP on port 53.
 - **`internal` is the escape hatch, for a name reached over HTTP or HTTPS.** An
   allowlisted host that is *supposed* to resolve into private space is named
   there, with the reason it may:
@@ -1422,16 +1456,16 @@ Two consequences to know:
 - **`allow` is the escape hatch on every other port.** A site that needs an
   internal service on a port no redirect touches names it as an address (or a
   name) and a port, and the allow rules are evaluated ahead of these drops. That
-  grant is not proxy-specific — it is the same scoped grant the guest's own
+  grant is not inspector-specific — it is the same scoped grant the guest's own
   direct path gets, which is the honest description of what it opens.
 
 `workloadctl diagnose <name>` reports whether the redirect is actually armed —
-the proxy can be listening while the guest has no path to it, and every other
+the socket can be bound while the guest has no path to it, and every other
 signal looks correct when that happens.
 
-The [filtered VM walkthrough](vm-egress-walkthrough.md) traces a single CONNECT
-from the guest through the redirect, the proxy's allowlist and the proxy's own
-exempted egress, alongside the two paths that are refused.
+The [filtered VM walkthrough](vm-egress-walkthrough.md) traces a single request
+from the guest through the redirect, the inspector's allowlist and the
+inspector's own exempted egress, alongside the paths that are refused.
 
 ### Reaching a Credential Broker
 
@@ -1451,12 +1485,16 @@ maps that to whatever base-URL variable it reads. The variable is deliberately
 neutral: clients disagree about the spelling, so naming one here would be wrong
 for every other.
 
-The same mechanism as the hostname proxy, at a different port on the same
+The same uid-keyed rewrite hostname policy uses, at a different port on the same
 advertised address: every guest dials one endpoint and the kernel rewrites the
-destination per uid. A workload can have both, and when it does the advertised
-address is in the guest's `NO_PROXY` — otherwise a client honouring proxy
-variables would ask the proxy to fetch the broker, and the proxy's allowlist
-holds internet hostnames rather than this address. **A workload without the key gets no translation, and
+destination per uid. A workload can have both, and they no longer interact.
+Through rung 1 they did, awkwardly: the guest was configured with proxy
+variables, so the advertised address had to be listed in its `NO_PROXY` or a
+client honouring them would ask the proxy to fetch the broker — and the proxy's
+allowlist held internet hostnames, not this address. That whole hazard is gone
+with the proxy. The broker's port is not one of the two the redirect touches,
+and there is nothing in the guest telling it to route requests anywhere.
+**A workload without the key gets no translation, and
 nothing is listening where it would dial** — so one VM cannot reach another's
 broker, and that is a property of the topology rather than a rule that could be
 misconfigured.

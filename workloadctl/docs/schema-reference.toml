@@ -283,12 +283,27 @@ name = "schema-reference"
 #                resolver the query is made BY THE HOST, so guest DNS is
 #                invisible to uid-keyed egress policy; log at the host
 #                resolver instead.
-#   "none" — the guest gets no resolver at all. It breaks anything not
-#            proxy-aware, including cloud-init, package installs and NTP. For
-#            purpose-built guests. Under egress = "filtered" this is no longer
-#            what closes DNS tunnelling — synthesis already makes that channel
-#            absent rather than filtered — so "none" now buys only a guest
-#            that cannot look names up at all.
+#   "none" — the guest gets no resolver at all. It breaks anything that needs
+#            to look a name up, including cloud-init, package installs and NTP.
+#            For purpose-built guests.
+#
+#            IT KEPT ITS MEANING AND LOST ITS COHERENCE. Under the retired
+#            forward proxy a guest that could not resolve was in a strong
+#            position: it named hosts in a `CONNECT` instead, which is what
+#            made it immune to encrypted-SNI. Under a transparent redirect the
+#            same guest can only dial LITERALS, and a literal reaches the
+#            inspector with no name to match — so it is dropped, and every
+#            name-based destination is unreachable while the workload starts
+#            clean and reports healthy. It is also no longer what closes DNS
+#            tunnelling: synthesis makes that channel absent rather than
+#            filtered, whatever this key says.
+#
+#            The one coherent use left is a workload whose destinations are all
+#            address-keyed .allow entries — those reach the filter chain
+#            without touching the inspector. `validate` ERRORS if .hosts,
+#            .internal, or an .allow entry written by NAME is set alongside it,
+#            and WARNS even in the coherent case, because the same file read six
+#            months later looks like a workload that simply lost DNS.
 # resolver = "host"
 #
 # REQUIRED IN PRACTICE: how this VM's outbound traffic is treated.
@@ -303,7 +318,7 @@ name = "schema-reference"
 #                drop rule (which is set-guarded) never sees this VM.
 #
 # The default is "filtered", and a filtered VM needs somewhere for its traffic
-# to go: either .hosts (HTTP/HTTPS, through its own proxy) or .allow
+# to go: either .hosts (HTTP/HTTPS, through its own egress inspector) or .allow
 # (everything else). "filtered" with neither is a VALIDATION ERROR rather than
 # a VM that boots and can reach nothing. That is deliberate — a config reading
 # "filtered" while the VM is in fact wide open is the exact misreport this
@@ -313,40 +328,60 @@ name = "schema-reference"
 # Optional: hostnames this VM may reach over HTTP and HTTPS.
 # Type: array of hostnames or fnmatch patterns
 # Default: []
-# Setting this gives the workload its own tinyproxy instance, listening on the
-# workload's own management address — which no guest can reach — and reached
-# through a redirect keyed on the workload uid, so cross-workload proxy access
-# is structurally unavailable rather than denied by rule. Every guest is told
-# the same proxy address (192.0.2.1:3128, on a dedicated `workload-proxy` dummy
-# link), and the redirect decides which instance it lands on.
+# Setting this gives the workload its own egress inspector: a socket-activated
+# listener on an address only this workload's traffic is redirected to, running
+# as _wl-<name> and confined to its own SELinux domain. The guest is told
+# nothing. It dials 80 and 443 the way it would on any network, and a DNAT keyed
+# on the workload uid lands the connection on that workload's inspector, which
+# reads the name and matches it against the patterns here.
 #
-# Why a proxy and not a resolved allowlist: an HTTP forward proxy reads
-# `CONNECT host:443` in plaintext before any TLS handshake, so it allowlists
-# the NAME with no interception and no CA. Resolving names to addresses at
-# rule-install time instead races DNS, breaks on CDN churn, and opens
-# everything sharing an address.
+# THE GUEST IS NOT ASKED TO COOPERATE. That is the difference from the forward
+# proxy this replaced (through rung 1 a guest was configured with http_proxy /
+# https_proxy at an advertised literal). A proxy is advisory: a process free to
+# ignore the variables simply did not use it, and the default-deny chain could
+# only turn that into a failure — never into a filtered request. Every language
+# runtime, static binary and vendored HTTP client was one more place the
+# variables had to be honoured. A redirect has no such surface, and there is
+# nothing in the guest to configure, misconfigure or strip.
+#
+# WHERE THE NAME COMES FROM, per plane:
+#   HTTP  — the Host header, read before anything is forwarded. A match is
+#           forwarded upstream; a miss is answered 403 to the guest.
+#   HTTPS — the SNI in the ClientHello. A match is SPLICED: the same bytes are
+#           replayed upstream unmodified, nothing is decrypted and no CA is
+#           involved. See .tls below.
+# Either way enforcement is at the NAME and never at an address, which is what
+# resolving the list to addresses at rule-install time could not do — that races
+# DNS, breaks on CDN churn, and opens everything sharing an address.
+#
+# A connection carrying no readable name is dropped, not guessed at: a literal
+# dialled with no Host header, or a non-TLS byte stream on 443, has nothing to
+# match a pattern against.
 #
 # Patterns match the hostname only, so no scheme, no path and no port — those
-# are rejected by `validate` rather than silently matching nothing. CONNECT is
-# permitted to 443 alone; use .allow for any other port.
+# are rejected by `validate` rather than silently matching nothing. Ports 80 and
+# 443 are the only ones redirected; use .allow for anything else.
 #
 # fnmatch, NOT a DNS suffix match. `*.example.com` requires something before the
 # dot, so it does not cover the bare `example.com` — list the apex separately
 # when you want both, as the example below does. Measured on a live VM: with
-# ["*.fedoraproject.org"], download.fedoraproject.org is proxied and
+# ["*.fedoraproject.org"], download.fedoraproject.org is reached and
 # fedoraproject.org is refused, and the refusal is a 403 indistinguishable from
 # any other policy denial.
 #
-# REQUIRES egress = "filtered", and validate rejects the pair otherwise. The
-# proxy is advisory on its own — a guest process free to ignore HTTPS_PROXY does
-# — and the default-deny chain is what leaves such a process nowhere else to go.
-# Under "open" there is no drop, so the allowlist would bind only cooperative
-# guests while still costing a daemon that parses guest-controlled HTTP. Set
-# egress = "filtered" to enforce the list, or drop .hosts to run without a proxy.
+# REQUIRES egress = "filtered", and validate rejects the pair otherwise. Under
+# "open" nothing is redirected at all — the guest dials 443 and the packet
+# leaves — so the list would be read by a process no connection ever reaches
+# while the workload looked configured. Set egress = "filtered" to enforce the
+# list, or drop .hosts to run without hostname policy.
 #
-# Only the built-in cloud-config sets the proxy environment — a workload
-# supplying its own [vm.cloud_init].user_data_file owns its guest configuration
-# and must set http_proxy/https_proxy itself.
+# NOTHING IS ASKED OF A CUSTOM SEED for this key. A workload supplying its own
+# [vm.cloud_init].user_data_file used to have to set the proxy environment
+# itself; there is no guest-side half any more, so a hand-written seed and the
+# built-in one are filtered identically. If you are copying an older seed
+# forward, DELETE its proxy exports — they name an endpoint where nothing
+# listens, and a client that honours them fails while every client that ignores
+# them works.
 # hosts = ["example.com", "*.fedoraproject.org"]
 #
 # WARNED: a wildcard whose parent is a registration domain anyone can create
@@ -465,7 +500,7 @@ name = "schema-reference"
 #
 # [[vm.network.allow]]
 # address = "192.168.0.10:22"
-# reason  = "backup target; SSH, not TLS, and not proxyable"
+# reason  = "backup target; SSH, so hostname policy cannot carry it"
 #
 # [[vm.network.allow]]
 # address = "git.local:2222"
@@ -545,20 +580,31 @@ name = "schema-reference"
 #
 # Optional: Declare that this seed handles a concern the built-in cloud-config
 # would otherwise have covered, suppressing the matching completeness check.
-# Type: list of strings; valid entries: "proxy", "mounts".
+# Type: list of strings; valid entries: "ca", "mounts".
 # seed_provides = ["mounts"]
 #
 # Because a custom user-data replaces the built-in config rather than adding to
-# it, two things the TOML implies stop happening unless this file does them:
-# the guest's proxy environment (whenever [vm.network] sets `hosts`) and the
-# mounts for [vm].volumes. Both fail silently — filtered egress DROPS
-# unproxied traffic, so the guest hangs rather than errors; an unmounted volume
-# leaves the guest writing to the system disk at a path believed persistent,
-# which the next disk rebuild discards. Provisioning therefore refuses a seed
-# that needs either and lacks it, and names what is missing. Use seed_provides
-# only when the guest image genuinely carries the configuration already (a
-# mount baked into its own /etc/fstab, say) — it silences the check, it does
-# not satisfy the requirement.
+# it, what the TOML implies stops happening unless this file does it. The live
+# case is "mounts", for [vm].volumes: an unmounted volume leaves the guest
+# writing to the system disk at a path believed persistent, which the next disk
+# rebuild discards — silent, and not visible until the rebuild. Provisioning
+# refuses a seed that needs it and lacks it, and names what is missing. Use
+# seed_provides only when the guest image genuinely carries the configuration
+# already (a mount baked into its own /etc/fstab, say) — it silences the check,
+# it does not satisfy the requirement.
+#
+# "proxy" WAS one of these, and a seed that still declares it is REFUSED BY
+# NAME rather than ignored. There is no guest-side proxy configuration left to
+# provide: hostname policy is a redirect the guest is not told about, so a
+# custom seed and the built-in one are filtered identically and neither owes
+# anything for [vm.network].hosts. The refusal is by name so an operator
+# carrying an older TOML forward is told what happened, instead of reading a
+# generic "unknown entry" and hunting a typo they did not make.
+#
+# "ca" is accepted and its check is not armed: the concern it names is the
+# trust anchor a decrypting inspector would be presented under, and nothing
+# mints one yet. Declaring it today suppresses nothing; it is accepted so that
+# a seed written against it does not have to change when it does.
 #
 # Substitution rules applied to the user_data_file (in order):
 #   ${SECRET:name}  - Decrypted via `systemd-creds decrypt` from
@@ -679,7 +725,7 @@ name = "schema-reference"
 #
 # [[vm.network.allow]]              # addresses or names, on any port but
 # address = "192.168.0.10:22"       # 80 and 443, which are redirected
-# reason  = "backup target; SSH, not TLS, and not proxyable"
+# reason  = "backup target; SSH, so hostname policy cannot carry it"
 #
 # [vm.cloud_init]
 # user_data_file = "./cloud-init/user-data"

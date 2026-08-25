@@ -5,7 +5,7 @@
 - Step 1 (2026-08-09): the passt netdev, the schema, and the SELinux label work.
 - Step 2 (2026-08-10): the nftables skeleton and the `egress`/`allow` schema.
 - Step 3 (2026-08-10): QEMU confined as `svirt_t`, and the virtiofsd domain.
-- Step 4 (2026-08-10): the per-workload proxy, the `hosts` schema key, and its domain.
+- Step 4 (2026-08-10): the per-workload proxy, the `hosts` schema key, and its domain. **The proxy was retired on 2026-08-25** and replaced by a transparent, uid-keyed redirect into a per-workload egress inspector — see [ADR 008](008-transparent-egress-inspection.md). `hosts` and everything this ADR says about *why* hostname policy is uid-keyed survive it; the mechanism that reads the name does not.
 - Step 5 (2026-08-11): `workloadctl pcap`, both vantages, and the timestamp correction.
 
 **Date:** 2026-08-09.
@@ -53,7 +53,7 @@ Three values derive from the uid with no registry:
 
 | Derived value | Formula | Used for |
 |---|---|---|
-| Management address | `127.128.0.0 + (uid - UID_MIN)` | inbound SSH, proxy listener |
+| Management address | `127.128.0.0 + (uid - UID_MIN)` | inbound SSH |
 | nflog group | `1000 + (uid - UID_MIN)` | per-workload packet capture |
 | Policy key | the uid itself | `meta skuid` in nftables |
 
@@ -84,7 +84,8 @@ test until now asserted only the string.
 The per-VM schema gains `[vm.network]` with `ports`, `egress`
 (`"filtered"` default / `"open"`), `allow`, `hosts`, `outbound_if`, and
 `resolver` (`"host"` default / `"none"`). `allow` is address policy; `hosts`
-is hostname policy, served by the per-workload proxy step 4 added.
+is hostname policy, served by the per-workload proxy step 4 added — since
+retired for a transparent inspector, ADR 008.
 `[vm.network].bridge` is retained as the unfiltered escape hatch: a VM that
 names an operator-provided bridge attaches directly, takes a real LAN
 identity, and is not filtered — by design.
@@ -148,6 +149,15 @@ per-workload proxy step 4 added; `allow` is for the non-HTTP exceptions a
 proxy cannot carry, and those are overwhelmingly single hosts (ssh, a
 database, an NTP peer) where an address is the honest way to say it.
 
+> **Reversed 2026-08-25 (ADR 008).** `allow` now accepts a name with a port
+> (`"git.local:2222"`), resolved on the host once at start. The staleness
+> argument above was never wrong — it is simply a cost now paid on purpose,
+> because the guest's resolver is a static map served host-side, so a `allow`
+> destination named by address had no way to be reached by name at all. The
+> conclusion that survives is the second half: hostname *policy* is `hosts`,
+> because that is the path where the name is re-read on every connection
+> rather than pinned once.
+
 **`egress = "filtered"` with nothing reachable is a validation error.** The
 choices were to default to `"open"` and tighten later, to accept `"filtered"`
 and let the VM boot unreachable, or to refuse the combination. Refusing it was
@@ -167,6 +177,12 @@ nothing being indistinguishable from a broken one. A bare `[vm.network]`
 therefore still describes a VM that can reach nothing. The refusal is permanent,
 with its trigger widened rather than removed: `"filtered"` is an error when
 `allow` and `hosts` are *both* empty.
+
+The transparent inspector that replaced the proxy (ADR 008) did not retire it
+either, and for the same reason one level down: a workload gets an inspector
+only when `hosts` is non-empty. Twice now the mechanism changed and the argument
+did not, which is the sign it belongs to the schema rather than to the
+mechanism.
 
 **Loopback is exempt from the filter, and has to be.** The design treats
 management inbound (§3.3) and egress policy (§4) as independent, and they are
@@ -312,6 +328,23 @@ a clean stop — zero denials, no leaked passt. `diagnose` reports 12/12, and
 fails as intended when the module is removed.
 
 ### Step 4: the proxy
+
+> **SUPERSEDED 2026-08-25 by [ADR 008](008-transparent-egress-inspection.md).**
+> The per-workload tinyproxy, its `workload-proxy.cil` domain and the advertised
+> `192.0.2.1:3128` endpoint are deleted. Hostname policy is now a uid-keyed DNAT
+> of ports 80 and 443 into a per-workload egress inspector, which reads the
+> `Host` header or the SNI — the guest is told nothing and cannot opt out. The
+> weakness was never the filtering, it was the *configuring*: a proxy is
+> advisory, so a process free to ignore the variables did, and the default-deny
+> chain could only turn that into a failure rather than into a filtered request.
+>
+> This section is kept because most of what it records outlived the mechanism.
+> The uid-sharing finding below, its control-group fix, the pinned slice, the
+> constant advertised address, the `nft -j list map` shape and the enforcing-
+> iteration lesson all transferred to the inspector unchanged — several of them
+> are why the replacement was built the way it was. What did **not** transfer is
+> anything specific to tinyproxy itself: its client ACL, its exit-70 behaviour,
+> and the module that confined it.
 
 **The open question is closed, and the answer keeps tinyproxy.** The design
 tracked "how large is the SELinux delta for a confined tinyproxy?" as its last

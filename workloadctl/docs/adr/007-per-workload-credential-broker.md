@@ -175,8 +175,9 @@ processes, both of which already exist.
 **Per-host selection belongs to the inspector because per-host is what it
 already is.** Giving the broker its own hostname matcher would mean a second
 fnmatch implementation, a second apex-trap rule, and two allowlists that can
-disagree — the same argument that keeps hostname policy out of the shipped
-tinyproxy configuration once inspection exists.
+disagree — the same argument that keeps hostname policy in one place. (Written
+when that place was the shipped tinyproxy configuration; it is now the egress
+inspector, ADR 008, and the argument is unchanged by the move.)
 
 **Keying on `Host` moves credential selection from configuration alone to
 configuration plus a request header, and that is a threat-model change.**

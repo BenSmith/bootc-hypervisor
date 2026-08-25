@@ -117,8 +117,8 @@ VM_INSPECT_PORT_TLS = 8443
 VM_INSPECT_ORIG_CLEARTEXT = 80
 VM_INSPECT_ORIG_TLS = 443
 
-# The inspector's listener binary, the socket unit's ExecStart. It does not
-# exist yet (T5b); naming it here keeps the unit and the RPM one place apart.
+# The inspector's listener binary, the socket unit's ExecStart. Named here so
+# the unit and the RPM stay one place apart.
 VM_INSPECT_LISTENER_BIN = "/usr/libexec/workloadctl/workload-vm-inspect-listener"
 
 # VM workloads have no bridge. passt terminates the guest's stack in userspace
@@ -151,11 +151,13 @@ VM_MGMT_ADDR_BASE = 0x7F800000  # 127.128.0.0
 #
 # It is /9 rather than the /16 the management addresses actually occupy, and the
 # extra bits are load-bearing rather than slack: everything else this design
-# hangs on loopback is carved out of the same range (§9's synthesising responder
-# is next), so a narrowing pass that "tidied" this to 127.128.0.0/16 would take
-# the reservation away from planes that never had one of their own. The
-# reservation is enforced through VM_RESERVED_PLANES, which is where a new plane
-# is added — not by widening or narrowing this.
+# hangs on loopback is carved out of the same range, so a narrowing pass that
+# "tidied" this to 127.128.0.0/16 would take the reservation away from planes
+# that never had one of their own. The synthesising responder is the case that
+# proved it — it sits at 127.130.0.0 + the same uid offset, and needs no
+# ReservedPlane entry of its own precisely because this /9 already covers it.
+# The reservation is enforced through VM_RESERVED_PLANES, which is where a plane
+# OUTSIDE this range is added — not by widening or narrowing this.
 VM_MGMT_NETWORK = ipaddress.ip_network("127.128.0.0/9")
 
 # Port passt forwards to the guest's sshd for `workloadctl exec` / `shell`.

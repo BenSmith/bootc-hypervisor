@@ -383,36 +383,26 @@ RUN set -- /tmp/wl-rpms/workloadctl-*.rpm && \
     rm -rf /tmp/wl-rpms && \
     dnf clean all
 
-# Declare tinyproxy's user, which its own packaging does not.
+# The tinyproxy sysusers fragment is gone, and its absence has a reason.
 #
-# workloadctl hard-requires tinyproxy (one instance per VM workload that sets
-# [vm.network].hosts — ADR 006 §4.4), and tinyproxy-1.11.2-8.fc44 still creates
-# its account the legacy way: `groupadd -r` / `useradd -r` in %pre, with no
-# sysusers.d fragment. That writes /etc/passwd and /etc/group entries with no
-# declaration behind them, which bootc's `etc-sysusers` lint reports — and since
-# our lint runs with --fatal-warnings, it fails the build.
+# workloadctl used to hard-require tinyproxy — one instance per VM workload that
+# set [vm.network].hosts — and tinyproxy-1.11.2-8.fc44 creates its account the
+# legacy way (`groupadd -r` / `useradd -r` in %pre, no sysusers.d fragment).
+# That writes /etc/passwd and /etc/group entries with no declaration behind
+# them, which bootc's `etc-sysusers` lint reports, so this file carried a
+# fragment under /usr/lib to regenerate the account deterministically.
 #
-# It fails the VARIANT builds only. The base image lints before this layer, so
-# hypervisor-bootc is clean and hypervisor-{amd,nvidia-*} are not, which reads
-# as a GPU problem and is not one.
+# workloadctl retired the proxy on 2026-08-25: hostname policy is now a
+# uid-keyed redirect into a per-workload egress inspector that ships inside the
+# workloadctl RPM itself. The `Requires: tinyproxy` is gone with it, nothing
+# else in this image pulls the package in, and a fragment declaring an account
+# for an absent package would create a user nothing on the host can use.
 #
-# bootc is right to care. /etc is per-machine and 3-way merged across upgrades,
-# so an account that exists only in the build's /etc/passwd is not guaranteed to
-# exist — or to keep the same uid — on a machine that upgrades into this image.
-# A fragment under /usr/lib regenerates it deterministically on every boot.
-#
-# Values mirror the %pre scriptlet exactly (`-d /usr/share/tinyproxy
-# -s /sbin/nologin -c 'tinyproxy user'`). The ids stay dynamic: sysusers never
-# rewrites an account that already exists, so pinning a number here would only
-# invent a second source of truth.
-#
-# Note this account is dead weight for us. Our proxies run as the workload's own
-# _wl-<name> user (that shared uid is the whole mechanism the egress filter keys
-# on), and the shipped tinyproxy.service stays disabled by the default preset.
-# The entry is declared because it EXISTS, not because anything uses it.
-RUN printf 'g tinyproxy - -\n' > /usr/lib/sysusers.d/hypervisor-tinyproxy.conf && \
-    printf 'u tinyproxy - "tinyproxy user" /usr/share/tinyproxy /sbin/nologin\n' \
-        >> /usr/lib/sysusers.d/hypervisor-tinyproxy.conf
+# Kept as a comment rather than deleted outright because the ORDERING LESSON it
+# produced is still live, and is recorded at the second lint call below: the
+# gap surfaced as a hypervisor-amd build failure, hundreds of layers from its
+# cause. If a future dependency creates accounts the legacy way, that is the
+# shape the failure will take again.
 
 # Bootc-specific: emergency access, cosy
 COPY systemd/emergency-access.conf /usr/lib/systemd/system/emergency.target.d/emergency-access.conf
@@ -433,7 +423,8 @@ RUN chmod 0755 /usr/bin/cosy && \
 # the layers that follow it. So the base image never re-checked the /etc entries
 # its own dependencies create, and a tinyproxy packaging gap surfaced instead as
 # a hypervisor-amd build failure — a lint about a workloadctl dependency,
-# reported by the GPU image, hundreds of layers from its cause.
+# reported by the GPU image, hundreds of layers from its cause. (That specific
+# dependency is gone; the ordering it exposed is not.)
 #
 # The variants have always covered this ground incidentally, by linting on top
 # of the finished base. That is the wrong place to find out: it is a slower
