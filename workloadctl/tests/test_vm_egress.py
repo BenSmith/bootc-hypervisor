@@ -1037,6 +1037,46 @@ class TestEgressDiagnose(unittest.TestCase):
         self.assertTrue(passed)
         self.assertIn("1 allow entry", msg)
 
+    def test_the_conntrack_figure_is_reported_on_a_healthy_host(self):
+        """Always a number, so it is there when someone looks."""
+        with self._nft(dropped=0), mock.patch.object(
+                self.mod, "conntrack_occupancy", lambda: (34, 262144)):
+            _, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertTrue(passed)
+        self.assertIn("conntrack 34/262144", msg)
+        self.assertNotIn("near capacity", msg)
+
+    def test_conntrack_near_capacity_carries_its_interpretation(self):
+        """The number alone is not the finding -- the sentence is.
+
+        An exhausted table reclassifies established replies as `direction
+        original` and the guard drops them mid-transfer, which inside the
+        guest is a download dying part-way with nothing else moving: the
+        accept counters are unchanged and the guard counter climbs for what
+        looks exactly like the cross-workload case. This line is the only path
+        from that symptom to the cause.
+
+        The threshold constant and the reader were both tested; that
+        vm_egress_check ever appends the sentence was not, so raising the
+        multiplier so it could never fire left the whole suite green.
+        """
+        with self._nft(dropped=0), mock.patch.object(
+                self.mod, "conntrack_occupancy", lambda: (250000, 262144)):
+            _, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertTrue(passed, msg)
+        self.assertIn("conntrack 250000/262144", msg)
+        self.assertIn("near capacity", msg)
+        self.assertIn("part-way", msg)
+
+    def test_an_unreadable_conntrack_figure_is_simply_absent(self):
+        """The module is not loaded until something uses it, so None is a
+        normal reading and must not become a traceback or a zero."""
+        with self._nft(dropped=0), mock.patch.object(
+                self.mod, "conntrack_occupancy", lambda: None):
+            _, passed, msg = self.mod.vm_egress_check(self._config())
+        self.assertTrue(passed)
+        self.assertNotIn("conntrack", msg)
+
     def test_filtered_but_not_armed_fails_loudly(self):
         with self._nft(armed=False):
             _, passed, msg = self.mod.vm_egress_check(self._config())
@@ -1550,6 +1590,51 @@ class TestElementCounterParsing(unittest.TestCase):
             self.assertIn("counter", line)
 
 
+class TestV6RouteProbeFailsQuiet(unittest.TestCase):
+    """_host_has_v6_route answers "unknown" as True, and that direction matters.
+
+    The note it gates says the v6 redirect will log nothing because the host
+    has no IPv6 default route -- a statement about the HOST, offered so an
+    operator does not read the silence as a broken redirect. If the probe
+    cannot run at all, the honest position is to say nothing: a note claiming
+    the host has no v6 route, printed because `ip` was missing, sends the
+    reader to investigate a routing table that may be perfectly fine.
+
+    Inverting the fallback to False left the whole suite green, so the comment
+    saying "unknown: do not manufacture a warning" was the only thing holding
+    the direction.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+
+    def test_a_probe_that_cannot_run_reads_as_having_a_route(self):
+        with mock.patch.object(self.mod.subprocess, "run",
+                               side_effect=OSError("no ip binary")):
+            self.assertTrue(self.mod._host_has_v6_route())
+
+    def test_a_probe_that_times_out_reads_as_having_a_route(self):
+        import subprocess as _sp
+        with mock.patch.object(self.mod.subprocess, "run",
+                               side_effect=_sp.TimeoutExpired("ip", 5)):
+            self.assertTrue(self.mod._host_has_v6_route())
+
+    def test_an_empty_routing_table_reads_as_having_none(self):
+        """The real finding still has to register, or the fallback above would
+        be indistinguishable from the probe never working."""
+        with mock.patch.object(self.mod.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0, stdout="")):
+            self.assertFalse(self.mod._host_has_v6_route())
+
+    def test_a_default_route_reads_as_having_one(self):
+        with mock.patch.object(
+                self.mod.subprocess, "run",
+                return_value=SimpleNamespace(
+                    returncode=0, stdout="default via fe80::1 dev eth0\n")):
+            self.assertTrue(self.mod._host_has_v6_route())
+
+
 class TestSelfDialCounterIsReported(unittest.TestCase):
     """`diagnose` names the wrong-port self-dial drops (HLD §11).
 
@@ -1590,6 +1675,49 @@ class TestSelfDialCounterIsReported(unittest.TestCase):
         _name, ok, detail = self._line((0, 0))
         self.assertTrue(ok)
         self.assertNotIn("packet(s) dropped dialling", detail)
+
+    def test_the_counter_sums_both_address_families(self):
+        """A v6-only self-dial is the same mistake as a v4-only one.
+
+        _inspect_self_counter reads NFT_SET_INSPECT_SELF and its v6 twin and
+        adds them, because which family the guest happened to pick is not the
+        operator's question -- reporting them separately would ask the reader
+        to add two numbers to learn one thing. Dropping the v6 set from that
+        loop left the whole suite green, so the summing was asserted by
+        nothing: every existing test here injects `self_dials` already summed
+        and so runs entirely past the function that does the adding.
+        """
+        def payload(packets):
+            return {"nftables": [{"set": {"elem": [
+                {"elem": {"val": {"concat": [10001, "198.18.1.1"]},
+                          "counter": {"packets": packets, "bytes": packets * 60}}}
+            ]}}]}
+
+        seen = []
+
+        def fake(*args):
+            seen.append(args[-1])
+            # v4 set silent, v6 set carrying the drops: the arrangement that a
+            # v4-only reader reports as a healthy zero.
+            return payload(0 if args[-1] == NFT_SET_INSPECT_SELF else 9)
+
+        with mock.patch.object(self.mod, "_nft_json", fake):
+            total = self.mod._inspect_self_counter(10001)
+        self.assertEqual(total, (9, 540))
+        self.assertIn(NFT_SET_INSPECT_SELF6, seen)
+
+    def test_a_family_whose_set_is_unreadable_does_not_zero_the_other(self):
+        """One unreadable set is a partial reading, not a contradiction of the
+        other -- so it is skipped, and the family that did read still counts."""
+        def fake(*args):
+            if args[-1] == NFT_SET_INSPECT_SELF:
+                return None
+            return {"nftables": [{"set": {"elem": [
+                {"elem": {"val": {"concat": [10001, "198.18.1.1"]},
+                          "counter": {"packets": 4, "bytes": 240}}}]}}]}
+
+        with mock.patch.object(self.mod, "_nft_json", fake):
+            self.assertEqual(self.mod._inspect_self_counter(10001), (4, 240))
 
     def test_an_unreadable_counter_says_nothing_rather_than_zero(self):
         """None must not be rendered as a count.

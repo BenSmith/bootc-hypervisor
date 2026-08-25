@@ -76,6 +76,35 @@ class TestSocketActivation(unittest.TestCase):
             body,
             r"\(allow\s+init_t\s+wlinspect_t\s+\(tcp_socket\s+\([^)]*create")
 
+    def test_the_fd_passing_socketpair_rule_is_present(self):
+        """The rule whose absence leaves the audit log EMPTY.
+
+        systemd creates the socket in a forked (sd-listen) helper and passes
+        the fd back to PID 1 over a socketpair, so init_t also needs
+        `read write` on the wlinspect_t socket. That denial is dontaudit'd in
+        shipped policy: without this rule the unit fails with
+
+            Failed to receive listening socket (198.18.1.1:8080):
+              Channel number out of range
+
+        -- receive_one_fd() reporting -ECHRNG for a control message that
+        carried no descriptor -- and nothing in that names SELinux. It was
+        found only by running `semodule -DB` to disable dontaudit rules.
+
+        Asserted because deleting the line left the whole suite green, and of
+        every rule in this module it is the one that costs the most to
+        rediscover: a plain enforcing harvest cannot see the denial at all.
+        """
+        body = _body()
+        self.assertRegex(
+            body,
+            r"\(allow\s+wlinspect_t\s+init_t\s+"
+            r"\(unix_stream_socket\s+\([^)]*read")
+        self.assertRegex(
+            body,
+            r"\(allow\s+wlinspect_t\s+init_t\s+"
+            r"\(unix_stream_socket\s+\([^)]*write")
+
     def test_the_domain_owns_its_listening_and_accepted_sockets(self):
         """Both carry this domain's label, so both are `self`."""
         body = _body()
