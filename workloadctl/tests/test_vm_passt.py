@@ -251,7 +251,12 @@ class TestNetworkValidation(unittest.TestCase):
 
 
 class TestNetdevDnsDerivation(unittest.TestCase):
-    """libexec/workload-vm-netdev — the host-derived half of the netdev.
+    """libexec/workload-vm-netdev, for a workload with NO responder.
+
+    An unfiltered or bridged VM: its guest really is handed the host's own
+    nameservers, so the symmetric all-three-or-none loop still governs it, and
+    every assertion below is about that loop. A filtered workload takes a
+    different path entirely — TestNetdevUnderSynthesis.
 
     passt's DNS handling is per address family and half-configuring a family
     fails open: supplying `--dns` for one family suppresses only that family's
@@ -368,6 +373,170 @@ class TestNetdevDnsDerivation(unittest.TestCase):
         with mock.patch.object(self.mod.subprocess, "run",
                                side_effect=OSError("no ip")):
             self.assertEqual(self.mod.default_gateways(), {})
+
+
+class TestNetdevUnderSynthesis(unittest.TestCase):
+    """libexec/workload-vm-netdev, for a workload WITH a responder.
+
+    Three fragments and no fourth, because only one of the three carries the v6
+    flag and getting that wrong is invisible in a functional test: a guest with
+    a dead v6 nameserver still resolves, it just spends a retry schedule per
+    lookup first, which reads as broken DNS rather than as policy.
+
+    The assertions that matter most here are the negative ones. That
+    /etc/resolv.conf is not read on this path is the headline property -- a
+    filtered guest's DNS must not depend on what the host's resolver
+    configuration said that morning -- and it is exactly the kind of thing a
+    "does DNS work" test passes with a leak in place.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load("libexec/workload-vm-netdev", "workload_vm_netdev")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    # --- the fragment itself -------------------------------------------
+
+    def test_row_one_points_dns_host_at_the_responder(self):
+        fragment, _ = self.mod.build_synthesis_fragment(
+            {4: "192.168.0.1"}, "127.130.0.5")
+        self.assertIn("dns-forward=192.168.0.1", fragment)
+        self.assertIn("dns=192.168.0.1", fragment)
+        self.assertIn("dns-host=127.130.0.5", fragment)
+
+    def test_row_one_carries_the_v6_black_hole(self):
+        fragment, _ = self.mod.build_synthesis_fragment(
+            {4: "192.168.0.1"}, "127.130.0.5")
+        self.assertIn("param=--dns,param=::1", fragment)
+
+    def test_row_two_is_dhcp_dns_off_with_no_black_hole(self):
+        # --no-dhcp-dns is global (dhcp.c:437, dhcpv6.c:427, ndp.c:284), so
+        # under dhcp-dns=off nothing is advertised on either family and a dead
+        # ::1 would be a guest-visible artifact of a switched-off mechanism.
+        fragment, notes = self.mod.build_synthesis_fragment({}, "127.130.0.5")
+        self.assertEqual(fragment, "dhcp-dns=off")
+        self.assertNotIn("::1", fragment)
+        self.assertTrue(any("no IPv4 default route" in n for n in notes))
+
+    def test_the_v6_gateway_is_never_used(self):
+        # IPv6 leaves the loop entirely. A host with a v6 default route must
+        # still get exactly one v6 option, and it must be the black hole --
+        # a symmetric loop here is what reopens the v6 resolver.
+        fragment, _ = self.mod.build_synthesis_fragment(
+            {4: "192.168.0.1", 6: "fd00::1"}, "127.130.0.5")
+        self.assertNotIn("fd00::1", fragment)
+        self.assertEqual(fragment.count("param=--dns"), 1)
+        self.assertNotIn("param=--dns-forward", fragment)
+        self.assertNotIn("param=--dns-host", fragment)
+
+    def test_a_v6_only_host_gets_nothing(self):
+        # Neither --dns nor --dns-forward can be 127.130.x.y -- that is the
+        # guest's own loopback -- so with no v4 gateway there is no address to
+        # advertise and intercept, whatever v6 the host has.
+        fragment, _ = self.mod.build_synthesis_fragment(
+            {6: "fd00::1"}, "127.130.0.5")
+        self.assertEqual(fragment, "dhcp-dns=off")
+
+    def test_the_note_no_longer_claims_queries_go_to_a_host_resolver(self):
+        # The old string read "queries go to <resolver>", which is now false in
+        # the strongest way available: nothing is forwarded at all.
+        _, notes = self.mod.build_synthesis_fragment(
+            {4: "192.168.0.1"}, "127.130.0.5")
+        joined = " ".join(notes)
+        self.assertIn("127.130.0.5", joined)
+        self.assertIn("nothing is forwarded", joined)
+
+    # --- the gate, which is the whole point of the change ---------------
+
+    def test_a_gateway_with_no_host_nameserver_still_gets_the_fragment(self):
+        # THE case the change exists for. Before synthesis this host silently
+        # lost DNS on the family, because the gate demanded a nameserver from
+        # /etc/resolv.conf as well. --dns-host is now an address that always
+        # exists, so the resolver half of the gate is obsolete.
+        fragment, _ = self.mod.build_synthesis_fragment(
+            {4: "192.168.0.1"}, "127.130.0.5")
+        self.assertIn("dns-host=127.130.0.5", fragment)
+        self.assertNotEqual(fragment, "dhcp-dns=off")
+
+    # --- and the dispatch, which decides which of the two paths runs -----
+
+    def _run_main(self, toml_text, uid=10005, gateways=None):
+        """Run main() against a written config, returning (fragment, resolv)."""
+        config_path = Path(self.tmp.name) / "workload.toml"
+        config_path.write_text(toml_text)
+        env_dir = Path(self.tmp.name) / "env"
+        resolv = Path(self.tmp.name) / "resolv.conf"
+        resolv.write_text("nameserver 9.9.9.9\n")
+
+        entry = mock.MagicMock()
+        entry.pw_uid = uid
+        with mock.patch.object(self.mod, "workload_config_path",
+                               return_value=str(config_path)), \
+                mock.patch.object(self.mod, "workload_env_dir",
+                                  return_value=env_dir), \
+                mock.patch.object(self.mod, "RESOLV_CONF", resolv), \
+                mock.patch.object(self.mod.pwd, "getpwnam",
+                                  return_value=entry), \
+                mock.patch.object(self.mod, "default_gateways",
+                                  return_value=gateways
+                                  if gateways is not None
+                                  else {4: "192.168.0.1"}):
+            self.assertEqual(self.mod.main(["netdev", "vm1"]), 0)
+
+        written = (env_dir / "workload-vm1.passt").read_text()
+        self.assertTrue(written.startswith("WL_PASST_DNS="), written)
+        return written.split("=", 1)[1].strip(), resolv
+
+    FILTERED = ('[workload]\nname = "vm1"\n[vm]\nmemory = "2G"\n'
+                '[vm.network]\negress = "filtered"\n')
+
+    def test_a_filtered_vm_is_pointed_at_its_own_responder(self):
+        fragment, _ = self._run_main(self.FILTERED)
+        # uid 10005 -> 127.130.0.5, by the same offset arithmetic as
+        # management and the broker. Spelled out rather than re-derived.
+        self.assertIn("dns-host=127.130.0.5", fragment)
+        self.assertIn("param=--dns,param=::1", fragment)
+
+    def test_a_filtered_vm_never_reads_resolv_conf(self):
+        # The headline property, asserted as a negative: the host's resolver
+        # configuration stops mattering to a filtered guest entirely.
+        fragment, resolv = self._run_main(self.FILTERED)
+        self.assertNotIn("9.9.9.9", fragment)
+
+    def test_an_open_vm_still_takes_the_host_resolver_path(self):
+        fragment, _ = self._run_main(
+            '[workload]\nname = "vm1"\n[vm]\nmemory = "2G"\n'
+            '[vm.network]\negress = "open"\n')
+        self.assertIn("dns-host=9.9.9.9", fragment)
+        self.assertNotIn("127.130.", fragment)
+        self.assertNotIn("::1", fragment)
+
+    def test_a_bridged_vm_still_takes_the_host_resolver_path(self):
+        # Belt and braces: the generator does not even emit the netdev prestart
+        # for a bridged VM, but the predicate has to be right standing alone.
+        fragment, _ = self._run_main(
+            '[workload]\nname = "vm1"\n[vm]\nmemory = "2G"\n'
+            '[vm.network]\nbridge = "br0"\negress = "filtered"\n')
+        self.assertIn("dns-host=9.9.9.9", fragment)
+        self.assertNotIn("127.130.", fragment)
+
+    def test_resolver_none_still_wins_over_everything(self):
+        fragment, _ = self._run_main(
+            '[workload]\nname = "vm1"\n[vm]\nmemory = "2G"\n'
+            '[vm.network]\negress = "filtered"\nresolver = "none"\n')
+        self.assertEqual(fragment, "dhcp-dns=off")
+
+    def test_an_underivable_responder_fails_closed_not_back_to_the_host(self):
+        # A uid outside the workload range has no responder address. The guest
+        # gets nothing rather than the host's real nameservers: falling back to
+        # build_dns_fragment here would be a leak of exactly the kind synthesis
+        # exists to remove, and it would look like the feature working.
+        fragment, _ = self._run_main(self.FILTERED, uid=0)
+        self.assertEqual(fragment, "dhcp-dns=off")
+        self.assertNotIn("9.9.9.9", fragment)
 
 
 class TestPasstRunsAsTheWorkloadUser(unittest.TestCase):

@@ -268,14 +268,27 @@ name = "schema-reference"
 # Optional: What resolver the guest is given.
 # Type: string, one of "host" | "none"
 # Default: "host"
-#   "host" — passt advertises a stand-in address, intercepts DNS sent to it,
-#            and forwards to the host's own resolver. The guest never learns a
-#            real resolver address. Note that when the host runs a stub
-#            resolver the query is made BY THE HOST, so guest DNS is invisible
-#            to uid-keyed egress policy; log at the host resolver instead.
-#   "none" — the guest gets no resolver at all. The only setting that closes
-#            DNS tunnelling, and it breaks anything not proxy-aware, including
-#            cloud-init, package installs and NTP. For purpose-built guests.
+#   "host" — passt advertises a stand-in address and intercepts DNS sent to
+#            it. The guest never learns a real resolver address. What happens
+#            to the query then depends on .egress, and the two are not
+#            variations of one thing:
+#              egress = "filtered" — the query reaches this workload's own
+#                synthesising responder and STOPS THERE. Every A/AAAA, for any
+#                name, is answered with the workload's inspector address;
+#                everything else is NODATA. Nothing is forwarded, so no query
+#                the guest emits ever leaves the host and the host's own
+#                resolver never sees it. /etc/resolv.conf is not consulted.
+#              egress = "open" (and any .bridge VM) — forwarded to the host's
+#                own resolver, as before. Note that when the host runs a stub
+#                resolver the query is made BY THE HOST, so guest DNS is
+#                invisible to uid-keyed egress policy; log at the host
+#                resolver instead.
+#   "none" — the guest gets no resolver at all. It breaks anything not
+#            proxy-aware, including cloud-init, package installs and NTP. For
+#            purpose-built guests. Under egress = "filtered" this is no longer
+#            what closes DNS tunnelling — synthesis already makes that channel
+#            absent rather than filtered — so "none" now buys only a guest
+#            that cannot look names up at all.
 # resolver = "host"
 #
 # REQUIRED IN PRACTICE: how this VM's outbound traffic is treated.

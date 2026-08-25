@@ -45,13 +45,88 @@ nameservers over NDP RDNSS / DHCPv6. So the invariant is:
 Never one or two. A family the host has no resolver for gets nothing at all,
 which is safe: the scan runs, finds nothing, and advertises nothing.
 
+That rule governs a workload WITHOUT a synthesising responder — an unfiltered
+or bridged VM, whose guest really is being handed the host's own nameservers.
+It is not the rule for a filtered one; see the next section, which is where
+the loop stops being symmetric.
+
 `--search none` suppresses the resolv.conf search list, which is otherwise
 advertised over both DHCP and NDP and leaks internal domain names. It covers
 both families by itself and is emitted by the generator, not here, because it
 depends on nothing about the host.
+
+AND WHAT THAT RULE BECOMES ONCE THE WORKLOAD HAS A RESPONDER
+
+A workload matching `vm_uses_resolve` (filtered, not bridged, `resolver` not
+"none") has its own synthesising responder on 127.130.x.y:53, and `--dns-host`
+points there instead of at a nameserver from /etc/resolv.conf. Three things
+change, and the middle one is the one that looks unchanged and is not.
+
+  - **/etc/resolv.conf stops being read at all.** Not an optimisation: it is
+    the headline property. A filtered guest's DNS must not depend on what the
+    host's resolver configuration said that morning, and a code path that still
+    consults it is one `resolv.conf` edit away from handing that guest nothing
+    while a responder sits ready to answer every query.
+  - **The all-three-or-none invariant becomes IPv4's.** IPv6 leaves the loop
+    entirely and emits exactly one of the three (`--dns ::1`), which is neither
+    all nor none. Stated this way deliberately: "the invariant stays exactly as
+    it is" reads as licence to keep the loop symmetric, and a symmetric loop is
+    what reopens the v6 resolver.
+  - **The gate loses its resolver half.** Today a family is dropped unless the
+    host has both a default-route gateway and a nameserver of its own for it.
+    `--dns-host` is now an address that always exists, so the resolver half is
+    obsolete. The gateway half is NOT: `--dns` advertises it over DHCP and
+    `--dns-forward` is the address passt intercepts, and neither can be
+    127.130.x.y — that is the *guest's* own loopback and unreachable from it by
+    construction. So the gate becomes `gateway` alone, for IPv4.
+
+The three fragments that produces, since the shape is what a reviewer checks
+and only one of the three carries the v6 flag:
+
+    | host                     | fragment                                    |
+    |--------------------------|---------------------------------------------|
+    | v4 default route present | dns-forward=<gw4>,dns=<gw4>,dns-host=<resp> |
+    |                          |   plus param=--dns param=::1                |
+    | no v4 default route      | dhcp-dns=off                                |
+    | resolver = "none"        | dhcp-dns=off                                |
+
+WHY `--dns ::1`, ARGUED AS WHAT IT IS
+
+A failure-shape fix, not a leak fix. Overstating it is how the requirement gets
+dropped by the first person who checks the claim.
+
+With no v6 `--dns-forward`, `ip6.dns_match` stays unset, so passt intercepts
+nothing on v6 and `ip6.dns_host` is inert (fwd.c:906-914, via is_dns_flow()).
+The guest's v6 query to an advertised nameserver is then *ordinary egress
+meeting the default deny* — not in any allow set, not `oif lo`, not in the
+proxy cgroup — so it is dropped. Fail-closed. What it costs is a full retry
+schedule per lookup on the family clients try first, which presents as broken
+DNS rather than as policy.
+
+`--dns ::1` sets ip6.dns[0], which makes `dns6_set` true and stops the
+resolv.conf scan before it reaches the v6 branch; neither RDNSS nor DHCPv6
+filters loopback (ndp.c:284-300, dhcpv6.c:427-443), so `::1` reaches the guest
+verbatim — where it is the guest's *own* loopback with nothing listening. The
+v6 query fails locally with ECONNREFUSED, immediately, never leaving the guest.
+
+Do not reach for the alternatives: `--no-dhcp-dns` is global (dhcp.c:437,
+dhcpv6.c:427, ndp.c:284) and `--dns none` is global, destructive of
+dns/dns_match/dns_host on both families (conf.c:1785-1797), and order-sensitive
+in the option parse (conf.c:1801).
+
+That globality is also why `--dns ::1` belongs to the first row only: under
+`dhcp-dns=off` nothing is advertised on either family, so a dead `::1` there
+would be a guest-visible artifact of a mechanism that is switched off.
+
+RESIDUAL, STATED RATHER THAN SOLVED
+
+A host with no default route on a family still cannot offer the guest DNS on
+it — there is no address to advertise that passt would then intercept. A limit
+of the mechanism, unchanged from before synthesis.
 """
 import ipaddress
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -59,6 +134,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+from vm import vm_resolve_address, vm_uses_resolve
 from workload_lib import workload_config_path, workload_env_dir
 
 try:
@@ -144,9 +220,50 @@ def host_resolvers() -> dict[int, str]:
     return resolvers
 
 
+def build_synthesis_fragment(gateways: dict[int, str],
+                             responder: str) -> tuple[str, list[str]]:
+    """The fragment for a workload whose queries are answered by its responder.
+
+    IPv4 only, gated on the default-route gateway alone, with `--dns-host`
+    pointing at 127.130.x.y instead of at anything from /etc/resolv.conf —
+    which is not read on this path at all. IPv6 is handled outside any loop:
+    exactly one option, `--dns ::1`, and only when v4 was configured. The
+    module docstring carries the reasoning for all three of those; this is the
+    transcription of its table.
+    """
+    gateway = gateways.get(4)
+    if not gateway:
+        # No address to advertise that passt would then intercept. The stated
+        # residual, and the reason this row carries no `--dns ::1`: dhcp-dns=off
+        # suppresses the advertisement on BOTH families, so a dead ::1 here
+        # would be a guest-visible artifact of a switched-off mechanism.
+        return ("dhcp-dns=off",
+                ["host has no IPv4 default route, so there is no address to "
+                 "advertise and intercept; the guest gets no resolver"])
+
+    props = [f"dns-forward={gateway}", f"dns={gateway}",
+             f"dns-host={responder}"]
+    # The v6 black hole. `param=` is QEMU's repeatable escape hatch, appended to
+    # passt's command line verbatim; `--dns ::1` sets ip6.dns[0], which makes
+    # dns6_set true and stops the resolv.conf scan before it reaches the v6
+    # branch. Not a leak fix -- see the module docstring.
+    params = ["param=--dns", "param=::1"]
+    notes = [
+        f"IPv4: guest is told {gateway}, intercepted to this workload's "
+        f"responder at {responder}; nothing is forwarded",
+        "IPv6: guest is told ::1, its own loopback with nothing listening, so "
+        "a v6 lookup fails immediately instead of timing out",
+    ]
+    return (",".join(props + params), notes)
+
+
 def build_dns_fragment(gateways: dict[int, str],
                        resolvers: dict[int, str]) -> tuple[str, list[str]]:
-    """Build the netdev fragment. Returns (fragment, human-readable notes).
+    """Build the netdev fragment for a workload with NO responder.
+
+    An unfiltered or bridged VM: its guest really is being handed the host's own
+    nameservers, so the symmetric all-three-or-none loop still governs it. A
+    filtered one goes through build_synthesis_fragment instead.
 
     The QEMU netdev's dns-forward/dns/dns-host properties are single-valued
     (qapi/net.json:203-216), so only one family can use them; the second goes
@@ -193,17 +310,37 @@ def build_dns_fragment(gateways: dict[int, str],
     return (",".join(props + params), notes)
 
 
-def resolver_mode(name: str) -> str:
-    """[vm.network].resolver for this workload: "host" (default) or "none"."""
+def workload_config(name: str) -> dict:
+    """This workload's parsed TOML, or {} if it cannot be read.
+
+    An empty dict is a workload that is not a VM as far as vm_uses_resolve is
+    concerned, which lands on the no-responder path — the same assumption the
+    old resolver_mode made when the file was unreadable.
+    """
     try:
         with open(workload_config_path(name), "rb") as f:
-            config = tomllib.load(f)
+            return tomllib.load(f)
     except (OSError, ValueError) as e:
         log(f"  WARNING: could not read config for {name}: {e}; assuming "
-            f"resolver = \"host\"")
-        return "host"
-    mode = config.get("vm", {}).get("network", {}).get("resolver", "host")
+            f"resolver = \"host\" and no responder")
+        return {}
+
+
+def resolver_mode(config: dict) -> str:
+    """[vm.network].resolver for this workload: "host" (default) or "none"."""
+    mode = (config.get("vm", {}) or {}).get("network", {}) \
+        .get("resolver", "host")
     return mode if mode in ("host", "none") else "host"
+
+
+def responder_address(name: str) -> str:
+    """This workload's synthesising responder address, 127.130.x.y.
+
+    Derived from the uid, which exists by the time this runs: the netdev
+    prestart is on the VM unit, and the VM unit Requires= the setup service
+    that creates the user.
+    """
+    return vm_resolve_address(pwd.getpwnam(f"_wl-{name}").pw_uid)
 
 
 def main(argv):
@@ -212,13 +349,34 @@ def main(argv):
         return 2
     name = argv[1]
 
-    if resolver_mode(name) == "none":
-        # The guest gets no resolver at all; a proxy resolves on its behalf.
-        # This is the only setting that actually closes DNS tunnelling.
+    config = workload_config(name)
+
+    if resolver_mode(config) == "none":
+        # The guest gets no resolver at all. Under synthesis this no longer
+        # means "no DNS tunnelling" -- nothing is forwarded either way -- it
+        # means a guest that can only dial literals.
         fragment = "dhcp-dns=off"
         notes = ['[vm.network].resolver = "none": the guest is given no '
                  'resolver']
+    elif vm_uses_resolve(config):
+        try:
+            responder = responder_address(name)
+        except (KeyError, ValueError) as e:
+            # Fail closed, and specifically NOT back to build_dns_fragment.
+            # This workload's guest is filtered; handing it the host's real
+            # nameservers because we could not derive a uid would be a leak of
+            # exactly the kind synthesis exists to remove.
+            log(f"  WARNING: no responder address for {name} ({e}); "
+                f"the guest gets no resolver rather than the host's")
+            fragment = "dhcp-dns=off"
+            notes = []
+        else:
+            fragment, notes = build_synthesis_fragment(default_gateways(),
+                                                       responder)
     else:
+        # No responder: an unfiltered or bridged VM, whose guest really is being
+        # handed the host's own nameservers. /etc/resolv.conf is read here and
+        # nowhere else.
         gateways = default_gateways()
         resolvers = host_resolvers()
         fragment, notes = build_dns_fragment(gateways, resolvers)
