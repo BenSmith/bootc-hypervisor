@@ -163,6 +163,47 @@ class TestRedirect(unittest.TestCase):
             self.assertIn("meta skuid", rule, rule)
             self.assertIn("map @", rule, rule)
 
+    def test_the_cgroup_return_precedes_every_dnat_rule(self):
+        """Rule order IS the loop prevention, and only order enforces it.
+
+        The `return` for @wl_inspect_cg exempts the processes that
+        re-originate workload-uid traffic -- the inspector, and during rung 1
+        tinyproxy's upstream CONNECT leg. Below the two transparent DNAT
+        rules it stops exempting anything: the packet is translated on the
+        way past and the inspector dials into the listener it IS, or the
+        proxy's CONNECT leg is answered by the listener it was dialling past.
+
+        The skeleton's own comment states this ("sits immediately above the
+        two transparent DNAT rules that follow"), and nothing else checks it:
+        the filter chain has TestRuleOrderIsPinned, the proxy chain had no
+        equivalent, so this file's rules could be reordered freely. Written
+        after moving the return to the end of the skeleton left the whole
+        suite green.
+        """
+        rules = [ln for ln in self.nft.splitlines() if ln.startswith("add rule")]
+        returns = [i for i, ln in enumerate(rules)
+                   if "@wl_inspect_cg" in ln and ln.endswith("return")]
+        transparent = [i for i, ln in enumerate(rules)
+                       if " dnat " in ln
+                       and ("@wl_inspect4" in ln or "@wl_inspect6" in ln)]
+        self.assertEqual(len(returns), 1, rules)
+        self.assertEqual(len(transparent), 2, rules)
+        self.assertLess(returns[0], min(transparent), rules)
+
+    def test_the_return_need_not_precede_the_advertised_endpoint_rule(self):
+        """The claim above is deliberately scoped to the transparent pair.
+
+        The 3128 rule matches only a dial to the advertised literal, which the
+        set's members never make -- the guest dials it, and the guest is not in
+        the set. Asserting the return above THAT rule too would pin an ordering
+        the design does not owe, and the next person to reorder for a real
+        reason would be failing a test that means nothing.
+        """
+        rules = [ln for ln in self.nft.splitlines() if ln.startswith("add rule")]
+        advertised = [i for i, ln in enumerate(rules)
+                      if f"tcp dport {VM_PROXY_PORT}" in ln and " dnat " in ln]
+        self.assertEqual(len(advertised), 1, rules)
+
 
 class TestProxyEgressExemption(unittest.TestCase):
     """The proxy shares the guest's uid, so `meta skuid` cannot separate them.
@@ -585,6 +626,30 @@ class TestGeneratedUnit(unittest.TestCase):
         guest's and one `meta skuid` rule governs both paths."""
         self.assertIn("User=_wl-web", self.unit)
         self.assertIn("Group=_wl-web", self.unit)
+
+    def test_the_slice_is_pinned_literally(self):
+        """Pinned, NOT taken from [resources].slice, and the whole line.
+
+        Two rules match this unit's cgroup at `level 2` -- the egress
+        exemption in wl_proxy_cg and the redirect exemption in wl_inspect_cg
+        -- so the path has to be exactly two components. A nested slice
+        deepens it and BOTH stop firing at once: the proxy's own upstream
+        traffic hits the default-deny drop, and its CONNECT leg is redirected
+        into the inspector it was dialling past.
+
+        The whole line rather than a substring, because
+        `assertIn("Slice=workloads.slice", unit)` is satisfied by
+        Slice=workloads.slice/anything.slice -- which is the nesting being
+        forbidden. Written after nesting this unit's slice left the whole
+        suite green; the inspector's twin had a test, this one had none.
+        """
+        self.assertIn(f"Slice={VM_PROXY_SLICE}", self.unit.splitlines())
+        self.assertEqual(VM_PROXY_SLICE, "workloads.slice")
+        # And the element the two rules match is built on that same slice: two
+        # independent spellings of one path, a drift between them silent.
+        self.assertEqual(vm_proxy_cgroup("web").count("/"), 1)
+        self.assertTrue(vm_proxy_cgroup("web").startswith(f"{VM_PROXY_SLICE}/"),
+                        vm_proxy_cgroup("web"))
 
     def test_declares_no_runtime_directory(self):
         """The VM service owns /run/workload-vm/<name>; a second claimant would

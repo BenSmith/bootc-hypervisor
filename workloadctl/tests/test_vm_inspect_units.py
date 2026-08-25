@@ -216,10 +216,21 @@ class TestGeneratedService(unittest.TestCase):
         `socket cgroupv2 level 2` matches, so the path must be exactly two
         components — a nested custom slice would deepen it and both would
         silently stop firing."""
-        self.assertIn(f"Slice={VM_PROXY_SLICE}", self.unit)
+        # The WHOLE line, not a substring of it. `assertIn` against the unit
+        # text passes for Slice=workloads.slice/anything.slice, which is
+        # exactly the nesting this test exists to forbid -- and a nested slice
+        # deepens the path so both `level 2` matches silently stop firing.
+        # Found by nesting the slice in the generator and watching the whole
+        # suite stay green.
+        self.assertIn(f"Slice={VM_PROXY_SLICE}", self.unit.splitlines())
         self.assertEqual(VM_PROXY_SLICE, "workloads.slice")
-        # The element names the cgroup on the pinned slice, two components.
+        # The element names the cgroup on the pinned slice, two components...
         self.assertEqual(vm_inspect_cgroup("web").count("/"), 1)
+        # ...and on the SAME slice the unit pins. Two independent spellings of
+        # the path exist -- the unit's Slice= and the element the rule matches
+        # -- and a drift between them is a redirect that never returns.
+        self.assertTrue(vm_inspect_cgroup("web").startswith(f"{VM_PROXY_SLICE}/"),
+                        vm_inspect_cgroup("web"))
 
     def test_both_cgroup_elements_are_armed_on_start(self):
         """Both or neither on the way in: the redirect exemption without the

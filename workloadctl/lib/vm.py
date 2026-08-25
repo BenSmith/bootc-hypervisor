@@ -1068,8 +1068,11 @@ def vm_inspect_cgroup(name: str) -> str:
     unit the inspector actually runs as — a service named -inspect with a
     cgroup element naming -inspector is a `return` rule that matches nothing
     and an inspector whose own egress is dropped. The premise it rests on is
-    wired by T5: the service unit is named workload-<name>-inspect.service and
-    pins Slice=workloads.slice, which is what makes this path exact.
+    wired by generate_vm_inspect_service: the service unit is named
+    workload-<name>-inspect.service and pins Slice=workloads.slice, which is
+    what makes this path exact. tests/test_vm_inspect_units.py asserts the pin
+    as a whole line, since a nested slice satisfies a substring match and
+    silently deepens this path past `level 2`.
     """
     return f"{VM_PROXY_SLICE}/workload-{name}-inspect.service"
 
@@ -1084,9 +1087,10 @@ def vm_inspect_cgroup_command(name: str, action: str) -> list[str]:
     declared in workload-proxy.nft next to the `return` rule it feeds.
 
     Armed by the inspector's own unit (ExecStartPre adds, ExecStopPost
-    removes), which T5 wires in: an element resolves to a cgroup id at add
-    time and systemd makes a fresh cgroup on every start, so the add belongs
-    to the unit that owns the cgroup, not to the arming helper.
+    removes), emitted by generate_vm_inspect_service: an element resolves to a
+    cgroup id at add time and systemd makes a fresh cgroup on every start, so
+    the add belongs to the unit that owns the cgroup, not to the arming
+    helper.
     """
     return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(),
             NFT_SET_INSPECT_CG, '{ "' + vm_inspect_cgroup(name) + '" }']

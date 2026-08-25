@@ -66,7 +66,7 @@ element is armed by the inspector's own unit, not this helper: an element
 resolves to a cgroup id at add time and systemd makes a fresh cgroup on
 every start, so the add belongs to the unit that owns the cgroup, and the
 remove to its ExecStopPost — "the only point at which a path still resolves
-to the id being retired". T5 wires those builders in.
+to the id being retired". generate_vm_inspect_service emits both lines.
 
 That wiring owed one more premise, and it is now paid: during rung 1 the
 workload's tinyproxy cgroup must be in wl_inspect_cg as well — its upstream
