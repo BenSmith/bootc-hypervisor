@@ -89,13 +89,19 @@ are answered from memory with no I/O; the cost is a syscall, not a timeout.
 import json
 import os
 import selectors
+import signal
 import socket
 import struct
 import sys
+import time
 
 sys.dont_write_bytecode = True
 
-from vm import VM_RESOLVE_TTL, vm_normalise_hostname, vm_resolve_policy_path
+from vm import (
+    VM_RESOLVE_TTL, vm_hostname_match, vm_normalise_hostname,
+    vm_resolve_policy_path, vm_resolve_status_path,
+)
+from vm_status import STATUS_TOP_N, BoundedCounts, write_status
 
 # Header flags and fields, by name rather than by magic number at the use site.
 FLAG_QR = 0x8000
@@ -132,6 +138,9 @@ TCP_MAX = 4096
 # reuse connections (RFC 7766) so this is not one query per connection, but an
 # idle one must not pin a slot forever.
 TCP_IDLE_TIMEOUT = 10.0
+
+# How long the accept loop blocks before checking the clock and the stop flag.
+_SELECT_POLL = 0.5
 
 
 class Malformed(Exception):
@@ -170,6 +179,20 @@ class Policy:
             vm_normalise_hostname(name): tuple(addrs)
             for name, addrs in static.items()
         }
+        # Read to COUNT, never to answer. See vm_resolve_policy: synthesis is
+        # unconditional, and a responder that refused an unlisted name would be
+        # a different design. Tolerated absent so a policy document written
+        # before this key existed still loads.
+        self.hosts = tuple(document.get("hosts") or ())
+
+    def on_a_list(self, name: str) -> bool:
+        """Whether any list in this workload would authorise the name.
+
+        `static` counts as a list: an `allow` entry is an authorisation, and a
+        query for one is not the tunnelling signature even though `hosts` does
+        not match it.
+        """
+        return name in self.static or vm_hostname_match(name, self.hosts)
 
     def answers(self, name, qtype):
         """The addresses to answer `name`/`qtype` with, and where they came from.
@@ -251,10 +274,88 @@ def pack_address(text):
     return socket.inet_pton(socket.AF_INET, text)
 
 
-def build_answer(query, policy, budget=None):
+# The tick on which the status file is replaced while the responder is idle.
+# Matches the listener's, so an operator reading both files side by side is not
+# comparing two different staleness budgets.
+STATUS_INTERVAL = 30.0
+
+
+class Counters:
+    """What the synthesising responder reports.
+
+    THE FIGURE THAT IS NOT A HEALTH METRIC
+
+    `unlisted` counts queries for names no list would authorise. It is the
+    tunnelling signature, and it is worth being precise about what it does and
+    does not mean. Synthesis makes the channel ABSENT rather than filtered:
+    every name is answered with the inspector's address, so a guest encoding
+    data into a1.example.com ... aN.example.com exfiltrates nothing -- the
+    queries never leave this process, and nothing resolves them onward.
+
+    What the count gives is evidence that something in the guest is TRYING. A
+    legitimate guest's lookups cluster on a short list; an encoder's do not.
+    That makes a rising `unlisted` a reason to look at the workload, never on
+    its own a reason to believe anything left.
+    """
+
+    def __init__(self, top_n: int = STATUS_TOP_N):
+        self.synthesised = 0
+        self.static = 0
+        self.nodata = 0
+        self.unlisted = 0
+        self.malformed = 0
+        # Bounded for the reason every per-host map here is: the keys are names
+        # the GUEST chose, and this is the map a name-encoding guest is
+        # actively trying to fill.
+        self.unlisted_names = BoundedCounts(top_n)
+
+    def record_answer(self, name: str, source: str, count: int,
+                      on_a_list: bool) -> None:
+        if source == "static":
+            self.static += 1
+        elif count:
+            self.synthesised += 1
+        else:
+            self.nodata += 1
+        if not on_a_list:
+            self.unlisted += 1
+            self.unlisted_names.add(name or ".")
+
+    def record_nodata(self) -> None:
+        """A question that was never about an address.
+
+        HTTPS, SVCB, TXT, PTR, MX, SRV and every other type land here, and none
+        of them is classified against the lists. The name in an HTTPS query is
+        usually one the guest is about to look up properly anyway, so counting
+        it as unlisted too would double every ordinary miss and drown the
+        signal the unlisted figure exists to carry.
+        """
+        self.nodata += 1
+
+    def record_malformed(self) -> None:
+        self.malformed += 1
+
+    def snapshot(self) -> dict:
+        return {
+            "queries": {
+                "synthesised": self.synthesised,
+                "static": self.static,
+                "nodata": self.nodata,
+                "malformed": self.malformed,
+            },
+            "unlisted": self.unlisted,
+            "unlisted_names": self.unlisted_names.snapshot(),
+        }
+
+
+def build_answer(query, policy, budget=None, counters=None):
     """Build the response to one query. Returns the full message bytes.
 
     `budget` bounds the message for UDP; None means unbounded (TCP).
+
+    `counters` is optional so that every existing caller and test that only
+    wants the bytes still gets them. A response is never shaped by whether
+    anyone is counting.
     """
     if len(query) < HEADER_LEN:
         raise Malformed("shorter than a DNS header")
@@ -291,6 +392,8 @@ def build_answer(query, policy, budget=None):
         # NODATA: NOERROR, this question echoed, no records. Every type that is
         # not an address -- HTTPS, SVCB, TXT, PTR, MX, SRV, and a CHAOS-class
         # version.bind -- lands here.
+        if counters is not None:
+            counters.record_nodata()
         return HEADER.pack(ident, base | RCODE_NOERROR, 1, 0, 0, 0) + question
 
     addresses, source = policy.answers(name, qtype)
@@ -314,6 +417,8 @@ def build_answer(query, policy, budget=None):
         records += record
         count += 1
 
+    if counters is not None:
+        counters.record_answer(name, source, count, policy.on_a_list(name))
     flags_out = base | RCODE_NOERROR | (FLAG_TC if truncated else 0)
     log(f"  {name or '.'} {'AAAA' if qtype == TYPE_AAAA else 'A'} -> "
         f"{source}: {count} record(s)"
@@ -369,15 +474,18 @@ def inherited_listening_sockets():
 # --- the serve loop ---
 
 
-def serve_datagram(sock, policy):
+def serve_datagram(sock, policy, counters=None):
     try:
         query, peer = sock.recvfrom(UDP_BUDGET * 4)
     except OSError as exc:
         log(f"  WARNING: recvfrom failed: {exc}")
         return
     try:
-        reply = build_answer(query, policy, budget=UDP_BUDGET)
+        reply = build_answer(query, policy, budget=UDP_BUDGET,
+                             counters=counters)
     except Malformed as exc:
+        if counters is not None:
+            counters.record_malformed()
         if len(query) < 2:
             return
         log(f"  malformed query from {peer}: {exc}")
@@ -388,7 +496,7 @@ def serve_datagram(sock, policy):
         log(f"  WARNING: sendto failed: {exc}")
 
 
-def serve_stream(listener, policy):
+def serve_stream(listener, policy, counters=None):
     """Answer on one accepted TCP connection, then close it.
 
     Handled inline rather than in a thread: answers come from memory with no
@@ -416,8 +524,10 @@ def serve_stream(listener, policy):
                 try:
                     # No budget: TCP is where a truncated UDP answer is retried,
                     # so bounding it here would be the same answer twice.
-                    reply = build_answer(query, policy)
+                    reply = build_answer(query, policy, counters=counters)
                 except Malformed as exc:
+                    if counters is not None:
+                        counters.record_malformed()
                     if len(query) < 2:
                         return
                     log(f"  malformed TCP query: {exc}")
@@ -438,18 +548,59 @@ def recv_exactly(conn, count):
     return bytes(chunks)
 
 
-def serve(sockets, policy):
+def serve(sockets, policy, counters=None, status_path=None, stop=None):
+    """The accept loop. Returns when `stop` says so, or never.
+
+    `stop` is a callable rather than an Event so the tests can end the loop
+    after a fixed number of turns without a thread. In the process it is the
+    SIGTERM flag.
+    """
     selector = selectors.DefaultSelector()
     for sock in sockets:
         sock.setblocking(True)
         selector.register(sock, selectors.EVENT_READ)
-    while True:
-        for key, _events in selector.select():
+    emit = lambda: emit_status(status_path, counters)
+    # Before the first query, so the file's absence means "never started"
+    # rather than the ambiguous "never asked a question" -- a responder whose
+    # guest has looked nothing up yet is healthy.
+    emit()
+    due = time.monotonic() + STATUS_INTERVAL
+    while stop is None or not stop():
+        # The timeout is what makes the tick happen on an idle responder. With
+        # a blocking select, a workload that stopped asking questions would
+        # freeze its own status file at whatever the last query left behind and
+        # look, to a reader, exactly like a process that had died.
+        for key, _events in selector.select(timeout=_SELECT_POLL):
             sock = key.fileobj
             if sock.type == socket.SOCK_DGRAM:
-                serve_datagram(sock, policy)
+                serve_datagram(sock, policy, counters)
             else:
-                serve_stream(sock, policy)
+                serve_stream(sock, policy, counters)
+        if time.monotonic() >= due:
+            emit()
+            due = time.monotonic() + STATUS_INTERVAL
+    emit()
+
+
+def emit_status(status_path, counters):
+    """Replace the status file, or log why it could not be replaced.
+
+    Never raises, and the except clause has to be as wide as that claim: a
+    responder that died because it could not write a diagnostic would leave the
+    guest unable to resolve anything, which is a far worse failure than the
+    missing file.
+
+    OSError is the expected failure (a full or read-only /run). TypeError and
+    ValueError are caught because json.dump raises them for a value it cannot
+    serialise -- unreachable for the figures here today, and a counter added
+    later that is not must cost a status file, not the guest's DNS.
+    """
+    if status_path is None or counters is None:
+        return
+    try:
+        write_status(status_path, counters.snapshot())
+    except (OSError, TypeError, ValueError) as exc:
+        log(f"  WARNING: could not write {status_path}: {exc}")
 
 
 def main(argv):
@@ -462,8 +613,13 @@ def main(argv):
         raise NotSocketActivated("LISTEN_FDS=0: no sockets were passed")
     policy = load_policy(vm_resolve_policy_path(name))
     log(f"  responder for {name}: {len(sockets)} socket(s), "
-        f"{len(policy.static)} static name(s), ttl {policy.ttl}s")
-    serve(sockets, policy)
+        f"{len(policy.static)} static name(s), "
+        f"{len(policy.hosts)} host pattern(s), ttl {policy.ttl}s")
+    counters = Counters()
+    stopping = []
+    signal.signal(signal.SIGTERM, lambda *_a: stopping.append(True))
+    serve(sockets, policy, counters, vm_resolve_status_path(name),
+          stop=lambda: bool(stopping))
     return 0
 
 

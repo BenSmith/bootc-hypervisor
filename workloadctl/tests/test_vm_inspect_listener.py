@@ -187,6 +187,22 @@ class TestCeiling(unittest.TestCase):
         conns[0].close.assert_called()
         conns[1].close.assert_called()
 
+    def test_a_rejected_connection_reaches_the_counters_too(self):
+        """The log line and the counter are two separate statements and only
+        one of them was being checked. A refused connection is closed on the
+        guest exactly as every other drop is, so a disposition total that
+        omitted it would not account for every connection the guest saw end."""
+        mod = _mod()
+        local = ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)
+        listener = mod.Listener([_listener_with(local)], io.StringIO(), limit=0)
+        for _ in range(2):
+            listener._handle(_mock_conn(), ("192.0.2.1", 1024),
+                             _listener_with(local))
+        snap = listener.status()
+        self.assertEqual(snap["dispositions"]["dropped"], 2)
+        self.assertEqual(snap["drop_reasons"]["connection ceiling reached"], 2)
+        self.assertEqual(snap["concurrency"]["refused"], 2)
+
     def test_releasing_an_admission_opens_a_slot(self):
         mod = _mod()
         ceiling = mod.Ceiling(1)
@@ -523,6 +539,19 @@ class TestPolicyLoading(unittest.TestCase):
         policy = mod.load_policy(path)
         self.assertEqual(policy.hosts, ("example.com",))
         self.assertEqual(policy.tls, "splice")
+
+    def test_the_document_carries_the_internal_list_through(self):
+        """The listener's copy of [[vm.network.internal]] authorises nothing --
+        it is what tells a wildcard-trap refusal apart from a host that is
+        simply down. Dropped on load, every internal-destination refusal is
+        misfiled as 'upstream unreachable' and the counter that exists to name
+        the wildcard trap never moves."""
+        mod = _mod()
+        path = self._write(json.dumps(vm_inspect_policy({
+            "hosts": ["nas.example.com"], "tls": "splice",
+            "internal": [{"host": "nas.example.com"}]})))
+        policy = mod.load_policy(path)
+        self.assertEqual(policy.internal, ("nas.example.com",))
 
     def test_a_missing_document_is_an_error_not_an_empty_policy(self):
         """An empty `hosts` list is a legal configuration, so a listener that
@@ -1237,6 +1266,402 @@ class TestCleartextUpstreamFailure(unittest.TestCase):
         self.assertIn("upstream unreachable", log)
         self.assertNotIn("not allowlisted", log)
         self.assertIn(b"502 Bad Gateway", got)
+
+
+def _ech_extension(payload=b"\x00" * 8):
+    """An encrypted_client_hello extension.
+
+    Its contents are never read -- by the parser, which skips it by length, or
+    by the tripwire, which keys on the type alone. A real client sends this
+    same codepoint with deliberately fake contents (GREASE ECH) on ordinary
+    connections, which is exactly why the capability count is not the alarm.
+    """
+    return (0xfe0d).to_bytes(2, "big") + len(payload).to_bytes(2, "big") + payload
+
+
+class TestEchFixture(unittest.TestCase):
+    """The captured handshake, pinned as a regression.
+
+    Hand-built helloes prove the parser handles the shapes we thought of. This
+    one is a real ECH ClientHello from a real client, and the property it pins
+    is the one the whole tripwire rests on: an ECH hello parses like any other
+    and yields the COVER name, so the extension is what is observable and the
+    name never is.
+    """
+
+    FIXTURE = ROOT / "tests" / "fixtures" / "ech-clienthello.bin"
+
+    def test_the_fixture_is_present(self):
+        """Cited by the design; a missing fixture would make every assertion
+        below vacuously skip rather than fail."""
+        self.assertTrue(self.FIXTURE.exists())
+
+    def test_it_parses_to_the_cover_name(self):
+        mod = _mod()
+        raw = self.FIXTURE.read_bytes()
+        _, hello = mod.read_client_hello(_FakeSocket([raw]))
+        self.assertEqual(hello.server_name, "cloudflare-ech.com")
+
+    def test_it_carries_the_ech_extension(self):
+        mod = _mod()
+        _, hello = mod.read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        self.assertIn(mod.TLS_EXT_ECH, hello.extensions)
+
+    def test_the_parser_does_not_decrypt_or_special_case_it(self):
+        """The ECH extension must be skipped by its length like every other.
+        A parser that reached inside it would be a TLS implementation, which
+        the peek must not become."""
+        mod = _mod()
+        _, hello = mod.read_client_hello(_FakeSocket([self.FIXTURE.read_bytes()]))
+        # Every extension after the ECH one is still recovered, which is only
+        # true if it was skipped correctly rather than terminating the walk.
+        self.assertGreater(len(hello.extensions),
+                           hello.extensions.index(mod.TLS_EXT_ECH) + 1)
+
+
+class TestEchTripwire(unittest.TestCase):
+    """Two numbers, and the reason they are two.
+
+    Capability is dominated by GREASE and moves the moment an ECH-capable
+    client is installed in the guest. The alarm is the pair -- extension
+    present AND the name on no list. Counting only the first is how a tripwire
+    ends up permanently lit and therefore ignored.
+    """
+
+    def _listener(self, hosts):
+        mod = _mod()
+        out = io.StringIO()
+        return mod, mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts))), out
+
+    def _serve(self, listener, payload):
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(payload)
+        ours.settimeout(2.0)
+        listener._serve_tls(ours, "plane=tls")
+
+    def test_an_allowlisted_ech_hello_moves_capability_and_not_the_alarm(self):
+        """THE case the split exists for: an ordinary modern client reaching
+        an allowed host. If this lit the alarm, the alarm would be lit on every
+        healthy workload from the day a browser was installed."""
+        mod, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, _hello_bytes(
+            _ech_extension(), server_name="allowed.example"))
+        self.assertEqual(listener.counters.ech_seen, 1)
+        self.assertEqual(listener.counters.ech_alarm, 0)
+
+    def test_an_unlisted_ech_hello_moves_both(self):
+        mod, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, _hello_bytes(
+            _ech_extension(), server_name="denied.example"))
+        self.assertEqual(listener.counters.ech_seen, 1)
+        self.assertEqual(listener.counters.ech_alarm, 1)
+
+    def test_an_ech_hello_with_no_sni_counts_toward_the_alarm(self):
+        """The stronger form of the signal, not a weaker one: the extension
+        was there and the name matched nothing at all."""
+        _, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, _hello_bytes(_ech_extension(), server_name=None))
+        self.assertEqual(listener.counters.ech_seen, 1)
+        self.assertEqual(listener.counters.ech_alarm, 1)
+
+    def test_a_hello_without_the_extension_moves_neither(self):
+        """Including one that is refused. The tripwire is about ECH, not about
+        denial, and a figure that moved on every policy miss would measure the
+        allowlist rather than the guest's TLS stack."""
+        _, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, _hello_bytes(server_name="denied.example"))
+        self.assertEqual(listener.counters.ech_seen, 0)
+        self.assertEqual(listener.counters.ech_alarm, 0)
+
+    def test_ordinary_grease_extensions_do_not_count_as_ech(self):
+        """RFC 8701 GREASE on other codepoints is not ECH. Counting it would
+        make capability meaningless."""
+        _, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, _hello_bytes(
+            _grease_extension() + _grease_extension(0x1a1a),
+            server_name="allowed.example"))
+        self.assertEqual(listener.counters.ech_seen, 0)
+
+    def test_an_unreadable_hello_moves_no_ech_figure(self):
+        """The extension list comes from the parse. Bytes that did not parse
+        have no extensions to have been seen, and guessing would put junk in
+        the capability count and make the alarm's denominator a fiction."""
+        _, listener, _ = self._listener(["allowed.example"])
+        self._serve(listener, b"GET / HTTP/1.1\r\n\r\n")
+        self.assertEqual(listener.counters.ech_seen, 0)
+        self.assertEqual(listener.counters.ech_alarm, 0)
+
+    def test_the_fixture_lights_the_alarm_when_its_name_is_unlisted(self):
+        """End to end on the real capture rather than a hand-built hello."""
+        _, listener, _ = self._listener(["allowed.example"])
+        raw = (ROOT / "tests" / "fixtures" / "ech-clienthello.bin").read_bytes()
+        self._serve(listener, raw)
+        self.assertEqual(listener.counters.ech_seen, 1)
+        self.assertEqual(listener.counters.ech_alarm, 1)
+
+
+class TestCounters(unittest.TestCase):
+    """The rung's figures, emitted rather than rendered."""
+
+    def _listener(self, hosts=("allowed.example",), internal=()):
+        mod = _mod()
+        out = io.StringIO()
+        return mod, mod.Listener([], out, policy=mod.Policy(
+            tls="splice", hosts=tuple(hosts),
+            internal=tuple(internal))), out
+
+    def test_every_drop_reason_is_present_before_anything_happens(self):
+        """A reason absent from the file and a reason reading zero are the
+        same fact and must look the same, or an operator reads a missing key
+        as 'not measured' and goes looking for a bug that is not there."""
+        _, listener, _ = self._listener()
+        reasons = listener.status()["drop_reasons"]
+        self.assertIn("not allowlisted", reasons)
+        self.assertIn("no readable name", reasons)
+        self.assertIn("internal destination", reasons)
+        self.assertTrue(all(v == 0 for v in reasons.values()))
+
+    def test_the_dispositions_add_up_to_the_drops(self):
+        """A total that did not include the ceiling's rejections would not
+        account for every connection the guest saw closed."""
+        _, listener, _ = self._listener()
+        c = listener.counters
+        c.record_drop("not allowlisted", "a.example")
+        c.record_drop("no readable name")
+        c.record_drop("connection ceiling reached")
+        snap = listener.status()
+        self.assertEqual(snap["dispositions"]["dropped"], 3)
+        self.assertEqual(sum(snap["drop_reasons"].values()), 3)
+
+    def test_a_drop_reason_the_counters_do_not_know_still_counts_as_a_drop(self):
+        """The disposition is the figure that must never undercount; a reason
+        added to the log and not to this map degrades to unattributed rather
+        than to invisible."""
+        _, listener, _ = self._listener()
+        listener.counters.record_drop("something new")
+        self.assertEqual(listener.status()["dispositions"]["dropped"], 1)
+
+    def test_an_unknown_reason_still_reconciles_the_two_maps(self):
+        """`dropped` and the sum of `drop_reasons` must agree unconditionally.
+        An unattributed drop that vanished from the reason map would leave an
+        operator reconciling the two against a number that lost rows, with
+        nothing in the file to say a row had been lost."""
+        _, listener, _ = self._listener()
+        listener.counters.record_drop("not allowlisted", "a.example")
+        listener.counters.record_drop("something new")
+        snap = listener.status()
+        self.assertEqual(snap["drop_reasons"]["(unclassified)"], 1)
+        self.assertEqual(sum(snap["drop_reasons"].values()),
+                         snap["dispositions"]["dropped"])
+
+    def test_the_unclassified_bucket_is_absent_rather_than_zero(self):
+        """It reads zero on every correct build, and a line that always reads
+        zero is a line an operator learns to skip -- which is the line that
+        matters on the one build where it does not. Same argument as (other)."""
+        _, listener, _ = self._listener()
+        listener.counters.record_drop("not allowlisted", "a.example")
+        self.assertNotIn("(unclassified)",
+                         listener.status()["drop_reasons"])
+
+    def test_no_call_site_passes_a_drop_reason_as_a_literal(self):
+        """The guard on the bucket above. `record_drop` cannot reject a reason
+        it does not know -- it must count the drop either way -- so the only
+        thing keeping a new reason in step with the pre-seed is that every call
+        site names a constant, and every constant is in DROP_REASONS."""
+        import re
+        mod = _mod()
+        source = LISTENER_FILE.read_text()
+        calls = re.findall(r"record_drop\(\s*([^,)]+)", source)
+        self.assertGreater(len(calls), 5)
+        for arg in calls:
+            arg = arg.strip()
+            if arg in ("self", "reason", "reason: str"):
+                continue          # the definition and the docstring's own text
+            self.assertFalse(arg.startswith(('"', "'")),
+                             f"record_drop called with the literal {arg}")
+            self.assertIn(getattr(mod, arg), mod.DROP_REASONS)
+
+    def test_the_pre_seed_is_exactly_the_named_reasons(self):
+        _, listener, _ = self._listener()
+        mod = _mod()
+        self.assertEqual(set(listener.status()["drop_reasons"]),
+                         set(mod.DROP_REASONS))
+
+    def test_the_reasons_and_the_call_sites_are_the_same_set(self):
+        """Drift is possible in both directions and neither is visible at
+        runtime. A call site naming a reason the tuple lacks lands in
+        (unclassified); a tuple entry no call site uses reads zero forever and
+        is indistinguishable from a refusal that never happened to fire."""
+        import re
+        mod = _mod()
+        source = LISTENER_FILE.read_text()
+        named = {arg.strip() for arg in
+                 re.findall(r"record_drop\(\s*([^,)]+)", source)
+                 if arg.strip().startswith("DROP_")}
+        named |= {m for m in re.findall(r"return (DROP_\w+)", source)}
+        self.assertEqual({getattr(mod, n) for n in named},
+                         set(mod.DROP_REASONS))
+
+    def test_the_lists_loaded_at_start_are_reported(self):
+        """`drift` cannot see them, so this is the only place the question
+        'what is this process actually enforcing' has an answer."""
+        _, listener, _ = self._listener(hosts=["a.example", "b.example"],
+                                        internal=["nas.internal"])
+        lists = listener.status()["lists"]
+        self.assertEqual(lists["hosts"], ["a.example", "b.example"])
+        self.assertEqual(lists["internal"], ["nas.internal"])
+        self.assertEqual(lists["tls"], "splice")
+
+    def test_concurrency_reports_live_and_refused_together(self):
+        """One number cannot separate a guest storming the listener from a
+        ceiling set too low for a real workload."""
+        _, listener, _ = self._listener()
+        conc = listener.status()["concurrency"]
+        self.assertIn("open", conc)
+        self.assertIn("refused", conc)
+
+    def test_the_per_host_map_is_bounded(self):
+        """The keys are guest-chosen. Unbounded here is a cardinality
+        explosion on the HOST, through the exporter."""
+        _, listener, _ = self._listener()
+        for i in range(200):
+            listener.counters.record_drop("internal destination", f"h{i}.example")
+        snap = listener.status()
+        self.assertLessEqual(len(snap["internal_refusals"]), 21)
+        self.assertEqual(snap["internal_refusals_total"], 200)
+
+    def test_a_splice_is_counted_as_a_splice(self):
+        _, listener, _ = self._listener()
+        listener.counters.record_splice()
+        self.assertEqual(listener.status()["dispositions"]["spliced"], 1)
+
+
+class TestInternalAttribution(unittest.TestCase):
+    """Two failures arrive as one OSError, and telling them apart is the whole
+    value of the internal-refusal figure.
+
+    Nothing here decides anything: the kernel's wl_internal_ok4/6 elements are
+    the one enforcement point. This only names what already happened.
+    """
+
+    def _listener(self, internal=()):
+        mod = _mod()
+        return mod, mod.Listener([], io.StringIO(), policy=mod.Policy(
+            tls="splice", hosts=("host.example",), internal=tuple(internal)))
+
+    def test_a_name_resolving_into_private_space_is_an_internal_refusal(self):
+        mod, listener = self._listener()
+        with unittest.mock.patch.object(
+                mod.socket, "getaddrinfo",
+                return_value=[(2, 1, 6, "", ("192.168.5.5", 443))]):
+            self.assertEqual(listener._dial_failure_reason("host.example"),
+                             "internal destination")
+
+    def test_a_name_with_an_internal_entry_is_a_host_that_is_down(self):
+        """It has the exemption the drop would otherwise have caught, so the
+        failure is not the wildcard trap -- and reporting it as one sends an
+        operator to edit a config line that is already correct."""
+        mod, listener = self._listener(internal=["host.example"])
+        with unittest.mock.patch.object(
+                mod.socket, "getaddrinfo",
+                return_value=[(2, 1, 6, "", ("192.168.5.5", 443))]):
+            self.assertEqual(listener._dial_failure_reason("host.example"),
+                             "upstream unreachable")
+
+    def test_a_public_address_is_a_host_that_is_down(self):
+        mod, listener = self._listener()
+        with unittest.mock.patch.object(
+                mod.socket, "getaddrinfo",
+                return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+            self.assertEqual(listener._dial_failure_reason("host.example"),
+                             "upstream unreachable")
+
+    def test_a_name_that_no_longer_resolves_degrades_to_the_generic_reason(self):
+        """This runs on a path that has already failed. A counter is not worth
+        raising a second exception over."""
+        mod, listener = self._listener()
+        with unittest.mock.patch.object(
+                mod.socket, "getaddrinfo", side_effect=OSError("no such host")):
+            self.assertEqual(listener._dial_failure_reason("host.example"),
+                             "upstream unreachable")
+
+    def test_the_internal_list_is_matched_on_the_normalised_name(self):
+        """`Host.Example.` and `host.example` are the same name; a spelling
+        that missed here would misattribute the counter."""
+        mod, listener = self._listener(internal=["host.example"])
+        with unittest.mock.patch.object(
+                mod.socket, "getaddrinfo",
+                return_value=[(2, 1, 6, "", ("10.0.0.9", 443))]):
+            self.assertEqual(
+                listener._dial_failure_reason(
+                    mod.vm_normalise_hostname("Host.Example.")),
+                "upstream unreachable")
+
+
+class TestStatusFile(unittest.TestCase):
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.dir))
+        self.path = os.path.join(self.dir, "inspect-status.json")
+
+    def _listener(self, path):
+        mod = _mod()
+        return mod, mod.Listener(
+            [], io.StringIO(), policy=mod.Policy(tls="splice", hosts=()),
+            status_path=path)
+
+    def test_it_writes_the_counters(self):
+        _, listener = self._listener(self.path)
+        listener.counters.record_splice()
+        listener.write_status()
+        doc = json.loads(Path(self.path).read_text())
+        self.assertEqual(doc["dispositions"]["spliced"], 1)
+        self.assertIn("written_at", doc)
+
+    def test_no_path_means_count_but_never_write(self):
+        """A figure that only accumulates when someone is watching is a figure
+        nobody can trust."""
+        _, listener = self._listener(None)
+        listener.counters.record_splice()
+        listener.write_status()
+        self.assertEqual(listener.status()["dispositions"]["spliced"], 1)
+
+    def test_an_unwritable_path_never_takes_the_listener_down(self):
+        """This runs on the accept loop -- the thread whose death stops the
+        guest reaching anything at all. A missing diagnostic is the lesser
+        failure by a wide margin."""
+        _, listener = self._listener(os.path.join(self.dir, "no", "such",
+                                                  "status.json"))
+        listener.write_status()   # must not raise
+
+    def test_the_failure_is_logged_rather_than_swallowed_silently(self):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=()),
+            status_path=os.path.join(self.dir, "no", "such", "status.json"))
+        listener.write_status()
+        self.assertIn("could not write", out.getvalue())
+
+    def test_an_unserialisable_counter_never_takes_the_listener_down(self):
+        """The wrapper promises it never raises, and the except clause has to
+        be as wide as the promise. json.dump raises TypeError, not OSError, for
+        a value it cannot encode -- so a counter added in a later rung that is
+        not a plain int or str would, under a narrower clause, kill the accept
+        loop and with it the guest's whole egress. It must cost the status file
+        instead."""
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=()),
+            status_path=self.path)
+        listener.status = lambda: {"a_later_rungs_counter": object()}
+        listener.write_status()   # must not raise
+        self.assertIn("could not write", out.getvalue())
 
 
 if __name__ == "__main__":

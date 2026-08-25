@@ -47,8 +47,9 @@ from vm import (
     NFT_BIN, NFT_SETS, NFT_SKELETON, NFT_TABLE, VM_EGRESS_DEFAULT,
     vm_allow_resolved, vm_filter_commands, vm_filter_delete_command,
     vm_owned_elements, vm_resolve_policy, vm_resolve_policy_path,
-    vm_uses_resolve,
+    vm_resolve_status_path, vm_uses_resolve,
 )
+from vm_status import clear_status
 from workload_lib import workload_config_path
 
 try:
@@ -178,6 +179,11 @@ def up(name: str) -> int:
         # to fail the VM's start here, where the message names this helper.
         path = write_resolve_policy(name, net, uid, resolved)
         log(f"  Wrote {path}")
+        # The previous instance's query counters, for the reason
+        # vm_status.clear_status gives: the RuntimeDirectory is preserved
+        # across a restart and the responder does not start until the guest's
+        # first query, so the file on disk until then belongs to the last boot.
+        clear_status(vm_resolve_status_path(name))
     return 0
 
 

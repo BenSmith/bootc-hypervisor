@@ -312,6 +312,17 @@ class TestHelperArmsBothTables(unittest.TestCase):
         self.assertNotIn("vm_inspect_cgroup_command", up)
         self.assertNotIn("vm_inspect_cgroup_filter_command", up)
 
+    def test_up_clears_the_previous_instances_status_file(self):
+        """/run/workload-vm/<name> is the VM service's RuntimeDirectory with
+        RuntimeDirectoryPreserve=yes, and the inspector is socket-activated --
+        so without this, an operator reading `diagnose` between a VM start and
+        the guest's first dial sees the LAST boot's ECH alarms and internal
+        refusals with nothing marking them as stale. Cleared at arm rather than
+        at stop because a stop is not guaranteed to run."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertIn("clear_status(vm_inspect_status_path(name))", up)
+
     def test_down_removes_elements_and_addresses_but_not_the_link(self):
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]

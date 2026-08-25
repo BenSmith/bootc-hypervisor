@@ -1067,6 +1067,22 @@ class TestFilterHelper(unittest.TestCase):
         self.assertEqual(self.mod.main(["x", "sideways", "vm1"]), 2)
 
 
+    def test_up_clears_the_previous_instances_resolver_status(self):
+        """Same lifecycle trap as the inspector's: the run dir is preserved
+        across a restart and the responder is socket-activated, so until the
+        guest's first query the file on disk is the last boot's query counts.
+        Cleared beside the policy write, which is the other thing this helper
+        does to that directory on every arm."""
+        source = (Path(__file__).resolve().parent.parent
+                  / "libexec" / "workload-vm-filter").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertIn("clear_status(vm_resolve_status_path(name))", up)
+        # Inside the resolver branch: a workload with no synthesising responder
+        # has no such file, and clearing one unconditionally would claim a
+        # producer that this workload does not run.
+        self.assertLess(up.index("vm_uses_resolve"),
+                        up.index("clear_status"))
+
 class TestEgressDiagnose(unittest.TestCase):
     """`diagnose`'s egress check.
 
@@ -1946,6 +1962,36 @@ class TestRung2Schema(unittest.TestCase):
         errors = self._egress({"allow": [{"address": "192.168.0.10:22",
                                           "reason": "r", "host": "x"}]})
         self.assertTrue(any("unknown key" in e for e in errors), errors)
+
+    def test_a_network_scalar_below_the_allow_table_names_its_cause(self):
+        """The misordering the schema reference's own reading order invites.
+
+        The annotated section documents [[vm.network.allow]] above `hosts`, so
+        an operator working down the file writes `hosts` after the allow table
+        -- where TOML reads it as part of the allow ENTRY. The key is not
+        missing and not misspelled; it belongs to the wrong table, and the file
+        looks entirely reasonable. "unknown key" alone sends the reader
+        hunting for a typo that is not there.
+        """
+        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+                                          "reason": "r",
+                                          "hosts": ["example.com"]}]})
+        message = " ".join(errors)
+        self.assertIn("unknown key", message)
+        self.assertIn("[vm.network]", message)
+        # The remedy has to be "move it up": re-declaring the table lower down
+        # is a TOML error, so a reader who guesses that way gets a second
+        # failure with a message that names no workloadctl concept at all.
+        self.assertIn("ABOVE", message)
+
+    def test_a_genuine_typo_gets_no_misordering_hint(self):
+        """The hint is for a key that exists somewhere else, not for any
+        unknown key -- otherwise it is noise on every real typo."""
+        errors = self._egress({"allow": [{"address": "192.168.0.10:22",
+                                          "reason": "r", "adress": "x"}]})
+        message = " ".join(errors)
+        self.assertIn("unknown key", message)
+        self.assertNotIn("ABOVE", message)
 
     def test_an_allow_on_443_is_refused_with_tls_absent(self):
         """The case the design's own wording would have let through.

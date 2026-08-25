@@ -103,8 +103,9 @@ from vm import (
     vm_inspect_link_address_commands, vm_inspect_link_delete_commands,
     vm_inspect_policy, vm_inspect_policy_path,
     vm_internal_hosts, vm_internal_ok_commands, vm_internal_resolve,
-    vm_uses_inspect,
+    vm_inspect_status_path, vm_uses_inspect,
 )
+from vm_status import clear_status
 from workload_lib import workload_config_path
 
 try:
@@ -177,6 +178,12 @@ def up(name: str) -> int:
     # that started ahead of its policy would fail its start rather than read a
     # stale one -- but it would fail it on a connection the guest already made.
     write_policy(name)
+    # The previous instance's counters, which the RuntimeDirectory preserved
+    # across the restart. See vm_status.clear_status: the inspector is
+    # socket-activated, so without this an operator reading `diagnose` between
+    # the VM's start and the guest's first dial sees the last boot's ECH alarms
+    # and internal refusals presented as this boot's.
+    clear_status(vm_inspect_status_path(name))
 
     ensure_advertised_interface(run)
     # Both skeletons, for the reason in the module docstring: the DNAT maps

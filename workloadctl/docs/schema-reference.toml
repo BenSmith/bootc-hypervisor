@@ -354,6 +354,18 @@ name = "schema-reference"
 # remove. A warning and not an error, because a filtered workload deliberately
 # given its own resolver is a coherent thing to want.
 #
+# WHERE IT GOES IN THE FILE. Every [vm.network] scalar -- egress, hosts,
+# resolver, ports, bridge, tls -- must be written ABOVE the first
+# [[vm.network.allow]] table, because that table ends the [vm.network] section.
+# A scalar written below it is read by TOML as part of the allow ENTRY, not of
+# [vm.network]: not a typo, not a missing key, just a key that quietly belongs
+# to the wrong table in a file that looks fine. workloadctl catches it and says
+# so, but the keys below are documented in reading order and not in file order,
+# so working down this document top-to-bottom produces exactly that mistake.
+# Re-declaring [vm.network] further down does not fix it -- TOML rejects a
+# table declared twice. The complete-example block at the end of this file is
+# in valid file order; copy from there.
+#
 # [[vm.network.allow]]
 # address = "192.168.0.10:22"
 # reason  = "backup target; SSH, not TLS, and not proxyable"

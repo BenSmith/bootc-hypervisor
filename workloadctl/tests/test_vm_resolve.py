@@ -14,10 +14,14 @@ as one.
 """
 
 import ipaddress
+import json
 import os
+import shutil
 import socket
 import struct
+import tempfile
 import unittest
+from pathlib import Path
 
 from vm import (
     UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_PROXY_SLICE, VM_RESOLVE_ADDR_BASE,
@@ -1009,6 +1013,155 @@ class TestGeneratedUnits(unittest.TestCase):
                   "vm": {"memory": "1G", "network": {"egress": "open"}}}
         vm_unit = self.gen.generate_vm_service(config, "_wl-web", UID, [])
         self.assertNotIn("workload-web-resolve.socket", vm_unit)
+
+
+class TestDnsCounters(unittest.TestCase):
+    """The responder's figures, and the one that is not a health metric.
+
+    `unlisted` is the tunnelling signature. Synthesis makes the channel ABSENT
+    rather than filtered -- an encoded name is answered like any other and
+    resolves nowhere -- so a rising count is evidence that something in the
+    guest is trying, never evidence that anything left.
+    """
+
+    def setUp(self):
+        self.mod = _module()
+        self.policy = _policy(self.mod, hosts=["allowed.example", "*.ok.example"])
+        self.counters = self.mod.Counters()
+
+    def answer(self, *args, **kwargs):
+        return self.mod.build_answer(query(*args, **kwargs), self.policy,
+                                     counters=self.counters)
+
+    def test_a_synthesised_answer_is_counted_as_one(self):
+        self.answer("allowed.example", TYPE_A)
+        self.assertEqual(self.counters.snapshot()["queries"]["synthesised"], 1)
+
+    def test_a_query_for_an_unlisted_name_is_counted_as_unlisted(self):
+        self.answer("encoded-data-1.attacker.example", TYPE_A)
+        snap = self.counters.snapshot()
+        self.assertEqual(snap["unlisted"], 1)
+        self.assertIn("encoded-data-1.attacker.example", snap["unlisted_names"])
+
+    def test_it_is_still_answered_and_answered_the_same_way(self):
+        """The count must not become a refusal. A responder that withheld an
+        answer for an unlisted name would be a different design -- and would
+        tell the guest which names are on the list."""
+        listed = Reply(self.answer("allowed.example", TYPE_A))
+        unlisted = Reply(self.answer("nowhere.example", TYPE_A))
+        self.assertEqual(listed.rcode, unlisted.rcode)
+        self.assertEqual(listed.addresses(), unlisted.addresses())
+
+    def test_an_allowlisted_name_is_not_counted_as_unlisted(self):
+        self.answer("allowed.example", TYPE_A)
+        self.assertEqual(self.counters.snapshot()["unlisted"], 0)
+
+    def test_a_wildcard_match_is_on_a_list(self):
+        self.answer("api.ok.example", TYPE_A)
+        self.assertEqual(self.counters.snapshot()["unlisted"], 0)
+
+    def test_an_allow_entry_counts_as_a_list(self):
+        """`static` is an authorisation. A query for one is not the tunnelling
+        signature even though `hosts` does not match it."""
+        policy = _policy(self.mod, hosts=[],
+                         static={"forge.internal": ["10.0.0.5"]})
+        self.mod.build_answer(query("forge.internal", TYPE_A), policy,
+                              counters=self.counters)
+        snap = self.counters.snapshot()
+        self.assertEqual(snap["unlisted"], 0)
+        self.assertEqual(snap["queries"]["static"], 1)
+
+    def test_a_nodata_type_is_counted_as_nodata_and_not_as_unlisted(self):
+        """An HTTPS query names a host the guest is about to look up properly
+        anyway. Counting it as unlisted too would double every ordinary miss
+        and drown the signal."""
+        self.answer("nowhere.example", 65)
+        snap = self.counters.snapshot()
+        self.assertEqual(snap["queries"]["nodata"], 1)
+        self.assertEqual(snap["unlisted"], 0)
+
+    def test_the_unlisted_name_map_is_bounded(self):
+        """This is the map a name-encoding guest is actively trying to fill,
+        which makes it the one that must not grow."""
+        for i in range(200):
+            self.answer(f"h{i}.attacker.example", TYPE_A)
+        snap = self.counters.snapshot()
+        self.assertLessEqual(len(snap["unlisted_names"]), 21)
+        self.assertEqual(snap["unlisted"], 200)
+
+    def test_counters_are_optional_and_the_bytes_do_not_change(self):
+        """Every existing caller passes none. A response must never be shaped
+        by whether anyone is counting."""
+        with_counters = self.answer("allowed.example", TYPE_A)
+        without = self.mod.build_answer(query("allowed.example", TYPE_A),
+                                        self.policy)
+        self.assertEqual(with_counters, without)
+
+    def test_a_policy_without_hosts_still_loads(self):
+        """A policy document written before this key existed is a policy with
+        no host patterns, not a broken one."""
+        doc = vm_resolve_policy({}, UID)
+        doc.pop("hosts", None)
+        policy = self.mod.Policy(doc)
+        self.assertEqual(policy.hosts, ())
+
+
+class TestResponderStatusFile(unittest.TestCase):
+
+    def setUp(self):
+        self.mod = _module()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.dir))
+        self.path = os.path.join(self.dir, "resolve-status.json")
+
+    def test_it_writes_the_counters(self):
+        counters = self.mod.Counters()
+        counters.record_answer("a.example", "synthesised", 1, True)
+        self.mod.emit_status(self.path, counters)
+        doc = json.loads(Path(self.path).read_text())
+        self.assertEqual(doc["queries"]["synthesised"], 1)
+        self.assertIn("written_at", doc)
+
+    def test_an_unwritable_path_never_takes_the_responder_down(self):
+        """A responder that died over a diagnostic would leave the guest
+        unable to resolve anything -- a far worse failure than a missing
+        file."""
+        counters = self.mod.Counters()
+        self.mod.emit_status(os.path.join(self.dir, "no", "such", "s.json"),
+                             counters)   # must not raise
+
+    def test_an_unserialisable_counter_never_takes_the_responder_down(self):
+        """json.dump raises TypeError, not OSError. The except clause has to be
+        as wide as the docstring's promise, or a counter added in a later rung
+        that is not a plain int costs the guest its DNS rather than costing a
+        status file."""
+        counters = self.mod.Counters()
+        counters.snapshot = lambda: {"a_later_rungs_counter": object()}
+        self.mod.emit_status(self.path, counters)   # must not raise
+        self.assertFalse(Path(self.path).exists())
+
+    def test_the_loop_writes_before_the_first_query(self):
+        """Absence must mean 'never started', not the ambiguous 'never asked a
+        question' -- a responder whose guest has looked nothing up is
+        healthy, and a socket unit that failed is not.
+
+        The file's existence AFTER serve() returns proves nothing: serve emits
+        once more on its way out, so a missing pre-loop write would leave the
+        same file behind and the test would pass over the bug. What has to be
+        observed is the file existing at the moment the loop first asks whether
+        to stop -- which is after the pre-loop emit and before any query."""
+        counters = self.mod.Counters()
+        seen = []
+
+        def stop():
+            seen.append(Path(self.path).exists())
+            return True
+
+        self.mod.serve([], self.mod.Policy(vm_resolve_policy({}, UID)),
+                       counters, self.path, stop=stop)
+        self.assertEqual(seen, [True],
+                         "the status file did not exist before the first turn "
+                         "of the accept loop")
 
 
 if __name__ == "__main__":

@@ -746,20 +746,51 @@ def vm_inspect_policy_path(name: str) -> str:
     return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_POLICY_FILE}"
 
 
+VM_INSPECT_STATUS_FILE = "inspect-status.json"
+VM_RESOLVE_STATUS_FILE = "resolve-status.json"
+
+
+def vm_inspect_status_path(name: str) -> str:
+    """Where one workload's inspector writes its counters.
+
+    Two status files rather than one, and lib/vm_status.py carries the
+    argument: the responder is a separate socket-activated process, and two
+    processes atomically replacing one path leaves only the last writer's
+    figures, silently.
+    """
+    return f"{VM_SOCKET_DIR}/{name}/{VM_INSPECT_STATUS_FILE}"
+
+
+def vm_resolve_status_path(name: str) -> str:
+    """Where one workload's responder writes its counters."""
+    return f"{VM_SOCKET_DIR}/{name}/{VM_RESOLVE_STATUS_FILE}"
+
+
 def vm_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 
     `hosts` is the same list tinyproxy is given, deliberately: at this rung the
     two enforce the same patterns by two mechanisms, and generating them from
     one source is what keeps a redirected connection and a proxied one making
-    the same decision. `internal` names are NOT added here — an `internal`
-    entry names a host that is already on a list (validation refuses one that is
-    not), and it excepts the inspector's *upstream* leg from the internal drop
-    rather than authorising a name.
+    the same decision.
+
+    `internal` is carried and AUTHORISES NOTHING. An `internal` entry names a
+    host that is already on a list (validation refuses one that is not), and it
+    excepts the inspector's *upstream* leg from the internal drop rather than
+    authorising a name. The listener never consults it to admit a connection:
+    the kernel's wl_internal_ok4/6 elements are the one enforcement point, and a
+    second one in userspace could disagree with them while both looked right.
+
+    It is here so that a FAILED upstream dial to a private address can be
+    attributed. An allowlisted name that resolved into private space with no
+    entry is the wildcard trap firing; one WITH an entry is a host that is
+    simply down. Those are the same OSError without this list, and telling them
+    apart is the whole value of the internal-refusal counter.
     """
     return {
         "tls": net.get("tls", VM_TLS_DEFAULT),
         "hosts": vm_proxy_hosts(net),
+        "internal": vm_internal_hosts(net),
     }
 
 
@@ -1631,6 +1662,13 @@ def vm_allow_reserved_reason(
             f"through the inspector by name instead")
 
 
+# The [vm.network] keys that are scalars rather than sub-tables. Used only to
+# recognise one written in the wrong place; see parse_vm_allow.
+VM_NETWORK_SCALARS = frozenset({
+    "bridge", "ports", "resolver", "egress", "hosts", "tls",
+})
+
+
 def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
     """Parse one [[vm.network.allow]] table into a VmAllowEntry.
 
@@ -1658,9 +1696,24 @@ def parse_vm_allow(entry, *, filtered: bool = True) -> VmAllowEntry:
             f"`reason`, got {entry!r}")
     unknown = sorted(set(entry) - {"address", "reason"})
     if unknown:
+        # An unknown key here is usually not a typo -- it is a [vm.network]
+        # scalar written BELOW the first [[vm.network.allow]] table, which TOML
+        # reads as part of the allow entry rather than of [vm.network]. The
+        # file looks right and the key silently belongs to the wrong table, so
+        # the message names the cause rather than only the symptom. It cannot
+        # be fixed by re-opening [vm.network] further down -- TOML rejects a
+        # table declared twice -- so the instruction is "move it up".
+        misplaced = [k for k in unknown if k in VM_NETWORK_SCALARS]
+        hint = ""
+        if misplaced:
+            hint = (f"\n{', '.join(misplaced)} belongs to [vm.network] itself. "
+                    f"The [[vm.network.allow]] table above it ends that "
+                    f"section, so move it ABOVE the first "
+                    f"[[vm.network.allow]]; re-declaring [vm.network] lower "
+                    f"down is not valid TOML.")
         raise ValueError(
             f"unknown key(s) {', '.join(unknown)}; an allow entry carries "
-            f"`address` and `reason` only")
+            f"`address` and `reason` only{hint}")
     spec = entry.get("address")
     if not isinstance(spec, str) or not spec.strip():
         raise ValueError(
@@ -1886,6 +1939,15 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
     Addresses come from `resolved` when the caller has one, so the map holds the
     addresses that were ARMED -- see vm_filter_elements for why a second
     resolution is a different question.
+
+    `hosts` changes NO answer this responder gives. Synthesis is unconditional
+    by design: an unlisted name is answered like any other, and the refusal
+    happens later, at the listener. The list is carried so the responder can
+    COUNT queries for names on no list -- the tunnelling signature, since
+    synthesis makes the channel absent rather than filtered, so a burst of
+    unique unlisted names exfiltrates nothing and is still the cleanest
+    evidence that something in the guest is trying. A responder that REFUSED
+    those names would be a different design; this one only notices.
     """
     inspect = vm_inspect_address(uid)
     if resolved is None:
@@ -1907,6 +1969,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "address6": inspect.v6,
         "ttl": VM_RESOLVE_TTL,
         "static": static,
+        "hosts": vm_proxy_hosts(net),
     }
 
 
