@@ -325,20 +325,47 @@ def guards():
             record(f"{arm.name}: {mapname} carries uid {uid}",
                    hit, "present" if hit else f"elems={elems}")
 
-    # The redirect exemption. One element per re-originating unit whose service
-    # has started -- each arms its own on ExecStartPre -- so the members here are
-    # inspectors and responders and nothing else.
-    #
-    # Under rung 1 there was a third kind of member, the workload's tinyproxy,
-    # and it was the one this check existed for: without it the proxy's upstream
-    # CONNECT leg was redirected into the listener it was dialling past. That
-    # member is gone with the service. The check stays because the exemption it
-    # covers did not: an inspector missing from this set dials into itself, and
-    # no unit test can see that fail -- it is a cgroup id resolved at add time.
-    cg = set_elements("workload_proxy", "wl_inspect_cg")
-    n = len(cg or [])
-    record("wl_inspect_cg carries at least one re-originator cgroup",
-           n >= 1, f"{n} element(s)")
+def exemptions():
+    """Both cgroup exemptions, named per arm, AFTER the probes.
+
+    WHY THIS IS NOT IN guards()
+
+    It was, through rung 1, and it passed there -- because the member it was
+    really watching was the workload's tinyproxy, an ordinary long-running
+    service that came up with the VM. By the time guards() ran, its element was
+    installed.
+
+    The inspector is not that. It is socket-activated, and the elements are
+    armed by the SERVICE's ExecStartPre, not the socket's -- a cgroup element
+    resolves to an id at add time, and at the moment the socket is bound the
+    service has no cgroup for one to resolve to. So before the first guest dial
+    the set is legitimately empty, and a guard that reads it there reports a
+    missing exemption on a host where nothing is missing. That is the shape of
+    failure this rig exists to avoid, arriving from the rig's own side.
+
+    WHY BOTH SETS, AND WHY BY PATH
+
+    The invariant is both-or-neither. wl_inspect_cg (nat) keeps the inspector's
+    upstream dial from being redirected into the listener it IS; wl_egress_cg
+    (filter) keeps that same dial from hitting the default-deny drop. One
+    without the other is an inspector that loops into itself or reaches
+    nothing, and each failure looks like the other from the guest.
+
+    Matched on the exact cgroup path rather than counted, because a non-empty
+    set proves nothing about WHICH unit is in it: with two arms running, one
+    arm's element satisfies a count of >= 1 while the other dials into itself.
+    """
+    say("== cgroup exemptions ==")
+    nat = set_elements("workload_proxy", "wl_inspect_cg")
+    flt = set_elements("workload_filter", "wl_egress_cg")
+    for arm in ARMS:
+        path = f"workloads.slice/workload-{arm.name}-inspect.service"
+        for label, elems in (("wl_inspect_cg (redirect)", nat),
+                             ("wl_egress_cg (default-deny)", flt)):
+            hit = elems is not None and any(
+                path in json.dumps(e) for e in elems)
+            record(f"{arm.name}: inspector exempted in {label}",
+                   hit, "present" if hit else f"elems={elems}")
 
 
 def host_can_route_v6():
@@ -727,6 +754,7 @@ def main():
         probes()
         # After the probes, so both producers have been socket-activated and
         # have something to report. Before the restart, which clears them.
+        exemptions()
         domains()
         before = status_files(mark)
         restart_clears_status(before)

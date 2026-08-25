@@ -173,29 +173,33 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-**Not green against this shape yet.** The rig was rewritten in the same commit
-that deleted the proxy, so the last recorded run describes a different rig and
-saying otherwise would be the worst of the options: a "last green" line that
-survives the change it did not cover.
+Last green 2026-08-25, **37 assertions**, on a bare-metal Fedora 44 KVM host
+under plain **enforcing** with the shipped dontaudit rules in place. That is the
+first recorded run of the post-deletion shape: the rig was rewritten in the same
+commit that deleted the proxy, so every earlier figure describes a different rig.
 
-What the recorded runs said, kept because the *reasoning* still applies. On
-2026-08-25 this rig was green at **33 assertions** on a bare-metal Fedora 44 KVM
-host, and two runs were worth keeping apart. The earlier one, at 31 assertions,
-ran with `semodule -DB` in effect and is what *found* the two SELinux findings
-below; both were real, and neither was visible from `just test`. The
-33-assertion run is the one that closed them, and it ran under plain
-**enforcing** with shipped dontaudit rules in place — which is the harder
-result: a permissive or dontaudit-disabled pass measures the branch that ran,
-and an earlier denial changes which branch that is. The two added assertions
-were the domain checks, and `workload-<name>-resolve.service` measuring as
-`wlresolve_t` rather than `unconfined_service_t` is the whole of what
+Run under **enforcing**, not `semodule -DB`. A permissive or dontaudit-disabled
+pass measures the branch that ran, and an earlier denial changes which branch
+that is. The history is worth keeping for that reason: an earlier 31-assertion
+run under `-DB` is what *found* the two SELinux findings below — both real,
+neither visible from `just test` — and a 33-assertion run under enforcing is
+what closed them. `workload-<name>-resolve.service` measuring as `wlresolve_t`
+rather than `unconfined_service_t` is the whole of what
 `security/workload-resolve.cil` was written for.
 
-Re-run under **enforcing**, not `-DB`, for that reason. The rewrite moved the
-allowed path onto an arm whose traffic used to be exempted before the inspector
-saw it, so the forward and splice legs now execute in a configuration no
-recorded run has measured — which is exactly the case where a permissive pass
-would report a green that means nothing.
+**One correction the first post-deletion run produced, in the rig itself.** The
+`wl_inspect_cg` check used to sit in `guards()`, before any probe, and it failed
+there at 33/34 on a host where nothing was wrong. Under rung 1 the member it
+watched was the workload's tinyproxy — an ordinary long-running service, up
+before the guards ran. The inspector is socket-activated, and both cgroup
+elements are armed by the *service*'s `ExecStartPre`, not the socket's, because
+an element resolves to a cgroup id at add time and a socket-bound-but-unstarted
+service has no cgroup for one to resolve to. So the set is legitimately empty
+until the first guest dial. The check moved after `probes()` and got stronger on
+the way: it now matches the exact cgroup path per arm, in *both* sets
+(`wl_inspect_cg` for the redirect, `wl_egress_cg` for the default-deny), because
+the invariant is both-or-neither and a bare count of `>= 1` is satisfied by one
+arm while the other dials into itself.
 
 **Status files.** Both producers keep counters and write them into the VM's
 runtime directory, and that write is guaranteed never to raise: a failure is a
