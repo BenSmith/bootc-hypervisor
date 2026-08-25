@@ -75,10 +75,10 @@ try:
     )
     from vm import (
         VM_MGMT_SSH_PORT, VM_REBOOT_EXIT_CODE,
-        VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_PROXY_BIN, VM_PROXY_SLICE,
+        VM_GUEST_UID, VM_GUEST_AGENT_PORT, VM_SIDECAR_SLICE,
         VM_INSPECT_LISTENER_BIN, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
         vm_mac_address, vm_management_address, parse_vm_port,
-        find_ovmf_code, parse_memory_mib, vm_proxy_env, vm_uses_proxy,
+        find_ovmf_code, parse_memory_mib, vm_ca_env,
         vm_uses_inspect, vm_inspect_address, vm_inspect_cgroup_command,
         vm_inspect_cgroup_filter_command,
         VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
@@ -1881,79 +1881,6 @@ def build_passt_netdev(name: str, uid: int, net_cfg: dict, mac: str) -> str:
     return "-netdev " + ",".join(props)
 
 
-def generate_vm_proxy_service(config, user_name: str) -> str:
-    """Generate the hostname-policy proxy sidecar for one VM (ADR 006 §4.4).
-
-    One tinyproxy instance per workload, listening on the workload's own
-    management address — which no guest can reach (§3.5) — and reached instead
-    through a uid-keyed redirect from one address every guest is told to use.
-
-    Two properties this unit is responsible for. It runs as _wl-<name>, so the
-    proxy's own outbound traffic carries the same uid as the guest's and the
-    single `meta skuid` egress rule governs the direct and the via-proxy path
-    alike. And it declares no RuntimeDirectory, for the same reason the
-    virtiofsd sidecars do not: the VM service owns /run/workload-vm/<name>, and
-    a second claimant would refcount-cleanup the directory on proxy stop and
-    yank the VM's qmp and console sockets out from under it.
-
-    ExecStart is the bare binary, not a runcon wrapper. Unlike QEMU — where the
-    policy deliberately has no init_t -> svirt_t transition — security/
-    workload-proxy.cil declares the transition into wlproxy_t itself, so systemd
-    execs straight into the confined domain.
-    """
-    name = config["workload"]["name"]
-    socket_dir = f"/run/workload-vm/{name}"
-
-    unit = Unit()
-    unit.comment(f"hostname-policy proxy for {name}")
-    unit.comment(GENERATED_BY)
-
-    u = unit.section("Unit")
-    u.set("Description", f"Egress proxy for {name}")
-    u.set("Requires", f"workload-{name}-setup.service")
-    u.set("After", f"workload-{name}-setup.service")
-    # Before= the VM, so a guest that comes up fast cannot find its proxy
-    # missing; PartOf= so it stops with the VM. Not Requires= in the other
-    # direction — see the BindsTo note on the VM service.
-    u.set("Before", f"workload-{name}.service")
-    u.set("PartOf", f"workload-{name}.service")
-
-    svc = unit.section("Service")
-    # Type=exec, matching the virtiofsd sidecars: tinyproxy has no readiness
-    # protocol, and `-d` keeps it in the foreground so systemd tracks the
-    # process it started rather than a daemonized child.
-    svc.set("Type", "exec")
-    svc.set("User", user_name)
-    svc.set("Group", user_name)
-    # Pinned, NOT taken from [resources].slice. The egress exemption for this
-    # proxy is an nftables `socket cgroupv2 level 2` match, so the cgroup path
-    # has to be exactly two components — a nested custom slice would deepen it
-    # and the match would silently stop firing, dropping the proxy's own
-    # traffic. The proxy is not the payload; resource control belongs on the VM.
-    svc.set("Slice", VM_PROXY_SLICE)
-    # The `+` prefix runs the prestart as root under User=_wl-<name>: it writes
-    # the generated config into a root-owned runtime dir, creates the shared
-    # dummy interface, and installs an nftables element. Not `-` prefixed — a
-    # redirect that failed to install leaves a healthy-looking proxy that no
-    # guest can reach.
-    svc.add("ExecStartPre",
-            f"+/usr/libexec/workloadctl/workload-vm-proxy up {dq(name)}")
-    svc.add("ExecStart", f"{VM_PROXY_BIN} -d -c {socket_dir}/tinyproxy.conf")
-    # ExecStopPost rather than ExecStop, so a killed or failed proxy still
-    # withdraws its redirect. Tolerant: the element is legitimately absent when
-    # the start failed before installing it.
-    svc.add("ExecStopPost",
-            f"-+/usr/libexec/workloadctl/workload-vm-proxy down {dq(name)}")
-    svc.blank()
-    svc.add("StandardOutput", "journal")
-    svc.add("StandardError", "journal")
-    svc.blank()
-    svc.add("Restart", "on-failure")
-    svc.add("RestartSec", "5s")
-
-    return unit.render()
-
-
 def generate_vm_inspect_socket(config, user_name: str, uid: int) -> str:
     """Generate the socket unit for one VM's transparent egress inspector.
 
@@ -1979,8 +1906,8 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int) -> str:
 
     u = unit.section("Unit")
     u.set("Description", f"Transparent egress inspection socket for {name}")
-    # Ordered after the setup service, exactly as the proxy sidecar is, and for
-    # the reason generate_setup_service's docstring gives: the user must be
+    # Ordered after the setup service, exactly as the virtiofsd sidecars are,
+    # for the reason generate_setup_service's docstring gives: the user must be
     # resolvable before any ExecStartPre runs. This socket's ExecStartPre calls
     # workload-vm-inspect up, whose second statement is a getpwnam of
     # _wl-<name>, and the user does not exist until setup.service has run --
@@ -2064,7 +1991,7 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     socket's ExecStartPre runs, the service has not started and its cgroup does
     not exist, so the socket cannot arm these. Both or neither: the redirect
     exemption (wl_inspect_cg, proxy table) without the egress exemption
-    (wl_proxy_cg, filter table) is an inspector that redirects its own dials
+    (wl_egress_cg, filter table) is an inspector that redirects its own dials
     into itself; the egress exemption without the redirect exemption is one
     whose upstream traffic is caught by the default-deny drop. Both missing is
     both failures at once.
@@ -2102,14 +2029,14 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # readiness protocol the generator would otherwise have to wait on.
     svc.set("User", user_name)
     svc.set("Group", user_name)
-    # Pinned, NOT taken from [resources].slice, for the same reason the proxy
-    # unit pins it: the two cgroup exemptions are `socket cgroupv2 level 2`
+    # Pinned, NOT taken from [resources].slice: the two cgroup exemptions
+    # this unit arms are `socket cgroupv2 level 2`
     # matches, so the cgroup path has to be exactly two components — a nested
     # custom slice would deepen it and both matches would silently stop firing,
     # dropping the inspector's own traffic (the redirect side into itself, the
     # egress side into the default-deny drop). The inspector is not the
     # payload; resource control belongs on the VM.
-    svc.set("Slice", VM_PROXY_SLICE)
+    svc.set("Slice", VM_SIDECAR_SLICE)
     # Arm BOTH cgroup exemptions before the listener starts. `+` runs them as
     # root (nft needs the capability); not `-` — an exemption that failed to
     # install leaves a healthy-looking inspector that reaches nothing or dials
@@ -2264,7 +2191,7 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     # components; nothing keys on this unit's cgroup, so the pin here only
     # keeps the responder out of the VM's own resource accounting. Stated so a
     # later reader does not conclude the inspector's pin is decorative.
-    svc.set("Slice", VM_PROXY_SLICE)
+    svc.set("Slice", VM_SIDECAR_SLICE)
     # The workload name is an argument, not something the responder derives:
     # it is socket-activated with two identically-named fds, so there is
     # nothing on the socket to recover it from. It is what the responder
@@ -2350,15 +2277,10 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
     ]
     for tag in vfs_tags:
         prereqs.append(f"workload-{name}-virtiofs-{tag}.service")
-    # The proxy is a hard prerequisite, not a Wants=. A VM whose config names a
-    # hostname allowlist and whose egress is filtered can reach nothing but its
-    # proxy, so booting the guest without one produces a VM that looks healthy
-    # and cannot do its job — the misreported-confinement failure again.
-    if vm_uses_proxy(config):
-        prereqs.append(f"workload-{name}-proxy.service")
-    # Same reasoning as the proxy line: a filtered VM whose inspector socket
-    # is not bound reaches nothing on 80 or 443 while the VM itself looks
-    # healthy — the misreported-confinement failure again. Requires=, not
+    # The inspector socket is a hard prerequisite, not a Wants=. A filtered VM
+    # whose inspector socket is not bound reaches nothing on 80 or 443 while the
+    # VM itself looks healthy — the misreported-confinement failure. Requires=,
+    # not
     # Wants=, so a failed ExecStartPre — the nft arming — stops the VM from
     # booting rather than booting it unprotected. And the ordering is now
     # stated twice, from both ends: the socket's
@@ -2609,8 +2531,8 @@ def generate_vm_service(config, user_name: str, uid: int, vfs_tags=None) -> str:
 
         # Reachability for the host-side credential broker. This rides the VM
         # unit rather than a unit of its own because the broker is a single host
-        # service — unlike the hostname-policy proxy, there is no per-workload
-        # process whose lifecycle the map element could follow.
+        # service — unlike the inspector and the responder, there is no
+        # per-workload process whose lifecycle the map element could follow.
         #
         # Emitted for every non-bridged VM, not only the entitled ones. The
         # helper installs an element when [vm.network].broker is set and removes
@@ -2704,12 +2626,6 @@ def generate_vm_workload(config, user_name: str, uid: int):
     # was created and destroyed.
     wants_dir = SERVICES_DIR / "multi-user.target.wants"
     wants_dir.mkdir(parents=True, exist_ok=True)
-
-    # Hostname-policy proxy sidecar, when [vm.network].hosts is set.
-    proxy_dests = paths.get(("unit", "proxy"), [])
-    if proxy_dests and vm_uses_proxy(config):
-        proxy_dests[0].write_text(generate_vm_proxy_service(config, user_name))
-        log_msg("  Created hostname-policy proxy service")
 
     # Transparent egress inspection socket + service, when egress is filtered
     # (not bridged). The socket binds and arms the redirect before the VM can

@@ -21,7 +21,7 @@ from vm import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_ALLOW4, NFT_SET_ALLOW6,
     NFT_SET_FILTERED, NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_PROXY_CG, NFT_SKELETON,
+    NFT_SET_INTERNAL4, NFT_SET_INTERNAL6, NFT_SET_EGRESS_CG, NFT_SKELETON,
     VM_INSPECT_ADDR6_PREFIX, VM_INSPECT_NETWORK,
     VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
     CONNTRACK_PRESSURE, conntrack_occupancy,
@@ -102,12 +102,12 @@ class TestSkeleton(unittest.TestCase):
         """An unguarded drop would take the whole host off the network.
 
         The qualifying sets hold only per-workload state. `wl_filtered` holds
-        workload uids; `wl_proxy_cg` holds the cgroup paths of hostname-proxy
+        workload uids; `wl_egress_cg` holds the cgroup paths of hostname-proxy
         units, which only exist for filtered VMs; `wl_inspect_self`/`self6`
         hold one element per armed workload. All are empty on a host running
         no filtered workload, which is what makes an abandoned table inert.
         """
-        guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_PROXY_CG}",
+        guards = (f"@{NFT_SET_FILTERED}", f"@{NFT_SET_EGRESS_CG}",
                   f"@{NFT_SET_INSPECT_SELF}", f"@{NFT_SET_INSPECT_SELF6}")
         # The output chain only. The input chain's drops are deliberately
         # unguarded on any set — there is no uid on the input path — and are
@@ -271,14 +271,14 @@ class TestSkeleton(unittest.TestCase):
 
 
 class TestInternalDestinationGuard(unittest.TestCase):
-    """The proxy's cgroup exemption is not destination-blind.
+    """The re-originators' cgroup exemption is not destination-blind.
 
-    tinyproxy matches the CONNECT hostname, resolves it with the host
-    resolver, and connects to whatever comes back; it has no directive that
-    could express a destination range. Without these rules an allowlisted name
-    resolving into RFC 1918, loopback or link-local space was reachable from a
-    VM that reports itself confined -- and the guest never controls the
-    resolution, so nothing about it looks like an attack in a log.
+    The inspector matches the name it read out of a Host header or an SNI,
+    resolves it with the host resolver, and connects to whatever comes back.
+    Without these rules an allowlisted name resolving into RFC 1918, loopback
+    or link-local space is reachable from a VM that reports itself confined --
+    and the guest never controls the resolution, so nothing about it looks like
+    an attack in a log.
     """
 
     @classmethod
@@ -289,7 +289,7 @@ class TestInternalDestinationGuard(unittest.TestCase):
 
     def _drops(self):
         return [r for r in self.rules
-                if r.endswith("drop") and NFT_SET_PROXY_CG in r]
+                if r.endswith("drop") and NFT_SET_EGRESS_CG in r]
 
     def test_one_drop_per_address_family(self):
         """`ip daddr` matches v4 only and `ip6 daddr` v6 only, so a single
@@ -355,32 +355,39 @@ class TestInternalDestinationGuard(unittest.TestCase):
                   f"element line for {NFT_SET_INTERNAL6}")
         self.assertNotIn("2001::/32", v6)
 
-    def test_the_advertised_proxy_address_is_not_blocked(self):
-        """The guest's flow reaches tinyproxy FROM 192.0.2.1, so the proxy's
-        replies are addressed to it. Listing that prefix takes hostname policy
-        down completely -- every request hangs, and the proxy logs nothing."""
+    def test_the_advertised_address_is_not_blocked(self):
+        """The guest's flow reaches the credential broker FROM 192.0.2.1, so
+        the broker's replies are addressed to it. Listing that prefix takes the
+        broker down completely -- every request hangs and nothing logs. It did
+        the same to the retired proxy, which shared the address."""
         elems = " ".join(ln for ln in self.text.splitlines()
                          if ln.startswith("add element"))
         self.assertNotIn("192.0.2.", elems)
 
-    def test_the_drop_only_covers_connections_the_proxy_opens(self):
+    def test_the_drop_only_covers_connections_the_exempt_processes_open(self):
         """Without `ct direction original` this drops the reply direction of
-        connections made TO the proxy whenever the client's source address
-        falls in one of these ranges -- 127.0.0.1 being the obvious one."""
+        connections made TO an exempt process whenever the client's source
+        address falls in one of these ranges -- 127.0.0.1 being the obvious
+        one."""
         for rule in self._drops():
             self.assertIn("ct direction original", rule, rule)
 
     def test_name_resolution_is_exempted_before_the_drop(self):
-        """tinyproxy resolves through the host's configured resolver, which
+        """The inspector resolves through the host's configured resolver, which
         may be a stub on 127.0.0.53 or a box on the LAN -- both inside these
-        ranges. Without the carve-out every lookup fails and the proxy returns
-        502 while looking healthy."""
+        ranges. Without the carve-out every lookup fails and the listener
+        returns 502 while looking healthy.
+
+        This carve-out was written for tinyproxy and OUTLIVED it deliberately:
+        the inspector resolves host-side on every connection it authorises,
+        permanently, so deleting it with the service it was named for would
+        have taken hostname policy down on the rung that replaced it."""
         dns = [i for i, r in enumerate(self.rules)
-               if NFT_SET_PROXY_CG in r and "th dport 53" in r
+               if NFT_SET_EGRESS_CG in r and "th dport 53" in r
                and r.endswith("accept")]
         self.assertEqual(len(dns), 1, "expected one DNS carve-out rule")
         first_drop = min(i for i, r in enumerate(self.rules)
-                         if r.endswith("drop") and NFT_SET_PROXY_CG in r)
+                         if r.endswith("drop") and NFT_SET_EGRESS_CG in r)
         self.assertLess(dns[0], first_drop,
                         "the DNS carve-out must precede the drop")
 
@@ -390,7 +397,7 @@ class TestInternalDestinationGuard(unittest.TestCase):
         the proxy's blanket accept, where moving them changes nothing: every
         rule they passed on the way up is also an accept."""
         first_drop = min(i for i, r in enumerate(self.rules)
-                         if r.endswith("drop") and NFT_SET_PROXY_CG in r)
+                         if r.endswith("drop") and NFT_SET_EGRESS_CG in r)
         for name in (NFT_SET_ALLOW4, NFT_SET_ALLOW6):
             idx = next(i for i, r in enumerate(self.rules) if f"@{name}" in r)
             self.assertLess(idx, first_drop,
@@ -405,10 +412,10 @@ class TestInternalDestinationGuard(unittest.TestCase):
         # also carries two internal EXEMPTIONS that are cgroup accepts with a
         # set key, and matching one of those would test the wrong rule.
         blanket = next(i for i, r in enumerate(self.rules)
-                       if NFT_SET_PROXY_CG in r and r.endswith("accept")
+                       if NFT_SET_EGRESS_CG in r and r.endswith("accept")
                        and "dport" not in r and "daddr" not in r)
         for i, r in enumerate(self.rules):
-            if r.endswith("drop") and NFT_SET_PROXY_CG in r:
+            if r.endswith("drop") and NFT_SET_EGRESS_CG in r:
                 self.assertLess(i, blanket)
 
 
@@ -459,17 +466,17 @@ class TestRuleOrderIsPinned(unittest.TestCase):
         ("inspector self drop v6",  ("@wl_inspect_self6", "ct direction original", "drop")),
         ("inspector range guard v4", ("@wl_filtered", "ct direction original", "198.18.0.0/16", "drop")),
         ("inspector range guard v6", ("@wl_filtered", "ct direction original", "2001:2::/48", "drop")),
-        ("proxy name resolution",   ("@wl_proxy_cg", "th dport 53", "accept")),
-        ("internal exemption v4",   ("@wl_proxy_cg", "@wl_internal_ok4",
+        ("host-side name resolution", ("@wl_egress_cg", "th dport 53", "accept")),
+        ("internal exemption v4",   ("@wl_egress_cg", "@wl_internal_ok4",
                                     "ct direction original", "accept")),
-        ("internal exemption v6",   ("@wl_proxy_cg", "@wl_internal_ok6",
+        ("internal exemption v6",   ("@wl_egress_cg", "@wl_internal_ok6",
                                     "ct direction original", "accept")),
-        ("proxy internal drop v4",  ("@wl_proxy_cg", "ct direction original",
+        ("re-originator internal drop v4", ("@wl_egress_cg", "ct direction original",
                                     "@wl_internal4", "drop")),
-        ("proxy internal drop v6",  ("@wl_proxy_cg", "ct direction original",
+        ("re-originator internal drop v6", ("@wl_egress_cg", "ct direction original",
                                     "@wl_internal6", "drop")),
         ("loopback accept",         ("@wl_filtered", "oif lo", "accept")),
-        ("proxy egress",            ("@wl_proxy_cg", "accept")),
+        ("re-originator egress",    ("@wl_egress_cg", "accept")),
         ("HTTP/3 counted drop",     ("@wl_filtered", "udp dport 443", "counter drop")),
         ("default drop",            ("@wl_filtered", "counter drop")),
     ]
@@ -2343,10 +2350,10 @@ class TestInternalOkAccept(unittest.TestCase):
         address. Dropping the match leaves a rule that still parses, still
         matches, and means something else entirely.
         """
-        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6, NFT_SET_PROXY_CG
+        from vm import NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6, NFT_SET_EGRESS_CG
         for name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6):
             rule = self.rules[self._index(f"@{name}")]
-            self.assertIn(f"socket cgroupv2 level 2 @{NFT_SET_PROXY_CG}", rule)
+            self.assertIn(f"socket cgroupv2 level 2 @{NFT_SET_EGRESS_CG}", rule)
             self.assertIn("ct direction original", rule)
 
     def test_the_accept_precedes_the_drop_it_excepts(self):

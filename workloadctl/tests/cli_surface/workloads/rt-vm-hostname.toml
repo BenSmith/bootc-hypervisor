@@ -1,15 +1,24 @@
-# rt-vm-hostname — the runtime rung's hostname-policy VM (ADR 006 §4.4).
+# rt-vm-hostname — the runtime rung's hostname-policy VM (ADR 008).
 #
-# The unit suite proves the proxy is CONSTRUCTED correctly — tinyproxy.conf's
-# FilterDefaultDeny, the uid-keyed redirect, the cgroup exemption, the generated
-# unit. What it cannot reach is whether a booted guest, given all of that,
-# actually gets one answer for an allowlisted name and a different one for an
-# unlisted name. That is what this workload exists for.
+# The unit suite proves the inspector is CONSTRUCTED correctly — the policy
+# document's `hosts` list, the uid-keyed redirect maps, the two cgroup
+# exemptions, the generated socket and service units. What it cannot reach is
+# whether a booted guest, given all of that, actually gets one answer for an
+# allowlisted name and a different one for an unlisted name. That is what this
+# workload exists for.
+#
+# WHAT CHANGED AT RUNG 2, AND WHY THE FIXTURE SURVIVED IT
+#
+# Through rung 1 this bundle described a guest configured to use a proxy: the
+# probes dialled an advertised endpoint and read tinyproxy's CONNECT status.
+# The names, the pair of them, and the apex trap are all unchanged, because
+# none of that was about the proxy — it was about what `hosts` means. What is
+# different is that the guest is now told nothing and dials the names directly.
 #
 # `hosts` and no `allow`: deliberate, and valid (a filtered VM needs one or the
-# other, not both). It means every destination this guest can reach, it reaches
-# through the proxy — so a probe that succeeds proves the proxy permitted it
-# rather than proving some other path existed.
+# other, not both). It means every destination this guest can reach on 80 or
+# 443, it reaches through its inspector — so a probe that succeeds proves the
+# inspector permitted it rather than proving some other path existed.
 #
 # The names are under `.test`, which RFC 6761 reserves and guarantees will never
 # resolve publicly. The test points them at a stub on the harness host through
@@ -20,6 +29,15 @@
 # Two entries, and the pair is the point:
 #   - wl-allowed.test    an exact name
 #   - *.wl-wild.test     a wildcard, which does NOT cover the bare apex
+#
+# THE [[vm.network.internal]] ENTRIES ARE NEW AND ARE NOT DECORATION. The stub
+# is on 127.0.0.1, and the inspector's UPSTREAM dial is subject to the
+# internal-destination guard: an allowlisted name resolving into loopback is
+# dropped unless the operator has said so. Under the proxy that guard existed
+# too, but the proxy's dial was exempted by a cgroup rule that predated the
+# guard. Without these two entries every positive probe below fails with
+# `resolves to an internal address` — which is the guard working exactly as
+# designed against a harness that meant it.
 #
 # Nested inside the harness guest, so keep it minimal. Do NOT enable this
 # manually; it is managed by the runtime harness.
@@ -40,3 +58,13 @@ rollback_keep = 1
 [vm.network]
 egress = "filtered"
 hosts = ["wl-allowed.test", "*.wl-wild.test"]
+
+# Scalars above, array-of-tables below: a scalar written under an
+# [[vm.network.internal]] header belongs to that entry, not to [vm.network].
+[[vm.network.internal]]
+host = "wl-allowed.test"
+reason = "harness stub on 127.0.0.1; there is no upstream on the internet"
+
+[[vm.network.internal]]
+host = "sub.wl-wild.test"
+reason = "harness stub on 127.0.0.1; matched by the *.wl-wild.test entry"

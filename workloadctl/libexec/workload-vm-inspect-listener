@@ -442,10 +442,12 @@ def _recv_at_least(conn, raw, n, max_bytes):
 
 # --- the cleartext plane ---
 #
-# Port 80, authorised per REQUEST rather than per connection. tinyproxy filters
-# cleartext by name today and this unit takes that over, so the properties it
-# has to keep are its properties: a name that is on no list gets a real 403
-# naming it, and nothing reaches an upstream the policy did not authorise.
+# Port 80, authorised per REQUEST rather than per connection. This took over
+# cleartext name filtering from the per-workload proxy rung 2 deleted, and the
+# properties it has to keep are that proxy's: a name that is on no list gets a
+# real 403 naming it, and nothing reaches an upstream the policy did not
+# authorise. The difference is that a guest no longer has to be configured to
+# send its requests here.
 #
 # The whole of the danger here is that ONE connection carries MANY requests,
 # each of which may name a different host, and the framing that says where one

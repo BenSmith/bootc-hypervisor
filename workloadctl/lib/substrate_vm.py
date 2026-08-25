@@ -817,19 +817,14 @@ class VMSubstrate(Substrate):
             except Exception as e:
                 failures.append(f"clear egress filter elements: {e}")
 
-            # Same reasoning for the proxy redirect: the map is keyed on the
-            # uid, so an element left behind by a purge would be inherited by
-            # whatever workload is issued that uid next — and it would point at
-            # a management address derived from the same uid, so the redirect
-            # would silently send the new workload's guest to the old
-            # workload's hostname policy.
-            try:
-                subprocess.run(
-                    ["/usr/libexec/workloadctl/workload-vm-proxy",
-                     "down", self.config.name],
-                    capture_output=True, timeout=30, check=False)
-            except Exception as e:
-                failures.append(f"clear proxy redirect element: {e}")
+            # There is no second helper to call for the redirect. The proxy's
+            # uid-keyed map element needed one here, because a stale element
+            # would have been inherited by whatever workload was issued that
+            # uid next and would have pointed it at the old workload's hostname
+            # policy. The inspector's elements are keyed the same way, but they
+            # are armed and withdrawn by the socket and service units' own
+            # Exec*Post -- workload-vm-filter down above clears what survives a
+            # unit that never got to stop.
 
         return failures
 

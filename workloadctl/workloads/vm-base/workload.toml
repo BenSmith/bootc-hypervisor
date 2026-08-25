@@ -51,10 +51,13 @@ user = "fedora"
 # list, with egress = "filtered", is a validation error rather than a VM that
 # boots and can reach nothing.
 #
-# For THIS bundle: the proxy environment is injected only into the built-in
-# cloud-config, and vm-base supplies its own user_data_file below. If you set
-# `hosts`, export http_proxy/https_proxy=http://192.0.2.1:3128 in that
-# user-data yourself, or the guest will ignore the proxy and be dropped.
+# For THIS bundle: setting `hosts` needs nothing in the seed. Hostname policy
+# is a uid-keyed redirect into this workload's own inspector -- the guest is
+# told nothing, dials names normally, and cannot opt out. Through rung 1 this
+# note told you to export http_proxy/https_proxy into vm-base's own user-data;
+# do not, on any guest built from this bundle. Nothing listens at the old
+# endpoint, so a client honouring those variables now fails where every client
+# that ignored them works.
 egress = "open"
 
 [vm.cloud_init]

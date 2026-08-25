@@ -49,7 +49,8 @@ class TestImageLintGate(unittest.TestCase):
         the packages layer, and once at the end, because everything after the
         first call — the workloadctl RPM and what it drags in — was otherwise
         checked only incidentally by the variants. That gap is what turned a
-        tinyproxy packaging bug into a hypervisor-amd build failure.
+        packaging bug in a workloadctl dependency into a hypervisor-amd build
+        failure.
 
         The count is not the invariant. The invariant is that every call is a
         real gate, which the two tests below check on ALL calls rather than on

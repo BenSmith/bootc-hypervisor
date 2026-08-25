@@ -575,31 +575,41 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
     def _seed(self, body: str = "") -> None:
         (self.config_dir / "user-data").write_text("#cloud-config\n" + body)
 
-    def test_filtered_egress_seed_without_proxy_refused(self):
-        """A seed that never mentions the proxy address, on a workload whose
-        egress is hostname-filtered, leaves the guest going direct — which is
-        dropped, not refused, so every fetch hangs instead of failing."""
+    def test_no_seed_is_refused_for_a_missing_proxy_block(self):
+        """The retired half of this contract, asserted as an absence.
+
+        Through rung 1 a seed that never named the advertised address was
+        refused on any hostname-filtered workload: the guest would have gone
+        direct, which is dropped rather than refused, so every fetch hung. Rung
+        2's redirect is transparent, so a seed that says nothing about proxies
+        is now the CORRECT seed -- and a check still demanding one would refuse
+        every seed an operator writes against the current design.
+        """
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET}}
-        with self.assertRaises(RuntimeError) as ctx:
-            self._run_build(cfg)
-        msg = str(ctx.exception)
-        self.assertIn("proxy", msg)
-        self.assertIn(self.mod.VM_PROXY_ADDR, msg)
+        self._run_build(cfg)
+        self.assertNotIn("proxy", self._read_user_data())
 
-    def test_filtered_egress_seed_with_proxy_accepted(self):
-        """Naming the proxy address satisfies the check."""
-        self._seed(f"write_files:\n  - path: /etc/environment\n"
-                   f"    content: https_proxy=http://{self.mod.VM_PROXY_ADDR}:3128\n")
+    def test_ca_contract_does_not_fire_before_the_ca_exists(self):
+        """VM_CA_BUNDLE_AVAILABLE gates the CA half of the contract.
+
+        Rung 3 mints the bundle and flips the flag. Until then the built-in seed
+        writes no bundle either, so refusing a custom seed for omitting one
+        would enforce a rule against the template path alone. This test is what
+        will fail when the flag flips -- deliberately, because the contract, the
+        default seed and this assertion have to move in one commit.
+        """
+        self.assertFalse(self.mod.VM_CA_BUNDLE_AVAILABLE)
+        self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET}}
         self._run_build(cfg)
-        self.assertIn(self.mod.VM_PROXY_ADDR, self._read_user_data())
+        self.assertNotIn(self.mod.VM_CA_BUNDLE_PATH, self._read_user_data())
 
-    def test_open_egress_seed_without_proxy_accepted(self):
-        """With no `hosts` there is no proxy to point at, so the check must not
-        fire — the common case is a seed that rightly says nothing about it."""
+    def test_open_egress_seed_is_accepted(self):
+        """An unfiltered VM is outside the contract entirely -- the common case
+        is a seed that rightly says nothing about egress at all."""
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": {"egress": "open"}}}
@@ -643,10 +653,15 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         keeps the CLI from framing an operator's fixable mistake as a crash and
         asking them to file a bug report. A plain RuntimeError would still fail
         the build, but with the message buried under a traceback.
+
+        Carried on the volume-mount contract now that the proxy contract it was
+        written against is gone. The type is the assertion, not which check
+        raises it.
         """
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
-                      "network": self._FILTERED_NET}}
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./home:/home/fedora"]}}
         with self.assertRaises(self.mod.SeedContractError):
             self._run_build(cfg)
 
@@ -656,7 +671,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         blocked with no recourse."""
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
-                                     "seed_provides": ["proxy", "mounts"]},
+                                     "seed_provides": ["ca", "mounts"]},
                       "network": self._FILTERED_NET,
                       "volumes": ["./home:/home/fedora"]}}
         self._run_build(cfg)
@@ -665,23 +680,27 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         """Opting out of one check must not disable the other."""
         self._seed()
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data",
-                                     "seed_provides": ["mounts"]},
+                                     "seed_provides": ["ca"]},
                       "network": self._FILTERED_NET,
                       "volumes": ["./home:/home/fedora"]}}
         with self.assertRaises(RuntimeError) as ctx:
             self._run_build(cfg)
-        self.assertIn("proxy", str(ctx.exception))
+        self.assertIn("home-fedora", str(ctx.exception))
 
     def test_default_mode_is_unaffected_by_the_contract(self):
-        """The checks are template-mode only: default mode derives both the
-        proxy env and the mounts itself, so the same config must build."""
+        """The checks are template-mode only: default mode derives the guest
+        environment and the mounts itself, so the same config must build."""
         cfg = {"vm": {"user": "fedora",
                       "network": self._FILTERED_NET,
                       "volumes": ["./home:/home/fedora"]}}
         self._run_build(cfg, name="defvm")
         text = self._read_user_data("defvm")
-        self.assertIn(self.mod.VM_PROXY_ADDR, text)
         self.assertIn("home-fedora", text)
+        # And it names no proxy. The default seed carried an http_proxy export
+        # at the advertised literal through rung 1; a guest that still got one
+        # would dial a host address where nothing listens.
+        self.assertNotIn("http_proxy", text)
+        self.assertNotIn("192.0.2.1:3128", text)
 
     def test_missing_host_keypair_raises(self):
         """A missing host keypair (setup step skipped) fails the ISO build."""

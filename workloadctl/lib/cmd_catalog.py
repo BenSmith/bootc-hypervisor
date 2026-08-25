@@ -201,47 +201,37 @@ write_files:
     owner: root:root
     content: ${WORKLOADCTL_VM_HOST_PUBKEY}
 
-# --- Two things this file must carry that the built-in seed would have -------
+# --- One thing this file must carry that the built-in seed would have -------
 #
 # Setting user_data_file replaces workloadctl's generated cloud-config outright.
-# That config is where the proxy environment and the virtiofs mounts come from,
-# so once this file is in play they are yours to write. Both blocks below are
-# commented out because the shipped defaults (egress = "open", no volumes) need
-# neither; provisioning refuses to build a seed that needs one and lacks it, and
-# names which, so you will be told rather than left to find out.
+# That config is where the guest environment and the virtiofs mounts come from,
+# so once this file is in play they are yours to write. The block below is
+# commented out because the shipped defaults (no volumes) do not need it;
+# provisioning refuses to build a seed that needs it and lacks it, and names
+# what is missing, so you will be told rather than left to find out.
 
-# 1. Proxy environment — required once [vm.network] sets `hosts`.
-#    Filtered egress DROPS what does not go through the proxy rather than
-#    refusing it, so a guest that never learned these variables does not error:
-#    it hangs for a full TCP timeout on every fetch and looks like a broken
-#    network. Uncomment together with `hosts`.
+# THERE IS NO PROXY BLOCK HERE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #
-# write_files (append to the list above):
-#   - path: /etc/environment
-#     append: true
-#     content: |
-#       http_proxy=http://192.0.2.1:3128
-#       https_proxy=http://192.0.2.1:3128
-#       HTTP_PROXY=http://192.0.2.1:3128
-#       HTTPS_PROXY=http://192.0.2.1:3128
-#       no_proxy=localhost,127.0.0.1,::1,192.0.2.1
-#       NO_PROXY=localhost,127.0.0.1,::1,192.0.2.1
+# Through rung 1 this file carried an export block for
+# http_proxy/https_proxy/no_proxy at an advertised endpoint, plus recipes for
+# /etc/systemd/system.conf.d and /etc/dnf/dnf.conf, and a seed that omitted them
+# on a workload with `hosts` was refused. All of it is gone. Egress filtering is
+# now a uid-keyed redirect the guest is neither told about nor able to opt out
+# of: it dials names normally and its own inspector reads the Host header or the
+# SNI. A guest that still exports the old variables dials a host address where
+# nothing listens.
 #
-#    /etc/environment covers PAM (login shells, ssh). Units get no PAM, so a
-#    service that fetches anything needs this too:
-#   - path: /etc/systemd/system.conf.d/10-proxy.conf
-#     content: |
-#       [Manager]
-#       DefaultEnvironment=http_proxy=http://192.0.2.1:3128 https_proxy=http://192.0.2.1:3128 no_proxy=localhost,127.0.0.1,::1,192.0.2.1
+# If you are copying an older seed forward, DELETE those exports rather than
+# leaving them. They do not degrade gracefully -- a client that honours them
+# fails outright, while every client that ignores them works, so the guest ends
+# up half broken in a way that looks like a flaky network.
 #
-#    Note dnf does NOT read the environment for its own downloads in every
-#    path; set `proxy=http://192.0.2.1:3128` in /etc/dnf/dnf.conf as well. And
-#    an allowlist of `*.fedoraproject.org` does not cover Fedora's mirrors
-#    (they live on mm.fcix.net, osuosl.org, …) — either pin the repos to a
-#    baseurl under dl.fedoraproject.org, or provision with egress = "open" and
-#    switch to filtered once the guest is built.
+# One consequence worth keeping: an allowlist of `*.fedoraproject.org` still
+# does not cover Fedora's mirrors (they live on mm.fcix.net, osuosl.org, ...).
+# Either pin the repos to a baseurl under dl.fedoraproject.org, or provision
+# with egress = "open" and switch to filtered once the guest is built.
 
-# 2. Volume mounts — required once [vm] sets `volumes`.
+# Volume mounts — required once [vm] sets `volumes`.
 #    Each volume is attached as a virtiofs device tagged after its guest path
 #    (see virtiofs_tags in lib/workload_lib.py: sanitized, truncated to 36
 #    chars, index-suffixed on collision). The device is present and virtiofsd
@@ -271,7 +261,7 @@ write_files:
 #    If the guest image already handles one of these — a mount baked into its
 #    own /etc/fstab, say — declare it instead of duplicating it:
 #      [vm.cloud_init]
-#      seed_provides = ["mounts"]   # and/or "proxy"
+#      seed_provides = ["mounts"]   # and/or "ca"
 
 # runcmd:
 #   - echo "first boot" > /etc/motd

@@ -36,11 +36,14 @@ Recommends:     udica
 # managed bridge: passt serves the guest DHCP and DNS itself.
 Requires:       passt
 Requires:       nftables
-# Hostname policy (ADR 006 §4.4) runs one tinyproxy instance per VM workload
-# that declares [vm.network].hosts. A hard Requires rather than a Recommends:
-# such a VM is filtered default-deny with the proxy as its only route out, so a
-# missing binary is not a degraded feature but a VM that cannot reach anything.
-Requires:       tinyproxy
+# There is deliberately NO proxy dependency here. Through rung 1 this was a hard
+# `Requires: tinyproxy`, because a VM declaring [vm.network].hosts was filtered
+# default-deny with its own proxy as the only route out. Rung 2 replaced that
+# with a transparent redirect into workload-vm-inspect-listener, which is
+# shipped by this package and has no dependency outside the standard library --
+# so hostname policy now needs nothing installed that this package does not
+# install itself. On upgrade, dnf leaves tinyproxy on the host as a package
+# nothing requires; %%post removes the SELinux module that confined it.
 # `workloadctl pcap` reads the host-side vantage back through tcpdump. Weak,
 # because capture is a diagnostic and `pcap -D` reports a missing tcpdump rather
 # than failing at the point of use.
@@ -118,8 +121,6 @@ install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-filter \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-filter
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-netdev \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-netdev
-install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-proxy \
-    %{buildroot}%{_libexecdir}/workloadctl/workload-vm-proxy
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect \
     %{buildroot}%{_libexecdir}/workloadctl/workload-vm-inspect
 install -Dpm 0755 %{_sourcedir}/libexec/workload-vm-inspect-listener \
@@ -182,7 +183,8 @@ install -Dpm 0644 %{_sourcedir}/nftables/workload-filter.nft \
     %{buildroot}%{_datadir}/workloadctl/workload-filter.nft
 
 # The workload_proxy nat skeleton — same rules as workload-filter.nft: data
-# applied with `nft -f` by the proxy sidecar's prestart, idempotent, unowned.
+# applied with `nft -f` by workload-vm-inspect's prestart, idempotent, unowned.
+# The file name is historical; see the header of the file itself.
 install -Dpm 0644 %{_sourcedir}/nftables/workload-proxy.nft \
     %{buildroot}%{_datadir}/workloadctl/workload-proxy.nft
 install -Dpm 0644 %{_sourcedir}/nftables/workload-broker.nft \
@@ -194,10 +196,6 @@ install -Dpm 0644 %{_sourcedir}/nftables/workload-broker.nft \
 # by %%post, not by any unit.
 install -Dpm 0644 %{_sourcedir}/security/workload-vm.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-vm.cil
-
-# The tinyproxy domain, host-global for the same reasons.
-install -Dpm 0644 %{_sourcedir}/security/workload-proxy.cil \
-    %{buildroot}%{_datadir}/workloadctl/workload-proxy.cil
 
 install -Dpm 0644 %{_sourcedir}/security/workload-inspect.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-inspect.cil
@@ -381,11 +379,21 @@ if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-vm.cil ]; 
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
     fi
 fi
-# The tinyproxy domain, on the same terms. Note /usr/bin, not /usr/sbin: Fedora
-# symlinks sbin to bin, and a filecon naming the symlinked path silently matches
-# nothing (see the module header).
-if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-proxy.cil ]; then
-    if semodule -i %{_datadir}/workloadctl/workload-proxy.cil 2>/dev/null; then
+# The retired tinyproxy domain, removed here rather than only in %%postun.
+#
+# %%postun's module removals are guarded on $1 -eq 0 -- an erase, not an
+# upgrade -- which is correct for the modules this package still ships. This one
+# it no longer ships, and on an UPGRADE nothing else would ever take it out: the
+# host would keep a loaded wlproxy_t whose filecon labels /usr/bin/tinyproxy for
+# a domain no unit enters, indefinitely. Unconditional and tolerant, so a fresh
+# install where the module was never present is a no-op.
+#
+# The restorecon is not optional. Removing the module drops its filecon, but the
+# installed binary keeps the wlproxy_exec_t label it was given until something
+# relabels it, and a host that still has tinyproxy would be left with a file
+# labelled for a type that no longer exists.
+if [ -x /usr/sbin/semodule ]; then
+    if semodule -r workload-proxy 2>/dev/null; then
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
     fi
 fi
@@ -471,8 +479,6 @@ if [ $1 -eq 0 ]; then
     if [ -x /usr/sbin/semodule ]; then
         semodule -r workload-vm 2>/dev/null || :
         restorecon /usr/libexec/virtiofsd 2>/dev/null || :
-        semodule -r workload-proxy 2>/dev/null || :
-        restorecon /usr/bin/tinyproxy 2>/dev/null || :
         semodule -r workload-inspect 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
         semodule -r workload-resolve 2>/dev/null || :
@@ -496,7 +502,6 @@ fi
 %{_libexecdir}/workloadctl/workload-vm-filter
 %{_libexecdir}/workloadctl/workload-vm-netdev
 %{_libexecdir}/workloadctl/workload-vm-notify
-%{_libexecdir}/workloadctl/workload-vm-proxy
 %{_libexecdir}/workloadctl/workload-vm-inspect
 %{_libexecdir}/workloadctl/workload-vm-inspect-listener
 %{_libexecdir}/workloadctl/workload-vm-resolve

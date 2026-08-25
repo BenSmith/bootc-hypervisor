@@ -17,12 +17,11 @@ import unittest
 import unittest.mock
 
 from vm import (
-    NFT_SET_INSPECT_CG, NFT_SET_PROXY_CG,
+    NFT_SET_INSPECT_CG, NFT_SET_EGRESS_CG,
     VM_EGRESS_DEFAULT, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
-    VM_PROXY_SLICE, VM_INSPECT_LISTENER_BIN, vm_inspect_address,
+    VM_SIDECAR_SLICE, VM_INSPECT_LISTENER_BIN, vm_inspect_address,
     vm_inspect_cgroup, vm_inspect_cgroup_command,
-    vm_inspect_cgroup_filter_command, vm_proxy_cgroup,
-    vm_proxy_cgroup_inspect_command, vm_uses_inspect,
+    vm_inspect_cgroup_filter_command, vm_uses_inspect,
 )
 from workload_lib import dq
 
@@ -227,14 +226,14 @@ class TestGeneratedService(unittest.TestCase):
         # deepens the path so both `level 2` matches silently stop firing.
         # Found by nesting the slice in the generator and watching the whole
         # suite stay green.
-        self.assertIn(f"Slice={VM_PROXY_SLICE}", self.unit.splitlines())
-        self.assertEqual(VM_PROXY_SLICE, "workloads.slice")
+        self.assertIn(f"Slice={VM_SIDECAR_SLICE}", self.unit.splitlines())
+        self.assertEqual(VM_SIDECAR_SLICE, "workloads.slice")
         # The element names the cgroup on the pinned slice, two components...
         self.assertEqual(vm_inspect_cgroup("web").count("/"), 1)
         # ...and on the SAME slice the unit pins. Two independent spellings of
         # the path exist -- the unit's Slice= and the element the rule matches
         # -- and a drift between them is a redirect that never returns.
-        self.assertTrue(vm_inspect_cgroup("web").startswith(f"{VM_PROXY_SLICE}/"),
+        self.assertTrue(vm_inspect_cgroup("web").startswith(f"{VM_SIDECAR_SLICE}/"),
                         vm_inspect_cgroup("web"))
 
     def test_both_cgroup_elements_are_armed_on_start(self):
@@ -256,7 +255,7 @@ class TestGeneratedService(unittest.TestCase):
         # One element per table: the redirect exemption in the proxy table,
         # the egress exemption in the filter table.
         self.assertEqual(sum("wl_inspect_cg" in ln for ln in pre), 1)
-        self.assertEqual(sum("wl_proxy_cg" in ln for ln in pre), 1)
+        self.assertEqual(sum("wl_egress_cg" in ln for ln in pre), 1)
 
     def test_both_cgroup_elements_are_removed_on_stop(self):
         """ExecStopPost, not ExecStop: a killed or failed inspector still
@@ -274,7 +273,7 @@ class TestGeneratedService(unittest.TestCase):
         }
         self.assertEqual(set(post), expected)
         self.assertEqual(sum("wl_inspect_cg" in ln for ln in post), 1)
-        self.assertEqual(sum("wl_proxy_cg" in ln for ln in post), 1)
+        self.assertEqual(sum("wl_egress_cg" in ln for ln in post), 1)
 
     def test_execstart_is_the_listener_binary(self):
         self.assertIn(f"ExecStart={VM_INSPECT_LISTENER_BIN}", self.unit)

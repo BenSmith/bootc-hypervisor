@@ -64,31 +64,38 @@ add set inet workload_filter wl_inspect_dst6 { typeof meta skuid . ip6 daddr . t
 add set inet workload_filter wl_inspect_self  { typeof meta skuid . ip  daddr ; counter ; }
 add set inet workload_filter wl_inspect_self6 { typeof meta skuid . ip6 daddr ; counter ; }
 
-# The hostname-policy proxies, by control group (ADR 006 §4.4). Each proxy runs
-# as its workload's own user *on purpose*, so `meta skuid` cannot tell the
-# proxy's traffic from the guest's — and under default-deny that means the drop
-# below catches the proxy too, leaving hostname policy permitting nothing at
-# all. Observed on a live VM: the guest's CONNECT reaches the proxy, the proxy
-# resolves the host, and its outbound SYN is dropped.
+# The host-side processes that RE-ORIGINATE a workload's egress, by control
+# group: the egress inspector and the synthesising responder. Each runs as its
+# workload's own user *on purpose*, so `meta skuid` cannot tell their traffic
+# from the guest's — and under default-deny that means the drop below catches
+# them too, leaving hostname policy permitting nothing at all. Observed on a
+# live VM under the retired proxy, and equally true of the inspector: the
+# guest's connection reaches it, it resolves the host, and its outbound SYN is
+# dropped.
+#
+# Named wl_egress_cg, not wl_proxy_cg. Through rung 1 the set held exactly one
+# member per workload, that workload's tinyproxy, and the old name was
+# accurate. Rung 2 deleted tinyproxy and left the set holding two members that
+# are not proxies at all.
 #
 # The control group is the discriminator that survives the shared uid. It is
 # assigned by systemd, is not something a guest can enter or forge, and is
-# exact — no destination or port is widened, so a guest that ignores the proxy
-# and dials 443 directly is still dropped, which is what makes the proxy
-# mandatory rather than advisory.
+# exact — no destination or port is widened, so a guest that dials 443 past the
+# inspector is still dropped, which is what makes inspection mandatory rather
+# than advisory. Under the proxy that sentence was a claim about a guest that
+# ignored HTTPS_PROXY; under the redirect the guest is never asked.
 #
 # Widening by port instead — "let this uid reach 443 anywhere" — was the
 # obvious alternative and is fatal: it is precisely the bypass the default-deny
 # chain exists to close.
-add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
+add set inet workload_filter wl_egress_cg { typeof socket cgroupv2 level 2 ; }
 
-# Internal destinations the hostname proxy may not open a connection to.
+# Internal destinations the egress inspector may not open a connection to.
 #
-# The proxy is exempted from the default-deny drop by control group, and that
-# exemption was destination-BLIND: tinyproxy matches the CONNECT hostname
-# against the allowlist, resolves it with the host resolver, and connects to
-# whatever comes back. tinyproxy has no notion of destination ranges and no
-# directive that could express one. So an allowlisted name that resolves into
+# The inspector is exempted from the default-deny drop by control group, and
+# that exemption is destination-BLIND: it matches the name it read out of a
+# Host header or an SNI against the allowlist, resolves it with the host
+# resolver, and connects to whatever comes back. So an allowlisted name that resolves into
 # RFC 1918, loopback or link-local space was reachable from a VM that reports
 # itself confined -- via a wildcard pattern over a domain someone else can
 # create records in, an allowlisted third party whose DNS is compromised, or an
@@ -113,9 +120,10 @@ add set inet workload_filter wl_proxy_cg { typeof socket cgroupv2 level 2 ; }
 # to prevent. Teredo (2001::/32) is deliberately NOT here: it encodes the
 # client's own public address and does not name an internal destination.
 #
-# 192.0.2.0/24 is deliberately ABSENT. That is the advertised proxy address,
-# and the guest's flow reaches tinyproxy from it -- listing it would drop the
-# proxy's replies to its own client and take hostname policy down entirely.
+# 192.0.2.0/24 is deliberately ABSENT. That is the advertised address, which
+# still carries the credential broker -- listing it would drop the broker's
+# replies to its own client and take the broker down entirely. It carried the
+# retired proxy on another port for the same reason.
 add set inet workload_filter wl_internal4 { type ipv4_addr ; flags interval ; }
 add set inet workload_filter wl_internal6 { type ipv6_addr ; flags interval ; }
 
@@ -248,20 +256,25 @@ add rule inet workload_filter output meta skuid @wl_filtered ct direction origin
 # ip6 daddr v6 only, so the split is the same one the allow sets carry.
 add rule inet workload_filter output meta skuid @wl_filtered ct direction original ip6 daddr 2001:2::/48 drop
 
-# The proxy's own name resolution, which is not guest-chosen egress: tinyproxy
+# Host-side name resolution, which is not guest-chosen egress: the inspector
 # resolves through whatever the host is configured to use, which may be a stub
 # resolver on 127.0.0.53 or a resolver on the LAN. Without this carve-out the
-# drops below break every lookup, and the symptom is a 502 from a proxy that
+# drops below break every lookup, and the symptom is a 502 from a listener that
 # looks healthy. The residual it leaves is an internal service answering HTTP
 # on port 53, which is not a thing that exists.
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg th dport 53 counter accept
+#
+# THIS CARVE-OUT SURVIVED RUNG 2 AND HAD TO. It was written for tinyproxy, and
+# deleting it with tinyproxy is the obvious mistake: the inspector resolves
+# host-side on every connection it authorises, permanently, and the responder
+# resolves the names it synthesises answers for. Both are in this set.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg th dport 53 counter accept
 
 # The per-workload exceptions, ahead of the drops they except.
 #
 # THE CGROUP MATCH ON THESE TWO RULES IS THE WHOLE OF WHAT MAKES THEM SAFE, and
 # it is invisible when omitted. The set key holds a uid and an address and NO
 # PORT — deliberately, because the exemption is about where a name resolves to,
-# not about a service. Without `socket cgroupv2 level 2 @wl_proxy_cg` the very
+# not about a service. Without `socket cgroupv2 level 2 @wl_egress_cg` the very
 # same element becomes an all-ports grant from the GUEST to a LAN address: the
 # uid is shared between the guest and the inspector, which is the reason the
 # drops below are keyed on the cgroup rather than the uid in the first place.
@@ -272,15 +285,17 @@ add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg th dpo
 # for "whose element is it", `ct direction original` for "not a reply to
 # somebody dialling in". A test asserts the cgroup match is on the rule, because
 # dropping it leaves a passing accept that quietly means something else.
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg meta skuid . ip  daddr @wl_internal_ok4 ct direction original counter accept
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg meta skuid . ip6 daddr @wl_internal_ok6 ct direction original counter accept
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg meta skuid . ip  daddr @wl_internal_ok4 ct direction original counter accept
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg meta skuid . ip6 daddr @wl_internal_ok6 ct direction original counter accept
 
 # The destination check the cgroup exemption did not have. `ct direction
-# original` restricts this to connections the proxy OPENS: the reply direction
-# of a connection some client made TO the proxy must never be dropped here,
-# whatever source address that client had, or hostname policy dies with it.
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg ct direction original ip daddr @wl_internal4 counter drop
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg ct direction original ip6 daddr @wl_internal6 counter drop
+# original` restricts this to connections the inspector OPENS: the reply
+# direction of a connection the guest made TO the inspector must never be
+# dropped here -- the guest reaches it on a 198.18.x.y listener address, which
+# is not in these sets, but a bridged or re-addressed future one could be, and
+# hostname policy dies with it.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg ct direction original ip daddr @wl_internal4 counter drop
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg ct direction original ip6 daddr @wl_internal6 counter drop
 
 # Loopback is the workload's own control plane, not egress. Without this a
 # filtered VM is cut off from the host in two ways that both look like bugs
@@ -301,18 +316,19 @@ add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg ct dir
 # 127.0.0.1 never leaves the guest's own stack.
 add rule inet workload_filter output meta skuid @wl_filtered oif lo counter accept
 
-# The proxy's own egress. `level 2` is exact because the proxy unit pins
+# The re-originators' own egress. `level 2` is exact because each unit pins
 # Slice=workloads.slice, making its cgroup path always
-# workloads.slice/workload-<name>-proxy.service — two components, whatever the
-# workload's [resources].slice says. An element resolves to a cgroup id at add
-# time and systemd creates a fresh cgroup on each start, so the proxy's own
-# ExecStartPre adds the current one and its ExecStopPost removes it — the only
-# point at which a path still resolves to the id being retired.
-add rule inet workload_filter output socket cgroupv2 level 2 @wl_proxy_cg counter accept
+# workloads.slice/workload-<name>-inspect.service (or -resolve.service) — two
+# components, whatever the workload's [resources].slice says. An element
+# resolves to a cgroup id at add time and systemd creates a fresh cgroup on
+# each start, so each unit's own ExecStartPre adds the current one and its
+# ExecStopPost removes it — the only point at which a path still resolves to
+# the id being retired.
+add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg counter accept
 
 # HTTP/3, which is dropped and must not be dropped silently. The redirect
 # keys on `tcp dport`, so QUIC — HTTP/3, UDP 443 — is never redirected: it
-# is in no allow set, it is not `oif lo`, and it is not in the proxy cgroup,
+# is in no allow set, it is not `oif lo`, and it is not in wl_egress_cg,
 # so it meets the default deny below and is dropped. That disposition is
 # right and it arrives the wrong way — silently, on the shared counter
 # everything else lands on — so it gets a counted drop of its own.

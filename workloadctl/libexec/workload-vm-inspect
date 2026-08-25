@@ -19,8 +19,7 @@ never started a filtered VM has no table of either kind. Applying both at
 start makes an RPM upgrade self-heal on the next start instead of the next
 reboot: a rebuild that changes a skeleton's object layout is picked up by the
 next workload start, not left to a reboot the operator will never think to
-do. workload-vm-proxy applies both for the same reason; this one touches both
-tables, so it needs both.
+This helper touches both tables, so it applies both skeletons.
 
 WHAT IS NEVER TORN DOWN
 
@@ -37,8 +36,8 @@ reason the add tolerates "assigned".
 WHAT ELSE IS WRITTEN HERE
 
 The inspector's policy document, /run/workload-vm/<name>/inspect.json. It is
-written here rather than by the generator for the reason workload-vm-proxy
-writes tinyproxy.conf here: /run does not exist at generate time, and writing
+written here rather than by the generator for the reason the retired proxy's
+config was written here: /run does not exist at generate time, and writing
 at start is what makes an edited `hosts` list take effect on a plain restart.
 The listener reads it once, at start, and holds it for the life of the process
 — which is why the inspect service is PartOf= the VM.
@@ -67,7 +66,7 @@ internal_failure.
 
 WHAT IS NOT ARMED HERE
 
-The cgroup elements in wl_proxy_cg (inet workload_filter) and wl_inspect_cg
+The cgroup elements in wl_egress_cg (inet workload_filter) and wl_inspect_cg
 (inet workload_proxy). The builders for both live in lib/vm.py, but the
 element is armed by the inspector's own unit, not this helper: an element
 resolves to a cgroup id at add time and systemd makes a fresh cgroup on
@@ -75,22 +74,17 @@ every start, so the add belongs to the unit that owns the cgroup, and the
 remove to its ExecStopPost — "the only point at which a path still resolves
 to the id being retired". generate_vm_inspect_service emits both lines.
 
-That wiring owed one more premise, and it is now paid: during rung 1 the
-workload's tinyproxy cgroup must be in wl_inspect_cg as well — its upstream
-CONNECT leg is tcp dport 443 from the same uid and would otherwise be
-redirected into a listener that only logs. `vm_proxy_cgroup_inspect_command`
-builds that element and the *proxy* unit arms it, not this helper, for the
-same cgroup-id reason as the rest: the id only exists once the proxy has
-started. So a filtered VM with a hostname policy has two cgroups exempt from
-the redirect, armed by two different units, and neither unit can arm the
-other's. Proven end to end rather than argued: proxied HTTPS through a real
-guest returns 200 with the inspector enforcing (tests/manual/inspect_rig.py),
-which is the only check that exercises the exemption at all — every other
-probe in that rig would pass with it missing.
+Through rung 1 there was a THIRD cgroup to exempt, and it is worth recording
+why it is gone rather than leaving a reader to find only two where the design
+notes said three. The workload's tinyproxy had to be in wl_inspect_cg as well:
+its upstream CONNECT leg was tcp dport 443 from the same uid and would
+otherwise have been redirected into a listener that only logs. Rung 2 deleted
+tinyproxy, so the members are now the inspector and the responder, each armed
+by its own unit and neither able to arm the other's.
 
 EXIT CODES
 
-`up` fails loudly, on the same reasoning as workload-vm-proxy: an inspector
+`up` fails loudly: an inspector
 whose redirect did not install leaves the guest reaching nothing while the
 VM itself looks healthy. `down` is tolerant: its elements are legitimately
 absent whenever the start failed before installing them, and the stop must
@@ -150,8 +144,8 @@ def inspection_applies(net: dict) -> bool:
 def write_policy(name: str) -> str:
     """Write the inspector's policy document. Returns its path.
 
-    Root-owned and 0640 with the workload's group, exactly as the proxy's
-    generated files are: the listener runs as _wl-<name> and needs to read it,
+    Root-owned and 0640 with the workload's group: the listener runs as
+    _wl-<name> and needs to read it,
     and 0640 rather than 0644 keeps one workload's policy from being
     enumerable by another. Replaced rather than truncated in place, because a
     restart racing a rewrite would otherwise read a half-written document and

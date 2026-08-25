@@ -52,7 +52,7 @@ flush chain inet workload_broker broker_dnat
 #
 # The advertised address is shared with the proxy and the port distinguishes the
 # two, so this needs no second dummy link and no second host address. It must
-# agree with VM_PROXY_ADDR / VM_BROKER_PORT in lib/vm.py; tests/test_vm_broker.py
+# agree with VM_ADVERTISED_ADDR / VM_BROKER_PORT in lib/vm.py; tests/test_vm_broker.py
 # asserts that rather than trusting it.
 #
 # Note for anyone debugging the far end: a connection translated here is still

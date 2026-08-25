@@ -15,14 +15,14 @@ from vm import (
     IP_BIN, NFT_BIN, NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_PROXY_TABLE,
     NFT_SET_INSPECT_CG, NFT_SET_INSPECT_DST,
     NFT_SET_INSPECT_DST6, NFT_SET_INSPECT_SELF, NFT_SET_INSPECT_SELF6,
-    NFT_SET_PROXY_CG, NFT_TABLE, VM_INSPECT_ORIG_CLEARTEXT,
+    NFT_SET_EGRESS_CG, NFT_TABLE, VM_INSPECT_ORIG_CLEARTEXT,
     VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
-    VM_PROXY_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
+    VM_ADVERTISED_IFACE, vm_inspect_cgroup, vm_inspect_cgroup_command,
     vm_inspect_cgroup_filter_command, vm_inspect_dst_elements,
     vm_inspect_element_commands, vm_inspect_link_address_commands,
     vm_inspect_link_delete_commands, vm_inspect_map_elements,
     vm_inspect_policy, vm_inspect_policy_path, vm_inspect_self_elements,
-    vm_proxy_hosts, vm_proxy_runtime_dir, VM_TLS_DEFAULT,
+    vm_allowed_hosts, vm_runtime_dir, VM_TLS_DEFAULT,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -210,19 +210,19 @@ class TestCgroupCommands(unittest.TestCase):
     def test_the_redirect_exemption_lives_in_the_proxy_table(self):
         """wl_inspect_cg feeds the `return` rule in workload-proxy.nft; sets
         are table-scoped, so naming the filter table fails only at load time
-        with `did you mean set 'wl_proxy_cg' in table inet
+        with `did you mean set 'wl_egress_cg' in table inet
         'workload_filter'?`."""
         argv = vm_inspect_cgroup_command("web", "add")
         self.assertEqual(argv[3:5], NFT_PROXY_TABLE.split())
         self.assertEqual(argv[5], NFT_SET_INSPECT_CG)
 
     def test_the_egress_exemption_lives_in_the_filter_table(self):
-        """wl_proxy_cg feeds the accept rule in workload-filter.nft; the
+        """wl_egress_cg feeds the accept rule in workload-filter.nft; the
         inspector is a filtered uid, so without it its own upstream
         connections hit the default-deny drop and it reaches nothing."""
         argv = vm_inspect_cgroup_filter_command("web", "add")
         self.assertEqual(argv[3:5], NFT_TABLE.split())
-        self.assertEqual(argv[5], NFT_SET_PROXY_CG)
+        self.assertEqual(argv[5], NFT_SET_EGRESS_CG)
 
     def test_the_two_builders_name_opposite_tables(self):
         proxy_side = vm_inspect_cgroup_command("web", "add")
@@ -253,9 +253,9 @@ class TestLinkAddressCommands(unittest.TestCase):
     def test_the_addresses_are_host_global_host_local(self):
         v4, v6 = vm_inspect_link_address_commands(10004)
         self.assertEqual(v4, [IP_BIN, "addr", "add", "198.18.1.4/32",
-                              "dev", VM_PROXY_IFACE])
+                              "dev", VM_ADVERTISED_IFACE])
         self.assertEqual(v6, [IP_BIN, "addr", "add", "2001:2::c612:104/128",
-                              "dev", VM_PROXY_IFACE, "nodad"])
+                              "dev", VM_ADVERTISED_IFACE, "nodad"])
 
     def test_nodad_is_on_v6_only(self):
         """A dummy link runs no DAD (measured 2026-08-19), so the flag
@@ -271,9 +271,9 @@ class TestLinkAddressCommands(unittest.TestCase):
         # Same address, same dev, the verb flipped: a delete that named a
         # different prefix would leave the add's address on the link.
         self.assertEqual(v4_del, [IP_BIN, "addr", "del", "198.18.1.4/32",
-                                  "dev", VM_PROXY_IFACE])
+                                  "dev", VM_ADVERTISED_IFACE])
         self.assertEqual(v6_del, [IP_BIN, "addr", "del", "2001:2::c612:104/128",
-                                  "dev", VM_PROXY_IFACE])
+                                  "dev", VM_ADVERTISED_IFACE])
 
 
 class TestHelperArmsBothTables(unittest.TestCase):
@@ -330,7 +330,7 @@ class TestHelperArmsBothTables(unittest.TestCase):
         self.assertIn("vm_inspect_link_delete_commands", down)
         # The shared link and the advertised address are never torn down.
         self.assertNotIn('"link", "del"', down)
-        self.assertNotIn("VM_PROXY_ADDR", down)
+        self.assertNotIn("VM_ADVERTISED_ADDR", down)
 
     def test_up_arms_the_internal_exemptions_after_the_skeleton(self):
         """Same ordering property as the six above, for the same reason.
@@ -388,12 +388,12 @@ class TestHelperArmsBothTables(unittest.TestCase):
 class TestPolicyDocument(unittest.TestCase):
     """What `hosts` means to the inspector, and what `internal` does not."""
 
-    def test_the_hosts_list_is_the_one_tinyproxy_is_given(self):
+    def test_the_hosts_list_is_the_configured_one(self):
         """At this rung the two enforce the same patterns by two mechanisms.
         Generating them from one source is what keeps a redirected connection
         and a proxied one making the same decision about the same name."""
         net = {"hosts": ["*.example.com", "git.local"]}
-        self.assertEqual(vm_inspect_policy(net)["hosts"], vm_proxy_hosts(net))
+        self.assertEqual(vm_inspect_policy(net)["hosts"], vm_allowed_hosts(net))
 
     def test_internal_hosts_are_not_added_to_the_allowlist(self):
         """An `internal` entry names a host that is ALREADY on a list --
@@ -409,11 +409,122 @@ class TestPolicyDocument(unittest.TestCase):
         self.assertEqual(vm_inspect_policy({"tls": "splice"})["tls"], "splice")
 
     def test_the_policy_path_is_in_the_workloads_runtime_dir(self):
-        """The same directory tinyproxy.conf is written into, and for the same
+        """The same directory the retired proxy's config was written into, and for the same
         reason: /run does not exist when the boot generator runs, so writing at
         start is what makes an edited list apply on a plain restart."""
         self.assertEqual(vm_inspect_policy_path("web"),
-                         f"{vm_proxy_runtime_dir('web')}/inspect.json")
+                         f"{vm_runtime_dir('web')}/inspect.json")
+
+
+
+class TestRuntimeFixture(unittest.TestCase):
+    """The runtime rung's hostname-policy VM, checked without a KVM host.
+
+    tests/cli_surface/test_runtime_vm_hostname_policy.py boots this workload and
+    probes it for one answer on an allowlisted name and a different one on a
+    name that is not on the list. Every one of those probes is evidence only
+    while the fixture still says what they assume.
+
+    Nothing else validates that file, and the suite it belongs to runs weekly on
+    a host with /dev/kvm -- so a drifted allowlist would surface days later as a
+    confusing runtime failure, or worse, as a green run proving nothing (an
+    allowlist that gained the apex would make the wildcard test pass for the
+    wrong reason). These checks are text, and they run on every PR.
+
+    It lived in tests/test_vm_proxy.py until rung 2 deleted that module. Moved
+    here rather than dropped, because the fixture it guards outlived the proxy:
+    the names, the pair, and the apex trap were never claims about tinyproxy.
+    """
+
+    FIXTURE = (ROOT / "tests" / "cli_surface" / "workloads"
+               / "rt-vm-hostname.toml")
+    WILDCARD = "*.wl-wild.test"
+    APEX = "wl-wild.test"
+
+    def setUp(self):
+        import tomllib
+        if not self.FIXTURE.exists():
+            self.skipTest(f"{self.FIXTURE.name} is not in this checkout")
+        with open(self.FIXTURE, "rb") as f:
+            self.config = tomllib.load(f)
+        self.net = self.config["vm"]["network"]
+
+    def test_the_fixture_is_a_config_workloadctl_would_accept(self):
+        """A fixture that fails `validate` fails at enable, inside the harness
+        guest, as a timeout with no useful message."""
+        from vm import validate_vm_network
+        self.assertEqual(validate_vm_network(self.net), [])
+
+    def test_egress_is_filtered_so_the_redirect_is_armed(self):
+        """Under `open` nothing is redirected at all: the guest would dial the
+        stub directly, the 200 probe would still pass, and it would no longer
+        mean the inspector permitted anything."""
+        self.assertEqual(self.net.get("egress"), "filtered")
+
+    def test_there_is_no_address_allowlist(self):
+        """`allow` would give the guest a second path out. Then a reachable
+        destination would no longer imply the inspector permitted it."""
+        self.assertEqual(self.net.get("allow", []), [])
+
+    def test_it_carries_both_an_exact_entry_and_a_wildcard(self):
+        hosts = self.net.get("hosts", [])
+        self.assertTrue(any("*" in h for h in hosts),
+                        f"no wildcard entry in {hosts}; the apex test needs one")
+        self.assertTrue(any("*" not in h for h in hosts),
+                        f"no exact entry in {hosts}; the positive probe needs one")
+
+    def test_the_wildcards_apex_is_not_itself_listed(self):
+        """The load-bearing absence.
+
+        `*.wl-wild.test` does not match `wl-wild.test` -- that is the claim the
+        runtime test pins and the docs tell operators about. Listing the apex
+        explicitly would make the guest reach it for an ordinary reason and turn
+        a real finding into a test that cannot fail.
+        """
+        hosts = self.net.get("hosts", [])
+        self.assertIn(self.WILDCARD, hosts)
+        self.assertNotIn(self.APEX, hosts,
+                         f"{self.APEX} is listed outright, so the apex probe "
+                         f"would pass without proving anything about {self.WILDCARD}")
+
+    def test_the_names_cannot_resolve_on_the_public_internet(self):
+        """RFC 6761 reserves `.test`. The harness points these at a local stub
+        through /etc/hosts; if that setup were ever skipped, the failure has to
+        be 'no upstream', never 'a different upstream'."""
+        for host in self.net.get("hosts", []):
+            self.assertTrue(host.endswith(".test"),
+                            f"{host!r} is not under .test, so this fixture can "
+                            f"reach something real when the stub is absent")
+
+    def test_the_probed_names_are_excepted_from_the_internal_guard(self):
+        """New at rung 2, and the fixture does not work without it.
+
+        The harness stub is on 127.0.0.1 and the INSPECTOR is what dials it, so
+        its upstream leg meets the internal-destination drop. Under the proxy
+        the equivalent dial was exempted by a cgroup rule that predated the
+        guard; the inspector's is not. Without an [[vm.network.internal]] entry
+        every positive probe returns 502 -- the guard working exactly as
+        designed against a harness that meant it.
+
+        Asserted as a SUBSET, not an equality: the two names the positive probes
+        use must be excepted, and anything else the fixture excepts is its own
+        business.
+        """
+        excepted = {e["host"] for e in self.net.get("internal", [])}
+        for host in ("wl-allowed.test", "sub.wl-wild.test"):
+            self.assertIn(host, excepted,
+                          f"{host} is probed for a 200 but is not in "
+                          f"[[vm.network.internal]], so the inspector's dial "
+                          f"to the loopback stub is dropped")
+
+    def test_no_refused_name_is_excepted(self):
+        """The mirror of the above, and the one that keeps it honest. An entry
+        for a name the suite probes for a 403 would not change the verdict --
+        `internal` authorises nothing -- but it would mean the fixture and the
+        suite disagree about which names are supposed to work."""
+        excepted = {e["host"] for e in self.net.get("internal", [])}
+        for host in ("wl-wild.test", "wl-denied.test"):
+            self.assertNotIn(host, excepted)
 
 
 if __name__ == "__main__":

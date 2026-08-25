@@ -20,7 +20,7 @@ rather than a dependency question.
 ### What it needs
 
 - a KVM host, root, and the VM toolchain (`qemu-system-x86_64`, `qemu-img`,
-  `socat`, OVMF, `tinyproxy`, `passt`, `nft`)
+  `socat`, OVMF, `passt`, `nft`) — no `tinyproxy`, which rung 2 retired
 - the workloadctl RPM installed: the rig runs the *installed* broker at
   `/usr/libexec/workloadctl/agent-broker`, so a green run says the package is
   right. `just rpm-install` refreshes it from the checkout.
@@ -115,9 +115,9 @@ also held apart — an unarmed element reads as absent, not as zero.
 
 Last green 2026-08-25, 11 assertions, on a bare-metal Fedora 44 host.
 
-## inspect_rig.py — does a guest with no proxy variables land in the inspector?
+## inspect_rig.py — does a guest told nothing land in the inspector?
 
-Rung 1's headline claim, and the one thing about it that only a real boot can
+The rung's headline claim, and the one thing about it that only a real boot can
 show. Needs a KVM host with the workloadctl RPM installed; it boots two
 throwaway VM workloads and probes them from inside, then purges them.
 
@@ -126,18 +126,31 @@ sudo python3 tests/manual/inspect_rig.py
 ```
 
 **Two guests, differing in one config line.** The `plain` arm is filtered with
-no `hosts`, so the guest has no proxy variables at all and its dial to 80/443
-is DNAT'd onto the listener — the rung's actual claim. The `proxy` arm has
-`hosts`, so tinyproxy runs and its upstream `CONNECT` leg is `tcp dport 443`
-from the same uid; without the `wl_inspect_cg` exemption that leg is redirected
-into the inspector — which, from rung 2, terminates it: the proxy's connection
-to its own upstream is answered by the listener it was dialling past, and every
-proxied HTTPS request fails. (When the rig was first green the listener only
-logged, so the same failure presented as a hang.) **That
-exemption has no unit test that can see it fail** — the element resolves a
-cgroup id at add time, so nothing static can tell an armed one from a missing
-one. The single-line difference between the arms is what makes a failure
+no `hosts`, so nothing is allowlisted and every dial to 80/443 is DNAT'd onto
+the listener and dropped there — the redirect's own claim, isolated from any
+question about what policy then says. The `hosts` arm is the allowed path: a
+dial to an allowlisted name is forwarded (cleartext) or spliced (TLS) and comes
+back 200. Nothing else in the rig walks the inspector's *upstream* leg, so
+without that arm the forward and splice code paths never execute under SELinux
+at all. The single-line difference between the arms is what makes a failure
 attributable to one half or the other.
+
+**The negative half is the guest's, and it is new.** The plain arm also dials
+`192.0.2.1:3128` and asserts nothing answers, then sets `https_proxy` to that
+endpoint and asserts a real `curl` through it fails. An operator upgrading a
+workload whose image bakes in the old export, or whose custom seed was written
+against the old docs, has to get a hard failure rather than a client that
+quietly falls back — otherwise both designs are live at once and the
+transparent one is not the only path out.
+
+**The second arm changed shape at rung 2.** It was called `proxy` and carried a
+real tinyproxy, and its job was the `wl_inspect_cg` exemption: the proxy's
+upstream `CONNECT` leg was `tcp dport 443` from the workload's own uid, so
+without that element it was redirected into the listener it was dialling past.
+Rung 2 deleted the proxy and with it that member of the set. The exemption
+check stays — an inspector missing from the set dials into itself, and **no
+unit test can see that fail**, because the element resolves a cgroup id at add
+time — but it now covers inspectors and responders rather than proxies.
 
 **What only a real boot showed.** Both defects this rig found were ordering
 against user creation, and both passed every unit test. The generator called
@@ -160,18 +173,29 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-**Last green 2026-08-25, 33 assertions**, on a bare-metal Fedora 44 KVM host.
+**Not green against this shape yet.** The rig was rewritten in the same commit
+that deleted the proxy, so the last recorded run describes a different rig and
+saying otherwise would be the worst of the options: a "last green" line that
+survives the change it did not cover.
 
-Two runs are worth keeping apart. The earlier one, at 31 assertions, ran with
-`semodule -DB` in effect and is what *found* the two SELinux findings below;
-both were real, and neither was visible from `just test`. The 33-assertion run
-is the one that closed them, and it ran under plain **enforcing** with shipped
-dontaudit rules in place — which is the harder result: a permissive or
-dontaudit-disabled pass measures the branch that ran, and an earlier denial
-changes which branch that is. The two added assertions are the domain checks,
-and `workload-<name>-resolve.service` measuring as `wlresolve_t` rather than
-`unconfined_service_t` is the whole of what `security/workload-resolve.cil`
-was written for.
+What the recorded runs said, kept because the *reasoning* still applies. On
+2026-08-25 this rig was green at **33 assertions** on a bare-metal Fedora 44 KVM
+host, and two runs were worth keeping apart. The earlier one, at 31 assertions,
+ran with `semodule -DB` in effect and is what *found* the two SELinux findings
+below; both were real, and neither was visible from `just test`. The
+33-assertion run is the one that closed them, and it ran under plain
+**enforcing** with shipped dontaudit rules in place — which is the harder
+result: a permissive or dontaudit-disabled pass measures the branch that ran,
+and an earlier denial changes which branch that is. The two added assertions
+were the domain checks, and `workload-<name>-resolve.service` measuring as
+`wlresolve_t` rather than `unconfined_service_t` is the whole of what
+`security/workload-resolve.cil` was written for.
+
+Re-run under **enforcing**, not `-DB`, for that reason. The rewrite moved the
+allowed path onto an arm whose traffic used to be exempted before the inspector
+saw it, so the forward and splice legs now execute in a configuration no
+recorded run has measured — which is exactly the case where a permissive pass
+would report a green that means nothing.
 
 **Status files.** Both producers keep counters and write them into the VM's
 runtime directory, and that write is guaranteed never to raise: a failure is a

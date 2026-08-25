@@ -492,7 +492,8 @@ class _FakeSocket:
 
 
 class TestHostnameMatching(unittest.TestCase):
-    """One matcher, shared with the cleartext plane and with tinyproxy's list."""
+    """One matcher, shared with the cleartext plane and with the `hosts` list
+    the retired proxy matched the same way."""
 
     def test_a_name_differing_only_in_case_matches(self):
         """DNS is case-insensitive and fnmatchcase is not, which is exactly
@@ -508,7 +509,7 @@ class TestHostnameMatching(unittest.TestCase):
 
     def test_the_apex_trap_is_preserved(self):
         """`*.example.com` does not authorise `example.com`. Documented in
-        three tracked files and matched this way by tinyproxy today: widening
+        three tracked files and was matched this way by the retired proxy: widening
         it here would silently grant every existing config a destination its
         operator did not write down."""
         self.assertFalse(vm_hostname_match("example.com", ["*.example.com"]))
@@ -807,7 +808,7 @@ class TestCleartextAuthorisation(unittest.TestCase):
     def test_the_matcher_is_the_one_the_tls_plane_uses(self):
         """One matcher, not two. The apex trap has to be preserved here for
         the same reason it is preserved there: `*.example.com` does not
-        authorise `example.com`, that is what tinyproxy does with the same list
+        authorise `example.com`, that is what the retired proxy did with the same list
         today, and a plane that widened it would grant every existing config a
         destination its operator did not write down."""
         _, got, ups = self._run(

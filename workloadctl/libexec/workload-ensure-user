@@ -36,9 +36,10 @@ from workload_lib import (
     append_subid_entries, replace_file_atomically, subgid_file, subuid_file,
 )
 from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
-                VM_GUEST_UID, VM_PROXY_ADDR, VM_PROXY_PORT,
+                VM_GUEST_UID, VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH,
+                VM_CA_ENV_VARS,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
-                vm_broker_env, vm_proxy_env, vm_uses_proxy)
+                vm_broker_env, vm_ca_env, vm_uses_inspect)
 from secrets_template import substitute_template
 
 
@@ -1053,15 +1054,26 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         for keyline in host_private_key.splitlines():
             lines.append(f"    {keyline}")
         lines.append(f"  ed25519_public: {host_public_key}")
-    # Hostname policy (ADR 006 §4.4): tell the guest where its proxy is. Two
-    # files rather than one because they cover different consumers —
-    # /etc/environment is read by PAM so login sessions and systemd services
-    # inherit it, and profile.d covers interactive shells that never go through
-    # PAM. dnf, curl and git all read these names from the environment.
+    # The guest environment block. Two files rather than one because they cover
+    # different consumers — /etc/environment is read by PAM so login sessions and
+    # systemd services inherit it, and profile.d covers interactive shells that
+    # never go through PAM. dnf, curl and git all read these names from the
+    # environment.
     #
-    # This is advisory by construction: a guest process free to ignore
-    # HTTPS_PROXY simply does. What makes the policy binding is the default-deny
-    # egress chain on the host, which leaves such a process nowhere else to go.
+    # WHAT IS AND IS NOT IN IT, AFTER RUNG 2. Through rung 1 this block carried
+    # http_proxy/https_proxy/no_proxy and the enforcement was advisory by
+    # construction: a guest process free to ignore the variables simply did, and
+    # only the default-deny chain turned that into a failure rather than a
+    # bypass. Those variables are gone. Egress filtering is now transparent — a
+    # uid-keyed redirect the guest is not told about and cannot opt out of — so
+    # NOTHING written here affects whether the guest is filtered. What remains
+    # is the credential broker's endpoint and the CA bundle the inspector's
+    # spliced connections will be presented under: conveniences, not controls.
+    #
+    # That is worth stating because the block LOOKS the same and its failure
+    # mode inverted. A guest missing this block used to be a guest reaching
+    # nothing; now it is a guest that reaches everything it is allowed to and
+    # cannot verify a certificate.
     #
     # Only the built-in cloud-config gets this. A workload supplying its own
     # user_data_file owns its guest configuration entirely, and this is
@@ -1073,9 +1085,12 @@ def _render_default_user_data(name: str, guest_user: str, pubkey: str,
         lines.append("    content: |")
         for key, value in guest_env.items():
             lines.append(f"      {key}={value}")
-        # Filename kept as -proxy despite now carrying the broker endpoint too:
-        # renaming it would leave the old file behind on every existing guest,
-        # since cloud-config runs once at first boot.
+        # Filename kept as -proxy though it now carries the broker endpoint and
+        # the CA bundle and no proxy variable at all: renaming it would leave the
+        # old file behind on every existing guest, still exporting the retired
+        # https_proxy, since cloud-config runs once at first boot. A guest that
+        # keeps that stale export dials an address where nothing listens -- which
+        # is the negative case tests/manual/inspect_rig.py proves on a live VM.
         lines.append("  - path: /etc/profile.d/99-workload-proxy.sh")
         lines.append("    permissions: '0644'")
         lines.append("    content: |")
@@ -1340,16 +1355,16 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 f"verification. Add `ssh_deletekeys: false` to the seed."
             )
 
-        # Seed-completeness contract. Default mode derives the proxy
+        # Seed-completeness contract. Default mode derives the guest
         # environment and the virtiofs mounts from the TOML and emits them;
         # template mode emits nothing but what the operator wrote, so a seed
         # that omits them yields a VM that boots, passes every check, and is
         # quietly wrong:
         #
-        #   - no proxy env under egress = "filtered" means every guest tool
-        #     that honours the variables goes direct instead, and direct is
-        #     DROPPED rather than refused — so it hangs for a full TCP timeout
-        #     and reads as a network fault, not a policy one;
+        #   - no CA bundle under egress = "filtered" means every guest tool
+        #     that verifies certificates rejects the inspector's spliced
+        #     connections once rung 3 presents one, and reads as a broken
+        #     upstream rather than a missing anchor;
         #   - an unmounted volume leaves the guest writing to the system disk
         #     at the path the operator believes is persistent, and a
         #     generational rollback then discards it.
@@ -1360,24 +1375,36 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # they establish the seed refers to the thing at all, not that it wires
         # it up correctly. [vm.cloud_init].seed_provides opts out per concern,
         # for a seed that handles one of them by means we cannot see (an image
-        # with the mount already in /etc/fstab, a guest-side proxy config
-        # baked into the disk).
+        # with the mount already in /etc/fstab, a guest-side CA store the image
+        # builder populated).
         seed_provides = ci_cfg.get("seed_provides", []) or []
 
-        if (vm_uses_proxy(config) and "proxy" not in seed_provides
-                and VM_PROXY_ADDR not in user_data_text):
+        # The CA contract, which replaced the proxy contract this check used to
+        # be. It is pinned on the BUNDLE PATH rather than on the advertised
+        # address: the address is still in the seed of any workload that uses
+        # the broker, so pinning on it would pass a seed that mentions the
+        # broker and configures no anchor at all -- the exact false green the
+        # substring style has to be watched for.
+        # Gated on VM_CA_BUNDLE_AVAILABLE for the reason that flag exists: until
+        # rung 3 mints the CA, default mode writes no bundle either, and a
+        # contract that refused custom seeds for omitting a file the built-in
+        # seed also omits would be enforcing a rule against one path only.
+        if (VM_CA_BUNDLE_AVAILABLE and vm_uses_inspect(config)
+                and "ca" not in seed_provides
+                and VM_CA_BUNDLE_PATH not in user_data_text):
             raise SeedContractError(
-                f"[vm.cloud_init].user_data_file for {name} does not configure "
-                f"the guest's proxy, but this workload has hostname-policy "
-                f"egress. A custom seed replaces the built-in cloud-config, "
-                f"which is what would normally set http_proxy/https_proxy — "
-                f"without it the guest ignores the proxy, its traffic is "
-                f"dropped rather than refused, and every fetch hangs until it "
-                f"times out. Export the proxy environment in the seed (see "
-                f"workloads/vm-base/cloud-init/user-data), pointing at "
-                f"http://{VM_PROXY_ADDR}:{VM_PROXY_PORT}, or set "
-                f"[vm.cloud_init].seed_provides = [\"proxy\"] if the guest "
-                f"image already carries that configuration."
+                f"[vm.cloud_init].user_data_file for {name} never installs the "
+                f"egress CA bundle at {VM_CA_BUNDLE_PATH}, but this workload's "
+                f"egress is filtered and inspected. A custom seed replaces the "
+                f"built-in cloud-config, which is what would normally write it "
+                f"and point the guest's HTTP clients at it -- without it the "
+                f"guest cannot verify the certificates its own inspector "
+                f"presents, and every HTTPS fetch fails as a bad certificate "
+                f"rather than as a policy decision. Write the bundle and export "
+                f"{', '.join(VM_CA_ENV_VARS)} in the seed (see "
+                f"workloads/vm-base/cloud-init/user-data), or set "
+                f"[vm.cloud_init].seed_provides = [\"ca\"] if the guest image "
+                f"already carries that configuration."
             )
 
         if "mounts" not in seed_provides:
@@ -1413,7 +1440,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
             has_data_disk=bool(vm_cfg.get("data_disk_size")),
             host_private_key=host_private_key,
             host_public_key=host_public_key,
-            guest_env={**vm_proxy_env(config), **vm_broker_env(config)},
+            guest_env={**vm_ca_env(config), **vm_broker_env(config)},
         )
 
     # Pin the guest host key on the host (S1). Both provisioning paths have now

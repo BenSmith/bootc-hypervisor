@@ -106,10 +106,14 @@ VM_INSPECT_PORT_TLS = 8443
 # The two ORIGINAL ports the redirect matches and the map keys on: a guest dial
 # to 80 or one to 443. Fixed by the redirect rules in workload-proxy.nft; they
 # never appear in an element value, which is why the constants live beside the
-# listener ports they select. 443 is spelled rather than aliased to
-# VM_PROXY_PORT_HTTPS: that constant is tinyproxy's CONNECT restriction, and an
-# alias would tie the redirect's key to a policy directive of a service it
-# replaces (rung 2).
+# listener ports they select.
+#
+# Until rung 2 these two numbers had a rival: tinyproxy's ConnectPort directive
+# also named 443, and the two were deliberately NOT aliased so the redirect's
+# key could not be changed by editing a policy directive of the service it was
+# built to replace. That service is gone and these are now the only 80 and 443
+# in the design; the note survives because the reason a constant was not shared
+# is otherwise invisible once one of the two sharers is deleted.
 VM_INSPECT_ORIG_CLEARTEXT = 80
 VM_INSPECT_ORIG_TLS = 443
 
@@ -429,7 +433,7 @@ NFT_TABLE = "inet workload_filter"
 NFT_SET_FILTERED = "wl_filtered"
 NFT_SET_ALLOW4 = "wl_allow4"
 NFT_SET_ALLOW6 = "wl_allow6"
-# Internal destination prefixes the hostname proxy may not connect OUT to. The
+# Internal destination prefixes the egress inspector may not connect OUT to. The
 # elements are constant and live in the skeleton, not here -- nothing in Python
 # manages them. The names exist so tests can name the sets and so
 # `vm_egress_check` can tell a loaded guard from a table that predates it,
@@ -528,29 +532,31 @@ def vm_filter_elements(uid: int, allow: list[str],
 NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 
 
-# --- Hostname policy: the per-workload proxy (ADR 006 §4.4) ---
+# --- Hostname policy: what the guest is told, and what enforces it ---
 #
-# Kernel rules match addresses; policy is written about names. Rather than
-# resolve names to addresses at rule-install time — which races DNS, breaks on
-# CDN churn, and opens everything sharing an address — an HTTP forward proxy
-# reads `CONNECT host:443` in plaintext before any TLS handshake and allowlists
-# the hostname directly, with no interception and no CA.
+# Kernel rules match addresses; policy is written about names. Through rung 1
+# the resolution was an HTTP forward proxy: one tinyproxy per workload reading
+# `CONNECT host:443` in plaintext and allowlisting the hostname directly, with
+# the guest configured to use it through HTTPS_PROXY. That proxy is gone. Its
+# weakness was never the filtering, it was the configuring: a proxy is advisory,
+# so a guest process that ignores the variables simply does not use it, and the
+# default-deny chain could only turn that into a failure — never into a
+# filtered request. Every language runtime, every static binary and every
+# vendored HTTP client was one more place the variables had to be honoured.
 #
-# One tinyproxy instance per workload, because tinyproxy's filter directives are
-# instance-global. Each runs as _wl-<name>, so its own outbound traffic carries
-# the same uid as the guest's and one `meta skuid` rule governs both the direct
-# and the via-proxy path. The proxy is a policy layer, not a second trust domain.
+# What replaced it is transparent: the guest is told nothing, dials 80 and 443
+# normally, and a uid-keyed DNAT lands it on this workload's own inspector,
+# which reads the Host header or the SNI and applies the same `hosts` patterns.
+# The guest's cooperation is no longer part of the enforcement path.
 #
-# What binds it: a proxy alone is advisory, since a guest process that ignores
-# HTTPS_PROXY simply does not use it. The default-deny output chain is what
-# makes it mandatory — the uncooperative process has nowhere else to go.
-
-# The address every guest is told to use. It is the same for every workload on
-# purpose: the redirect is keyed on uid, so one advertised endpoint reaches N
-# private listeners and every guest's cloud-init is identical. Two host
-# addresses are ruled out by §3.5 — host loopback is unreachable by design, and
-# the host's default-route address is structurally unreachable because passt
-# assigns the guest that same address — so it has to be some other host address.
+# The advertised address survives the proxy. It is still the address every
+# guest is told to use — now for the credential broker alone — and still the
+# same address for every workload on purpose: the broker redirect is keyed on
+# uid, so one advertised endpoint reaches N private listeners and every guest's
+# cloud-init is identical. Two host addresses are ruled out by §3.5 — host
+# loopback is unreachable by design, and the host's default-route address is
+# structurally unreachable because passt assigns the guest that same address —
+# so it has to be some other host address.
 #
 # TEST-NET-1 is reserved for documentation and can never be a destination a
 # guest legitimately wants, and a dummy link keeps it off every real NIC and
@@ -562,16 +568,29 @@ NFT_SETS = (NFT_SET_FILTERED, NFT_SET_ALLOW4, NFT_SET_ALLOW6)
 # the last-write-wins hazard ADR 002 exists to describe and this design deleted
 # along with the bridge. A site that genuinely uses TEST-NET-1 internally should
 # use `allow` and skip hostname policy; see docs/workloads.md.
-VM_PROXY_ADDR = "192.0.2.1"
-VM_PROXY_PORT = 3128
+VM_ADVERTISED_ADDR = "192.0.2.1"
 
 # What [vm.cloud_init].seed_provides may name — the concerns a custom seed can
 # declare it handles itself, suppressing the matching completeness check in
 # build_cloud_init_iso.
-SEED_PROVIDES_CHOICES = {"proxy", "mounts"}
+#
+# "proxy" was one of these and is not merely dropped: a seed that still declares
+# it is REFUSED, by name, in validate_vm_config. Silently ignoring it would let
+# a custom seed opt out of a check that no longer exists while never being told
+# the check it now needs — the CA bundle the inspector's spliced connections
+# will be presented under — and the operator would learn that at the first
+# certificate error inside the guest rather than at validation.
+SEED_PROVIDES_CHOICES = {"ca", "mounts"}
+
+# The retired opt-out and what an operator should write instead. Kept as data
+# rather than spelled into the error string so the accepted set and the message
+# naming its replacement cannot drift.
+SEED_PROVIDES_RETIRED = {
+    "proxy": "ca",
+}
 
 # workload-ensure-user exits with this when a custom seed fails one of the
-# contracts build_cloud_init_iso enforces (host key, proxy env, volume mounts).
+# contracts build_cloud_init_iso enforces (host key, CA bundle, volume mounts).
 # Distinct from a plain 1 so the caller can tell "the operator's seed is wrong,
 # and the helper already said how" from "the helper broke": provisioning maps
 # it to UsageError, which keeps the CLI's bug-report banner — and the traceback
@@ -584,29 +603,42 @@ class SeedContractError(RuntimeError):
     built-in seed would have satisfied. The message is written for the operator
     and names the fix."""
 
-# Dummy link carrying the advertised address. Host-global and shared, created
-# on demand and never torn down by a workload stop: it is refcount-free because
-# it holds no per-workload state, costs nothing idle, and an orphan is inert.
-VM_PROXY_IFACE = "workload-proxy"
+# Dummy link carrying the advertised address and every per-workload listener
+# address. Host-global and shared, created on demand and never torn down by a
+# workload stop: it is refcount-free because it holds no per-workload state,
+# costs nothing idle, and an orphan is inert.
+#
+# The DEVICE name still reads "workload-proxy" after the proxy it was named for
+# was deleted, and that is deliberate. A link name is an object that exists on
+# running hosts: renaming it would leave the old link in place holding this
+# workload's 127.128.x.y and 198.18.x.y addresses, with the new link claiming
+# the same addresses — two links answering for one address is a routing
+# ambiguity, and it would arrive on upgrade rather than on a fresh install.
+VM_ADVERTISED_IFACE = "workload-proxy"
 
-VM_PROXY_BIN = "/usr/bin/tinyproxy"
-
-# The proxy runs as the workload's own user by design, so `meta skuid` cannot
-# separate its traffic from the guest's — and under default-deny the drop
-# catches the proxy too, leaving hostname policy permitting nothing. The
-# control group is the discriminator that survives the shared uid: systemd
-# assigns it, a guest can neither enter nor forge it, and it widens no
-# destination or port, so a guest that ignores the proxy and dials 443 directly
-# is still dropped.
+# The host-side processes that re-originate a workload's egress — the egress
+# inspector and the synthesising responder — run as the workload's own user, so
+# `meta skuid` cannot separate their traffic from the guest's, and under
+# default-deny the drop catches them too, leaving the workload's own enforcement
+# path unable to reach anything. The control group is the discriminator that
+# survives the shared uid: systemd assigns it, a guest can neither enter nor
+# forge it, and it widens no destination or port, so a guest that dials 443
+# past the inspector is still dropped.
+#
+# Named wl_egress_cg, not wl_proxy_cg. Through rung 1 its one member was the
+# per-workload tinyproxy and the name was accurate; rung 2 deleted that service
+# and left the set holding two members that are not proxies at all. Its twin in
+# the nat table, wl_inspect_cg, exempts the same processes from the REDIRECT;
+# this one exempts them from the DROP. A process needs both or it either
+# reaches nothing or loops into the listener it is dialling past.
 #
 # The slice is pinned rather than taken from [resources].slice so the cgroup
-# path is always exactly two components and the rule's `level 2` is exact. The
-# proxy is not the payload; resource control belongs on the VM.
-NFT_SET_PROXY_CG = "wl_proxy_cg"
-VM_PROXY_SLICE = "workloads.slice"
+# path is always exactly two components and the rule's `level 2` is exact.
+# These sidecars are not the payload; resource control belongs on the VM.
+NFT_SET_EGRESS_CG = "wl_egress_cg"
+VM_SIDECAR_SLICE = "workloads.slice"
 NFT_PROXY_SKELETON = "/usr/share/workloadctl/workload-proxy.nft"
 NFT_PROXY_TABLE = "inet workload_proxy"
-NFT_PROXY_MAP = "wl_proxy_dest"
 
 # The transparent redirect's objects (§7.1). The two maps carry one element per
 # workload per redirected port, keyed uid . original port -> (listener address,
@@ -619,40 +651,10 @@ NFT_MAP_INSPECT4 = "wl_inspect4"
 NFT_MAP_INSPECT6 = "wl_inspect6"
 NFT_SET_INSPECT_CG = "wl_inspect_cg"
 
-# tinyproxy's own client ACL. It must name the advertised address, not just
-# loopback: the guest's packet is routed to 192.0.2.1 before it is translated,
-# so the host picks that same address as the source and the proxy sees a client
-# connecting *from* 192.0.2.1. Omit it and every request answers 403 while the
-# listener, the redirect and the guest all look healthy — the failure logs only
-# as tinyproxy's "Unauthorized connection from".
-VM_PROXY_ALLOWED_CLIENTS = ("127.0.0.0/8", VM_PROXY_ADDR)
-
-# The only port CONNECT may target. Without a ConnectPort directive tinyproxy
-# permits CONNECT to any port, which would turn the proxy into a general TCP
-# tunnel out of the guest and undo the egress policy it exists to express.
-VM_PROXY_PORT_HTTPS = 443
-
-
-def vm_proxy_hosts(net: dict) -> list[str]:
+def vm_allowed_hosts(net: dict) -> list[str]:
     """The hostname allowlist for one workload, or [] if it has none."""
     hosts = net.get("hosts", [])
     return list(hosts) if isinstance(hosts, list) else []
-
-
-def vm_uses_proxy(config: dict) -> bool:
-    """Whether this workload gets a proxy instance.
-
-    Keyed on `hosts` being non-empty rather than on a separate enable flag, so
-    the schema cannot express "proxy on, allowlist empty" — an instance that
-    permits nothing, which is indistinguishable from a broken one. A bridged VM
-    is outside all of this (§5.3): nothing of ours is in its data path, so there
-    is no uid to key the redirect on.
-    """
-    vm_cfg = config.get("vm", {}) or {}
-    net = vm_cfg.get("network", {}) or {}
-    if not isinstance(net, dict) or net.get("bridge"):
-        return False
-    return bool(vm_proxy_hosts(net))
 
 
 def vm_uses_inspect(config: dict) -> bool:
@@ -684,60 +686,25 @@ def vm_uses_inspect(config: dict) -> bool:
     return net.get("egress", VM_EGRESS_DEFAULT) == "filtered"
 
 
-def vm_proxy_runtime_dir(name: str) -> str:
+def vm_runtime_dir(name: str) -> str:
     """Where one instance's config, allowlist, log and pid file live."""
     return f"{VM_SOCKET_DIR}/{name}"
-
-
-def vm_proxy_config(name: str, listen_addr: str, hosts: list[str]) -> str:
-    """The tinyproxy.conf for one workload.
-
-    FilterDefaultDeny is the whole point: without it the Filter file is a
-    denylist and an unlisted host is permitted. FilterURLs stays off so the
-    pattern matches the host, which is all a CONNECT carries anyway.
-    """
-    rt = vm_proxy_runtime_dir(name)
-    lines = [
-        f"# tinyproxy for workload {name} — generated by workloadctl, do not edit.",
-        f"Listen {listen_addr}",
-        f"Port {VM_PROXY_PORT}",
-        "Timeout 600",
-        f'PidFile "{rt}/tinyproxy.pid"',
-        f'LogFile "{rt}/tinyproxy.log"',
-        "LogLevel Info",
-        "MaxClients 64",
-        "DisableViaHeader Yes",
-    ]
-    lines += [f"Allow {client}" for client in VM_PROXY_ALLOWED_CLIENTS]
-    lines += [
-        f"ConnectPort {VM_PROXY_PORT_HTTPS}",
-        f'Filter "{rt}/hosts.allow"',
-        "FilterType fnmatch",
-        "FilterURLs Off",
-        "FilterDefaultDeny Yes",
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def vm_proxy_filter_file(hosts: list[str]) -> str:
-    """The hostname allowlist file. fnmatch patterns, one per line."""
-    return "".join(f"{host}\n" for host in hosts)
 
 
 # --- The inspector's policy document (§7.7.1, §13) ---
 #
 # The listener is socket-activated and long-lived, so it reads its lists once,
-# at start, out of the workload's runtime directory — the same place and the
-# same moment as tinyproxy's generated config, and for the same reason: /run
+# at start, out of the workload's runtime directory — written at start rather
+# than at generate time for the reason the retired proxy's config was: /run
 # does not exist when the boot generator runs, and writing at start is what
 # makes an edited list take effect on a plain `systemctl restart` with no
 # regeneration. §13 states that recovery property, and the inspect service's
 # PartOf= on the VM is what enforces it; a listener that held its lists in a
 # file written at generate time would keep enforcing the previous boot's policy.
 #
-# JSON rather than a bare line-per-pattern file like hosts.allow, because this
-# document carries a mode as well as a list and will carry more of both.
+# JSON rather than a bare line-per-pattern file — the shape the proxy's
+# hosts.allow had — because this document carries a mode as well as a list and
+# will carry more of both.
 VM_INSPECT_POLICY_FILE = "inspect.json"
 
 
@@ -769,10 +736,10 @@ def vm_resolve_status_path(name: str) -> str:
 def vm_inspect_policy(net: dict) -> dict:
     """The inspector's policy document for one workload.
 
-    `hosts` is the same list tinyproxy is given, deliberately: at this rung the
-    two enforce the same patterns by two mechanisms, and generating them from
-    one source is what keeps a redirected connection and a proxied one making
-    the same decision.
+    `hosts` is `[vm.network].hosts` unchanged. The key kept its name and its
+    meaning across rung 2 deliberately: an operator's allowlist means what it
+    meant when a proxy read it, and the only thing that changed is which
+    process reads it and whether the guest has to cooperate for it to apply.
 
     `internal` is carried and AUTHORISES NOTHING. An `internal` entry names a
     host that is already on a list (validation refuses one that is not), and it
@@ -789,7 +756,7 @@ def vm_inspect_policy(net: dict) -> dict:
     """
     return {
         "tls": net.get("tls", VM_TLS_DEFAULT),
-        "hosts": vm_proxy_hosts(net),
+        "hosts": vm_allowed_hosts(net),
         "internal": vm_internal_hosts(net),
     }
 
@@ -812,12 +779,13 @@ def vm_hostname_match(host: str, patterns) -> bool:
     `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`. The plain form normalises its
     arguments through os.path.normcase, which is a no-op on Linux and lowercases
     on other platforms — so it is case-insensitive only by accident of platform,
-    and the operators' patterns are the ones tinyproxy already matches. Both
-    sides are normalised here instead, which is the same answer everywhere.
+    and the operators' patterns were written against fnmatch's case-sensitive
+    behaviour. Both sides are normalised here instead, which is the same answer
+    everywhere.
 
     The apex trap is preserved, not fixed: `*.example.com` does not authorise
-    `example.com`. That is fnmatch's behaviour, it is what tinyproxy does with
-    the same list today, and three tracked files document it. A rung that
+    `example.com`. That is fnmatch's behaviour, it is what the proxy this
+    replaced did with the same list, and three tracked files document it. A rung that
     quietly widened it would silently grant every existing config a destination
     its operator did not write down.
     """
@@ -826,57 +794,6 @@ def vm_hostname_match(host: str, patterns) -> bool:
         return False
     return any(fnmatch.fnmatchcase(host, vm_normalise_hostname(p))
                for p in patterns)
-
-
-def vm_proxy_element(uid: int, listen_addr: str) -> str:
-    """This workload's element in the uid -> listener map."""
-    return f"{uid} : {listen_addr} . {VM_PROXY_PORT}"
-
-
-def vm_proxy_map_command(uid: int, listen_addr: str, action: str) -> list[str]:
-    """`nft add|delete element` for one workload's redirect."""
-    return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(), NFT_PROXY_MAP,
-            "{ " + vm_proxy_element(uid, listen_addr) + " }"]
-
-
-def vm_proxy_cgroup(name: str) -> str:
-    """The control group path of one workload's proxy unit."""
-    return f"{VM_PROXY_SLICE}/workload-{name}-proxy.service"
-
-
-def vm_proxy_cgroup_command(name: str, action: str) -> list[str]:
-    """`nft add|delete element` for one proxy's egress exemption.
-
-    The element lives in the *filter* table, not the proxy table: the rule it
-    feeds has to sit in the output chain ahead of the drop, and that chain is
-    the filter skeleton's.
-    """
-    return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_PROXY_CG,
-            '{ "' + vm_proxy_cgroup(name) + '" }']
-
-
-def vm_proxy_cgroup_inspect_command(name: str, action: str) -> list[str]:
-    """`nft add|delete element` putting one proxy's cgroup into the *nat* return set.
-
-    The missing corner of the table vm_proxy_cgroup_command fills: same cgroup
-    as that one, but in the *proxy* table's wl_inspect_cg — the opposite of
-    vm_proxy_cgroup_command, the twin of vm_inspect_cgroup_command, whose other
-    member names the proxy unit rather than the inspector's.
-
-    wl_inspect_cg's name misleads: it is not "the inspector's cgroup". It is
-    every workload-uid process that *re-originates* guest traffic rather than
-    emitting it — during rung 1 there are two, the inspector and tinyproxy's
-    upstream CONNECT leg. That leg is `tcp dport 443` from the workload uid, so
-    without this element the transparent redirect rewrites it into the
-    inspector's listener, and every proxied HTTPS request on every filtered VM
-    breaks. Rung 2 removes tinyproxy and with it this element.
-
-    The proxy unit's start applies both skeletons, so the table exists before
-    the add; its ExecStopPost removes it, for the same cgroup-id reason the
-    sibling delete in the filter table is owed by that unit's stop.
-    """
-    return [NFT_BIN, action, "element", *NFT_PROXY_TABLE.split(),
-            NFT_SET_INSPECT_CG, '{ "' + vm_proxy_cgroup(name) + '" }']
 
 
 # --- The transparent redirect's per-workload elements (§7.1, §7.2) ---
@@ -1115,8 +1032,8 @@ def vm_internal_resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
 def vm_inspect_cgroup(name: str) -> str:
     """The control group path of one workload's inspector unit.
 
-    Follows vm_proxy_cgroup's shape: the pinned slice plus the unit name, so
-    the path is always two components and the rule's `level 2` is exact. The
+    The pinned slice plus the unit name, so the path is always two components
+    and the rule's `level 2` is exact. The
     element resolves a *path*, so the unit name here must match the service
     unit the inspector actually runs as — a service named -inspect with a
     cgroup element naming -inspector is a `return` rule that matches nothing
@@ -1127,15 +1044,15 @@ def vm_inspect_cgroup(name: str) -> str:
     as a whole line, since a nested slice satisfies a substring match and
     silently deepens this path past `level 2`.
     """
-    return f"{VM_PROXY_SLICE}/workload-{name}-inspect.service"
+    return f"{VM_SIDECAR_SLICE}/workload-{name}-inspect.service"
 
 
 def vm_inspect_cgroup_command(name: str, action: str) -> list[str]:
     """`nft add|delete element` for one inspector's redirect exemption.
 
     The element lives in the *proxy* table, not the filter table — the
-    opposite of vm_proxy_cgroup_command. Backwards, it fails only at load
-    time with `did you mean set 'wl_proxy_cg' in table inet
+    opposite of vm_inspect_cgroup_filter_command. Backwards, it fails only at load
+    time with `did you mean set 'wl_egress_cg' in table inet
     'workload_filter'?`: nftables sets are table-scoped, and wl_inspect_cg is
     declared in workload-proxy.nft next to the `return` rule it feeds.
 
@@ -1154,45 +1071,99 @@ def vm_inspect_cgroup_filter_command(name: str, action: str) -> list[str]:
 
     The twin of vm_inspect_cgroup_command in the *filter* table: the
     inspector runs as _wl-<name>, a filtered uid, so without its cgroup in
-    wl_proxy_cg its own upstream connections hit the default-deny drop and it
+    wl_egress_cg its own upstream connections hit the default-deny drop and it
     reaches nothing. The twin is owed by the same unit's start and stop as
     vm_inspect_cgroup_command's: a helper that does one of the two and not
     the other produces an inspector that either reaches nothing (this one
     missing) or redirects its own dials into itself (the other missing).
     """
-    return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_PROXY_CG,
+    return [NFT_BIN, action, "element", *NFT_TABLE.split(), NFT_SET_EGRESS_CG,
             '{ "' + vm_inspect_cgroup(name) + '" }']
 
 
-def vm_proxy_env(config: dict) -> dict[str, str]:
-    """The proxy environment a guest is told to use, or {} if it has none.
+# Where the guest finds the CA whose certificates the inspector's spliced
+# connections are presented under. A guest path, not a host path: the file
+# arrives inside the seed and is written by cloud-init.
+#
+# /usr/local/share/ca-certificates is the directory `update-ca-certificates`
+# consumes on Debian-family guests; Fedora's anchors live elsewhere. The five
+# variables below name the FILE directly rather than relying on either, because
+# the whole point of the block is to work in a guest whose distribution we do
+# not choose.
+VM_CA_BUNDLE_PATH = "/usr/local/share/ca-certificates/workloadctl-egress.crt"
 
-    NO_PROXY carries the guest's own view of the host and localhost so guest-local
-    traffic does not loop out through the proxy. It is an IP literal throughout,
-    which is what makes the proxy path free of any DNS dependency — DNS being
-    precisely what a compromised guest would attack to escape hostname policy.
+# The environment variables that point a guest's HTTP clients at that bundle.
+# Five, because there is no single one: OpenSSL reads SSL_CERT_FILE, Node reads
+# NODE_EXTRA_CA_CERTS, python-requests reads REQUESTS_CA_BUNDLE, git reads
+# GIT_SSL_CAINFO and pip reads PIP_CERT. A guest missing any one of them fails
+# only in that ecosystem, which is the hardest kind of failure to attribute.
+VM_CA_ENV_VARS = (
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "PIP_CERT",
+)
 
-    The advertised address is in NO_PROXY too, and it is load-bearing rather
-    than tidiness. Everything at that address is one of the host's own endpoints
-    for this guest — the proxy itself, and the broker on another port — and a
-    client that honours proxy variables would otherwise ask the proxy to fetch
-    the broker for it. The proxy's allowlist holds hostnames a guest may reach
-    on the internet and will not contain this address, so it answers 403: a
-    refusal that reads exactly like the broker rejecting the caller, for a
-    request that never reached the broker at all.
+# Whether there is a bundle at VM_CA_BUNDLE_PATH for those variables to name.
+# Rung 3 mints the CA, writes the bundle into the seed, and flips this to True;
+# until then nothing writes the file and vm_ca_env() returns {}.
+#
+# THIS IS NOT CAUTION, IT IS THE DIFFERENCE BETWEEN WORKING AND BROKEN. Every
+# one of those five variables REPLACES the runtime's default trust store rather
+# than adding to it, and every one of them fails closed when the file it names
+# does not exist: OpenSSL's SSL_CERT_FILE pointing at a missing path makes
+# loading the default verify paths fail outright, and requests, git and pip
+# raise on the open. Writing the block one rung early would take TLS
+# verification down inside every filtered guest, for a certificate nothing is
+# presenting yet -- a total outage in exchange for avoiding one seed migration.
+#
+# So the SEAM moves at rung 2 and the CONTENT at rung 3: the function, its call
+# site, the variable names and the guest path are all settled and tested here,
+# and rung 3 changes one boolean and adds the write_files entry. The cost is the
+# one the flag is paying for: a workload with no broker loses its guest
+# environment block at rung 2 and regains it at rung 3, which is a seed
+# migration for those workloads. A guest that cannot verify certificates is
+# worse than a guest re-seeded twice.
+VM_CA_BUNDLE_AVAILABLE = False
+
+
+def vm_ca_env(config: dict) -> dict[str, str]:
+    """The CA environment a filtered guest is given, or {} if it has none.
+
+    WHAT THIS REPLACED, AND WHY THE SEAM SURVIVED THE THING IN IT
+
+    Through rung 1 this call wrote http_proxy/https_proxy/no_proxy at an
+    advertised literal, and the guest's cooperation was load-bearing: a client
+    that ignored the variables did not use the proxy, and the default-deny chain
+    could only turn that into a dropped connection. Rung 2's redirect is
+    transparent, so no variable in a guest can turn the filtering off or on —
+    and none of those six variables is written any more. A guest that still sets
+    https_proxy to the old literal now reaches a host address where nothing
+    listens.
+
+    The CALL is the same call at the same point, writing the same
+    once-per-instance-id block into the same seed. That is deliberate: the seed
+    has carried a guest environment block since rung 0, and a rung that deleted
+    the block and a later rung that re-added it would be two migrations of the
+    seed contract where one will do.
+
+    THE VALUES ARE NOT HERE YET
+
+    Rung 3 mints the CA; until then `tls` is "splice" only, no certificate is
+    presented to the guest, and nothing needs to trust anything. The shape moves
+    now and the path is fixed now so that the variable NAMES and the guest file
+    path are settled before there is a certificate to put at the end of them.
+
+    ONCE PER INSTANCE ID, the same caveat the proxy block carried. cloud-init
+    replays a seed only when the instance id changes, so editing this block on a
+    running guest changes nothing until the VM is re-seeded — and an operator
+    who switches egress mode on a live workload gets a guest whose environment
+    still describes the previous mode.
     """
-    if not vm_uses_proxy(config):
+    if not vm_uses_inspect(config) or not VM_CA_BUNDLE_AVAILABLE:
         return {}
-    url = f"http://{VM_PROXY_ADDR}:{VM_PROXY_PORT}"
-    bypass = f"localhost,127.0.0.1,::1,{VM_PROXY_ADDR}"
-    return {
-        "http_proxy": url,
-        "https_proxy": url,
-        "HTTP_PROXY": url,
-        "HTTPS_PROXY": url,
-        "no_proxy": bypass,
-        "NO_PROXY": bypass,
-    }
+    return {var: VM_CA_BUNDLE_PATH for var in VM_CA_ENV_VARS}
 
 
 # --- The credential broker endpoint ---
@@ -1207,10 +1178,12 @@ def vm_proxy_env(config: dict) -> dict[str, str]:
 # redirect map and tells the guest where to dial. The broker is one host service
 # with its own unit and its own lifecycle.
 #
-# The advertised address is the proxy's, distinguished by port. One dummy link,
-# one host address, two services — a second address would need a second
-# interface to hang it on and would buy nothing, since the redirect is keyed on
-# uid either way.
+# The broker is now the ONLY thing at the advertised address. Through rung 1 it
+# shared that address with the per-workload proxy, distinguished by port; rung 2
+# deleted the proxy and left the port distinguishing the broker from nothing.
+# The address is kept rather than collapsed into a bare port: it is what a
+# guest's seed already names, and moving it would re-seed every workload to buy
+# tidiness.
 VM_BROKER_PORT = 8081
 
 # Where the broker actually listens. This is the value every element carries, so
@@ -1240,7 +1213,7 @@ def vm_uses_broker(config: dict) -> bool:
     """Whether this workload gets a broker map element.
 
     A bridged VM is outside this for the same reason it is outside egress
-    policy and the proxy (§5.3): nothing of ours is in its data path, so there
+    policy and inspection (§5.3): nothing of ours is in its data path, so there
     is no uid to key the redirect on and no advertised address it can reach.
     """
     vm_cfg = config.get("vm", {}) or {}
@@ -1264,12 +1237,15 @@ def vm_broker_map_command(uid: int, action: str) -> list[str]:
 def vm_broker_env(config: dict) -> dict[str, str]:
     """The broker endpoint a guest is told to use, or {} if it has none.
 
-    An IP literal, like the proxy's, so reaching the broker never depends on
-    DNS -- which is what a compromised guest would attack to escape policy.
+    An IP literal, so reaching the broker never depends on DNS -- which is what
+    a compromised guest would attack to escape policy. It is also why the broker
+    is advertised at an address and not a name: a name would be resolved by the
+    synthesising responder, which answers for allowlisted hosts and would have
+    to be taught about this one.
     """
     if not vm_uses_broker(config):
         return {}
-    return {VM_BROKER_ENV_VAR: f"http://{VM_PROXY_ADDR}:{VM_BROKER_PORT}"}
+    return {VM_BROKER_ENV_VAR: f"http://{VM_ADVERTISED_ADDR}:{VM_BROKER_PORT}"}
 
 
 def ensure_advertised_interface(run) -> None:
@@ -1285,30 +1261,30 @@ def ensure_advertised_interface(run) -> None:
     is fatal: without the address the redirect's destination is unroutable and
     the guest's connection fails with no useful diagnostic.
     """
-    result = run([IP_BIN, "link", "add", VM_PROXY_IFACE, "type", "dummy"])
+    result = run([IP_BIN, "link", "add", VM_ADVERTISED_IFACE, "type", "dummy"])
     if result.returncode != 0 and "File exists" not in result.stderr:
         raise RuntimeError(
-            f"could not create {VM_PROXY_IFACE}: {result.stderr.strip()}")
+            f"could not create {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
 
     # Query, then add. Not "add and tolerate the error": iproute2 answers a
     # duplicate address with "Address already assigned", not the "File exists"
     # the duplicate-link case produces, so a string match on the wrong phrase
     # fails only on the SECOND start of a workload — which is how this was
     # found, and not by any test.
-    shown = run([IP_BIN, "-o", "addr", "show", "dev", VM_PROXY_IFACE])
-    if VM_PROXY_ADDR not in shown.stdout:
-        result = run([IP_BIN, "addr", "add", f"{VM_PROXY_ADDR}/32",
-                      "dev", VM_PROXY_IFACE])
+    shown = run([IP_BIN, "-o", "addr", "show", "dev", VM_ADVERTISED_IFACE])
+    if VM_ADVERTISED_ADDR not in shown.stdout:
+        result = run([IP_BIN, "addr", "add", f"{VM_ADVERTISED_ADDR}/32",
+                      "dev", VM_ADVERTISED_IFACE])
         if result.returncode != 0 and "xist" not in result.stderr \
                 and "assigned" not in result.stderr:
             raise RuntimeError(
-                f"could not add {VM_PROXY_ADDR} to {VM_PROXY_IFACE}: "
+                f"could not add {VM_ADVERTISED_ADDR} to {VM_ADVERTISED_IFACE}: "
                 f"{result.stderr.strip()}")
 
-    result = run([IP_BIN, "link", "set", VM_PROXY_IFACE, "up"])
+    result = run([IP_BIN, "link", "set", VM_ADVERTISED_IFACE, "up"])
     if result.returncode != 0:
         raise RuntimeError(
-            f"could not bring up {VM_PROXY_IFACE}: {result.stderr.strip()}")
+            f"could not bring up {VM_ADVERTISED_IFACE}: {result.stderr.strip()}")
 
 
 def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
@@ -1327,8 +1303,8 @@ def vm_inspect_link_address_commands(uid: int) -> tuple[list[str], list[str]]:
     connection on that family would time out.
     """
     addr = vm_inspect_address(uid)
-    v4 = [IP_BIN, "addr", "add", f"{addr.v4}/32", "dev", VM_PROXY_IFACE]
-    v6 = [IP_BIN, "addr", "add", f"{addr.v6}/128", "dev", VM_PROXY_IFACE,
+    v4 = [IP_BIN, "addr", "add", f"{addr.v4}/32", "dev", VM_ADVERTISED_IFACE]
+    v6 = [IP_BIN, "addr", "add", f"{addr.v6}/128", "dev", VM_ADVERTISED_IFACE,
           "nodad"]
     return v4, v6
 
@@ -1342,8 +1318,8 @@ def vm_inspect_link_delete_commands(uid: int) -> tuple[list[str], list[str]]:
     its listener address behind is exactly what `diagnose` cannot explain.
     """
     addr = vm_inspect_address(uid)
-    v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", VM_PROXY_IFACE]
-    v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", VM_PROXY_IFACE]
+    v4 = [IP_BIN, "addr", "del", f"{addr.v4}/32", "dev", VM_ADVERTISED_IFACE]
+    v6 = [IP_BIN, "addr", "del", f"{addr.v6}/128", "dev", VM_ADVERTISED_IFACE]
     return v4, v6
 
 
@@ -1987,7 +1963,7 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
         "address6": inspect.v6,
         "ttl": VM_RESOLVE_TTL,
         "static": static,
-        "hosts": vm_proxy_hosts(net),
+        "hosts": vm_allowed_hosts(net),
     }
 
 
@@ -2001,7 +1977,7 @@ def _validate_egress(net: dict) -> list[str]:
     now and is expensive to retrofit.
 
     `filtered` needs somewhere for the VM's traffic to go: either an address
-    allowlist or a hostname allowlist served by its own proxy. Neither means a
+    allowlist or a hostname allowlist served by its own inspector. Neither means a
     VM that can reach nothing at all, which is rejected. The failure is loud on
     purpose — silently treating an un-allowlisted VM as open is the
     misreported-confinement bug this whole layer exists to prevent.
@@ -2121,9 +2097,9 @@ def _validate_egress(net: dict) -> list[str]:
         if "hosts" in net:
             errors.append(
                 "[vm.network].hosts has no effect with .bridge set — hostname "
-                "policy is enforced by a proxy the guest is redirected to on "
-                "the workload's own uid, and a bridged guest sends from its "
-                "own LAN address with no host socket in the path")
+                "policy is enforced by redirecting the guest's own traffic on "
+                "the workload's uid, and a bridged guest sends from its own "
+                "LAN address with no host socket in the path")
         return errors
 
     if egress == "filtered" and not allow and not hosts:
@@ -2131,15 +2107,21 @@ def _validate_egress(net: dict) -> list[str]:
             "[vm.network].egress is 'filtered' (the default) but both .allow "
             "and .hosts are empty, so this VM could reach nothing at all. "
             "List the hostnames it needs as .hosts (HTTP/HTTPS, via its own "
-            "proxy), non-HTTP destinations as .allow entries "
+            "inspector), non-HTTP destinations as .allow entries "
             "('<addr>:<port>'), or set egress = 'open' to opt out of "
             "filtering.")
 
-    # The drop is what makes the allowlist binding — it leaves a guest that
-    # ignores HTTPS_PROXY nowhere else to go. Under 'open' there is none, so the
-    # allowlist binds only cooperative guests while the proxy still costs a
-    # daemon parsing guest-controlled HTTP, its own SELinux domain, and an egress
-    # exemption the guest's uid does not get.
+    # The redirect is what carries the guest's traffic to the inspector, and it
+    # is armed only under 'filtered'. Under 'open' nothing is redirected at all:
+    # the guest dials 443 and the packet leaves, so a `hosts` list would be read
+    # by a process no connection ever reaches while the workload looked
+    # configured.
+    #
+    # This was a sharper distinction under the proxy, and it is worth recording
+    # why it stopped being one. There, 'open' left the allowlist binding on
+    # cooperative guests only — the variables still pointed at a proxy that
+    # still filtered — so the failure was partial confinement. Here it is total:
+    # not a weaker enforcement of `hosts`, but none.
     #
     # Refused, not silently skipped: a `hosts` list accepted and then ignored is
     # the misreported confinement this layer exists to prevent. Joins .hosts with
@@ -2147,11 +2129,10 @@ def _validate_egress(net: dict) -> list[str]:
     if egress == "open" and hosts:
         errors.append(
             "[vm.network].hosts is set but .egress is 'open', so nothing "
-            "requires the guest to use the proxy — a process that ignores "
-            "HTTPS_PROXY reaches the internet directly and the allowlist binds "
-            "only the guests that cooperate. Set egress = 'filtered' to make "
-            "the hostname allowlist enforceable, or drop .hosts to run "
-            "unfiltered without a proxy.")
+            "redirects this guest to its inspector — its traffic leaves "
+            "directly and the hostname allowlist is never consulted. Set "
+            "egress = 'filtered' to make the hostname allowlist enforceable, "
+            "or drop .hosts to run unfiltered.")
 
     # `tls` and `internal` describe what happens to a redirected connection, and
     # under 'open' nothing is redirected. Refused rather than ignored, for the
@@ -2166,8 +2147,8 @@ def _validate_egress(net: dict) -> list[str]:
                     f"inspector, so there is no intercepted connection for it "
                     f"to describe. Set egress = 'filtered' to use it.")
 
-    # `resolver = "none"` kept its meaning and lost its coherence. Under the old
-    # proxy posture a guest that could not resolve simply named hosts in a
+    # `resolver = "none"` kept its meaning and lost its coherence. Under the
+    # retired proxy a guest that could not resolve simply named hosts in a
     # CONNECT, which is why it was ECH-immune. Under a transparent redirect the
     # same guest can only dial literals, which reach the inspector with no name
     # to match and are dropped — so every name-based destination is unreachable
@@ -2200,10 +2181,11 @@ def _validate_egress(net: dict) -> list[str]:
     return errors
 
 
-# Hostname patterns are matched by tinyproxy's fnmatch filter against the host
-# alone (FilterURLs Off), so a pattern carrying a scheme, a path or a port never
-# matches anything — a silent hole in an allowlist, which is the failure worth
-# catching at validate time rather than at 3am.
+# Hostname patterns are matched by fnmatch against the host ALONE — the name the
+# inspector read out of a Host header or an SNI, which carries no scheme, no
+# path and no port. So a pattern carrying any of those never matches anything: a
+# silent hole in an allowlist, which is the failure worth catching at validate
+# time rather than at 3am.
 _PROXY_HOST_RE = re.compile(r"^[A-Za-z0-9*?.\[\]!_-]+$")
 
 
@@ -2219,10 +2201,11 @@ def _validate_proxy_host(pattern) -> list[str]:
                 f"only, so drop the scheme"]
     if "/" in text:
         return [f"{pattern!r} contains a path — patterns match the hostname "
-                f"only (FilterURLs is off), so a path never matches"]
+                f"only, so a path never matches"]
     if ":" in text:
-        return [f"{pattern!r} contains a port — the proxy allows CONNECT to "
-                f"{VM_PROXY_PORT_HTTPS} only; use .allow for other ports"]
+        return [f"{pattern!r} contains a port — hostname policy applies to the "
+                f"redirected ports ({VM_INSPECT_ORIG_CLEARTEXT} and "
+                f"{VM_INSPECT_ORIG_TLS}) only; use .allow for other ports"]
     if text == "*":
         return ["'*' matches every host, which is the same as egress = 'open' "
                 "but harder to notice — set egress = 'open' if that is meant"]
@@ -2574,7 +2557,7 @@ def validate_vm_config(config: dict) -> list[str]:
                     f"[vm.cloud_init].user_data_file must be a string path, got {ud!r}"
                 )
             # seed_provides opts a custom seed out of the seed-completeness
-            # checks build_cloud_init_iso applies (proxy env, virtiofs mounts).
+            # checks build_cloud_init_iso applies (CA bundle, virtiofs mounts).
             # Validated against a closed set: the whole value of the check is
             # that it fires, and a typo'd opt-out would silently disable it —
             # which is the failure mode the check exists to prevent.
@@ -2584,7 +2567,24 @@ def validate_vm_config(config: dict) -> list[str]:
                     "[vm.cloud_init].seed_provides must be a list of strings"
                 )
             else:
-                unknown = sorted(set(sp) - SEED_PROVIDES_CHOICES)
+                # A retired entry is refused BY NAME, ahead of the unknown-entry
+                # message, and told what to write instead. Folding it into
+                # "unknown entries ['proxy']" would be true and useless: the
+                # operator's seed does provide something, the concern it
+                # provides was renamed under them, and the generic message
+                # would send them looking for a typo they did not make.
+                for entry in sorted(set(sp) & set(SEED_PROVIDES_RETIRED)):
+                    errors.append(
+                        f"[vm.cloud_init].seed_provides = [{entry!r}] is no "
+                        f"longer accepted: rung 2 replaced the per-workload "
+                        f"proxy with a transparent redirect, so a guest is "
+                        f"given no proxy environment for a seed to provide. "
+                        f"Write {SEED_PROVIDES_RETIRED[entry]!r} instead if "
+                        f"the seed installs and trusts the egress CA bundle "
+                        f"itself, or drop the entry if it does not."
+                    )
+                unknown = sorted(set(sp) - SEED_PROVIDES_CHOICES
+                                 - set(SEED_PROVIDES_RETIRED))
                 if unknown:
                     errors.append(
                         f"[vm.cloud_init].seed_provides has unknown entries "

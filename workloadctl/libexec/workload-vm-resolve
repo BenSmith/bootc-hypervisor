@@ -29,11 +29,12 @@ exactly this feature in about eight lines of config:
 
 It is battle-tested where this is not, it handles EDNS0, TCP framing,
 truncation and 0x20 randomisation for free, and running one per workload is the
-same shape as the tinyproxy this design already runs per workload. The reason
-it is not used here is narrower than "not invented here":
+same shape as the inspector beside it. The reason it is not used here is
+narrower than "not invented here":
 
-  * THE PROPERTY IS NEGATIVE. tinyproxy's job is positive -- allow these hosts
-    -- so a misconfiguration is visible and tends toward refusing traffic. This
+  * THE PROPERTY IS NEGATIVE. The inspector's job is positive -- allow these
+    hosts -- so a misconfiguration is visible and tends toward refusing
+    traffic. This
     program's job is "never speaks upstream", and dnsmasq's DEFAULT is to
     forward. The security property would then be carried by the ABSENCE of
     configuration: a /etc/dnsmasq.d drop-in, a changed packaging default, or an

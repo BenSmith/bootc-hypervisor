@@ -189,8 +189,6 @@ class TestPostunScriptlet(unittest.TestCase):
             self._policy_calls(),
             ["semodule -r workload-vm",
              "restorecon /usr/libexec/virtiofsd",
-             "semodule -r workload-proxy",
-             "restorecon /usr/bin/tinyproxy",
              "semodule -r workload-inspect",
              "restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener",
              "semodule -r workload-resolve",

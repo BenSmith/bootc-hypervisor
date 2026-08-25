@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 
 from vm import (
-    UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_PROXY_SLICE, VM_RESOLVE_ADDR_BASE,
+    UID_MAX, UID_MIN, VM_MGMT_NETWORK, VM_SIDECAR_SLICE, VM_RESOLVE_ADDR_BASE,
     VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_POLICY_FILE, VM_RESOLVE_PORT,
     VM_RESOLVE_TTL, vm_allow_resolved, vm_filter_elements, vm_inspect_address,
     vm_management_address, vm_reserved_plane, vm_resolve_address,
@@ -979,7 +979,7 @@ class TestGeneratedUnits(unittest.TestCase):
         The responder originates none -- it has no upstream socket at all --
         so an exemption here would be a hole with nothing behind it."""
         self.assertNotIn("wl_inspect_cg", self.service)
-        self.assertNotIn("wl_proxy_cg", self.service)
+        self.assertNotIn("wl_egress_cg", self.service)
         self.assertNotIn("nft", self.service)
 
     def test_the_service_stops_with_the_vm(self):
@@ -988,7 +988,7 @@ class TestGeneratedUnits(unittest.TestCase):
         self.assertIn("PartOf=workload-web.service", self.service.splitlines())
 
     def test_the_slice_is_pinned(self):
-        self.assertIn(f"Slice={VM_PROXY_SLICE}", self.service.splitlines())
+        self.assertIn(f"Slice={VM_SIDECAR_SLICE}", self.service.splitlines())
 
     def test_the_vm_requires_the_responder_socket(self):
         """Requires=, not Wants=. The guest has exactly one nameserver, so a VM

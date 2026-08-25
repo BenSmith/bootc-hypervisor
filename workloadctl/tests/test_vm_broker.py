@@ -14,7 +14,7 @@ from tests import load_script
 from vm import (
     NFT_BROKER_MAP, NFT_BROKER_SKELETON, NFT_BROKER_TABLE, VM_BROKER_ENV_VAR,
     VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT, VM_BROKER_PORT,
-    VM_PROXY_ADDR, VM_PROXY_PORT, validate_vm_network, vm_broker_element,
+    VM_ADVERTISED_ADDR, validate_vm_network, vm_broker_element,
     vm_broker_env, vm_broker_map_command, vm_uses_broker,
 )
 
@@ -75,18 +75,23 @@ class TestAdvertisedEndpoint(unittest.TestCase):
     def test_the_rule_matches_the_advertised_address_and_port(self):
         text = NFT_FILE.read_text()
         self.assertIn("ip daddr 192.0.2.1 tcp dport 8081", text)
-        self.assertEqual(VM_PROXY_ADDR, "192.0.2.1")
+        self.assertEqual(VM_ADVERTISED_ADDR, "192.0.2.1")
         self.assertEqual(VM_BROKER_PORT, 8081)
 
-    def test_it_shares_the_proxy_address_but_not_its_port(self):
-        """One dummy link and one host address serve both; the port is what
-        separates them, so a collision here would silently route a guest's
-        broker traffic into the hostname proxy."""
-        self.assertNotEqual(VM_BROKER_PORT, VM_PROXY_PORT)
+    def test_it_is_the_only_thing_at_the_advertised_address(self):
+        """Through rung 1 the advertised address carried two services and the
+        port was what separated them -- a collision would have routed a guest's
+        broker traffic into the hostname proxy. Rung 2 deleted the proxy, so
+        this asserts the weaker thing that is now true: the skeleton has exactly
+        one rule matching the advertised address, and it is the broker's."""
+        rules = [ln for ln in NFT_FILE.read_text().splitlines()
+                 if ln.startswith("add rule") and VM_ADVERTISED_ADDR in ln]
+        self.assertEqual(len(rules), 1, rules)
+        self.assertIn(f"tcp dport {VM_BROKER_PORT}", rules[0])
 
     def test_the_listener_is_not_the_advertised_address(self):
         """If these were equal the rule would translate to itself and loop."""
-        self.assertNotEqual(VM_BROKER_LISTEN_ADDR, VM_PROXY_ADDR)
+        self.assertNotEqual(VM_BROKER_LISTEN_ADDR, VM_ADVERTISED_ADDR)
         self.assertEqual((VM_BROKER_LISTEN_ADDR, VM_BROKER_LISTEN_PORT),
                          ("127.0.0.1", 8081))
 

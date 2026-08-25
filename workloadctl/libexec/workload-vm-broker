@@ -16,7 +16,7 @@ own a uid a previously entitled workload may have held.
 
 WHY THIS RIDES THE VM UNIT AND NOT A UNIT OF ITS OWN
 
-The hostname-policy proxy has one instance per workload, so its element lifecycle
+The egress inspector has one instance per workload, so its element lifecycle
 belongs to that instance's unit. The broker does not: it is a single host service
 with its own unit, its own credentials and its own restart policy, and nothing
 about it is per-workload except the entitlement recorded here. There is no
@@ -46,7 +46,7 @@ import sys
 sys.dont_write_bytecode = True
 
 from vm import (
-    NFT_BIN, NFT_BROKER_SKELETON, VM_BROKER_PORT, VM_PROXY_ADDR,
+    NFT_BIN, NFT_BROKER_SKELETON, VM_BROKER_PORT, VM_ADVERTISED_ADDR,
     ensure_advertised_interface, vm_broker_map_command, vm_uses_broker,
 )
 from workload_lib import workload_config_path
@@ -105,7 +105,7 @@ def up(name: str) -> int:
     run(vm_broker_map_command(uid, "add"), check=True)
 
     log(f"  Broker reachable for uid {uid} at "
-        f"{VM_PROXY_ADDR}:{VM_BROKER_PORT}")
+        f"{VM_ADVERTISED_ADDR}:{VM_BROKER_PORT}")
     return 0
 
 

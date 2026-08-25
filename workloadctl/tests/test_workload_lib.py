@@ -972,8 +972,24 @@ class TestVmCloudInit(unittest.TestCase):
         self.assertTrue(any("must be a scalar" in e for e in errs), errs)
 
     def test_seed_provides_known_values_accepted(self):
-        cfg = self._base(seed_provides=["proxy", "mounts"])
+        cfg = self._base(seed_provides=["ca", "mounts"])
         self.assertEqual(validate_workload_config(cfg), [])
+
+    def test_seed_provides_proxy_is_refused_and_names_its_replacement(self):
+        """The retired entry is not merely dropped from the accepted set.
+
+        A seed that still declares it DOES provide something -- the concern it
+        provides was renamed under the operator -- so the generic
+        "unknown entries" message would send them hunting a typo they did not
+        make. The message has to name the replacement, or a custom seed declines
+        a CA it was never offered.
+        """
+        errs = validate_workload_config(self._base(seed_provides=["proxy"]))
+        self.assertEqual(len(errs), 1, errs)
+        self.assertIn("proxy", errs[0])
+        self.assertIn("'ca'", errs[0])
+        # And not ALSO reported as unknown: one entry, one error.
+        self.assertNotIn("unknown entries", errs[0])
 
     def test_seed_provides_unknown_value_rejected(self):
         """A typo'd opt-out would silently disable a seed-completeness check —

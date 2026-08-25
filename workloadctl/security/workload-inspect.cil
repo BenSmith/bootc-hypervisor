@@ -1,13 +1,15 @@
 ; workload-inspect — an SELinux domain for the per-workload egress inspector.
 ;
-; WHY THIS IS NOT AN EXTENSION OF workload-proxy.cil
+; WHY THIS WAS NOT AN EXTENSION OF workload-proxy.cil
 ;
-; wlproxy_t is defined by two things the inspector does not share: the binary it
-; entrypoints (/usr/bin/tinyproxy) and a filesystem boundary drawn at
+; Recorded because the module it declined to extend is now deleted, and the
+; reasoning is what says whether this one should have absorbed anything from it.
+; wlproxy_t was defined by two things the inspector does not share: the binary
+; it entrypointed (/usr/bin/tinyproxy) and a filesystem boundary drawn at
 ; /run/workload-vm/<name>. The inspector is a Python script in
 ; /usr/libexec/workloadctl and its sockets are opened by init, so nothing about
-; the shape transfers. It gets its own module, and the two are expected to
-; diverge further, not converge.
+; the shape transferred. Rung 2 deleted wlproxy_t entirely; nothing moved here,
+; because there was nothing in it that this domain lacked.
 ;
 ; THE ENTRYPOINT IS A SCRIPT, AND THAT WORKS
 ;
@@ -86,8 +88,9 @@
 ;
 ; Derived by enforcing iterations against a real guest dialling the listener,
 ; not by a single permissive pass. A permissive run gets further here than it
-; does for tinyproxy — Python reaches its imports and its inherited socket
-; before it needs anything else — but the accept path is still a gate behind a
+; did for the retired tinyproxy domain — Python reaches its imports and its
+; inherited socket before it needs anything else, where tinyproxy exited 70 at
+; the first gate — but the accept path is still a gate behind a
 ; gate, so the last rules only appear once the earlier ones are granted.
 ; tests/manual/inspect_rig.py is the run that exercises it.
 ;

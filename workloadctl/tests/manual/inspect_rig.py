@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
-"""inspect_rig.py — does a guest with no proxy variables actually land in the
-transparent egress inspector, and does the proxy path survive it?
+"""inspect_rig.py — does a guest told nothing about egress actually land in the
+transparent inspector, and does an allowlisted host actually come back?
 
 Run this ON a KVM host with the workloadctl RPM installed. It boots two
 throwaway VM workloads and probes them from inside.
 
 WHY TWO GUESTS
 
-Rung 1's claim has two halves that fail independently, and a single guest
+The rung's claim has two halves that fail independently, and a single guest
 proves neither on its own:
 
-  plain  filtered, no `hosts`   the guest has NO proxy variables. Its dial to
-                                80/443 is DNAT'd onto the listener. This is
-                                the rung's headline claim.
-  proxy  filtered, with `hosts` the guest has tinyproxy. Its upstream CONNECT
-                                leg is tcp dport 443 from the same uid, so
-                                without the wl_inspect_cg exemption it would be
-                                redirected into the listener it was dialling
-                                past, and every proxied HTTPS request would
-                                fail. That
-                                exemption has no unit test that can see it fail
-                                -- it is a cgroup id resolved at add time.
+  plain  filtered, no `hosts`   nothing is allowlisted, so every dial to 80/443
+                                is DNAT'd onto the listener and DROPPED there.
+                                This is the redirect's own claim, isolated from
+                                any question about what policy then says.
+  hosts  filtered, with `hosts` the allowed path. Its dial to an allowlisted
+                                name is forwarded (cleartext) or spliced (TLS)
+                                and comes back 200. Nothing else in this rig
+                                walks the inspector's upstream leg, so without
+                                this arm the forward and splice code paths have
+                                never executed under SELinux at all.
 
 The two differ in exactly one config line, which is what makes a failure
 attributable.
+
+WHAT THIS RIG LOOKED LIKE BEFORE RUNG 2, AND WHY THAT MATTERS TO A READER
+
+Its second arm was called `proxy` and carried a real tinyproxy. Its job was the
+wl_inspect_cg exemption: the proxy's upstream CONNECT leg was tcp dport 443 from
+the workload's own uid, so without that element it was redirected into the
+listener it was dialling past. Rung 2 deleted the proxy, so that member of the
+set is gone and the arm's purpose changed underneath its name. Every "last
+green" figure recorded against the older shape describes a different rig; see
+tests/manual/README.md.
 
 WHAT ONLY A REAL BOOT CAN SHOW
 
@@ -73,7 +82,14 @@ from pathlib import Path
 
 BASE_IMAGE = Path("/var/lib/broker-rig/base.qcow2")
 DNS_ALLOW = "1.1.1.1:53"
-PROXY_HOST = "example.com"
+ALLOWED_HOST = "example.com"
+
+# The endpoint the retired proxy advertised. Dialled from inside a guest to
+# prove nothing answers there any more -- the negative this rung owes, and the
+# one that catches a host still carrying a stale nft element or an older
+# workloadctl beside this one.
+RETIRED_PROXY_ADDR = "192.0.2.1"
+RETIRED_PROXY_PORT = 3128
 
 # Spelled out rather than imported from lib/vm.py: a rig that computes both
 # sides from one constant cannot notice them drifting apart.
@@ -139,10 +155,10 @@ EXPECTED_DOMAINS = {
 @dataclass(frozen=True)
 class Arm:
     name: str
-    proxy: bool
+    hosts: bool
 
 
-ARMS = (Arm("wlri-plain", False), Arm("wlri-proxy", True))
+ARMS = (Arm("wlri-plain", False), Arm("wlri-hosts", True))
 
 results = []
 
@@ -202,13 +218,18 @@ def toml_for(arm):
     # Every [vm.network] scalar first: the [[vm.network.allow]] table below
     # closes that section, and TOML will not let it be reopened.
     #
-    # Only the proxy arm gets `hosts`, and it is not a naming accident: `hosts`
-    # is what vm_uses_proxy() keys on, so setting it on the plain arm does not
-    # give that arm an allowlist -- it stops being the plain arm. Measured, by
-    # doing it: six proxy variables appeared in the guest, the forwards returned
-    # 200 through tinyproxy, and the inspector never activated at all.
-    if arm.proxy:
-        lines.append(f'hosts = ["{PROXY_HOST}"]')
+    # Only the second arm gets `hosts`, and it is not a naming accident: it is
+    # the single line the two arms differ by, so a difference in what they can
+    # reach has one available explanation.
+    #
+    # Under rung 1 this line did more than that. `hosts` was what vm_uses_proxy()
+    # keyed on, so setting it on the plain arm did not give that arm an
+    # allowlist -- it gave it a tinyproxy and six proxy variables, and stopped it
+    # being the plain arm at all. Measured, by doing it: the forwards returned
+    # 200 through the proxy and the inspector never activated. That trap is gone
+    # with the predicate, and both arms are inspected either way now.
+    if arm.hosts:
+        lines.append(f'hosts = ["{ALLOWED_HOST}"]')
     # The table form, not the bare string rung 2 retired. A rig carrying a
     # retired spelling fails at enable with no VM ever booted, which looks
     # nothing like the thing under test.
@@ -304,14 +325,19 @@ def guards():
             record(f"{arm.name}: {mapname} carries uid {uid}",
                    hit, "present" if hit else f"elems={elems}")
 
-    # The tinyproxy exemption: only the proxy arm should have a cgroup element.
-    # One element per inspector whose service has started (each arms its own
-    # on ExecStartPre), plus the proxy workload's tinyproxy cgroup -- which is
-    # the one that matters: without it the CONNECT leg is redirected into the
-    # listener it was dialling past.
+    # The redirect exemption. One element per re-originating unit whose service
+    # has started -- each arms its own on ExecStartPre -- so the members here are
+    # inspectors and responders and nothing else.
+    #
+    # Under rung 1 there was a third kind of member, the workload's tinyproxy,
+    # and it was the one this check existed for: without it the proxy's upstream
+    # CONNECT leg was redirected into the listener it was dialling past. That
+    # member is gone with the service. The check stays because the exemption it
+    # covers did not: an inspector missing from this set dials into itself, and
+    # no unit test can see that fail -- it is a cgroup id resolved at add time.
     cg = set_elements("workload_proxy", "wl_inspect_cg")
     n = len(cg or [])
-    record("wl_inspect_cg carries at least the proxy workload's cgroup",
+    record("wl_inspect_cg carries at least one re-originator cgroup",
            n >= 1, f"{n} element(s)")
 
 
@@ -375,48 +401,60 @@ def probes():
     record(f"{plain}: inspect service activated by the connection",
            st == "active", st)
 
-    # The proxy arm: the CONNECT leg is tcp dport 443 from the same uid, so
-    # this is the whole test of the wl_inspect_cg exemption.
-    p = "wlri-proxy"
-    # Both spellings are written, so count >= 1 rather than == 1: an exact
-    # count here would fail on a correct guest and hide the real question,
-    # which is whether the variable is there at all.
-    r = guest(p, "env | grep -ci '^https_proxy='")
-    record(f"{p}: guest carries the proxy variable",
-           r.stdout.strip().isdigit() and int(r.stdout.strip()) >= 1,
-           parse_probe(r))
-    r = guest(p, f"curl -sS -m 25 -o /dev/null -w '%{{http_code}}' "
-                 f"https://{PROXY_HOST}/ ; echo ' rc='$?", timeout=60)
-    ok = r.returncode == 0 and r.stdout.strip().startswith("200")
-    record(f"{p}: proxied HTTPS still works through the inspector", ok,
-           parse_probe(r))
-
-    # THE ALLOWED PATH, and until this was written nothing had ever walked it.
-    # Every event this rig produced was a drop -- {"dropped": 5, "forwarded": 0,
-    # "spliced": 0} on a 31/31 run -- because the plain arm's allowlist is empty
-    # by construction and the proxy arm's traffic is exempted by wl_inspect_cg
-    # before the inspector sees it. So the inspector's forward and splice legs
-    # had never executed under SELinux, and the module grants those sockets
-    # neither `create` nor `connect` nor name_connect on any port.
+    # THE NEGATIVE THIS RUNG OWES, and the only place it can be asked honestly:
+    # inside a booted guest, on a host running the real thing.
     #
-    # The one configuration that reaches them is a guest which IGNORES the proxy
-    # variables and dials an allowlisted host directly -- which is not a corner
-    # case, it is the adversarial case the whole rung exists for. lib/vm.py's
-    # validator says it outright: "the drop is what makes the allowlist binding
-    # -- it leaves a guest that ignores HTTPS_PROXY nowhere else to go". A guest
-    # that cooperates proves nothing about that.
-    unset = "env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "\
-            "-u no_proxy -u NO_PROXY "
+    # An operator upgrading a workload whose image bakes in the old export, or
+    # whose custom seed was written against the old docs, gets a client dialling
+    # 192.0.2.1:3128. That has to FAIL rather than quietly work, or the two
+    # designs run side by side and the transparent one is not the only path out.
+    # It is asked of the guest that has no allowlist at all, so a success here
+    # could not be confused with policy permitting something.
+    r = guest(plain,
+              f"timeout 8 bash -c "
+              f"'echo > /dev/tcp/{RETIRED_PROXY_ADDR}/{RETIRED_PROXY_PORT}' "
+              f"&& echo OPEN || echo CLOSED", timeout=40)
+    record(f"{plain}: the retired proxy endpoint answers nothing",
+           "CLOSED" in r.stdout, parse_probe(r))
+
+    # A guest that SETS the retired variable reaches nothing through it. Not the
+    # same assertion as the one above: that one says the endpoint is dead, this
+    # one says a real client configured against it fails rather than falling
+    # back to a direct dial that would have worked.
+    r = guest(plain,
+              f"https_proxy=http://{RETIRED_PROXY_ADDR}:{RETIRED_PROXY_PORT} "
+              f"curl -sS -m 15 -o /dev/null -w '%{{http_code}}' "
+              f"https://{ALLOWED_HOST}/ ; echo ' rc='$?", timeout=60)
+    record(f"{plain}: a guest setting the old https_proxy fails",
+           r.returncode != 0 or " rc=0" not in r.stdout, parse_probe(r))
+
+    # THE ALLOWED PATH, and until it was written nothing had ever walked it.
+    # Every event this rig produced was a drop -- {"dropped": 5, "forwarded": 0,
+    # "spliced": 0} on a 31/31 run under the rung-1 shape -- because the plain
+    # arm's allowlist is empty by construction and the old proxy arm's traffic
+    # was exempted by wl_inspect_cg before the inspector ever saw it. So the
+    # inspector's forward and splice legs had never executed under SELinux, and
+    # the module grants those sockets neither `create` nor `connect` nor
+    # name_connect on any port.
+    #
+    # This arm is now the ordinary case rather than an adversarial one: a guest
+    # with an allowlist, dialling an allowlisted host, with nothing to bypass
+    # because nothing was ever offered to it. That is the change rung 2 made, and
+    # these two probes are what say the change is real rather than only intended.
+    p = "wlri-hosts"
+    r = guest(p, "env | grep -i -E '^(https?|no)_proxy=' | wc -l")
+    record(f"{p}: guest has no proxy variables either",
+           r.stdout.strip() == "0", parse_probe(r))
     for label, scheme, plane in (("cleartext forward", "http", "cleartext"),
                                  ("tls splice", "https", "tls")):
         mark = time.strftime("%Y-%m-%d %H:%M:%S")
         time.sleep(1.2)
-        r = guest(p, f"{unset}curl -sS -m 25 -o /dev/null -w '%{{http_code}}' "
-                     f"{scheme}://{PROXY_HOST}/ ; echo ' rc='$?", timeout=60)
+        r = guest(p, f"curl -sS -m 25 -o /dev/null -w '%{{http_code}}' "
+                     f"{scheme}://{ALLOWED_HOST}/ ; echo ' rc='$?", timeout=60)
         ok = r.returncode == 0 and r.stdout.strip()[:3] in ("200", "301", "302")
         time.sleep(2)
         log = journal_since(p, mark)
-        record(f"{p}: {label} of an allowlisted host, proxy bypassed", ok,
+        record(f"{p}: {label} of an allowlisted host", ok,
                parse_probe(r) + "  | "
                + (log.strip().splitlines() or ["<no journal line>"])[-1])
 

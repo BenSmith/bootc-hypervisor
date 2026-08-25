@@ -53,8 +53,7 @@ from vm import (
     nft_drop_counter, nft_element_counter,
     nft_set_elements, selinux_enabled, vm_management_address, vm_nflog_group,
     vm_owned_elements,
-    NFT_PROXY_MAP, NFT_PROXY_TABLE, VM_PROXY_ADDR, VM_PROXY_IFACE,
-    VM_PROXY_PORT, vm_proxy_hosts, vm_uses_proxy,
+    NFT_PROXY_TABLE,
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
     NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
@@ -1157,103 +1156,14 @@ def _count_log_rules(payload) -> int:
     return count
 
 
-def vm_proxy_check(config, *, elements=PROBE, address_present=PROBE
-                   ) -> tuple[str, bool, str] | None:
-    """Report whether a VM's hostname policy is actually reachable.
-
-    Returns None for workloads with no `hosts` list — the check does not apply,
-    so no line is emitted.
-
-    Three things have to hold together and each fails silently on its own. The
-    proxy can be listening while its uid is absent from the redirect map, in
-    which case the guest's connection to the advertised address goes to a host
-    where nothing listens. The redirect can be installed while the dummy
-    interface is missing, in which case the destination is unroutable. And
-    either can be true while the unit is active, the guest boots, and `status`
-    is green — a filtered VM whose only route out is a proxy it cannot reach
-    looks exactly like a VM with a network problem.
-
-    Observations are injectable (PROBE sentinel) so the verdict logic is
-    testable without a live host.
-    """
-    if not vm_uses_proxy(config.config):
-        return None
-    try:
-        uid = config.uid
-    except Exception:
-        return None                      # no user yet; check 1 reports it
-
-    hosts = vm_proxy_hosts(config.vm_network or {})
-
-    if elements is PROBE:
-        payload = _nft_json("list", "map", *NFT_PROXY_TABLE.split(),
-                            NFT_PROXY_MAP)
-        elements = None if payload is None else nft_set_elements(payload)
-
-    if address_present is PROBE:
-        address_present = _proxy_address_present()
-
-    restart = f"systemctl restart workload-{config.name}-proxy.service"
-
-    if elements is None:
-        return ("vm_proxy", False,
-                f"{len(hosts)} host pattern(s) configured but the "
-                f"{NFT_PROXY_TABLE} table is absent, so nothing redirects this "
-                f"guest to its proxy. Rebuilt on the next start: {restart}")
-
-    # The map is keyed on uid; the element renders as "uid : addr . port".
-    armed = any(key.split(":")[0].strip() == str(uid)
-                for key in _proxy_map_keys(elements))
-    if not armed:
-        return ("vm_proxy", False,
-                f"{len(hosts)} host pattern(s) configured but uid {uid} has no "
-                f"element in {NFT_PROXY_MAP}, so this guest's traffic to "
-                f"{VM_PROXY_ADDR}:{VM_PROXY_PORT} is not redirected anywhere. "
-                f"Re-arm it: {restart}")
-
-    if not address_present:
-        return ("vm_proxy", False,
-                f"uid {uid} is redirected, but {VM_PROXY_ADDR} is not present "
-                f"on {VM_PROXY_IFACE}, so the guest cannot route to it. "
-                f"Re-create it: {restart}")
-
-    return ("vm_proxy", True,
-            f"hostname policy on {len(hosts)} pattern(s), reached at "
-            f"{VM_PROXY_ADDR}:{VM_PROXY_PORT} and redirected to this "
-            f"workload's own proxy")
-
-
-def _proxy_map_keys(elements) -> list:
-    """Flatten nft's map JSON to one entry per element.
-
-    nft 1.1.6 renders a map element as a two-item list [key, value] — NOT the
-    {"elem": {"key": …}} shape a set's counted element uses. Reading only the
-    dict shape reports a working redirect as missing, which is how this was
-    found. Hand-built fixtures may also use the flat "k : v" string. All three
-    are normalized to something whose leading field is the uid.
-    """
-    out = []
-    for elem in elements or []:
-        if isinstance(elem, list) and elem:
-            out.append(str(elem[0]))
-        elif isinstance(elem, dict) and "elem" in elem:
-            inner = elem["elem"]
-            key = inner.get("key", inner) if isinstance(inner, dict) else inner
-            out.append(str(key[0] if isinstance(key, list) else key))
-        else:
-            out.append(str(elem))
-    return out
-
-
-def _proxy_address_present() -> bool:
-    """Whether the advertised address is configured on the dummy interface."""
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/ip", "-o", "addr", "show", "dev", VM_PROXY_IFACE],
-            capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and VM_PROXY_ADDR in result.stdout
+# vm_proxy_check lived here, with _proxy_map_keys and _proxy_address_present.
+# It reported whether a workload's hostname policy was REACHABLE: an element in
+# wl_proxy_dest for this uid, and the advertised address present on the dummy
+# link. Rung 2 deleted both objects, and vm_inspect_check below is the same
+# check against the objects that replaced them -- the redirect maps and the
+# inspector's socket unit. Nothing was lost with it except the count of `hosts`
+# patterns in its healthy line, which was reporting rather than diagnosis and
+# belongs to rung 5's status reader.
 
 
 def _map_key_uid(elem) -> str | None:
@@ -2111,9 +2021,6 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         confinement_result = vm_confinement_check(config)
         if confinement_result:
             _check(*confinement_result)
-        proxy_result = vm_proxy_check(config)
-        if proxy_result:
-            _check(*proxy_result)
         inspect_result = vm_inspect_check(config)
         if inspect_result:
             _check(*inspect_result)
