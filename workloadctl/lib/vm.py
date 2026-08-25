@@ -1056,9 +1056,27 @@ def vm_internal_ok_commands(
 def vm_internal_hosts(net: dict) -> list[str]:
     """The host names in [[vm.network.internal]], in file order.
 
-    Shape-tolerant on purpose: this runs at VM start, where validation has
-    already refused a malformed entry, and a helper that raised on one would
-    turn an operator's typo into a workload that does not boot.
+    Shape-tolerant, while vm_internal_resolve two functions down is fatal on
+    the same key at the same moment. The two are not in tension, and the
+    difference is which question is still open at start.
+
+    SHAPE IS ALREADY SETTLED. validate_vm_network refuses a malformed entry --
+    not a table, no `host`, no `reason`, an unknown key, a host on no list --
+    and the boot generator SKIPS a workload whose config does not validate, so
+    it emits no units at all. A malformed entry therefore cannot reach this
+    function on the boot path: there is no VM for it to break. Raising here
+    would restate a verdict already delivered, in a context that can only
+    convert it into a start failure with a worse message.
+
+    RESOLUTION IS NOT SETTLED, AND CANNOT BE. Whether a name answers is a fact
+    about the host and the moment, not about the config -- `validate` warns on
+    it precisely because it cannot decide it. So the check has to happen at
+    start, and its failure is deliberately fatal: an exemption that silently
+    did not arm leaves the guest refused by the very drop the entry existed to
+    except. See workload-vm-inspect's internal_failure for what that failure
+    then has to say for itself.
+
+    So: tolerate what validation owns, fail loudly on what only start can know.
     """
     entries = net.get("internal", [])
     if not isinstance(entries, list):
