@@ -113,7 +113,7 @@ assertion still passes against a rule that has lost `meta skuid` and is
 dropping the address for everyone, host tooling included. Absent and zero are
 also held apart — an unarmed element reads as absent, not as zero.
 
-Last green 2026-08-22, 11 assertions, on a bare-metal Fedora 44 host.
+Last green 2026-08-25, 11 assertions, on a bare-metal Fedora 44 host.
 
 ## inspect_rig.py — does a guest with no proxy variables land in the inspector?
 
@@ -160,9 +160,18 @@ workload's plane. It is an artifact of the rig's own route, not a policy
 finding: the guards match on destination, and a host with a real v6 uplink
 sources from a global address. Worth recognising rather than re-investigating.
 
-**Last green 2026-08-25, 31 assertions**, on a bare-metal Fedora 44 KVM host
-with `semodule -DB` in effect. That run is what closed the two SELinux findings
-below; both were real, and neither was visible from `just test`.
+**Last green 2026-08-25, 33 assertions**, on a bare-metal Fedora 44 KVM host.
+
+Two runs are worth keeping apart. The earlier one, at 31 assertions, ran with
+`semodule -DB` in effect and is what *found* the two SELinux findings below;
+both were real, and neither was visible from `just test`. The 33-assertion run
+is the one that closed them, and it ran under plain **enforcing** with shipped
+dontaudit rules in place — which is the harder result: a permissive or
+dontaudit-disabled pass measures the branch that ran, and an earlier denial
+changes which branch that is. The two added assertions are the domain checks,
+and `workload-<name>-resolve.service` measuring as `wlresolve_t` rather than
+`unconfined_service_t` is the whole of what `security/workload-resolve.cil`
+was written for.
 
 **Status files.** Both producers keep counters and write them into the VM's
 runtime directory, and that write is guaranteed never to raise: a failure is a
@@ -272,7 +281,7 @@ the 4x needs a second leg, which arrives only when the inspector re-originates.
 Every packet a socket sent is captured twice; bare ACKs the kernel emits on its
 own behalf appear once, because there is no owner for `meta skuid` to match.
 
-Last green 2026-08-22, 12 assertions, on a bare-metal Fedora 44 host.
+Last green 2026-08-25, 12 assertions, on a bare-metal Fedora 44 host.
 
 ## splice_rig.py — does a real session survive the splice, and a real request get authorised?
 
@@ -331,7 +340,7 @@ It writes `/run/workload-vm/wlspl/inspect.json` and refuses to start if that
 path already exists, since it would be a real workload's policy. Teardown
 removes the namespace and the directory.
 
-Last green 2026-08-24, 24 assertions, on a bare-metal Fedora 44 host against
+Last green 2026-08-25, 24 assertions, on a bare-metal Fedora 44 host against
 the installed RPM.
 
 Verified by breaking the splice on purpose — replaying the buffer without its
