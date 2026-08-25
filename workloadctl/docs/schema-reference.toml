@@ -310,70 +310,6 @@ name = "schema-reference"
 # layer exists to prevent.
 # egress = "filtered"
 #
-# Optional: destinations this VM may reach when egress = "filtered".
-# Type: array of [[vm.network.allow]] tables, each with `address` and `reason`
-# Default: []
-# `address` is "<addr>:<port>" ("[<v6addr>]:<port>" for IPv6) or a NAME with a
-# port ("git.local:2222"), resolved on the HOST once at start. `reason` is
-# required, like every other bypass in this schema: the entry is a hole opened
-# on purpose, and the operator who later has to decide whether it is still
-# needed is not the one who opened it.
-#
-# .allow is for the non-HTTP exceptions hostname policy cannot carry — ssh, a
-# database, an NTP peer. Each family has its own nftables set, so v4 and v6
-# entries never match each other, and a name answering in both families arms
-# both.
-#
-# It is also the escape hatch for the internal-destination guard: the egress
-# inspector is barred from OPENING a connection into RFC 1918, loopback or
-# link-local space, so a destination that legitimately lives there needs it
-# named. (For a name reached over HTTP/HTTPS, that is [[vm.network.internal]]
-# below; .allow covers the other ports.) The allow rules are evaluated ahead of
-# that drop. Note what the grant actually opens — the same entry also permits
-# the guest's own direct path to that endpoint.
-#
-# REFUSED: port 80 or 443. Those are redirected into this workload's egress
-# inspector before the filter chain consults .allow at all, so the element
-# would be armed and never matched while the config read as if the destination
-# were exempt from inspection. The redirect keys on the workload uid and the
-# port alone — never on the destination — so this holds for the name form
-# exactly as for the address form. Allowlist the hostname in .hosts instead.
-#
-# REFUSED: an address inside the egress inspector's listener ranges,
-# 198.18.0.0/16 or 2001:2::/48 — including a NAME that resolves into one.
-# Those planes carry every filtered VM's own inspector, and .allow is matched
-# AHEAD of the rule that stops one workload reaching another's — so such an
-# entry does not bypass that guard so much as replace it: the connection is
-# accepted, lands on a policy point enforcing a different workload's
-# allowlist, and leaves the host as a different workload's uid. Refused by
-# `validate` and refused again when the element is armed, in both families.
-#
-# WARNED: port 53. It gives the guest a resolver of its own, past the
-# synthesising responder — which returns both the ECHConfig that hides the
-# name from the inspector and the DNS exfiltration channel synthesis exists to
-# remove. A warning and not an error, because a filtered workload deliberately
-# given its own resolver is a coherent thing to want.
-#
-# WHERE IT GOES IN THE FILE. Every [vm.network] scalar -- egress, hosts,
-# resolver, ports, bridge, tls -- must be written ABOVE the first
-# [[vm.network.allow]] table, because that table ends the [vm.network] section.
-# A scalar written below it is read by TOML as part of the allow ENTRY, not of
-# [vm.network]: not a typo, not a missing key, just a key that quietly belongs
-# to the wrong table in a file that looks fine. workloadctl catches it and says
-# so, but the keys below are documented in reading order and not in file order,
-# so working down this document top-to-bottom produces exactly that mistake.
-# Re-declaring [vm.network] further down does not fix it -- TOML rejects a
-# table declared twice. The complete-example block at the end of this file is
-# in valid file order; copy from there.
-#
-# [[vm.network.allow]]
-# address = "192.168.0.10:22"
-# reason  = "backup target; SSH, not TLS, and not proxyable"
-#
-# [[vm.network.allow]]
-# address = "git.local:2222"
-# reason  = "git-over-SSH to the homelab forge"
-#
 # Optional: hostnames this VM may reach over HTTP and HTTPS.
 # Type: array of hostnames or fnmatch patterns
 # Default: []
@@ -438,6 +374,103 @@ name = "schema-reference"
 # connection for the key to describe.
 # tls = "splice"
 #
+# Optional: give this VM a path to a host-side credential broker, so software
+# inside it can call an API it holds no key for. The host rewrites one advertised
+# endpoint per uid, so a guest can reach its own broker and no other; a workload
+# without this key gets no translation and nothing is listening where it would
+# dial, which makes the boundary structural rather than a rule to misconfigure.
+#
+# workloadctl provides reachability only. It does not run the broker or know
+# what a credential is — that is a separate service (agent-broker.service, which
+# this package ships and does not enable). If it is not running, a guest sees a
+# connection refused.
+#
+# The endpoint is handed to the guest as WORKLOAD_BROKER_URL. Deliberately not a
+# provider's own base-URL variable: clients disagree about the spelling, so the
+# guest image maps this to whatever its software reads. As with .hosts, only the
+# built-in cloud-config sets it — a workload supplying its own user_data_file
+# must carry it across itself.
+#
+# SETTING THIS ON AN EXISTING VM ONLY GETS YOU HALF OF IT. The host side follows
+# the config: the next start adds the map element and the guest becomes able to
+# reach the broker. The guest side does not. WORKLOAD_BROKER_URL is written by
+# cloud-init, which runs once per instance-id, so an already-provisioned guest
+# never sees the variable and its agent has nothing to point at. Either set it
+# before first boot, or write the variable into the guest yourself — the value
+# is the same fixed literal for every guest (VM_BROKER_ENV_VAR and the address
+# built in lib/vm.py).
+#
+# Rejected with .bridge set: the redirect is keyed on the uid of a host socket,
+# and a bridged VM does not create one.
+# broker = true
+#
+# Optional: destinations this VM may reach when egress = "filtered".
+# Type: array of [[vm.network.allow]] tables, each with `address` and `reason`
+# Default: []
+# `address` is "<addr>:<port>" ("[<v6addr>]:<port>" for IPv6) or a NAME with a
+# port ("git.local:2222"), resolved on the HOST once at start. `reason` is
+# required, like every other bypass in this schema: the entry is a hole opened
+# on purpose, and the operator who later has to decide whether it is still
+# needed is not the one who opened it.
+#
+# .allow is for the non-HTTP exceptions hostname policy cannot carry — ssh, a
+# database, an NTP peer. Each family has its own nftables set, so v4 and v6
+# entries never match each other, and a name answering in both families arms
+# both.
+#
+# It is also the escape hatch for the internal-destination guard: the egress
+# inspector is barred from OPENING a connection into RFC 1918, loopback or
+# link-local space, so a destination that legitimately lives there needs it
+# named. (For a name reached over HTTP/HTTPS, that is [[vm.network.internal]]
+# below; .allow covers the other ports.) The allow rules are evaluated ahead of
+# that drop. Note what the grant actually opens — the same entry also permits
+# the guest's own direct path to that endpoint.
+#
+# REFUSED: port 80 or 443. Those are redirected into this workload's egress
+# inspector before the filter chain consults .allow at all, so the element
+# would be armed and never matched while the config read as if the destination
+# were exempt from inspection. The redirect keys on the workload uid and the
+# port alone — never on the destination — so this holds for the name form
+# exactly as for the address form. Allowlist the hostname in .hosts instead.
+#
+# REFUSED: an address inside the egress inspector's listener ranges,
+# 198.18.0.0/16 or 2001:2::/48 — including a NAME that resolves into one.
+# Those planes carry every filtered VM's own inspector, and .allow is matched
+# AHEAD of the rule that stops one workload reaching another's — so such an
+# entry does not bypass that guard so much as replace it: the connection is
+# accepted, lands on a policy point enforcing a different workload's
+# allowlist, and leaves the host as a different workload's uid. Refused by
+# `validate` and refused again when the element is armed, in both families.
+#
+# WARNED: port 53. It gives the guest a resolver of its own, past the
+# synthesising responder — which returns both the ECHConfig that hides the
+# name from the inspector and the DNS exfiltration channel synthesis exists to
+# remove. A warning and not an error, because a filtered workload deliberately
+# given its own resolver is a coherent thing to want.
+#
+# WHERE IT GOES IN THE FILE. Every [vm.network] scalar -- egress, hosts,
+# resolver, ports, bridge, tls, broker -- must be written ABOVE this table and
+# the [[vm.network.internal]] one below it, because the first array-of-tables
+# ends the [vm.network] section. A scalar written after it is read by TOML as
+# part of that ENTRY, not of [vm.network]: not a typo, not a missing key, just
+# a key that quietly belongs to the wrong table in a file that looks fine.
+# Re-declaring [vm.network] further down does not fix it -- TOML rejects a
+# table declared twice.
+#
+# Everything above this point is a scalar and everything below it is a table,
+# so this document is in valid file order: reading it top-to-bottom and writing
+# as you go produces a file that parses the way it reads. That was NOT true
+# until 2026-08-25 -- .hosts, .tls and .broker were documented below here, so
+# the natural reading order built the broken file this note warns about.
+#
+# [[vm.network.allow]]
+# address = "192.168.0.10:22"
+# reason  = "backup target; SSH, not TLS, and not proxyable"
+#
+# [[vm.network.allow]]
+# address = "git.local:2222"
+# reason  = "git-over-SSH to the homelab forge"
+#
 # Optional: allowlisted names that are SUPPOSED to resolve into private
 # address space.
 # Type: array of [[vm.network.internal]] tables, each with `host` and `reason`
@@ -480,36 +513,6 @@ name = "schema-reference"
 # [[vm.network.internal]]
 # host   = "git.local"
 # reason = "homelab forge; clone and API over HTTPS"
-#
-# Optional: give this VM a path to a host-side credential broker, so software
-# inside it can call an API it holds no key for. The host rewrites one advertised
-# endpoint per uid, so a guest can reach its own broker and no other; a workload
-# without this key gets no translation and nothing is listening where it would
-# dial, which makes the boundary structural rather than a rule to misconfigure.
-#
-# workloadctl provides reachability only. It does not run the broker or know
-# what a credential is — that is a separate service (agent-broker.service, which
-# this package ships and does not enable). If it is not running, a guest sees a
-# connection refused.
-#
-# The endpoint is handed to the guest as WORKLOAD_BROKER_URL. Deliberately not a
-# provider's own base-URL variable: clients disagree about the spelling, so the
-# guest image maps this to whatever its software reads. As with .hosts, only the
-# built-in cloud-config sets it — a workload supplying its own user_data_file
-# must carry it across itself.
-#
-# SETTING THIS ON AN EXISTING VM ONLY GETS YOU HALF OF IT. The host side follows
-# the config: the next start adds the map element and the guest becomes able to
-# reach the broker. The guest side does not. WORKLOAD_BROKER_URL is written by
-# cloud-init, which runs once per instance-id, so an already-provisioned guest
-# never sees the variable and its agent has nothing to point at. Either set it
-# before first boot, or write the variable into the guest yourself — the value
-# is the same fixed literal for every guest (VM_BROKER_ENV_VAR and the address
-# built in lib/vm.py).
-#
-# Rejected with .bridge set: the redirect is keyed on the uid of a host socket,
-# and a bridged VM does not create one.
-# broker = true
 #
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
@@ -627,6 +630,12 @@ name = "schema-reference"
 # cloud_image_checksum = "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 # data_disk_size = "50G"
 # user = "fedora"
+#
+# [vm.network]
+# hosts = ["*.fedoraproject.org"]   # egress defaults to "filtered", and a
+#                                   # filtered VM with neither .hosts nor
+#                                   # .allow is a validation error, not a VM
+#                                   # that boots and reaches nothing.
 
 # Example VM-2: bootc image with virtiofs share
 # -----------------------------------------------
@@ -640,8 +649,13 @@ name = "schema-reference"
 # data_disk_size = "100G"
 # volumes = ["/home/user/code:/home/workload/code"]
 # rollback_keep = 3
+#
+# [vm.network]
+# egress = "open"                   # the other answer to the same
+#                                   # requirement: opt out of filtering
+#                                   # explicitly rather than by omission.
 
-# Example VM-3: Cloud image on LAN bridge with custom cloud-init
+# Example VM-3: Filtered cloud image with custom cloud-init
 # ---------------------------------------------------------------
 # [workload]
 # name = "lan-vm"
@@ -655,12 +669,13 @@ name = "schema-reference"
 # user = "fedora"
 #
 # [vm.network]
-# bridge = "br0"                    # a real LAN identity; unfiltered (see above)
 # egress = "filtered"               # or "open"; must be stated (see above)
 # hosts  = ["example.com", "*.example.com"]   # names; needs egress "filtered".
 #                                   # Both: the wildcard excludes the apex.
 # tls    = "splice"                 # SNI-matched, not decrypted (the default)
 # broker = true                     # path to a host-side credential broker
+#                                   # Scalars first: the table below ends the
+#                                   # [vm.network] section (see above).
 #
 # [[vm.network.allow]]              # addresses or names, on any port but
 # address = "192.168.0.10:22"       # 80 and 443, which are redirected
@@ -674,6 +689,13 @@ name = "schema-reference"
 # VERSION  = "1.4.2"
 # # In the user-data file, reference these as ${REPO_URL} / ${VERSION},
 # # and pull encrypted secrets with ${SECRET:db-password} etc.
+
+# This VM uses passt, which is the default and what every key above assumes.
+# `bridge = "br0"` is the other shape and it is NOT a line to add to the
+# example: a bridged VM has its own LAN address and no host socket, so egress,
+# hosts, tls, allow and broker all become inapplicable and `validate` refuses
+# each of them by name. A bridged VM's [vm.network] is the bridge, the ports it
+# publishes, and nothing on this page below .resolver.
 
 # ============================================================================
 
@@ -1866,7 +1888,7 @@ ports = ["8080:80", "8443:443"]
 #
 # [storage]
 # volumes = ["/etc/localtime:/etc/localtime:ro"]
-#
+
 # Note: USB device paths may change on reboot. Consider using udev rules for stable names:
 # - Create /etc/udev/rules.d/99-zigbee.rules:
 #   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="zigbee"
@@ -1883,7 +1905,7 @@ ports = ["8080:80", "8443:443"]
 #
 # [security]
 # extra_groups = ["video", "render", "input"]
-#
+
 # To verify groups work:
 #   id _wl-groups-test
 #   podman exec workload-groups-test id
@@ -1964,7 +1986,7 @@ ports = ["8080:80", "8443:443"]
 #
 # [network]
 # ports = ["8080:8080"]
-#
+
 # Setup:
 #   echo -n "sk-1234567890abcdef" | sudo systemd-creds encrypt --with-key=tpm2 --name=webapp-api-key - /etc/credstore.encrypted/webapp-api-key
 #   echo -n "secure-db-password" | sudo systemd-creds encrypt --with-key=tpm2 --name=db-password - /etc/credstore.encrypted/db-password
@@ -2001,7 +2023,7 @@ ports = ["8080:80", "8443:443"]
 # io_weight = 500         # High I/O priority
 # io_read_bandwidth_max = ["/dev/sda 200M"]
 # io_write_bandwidth_max = ["/dev/sda 100M"]
-#
+
 # Setup:
 #   echo -n "secure-password-123" | sudo systemd-creds encrypt --with-key=tpm2 --name=postgres-password - /etc/credstore.encrypted/postgres-password
 #   sudo systemd-creds encrypt --with-key=tpm2 /path/to/server.crt /etc/credstore.encrypted/tls-cert
