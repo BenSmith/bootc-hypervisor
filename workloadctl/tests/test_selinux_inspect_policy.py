@@ -114,15 +114,84 @@ class TestSocketActivation(unittest.TestCase):
 
 
 class TestInterpreter(unittest.TestCase):
-    def test_execute_no_trans_is_granted_on_the_attribute(self):
-        """bin_t is one member of base_ro_file_type, not the whole of it.
-        Naming bin_t alone works for /usr/bin/python3 and misses lib_t."""
+    def test_the_interpreter_is_execute_map_on_bin_t_not_execute_no_trans(self):
+        """This test asserted the exact opposite until 2026-08-25, and the
+        module's header argued for it: grant execute_no_trans on the
+        base_ro_file_type attribute, by analogy with sshd_keygen_t, because
+        naming bin_t alone "misses lib_t".
+
+        A permissive harvest measured the truth. execute_no_trans is only
+        checked when an exec does NOT cause a domain transition; sshd-keygen's
+        does not and ours does -- the typetransition asserted above is the
+        difference. The domain uses `execute map` on bin_t (/usr/bin/python3),
+        and base_ro_file_type is used for NOTHING. lib_t is not missed: base
+        policy already grants every domain read access to base_ro_file_type
+        and execute/map on lib_t, which is why no denial ever appeared to
+        contradict the old rule.
+
+        The old assertion could not fail, because over-granting never
+        produces a denial -- which is the whole reason it survived."""
         body = _body()
         self.assertRegex(
             body,
-            r"\(allow\s+wlinspect_t\s+base_ro_file_type\s+"
-            r"\(file\s+\([^)]*execute_no_trans")
-        self.assertNotRegex(body, r"\(allow\s+wlinspect_t\s+bin_t\s")
+            r"\(allow\s+wlinspect_t\s+bin_t\s+\(file\s+\([^)]*execute")
+        self.assertNotRegex(body, r"execute_no_trans")
+        self.assertNotRegex(body, r"\(allow\s+wlinspect_t\s+base_ro_file_type\s")
+
+
+class TestTheUpstreamDial(unittest.TestCase):
+    """The half of this domain that three green rig runs never executed.
+
+    Every event the rig produced was a drop -- {"dropped": 5, "forwarded": 0,
+    "spliced": 0} on a 31/31 run -- because the plain arm's allowlist is empty
+    by construction and the proxy arm's traffic is exempted by wl_inspect_cg
+    before the inspector sees it. So forward and splice were dead code under
+    SELinux, and none of these rules existed.
+
+    What makes the gap dangerous is its failure mode: a denial here does not
+    crash anything. getaddrinfo() or connect() raises, the relay catches
+    OSError, and the connection is counted as a drop with reason 'upstream
+    unreachable' -- byte-identical to a genuinely dead host. Measured under
+    enforcing with these rules absent: the guest got 502, and the log line read
+    "upstream unreachable: [Errno -3] Temporary failure in name resolution".
+    """
+
+    def test_the_domain_can_connect_out_to_the_upstream_port(self):
+        """80 and 443 are both http_port_t; 8080 (the listener) is
+        http_cache_port_t. name_bind is the listen side and was already here.
+        name_connect is the dial side."""
+        self.assertRegex(
+            _body(),
+            r"\(allow\s+wlinspect_t\s+http_port_t\s+"
+            r"\(tcp_socket\s+\([^)]*name_connect")
+
+    def test_the_domain_creates_and_connects_its_own_tcp_socket(self):
+        """The listening sockets are created by init_t and inherited. The
+        upstream socket is not: the domain makes it itself."""
+        body = _body()
+        for perm in ("create", "connect"):
+            with self.subTest(perm=perm):
+                self.assertRegex(
+                    body,
+                    rf"\(allow\s+wlinspect_t\s+self\s+"
+                    rf"\(tcp_socket\s+\([^)]*{perm}")
+
+    def test_the_domain_can_resolve_a_hostname(self):
+        """Resolution fails BEFORE any socket is created, so this is what the
+        guest actually hits first. /etc/resolv.conf is net_conf_t and is a
+        symlink on this host, hence both classes; the stub resolver is then
+        dialled over a udp_socket the domain creates itself."""
+        body = _body()
+        self.assertRegex(
+            body, r"\(allow\s+wlinspect_t\s+net_conf_t\s+\(file\s+\([^)]*read")
+        self.assertRegex(
+            body, r"\(allow\s+wlinspect_t\s+net_conf_t\s+\(lnk_file\s+\([^)]*read")
+        for perm in ("create", "connect"):
+            with self.subTest(perm=perm):
+                self.assertRegex(
+                    body,
+                    rf"\(allow\s+wlinspect_t\s+self\s+"
+                    rf"\(udp_socket\s+\([^)]*{perm}")
 
 
 class TestPackaging(unittest.TestCase):

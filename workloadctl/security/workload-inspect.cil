@@ -16,8 +16,18 @@
 ; the answer, and shipped Fedora policy already runs that shape:
 ; /usr/libexec/openssh/sshd-keygen is a #!/usr/bin/bash script carrying
 ; sshd_keygen_exec_t, with both halves present — a type_transition on the
-; script's own label and an entrypoint allow on it. The interpreter is
-; incidental; what the domain needs from it is execute_no_trans.
+; script's own label and an entrypoint allow on it.
+;
+; The analogy stops there, and this module got it wrong until 2026-08-25. It
+; claimed "what the domain needs from it is execute_no_trans", copied from
+; sshd_keygen_t. But execute_no_trans is only checked when an exec does NOT
+; cause a domain transition, and sshd-keygen's does not while ours does — the
+; type_transition two paragraphs down is the difference. Measured under a
+; permissive harvest, the domain uses `execute map` on bin_t and never
+; execute_no_trans, and the base_ro_file_type attribute it was granted on is
+; used for nothing at all. Reading the stdlib is unaffected: base policy's
+; `allow domain base_ro_file_type:file { getattr ioctl lock open read }` and
+; lib_t's own execute/map already cover it.
 ;
 ; ONE FILE, NOT A GLOB
 ;
@@ -81,16 +91,29 @@
 ; gate, so the last rules only appear once the earlier ones are granted.
 ; tests/manual/inspect_rig.py is the run that exercises it.
 ;
-; FOUR RESIDUAL DENIALS ARE DELIBERATELY NOT GRANTED
+; SIX RESIDUAL DENIALS ARE DELIBERATELY NOT GRANTED
 ;
 ; A green run with dontaudit disabled still logs these, and the run is green
-; WITH them denied — so each would widen the domain for nothing:
+; WITH them denied — so each would widen the domain for nothing. The list was
+; four until a permissive harvest on 2026-08-25 measured the full used-set;
+; two more were being logged all along, and the cert_t entry understated what
+; is attempted:
 ;
 ;   getattr, ioctl(TCGETS) on init_t:unix_stream_socket   Python probing
 ;     whether its stdout is a tty. The answer is "no" either way.
-;   search on cert_t (/etc/pki)                           import machinery
+;   getattr, open, read, search on cert_t (/etc/pki)      import machinery.
+;     NOT merely `search`: the domain attempts to open and read files under
+;     it. Still denied, still green — the listener splices TLS and never
+;     terminates it, so it has no use for a CA bundle.
 ;   search on container_file_t (/var/lib/workloads)       walking past the
 ;     workload state tree it must not read
+;   search on svirt_image_t                               likewise, the
+;     guest's own disks
+;
+; init_var_run_t:dir search was in this list for about an hour and does NOT
+; belong: it is granted above, because the resolver traverses /run/systemd to
+; reach the stub resolv.conf. It measured as "used, and the run is green
+; anyway" only because no green run had ever resolved a hostname.
 ;
 ; The last two are the boundary working. wlproxy_t is a separate domain from
 ; svirt_t precisely so that the component terminating guest input cannot reach
@@ -118,7 +141,7 @@
 (typetransition init_t wlinspect_exec_t process wlinspect_t)
 (allow init_t wlinspect_exec_t (file (getattr open read execute map)))
 (allow init_t wlinspect_t (process (transition siginh)))
-(allow wlinspect_t wlinspect_exec_t (file (entrypoint execute map getattr ioctl open read)))
+(allow wlinspect_t wlinspect_exec_t (file (entrypoint getattr ioctl open read)))
 
 ; The interpreter. execute_no_trans is granted on the attribute, not on a
 ; literal bin_t: shipped policy grants sshd_keygen_t the same permission on
@@ -130,7 +153,7 @@
 ; { getattr ioctl lock open read }` already applies to every domain, and
 ; /usr/lib64/python3.14/** is lib_t. Bytecode writes stay absent because every
 ; entrypoint sets sys.dont_write_bytecode.
-(allow wlinspect_t base_ro_file_type (file (execute execute_no_trans map)))
+(allow wlinspect_t bin_t (file (execute map)))
 
 ; stdout/stderr to the journal — the log line per connection is the whole of
 ; this rung's output.
@@ -154,9 +177,119 @@
 ; The two listener ports, both labels, for the reason in the header. node_bind
 ; covers binding to the workload's own listener address rather than a wildcard.
 (allow wlinspect_t http_cache_port_t (tcp_socket (name_bind)))
-(allow wlinspect_t http_port_t (tcp_socket (name_bind)))
+(allow wlinspect_t http_port_t (tcp_socket (name_bind name_connect)))
 (allow wlinspect_t node_t (tcp_socket (node_bind)))
+
+; THE UPSTREAM DIAL, WHICH THREE GREEN RIG RUNS NEVER EXERCISED
+;
+; Everything above is the LISTEN side. The rules below are the other half --
+; the inspector opening its own connection to the allowlisted host -- and they
+; were absent from this module until 2026-08-25 because nothing had ever run
+; that path. The rig's every event was a drop: {"dropped": 5, "forwarded": 0,
+; "spliced": 0} on a 31/31 run. The plain arm's allowlist is empty by
+; construction, and the proxy arm's traffic is exempted by wl_inspect_cg before
+; the inspector sees it, so forward and splice were dead code under SELinux
+; while the suite reported green.
+;
+; The path is reached by a guest that IGNORES the proxy variables and dials an
+; allowlisted host directly -- not a corner case but the adversarial case this
+; whole rung exists for, per lib/vm.py: "the drop is what makes the allowlist
+; binding". A cooperating guest proves nothing about it.
+;
+; WHY IT WAS SILENT, WHICH IS THE PART WORTH REMEMBERING
+;
+; A denial here does not crash the inspector and does not appear as a failure.
+; connect() or getaddrinfo() raises, the relay catches OSError, and the
+; connection is counted as a DROP with reason 'upstream unreachable'. That is
+; byte-identical to a genuinely dead upstream. Measured under enforcing with
+; these rules missing: 502 to the guest, and
+;   drop plane=cleartext host=example.com
+;     reason='upstream unreachable: [Errno -3] Temporary failure in name resolution'
+; -- a policy gap wearing a network error's clothes. No counter distinguishes
+; them, so do not read a clean drop total as evidence this side works.
+;
+; Resolution fails FIRST, before any socket is created, which is why the
+; resolv.conf rules matter as much as the socket ones: net_conf_t is
+; /etc/resolv.conf (a symlink to the stub resolver's copy on this host, hence
+; lnk_file). getaddrinfo then dials the stub over UDP, which needs a socket the
+; domain creates itself rather than one inherited from init.
+; The resolver's path, and it is three labels deep rather than one. Read from
+; the host rather than assumed:
+;
+;   /etc/resolv.conf                          net_conf_t (lnk_file)
+;     -> ../run/systemd                       init_var_run_t (dir)
+;        -> resolve/                          systemd_resolved_var_run_t (dir)
+;           -> stub-resolv.conf               net_conf_t (file)
+;
+; Every dir in that chain needs `search` or the read fails at the traversal,
+; not at the file. The init_var_run_t entry was briefly filed as a harmless
+; residual denial on the strength of a permissive harvest showing it "used but
+; the run was green" -- wrong, because the run was green only on paths that
+; never resolved a hostname.
+;
+; `setopt` is here for a sharper reason: it does NOT appear in a permissive
+; harvest of this path. It only showed up under enforcing, once the traversal
+; above was granted. A permissive run yields the used-set of the branch that
+; actually ran, and an earlier denial changes which branch glibc takes -- so a
+; harvest is one sample, not a closed-form answer. Iterate under enforcing
+; until the log is quiet; do not treat the first harvest as complete.
+(allow wlinspect_t self (udp_socket (connect create getattr setopt)))
+(allow wlinspect_t net_conf_t (file (getattr open read)))
+(allow wlinspect_t net_conf_t (lnk_file (read)))
+(allow wlinspect_t init_var_run_t (dir (search)))
+(allow wlinspect_t systemd_resolved_var_run_t (dir (search)))
+
+; And a third thing getaddrinfo does that neither the harvest nor the first two
+; enforcing runs could show: before it returns, glibc's __check_pf opens a
+; NETLINK_ROUTE socket to enumerate the host's own addresses, so it can order
+; the A/AAAA results by source-address selection (RFC 3484). This denial was
+; masked twice over -- by the resolv.conf traversal, and then by udp setopt --
+; and surfaced only once both were granted. It is also non-fatal: glibc falls
+; back and resolution still succeeds, so the rig stayed green on the probes and
+; failed only on its own audit-log assertion. Without that assertion the gap
+; would have shipped looking perfect.
+;
+; All six permissions are measured, not inferred. `create` was the only one the
+; enforcing run could show -- a denial there ends the sequence -- so the set was
+; first written from glibc's __check_pf call shape and then confirmed by a
+; harvest against the corrected policy: bind, create, getattr, nlmsg_read, read
+; and write all appear, and nothing else does.
+(allow wlinspect_t self (netlink_route_socket (bind create getattr nlmsg_read read write)))
 
 ; The listening sockets as the domain sees them, plus the accepted connections,
 ; which carry the same label.
-(allow wlinspect_t self (tcp_socket (accept bind getattr getopt ioctl listen read setopt shutdown write)))
+(allow wlinspect_t self (tcp_socket (accept connect create getattr getopt read write)))
+
+; Its own runtime directory: /run/workload-vm/<name>, which workload-vm.cil's
+; sibling arrangement labels qemu_var_run_t. Two distinct uses, and they were
+; added at different times for different reasons — worth keeping straight,
+; because granting for one and not the other fails in two unrelated ways.
+;
+;   inspect.json         READ, at start. The policy document: allowlists, the
+;                        internal list, the TLS settings. Without this the
+;                        process exits 1 before it accepts anything, the socket
+;                        unit restart-loops, and every guest dial to 80/443
+;                        times out with nothing in the guest to say why. LOUD:
+;                        the journal names the file and the errno.
+;   inspect-status.json  WRITTEN, periodically, via a temp file and os.replace.
+;                        The counters rung 5 reads. SILENT: the writer catches
+;                        OSError and logs a warning by design, so a missing
+;                        grant here costs the file and nothing else — a green
+;                        rig, a working inspector, and no observability at all.
+;
+; `rename` is the one permission no sibling grant carries, and it is not
+; optional — asserted here from a reading of write_status() when this module
+; was written, and MEASURED on 2026-08-25 under a permissive harvest, which
+; recorded the file class as used: create getattr open read rename unlink
+; write. `unlink` is in that set for a reason worth keeping: os.replace over an
+; existing target needs it on the destination, so it is load-bearing only from
+; the SECOND status write onward. A harvest that ticks once misses it; the
+; rig's STATUS_SETTLE against STATUS_INTERVAL is what makes it appear.
+; The same harvest trimmed `lock` and `setattr` from this line, and getattr,
+; open and read from the dir line below, as used by nothing. wlproxy_t writes its log and pid file in place and never renames;
+; the status write is a temp-file-plus-os.replace so that a reader never sees a
+; half-written document. Copying wlproxy_t's file line verbatim therefore
+; produces a grant that gets all the way to the replace and fails there — the
+; silent half of the table above, reached by a route that looks correct.
+(allow wlinspect_t qemu_var_run_t (dir (add_name remove_name search write)))
+(allow wlinspect_t qemu_var_run_t (file (create getattr open read rename unlink write)))

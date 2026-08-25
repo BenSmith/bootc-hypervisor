@@ -202,6 +202,9 @@ install -Dpm 0644 %{_sourcedir}/security/workload-proxy.cil \
 install -Dpm 0644 %{_sourcedir}/security/workload-inspect.cil \
     %{buildroot}%{_datadir}/workloadctl/workload-inspect.cil
 
+install -Dpm 0644 %{_sourcedir}/security/workload-resolve.cil \
+    %{buildroot}%{_datadir}/workloadctl/workload-resolve.cil
+
 install -Dpm 0644 %{_sourcedir}/completions/workloadctl-completion.bash \
     %{buildroot}%{_datadir}/bash-completion/completions/workloadctl
 
@@ -395,6 +398,18 @@ if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-inspect.ci
         restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
     fi
 fi
+# The synthesising responder's domain, on the same terms and for the same
+# reason the inspector has one: it parses guest-supplied wire format. Without
+# this module the script is bin_t, systemd's own rules run it as
+# unconfined_service_t, and NOTHING fails -- which is how it shipped unconfined
+# (see the module header). The restorecon is not optional on an upgrade: the
+# installed file keeps its old bin_t label until it is relabelled, and a
+# freshly loaded filecon does not retroactively touch it.
+if [ -x /usr/sbin/semodule ] && [ -f %{_datadir}/workloadctl/workload-resolve.cil ]; then
+    if semodule -i %{_datadir}/workloadctl/workload-resolve.cil 2>/dev/null; then
+        restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
+    fi
+fi
 # On upgrade ($1 >= 2), running workloads keep the units the *previous* build
 # generated: %%post does not regenerate them, and nothing else will until a
 # reboot re-runs workload-generate or the operator re-enables. On a bootc host
@@ -460,6 +475,8 @@ if [ $1 -eq 0 ]; then
         restorecon /usr/bin/tinyproxy 2>/dev/null || :
         semodule -r workload-inspect 2>/dev/null || :
         restorecon /usr/libexec/workloadctl/workload-vm-inspect-listener 2>/dev/null || :
+        semodule -r workload-resolve 2>/dev/null || :
+        restorecon /usr/libexec/workloadctl/workload-vm-resolve 2>/dev/null || :
     fi
 fi
 

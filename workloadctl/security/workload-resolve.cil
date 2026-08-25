@@ -1,0 +1,114 @@
+; workload-resolve — an SELinux domain for the per-workload synthesising DNS
+; responder.
+;
+; WHY THIS MODULE EXISTS AT ALL
+;
+; Measured, not assumed: with no filecon for the script, matchpathcon reports
+;
+;   /usr/libexec/workloadctl/workload-vm-resolve -> bin_t
+;
+; and the running service reports scontext=unconfined_service_t. bin_t carries
+; entry_type, systemd's own transition rules take it from there, and NOTHING
+; fails — so a responder that terminates guest-supplied DNS packets ran
+; unconfined for as long as it has existed, and no test could see it. The
+; inspect module has a filecon and a type_transition; this one did not, and the
+; difference is invisible from every side except the label of the process.
+;
+; The threat is the same shape as the inspector's, which is why the two modules
+; are near-identical: the responder parses attacker-controlled wire format from
+; a guest whose whole purpose is to be untrusted. wlinspect_t exists so that
+; component cannot reach the workload's disks and state; a responder in
+; unconfined_service_t reaches all of it.
+;
+; MODELLED ON workload-inspect.cil, AND THE SAME FOUR SURPRISES APPLY
+;
+; Read that module's header first — everything it records about socket
+; activation was re-derived here and holds unchanged:
+;
+;   * systemd's (sd-listen) CREATES and BINDS a socket unit's sockets in the
+;     SERVICE's domain, so init_t needs create/bind on wlresolve_t sockets. The
+;     rule points the opposite way from the obvious guess.
+;   * init_t additionally needs read/write on those sockets to pass the fd back
+;     to PID 1, and that denial is DONTAUDIT'D in shipped policy. Harvest with
+;     `semodule -DB` or converge one rule short of working, with an empty audit
+;     log and a systemd error naming no SELinux concept.
+;   * the script is the entrypoint, not the interpreter, and the filecon names
+;     ONE file rather than globbing /usr/libexec/workloadctl — a glob would make
+;     every helper an entrypoint into this domain.
+;   * the script is exec'd from init_t, and what the DOMAIN needs on the
+;     interpreter is `execute map` on bin_t -- NOT execute_no_trans, and not
+;     the base_ro_file_type attribute. Both modules asserted otherwise until
+;     2026-08-25, by analogy with sshd_keygen_t; the analogy is wrong, because
+;     sshd-keygen does not transition and these do. Measured under a permissive
+;     harvest: base_ro_file_type is used for nothing here, and execute_no_trans
+;     is never checked. Reading the stdlib is unaffected -- `allow domain
+;     base_ro_file_type:file { getattr ioctl lock open read }` in base policy
+;     already covers it, and lib_t's execute/map likewise.
+;
+; TWO TRANSPORTS, NOT ONE
+;
+; The socket unit carries both ListenDatagram= and ListenStream= on port 53:
+; DNS is UDP until a response does not fit, and a TCP retry that cannot bind
+; fails only for large answers — which is to say, rarely, and in a way that
+; looks like a flaky upstream rather than a policy gap. Both classes, or the
+; pair is wrong.
+
+(type wlresolve_t)
+(typeattributeset domain (wlresolve_t))
+(roletype system_r wlresolve_t)
+
+; roletype before the filecon, or semodule rejects the module with
+; "Type wlresolve_exec_t is invalid for role object_r".
+(type wlresolve_exec_t)
+(roletype object_r wlresolve_exec_t)
+(typeattributeset file_type (wlresolve_exec_t))
+(typeattributeset exec_type (wlresolve_exec_t))
+(typeattributeset entry_type (wlresolve_exec_t))
+(filecon "/usr/libexec/workloadctl/workload-vm-resolve" file (system_u object_r wlresolve_exec_t ((s0) (s0))))
+
+(typetransition init_t wlresolve_exec_t process wlresolve_t)
+(allow init_t wlresolve_exec_t (file (getattr open read execute map)))
+(allow init_t wlresolve_t (process (transition siginh)))
+(allow wlresolve_t wlresolve_exec_t (file (entrypoint getattr ioctl open read)))
+
+; The interpreter and the stdlib. See the inspect module for why this is on the
+; attribute rather than on bin_t.
+(allow wlresolve_t bin_t (file (execute map)))
+
+; stdout/stderr to the journal.
+(allow wlresolve_t init_t (unix_stream_socket (read write)))
+
+; The inherited listening sockets, created by init_t in this domain. Both
+; transports, for the reason in the header.
+(allow init_t wlresolve_t (udp_socket (bind create getattr getopt read setopt shutdown write)))
+(allow init_t wlresolve_t (tcp_socket (bind create getattr getopt listen read setopt shutdown write)))
+
+; Port 53 is dns_port_t in shipped policy; node_bind covers binding to the
+; workload's own management address rather than a wildcard.
+(allow wlresolve_t dns_port_t (udp_socket (name_bind)))
+(allow wlresolve_t dns_port_t (tcp_socket (name_bind)))
+(allow wlresolve_t node_t (udp_socket (node_bind)))
+(allow wlresolve_t node_t (tcp_socket (node_bind)))
+
+; The sockets as the domain sees them, plus accepted TCP connections, which
+; carry the same label. Trimmed to the measured set on 2026-08-25 -- bind,
+; ioctl, setopt and shutdown were carried on both classes and used by nothing,
+; because init_t binds these sockets and the domain only ever reads them.
+;
+; `accept` IS KEPT THOUGH THE HARVEST SHOWED IT UNUSED, and the distinction is
+; the whole reason a used-set is not a minimal set. The rig never triggers a
+; TCP DNS retry -- every answer it provokes fits in a datagram -- so accept
+; measured unused because the path was never walked, not because it is not
+; needed. Dropping it would fail exactly as the header describes: only for
+; large answers, looking like a flaky upstream rather than a policy gap.
+; An unexercised path is not the same finding as an unused permission.
+(allow wlresolve_t self (udp_socket (getattr getopt read write)))
+(allow wlresolve_t self (tcp_socket (accept getattr getopt read write)))
+
+; Its own runtime directory: /run/workload-vm/<name>, qemu_var_run_t. resolve.json
+; is READ at start (without it the process exits and the socket restart-loops);
+; resolve-status.json is WRITTEN via a temp file and os.replace, which is why
+; `rename` is present here and in no sibling grant — see the same block in
+; workload-inspect.cil for the full argument.
+(allow wlresolve_t qemu_var_run_t (dir (add_name remove_name search write)))
+(allow wlresolve_t qemu_var_run_t (file (create getattr open read rename unlink write)))
