@@ -65,11 +65,21 @@ ThreadingMixIn sets them, so a SIGTERM that stops the accept loop does not
 wait on the connections it already took.
 
 Every accepted socket gets an explicit timeout before it is touched, none of
-them the stdlib default. Two numbers, not one: CONNECTION_TIMEOUT bounds the
-handshake peek, and a spliced connection is then moved to RELAY_IDLE_TIMEOUT.
-They cannot be the same number — a peek that waited as long as a long-lived
-tunnel is idle gives a guest a cheap way to pin all 128 slots, and a tunnel
-held to the peek's timeout is cut mid-download every time the far end pauses.
+them the stdlib default. Two numbers, not one: CONNECTION_TIMEOUT bounds every
+wait up to and including a decision, and RELAY_IDLE_TIMEOUT bounds every wait
+after one. They cannot be the same number — a peek that waited as long as a
+long-lived tunnel is idle gives a guest a cheap way to pin all 128 slots, and a
+tunnel held to the peek's timeout is cut mid-download every time the far end
+pauses.
+
+BOTH planes spend both numbers, and the cleartext one is where the boundary is
+easy to get wrong. There, the decision is per REQUEST, so the socket returns to
+CONNECTION_TIMEOUT at the top of each one and moves to RELAY_IDLE_TIMEOUT the
+moment a request is authorised. The wait BETWEEN requests on a kept-alive
+connection is the third case and takes the idle number: a guest holding a
+connection open to use again is not a guest failing to say what it wants, and
+bounding that wait at the decision timeout would both break keep-alive and
+report each break as a request that could not be read.
 """
 
 import ipaddress
@@ -87,8 +97,8 @@ sys.dont_write_bytecode = True
 
 from vm import (
     VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS, VM_INSPECT_PORT_CLEARTEXT, VM_INSPECT_PORT_TLS,
-    VM_TLS_DEFAULT, vm_hostname_match, vm_inspect_policy_path,
-    vm_inspect_status_path, vm_normalise_hostname,
+    VM_TLS_DEFAULT, vm_hostname_control_character, vm_hostname_match,
+    vm_inspect_policy_path, vm_inspect_status_path, vm_normalise_hostname,
 )
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
 
@@ -122,6 +132,14 @@ RELAY_IDLE_TIMEOUT = 120.0
 
 # The buffer size the relay moves in each direction, in bytes.
 RELAY_CHUNK = 65536
+
+# How many 1xx interim responses one request may collect before the exchange is
+# abandoned. One is the real number -- a 100 for an Expect, or a 103 carrying
+# early hints -- and the rest of the allowance is there so the bound is never
+# what breaks an honest origin. It exists because the loop that reads them is
+# driven by the far end: without it an allowlisted host can hold a guest's
+# connection, and one of MAX_CONNECTIONS slots, with interim heads alone.
+INTERIM_MAX = 32
 
 # The ceiling on how much is read looking for a complete ClientHello, in bytes.
 # A real one is a few hundred bytes; post-quantum key shares push it over a
@@ -334,6 +352,11 @@ def _parse_server_name(data: bytes):
     RFC 6066, so bytes that are not ASCII are either a different encoding of a
     name — which would match a pattern differently from the way it was written
     — or not a name at all.
+
+    A control character is refused for the second reason, which ASCII-ness does
+    not cover: this name is logged and written into the status document, and a
+    bare LF inside it forges a journal record. See
+    `vm_hostname_control_character`.
     """
     r = _Reader(data)
     entries = _Reader(r.take(r.u16()))
@@ -342,11 +365,20 @@ def _parse_server_name(data: bytes):
         value = entries.take(entries.u16())
         if kind == TLS_SNI_HOST_NAME:
             try:
-                return value.decode("ascii")
+                name = value.decode("ascii")
             except UnicodeDecodeError:
                 raise HelloUnreadable(
                     "the server_name is not ASCII, so it is not a name as "
                     "RFC 6066 puts one on the wire") from None
+            ch = vm_hostname_control_character(name)
+            if ch is not None:
+                # The character is named with !r and nothing else of the name
+                # is: quoting the whole thing would put the injected bytes in
+                # the record this refusal exists to keep clean.
+                raise HelloUnreadable(
+                    f"the server_name carries the control character {ch!r}, "
+                    "which no name has and which forges a line in this log")
+            return name
     return None
 
 
@@ -518,6 +550,27 @@ class RequestUnreadable(Exception):
     """
 
 
+class ReadTimedOut(RequestUnreadable):
+    """A read that reached its timeout with nothing to show for it.
+
+    A subclass, so every existing handler still catches it: a peer that stalls
+    mid-message HAS failed to give us a request we can act on. It is separate
+    because one of the waits is not a failure at all -- a kept-alive connection
+    with no next request on it is a connection doing exactly what keep-alive is
+    for, and counting that as `unreadable request` would inflate the one bucket
+    whose job is to stay distinguishable from a guest speaking something that
+    is not HTTP at all.
+
+    `idle` is True when the timeout that fired was the wait for the FIRST byte,
+    which is the wait that means "nothing was said" rather than "something was
+    started and abandoned".
+    """
+
+    def __init__(self, message, *, idle=False):
+        super().__init__(message)
+        self.idle = idle
+
+
 class Framing(NamedTuple):
     """Where a message body ends. `length` is meaningful only for "length"."""
 
@@ -553,24 +606,56 @@ class _Stream:
         self._buf = b""
         self.eof = False
 
-    def _fill(self):
+    def _fill(self, timeout=None):
+        """One recv, appended to the buffer. False at a clean EOF.
+
+        `timeout` overrides the socket's own for this ONE read and is restored
+        afterwards, which is how the wait for the first byte of a head can be
+        bounded differently from the wait for the rest of it. A read that
+        reaches its timeout raises ReadTimedOut rather than the generic
+        RequestUnreadable, and the flag says which of the two waits it was --
+        the caller's disposition differs, and the socket cannot be asked after
+        the fact.
+        """
+        if timeout is not None:
+            previous = self.sock.gettimeout()
+            self.sock.settimeout(timeout)
         try:
             chunk = self.sock.recv(RELAY_CHUNK)
+        except TimeoutError:
+            # BEFORE the OSError arm: socket.timeout is TimeoutError and
+            # TimeoutError is an OSError, so a generic arm first would swallow
+            # every timeout into `read failed`.
+            raise ReadTimedOut(
+                f"nothing was readable within "
+                f"{timeout if timeout is not None else self.sock.gettimeout()}s",
+                idle=timeout is not None) from None
         except OSError as exc:
             raise RequestUnreadable(f"read failed: {exc}") from None
+        finally:
+            if timeout is not None:
+                self.sock.settimeout(previous)
         if not chunk:
             self.eof = True
             return False
         self._buf += chunk
         return True
 
-    def read_head(self, max_bytes=MESSAGE_HEAD_MAX):
+    def read_head(self, max_bytes=MESSAGE_HEAD_MAX, idle_timeout=None):
         """A whole message head, or b"" if the peer closed cleanly first.
 
         The terminator is CRLFCRLF and only that. A bare-LF head is refused by
         never being found, because bare-LF line endings are precisely what two
         parsers disagree about: accept them here and a request the origin reads
         as one message can be read as two.
+
+        `idle_timeout`, when given, bounds the wait for the FIRST byte only --
+        the socket's own timeout still bounds the rest. That is what lets a
+        kept-alive connection sit idle between requests for as long as a tunnel
+        may while a guest that has started a head still has to finish it inside
+        the decision timeout. One number for both would either cut keep-alive
+        at five seconds or hand a dribbling peer a 128th of the ceiling for two
+        minutes.
         """
         while True:
             idx = self._buf.find(b"\r\n\r\n")
@@ -580,7 +665,7 @@ class _Stream:
             if len(self._buf) > max_bytes:
                 raise RequestUnreadable(
                     f"a message head over {max_bytes} bytes is not one we read")
-            if not self._fill():
+            if not self._fill(idle_timeout if not self._buf else None):
                 if not self._buf:
                     return b""
                 raise RequestUnreadable("the connection closed mid-head")
@@ -1003,6 +1088,7 @@ DROP_UNREACHABLE = "upstream unreachable"
 DROP_INTERNAL = "internal destination"
 DROP_CEILING = "connection ceiling reached"
 DROP_RELAY_FAILED = "relay failed"
+DROP_TIMED_OUT = "timed out"
 
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
@@ -1012,6 +1098,7 @@ DROP_REASONS = (
     DROP_INTERNAL,
     DROP_CEILING,
     DROP_RELAY_FAILED,
+    DROP_TIMED_OUT,
 )
 
 # Where a drop whose reason is not in DROP_REASONS is counted. Emitted only when
@@ -1448,16 +1535,46 @@ class Listener:
         client = _Stream(conn)
         upstreams = {}
         try:
-            while self._serve_one_request(client, conn, where, upstreams):
-                pass
+            first = True
+            while self._serve_one_request(client, conn, where, upstreams,
+                                          first):
+                first = False
         finally:
             for up in upstreams.values():
                 up.sock.close()
 
-    def _serve_one_request(self, client, conn, where, upstreams):
-        """One request, start to finish. True to stay on the connection."""
+    def _serve_one_request(self, client, conn, where, upstreams, first):
+        """One request, start to finish. True to stay on the connection.
+
+        `first` says which of the two timeouts bounds the wait for this
+        request's first byte. On the first request it is the decision timeout:
+        a connection that has been accepted and says nothing is holding one of
+        MAX_CONNECTIONS slots for nothing. On every request after it, it is the
+        idle timeout: the guest is entitled to keep the connection and use it
+        again, and cutting that at five seconds both breaks keep-alive and
+        counts the break as a request we could not read.
+        """
+        # Back to the decision timeout at the top of every request, whatever
+        # the previous one left on the socket. What follows is a head to read
+        # and a policy to apply against it; the relay's idle bound is not the
+        # bound for that, and the idle_timeout below overrides this one for the
+        # only wait it should apply to.
+        conn.settimeout(CONNECTION_TIMEOUT)
         try:
-            head = client.read_head()
+            head = client.read_head(
+                idle_timeout=None if first else RELAY_IDLE_TIMEOUT)
+        except ReadTimedOut as exc:
+            if exc.idle:
+                # Not a drop and not counted as one: an idle kept-alive
+                # connection reaching its bound is this end closing a
+                # connection nobody was using. Logged all the same -- the guest
+                # sees a closed connection either way, and an operator staring
+                # at one wants to know which end let go and why.
+                self._log(f"close {where} reason='{exc}'")
+                return False
+            self.counters.record_drop(DROP_TIMED_OUT)
+            self._log(f"drop {where} reason='timed out: {exc}'")
+            return False
         except RequestUnreadable as exc:
             self.counters.record_drop(DROP_UNREADABLE_REQUEST)
             self._log(f"drop {where} reason='unreadable request: {exc}'")
@@ -1492,6 +1609,13 @@ class Listener:
                       f"reason='{reason}: {exc}'")
             return self._refuse(client, conn, req, 502, "Bad Gateway",
                                 f"{req.host} could not be reached: {exc}")
+        # Authorised: the socket leaves the decision timeout and joins the
+        # relay's. Everything from here is transfer -- a body up, a body back
+        # -- and transfer is bounded by idleness, not by a five-second clock
+        # that would cut a large download at the first pause on either end and
+        # count it as `relay failed`. The upstream socket is set to the same
+        # number where it is opened, and the TLS plane's splice sets both.
+        conn.settimeout(RELAY_IDLE_TIMEOUT)
         try:
             up.sock.sendall(rebuild_request(req))
             if req.expects_continue:
@@ -1546,6 +1670,7 @@ class Listener:
         policy authorised. It is parsed all the same, because where the body
         ends is what says whether the next request can be read from here.
         """
+        interim = 0
         while True:
             head = up.read_head()
             if not head:
@@ -1559,7 +1684,19 @@ class Listener:
             framing = response_framing(status, req.method, headers)
             conn.sendall(head)
             if 100 <= status < 200:
-                continue                # interim; the real response follows
+                # Interim; the real response follows -- but not indefinitely.
+                # Every other guest- or peer-driven loop in this file carries a
+                # ceiling, and this one is driven by an authorised origin that
+                # can hold a guest's connection, and one of MAX_CONNECTIONS
+                # slots, by sending interim heads forever. A real exchange
+                # sends one (a 100, or a 103 with early hints); the bound is
+                # generous enough that no honest origin meets it.
+                interim += 1
+                if interim > INTERIM_MAX:
+                    raise RequestUnreadable(
+                        f"the upstream sent more than {INTERIM_MAX} interim "
+                        f"responses without a final one")
+                continue
             break
         copy_body(up, conn, framing)
         # An origin that ends its connection ends the guest's too, rather than

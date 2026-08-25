@@ -775,6 +775,35 @@ def vm_normalise_hostname(host: str) -> str:
     return host[:-1] if host.endswith(".") and host != "." else host
 
 
+def vm_hostname_control_character(host: str) -> str | None:
+    """The first control character in a name, or None if it carries none.
+
+    A name read off the wire — an SNI, a DNS label — is bytes a guest chose,
+    and both readers of one decode ASCII rather than refusing it: a control
+    character is ASCII. The name then reaches a `print()` whose destination is
+    the journal, where a bare LF ends the record and the rest of the name
+    becomes a SECOND entry, indistinguishable from one this program wrote. A
+    guest that can write `evil.com\\nsplice plane=tls … host=github.com` can
+    forge the evidence an operator reads a decision from. The same name is also
+    carried into the status document that `workloadctl diagnose` renders.
+
+    Refused, not escaped, and refused at the parse — the reason
+    `_reject_controls` in the cleartext plane gives for the same character
+    class: a field with a line ending inside it has no reading both ends share,
+    and rewriting one into something harmless is picking a reading. No name
+    that reaches a decision here needs one, so the parse is where it stops
+    rather than every log site having to remember.
+
+    Returns the character so the caller can name it in ITS own exception type
+    and disposition: an unreadable hello and a malformed query are already
+    counted differently, and a shared raise would flatten them.
+    """
+    for ch in host:
+        if ch < " " or ch == "\x7f":
+            return ch
+    return None
+
+
 def vm_hostname_match(host: str, patterns) -> bool:
     """Whether a hostname is authorised by a list of fnmatch patterns.
 
@@ -970,6 +999,57 @@ def vm_internal_ok_commands(
     return [[NFT_BIN, action, "element", *NFT_TABLE.split(), set_name,
              "{ " + ", ".join(entries) + " }"]
             for set_name, entries in vm_internal_ok_elements(uid, addresses).items()]
+
+
+def vm_internal_ok_list_commands() -> list[list[str]]:
+    """argv lists that dump each `internal` exemption set as JSON, v4 then v6."""
+    return [[NFT_BIN, "-j", "list", "set", *NFT_TABLE.split(), set_name]
+            for set_name in (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6)]
+
+
+def vm_internal_ok_uid_elements(uid: int, payload, user_name=None) -> list[str]:
+    """The element expressions in one dumped set that belong to `uid`.
+
+    THIS IS THE HANDLE THE CONFIG IS NOT. The exemptions are armed from names,
+    and a teardown that re-resolves those names to compute its deletes removes
+    whatever the names mean NOW -- so a record that rotated while the VM ran
+    leaves the OLD (uid, address) element armed, with no config line naming it
+    and nothing to remove it before a reboot. The next start then adds the new
+    address beside it, and the workload is exempted for an address its config
+    stopped naming. The uid is the one key that cannot rotate: every element
+    this workload ever armed carries it, so purging by uid removes exactly the
+    set of them, resolvable or not.
+
+    nft renders the uid half of the key as a NUMBER when it cannot name it and
+    as a USERNAME when it can -- which on a real host, where `_wl-<name>`
+    exists, is the usual case. Both are matched, plus the numeric string, so
+    the purge does not silently no-op on precisely the hosts it runs on. The
+    address half is passed through as nft rendered it, so it goes back exactly
+    as it was read.
+    """
+    wanted = {uid, str(uid)}
+    if user_name:
+        wanted.add(user_name)
+    out = []
+    for elem in nft_set_elements(payload):
+        if not isinstance(elem, dict):
+            continue
+        key = elem.get("concat")
+        if not isinstance(key, list) or len(key) != 2:
+            continue
+        owner, address = key
+        if owner in wanted:
+            out.append(f"{owner} . {address}")
+    return out
+
+
+def vm_internal_ok_delete_commands(set_name: str,
+                                   entries: list[str]) -> list[list[str]]:
+    """argv lists deleting exactly `entries` from one exemption set."""
+    if not entries:
+        return []
+    return [[NFT_BIN, "delete", "element", *NFT_TABLE.split(), set_name,
+             "{ " + ", ".join(entries) + " }"]]
 
 
 def vm_internal_hosts(net: dict) -> list[str]:
@@ -1354,6 +1434,17 @@ VM_QEMU_CONTEXT = f"system_u:system_r:{VM_QEMU_TYPE}:s0"
 # do with whether virtiofs works. See security/workload-vm.cil.
 VM_SELINUX_MODULE = "workload-vm"
 VM_SELINUX_CIL = "/usr/share/workloadctl/workload-vm.cil"
+
+# The inspector's and the responder's domains, installed the same way and for
+# the same reason. Named here rather than only in the spec because `diagnose`
+# compares each loaded module against the source the RPM shipped: a module
+# missing from that list is a domain whose policy can drift out from under a
+# running host with nothing saying so, which is the failure the check exists
+# for. They replaced workload-proxy, which the RPM's %post now removes.
+VM_INSPECT_SELINUX_MODULE = "workload-inspect"
+VM_INSPECT_SELINUX_CIL = "/usr/share/workloadctl/workload-inspect.cil"
+VM_RESOLVE_SELINUX_MODULE = "workload-resolve"
+VM_RESOLVE_SELINUX_CIL = "/usr/share/workloadctl/workload-resolve.cil"
 
 # The transition needs a wrapper, and only a wrapper. `SELinuxContext=` in the
 # unit does NOT work: systemd execs from init_t and the policy has no

@@ -343,25 +343,44 @@ class TestHelperArmsBothTables(unittest.TestCase):
         self.assertIn("vm_internal_ok_commands", up)
         self.assertLess(up.index("NFT_SKELETON"),
                         up.index("vm_internal_ok_commands"))
-        self.assertLess(up.index('vm_internal_ok_commands(uid, addresses, "delete")'),
+        self.assertLess(up.index("purge_internal_exemptions(uid, name)"),
                         up.index('vm_internal_ok_commands(uid, addresses, "add")'),
                         "purge before arming, or an edited config leaves a "
                         "dropped host's element behind")
+
+    def test_up_purges_by_uid_rather_than_by_the_addresses_it_is_arming(self):
+        """A name that resolved differently last time armed an element this
+        config cannot name. Arming the new address without purging by uid
+        leaves both live, and the workload is exempted for an address nothing
+        asked for."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        up = source[source.index("def up("):source.index("def down(")]
+        self.assertNotIn('vm_internal_ok_commands(uid, addresses, "delete")', up)
 
     def test_down_clears_the_internal_exemptions_and_tolerates_absence(self):
         """`up` fails loudly, `down` tolerates everything.
 
         A name that stopped resolving between start and stop must not block the
-        stop -- and the elements it armed are per-workload and die with the
-        reboot at the latest.
+        stop -- and by uid its elements are removable anyway, which is why the
+        teardown no longer needs the name at all.
         """
         source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
         down = source[source.index("def down("):source.index("def main(")]
-        self.assertIn('vm_internal_ok_commands(uid, addresses, "delete")', down)
+        self.assertIn("purge_internal_exemptions(uid, name)", down)
         # The calls, not the prose -- the comment above them says "not
         # check=True" and a substring search would match that.
         self.assertNotIn("run(argv, check=True)", down)
-        self.assertIn("except ValueError", down)
+        self.assertIn("except (OSError, ValueError)", down)
+
+    def test_down_never_resolves_a_name_to_decide_what_to_remove(self):
+        """THE ROTATION HOLE. Re-resolving computes deletes for whatever the
+        names mean NOW: a record that moved while the VM ran leaves its old
+        (uid, address) element armed, named by no config line and alive until
+        reboot -- and the next start adds the new address beside it."""
+        source = (ROOT / "libexec" / "workload-vm-inspect").read_text()
+        down = source[source.index("def down("):source.index("def main(")]
+        self.assertNotIn("vm_internal_resolve", down)
+        self.assertNotIn("vm_internal_hosts", down)
 
     def test_up_writes_the_policy_before_it_arms_the_redirect(self):
         """The listener is socket-activated, so the guest's first dial can

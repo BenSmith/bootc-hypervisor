@@ -2441,6 +2441,66 @@ class TestInternalOkElements(unittest.TestCase):
             with self.subTest(spec=spec):
                 self.assertTrue(vm_internal_ok_elements(10001, self._addrs(spec)))
 
+    def _dump(self, *elems):
+        """One `nft -j list set` document holding `elems`, as nft renders it."""
+        return {"nftables": [
+            {"metainfo": {}},
+            {"set": {"family": "inet", "name": "wl_internal_ok4",
+                     "table": "workload_filter",
+                     "elem": [{"concat": list(e)} for e in elems]}},
+        ]}
+
+    def test_the_uid_purge_selects_this_workloads_elements_and_no_others(self):
+        """THE ROTATION HOLE, at the level of the helper that closes it.
+
+        Elements are armed from names; a record that moves while the VM runs
+        leaves an element the config can no longer name. The uid is the half of
+        the key that cannot rotate, so it is the handle the teardown uses."""
+        from vm import vm_internal_ok_uid_elements
+        entries = vm_internal_ok_uid_elements(
+            10001, self._dump((10001, "192.168.0.10"), (10001, "10.0.0.5"),
+                              (10002, "192.168.0.11")))
+        self.assertEqual(entries,
+                         ["10001 . 192.168.0.10", "10001 . 10.0.0.5"])
+
+    def test_the_purge_matches_a_uid_nft_rendered_as_a_username(self):
+        """nft names the uid half of the key when it can resolve it, which on a
+        real host -- where `_wl-<name>` exists -- is the usual case. A purge
+        that matched only the number would silently no-op exactly there."""
+        from vm import vm_internal_ok_uid_elements
+        entries = vm_internal_ok_uid_elements(
+            10001, self._dump(("_wl-web", "192.168.0.10"),
+                              ("_wl-other", "192.168.0.11")),
+            "_wl-web")
+        self.assertEqual(entries, ["_wl-web . 192.168.0.10"])
+
+    def test_the_purge_reads_an_empty_or_malformed_dump_as_nothing_to_do(self):
+        from vm import vm_internal_ok_uid_elements
+        for payload in ({}, {"nftables": []}, self._dump(),
+                        {"nftables": [{"set": {"elem": ["not-a-concat"]}}]}):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    vm_internal_ok_uid_elements(10001, payload), [])
+
+    def test_the_delete_command_carries_exactly_the_entries_given(self):
+        from vm import (NFT_SET_INTERNAL_OK4, vm_internal_ok_delete_commands)
+        cmds = vm_internal_ok_delete_commands(
+            NFT_SET_INTERNAL_OK4, ["10001 . 192.168.0.10"])
+        self.assertEqual(len(cmds), 1)
+        self.assertEqual(cmds[0][1], "delete")
+        self.assertIn(NFT_SET_INTERNAL_OK4, cmds[0])
+        self.assertEqual(cmds[0][-1], "{ 10001 . 192.168.0.10 }")
+        self.assertEqual(
+            vm_internal_ok_delete_commands(NFT_SET_INTERNAL_OK4, []), [])
+
+    def test_the_list_commands_ask_for_json_for_both_families(self):
+        from vm import (NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6,
+                        vm_internal_ok_list_commands)
+        cmds = vm_internal_ok_list_commands()
+        self.assertEqual([c[-1] for c in cmds],
+                         [NFT_SET_INTERNAL_OK4, NFT_SET_INTERNAL_OK6])
+        self.assertTrue(all("-j" in c for c in cmds))
+
     def test_hosts_are_read_shape_tolerantly(self):
         """Validation already refused a malformed entry.
 

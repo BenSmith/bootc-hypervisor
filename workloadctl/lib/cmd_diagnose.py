@@ -48,6 +48,8 @@ from vm import (
     VM_EGRESS_DEFAULT, VM_MGMT_SSH_PORT, VM_QEMU_TYPE, VM_RUNCON_BIN,
     VM_SOCKET_DIR, VM_SOCKET_FCONTEXT_PATTERN, VM_SOCKET_SELINUX_TYPE,
     VM_SOCKET_SELINUX_TYPE_REAL, VM_SELINUX_CIL, VM_SELINUX_MODULE,
+    VM_INSPECT_SELINUX_CIL, VM_INSPECT_SELINUX_MODULE,
+    VM_RESOLVE_SELINUX_CIL, VM_RESOLVE_SELINUX_MODULE,
     CONNTRACK_PRESSURE,
     conntrack_occupancy,
     nft_drop_counter, nft_element_counter,
@@ -633,7 +635,11 @@ def _selinux_module_loaded(module: str) -> bool | None:
 
 
 # Host-global SELinux modules whose source the RPM installs, so a loaded module
-# can be compared against what the image ships. Deliberately just these two.
+# can be compared against what the image ships. Deliberately just these three:
+# the VM domain, and the two the retired proxy's module was replaced by. A
+# module the RPM installs and this tuple omits is a domain that drifts silently
+# -- which is what happened when workload-proxy left and this list did not
+# follow it.
 #
 # The image's own modules (pasta_sandbox, container_input_devices,
 # seatd_container, extra_varrun) are compiled into the policy store at build
@@ -645,7 +651,8 @@ def _selinux_module_loaded(module: str) -> bool | None:
 # every one of them as stale.
 HOST_SELINUX_MODULES = (
     (VM_SELINUX_MODULE, VM_SELINUX_CIL),
-    ("workload-proxy", "/usr/share/workloadctl/workload-proxy.cil"),
+    (VM_INSPECT_SELINUX_MODULE, VM_INSPECT_SELINUX_CIL),
+    (VM_RESOLVE_SELINUX_MODULE, VM_RESOLVE_SELINUX_CIL),
 )
 
 # Where semodule keeps the policy store. Fedora's default is /var/lib/selinux,
@@ -1034,13 +1041,14 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
                 f"systemctl restart workload-{config.name}.service")
 
     # The internal-destination guard is host-global, but it only bears on a
-    # workload that HAS a hostname proxy -- it qualifies that proxy's cgroup
-    # exemption and nothing else. Checked here rather than trusted because the
-    # table outlives the RPM that installed it: nft state is kernel state until
-    # reboot, and the skeleton is only re-applied by a VM unit's ExecStartPre.
-    # A host upgraded to a workloadctl that ships the guard keeps the OLD chain
-    # for every VM still running from before the upgrade, and every other
-    # signal on that VM stays green while its proxy can still reach RFC 1918.
+    # workload that HAS a hostname allowlist -- it qualifies the inspector's
+    # cgroup exemption and nothing else. Checked here rather than trusted
+    # because the table outlives the RPM that installed it: nft state is kernel
+    # state until reboot, and the skeleton is only re-applied by a VM unit's
+    # ExecStartPre. A host upgraded to a workloadctl that ships the guard keeps
+    # the OLD chain for every VM still running from before the upgrade, and
+    # every other signal on that VM stays green while its inspector can still
+    # reach RFC 1918.
     if (config.vm_network or {}).get("hosts"):
         unguarded = [name for name in (NFT_SET_INTERNAL4, NFT_SET_INTERNAL6)
                      if not nft_set_elements(
@@ -1049,8 +1057,9 @@ def vm_egress_check(config) -> tuple[str, bool, str] | None:
             return ("vm_egress", False,
                     f"egress is filtered on uid {uid}, but {' and '.join(unguarded)} "
                     f"{'is' if len(unguarded) == 1 else 'are'} missing or empty — "
-                    f"this VM's hostname proxy is NOT restricted from connecting "
-                    f"to internal addresses. The loaded table predates the guard; "
+                    f"this VM's egress inspector is NOT restricted from "
+                    f"connecting to internal addresses. The loaded table "
+                    f"predates the guard; "
                     f"restart to reload it: "
                     f"systemctl restart workload-{config.name}.service")
 
@@ -1215,9 +1224,9 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
     bridged, or unfiltered egress), so no line is emitted.
 
     Inspection is default-on for every filtered VM, which is what makes its
-    absence hard to see: unlike the hostname proxy, nothing in the config asked
-    for it, so there is no declaration for an operator to compare reality
-    against. A guest whose uid is missing from the inspect maps reaches the
+    absence hard to see: unlike the hostname proxy it replaced, nothing in the
+    config asked for it, so there is no declaration for an operator to compare
+    reality against. A guest whose uid is missing from the inspect maps reaches the
     internet directly, at full speed, with the unit active, `status` green, and
     `vm_egress` reporting the VM correctly filtered — because it *is* filtered.
     It is simply not being looked at. That is the failure this exists for, and

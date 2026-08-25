@@ -193,6 +193,16 @@ class TestTheUpstreamDial(unittest.TestCase):
                     rf"\(allow\s+wlinspect_t\s+self\s+"
                     rf"\(udp_socket\s+\([^)]*{perm}")
 
+    def test_the_domain_can_fall_back_to_dns_over_tcp(self):
+        """A UDP answer that does not fit sets TC and glibc retries over TCP.
+        Denied, that retry surfaces as `upstream unreachable` -- a policy gap
+        wearing a network error's clothes, and one that appears only for names
+        whose answers are large."""
+        self.assertRegex(
+            _body(),
+            r"\(allow\s+wlinspect_t\s+dns_port_t\s+"
+            r"\(tcp_socket\s+\([^)]*name_connect")
+
 
 class TestPackaging(unittest.TestCase):
     def test_the_spec_installs_loads_and_removes_the_module(self):

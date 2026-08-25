@@ -81,6 +81,7 @@ try:
         find_ovmf_code, parse_memory_mib, vm_ca_env,
         vm_uses_inspect, vm_inspect_address, vm_inspect_cgroup_command,
         vm_inspect_cgroup_filter_command,
+        VM_SOCKET_DIR,
         VM_RESOLVE_LISTENER_BIN, VM_RESOLVE_PORT,
         vm_resolve_address, vm_uses_resolve,
     )
@@ -1975,6 +1976,64 @@ def generate_vm_inspect_socket(config, user_name: str, uid: int) -> str:
     return unit.render()
 
 
+def _harden_vm_sidecar(svc, name: str, *, families: str, tasks_max: int,
+                       memory_max: str) -> None:
+    """The sandbox both egress sidecars run in.
+
+    These two processes are the ones ADR 008 names as the cost of the design:
+    code parsing hostile guest input, on the path for all HTTP and HTTPS, and
+    from a later rung holding a CA key. They were shipped confined by SELinux
+    alone, which is one mechanism where the virtiofsd sidecar three functions
+    up carries two -- and the sidecar's confinement was argued, while the
+    absence here was not argued anywhere.
+
+    DO NOT ADD NoNewPrivileges=yes (nor DynamicUser=yes, which implies it).
+    Both units reach their domain through a `#!` entrypoint transition from
+    init_t, and under NNP the kernel refuses a transition that is not bounded
+    by the calling domain -- which fails the exec with a bare 203/EXEC that
+    points nowhere near the cause. The generate_vm_virtiofs_service comment
+    carries the measurement and the audit record; it applies here unchanged.
+
+    ProtectSystem=strict makes the whole hierarchy read-only, /run included, so
+    the workload's socket directory is named back: it holds the policy document
+    these read at start and the status document they replace every 30 seconds.
+    The directory is created by workload-<name>-setup.service, which both units
+    Requires= and are ordered After=, so it exists by the time this applies.
+
+    The ExecStartPre/ExecStopPost lines that arm the cgroup exemptions are
+    prefixed `+`, and systemd exempts those from the sandboxing options here --
+    which is what lets nft keep working while the listener itself runs inside
+    all of this.
+    """
+    # Empty, not merely reduced. Neither process binds a privileged port: both
+    # take their listeners from their socket unit, which is the whole reason
+    # the socket units exist. Nothing else here wants a capability.
+    svc.set("CapabilityBoundingSet", "")
+    svc.set("AmbientCapabilities", "")
+
+    svc.set("ProtectSystem", "strict")
+    svc.set("ProtectHome", "yes")
+    svc.set("ProtectProc", "invisible")
+    svc.set("PrivateTmp", "yes")
+    svc.set("ReadWritePaths", uq(f"{VM_SOCKET_DIR}/{name}"))
+
+    # The families each one actually opens, so a code path that grew a socket
+    # nobody expected fails loudly instead of reaching the network. AF_UNIX and
+    # AF_NETLINK are not decoration on the inspector: glibc's getaddrinfo
+    # enumerates interfaces over netlink and talks to nscd or resolved over a
+    # unix socket, and losing either turns every upstream dial into `upstream
+    # unreachable` -- a policy gap wearing a network error's clothes.
+    svc.set("RestrictAddressFamilies", families)
+
+    # A ceiling on threads and memory, because the connection ceiling inside
+    # the listener is a number this process chooses and these are numbers it
+    # cannot. A process that has lost track of either takes the host down with
+    # it otherwise; here it is restarted by its own Restart=on-failure and
+    # re-triggered by its socket.
+    svc.set("TasksMax", str(tasks_max))
+    svc.set("MemoryMax", memory_max)
+
+
 def generate_vm_inspect_service(config, user_name: str) -> str:
     """Generate the service unit for one VM's transparent egress inspector.
 
@@ -2070,6 +2129,15 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     ):
         svc.add("ExecStopPost",
                 "-+" + " ".join(dq(a) for a in cmd))
+    svc.blank()
+    # 128 connections is MAX_CONNECTIONS in the listener, one thread each, plus
+    # the accept loop and a little room; a listener that has lost track of its
+    # own ceiling stops here instead of at the host's. The memory number is
+    # generous against the work: 128 relays at a 64 KiB buffer each direction
+    # is single-digit megabytes on top of the interpreter.
+    _harden_vm_sidecar(svc, name,
+                       families="AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+                       tasks_max=192, memory_max="512M")
     svc.blank()
     svc.add("StandardOutput", "journal")
     svc.add("StandardError", "journal")
@@ -2197,6 +2265,15 @@ def generate_vm_resolve_service(config, user_name: str) -> str:
     # nothing on the socket to recover it from. It is what the responder
     # resolves its answer document's path from.
     svc.add("ExecStart", f"{VM_RESOLVE_LISTENER_BIN} {dq(name)}")
+    svc.blank()
+    # Narrower than the inspector on both axes, and the address families are
+    # the load-bearing half: this program must contain no call that could
+    # consult a resolver, and it opens no socket of its own at all -- its two
+    # listeners are handed to it. AF_NETLINK is absent for that reason, so a
+    # getaddrinfo that appeared here would fail at the socket rather than
+    # quietly reaching a nameserver. One process, one loop: 16 tasks is slack.
+    _harden_vm_sidecar(svc, name, families="AF_INET AF_UNIX",
+                       tasks_max=16, memory_max="128M")
     svc.blank()
     svc.add("StandardOutput", "journal")
     svc.add("StandardError", "journal")

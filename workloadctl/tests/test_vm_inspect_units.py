@@ -311,6 +311,91 @@ class TestGeneratedService(unittest.TestCase):
         self.assertNotIn("Before=", self.unit)
 
 
+class TestSidecarHardening(unittest.TestCase):
+    """The sandbox both egress sidecars run in.
+
+    ADR 008 names this process as the cost of the design -- code parsing
+    hostile guest input, on the path for all HTTP and HTTPS -- and it shipped
+    confined by SELinux alone, next to a virtiofsd sidecar whose own
+    confinement is argued at length. Held here so the sandbox cannot quietly
+    fall off a unit that still looks configured.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import load_script
+        cls.gen = load_script("generators/workload-generate")
+        cls.inspect = cls.gen.generate_vm_inspect_service(_config({}), "_wl-web")
+        cls.resolve = cls.gen.generate_vm_resolve_service(_config({}), "_wl-web")
+
+    def units(self):
+        return (("inspect", self.inspect), ("resolve", self.resolve))
+
+    def test_both_units_drop_every_capability(self):
+        """Neither binds a privileged port: both take their listeners from
+        their socket unit, which is the whole reason those exist."""
+        for which, unit in self.units():
+            with self.subTest(unit=which):
+                self.assertIn("CapabilityBoundingSet=", unit.splitlines())
+                self.assertIn("AmbientCapabilities=", unit.splitlines())
+
+    def test_both_units_get_a_read_only_hierarchy_and_one_writable_path(self):
+        for which, unit in self.units():
+            with self.subTest(unit=which):
+                self.assertIn("ProtectSystem=strict", unit)
+                self.assertIn("PrivateTmp=yes", unit)
+                self.assertIn('ReadWritePaths="/run/workload-vm/web"', unit)
+
+    def test_neither_unit_carries_no_new_privileges(self):
+        """It breaks the `#!` entrypoint transition from init_t with a bare
+        203/EXEC that points nowhere near the cause -- the same measurement the
+        virtiofsd sidecar's comment records."""
+        for which, unit in self.units():
+            with self.subTest(unit=which):
+                self.assertNotIn("NoNewPrivileges", unit)
+                self.assertNotIn("DynamicUser", unit)
+
+    def test_the_inspector_keeps_the_families_getaddrinfo_needs(self):
+        """Losing AF_NETLINK or AF_UNIX turns every upstream dial into
+        `upstream unreachable` -- a policy gap wearing a network error's
+        clothes."""
+        line = [l for l in self.inspect.splitlines()
+                if l.startswith("RestrictAddressFamilies=")]
+        self.assertEqual(len(line), 1, self.inspect)
+        families = set(line[0].split("=", 1)[1].split())
+        self.assertEqual(
+            families, {"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"})
+
+    def test_the_responder_is_denied_the_family_a_resolver_call_would_need(self):
+        """It must contain no call that could consult a resolver. AF_NETLINK's
+        absence is what makes a getaddrinfo that appeared here fail at the
+        socket rather than quietly reach a nameserver."""
+        line = [l for l in self.resolve.splitlines()
+                if l.startswith("RestrictAddressFamilies=")]
+        self.assertEqual(len(line), 1, self.resolve)
+        families = set(line[0].split("=", 1)[1].split())
+        self.assertNotIn("AF_NETLINK", families)
+        self.assertIn("AF_INET", families)
+
+    def test_the_inspectors_task_ceiling_covers_its_connection_ceiling(self):
+        """One thread per connection, so a TasksMax below MAX_CONNECTIONS is a
+        listener that refuses connections it counted as admitted."""
+        from tests import load_script
+        listener = load_script("libexec/workload-vm-inspect-listener")
+        tasks = [l for l in self.inspect.splitlines()
+                 if l.startswith("TasksMax=")]
+        self.assertEqual(len(tasks), 1)
+        self.assertGreater(int(tasks[0].split("=", 1)[1]),
+                           listener.MAX_CONNECTIONS)
+
+    def test_both_units_bound_their_memory(self):
+        for which, unit in self.units():
+            with self.subTest(unit=which):
+                self.assertTrue(
+                    any(l.startswith("MemoryMax=") for l in unit.splitlines()),
+                    unit)
+
+
 class TestGeneratorWiring(unittest.TestCase):
     """The emit block: a bridged VM and an open-egress VM generate neither
     unit; a filtered non-bridged VM generates both — AND the VM unit pulls the

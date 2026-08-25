@@ -294,7 +294,7 @@ CT_MARK_UID_MASK = 0x3FFFFFFF
 # captured before the drop decides its fate. That is the more useful vantage
 # anyway: "what did this workload try to reach" is the question an
 # egress-filtering feature gets asked. It is after nat's dstnat (-100), so a
-# packet through the hostname proxy is captured with its translated
+# packet through the inspector's redirect is captured with its translated
 # destination — the same view the policy chain has.
 PCAP_OUTPUT_CHAIN = "pcap_output"
 PCAP_INPUT_CHAIN = "pcap_input"

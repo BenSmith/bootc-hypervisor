@@ -197,13 +197,18 @@ add rule inet workload_filter output meta skuid 10000-52948 ct mark set meta sku
 # here rather than absorbed silently into a rule justified by something else.
 add rule inet workload_filter output meta skuid @wl_filtered ct direction reply accept
 
-# The operator's explicit grants, and they are evaluated FIRST -- ahead of the
-# loopback accept and ahead of the proxy rules below -- so that `allow` is also
-# the escape hatch for the internal-destination drop. A site that genuinely
-# needs its proxy to reach an internal service names it here
+# The operator's explicit grants, and they are evaluated ahead of the loopback
+# accept, the redirect admissions and the internal-destination drop below -- so
+# that `allow` is also the escape hatch for that drop. A site that genuinely
+# needs its inspector to reach an internal service names it here
 # (`allow = ["10.0.0.5:443"]`) and gets the same scoped grant the guest's own
-# direct path gets. Moving them up changes nothing for existing configs: every
+# direct path gets. Moving them up changed nothing for existing configs: every
 # rule they used to sit behind is also an accept.
+#
+# NOT first in the chain, and the difference matters to anyone reading the
+# counters: the mark rule and the reply accept above both precede these, so a
+# reply-direction packet is accepted before an `allow` element is ever
+# consulted and these counters read the guest's own outbound traffic only.
 add rule inet workload_filter output meta skuid . ip daddr . th dport @wl_allow4 counter accept
 add rule inet workload_filter output meta skuid . ip6 daddr . th dport @wl_allow6 counter accept
 

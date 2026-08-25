@@ -8,6 +8,7 @@ it never mutates a workload.
 """
 import grp
 import json
+import threading
 from pathlib import Path
 import sys
 from typing import NoReturn
@@ -34,6 +35,52 @@ from workloadctl_core import (
     WorkloadManager,
     WorkloadUserNotFound,
 )
+# How long `validate` will wait for ONE [[vm.network.internal]] name, in
+# seconds. It resolves each entry so an operator learns at edit time that a
+# name would fail the VM's start -- but `validate` is a fast, read-only command
+# an operator runs while fixing something, quite possibly the resolver itself,
+# and getaddrinfo on a host whose nameserver is black-holing takes the
+# resolver's own retry budget (five seconds per nameserver by default, twice
+# over) with nothing on screen. Bounded here so a broken resolver costs a
+# warning per entry rather than the command.
+INTERNAL_RESOLVE_TIMEOUT = 2.0
+
+
+def _resolve_within(host: str, timeout: float):
+    """vm_internal_resolve, with a wall-clock bound on the lookup.
+
+    getaddrinfo takes no timeout and does not honour the socket default -- it
+    is a blocking call in libc -- so the only bound available without a
+    resolver of our own is to stop WAITING for it. The thread is a daemon and
+    is left running: it holds nothing this process needs, and it ends when the
+    resolver's own retries do or when the command exits, whichever comes first.
+
+    A lookup that does not finish in time is reported as a name that cannot be
+    armed right now, which is what a name that cannot be looked up right now
+    means for the check this feeds. The check is a warning either way, and
+    warns in BOTH directions already -- DNS at validate time is not DNS at boot
+    time -- so a slow resolver produces the same advice a failing one does.
+    """
+    box = {}
+
+    def run():
+        try:
+            box["ok"] = vm_internal_resolve(host)
+        except BaseException as exc:              # reported, never raised here
+            box["err"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if "err" in box:
+        raise box["err"]
+    if "ok" not in box:
+        raise ValueError(
+            f"the lookup did not answer within {timeout:g}s, so whether it "
+            f"would resolve at start is unknown from here")
+    return box["ok"]
+
+
 def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=False) -> dict:
     """Validate a single workload config. Returns dict with validation results."""
     errors = 0
@@ -504,7 +551,7 @@ def validate_single(config: WorkloadConfig, manager: WorkloadManager, json_mode=
         for host in vm_internal_hosts(net):
             problem = None
             try:
-                addresses = vm_internal_resolve(host)
+                addresses = _resolve_within(host, INTERNAL_RESOLVE_TIMEOUT)
             except ValueError as e:
                 problem = str(e)
             else:

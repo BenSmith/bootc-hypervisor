@@ -99,8 +99,8 @@ import time
 sys.dont_write_bytecode = True
 
 from vm import (
-    VM_RESOLVE_TTL, vm_hostname_match, vm_normalise_hostname,
-    vm_resolve_policy_path, vm_resolve_status_path,
+    VM_RESOLVE_TTL, vm_hostname_control_character, vm_hostname_match,
+    vm_normalise_hostname, vm_resolve_policy_path, vm_resolve_status_path,
 )
 from vm_status import STATUS_TOP_N, BoundedCounts, write_status
 
@@ -250,6 +250,17 @@ def read_name(msg, offset):
         name = ".".join(l.decode("ascii") for l in labels)
     except UnicodeDecodeError:
         raise Malformed("non-ASCII label") from None
+    # A label may legally carry any byte, including a bare LF -- and this name
+    # is logged and written into the status document, where an LF ends the
+    # record and makes the rest of it a second, fabricated entry. Refused at
+    # the parse, so no log site has to remember; see
+    # vm_hostname_control_character. The character is named and the name is
+    # not, so the refusal does not print what it is refusing.
+    ch = vm_hostname_control_character(name)
+    if ch is not None:
+        raise Malformed(
+            f"label carries the control character {ch!r}, which forges a "
+            f"line in this log")
     return vm_normalise_hostname(name), offset
 
 

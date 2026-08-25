@@ -242,6 +242,22 @@
 (allow wlinspect_t init_var_run_t (dir (search)))
 (allow wlinspect_t systemd_resolved_var_run_t (dir (search)))
 
+; The TCP half of the same lookup, and it is here by argument rather than by
+; harvest -- no run of ours has produced a truncated answer to force it. A UDP
+; response that does not fit sets TC, and glibc then retries the whole query
+; over TCP to port 53; without this the retry is denied and the caller sees
+; EACCES from connect. By this module's own standard that surfaces as
+; `drop ... reason='upstream unreachable'` -- a policy gap wearing a network
+; error's clothes, and one that appears only for the names whose answers are
+; large (a CDN with many A records, a host behind a long CNAME chain), which is
+; to say intermittently and for someone else's names.
+;
+; Granted rather than ruled out, because ruling it out means asserting that no
+; name any operator ever allowlists has a truncating answer, which is not ours
+; to assert. It widens nothing the UDP grant did not already: the destination
+; is the same port on the same resolver.
+(allow wlinspect_t dns_port_t (tcp_socket (name_connect)))
+
 ; And a third thing getaddrinfo does that neither the harvest nor the first two
 ; enforcing runs could show: before it returns, glibc's __check_pf opens a
 ; NETLINK_ROUTE socket to enumerate the host's own addresses, so it can order

@@ -581,6 +581,83 @@ class TestMalformed(unittest.TestCase):
         self.assertTrue(Reply(raw).qr)
 
 
+class TestLogInjectionViaLabel(unittest.TestCase):
+    """A label the guest wrote must not be able to write a line of this log.
+
+    A DNS label carries arbitrary bytes -- the wire format is length-prefixed,
+    not delimited -- so a guest can put a bare LF in one. The name then reaches
+    a `print()` whose destination is the journal, where an LF ends the record
+    and turns the rest of the label into a second entry indistinguishable from
+    one this responder wrote. The same name is carried into `unlisted_names`,
+    which `diagnose` renders.
+
+    Refused as malformed, which is a disposition this responder already has:
+    the query gets FORMERR and the malformed counter, not a new bucket.
+    """
+
+    def setUp(self):
+        self.mod = _module()
+        self.policy = _policy(self.mod, hosts=["allowed.example"])
+
+    _forged = "evil\n  allowed.example A -> static: 1 record(s)"
+
+    def test_a_label_with_a_newline_is_malformed(self):
+        with self.assertRaises(self.mod.Malformed):
+            self.mod.build_answer(query(self._forged, TYPE_A), self.policy)
+
+    def test_it_is_refused_before_it_is_logged_or_counted(self):
+        counters = self.mod.Counters()
+        with self.assertRaises(self.mod.Malformed):
+            self.mod.build_answer(query(self._forged, TYPE_A), self.policy,
+                                  counters=counters)
+        self.assertEqual(self.mod.logged, [])
+        snap = counters.snapshot()
+        self.assertEqual(snap["unlisted_names"], {})
+
+    def test_the_forged_text_appears_in_no_line_the_responder_writes(self):
+        """serve_datagram logs the refusal itself, so the property has to hold
+        over the refusal path too -- the name is not what it names."""
+        sock = _RefusingSocket(query(self._forged, TYPE_A))
+        counters = self.mod.Counters()
+        self.mod.serve_datagram(sock, self.policy, counters=counters)
+        self.assertEqual(Reply(sock.sent).rcode, 1)
+        self.assertEqual(counters.snapshot()["queries"]["malformed"], 1)
+        self.assertTrue(self.mod.logged)
+        for line in self.mod.logged:
+            self.assertNotIn("evil", line)
+            self.assertNotIn("\n", line)
+
+    def test_every_control_character_goes_with_the_newline(self):
+        for ch in ("\n", "\r", "\x00", "\x7f", "\t", "\x1b"):
+            with self.subTest(ch=ch):
+                with self.assertRaises(self.mod.Malformed):
+                    self.mod.build_answer(
+                        query(f"a{ch}b.example", TYPE_A), self.policy)
+
+    def test_an_ordinary_name_still_answers(self):
+        """The guard must not cost the names that are not attacks -- including
+        the hyphens and digits a real hostname carries."""
+        reply = Reply(self.mod.build_answer(
+            query("api-1.allowed.example", TYPE_A), self.policy))
+        self.assertEqual(reply.rcode, 0)
+        self.assertEqual(reply.ancount, 1)
+
+
+class _RefusingSocket:
+    """One datagram in, one datagram out. Enough of a socket for
+    serve_datagram, which is where a malformed query is logged and counted."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.sent = None
+
+    def recvfrom(self, _n):
+        return self._payload, ("127.0.0.1", 5300)
+
+    def sendto(self, data, _peer):
+        self.sent = data
+
+
 class TestUdpBudget(unittest.TestCase):
     """The one case that sets the truncate bit, and the retry it invites."""
 

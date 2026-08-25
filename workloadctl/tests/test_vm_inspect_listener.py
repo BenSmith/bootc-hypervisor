@@ -15,6 +15,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -136,6 +137,12 @@ class TestExplicitTimeout(unittest.TestCase):
     """
 
     def test_the_accepted_socket_is_set_to_the_stated_timeout(self):
+        """The FIRST call, not the only one.
+
+        The cleartext plane returns the socket to this same number at the top
+        of every request it serves, so a `called_once` assertion here would be
+        an assertion about how many requests the connection carried.
+        """
         mod = _mod()
         conn = _mock_conn()
         out = io.StringIO()
@@ -143,7 +150,8 @@ class TestExplicitTimeout(unittest.TestCase):
             ("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT))], out)
         listener._handle(conn, ("192.0.2.1", 1024),
                          _listener_with(("198.18.0.1", VM_INSPECT_PORT_CLEARTEXT)))
-        conn.settimeout.assert_called_once_with(mod.CONNECTION_TIMEOUT)
+        self.assertEqual(conn.settimeout.call_args_list[0],
+                         unittest.mock.call(mod.CONNECTION_TIMEOUT))
         self.assertIsInstance(mod.CONNECTION_TIMEOUT, float)
 
     def test_the_timeout_is_set_even_when_the_connection_is_rejected(self):
@@ -687,6 +695,97 @@ class TestTlsPlane(unittest.TestCase):
         self.assertNotIn("not allowlisted", out.getvalue())
 
 
+class TestLogInjection(unittest.TestCase):
+    """A name the guest wrote must not be able to write a line of this log.
+
+    The log is the operator's evidence, and it is line-oriented: a bare LF
+    inside a name ends the record journald stores and makes what follows a
+    second, fabricated entry that reads exactly like one this program emitted.
+    A guest that can forge `splice plane=tls ... host=github.com` can forge the
+    record of a decision that never happened.
+
+    The cleartext plane already refuses the whole control class in
+    `_reject_controls`, for the smuggling reason. These are the other two
+    readers of a guest-written name.
+    """
+
+    def _listener(self, hosts):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+        return mod, listener, out
+
+    _forged = "evil.example\nsplice plane=tls local=127.0.0.1:1 " \
+              "peer=127.0.0.1:2 host=allowed.example"
+
+    def test_an_sni_with_a_newline_is_not_a_readable_name(self):
+        mod = _mod()
+        with self.assertRaises(mod.HelloUnreadable):
+            mod.read_client_hello(
+                _FakeSocket([_hello_bytes(server_name=self._forged)]))
+
+    def test_a_forged_sni_writes_exactly_one_line_and_not_the_forged_one(self):
+        """The end-to-end property, over the plane rather than the parser: one
+        connection, one record, and the record is a refusal."""
+        _, listener, out = self._listener(["allowed.example"])
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(_hello_bytes(server_name=self._forged))
+        ours.settimeout(2.0)
+        listener._serve_tls(ours, "plane=tls")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("no readable name", lines[0])
+        self.assertNotIn("splice", lines[0])
+
+    def test_the_refusal_does_not_quote_the_name_it_refuses(self):
+        """Naming the character is the diagnosis; echoing the name would put
+        the injected bytes into the record the refusal exists to protect."""
+        _, listener, out = self._listener(["allowed.example"])
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(_hello_bytes(server_name=self._forged))
+        ours.settimeout(2.0)
+        listener._serve_tls(ours, "plane=tls")
+        self.assertNotIn("evil.example", out.getvalue())
+        self.assertIn(repr("\n"), out.getvalue())
+
+    def test_a_forged_sni_never_reaches_the_status_document(self):
+        """`unlisted_names` is rendered by diagnose, so a name that got as far
+        as being counted is a name that got as far as the operator."""
+        _, listener, _ = self._listener(["allowed.example"])
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(_hello_bytes(server_name=self._forged))
+        ours.settimeout(2.0)
+        listener._serve_tls(ours, "plane=tls")
+        snapshot = json.dumps(
+            listener.counters.snapshot(open_now=0, refused=0))
+        self.assertNotIn("evil.example", snapshot)
+
+    def test_every_control_character_is_refused_not_only_the_newline(self):
+        """LF is the one that forges a record; CR, NUL and DEL are refused with
+        it because a field with any of them has no reading both ends share."""
+        mod = _mod()
+        for ch in ("\n", "\r", "\x00", "\x7f", "\t", "\x1b"):
+            with self.subTest(ch=ch):
+                with self.assertRaises(mod.HelloUnreadable):
+                    mod.read_client_hello(
+                        _FakeSocket([_hello_bytes(
+                            server_name=f"a{ch}b.example")]))
+
+    def test_an_ordinary_name_still_reads(self):
+        """The guard must not cost the names that are not attacks."""
+        mod = _mod()
+        _, hello = mod.read_client_hello(
+            _FakeSocket([_hello_bytes(server_name="Fine-Name.EXAMPLE.com")]))
+        self.assertEqual(hello.server_name, "Fine-Name.EXAMPLE.com")
+
+
 _OK = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
 
 
@@ -1187,6 +1286,145 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertIn(b"Connection: close", got)
 
 
+class TestCleartextTimeouts(unittest.TestCase):
+    """Which of the two numbers bounds which wait, on the plane that has three.
+
+    The TLS plane has two waits and moves once. The cleartext plane authorises
+    per REQUEST, so it has three: the wait for a head (a decision), the transfer
+    once a request is authorised (a relay), and the wait for the NEXT head on a
+    kept-alive connection (an idle). Giving the third the decision number is
+    the mistake this class exists to hold shut: it cuts keep-alive at five
+    seconds AND counts each cut as `unreadable request`, which is the bucket
+    that is supposed to mean a guest speaking something that is not HTTP.
+    """
+
+    CONNECTION = 0.20
+    IDLE = 0.75
+
+    def _pair(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        a.settimeout(3.0)
+        b.settimeout(3.0)
+        return a, b
+
+    def _serve(self, hosts, feed, responses=(), watch=None):
+        """Serve a guest that does NOT close its end.
+
+        `feed` is written to the guest side before serving and nothing more is
+        ever written, so every case here ends on a timeout rather than on EOF.
+        Returns (log, counters snapshot, elapsed seconds).
+        """
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out, policy=mod.Policy(tls="splice", hosts=tuple(hosts)))
+        ours, guest = self._pair()
+        guest.sendall(feed)
+        pumps = []
+
+        def dial(addr, timeout=None):
+            near, far = self._pair()
+            if len(pumps) < len(responses):
+                far.sendall(responses[len(pumps)])
+            buf = bytearray()
+            pump = threading.Thread(target=_pump, args=(far, buf), daemon=True)
+            pump.start()
+            pumps.append(pump)
+            return near
+
+        real_copy_body = mod.copy_body
+
+        def copy_body(src, dst, framing):
+            if watch is not None:
+                watch.append(ours.gettimeout())
+            return real_copy_body(src, dst, framing)
+
+        started = time.monotonic()
+        with unittest.mock.patch.object(
+                socket, "create_connection", side_effect=dial), \
+                unittest.mock.patch.object(mod, "copy_body", copy_body), \
+                unittest.mock.patch.object(
+                    mod, "CONNECTION_TIMEOUT", self.CONNECTION), \
+                unittest.mock.patch.object(
+                    mod, "RELAY_IDLE_TIMEOUT", self.IDLE):
+            listener._serve_cleartext(ours, "plane=cleartext")
+        elapsed = time.monotonic() - started
+        for pump in pumps:
+            pump.join(timeout=3.0)
+        return (out.getvalue(),
+                listener.counters.snapshot(open_now=0, refused=0), elapsed)
+
+    def _drops(self, snapshot):
+        return {k: v for k, v in snapshot["drop_reasons"].items() if v}
+
+    def test_a_guest_that_says_nothing_is_cut_at_the_decision_timeout(self):
+        """The first wait is the decision's: a connection that has been
+        accepted and says nothing is holding one of MAX_CONNECTIONS slots for
+        nothing."""
+        log, snap, elapsed = self._serve(["a.example"], b"")
+        self.assertLess(elapsed, self.IDLE)
+        self.assertEqual(self._drops(snap), {"timed out": 1})
+        self.assertIn("timed out", log)
+
+    def test_a_stalled_head_is_a_timeout_not_an_unreadable_request(self):
+        """Bytes arrived and stopped. That is a peer that gave up mid-message,
+        not a peer speaking a protocol we could not read -- and the two have to
+        stay apart, because one of them is the tunnelling signal."""
+        log, snap, elapsed = self._serve(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.exa")
+        self.assertLess(elapsed, self.IDLE)
+        self.assertEqual(self._drops(snap), {"timed out": 1})
+        self.assertNotIn("unreadable request", log)
+
+    def test_an_idle_kept_alive_connection_is_not_counted_as_a_drop(self):
+        """The regression this class is named for. One authorised request, an
+        answer, and then a guest that simply holds the connection: the close is
+        this end letting go of something nobody was using, not a request that
+        could not be read."""
+        log, snap, elapsed = self._serve(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            responses=[_OK])
+        self.assertEqual(self._drops(snap), {})
+        self.assertEqual(snap["dispositions"]["forwarded"], 1)
+        self.assertIn("close plane=cleartext", log)
+
+    def test_the_idle_wait_is_the_tunnel_number_not_the_decision_one(self):
+        """Measured, because the count above would also be satisfied by a
+        connection cut at five seconds and merely counted differently."""
+        _, _, elapsed = self._serve(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            responses=[_OK])
+        self.assertGreater(elapsed, self.CONNECTION * 2)
+
+    def test_an_authorised_request_relays_under_the_idle_timeout(self):
+        """The socket leaves the decision timeout when the decision is made.
+        Held here rather than inferred from a slow transfer: the failure is a
+        large download cut at five seconds by whichever end paused first, and
+        a test that reproduced that would be a test that waits for it."""
+        watch = []
+        self._serve(["a.example"],
+                    b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+                    responses=[_OK], watch=watch)
+        # Twice: the request body going up and the response body coming
+        # back are both transfers, and both are bounded by idleness.
+        self.assertEqual(len(watch), 2)
+        self.assertEqual(set(watch), {self.IDLE})
+
+    def test_the_decision_timeout_is_restored_for_the_next_head(self):
+        """A relayed request must not leave the tunnel number behind for the
+        head that follows it: a guest that starts a second head and abandons it
+        would then hold its slot for the idle bound."""
+        log, snap, elapsed = self._serve(
+            ["a.example"],
+            b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: a.exa",
+            responses=[_OK])
+        self.assertEqual(self._drops(snap), {"timed out": 1})
+        self.assertLess(elapsed, self.IDLE)
+
+
 class TestCleartextExpectContinue(unittest.TestCase):
     """`Expect: 100-continue` is answered AFTER policy, never before.
 
@@ -1237,6 +1475,45 @@ class TestCleartextExpectContinue(unittest.TestCase):
             b"POST / HTTP/1.1\r\nHost: a.example\r\nExpect: other\r\n\r\n")
         self.assertEqual(ups, [])
         self.assertIn("cannot honour", log)
+
+
+class TestInterimResponses(unittest.TestCase):
+    """1xx heads are relayed, and they are counted.
+
+    The loop that reads them is driven by the far end. Every other loop in this
+    file that a guest or a peer can drive carries a ceiling, and an allowlisted
+    origin is not a trusted one -- it can hold a guest's connection, and one of
+    MAX_CONNECTIONS slots, with interim heads and no final answer.
+    """
+
+    _run = _CleartextRig._run
+    _pair = _CleartextRig._pair
+
+    def test_an_interim_response_is_passed_through_before_the_final_one(self):
+        _, got, _ = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [b"HTTP/1.1 103 Early Hints\r\n\r\n" + _OK])
+        self.assertIn(b"103 Early Hints", got)
+        self.assertIn(b"200 OK", got)
+
+    def test_an_endless_run_of_interim_heads_ends_the_exchange(self):
+        mod = _mod()
+        flood = b"HTTP/1.1 100 Continue\r\n\r\n" * (mod.INTERIM_MAX + 5)
+        log, got, _ = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [flood])
+        self.assertIn("relay failed", log)
+        self.assertIn("interim", log)
+        self.assertNotIn(b"200 OK", got)
+
+    def test_a_run_within_the_ceiling_still_reaches_the_final_response(self):
+        """The bound must not be what breaks an origin sending early hints."""
+        mod = _mod()
+        head = b"HTTP/1.1 103 Early Hints\r\n\r\n" * mod.INTERIM_MAX
+        _, got, _ = self._run(
+            ["a.example"], b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [head + _OK])
+        self.assertIn(b"200 OK", got)
 
 
 class TestCleartextUpstreamFailure(unittest.TestCase):

@@ -1,11 +1,34 @@
 # ADR 008: VM egress is inspected transparently, and terminated by default
 
-**Status:** **Proposed, not implemented.** Recorded ahead of the work because
+**Status:** **Accepted. Partly implemented** — the transparent path is in, the
+termination is not. Originally recorded ahead of the work, because
 `007-per-workload-credential-broker.md` is an accepted decision that assumes
 this one, and an accepted record resting on an undecided premise is the wrong
-order. Nothing here has shipped.
+order.
 
-**Date:** 2026-08-16.
+**Date:** 2026-08-16. Status updated 2026-08-25.
+
+**What has shipped.** Decisions 1, 6, 7, 8, 9 and 10: the uid-keyed transparent
+redirect on 80 and 443 with no guest-side proxy variables, both address
+families, tinyproxy removed and the allowlist owned by the inspector, the
+nftables guard on the listener range, the synthesising per-workload DNS
+responder, and the internal-destination refusal with its declared exemption.
+The inspector reads the name and either forwards or refuses: on 443 by peeking
+at the ClientHello and splicing byte-exact, on 80 by parsing and re-emitting
+each request and authorising every one of them separately.
+
+**What has not.** Decisions 2, 3, 4 and 5 — the termination itself, and
+therefore the CA, its lifetime, and the method/path policy and `Host`-binding
+that only a terminated session can carry. `VM_TLS_MODES` is `("splice",)`: the
+one mode the schema accepts today is the one this record calls the *exemption*,
+so the default it names as the decision is not yet the default in effect. Until
+that lands, `Given up` describes a cost this design has chosen to pay and has
+not yet paid, and the CDN-fronting and ECH properties under `Consequences` are
+the argument for the work rather than a description of the host.
+
+This split is deliberate rather than a stall: the transparent path is what makes
+the guest's cooperation irrelevant, and it is worth having on its own before a
+process on that path starts holding plaintext and a key.
 
 ## Context
 
