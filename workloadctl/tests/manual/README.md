@@ -374,3 +374,52 @@ the installed RPM.
 Verified by breaking the splice on purpose — replaying the buffer without its
 record header — which fails the four handshake assertions and leaves the other
 eleven green.
+
+## clock_rig.py — what a vCPU pause does to a guest's clock
+
+```bash
+sudo python3 tests/manual/clock_rig.py       # --keep leaves the guest up
+```
+
+Needs root, `/dev/kvm`, the workloadctl RPM and the same
+`/var/lib/broker-rig/base.qcow2` the other VM rigs use. Boots **one** throwaway
+filtered VM workload, measures its clock across a QMP `stop`/`cont`, and tries
+both forms of the guest agent's `guest-set-time`. Ten minutes end to end, most
+of it the 120-second pause and cloud-init's first boot.
+
+**Why it exists.** Rung 3 mints 30-day leaves for the guest to validate, which
+puts the guest's clock on the critical path for all of its traffic. Drift is a
+non-issue — about 10 ppm, four orders of magnitude inside a leaf's window — but
+a *pause* is not: the guest loses the pause exactly and never gets it back, and
+the 1-hour `notBefore` backdate covers roughly 1,200 years of drift and exactly
+one hour of pause. Past that, every freshly-minted leaf has a `notBefore` in the
+guest's future and validation fails on every request while `diagnose` reports a
+healthy VM.
+
+**One of the two paths that reaches it is ours.** `workloadctl backup
+--consistency crash` issues QMP `stop`, copies the qcow2, and `cont`s in a
+`finally`, resyncing nothing — so the guest is left behind by the copy duration,
+bounded by disk size and storage speed rather than by any check. The rig pauses
+over the same socket in the same order, so it is measuring that operation and
+not an analogue of it.
+
+**The guest is filtered on purpose.** An `egress = "open"` guest would resync
+over NTP and measure nothing. The rig records that NTP is dead first, because
+that premise is invisible from the host: `chronyd` stays `active` while
+`chronyc tracking` reports stratum 0 and a 1970 reference time.
+
+**Offsets are reported as intervals, not numbers.** The guest's clock is read
+somewhere inside the `workloadctl exec` round-trip, so the reading is bracketed
+by two host reads and the interval's *width* is that latency. The upper bound is
+the stable one; the lower tracks the round-trip.
+
+**What it settled, 2026-08-26, 8/9 assertions.** The step equals the pause to
+37 ms. `guest-set-time` with **no argument fails** — it reads the guest's RTC
+and returns `hwclock: select() to /dev/rtc0 to wait for clock tick timed out`,
+which corrects an earlier note recording it as not returning at all. The
+**explicit-nanoseconds form works**, taking the guest from −120.9 s to +0.6 s,
+inside the measurement's own bracket. That is the remedy rung 3 adopts.
+
+The one FAIL is the no-argument form and is the *finding*, not a defect in the
+rig: it is asserted rather than skipped so that a future QEMU or image making it
+work shows up as a rig that started passing.
