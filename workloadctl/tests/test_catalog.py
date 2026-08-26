@@ -241,6 +241,80 @@ class TestVmBaseBundle(CatalogTestBase):
         self.assertEqual(shipped, cmd_catalog._SCRATCH_VM_USER_DATA)
 
 
+class TestSeedsNeverSpliceRawMultilineVars(CatalogTestBase):
+    """A multi-line magic var is only safe where column 0 is where it belongs.
+
+    substitute_template is a plain textual replace: it puts the whole value in
+    at the placeholder, so the placeholder's own indentation reaches the FIRST
+    line of a multi-line value and nothing after it. Splice a PEM into an
+    indented YAML block scalar and every line after the first lands at column
+    0 -- which does not fail as a missing anchor. cloud-init cannot parse the
+    document at all, so the guest loses its host key, its mounts and everything
+    else the seed carried.
+
+    That shipped in this bundle's own CA recipe (`ca_certs: trusted: - |` with
+    ${WORKLOADCTL_VM_EGRESS_CA} indented under it), and the test covering it
+    asserted only that "BEGIN CERTIFICATE" appeared somewhere in the rendered
+    text. It did -- at column 0, in a broken document.
+
+    THE COMMENTED RECIPES COUNT. vm-base is the documented starting point for a
+    new VM workload and its CA block is commented out because the bundle is
+    `egress = "open"`; an operator uncommenting it is the intended path, so a
+    recipe that only works while it is a comment is the same bug.
+    """
+
+    # The vars whose value is a multi-line PEM. Their _B64 siblings are one
+    # line by construction and can be nested anywhere.
+    RAW_MULTILINE = ("${WORKLOADCTL_VM_EGRESS_CA}", "${WORKLOADCTL_VM_HOST_KEY}")
+
+    def _offenders(self, text):
+        """(line number, line) for every raw splice at a non-zero column.
+
+        A recipe line is one that ENDS with the placeholder -- `content: ${VAR}`
+        or the placeholder alone under a block scalar. Prose that merely names
+        the variable mid-sentence is not a splice and is left alone.
+        """
+        bad = []
+        for number, line in enumerate(text.splitlines(), 1):
+            # The line's own indentation is the whole question, so it is NOT
+            # stripped -- only a comment marker is, and what a commented recipe
+            # is indented BY is what it is indented by once uncommented.
+            body = line
+            if line.lstrip().startswith("#"):   # a commented recipe is a recipe
+                body = line.lstrip()[1:]
+                body = body[1:] if body.startswith(" ") else body
+            for var in self.RAW_MULTILINE:
+                if body.rstrip().endswith(var) and not body.startswith(var):
+                    bad.append((number, line))
+        return bad
+
+    def test_shipped_seeds_never_indent_a_raw_pem_splice(self):
+        checked = 0
+        for seed in sorted(REPO_BUNDLES.glob("*/cloud-init/user-data")):
+            checked += 1
+            bad = self._offenders(seed.read_text())
+            self.assertEqual(
+                bad, [],
+                f"{seed} splices a raw multi-line PEM at a non-zero column; "
+                f"use the ${{...}}_B64 form, which is one line")
+        self.assertGreater(checked, 0, "no shipped VM bundle seeds found")
+
+    def test_the_scratch_seed_constant_has_the_same_property(self):
+        """The catalog's copy is what `workloadctl init --scratch-vm` writes."""
+        self.assertEqual(
+            self._offenders(cmd_catalog._SCRATCH_VM_USER_DATA), [])
+
+    def test_the_check_sees_the_shape_that_shipped(self):
+        """The gate itself, against the exact text it was written for."""
+        broken = ("ca_certs:\n  trusted:\n    - |\n"
+                  "      ${WORKLOADCTL_VM_EGRESS_CA}\n")
+        self.assertTrue(self._offenders(broken))
+        self.assertTrue(self._offenders("#   " + broken.replace("\n", "\n#   ")))
+        self.assertFalse(self._offenders("${WORKLOADCTL_VM_EGRESS_CA}\n"))
+        self.assertFalse(self._offenders(
+            "    content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n"))
+
+
 class TestVmSeedUserIsNotDuplicated(CatalogTestBase):
     """A shipped VM seed must take its login account from [vm].user, not repeat it.
 

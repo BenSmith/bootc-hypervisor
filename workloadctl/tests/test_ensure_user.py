@@ -662,9 +662,15 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         the contract rather than a missing convenience.
 
         Same shape as WORKLOADCTL_VM_HOST_KEY / _B64 above, and for the same
-        reason: the raw PEM is multi-line and does not survive naive ${VAR}
-        splicing into a YAML block scalar, so the b64 form is what a write_files
-        entry uses and the raw form is what a ca_certs: block does.
+        reason: the raw PEM is multi-line, substitution is a plain textual
+        replace, and a multi-line value keeps the placeholder's indentation on
+        its first line only. So EVERY seed recipe uses the b64 form, and the
+        raw one is safe only at column 0 -- which is what this asserts, and
+        what the reference seed documents. The previous version of this test
+        spliced the raw form into an indented `ca_certs:` block scalar and
+        asserted only that "BEGIN CERTIFICATE" appeared somewhere in the
+        result; it did, at column 0, in a document cloud-init can no longer
+        parse at all.
         """
         from vm import vm_ca_cert_path
         # `workload_state_dir` is mocked to self.home for the duration of the
@@ -680,14 +686,21 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             f"  - path: {self.mod.VM_CA_BUNDLE_PATH}\n"
             "    encoding: b64\n"
             "    content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n"
-            "ca_certs:\n  trusted:\n    - |\n"
-            "      ${WORKLOADCTL_VM_EGRESS_CA}\n")
+            "raw_pem_at_column_zero: |\n"
+            "${WORKLOADCTL_VM_EGRESS_CA}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
                       "network": self._FILTERED_NET}}
         self._run_build(cfg, inject_ca=False)
         rendered = self._read_user_data()
-        self.assertIn("BEGIN CERTIFICATE", rendered,
-                      "the raw form must splice the PEM into the seed")
+        self.assertIn(expected, rendered,
+                      "the raw form must splice the PEM in unchanged")
+        # The line-by-line half, which the substring pin above cannot see: a
+        # raw splice indents nothing, so every line has to arrive where the
+        # placeholder's own column put the first one.
+        for line in expected.splitlines():
+            self.assertIn(f"\n{line}\n", rendered,
+                          "a raw multi-line splice is not re-indented, so "
+                          "every line lands at the placeholder's column")
         import base64 as _b64
         self.assertIn(_b64.b64encode(expected.encode()).decode(), rendered,
                       "the b64 form must splice the same PEM, encoded")

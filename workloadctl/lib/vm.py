@@ -2539,10 +2539,12 @@ def _validate_egress(net: dict) -> list[str]:
         if tls in VM_TLS_UNBUILT:
             errors.append(
                 f"[vm.network].tls = {tls!r} is not built yet — it lands in "
-                f"{VM_TLS_UNBUILT[tls]}. Accepting the word now would splice "
-                f"the connection while the config claimed it was inspected, "
-                f"which is the misreported confinement this layer exists to "
-                f"prevent. Use tls = 'splice' (the default) until then.")
+                f"{VM_TLS_UNBUILT[tls]}. Accepting the word now would give "
+                f"the connection one of the modes that IS built while the "
+                f"config claimed the property of one that is not, which is the "
+                f"misreported confinement this layer exists to prevent. Use "
+                f"one of "
+                f"{', '.join(repr(m) for m in VM_TLS_MODES)} until then.")
         elif tls not in VM_TLS_MODES:
             errors.append(
                 f"[vm.network].tls must be one of "

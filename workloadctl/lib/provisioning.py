@@ -819,9 +819,16 @@ def apply_vm_fcontext(config: WorkloadConfig, action: str):
             ["semanage", "fcontext", "-a", "-t", selinux_type, one],
             capture_output=True, text=True)
         if result.returncode != 0:
+            # WARN AND CARRY ON, never return. Each rule stands alone, and
+            # returning here left the ones already registered unlabelled: the
+            # relabel below is the only thing that applies them, and skipping
+            # it produces a tree whose rules say one thing and whose files say
+            # another -- which presents as the inspector reporting its own CA
+            # missing (EACCES and ENOENT are the same answer to Path.exists)
+            # or as "QMP socket not ready", never as a failed semanage call.
             warn(f"  WARNING: could not register the SELinux fcontext rule for "
                  f"'{config.name}': {result.stderr.strip()}")
-            return
+            continue
         info(f"  Registered SELinux fcontext: {one} -> {selinux_type}")
         registered_any = True
 

@@ -976,6 +976,10 @@ def generate_vm_egress_ca(pw, name: str):
     seed is fingerprinted over its rendered text, so dropping the CA out of it
     rotates the instance-id and re-provisions the guest in the middle of the
     incident the hatch exists for.
+
+    When it DOES mint, it clears the leaf caches -- see the comment at the end.
+    provision_vm_pki_dirs recreates and relabels them a moment later, which is
+    why removing them here is safe.
     """
     ca_dir = vm_ca_dir(workload_state_dir(name))
     key_path = vm_ca_key_path(workload_state_dir(name))
@@ -1008,6 +1012,20 @@ def generate_vm_egress_ca(pw, name: str):
     # anchor that the seed builder and `diagnose` both read, and the private
     # half is the only part worth protecting.
     os.chmod(cert_path, 0o644)
+
+    # A NEW CA MAKES EVERY CACHED LEAF A FORGERY, so the caches go with it.
+    # This runs only on the branch that actually minted -- the guard above
+    # returns before it for the ordinary case -- and the case it exists for is
+    # an operator recovering a lost or damaged CA by deleting state/ca. The
+    # leaves are files with a 30-day life, LeafCache adopts any PEM it finds at
+    # the hashed path without asking who signed it, and the guest by then
+    # trusts only the replacement. The result is a guest that fails handshakes
+    # on exactly its established hosts, told by the listener's own log line to
+    # re-seed -- which is both the wrong remedy and already done.
+    for cache_dir in (vm_leaf_dir(workload_state_dir(name)),
+                      vm_denial_dir(workload_state_dir(name))):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
     log(f"  Generated egress CA: {cert_path}")
 
 
