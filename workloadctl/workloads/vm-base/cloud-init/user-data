@@ -112,6 +112,53 @@ write_files:
 #      [vm.cloud_init]
 #      seed_provides = ["mounts"]   # and/or "ca"
 
+# --- The egress CA — required once [vm.network] sets egress = "filtered" -----
+#
+# A filtered workload's HTTPS is terminated by its own inspector, which presents
+# a leaf signed by a CA minted for this workload alone. The guest has to trust
+# that CA or every HTTPS request fails as a bad certificate rather than as a
+# policy decision — and provisioning refuses to build a filtered seed that never
+# installs it, so you are told rather than left to find out.
+#
+# The built-in cloud-config does this and a custom seed replaces it, so the
+# three pieces below are yours to write. They are commented out because this
+# bundle is `egress = "open"`: with no CA to install, ${WORKLOADCTL_VM_EGRESS_CA_B64}
+# substitutes to an empty string and the entries would write an empty anchor.
+# Uncomment them at the same moment you set egress = "filtered".
+#
+# TWO ROUTES, BOTH NEEDED. ca_certs installs it into the guest's system trust
+# store, which covers almost everything; the write_files copy at a fixed path is
+# what the five environment variables name, for the runtimes that carry their
+# own root list and never consult the system store. Either alone leaves a
+# measured population of clients failing.
+#
+# write_files (append to the list above):
+#   - path: /usr/local/share/ca-certificates/workloadctl-egress.crt
+#     permissions: '0644'
+#     owner: root:root
+#     encoding: b64
+#     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}
+#   - path: /etc/environment
+#     append: true
+#     content: |
+#       SSL_CERT_FILE=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#       NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#       REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#       GIT_SSL_CAINFO=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#       PIP_CERT=/usr/local/share/ca-certificates/workloadctl-egress.crt
+#
+# ca_certs (top level; ${WORKLOADCTL_VM_EGRESS_CA} is the raw multi-line PEM,
+# which needs the six-space indent of the block scalar it is spliced into):
+#   ca_certs:
+#     trusted:
+#       - |
+#         ${WORKLOADCTL_VM_EGRESS_CA}
+#
+# `tls = "splice"` on the workload is the one-line answer for a guest that
+# cannot be given the anchor — a weaker property, not a deprecated one, and it
+# needs none of this. The CA is still minted and still seeded either way, so
+# switching between the two never rotates the instance-id.
+
 # runcmd:
 #   - echo "first boot" > /etc/motd
 

@@ -94,7 +94,7 @@ class _Origin:
     client-certificate alert before forwarding anything.
     """
 
-    def __init__(self, pem, *, client_ca=None, response=None):
+    def __init__(self, pem, *, client_ca=None, response=None, follow=False):
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(str(pem))
         self.ctx.set_alpn_protocols(["http/1.1"])
@@ -108,6 +108,11 @@ class _Origin:
             self.ctx.load_verify_locations(str(client_ca))
         self.response = response or (
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        # `follow` keeps reading after the response has been sent, appending
+        # each further chunk to `requests`. It is what an upgraded connection
+        # needs: the bytes that matter there arrive AFTER the 101, and an origin
+        # that closes on the first recv cannot see them at all.
+        self.follow = follow
         self.requests = []
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -134,6 +139,11 @@ class _Origin:
                 if data:
                     self.requests.append(data)
                     conn.sendall(self.response)
+                    while self.follow:
+                        more = conn.recv(65536)
+                        if not more:
+                            break
+                        self.requests.append(more)
             except (ssl.SSLError, OSError):
                 pass
             finally:
@@ -502,6 +512,67 @@ class TestUpgradesAreRelayedAfterThePolicyCheck(TerminationCase):
                       "the post-101 bytes must be relayed, buffer included")
         self.assertIn("upgrade", out.getvalue())
         self.assertIn("policy no longer applies", out.getvalue())
+        # THE HALF THIS TEST USED TO MISS. _Origin answers 101 whatever it is
+        # sent, so every assertion above held while the offer was being stripped
+        # on the way upstream -- `Upgrade` and `Connection` are both in
+        # _NOT_FORWARDED, so for one rung no real origin could ever have
+        # answered 101 and this whole path was unreachable in production. The
+        # request the origin actually received is the only thing that says
+        # otherwise.
+        self.assertTrue(origin.requests, "the origin saw no request at all")
+        upstream = origin.requests[0]
+        self.assertIn(b"Upgrade: websocket", upstream,
+                      "the upgrade offer must reach the origin, or nothing can "
+                      "ever answer 101")
+        self.assertIn(b"Connection: upgrade", upstream)
+
+    def test_the_guests_pipelined_bytes_survive_the_upgrade(self):
+        """Bytes sent behind the upgrade request belong to the tunnel.
+
+        A client is entitled to write its first frame in the same segment as the
+        request that upgrades. Those bytes are read off the socket by the head
+        parser and sit in its buffer, and the 101 path has to hand them to the
+        upstream -- it forwarded the origin's surplus to the guest for a rung
+        while dropping the guest's on the floor, which presents as a tunnel that
+        opens and then stalls rather than as lost bytes.
+        """
+        mod = _mod()
+        origin = _Origin(
+            self.origin_pem, follow=True,
+            response=b"HTTP/1.1 101 Switching Protocols\r\n"
+                     b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        self.addCleanup(origin.close)
+        listener, _out = self._listener(mod, origin)
+        self._exchange(
+            listener, origin,
+            request=b"GET /ws HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+                    b"\x81\x03xyz")
+        self.assertIn(b"\x81\x03xyz", b"".join(origin.requests),
+                      "the guest's pipelined frame must reach the origin")
+
+    def test_an_h2c_upgrade_is_not_carried(self):
+        """HTTP/2 is the one upgrade that would cost the per-request check.
+
+        An h2c connection carries HPACK-compressed frames this relay cannot
+        read, so forwarding the offer would hand the guest a way out of
+        per-request authorisation. The request still completes as the ordinary
+        HTTP/1.1 exchange it also is -- a declined upgrade, which is behaviour
+        HTTP already defines, not a refusal the guest has to interpret.
+        """
+        mod = _mod()
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        listener, _out = self._listener(mod, origin)
+        response, _error = self._exchange(
+            listener, origin,
+            request=b"GET / HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Upgrade: h2c\r\nConnection: Upgrade\r\n"
+                    b"HTTP2-Settings: AAMAAABkAAQCAAAAAAIAAAAA\r\n\r\n")
+        self.assertIn(b"200 OK", response)
+        upstream = origin.requests[0]
+        self.assertNotIn(b"Upgrade:", upstream)
+        self.assertNotIn(b"Connection: upgrade", upstream)
 
 
 class TestARedirectOffTheAllowlistIsNamedWhereBothNamesAreKnown(
@@ -840,3 +911,131 @@ class TestWhatTheStatusFileCarriesFromARealExchange(TerminationCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestACountIsASCIIOrItIsNotACount(unittest.TestCase):
+    """`str.isdigit()` is the wrong guard in front of `int()` on this path.
+
+    The RESPONSE head is decoded latin-1 on purpose -- so that a raw byte in a
+    filename cannot kill an exchange the policy authorised -- and latin-1 spells
+    the superscripts. `"²".isdigit()` is True and `int("²")` raises,
+    so a Content-Length or a status code written with one passed the guard and
+    then raised ValueError out of a call site that catches RequestUnreadable and
+    OSError: the connection thread died with a traceback and no counter moved.
+
+    Refusal is the right answer, not repair -- the same voice as every other
+    framing refusal here.
+    """
+
+    def test_a_superscript_content_length_is_refused_not_crashed(self):
+        mod = _mod()
+        with self.assertRaises(mod.RequestUnreadable):
+            mod.response_framing(200, "GET", (("content-length", "²"),))
+
+    def test_a_superscript_status_code_is_refused_not_crashed(self):
+        mod = _mod()
+        self.assertFalse(mod._is_count("²"))
+        self.assertFalse(mod._is_count("2²"))
+
+    def test_ordinary_counts_still_pass(self):
+        mod = _mod()
+        self.assertTrue(mod._is_count("0"))
+        self.assertTrue(mod._is_count("4096"))
+        self.assertEqual(
+            mod.response_framing(200, "GET", (("content-length", "5"),)),
+            mod.Framing("length", 5))
+
+    def test_the_request_side_agrees(self):
+        """Safe there already -- that head is ASCII -- and checked anyway.
+
+        The guarantee that makes the request side safe lives two functions away
+        in `_split_head`. A guard written to depend on it is one refactor from
+        being wrong, so both sides use the same predicate and both are asserted.
+        """
+        mod = _mod()
+        with self.assertRaises(mod.RequestUnreadable):
+            mod.request_framing((("content-length", "²"),))
+
+
+class TestTheCachesCannotEvictALeafInFlight(unittest.TestCase):
+    """A cache must hold more entries than there are connection slots.
+
+    Eviction unlinks the victim's PEM, and a leaf is opened by the caller AFTER
+    the minter has handed it over. So if the least-recently-used entry can be
+    one a live connection still holds, a flood can delete a certificate out from
+    under a handshake about to use it -- which fails as a missing file and reads
+    as the guest not trusting the CA.
+
+    The two numbers live in different files and nothing else makes them meet.
+    """
+
+    def test_every_cache_is_larger_than_the_connection_ceiling(self):
+        from vm_mint import DENIAL_CACHE_MAX, LEAF_CACHE_MAX
+        mod = _mod()
+        for name, size in (("working set", LEAF_CACHE_MAX),
+                           ("denial set", DENIAL_CACHE_MAX)):
+            with self.subTest(cache=name):
+                self.assertGreater(
+                    size, mod.MAX_CONNECTIONS,
+                    f"the {name} holds {size} entries against "
+                    f"{mod.MAX_CONNECTIONS} connection slots, so its "
+                    f"least-recently-used entry can be one in flight")
+
+
+class TestARedialThatCannotBeVerifiedSaysSo(TerminationCase):
+    """`ssl.SSLError` IS an `OSError`, and one generic arm hid the difference.
+
+    The front of a terminated connection has always split the two -- a
+    certificate that will not verify gets the sentence naming THIS HOST's trust
+    anchors, an unreachable host gets the one naming the host. The REDIAL did
+    not: `_upstream_for` is reached again whenever an origin answers
+    `Connection: close` or an HTTP/1.0 exchange ends, and its handler caught
+    OSError only. So a verification failure on a redial was reported as
+    "upstream unreachable", and then paid for a second getaddrinfo to decide
+    which flavour of unreachable to call it.
+    """
+
+    def _drive(self, mod, exc):
+        listener, out = self._listener(mod, _Origin(self.origin_pem))
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(3.0)
+        guest.settimeout(3.0)
+        guest.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        with unittest.mock.patch.object(
+                listener, "_upstream_for", side_effect=exc):
+            listener._serve_one_request(
+                mod._Stream(ours), ours, "where", {}, True)
+        return listener, guest.recv(65536), out.getvalue()
+
+    def test_a_verification_failure_is_not_called_unreachable(self):
+        mod = _mod()
+        listener, response, log = self._drive(
+            mod, ssl.SSLCertVerificationError("self-signed certificate"))
+        self.assertIn(b"502", response)
+        self.assertIn(b"could not be verified", response,
+                      "the guest's 502 is the only place the reason lands")
+        self.assertIn(b"THIS HOST", response,
+                      "an operator has to be told whose trust store to fix")
+        self.assertIn(mod.DROP_UNVERIFIED, log)
+        self.assertNotIn(mod.DROP_UNREACHABLE, log)
+
+    def test_an_ordinary_dial_failure_still_goes_the_other_way(self):
+        """The other arm still works -- this is a split, not a replacement.
+
+        The reason is `internal destination` rather than `upstream
+        unreachable`, and that is _dial_failure_reason being right: the host
+        here is `localhost`, which resolves into loopback, and a name resolving
+        into private space with no [[vm.network.internal]] entry is a config an
+        operator is one line from fixing. Asserted as the specific string rather
+        than "not the TLS one", or the test would still pass if the split
+        collapsed back into a single arm.
+        """
+        mod = _mod()
+        listener, response, log = self._drive(
+            mod, ConnectionRefusedError("connection refused"))
+        self.assertIn(b"502", response)
+        self.assertIn(b"could not be reached", response)
+        self.assertIn(mod.DROP_INTERNAL, log)
+        self.assertNotIn(mod.DROP_UNVERIFIED, log)

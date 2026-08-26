@@ -380,6 +380,17 @@
 ; domain transition, and openssl is the first thing it has ever run. Stdlib-only
 ; is what puts it here: minting shells out because binding a TLS library would
 ; be a Python dependency the RPM must not declare.
+;
+; STATED PLAINLY, because the sentence above names the REASON and the rule is
+; wider than the reason: this grants execution of EVERY bin_t program, not of
+; openssl. Shipped Fedora policy gives openssl no type of its own -- it is
+; plain bin_t, along with most of /usr/bin -- so there is no narrower rule to
+; write, and inventing one would mean shipping a filecon that fights the base
+; policy for a binary this package does not own. What bounds the grant is
+; therefore the domain and not the rule: this process runs one argv, built by
+; vm_leaf_openssl_argv from a name vm_leaf_san has already refused every
+; character openssl's extension parser could read as a delimiter. Re-read that
+; boundary before adding any second subprocess here.
 (allow wlinspect_t bin_t (file (execute_no_trans)))
 
 ; THE GUEST AGENT SOCKET, which is the mint-time clock check and NOT the

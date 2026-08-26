@@ -1125,6 +1125,28 @@ def _decrypt_systemd_credential(name: str) -> str:
     )
 
 
+def _uncommented(text: str) -> str:
+    """The seed with its comment lines removed, for the substring contracts.
+
+    THE CONTRACTS BELOW ARE SUBSTRING PINS, which is a deliberate choice -- they
+    establish that a seed refers to a thing at all, not that it wires it up
+    correctly -- and a commented-out recipe satisfies one without doing
+    anything. That is not hypothetical: the reference seed at
+    workloads/vm-base/cloud-init/user-data carries both recipes commented out,
+    because it is `egress = "open"` and must not install an empty anchor, and
+    copying it forward is the intended way to start a filtered workload. A pin
+    that counted the copy would pass every seed that was started and never
+    finished, which is the false green this style has to be watched for.
+
+    Only a line whose FIRST non-space character is `#` is dropped. A `#` part
+    way through a line is content in YAML as often as it is a comment, and
+    guessing which would make the contract's answer depend on a reading of the
+    seed that cloud-init does not share.
+    """
+    return "\n".join(line for line in text.splitlines()
+                      if not line.lstrip().startswith("#"))
+
+
 def _render_default_user_data(name: str, guest_user: str, pubkey: str,
                               mounts: list, has_data_disk: bool,
                               host_private_key: str = "",
@@ -1451,6 +1473,26 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         template_vars.setdefault("WORKLOADCTL_VM_HOST_KEY", host_private_key)
         template_vars.setdefault("WORKLOADCTL_VM_HOST_KEY_B64", host_key_b64)
         template_vars.setdefault("WORKLOADCTL_VM_HOST_PUBKEY", host_public_key)
+        # The egress CA, on exactly the same terms as the host key above and
+        # for the same reason: a custom seed replaces the built-in cloud-config,
+        # so the operator has to install the anchor themselves -- and the
+        # contract below REFUSES to build a seed that does not. Without these
+        # two variables that contract is unsatisfiable, because the certificate
+        # lives in the workload's state directory and a seed is rendered before
+        # anything in the guest can read it. The only remaining escape would be
+        # seed_provides = ["ca"], which turns the check off without the guest
+        # trusting anything -- the exact outcome the check exists to prevent.
+        #
+        # `` for a workload with no CA (egress = "open", or a filtered one whose
+        # CA has not been minted yet), which substitutes to an empty string
+        # rather than raising: a seed that references the variable it does not
+        # need is a mistake worth surviving, and the contract below is what
+        # actually decides whether the anchor was required.
+        egress_ca = _read_vm_egress_ca(name)
+        template_vars.setdefault("WORKLOADCTL_VM_EGRESS_CA", egress_ca)
+        template_vars.setdefault(
+            "WORKLOADCTL_VM_EGRESS_CA_B64",
+            base64.b64encode(egress_ca.encode()).decode() if egress_ca else "")
         try:
             user_data_text = substitute_template(
                 raw,
@@ -1522,6 +1564,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # with the mount already in /etc/fstab, a guest-side CA store the image
         # builder populated).
         seed_provides = ci_cfg.get("seed_provides", []) or []
+        live = _uncommented(user_data_text)
 
         # The CA contract, which replaced the proxy contract this check used to
         # be. It is pinned on the BUNDLE PATH rather than on the advertised
@@ -1535,7 +1578,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         # seed also omits would be enforcing a rule against one path only.
         if (VM_CA_BUNDLE_AVAILABLE and vm_uses_inspect(config)
                 and "ca" not in seed_provides
-                and VM_CA_BUNDLE_PATH not in user_data_text):
+                and VM_CA_BUNDLE_PATH not in live):
             raise SeedContractError(
                 f"[vm.cloud_init].user_data_file for {name} never installs the "
                 f"egress CA bundle at {VM_CA_BUNDLE_PATH}, but this workload's "
@@ -1544,9 +1587,12 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
                 f"and point the guest's HTTP clients at it -- without it the "
                 f"guest cannot verify the certificates its own inspector "
                 f"presents, and every HTTPS fetch fails as a bad certificate "
-                f"rather than as a policy decision. Write the bundle and export "
-                f"{', '.join(VM_CA_ENV_VARS)} in the seed (see "
-                f"workloads/vm-base/cloud-init/user-data), or set "
+                f"rather than as a policy decision. Write the bundle from "
+                f"${{WORKLOADCTL_VM_EGRESS_CA_B64}} (encoding: b64), add it to "
+                f"the guest's system store with a ca_certs: block, and export "
+                f"{', '.join(VM_CA_ENV_VARS)} -- "
+                f"workloads/vm-base/cloud-init/user-data carries the whole "
+                f"block to copy. Or set "
                 f"[vm.cloud_init].seed_provides = [\"ca\"] if the guest image "
                 f"already carries that configuration."
             )
@@ -1554,7 +1600,7 @@ def build_cloud_init_iso(pw, config: dict, name: str, config_path: Path | None =
         if "mounts" not in seed_provides:
             vm_volumes = vm_cfg.get("volumes", []) or []
             for tag, vol_spec in zip(virtiofs_tags(vm_volumes), vm_volumes):
-                if tag in user_data_text:
+                if tag in live:
                     continue
                 _host, guest_path, _opts = parse_volume_spec(vol_spec)
                 raise SeedContractError(

@@ -706,3 +706,71 @@ class TestAnUnwritableCacheIsAMintFailure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCountersAreWrittenUnderTheLockTheyAreReadWith(unittest.TestCase):
+    """`snapshot` took the lock; nothing that WROTE ever did.
+
+    `d[k] += 1` is a read and a write rather than one operation, and every call
+    site runs on a per-connection thread. Unlocked, increments are lost under
+    exactly the concurrency the figures exist to describe -- `throttled` and
+    `denied_mints` are what a workload under sustained abuse is read by, and a
+    flood is what drives them in parallel. The lock existed and was a lock over
+    nothing.
+
+    Proven by holding the lock and watching a bump BLOCK, rather than by racing
+    threads and hoping to observe a lost update: a test that only sometimes
+    catches the bug is worse than no test, because a green run means nothing.
+    """
+
+    def _minter(self):
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(state, ignore_errors=True))
+        _mint_ca(state)
+        return vm_mint.Minter("wl-test", state, clock_check=lambda: "ok")
+
+    def test_a_bump_waits_for_the_lock(self):
+        minter = self._minter()
+        minter._lock.acquire()
+        done = threading.Event()
+
+        def bump():
+            minter._bump("mints")
+            done.set()
+
+        worker = threading.Thread(target=bump, daemon=True)
+        worker.start()
+        self.assertFalse(
+            done.wait(0.2),
+            "the counter was written while the lock was held, so `snapshot` "
+            "can read a figure mid-update and two threads can lose one")
+        minter._lock.release()
+        self.assertTrue(done.wait(2), "the bump never completed")
+        self.assertEqual(minter.stats["mints"], 1)
+
+    def test_a_subset_and_its_total_move_in_one_critical_section(self):
+        """`denied_mints` is a subset of `mints`, not a second dimension.
+
+        Bumped in one call so no reader can see a total that has not yet been
+        told about its own subset.
+        """
+        minter = self._minter()
+        minter._bump("mints", "denied_mints")
+        snap = minter.snapshot()
+        self.assertEqual((snap["mints"], snap["denied_mints"]), (1, 1))
+
+    def test_no_counter_is_written_outside_the_helper(self):
+        """A structural guard, because the defect was invisible at every site.
+
+        Each unlocked `self.stats[...] += 1` read as ordinary correct code on
+        its own line; what was wrong was the absence of a lock several hundred
+        lines away. Grepping is the only check that sees that, and it is the
+        same shape as the constant-drift assertion in tests/test_vm_broker.py.
+        """
+        source = Path(vm_mint.__file__).read_text()
+        writes = [line.strip() for line in source.splitlines()
+                  if "self.stats[" in line and "+=" in line]
+        self.assertEqual(
+            writes, ["self.stats[name] += 1"],
+            "every counter write must go through Minter._bump, which is the "
+            "only place that takes the lock `snapshot` reads with")

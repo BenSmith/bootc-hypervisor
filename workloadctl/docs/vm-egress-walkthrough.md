@@ -263,6 +263,38 @@ normal: a client that tries h3 and falls back presents as "some sites are slow
 for no reason anyone can find", and this counter is the difference between
 finding that in a minute and never finding it.
 
+## What an inspected request looks like when it arrives
+
+Under `tls = "inspect"` the request the origin receives is not the guest's bytes
+forwarded. The inspector parses the head, decides on it, and then **re-emits**
+one it composed itself, so nothing on the path can read the framing two ways.
+Three consequences are visible from the origin's side and worth knowing before
+you debug one:
+
+- **Header names arrive lowercased.** They are folded to lowercase when the head
+  is parsed and re-emitted in that form. HTTP field names are case-insensitive,
+  so this is legal and nothing in the wild should care — but an origin with a
+  hand-rolled parser that string-matches `Content-Type` might, and the symptom
+  is a request that works direct and fails inspected.
+- **`Content-Length` and `Transfer-Encoding` are the inspector's**, recomputed
+  from what it read rather than copied. A request framed both ways at once is
+  refused outright rather than resolved in favour of either.
+- **`Host` is the name that was authorised**, which for an absolute-form request
+  target is not what the guest's own `Host` header said.
+
+Hop-by-hop headers are dropped. The one exception is a protocol upgrade: an
+`Upgrade:` offer the inspector recognises is re-emitted, so the origin can
+answer `101` and the connection becomes an opaque tunnel from there — the
+request was policed as ordinary HTTP, and what flows afterwards is not, which
+the journal says in as many words. An `h2c` offer is the one that is *not*
+carried: HTTP/2 requests are HPACK frames this relay cannot read, so forwarding
+one would let a guest leave per-request authorisation behind. Such a request
+completes as the ordinary HTTP/1.1 exchange it also is.
+
+The response head, by contrast, is relayed **verbatim**. It was written by a
+host the policy authorised, and it is parsed only far enough to learn where the
+body ends.
+
 ## What rule 17 does not say
 
 Rule 17 exempts the re-originators by control group and says nothing about where

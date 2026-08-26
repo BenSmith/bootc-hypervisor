@@ -632,9 +632,20 @@ _TOKEN_CHARS = frozenset(
     "!#$%&'*+-.^_`|~0123456789"
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-# Headers we never forward: hop-by-hop ones (RFC 9110 §7.6.1's connection
-# header field list), plus the two framing headers, which are re-emitted from
-# what we computed, plus Host, which is re-emitted as the name we authorised.
+# Headers we never forward: the hop-by-hop names, plus the two framing headers,
+# which are re-emitted from what we computed, plus Host, which is re-emitted as
+# the name we authorised.
+#
+# A FIXED LIST, NOT RFC 9110 §7.6.1's. That section says the names to drop are
+# the ones the message's own `Connection` header lists, which is a set the GUEST
+# writes; this is the standing set those names are drawn from in practice. The
+# difference is real and is accepted: a guest sending `Connection: x-custom`
+# has `x-custom` forwarded rather than stripped. It buys nothing here -- every
+# framing decision on this path is recomputed by request_framing and re-emitted
+# by rebuild_request, so a header the origin does not recognise is a header the
+# origin ignores -- and honouring the dynamic list would mean letting guest
+# input decide which of OUR headers survive. Named so the citation cannot be
+# read as a claim this implements it.
 _NOT_FORWARDED = frozenset((
     "host", "content-length", "transfer-encoding", "connection",
     "proxy-connection", "keep-alive", "te", "trailer", "upgrade", "expect",
@@ -691,6 +702,7 @@ class Request(NamedTuple):
     framing: Framing
     expects_continue: bool
     wants_close: bool
+    upgrade: str = ""   # the Upgrade value to re-emit, "" for an ordinary request
 
 
 class _Stream:
@@ -1216,6 +1228,26 @@ def redirect_host(location, scheme=SCHEME_HTTP):
             return None
 
 
+def _is_count(text):
+    """Whether `text` is a plain ASCII decimal `int()` will accept.
+
+    NOT `str.isdigit()`, which is the obvious spelling and is wrong on the
+    response path. That head is decoded latin-1 -- deliberately, so a raw byte
+    in a filename cannot kill an authorised exchange -- and latin-1 carries the
+    superscripts. `"\u00b2".isdigit()` is True and `int("\u00b2")` raises, so a
+    `Content-Length: \u00b2` or a status line of `\u00b200` passed the guard and
+    then raised ValueError out of a call site that catches RequestUnreadable and
+    OSError: the connection thread died with a traceback and no counter moved,
+    in a file whose whole discipline is that every disposition is counted.
+
+    The request side never had the hole -- that head is decoded ASCII, so a
+    non-ASCII byte is refused several steps earlier -- and uses this anyway.
+    The guarantee that makes it safe lives two functions away, and a check
+    written to depend on it is one refactor from being wrong.
+    """
+    return text.isascii() and text.isdigit()
+
+
 def request_framing(headers):
     """Where the request body ends, by refusal rather than by preference.
 
@@ -1243,7 +1275,7 @@ def request_framing(headers):
                 "refused whether or not they agree, because agreeing today "
                 "makes the disagreeing case the untested path")
         value = lengths[0]
-        if not value.isdigit():
+        if not _is_count(value):
             raise RequestUnreadable(
                 f"Content-Length {value!r} is not a plain decimal count")
         return Framing("length", int(value))
@@ -1290,6 +1322,38 @@ def is_http_request_start(start):
     return None if len(start) < HTTP_METHOD_MAX else False
 
 
+# Protocol names we will not carry an upgrade to. An `h2c` upgrade moves the
+# rest of the connection onto HTTP/2, whose requests are HPACK-compressed
+# frames this relay cannot read -- so forwarding one would hand the guest a
+# way to opt out of per-request authorisation entirely, which is the property
+# the terminating plane exists to provide. ADR 008 leaves HTTP/2 open as a
+# capability to buy deliberately, and this is the line that keeps it from
+# arriving by accident in the meantime.
+_UPGRADE_REFUSED = frozenset(("h2", "h2c"))
+
+
+def _upgrade_offer(headers, tokens, version):
+    """The Upgrade value to forward, or "" for a request that is not one.
+
+    "" covers three different things and deliberately does not distinguish
+    them, because they all mean the same to the origin: not an upgrade at all,
+    an upgrade this relay will not carry, and an upgrade on HTTP/1.0 (where the
+    mechanism does not exist). In each case the request goes upstream as the
+    ordinary HTTP/1.1 request it also is, the origin does not switch protocols,
+    and the exchange completes normally -- which is the behaviour RFC 9110
+    already defines for a server that declines an offer, not a silent breakage.
+    """
+    if version != "HTTP/1.1" or "upgrade" not in tokens:
+        return ""
+    offered = [v.strip() for v in _get_all(headers, "upgrade") if v.strip()]
+    joined = ", ".join(offered)
+    for entry in joined.split(","):
+        name = entry.strip().split("/", 1)[0].strip().lower()
+        if name in _UPGRADE_REFUSED:
+            return ""
+    return joined
+
+
 def parse_request(head, scheme=SCHEME_HTTP):
     """A Request from a request head, normalised and framed, or raise."""
     start, headers = _split_head(head)
@@ -1327,7 +1391,8 @@ def parse_request(head, scheme=SCHEME_HTTP):
         method=method, target=target, version=version, authority=host,
         host=host, headers=headers, framing=request_framing(headers),
         expects_continue=bool(expects) and version == "HTTP/1.1",
-        wants_close=wants_close)
+        wants_close=wants_close,
+        upgrade=_upgrade_offer(headers, tokens, version))
 
 
 def rebuild_request(req):
@@ -1338,6 +1403,15 @@ def rebuild_request(req):
     emitted from the Framing we computed, and Host is re-emitted as the
     authority that was actually matched -- which for an absolute-form request
     is not what the guest's Host header said.
+
+    THE NAMES GO UPSTREAM LOWERCASED, as a consequence of _split_head folding
+    them for its own comparisons. Field names are case-insensitive, so this is
+    legal and nothing that reads HTTP properly can tell -- but an origin with a
+    hand-rolled parser that string-matches `Content-Type` can, and the symptom
+    is a request that works direct and fails inspected. Named here and in
+    docs/vm-egress-walkthrough.md rather than repaired: preserving the guest's
+    spelling would mean carrying a second copy of every name purely to write it
+    back, and the case where that matters is an origin already outside the spec.
     """
     lines = [f"{req.method} {req.target} {req.version}",
              f"Host: {req.authority}"]
@@ -1347,14 +1421,29 @@ def rebuild_request(req):
         lines.append(f"Content-Length: {req.framing.length}")
     elif req.framing.kind == "chunked":
         lines.append("Transfer-Encoding: chunked")
-    # The guest's own version goes upstream, and an HTTP/1.0 request is not
-    # offered keep-alive. Speaking 1.1 upstream on a 1.0 guest's behalf invites
-    # a `Transfer-Encoding: chunked` response, and the head is relayed
-    # verbatim -- so a client that has never heard of chunked would be handed
-    # a chunked body. The version is the one field that decides that, so it is
-    # the guest's.
-    lines.append("Connection: close" if req.version == "HTTP/1.0"
-                 else "Connection: keep-alive")
+    # AN UPGRADE OFFER IS RE-EMITTED, NOT DROPPED, and this is the one place the
+    # strip-and-recompute rule reaches past framing. `Upgrade` and `Connection`
+    # are both in _NOT_FORWARDED -- correctly, since a guest must not choose
+    # which of our headers survive -- and for one rung that meant every upgrade
+    # request reached the origin with the offer removed, so no origin could
+    # ever answer 101 and the whole relay-after-101 path below it was
+    # unreachable. ADR 008 records upgrades as SUPPORTED behaviour (police the
+    # request as ordinary HTTP, relay opaquely afterwards), so the offer is put
+    # back here -- from the value _upgrade_offer recognised, never from the
+    # guest's own bytes, which is what keeps this a recompute rather than a
+    # forward.
+    if req.upgrade:
+        lines.append(f"Upgrade: {req.upgrade}")
+        lines.append("Connection: upgrade")
+    else:
+        # The guest's own version goes upstream, and an HTTP/1.0 request is not
+        # offered keep-alive. Speaking 1.1 upstream on a 1.0 guest's behalf
+        # invites a `Transfer-Encoding: chunked` response, and the head is
+        # relayed verbatim -- so a client that has never heard of chunked would
+        # be handed a chunked body. The version is the one field that decides
+        # that, so it is the guest's.
+        lines.append("Connection: close" if req.version == "HTTP/1.0"
+                     else "Connection: keep-alive")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
 
 
@@ -1380,7 +1469,7 @@ def response_framing(status, method, headers):
                 "single 'chunked'")
         return Framing("chunked")
     if lengths:
-        if len(lengths) > 1 or not lengths[0].isdigit():
+        if len(lengths) > 1 or not _is_count(lengths[0]):
             raise RequestUnreadable(
                 "the origin's Content-Length is duplicated or not a count")
         return Framing("length", int(lengths[0]))
@@ -2071,6 +2160,26 @@ class Listener:
             # The guest rejected the leaf, or went away mid-handshake. The most
             # common real cause is a guest that never got the CA -- an existing
             # instance whose seed predates it, which cloud-init will not revisit.
+            #
+            # BUT NOT IF THE LEAF IS GONE, and that is worth a branch of its
+            # own. A cache eviction unlinks the PEM, so a leaf handed over and
+            # then evicted before load_cert_chain opens it fails right here --
+            # with an OSError about a path, and the sentence below would send
+            # an operator to re-provision a guest whose trust is perfectly
+            # fine. The caches are sized so this cannot happen (see
+            # DENIAL_CACHE_MAX on the invariant), which is exactly why it must
+            # say so if it ever does: it means that sizing is wrong, and no
+            # other line would ever tell anyone.
+            if not leaf.path.exists():
+                self.counters.record_drop(DROP_MINT_FAILED, host)
+                self._log(f"drop {where} host={host} reason='the leaf minted "
+                          f"for this connection was evicted before it could be "
+                          f"presented: {exc}. This is a cache-sizing fault, "
+                          f"not a trust one -- the leaf cache must hold more "
+                          f"entries than there are connection slots'")
+                if upstream is not None:
+                    upstream.sock.close()
+                return
             self.counters.record_drop(DROP_RELAY_FAILED, host)
             self._log(f"drop {where} host={host} reason='the guest did not "
                       f"complete the handshake: {exc}. A guest provisioned "
@@ -2445,6 +2554,22 @@ class Listener:
                 req.host, upstreams, reusable=not transient,
                 dial=self._dial_upstream_tls if pinned_host is not None
                 else self._dial_upstream_cleartext)
+        except ssl.SSLError as exc:
+            # BEFORE the OSError arm: ssl.SSLError IS an OSError, so a single
+            # generic arm reported a certificate that would not verify as a
+            # host that could not be reached -- and then paid for a second
+            # getaddrinfo to decide which flavour of unreachable to call it.
+            # The front of a terminated connection has always split these two
+            # (see _serve_tls_inspect); this is the REDIAL, which reaches the
+            # same verifying dial by way of an origin that answered
+            # `Connection: close` or an HTTP/1.0 exchange, and it deserves the
+            # same sentence -- the one naming the host's own trust anchor,
+            # which is the only thing an operator can act on.
+            reason, text = self._upstream_tls_failure(req.host, exc)
+            self.counters.record_drop(reason, req.host)
+            self._log(f"drop {where} host={req.host} "
+                      f"reason='{reason}: {exc}'")
+            return self._refuse(client, conn, req, 502, "Bad Gateway", text)
         except OSError as exc:
             reason = self._dial_failure_reason(req.host)
             self.counters.record_drop(reason, req.host)
@@ -2480,7 +2605,7 @@ class Listener:
             copy_body(client, up.sock, req.framing)
             self.counters.record_forward()
             self._log(f"forward {where} host={req.host} method={req.method}")
-            return self._relay_response(up, conn, req, where)
+            return self._relay_response(up, client, conn, req, where)
         except (RequestUnreadable, OSError) as exc:
             self.counters.record_drop(DROP_RELAY_FAILED, req.host)
             self._log(f"drop {where} host={req.host} "
@@ -2557,7 +2682,7 @@ class Listener:
         sock.settimeout(RELAY_IDLE_TIMEOUT)
         return _Stream(sock)
 
-    def _relay_response(self, up, conn, req, where=""):
+    def _relay_response(self, up, client, conn, req, where=""):
         """Relay one response. True if the connection may carry another.
 
         The head goes across verbatim, which is not the rule the REQUEST
@@ -2577,7 +2702,7 @@ class Listener:
                 raise RequestUnreadable("the upstream closed before answering")
             start, headers = _split_response_head(head)
             fields = start.split(" ")
-            if len(fields) < 2 or not fields[1].isdigit():
+            if len(fields) < 2 or not _is_count(fields[1]):
                 raise RequestUnreadable(
                     f"status line {start!r} is not one we read")
             status = int(fields[1])
@@ -2597,12 +2722,20 @@ class Listener:
                 self._log(f"upgrade {where} host={req.host} "
                           f"reason='switched protocols; per-request policy no "
                           f"longer applies to this connection'")
-                # Anything either side read past the message boundary belongs to
-                # the tunnel and goes across before the relay starts, or the
-                # stream is delivered out of order.
+                # Anything EITHER side read past the message boundary belongs
+                # to the tunnel and goes across before the relay starts, or the
+                # stream is delivered out of order. Both directions, which for
+                # one rung this did not do: the guest's own surplus stayed in
+                # its _Stream buffer and was never sent, so a client that
+                # pipelined its first frame behind the upgrade request -- which
+                # is legal, and which some clients do -- lost exactly those
+                # bytes into a tunnel that then looked merely stalled.
                 pending_up = up.take_buffered()
                 if pending_up:
                     conn.sendall(pending_up)
+                pending_client = client.take_buffered()
+                if pending_client:
+                    up.sock.sendall(pending_client)
                 return self._relay_upgraded(conn, up.sock)
             self._note_redirect(status, headers, req, where)
             if 100 <= status < 200:

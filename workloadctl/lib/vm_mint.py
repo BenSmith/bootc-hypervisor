@@ -78,10 +78,28 @@ _CLOCK_STATS = {
 # unbounded growth rather than a budget anything is expected to press against.
 LEAF_CACHE_MAX = 1024
 
-# The denial set, deliberately an eighth the size. It is the one an adversary
+# The denial set, deliberately a quarter the size. It is the one an adversary
 # controls the fill rate of, and nothing depends on a denial staying cached --
 # a miss costs one mint, which is exactly what the bucket below rations.
-DENIAL_CACHE_MAX = 128
+#
+# THE FLOOR IS NOT AESTHETIC: A CACHE MUST HOLD MORE ENTRIES THAN THERE CAN BE
+# CONNECTIONS IN FLIGHT. Eviction unlinks the victim's PEM, and a leaf is a
+# file the caller opens AFTER this class has handed it over -- so if the
+# least-recently-used entry can be one a live connection is still holding, a
+# flood can delete a certificate out from under a handshake that was about to
+# use it. With N connection slots, N distinct names can be checked out at once,
+# and only the N+1'th insert can evict something nobody holds.
+#
+# This was 128, which is exactly workload-vm-inspect-listener's MAX_CONNECTIONS
+# and therefore exactly one entry short of the invariant: 128 concurrent
+# denials for distinct names could evict the oldest of themselves. The failure
+# was a handshake that died on a missing file and was reported as the guest not
+# trusting the CA -- a wrong diagnosis pointing at a re-provision. Doubled, so
+# the margin is a factor rather than an off-by-one, and asserted against the
+# listener's ceiling by tests/test_vm_mint.py, since the two numbers live in
+# different files and nothing else makes them meet. The working set was always
+# clear of this (1024 against 128) and is unchanged.
+DENIAL_CACHE_MAX = 256
 
 # The bucket. 256 tokens refilling at 1/s: a cold VM contacting fifty hosts
 # spends fifty tokens at once and refills in under a minute, while a guest
@@ -421,6 +439,26 @@ class Minter:
         self._lock = threading.Lock()
         self._ca_identity = None
 
+    def _bump(self, *names: str) -> None:
+        """Add one to each named counter, under the lock `snapshot` reads with.
+
+        `d[k] += 1` is a read and a write rather than one operation, and every
+        call site here runs on a per-connection thread. Unlocked, increments are
+        lost under exactly the concurrency the figures exist to describe -- a
+        workload under sustained abuse is read by `throttled` and
+        `denied_mints`, and those are the counters a flood drives in parallel.
+        The lock was already taken by `snapshot`; it simply was not taken by
+        anything that WROTE, which made it a lock over nothing.
+
+        Several names at once because the pairs are subsets, not dimensions:
+        `denied_mints` counts the denial-only half of `mints`. Bumping them in
+        one critical section is what stops a reader seeing a total that has not
+        yet been told about its own subset.
+        """
+        with self._lock:
+            for name in names:
+                self.stats[name] += 1
+
     def leaf(self, server_name: str, *, denied: bool) -> Leaf:
         """A leaf for one exact name. Raises rather than returning a sentinel.
 
@@ -442,25 +480,23 @@ class Minter:
 
         cached = cache.get(name, now=now)
         if cached is not None:
-            self.stats["hits"] += 1
-            if denied:
-                self.stats["denied_hits"] += 1
+            self._bump(*(("hits", "denied_hits") if denied else ("hits",)))
             return cached
 
         if denied:
             if not self.bucket.take():
-                self.stats["throttled"] += 1
+                self._bump("throttled")
                 raise MintThrottled(name, denied=True)
         else:
             if not self.bucket.wait(MINT_WAIT_SECONDS):
-                self.stats["throttled"] += 1
+                self._bump("throttled")
                 raise MintThrottled(name, denied=False)
 
         # On a miss only, and after the bucket: a guest cannot make this run
         # more often than it can make us mint.
         outcome = self._clock_check()
         if outcome in _CLOCK_STATS:
-            self.stats[_CLOCK_STATS[outcome]] += 1
+            self._bump(_CLOCK_STATS[outcome])
 
         leaf = self._mint(name, cache, denied=denied)
         cache.put(leaf)
@@ -548,10 +584,10 @@ class Minter:
                     result = self._runner(argv, capture_output=True, text=True,
                                           timeout=30)
                 except (OSError, subprocess.SubprocessError) as exc:
-                    self.stats["failed"] += 1
+                    self._bump("failed")
                     raise MintFailed(f"could not run openssl: {exc}") from exc
                 if result.returncode != 0:
-                    self.stats["failed"] += 1
+                    self._bump("failed")
                     # Both streams: openssl splits its diagnostics across them
                     # and which half carries the cause varies by subcommand.
                     detail = ((result.stderr or "")
@@ -563,19 +599,17 @@ class Minter:
                 os.chmod(staged, 0o600)
                 os.replace(staged, target)
         except OSError as exc:
-            self.stats["failed"] += 1
+            self._bump("failed")
             raise MintFailed(
                 f"could not write a leaf for {name!r} into {argv_dir}: "
                 f"{exc}") from exc
 
-        self.stats["mints"] += 1
-        if denied:
-            self.stats["denied_mints"] += 1
+        self._bump(*(("mints", "denied_mints") if denied else ("mints",)))
         not_after = _pem_not_after(target)
         if not_after is None:
             # A leaf we just minted and cannot read back is not a leaf.
             target.unlink(missing_ok=True)
-            self.stats["failed"] += 1
+            self._bump("failed")
             raise MintFailed(f"minted leaf for {name!r} is unreadable")
         return Leaf(name=name, path=target, not_after=not_after)
 

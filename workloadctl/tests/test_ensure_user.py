@@ -214,8 +214,15 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
             if path.exists():
                 body = path.read_text()
                 if self.mod.VM_CA_BUNDLE_PATH not in body:
+                    # A LIVE line, not a comment. This used to inject
+                    # `# egress CA bundle: <path>` and the contract accepted it,
+                    # because the pin was a bare substring search over the whole
+                    # seed -- so the harness was itself standing on the false
+                    # green the pin's own comment warns about. The contract now
+                    # ignores comment lines (see _uncommented), and the
+                    # injection has to be something a seed would really carry.
                     path.write_text(
-                        body + f"\n# egress CA bundle: "
+                        body + f"\nca_bundle_path: "
                                f"{self.mod.VM_CA_BUNDLE_PATH}\n")
         if udf and inject_host_key:
             path = Path(udf)
@@ -409,7 +416,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
-                      f"# egress CA bundle: {self.mod.VM_CA_BUNDLE_PATH}\n"
+                      f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -438,7 +445,7 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # filtered by default, so the CA contract applies to them anyway.
         ud.write_text("#cloud-config\nhostname: test\n"
                       "ssh_deletekeys: false\n"
-                      f"# egress CA bundle: {self.mod.VM_CA_BUNDLE_PATH}\n"
+                      f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
                       "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n")
         cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"}}}
         import shutil as _shutil
@@ -642,6 +649,83 @@ class TestBuildCloudInitIsoTemplateMode(unittest.TestCase):
         # front of them and needs to know which one applies.
         self.assertIn(self.mod.VM_CA_BUNDLE_PATH, str(ctx.exception))
         self.assertIn("seed_provides", str(ctx.exception))
+
+    def test_the_seed_can_reach_the_ca_the_contract_demands(self):
+        """The contract is only satisfiable because these variables exist.
+
+        The CA lives in the workload's state directory and a seed is rendered
+        before anything in the guest can read it, so without a magic var an
+        operator has NO way to install the anchor the check above insists on --
+        the only remaining escape would be seed_provides = ["ca"], which turns
+        the check off without the guest trusting anything. That is the outcome
+        the check exists to prevent, which makes the missing variable a hole in
+        the contract rather than a missing convenience.
+
+        Same shape as WORKLOADCTL_VM_HOST_KEY / _B64 above, and for the same
+        reason: the raw PEM is multi-line and does not survive naive ${VAR}
+        splicing into a YAML block scalar, so the b64 form is what a write_files
+        entry uses and the raw form is what a ca_certs: block does.
+        """
+        from vm import vm_ca_cert_path
+        # `workload_state_dir` is mocked to self.home for the duration of the
+        # build, so this is where _read_vm_egress_ca will look.
+        cert = vm_ca_cert_path(self.home)
+        cert.parent.mkdir(parents=True, exist_ok=True)
+        expected = ("-----BEGIN CERTIFICATE-----\n"
+                    "TUlJTk9UQVJFQUxDRVJU\n"
+                    "-----END CERTIFICATE-----\n")
+        cert.write_text(expected)
+        self._seed(
+            "write_files:\n"
+            f"  - path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            "    encoding: b64\n"
+            "    content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n"
+            "ca_certs:\n  trusted:\n    - |\n"
+            "      ${WORKLOADCTL_VM_EGRESS_CA}\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        self._run_build(cfg, inject_ca=False)
+        rendered = self._read_user_data()
+        self.assertIn("BEGIN CERTIFICATE", rendered,
+                      "the raw form must splice the PEM into the seed")
+        import base64 as _b64
+        self.assertIn(_b64.b64encode(expected.encode()).decode(), rendered,
+                      "the b64 form must splice the same PEM, encoded")
+
+    def test_a_commented_out_ca_recipe_does_not_satisfy_the_contract(self):
+        """The pin is a substring search, and a comment is not an installation.
+
+        This is not hypothetical: workloads/vm-base/cloud-init/user-data carries
+        the whole recipe commented out -- it must, being `egress = "open"`, since
+        an active block there would install an empty anchor -- and copying that
+        file forward is the documented way to start a filtered workload. A pin
+        that counted the copy would pass every seed that was started and never
+        finished, on exactly the workloads that need it most.
+        """
+        self._seed(
+            "ssh_deletekeys: false\n"
+            "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n"
+            "# write_files:\n"
+            f"#   - path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            "#     content: ${WORKLOADCTL_VM_EGRESS_CA_B64}\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET}}
+        with self.assertRaises(self.mod.SeedContractError):
+            self._run_build(cfg, inject_ca=False, inject_host_key=False)
+
+    def test_a_commented_out_mount_does_not_satisfy_the_contract(self):
+        """The volume pin has the same shape and the same hole."""
+        (self.home / "vol").mkdir(parents=True, exist_ok=True)
+        self._seed(
+            "ssh_deletekeys: false\n"
+            "host_key: ${WORKLOADCTL_VM_HOST_KEY}\n"
+            f"ca_bundle_path: {self.mod.VM_CA_BUNDLE_PATH}\n"
+            "# mounts:\n# - ['data-share', '/srv', 'virtiofs']\n")
+        cfg = {"vm": {"cloud_init": {"user_data_file": "user-data"},
+                      "network": self._FILTERED_NET,
+                      "volumes": ["./vol:/srv"]}}
+        with self.assertRaises(self.mod.SeedContractError):
+            self._run_build(cfg, inject_ca=False, inject_host_key=False)
 
     def test_a_custom_seed_declaring_ca_is_accepted(self):
         """seed_provides = ["ca"] is the opt-out for a guest image that already
