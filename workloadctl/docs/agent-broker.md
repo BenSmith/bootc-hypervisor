@@ -6,8 +6,13 @@ knows which sandbox is calling, and how to run it.
 A sandboxed coding agent never receives a provider API key. It points its client
 at the broker with a base-URL override; the broker attaches the real credential
 on the way out. Guest → broker is plain HTTP over an isolated path; broker →
-provider is ordinary verified TLS from the host. No CA in the guest, no TLS
-interception, nothing that breaks certificate pinning.
+provider is ordinary verified TLS from the host, and the agent never holds the
+credential. The broker's own path involves no TLS interception and breaks no
+certificate pinning. (Since 2026-08-26 a *filtered* VM does carry a CA for a
+different reason — its egress inspector terminates TLS by default; see
+`adr/008-transparent-egress-inspection.md`. That is egress policy, not
+this. The broker's argument never rested on the guest being CA-free; it rests
+on the credential never entering the guest at all.)
 
 Extracted 2026-08-12 from the session record that produced the broker. That
 record is a narrative of one design session and covers two other subjects; it
@@ -62,6 +67,15 @@ credential, re-encrypt — requires a CA in every guest, a full userspace networ
 stack, and it breaks certificate pinning. It has to work that way because it
 cannot assume the software inside cooperates.
 
+*Amended 2026-08-26:* a filtered VM now has all of that anyway, for egress
+policy. It does not change the conclusion, and the reason is worth stating
+plainly: the substitution is the expensive half. Reading a request to authorise
+its host is bounded work; rewriting one to carry a credential means knowing the
+provider's auth scheme, keeping up with it, and holding the key on a path that
+parses guest-controlled bytes. The broker holds the key on a path that parses
+nothing of the guest's beyond a request line — and it is 300 lines because of
+that, not because the guest has no CA.
+
 **You can assume cooperation.** You control the guest image, and every agent SDK
 honours a base-URL override. So:
 
@@ -70,15 +84,19 @@ honours a base-URL override. So:
 - Guest → broker is plain HTTP on an address only that guest can reach;
   broker → provider is ordinary verified TLS from the host
 
-No CA in the guest. No interception. No pinning breakage. The agent never holds
-a credential — the single property that matters most.
+No interception on this path. No pinning breakage. The agent never holds a
+credential — the single property that matters most, and the only one of the four
+that depends on nothing else being configured.
 
 **This does not replace network policy.** The broker covers exactly one
 destination. Everything else the agent reaches — git, package registries,
 whatever it decides to curl — still needs default-deny egress, or you have
 protected the API key while leaving every exfiltration path open. That companion
-work exists in workloadctl (per-VM default-deny keyed on the workload uid, plus
-a per-workload CONNECT proxy for hostname policy) and merged 2026-08-12.
+work exists in workloadctl — per-VM default-deny keyed on the workload uid,
+plus a transparent per-workload egress inspector for hostname policy — and
+merged 2026-08-12. The inspector replaced the CONNECT proxy this paragraph
+originally named: a proxy only filters a guest that is configured to use it,
+and the redirect does not ask.
 
 ---
 

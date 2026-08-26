@@ -1370,9 +1370,15 @@ How it fits together:
   dial to land on someone else's inspector.
 - **HTTP** is matched on the `Host` header, read before anything is forwarded —
   a match is forwarded, a miss is answered `403`. **HTTPS** is matched on the
-  SNI in the ClientHello and then **spliced**: the same bytes are replayed
-  upstream, nothing is decrypted, and no CA goes into the guest. See
-  `[vm.network].tls`.
+  SNI in the ClientHello and then, under the default `tls = "inspect"`,
+  **terminated**: the inspector completes the guest's handshake with a leaf from
+  this workload's own CA, verifies the origin against the *host's* anchors on a
+  separate session, and authorises every request inside by its `Host` header. A
+  refused name gets a real `403` through a chain the guest trusts. This host
+  holds the plaintext, and the guest must trust that CA — the seed installs it,
+  once per instance-id. `tls = "splice"` keeps the older, weaker property:
+  byte-for-byte replay, nothing decrypted, no CA, and the name checked once per
+  connection. See `[vm.network].tls`.
 - A connection carrying **no readable name** is dropped rather than guessed at —
   a literal dialled with no `Host` header, or a non-TLS byte stream on 443, has
   nothing to match a pattern against.

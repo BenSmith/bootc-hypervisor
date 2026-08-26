@@ -60,6 +60,7 @@ from vm import (
     NFT_MAP_INSPECT4, NFT_MAP_INSPECT6, NFT_SET_INSPECT_SELF,
     NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
+    VM_TLS_DEFAULT,
     vm_inspect_address, vm_uses_inspect,
     VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
     vm_uses_resolve,
@@ -1344,11 +1345,19 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                  f"expects a service there, it needs a [vm.network].allow "
                  f"entry for the real address, not the listener's")
 
+    # The TLS mode is named because the two are different security postures
+    # with the same green line: `inspect` authorises every request and holds
+    # the plaintext, `splice` checks one name per connection and holds nothing.
+    # An operator reading "inspected" and getting the other one is the whole
+    # reason this word is here.
+    tls_mode = config.config.get("vm", {}).get("network", {}).get(
+        "tls", VM_TLS_DEFAULT)
+    posture = "terminating" if tls_mode == "inspect" else "splicing"
     return ("vm_inspect", True,
             f"egress inspected on both families: uid {uid} redirected to "
             f"{addr.v4}/[{addr.v6}] ports {VM_INSPECT_PORT_CLEARTEXT} "
-            f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls), {unit} listening"
-            f"{tail}")
+            f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls, {posture}), "
+            f"{unit} listening{tail}")
 
 
 def _netdev_dns_fragment(name: str) -> str | None:

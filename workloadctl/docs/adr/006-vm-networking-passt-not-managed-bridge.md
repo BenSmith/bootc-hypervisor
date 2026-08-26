@@ -695,3 +695,35 @@ tests guard their own preconditions first — the postures are read back out of
 `wl_filtered` before any probe, and the run skips rather than passes if the
 harness host cannot reach the destination itself — because every one of those
 would otherwise turn into a green that means nothing.
+
+### Amendment 2026-08-26: the proxy this ADR added is gone, and the plane it left holds plaintext
+
+A decision record is not rewritten, so what follows amends the Consequences
+above rather than editing them. Two of its statements have been overtaken by
+`008-transparent-egress-inspection.md`.
+
+**The per-workload tinyproxy listed under *Added* (step 4) no longer exists.**
+It was replaced by a transparent inspector on a uid-keyed redirect. The
+mechanism this ADR chose is what made that possible and is unchanged: passt
+re-originates the guest's traffic as host sockets owned by `_wl-<name>`, so the
+workload uid is an unforgeable selector, and the redirect keys on it. What
+changed is that a guest no longer has to be *configured* to use a proxy for the
+policy to apply — the reason the proxy was always a weaker construction than
+the uid selector underneath it.
+
+**The `Not addressed` list gains an entry, and it is a real cost.** As of
+`tls = "inspect"` — the default — a filtered VM's HTTPS is terminated on the
+host: the inspector completes the guest's handshake with a leaf from that
+workload's own CA and holds the plaintext for the length of the connection.
+This ADR's design put nothing on the host that could read a guest's TLS. That
+is no longer true, and it is not a side effect: it is the price of the
+allowlist meaning per request what it previously meant only per connection. The
+CA is per workload, lives under that workload's uid, and can impersonate sites
+only to the single guest that trusts it — but a filtered VM is no longer a
+place where "the host cannot read this traffic" holds. `tls = "splice"` keeps
+the original property for a workload that needs it.
+
+**Unchanged by all of it:** the guest still has no LAN identity of its own, the
+management address is still uid-derived and unroutable, and `[vm.network].ports`
+is still the only inbound path. Nothing in the termination touches the network
+model this ADR decided.

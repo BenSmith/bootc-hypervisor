@@ -185,20 +185,34 @@ this is an ordinary dial on an ordinary network:
    before the filter chain) matches `tcp dport 443`, looks uid 10004 up in
    `wl_inspect4`, and DNATs to `198.18.1.4:8443`.
 4. The filter chain sees the translated tuple and rule 5 accepts it.
-5. The inspector reads the ClientHello, takes `api.example.com` out of the SNI,
-   and fnmatches it against `hosts`. It matches.
+5. The inspector reads the ClientHello **without answering it**, takes
+   `api.example.com` out of the SNI, and fnmatches it against `hosts`. It
+   matches.
 6. The inspector opens its own socket to `api.example.com:443` — same uid 10004,
    and that destination is in no allow set. What saves it is rule 17: the
    inspector runs as its workload's own user *on purpose*, so `meta skuid` cannot
    separate its traffic from the guest's, and the control group is the
    discriminator that survives the shared uid. systemd assigns it, a guest can
    neither enter nor forge it, and it widens no destination or port.
-7. The connection is **spliced**: the bytes the guest sent are replayed upstream
-   unmodified. Nothing is decrypted, there is no CA, and the guest's trust store
-   is untouched. Enforcement happened at the name, in step 5.
+7. Under the default `tls = "inspect"` the connection is **terminated**. The
+   inspector completes the guest's handshake with a leaf minted by *this
+   workload's* own CA, verifies the origin's certificate against **the host's**
+   trust anchors on its own session, and authorises every request inside by its
+   `Host` header. So the guest's trust store IS touched — it has to hold this
+   workload's CA, which the seed installs — and this host holds the plaintext
+   for the length of the connection. That is the trade the default takes: the
+   allowlist's claim, that the guest reaches these hosts and no others, is only
+   true per request once something is reading the requests.
+
+   Under `tls = "splice"` step 7 is instead a byte-for-byte replay: nothing is
+   decrypted, no CA is involved, and the guest's trust store is untouched. The
+   name is then checked **once**, at the front of a connection whose contents
+   nothing can see. Weaker, fully supported, and the answer for a guest that
+   cannot be re-seeded or a host that does not speak HTTP over 443.
 
 Cleartext is the same path one plane over: DNAT to `:8080`, the `Host` header
-read in place of the SNI, and a match **forwarded** rather than spliced.
+read in place of the SNI, and a match **forwarded**. Under termination the two
+planes converge — the same per-request authorisation runs on both.
 
 Then the paths that don't work, which are the point:
 
@@ -210,7 +224,17 @@ Then the paths that don't work, which are the point:
   where the same guest simply did not use it and had to be caught by the default
   deny instead.
 - **The guest asks for a host not on the list.** For HTTP, a `403` before
-  anything is forwarded. For HTTPS, dropped after the ClientHello is read.
+  anything is forwarded. For HTTPS under `inspect`, the same `403` — delivered
+  *through* a completed handshake, using a leaf minted for the refused name, so
+  the guest reads a sentence instead of guessing at a closed socket. Under
+  `splice` there is no session to say it in, so the connection is dropped after
+  the ClientHello is read and the guest cannot tell that from the host being
+  down.
+- **The guest speaks something other than HTTP over 443.** A database wire
+  protocol, a tunnel, HTTP/2 — under `inspect` the inspector is the one reading,
+  and bytes that do not begin a request line get the connection **closed**,
+  counted per host under *not HTTP*. Under `splice` those bytes went through
+  untouched. That per-host figure is the list of workloads to move to `splice`.
 - **The guest asks for a host not on the list, by name.** It does not get that
   far: the responder answers only for names policy knows about, so the lookup
   fails first. That is a second, earlier refusal than the inspector's.

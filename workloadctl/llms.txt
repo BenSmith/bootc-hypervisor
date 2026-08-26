@@ -327,8 +327,20 @@ socket-activated listener (`libexec/workload-vm-inspect-listener`) running as
 DNS responder** (`libexec/workload-vm-resolve`, `security/workload-resolve.cil`).
 **The guest is told nothing.** It dials 80 and 443 normally and a DNAT keyed on
 the workload uid lands it on its own inspector, which reads the `Host` header
-(forward, or 403) or the ClientHello's SNI (splice: the same bytes replayed
-upstream, nothing decrypted, no CA).
+(forward, or 403) or the ClientHello's SNI.
+
+`[vm.network].tls` decides what happens to 443, and the default is
+**`inspect`**: the inspector completes the guest's handshake with a leaf minted
+by *this workload's own CA*, verifies the origin against the **host's** anchors
+on a separate session, and authorises every request inside by its `Host` header
+— so the allowlist means the same thing on 443 as on 80, and a refused name gets
+a readable 403 through a chain the guest trusts rather than a closed socket.
+Consequences that catch people out: the guest must trust that CA, which the seed
+installs **once per instance-id** (an existing VM gets certificate errors until
+re-seeded); this host holds the plaintext; a host requiring a client certificate
+or not speaking HTTP over 443 is refused. `tls = "splice"` is the older, weaker
+property and stays fully supported — the same bytes replayed upstream, nothing
+decrypted, no CA, and the name checked once per connection.
 
 Through rung 1 this was a per-workload tinyproxy the guest was *configured* to
 use via `https_proxy` at an advertised literal. That is gone. Its weakness was

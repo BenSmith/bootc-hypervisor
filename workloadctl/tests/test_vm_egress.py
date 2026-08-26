@@ -1359,8 +1359,11 @@ class TestInspectDiagnose(unittest.TestCase):
         import cmd_diagnose
         self.mod = cmd_diagnose
 
-    def _config(self, egress="filtered", bridge=None, uid=10001, is_vm=True):
+    def _config(self, egress="filtered", bridge=None, uid=10001, is_vm=True,
+                tls=None):
         net = {} if egress is None else {"egress": egress}
+        if tls is not None:
+            net["tls"] = tls
         cfg = {"vm": {}} if is_vm else {"container": {}}
         if is_vm:
             cfg["vm"]["network"] = dict(net)
@@ -1374,14 +1377,14 @@ class TestInspectDiagnose(unittest.TestCase):
         return [{"concat": [uid, port]},
                 {"concat": ["198.18.1.1", 8080]}]
 
-    def _run(self, **kw):
+    def _run(self, tls=None, **kw):
         kw.setdefault("socket_active", True)
         kw.setdefault("v6_route", True)
         # Injected rather than probed so no test shells out to nft. None is
         # the reading on a host where the set cannot be read, which is what
         # every test that is not about this counter should see.
         kw.setdefault("self_dials", None)
-        return self.mod.vm_inspect_check(self._config(), **kw)
+        return self.mod.vm_inspect_check(self._config(tls=tls), **kw)
 
     # --- applicability ---
 
@@ -1444,6 +1447,20 @@ class TestInspectDiagnose(unittest.TestCase):
                                    elements6=[self._elem(10001, 80)])
         self.assertTrue(passed)
         self.assertIn("both families", msg)
+
+    def test_the_green_line_names_which_posture_is_in_force(self):
+        """Rung 3 T9. `inspect` and `splice` are different security postures
+        behind the same green line -- one authorises every request and holds
+        the plaintext, the other checks one name per connection and holds
+        nothing. An operator reading "inspected" and having the other one is
+        why the word is there."""
+        armed = dict(elements4=[self._elem(10001, 80)],
+                     elements6=[self._elem(10001, 80)])
+        _, _, default = self._run(**armed)
+        self.assertIn("terminating", default)
+        _, _, spliced = self._run(tls="splice", **armed)
+        self.assertIn("splicing", spliced)
+        self.assertNotIn("terminating", spliced)
 
     def test_a_host_with_no_v6_route_still_passes_but_says_so(self):
         # A correctly armed v6 redirect logs nothing on such a host: the packet

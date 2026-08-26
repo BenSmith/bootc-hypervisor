@@ -1360,12 +1360,14 @@ def vm_ca_env(config: dict) -> dict[str, str]:
     the block and a later rung that re-added it would be two migrations of the
     seed contract where one will do.
 
-    THE VALUES ARE NOT HERE YET
+    THE VALUES ARE HERE, SINCE RUNG 3
 
-    Rung 3 mints the CA; until then `tls` is "splice" only, no certificate is
-    presented to the guest, and nothing needs to trust anything. The shape moves
-    now and the path is fixed now so that the variable NAMES and the guest file
-    path are settled before there is a certificate to put at the end of them.
+    They were not, for one rung: the shape and the guest path moved first so
+    that the variable names were settled before there was a certificate to put
+    at the end of them. There is one now. This workload's own CA is minted into
+    its state directory, written into the seed at VM_CA_BUNDLE_PATH, and named
+    by these five variables -- and under the default `tls = "inspect"` the guest
+    NEEDS it, because the leaf the inspector presents is signed by nothing else.
 
     ONCE PER INSTANCE ID, the same caveat the proxy block carried. cloud-init
     replays a seed only when the instance id changes, so editing this block on a

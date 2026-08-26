@@ -828,6 +828,25 @@ purpose, because shifting a UID mapping under a running container corrupts its
 namespace. Remap by hand with the workload stopped, and `chown` only `state/` —
 `data/` is owned by the workload UID itself, not out of the subordinate range.
 
+**Two symptoms of a terminating inspector that no check can see.** With
+`[vm.network].tls = "inspect"` (the default) the inspector completes the guest's
+TLS itself, and two things then go wrong quietly enough that `diagnose` stays
+green:
+
+- *A host that requires a **client** certificate* answers `502` naming itself,
+  which is loud. A host that merely **offers** client authentication does not:
+  the session completes, the guest is simply unauthenticated, and the host
+  starts answering its own `401`/`403` — only under termination, while it worked
+  under `splice` and works from anywhere else. Nothing failed, so nothing counts
+  it. If a host regresses that way after a workload starts terminating, set
+  `tls = "splice"` on the workload.
+- *A private root that only the guest trusts.* Verification of the origin now
+  happens on **this host's** anchors, not the guest's, so an internal service
+  signed by a private root answers `502` until that root is installed in
+  `/etc/pki/ca-trust/source/anchors` on the host and `update-ca-trust` has run.
+  Installing it in the guest changes nothing, which is the part that costs an
+  afternoon.
+
 **Trust anchor check.** `ca_trust_anchors` fails when a certificate in
 `/etc/pki/ca-trust/source/anchors` is absent from the extracted TLS bundle —
 the anchor is installed but grants no trust, so pulls from a registry it signs
