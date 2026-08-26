@@ -1657,8 +1657,13 @@ class Listener:
             return self._refuse(
                 client, conn, req, 403, "Forbidden",
                 f"{req.host} is not on this workload's egress allowlist")
+        # An HTTP/1.0 request is the one we tell the origin to close (see
+        # rebuild_request), so its upstream is opened for this request alone
+        # and is not put in the map for the next one to find.
+        transient = req.version == "HTTP/1.0"
         try:
-            up = self._upstream_for(req.host, upstreams)
+            up = self._upstream_for(req.host, upstreams,
+                                    reusable=not transient)
         except OSError as exc:
             reason = self._dial_failure_reason(req.host)
             self.counters.record_drop(reason, req.host)
@@ -1700,8 +1705,18 @@ class Listener:
             self._log(f"drop {where} host={req.host} "
                       f"reason='relay failed: {exc}'")
             return False
+        finally:
+            # A transient upstream is in no map, so _serve_cleartext's own
+            # close over `upstreams` will never reach it. Closed here, on every
+            # path out of the exchange, or it leaks a host socket owned by the
+            # workload uid for as long as the client connection lives.
+            if transient:
+                try:
+                    up.sock.close()
+                except OSError:
+                    pass
 
-    def _upstream_for(self, host, upstreams):
+    def _upstream_for(self, host, upstreams, reusable=True):
         """The connection to an authorised name, opened once and reused.
 
         Dialled by NAME (§7.4), like the TLS plane: the address the guest aimed
@@ -1716,6 +1731,10 @@ class Listener:
         case and nothing at all in the honest one. `upstreams` is an ordinary
         dict, which preserves insertion order, and a hit reinserts to move the
         entry to the young end.
+
+        `reusable=False` opts one exchange out of the map entirely -- see the
+        branch below for which requests do that and why. The stream is still
+        returned; it is simply the caller's to close.
         """
         up = upstreams.pop(host, None)
         if up is None:
@@ -1723,6 +1742,18 @@ class Listener:
                 (host, VM_INSPECT_ORIG_CLEARTEXT), timeout=CONNECTION_TIMEOUT)
             sock.settimeout(RELAY_IDLE_TIMEOUT)
             up = _Stream(sock)
+        if not reusable:
+            # Not cached at all. rebuild_request sends `Connection: close`
+            # upstream for an HTTP/1.0 request, deliberately -- speaking 1.1 on
+            # a 1.0 guest's behalf invites a chunked response the guest has
+            # never heard of. A socket we told the origin to close is not one
+            # to hand the next request: RFC 9112 §9.6 requires the origin to
+            # echo `close`, and when it does _relay_response ends the whole
+            # connection -- but an origin that omits it (1.0 origins do) leaves
+            # this entry cached and dead, and the guest's next request for the
+            # same name dies as `relay failed` rather than being redialled.
+            # The caller closes it after the response.
+            return up
         upstreams[host] = up
         while len(upstreams) > UPSTREAMS_MAX:
             # The oldest entry, and never the one just returned: the dict holds

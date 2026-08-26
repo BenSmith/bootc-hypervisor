@@ -1472,6 +1472,139 @@ class TestInspectDiagnose(unittest.TestCase):
 
         self.assertIsNone(self.mod.vm_inspect_check(NoUser()))
 
+    def test_the_socket_probe_unpacks_what_service_active_returns(self):
+        """The uninjected path, which every test above skips.
+
+        service_active returns (active, state) and a bare tuple is always
+        truthy, so `if not socket_active` could never fire on a live host: an
+        inspect socket that was down reported as listening, and the one arm
+        whose whole argument is "the guest's HTTP dies while its DNS and SSH
+        keep working" was dead code exactly where it mattered.
+
+        capture_check carries the same fix and a comment saying the injected
+        tests miss it. They did here too, which is why this test does not
+        inject: it leaves socket_active at PROBE and patches the call instead.
+        """
+        with mock.patch.object(self.mod, "service_active",
+                               return_value=(False, "inactive")) as probe:
+            _, passed, msg = self._run(
+                elements4=[self._elem(10001, 80)],
+                elements6=[self._elem(10001, 80)],
+                socket_active=self.mod.PROBE)
+        probe.assert_called_once_with("workload-vm1-inspect.socket")
+        self.assertFalse(passed)
+        self.assertIn("nothing accepts", msg)
+
+    def test_the_socket_probe_passes_when_the_unit_is_up(self):
+        """The other direction of the same unpack: a live socket must not be
+        read as dead now that the tuple is destructured."""
+        with mock.patch.object(self.mod, "service_active",
+                               return_value=(True, "active")):
+            _, passed, _ = self._run(
+                elements4=[self._elem(10001, 80)],
+                elements6=[self._elem(10001, 80)],
+                socket_active=self.mod.PROBE)
+        self.assertTrue(passed)
+
+
+class TestResolveDiagnose(unittest.TestCase):
+    """`diagnose`'s synthesising-responder check.
+
+    The inspector's check argues that a socket down with the maps armed reads
+    as a broken guest rather than a broken host. The responder is that failure
+    one step worse: the guest's resolver list has exactly ONE entry, so a
+    responder that is not listening is the whole of DNS for it -- and every
+    other line in `diagnose` still passes, because everything else about the
+    workload is correct.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+
+    def _config(self, egress="filtered", resolver=None, bridge=None,
+                is_vm=True, uid=10001):
+        net = {"egress": egress} if egress is not None else {}
+        if resolver is not None:
+            net["resolver"] = resolver
+        if bridge:
+            net["bridge"] = bridge
+        cfg = {"vm": {"network": dict(net)}} if is_vm else {"container": {}}
+        return SimpleNamespace(name="vm1", uid=uid, vm_bridge=bridge,
+                               vm_network=net, config=cfg)
+
+    def _run(self, config=None, **kw):
+        kw.setdefault("socket_active", True)
+        kw.setdefault("policy_present", True)
+        return self.mod.vm_resolve_check(config or self._config(), **kw)
+
+    # --- applicability: the same predicate the generator uses ---
+
+    def test_a_container_gets_no_line(self):
+        self.assertIsNone(self._run(self._config(is_vm=False)))
+
+    def test_a_bridged_vm_gets_no_line(self):
+        self.assertIsNone(self._run(self._config(bridge="br0")))
+
+    def test_an_unfiltered_vm_gets_no_line(self):
+        self.assertIsNone(self._run(self._config(egress="open")))
+
+    def test_resolver_none_gets_no_line(self):
+        """The operator asked for no nameserver, so a missing one is the
+        configuration rather than a fault."""
+        self.assertIsNone(self._run(self._config(resolver="none")))
+
+    # --- verdicts ---
+
+    def test_a_dead_socket_fails_and_says_it_is_the_only_nameserver(self):
+        _, passed, msg = self._run(socket_active=False)
+        self.assertFalse(passed)
+        self.assertIn("ONLY", msg)
+        self.assertIn("workload-vm1-resolve.socket", msg)
+
+    def test_a_missing_answer_document_fails_and_names_the_prestart(self):
+        """The second way a booted VM loses DNS. The responder is
+        socket-activated, so a missing document is not noticed until the
+        guest's first query -- and then it fails the start, on a query that
+        has already been made."""
+        _, passed, msg = self._run(policy_present=False)
+        self.assertFalse(passed)
+        self.assertIn("first query", msg)
+        self.assertIn("workload-vm1.service", msg)
+
+    def test_a_listening_responder_with_its_document_passes(self):
+        name, passed, msg = self._run()
+        self.assertEqual(name, "vm_resolve")
+        self.assertTrue(passed)
+        self.assertIn("listening", msg)
+
+    def test_no_user_yet_gets_no_line(self):
+        """Generation precedes user creation, so a first `enable` reaches this
+        before _wl-vm1 exists. collect_diagnose_checks catches nothing, so an
+        unguarded config.uid here would take the whole command down rather
+        than skip one line -- and the healthy line reads the uid to derive the
+        responder's address."""
+        class NoUser:
+            name = "vm1"
+            vm_bridge = None
+            vm_network = {"egress": "filtered"}
+            config = {"vm": {"network": {"egress": "filtered"}}}
+
+            @property
+            def uid(self):
+                raise KeyError("_wl-vm1")
+
+        self.assertIsNone(self.mod.vm_resolve_check(NoUser()))
+
+    def test_the_socket_probe_unpacks_what_service_active_returns(self):
+        """Written the same way as the inspector's, and for the same reason:
+        the injected tests above cannot see a bare-tuple truthiness bug."""
+        with mock.patch.object(self.mod, "service_active",
+                               return_value=(False, "inactive")) as probe:
+            _, passed, _ = self._run(socket_active=self.mod.PROBE)
+        probe.assert_called_once_with("workload-vm1-resolve.socket")
+        self.assertFalse(passed)
+
 
 class TestInspectMapKeyShapes(unittest.TestCase):
     """The map-element reader accepts every shape nft renders.

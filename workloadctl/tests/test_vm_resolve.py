@@ -1214,13 +1214,107 @@ class TestGeneratedUnits(unittest.TestCase):
             "a vm_resolve_cgroup exists now, so the responder may be armed "
             "into wl_egress_cg -- update the nft comments this test guards"))
 
-    def test_the_nft_comments_do_not_claim_the_responder_is_exempted(self):
-        """The other half: the assertion above is about the generator, and the
-        false statement was in the kernel policy's comments."""
-        text = (Path(__file__).resolve().parent.parent
-                / "nftables" / "workload-filter.nft").read_text()
-        self.assertNotIn("Both are in this set", text)
-        self.assertNotIn("two members", text)
+    # Every tracked file that documents either cgroup set. The list is the
+    # test: a fifth file growing a comment about these sets and not being added
+    # here is exactly how the claim survived its first correction.
+    CGROUP_SET_FILES = (
+        ("nftables", "workload-filter.nft"),
+        ("nftables", "workload-proxy.nft"),
+        ("lib", "vm.py"),
+        ("libexec", "workload-vm-inspect"),
+    )
+
+    # A paragraph that names a cgroup set AND the responder has to be DENYING
+    # membership, so it must carry one of these.
+    #
+    # Denial phrases, not bare negations. The obvious "does it say `not`
+    # anywhere" version passes on the false text, because these paragraphs are
+    # long and one of them quotes an nftables error containing "No such file" --
+    # a marker that has nothing to do with the claim being checked. Each phrase
+    # here can only appear in a sentence about membership.
+    #
+    # And not a blocklist of the false phrasings either: the first version of
+    # this test banned the two exact strings that had just been fixed, which
+    # pinned the WORDING rather than the claim and let three re-phrasings of it
+    # stand in three other files.
+    DENIALS = (
+        "deliberately not",
+        "not the second",
+        "not a second",
+        "is not here",
+        "originates nothing",
+        "opens no socket",
+        "no upstream socket",
+        "nothing arms",
+        "no vm_resolve_cgroup",
+    )
+
+    @staticmethod
+    def _normalise(para):
+        """A paragraph as one lowercase line, comment markers gone.
+
+        The phrases above are sentences and these files wrap at 79 columns, so
+        every one of them is split across a line break and a `#` in at least
+        one file. Matching the raw text would make the test pass or fail on
+        where a line happened to wrap.
+        """
+        stripped = " ".join(line.lstrip("#").strip()
+                            for line in para.splitlines())
+        return " ".join(stripped.split()).lower()
+
+    def _cgroup_paragraphs(self, path):
+        """Blank-line-separated blocks of `path` that name a cgroup set."""
+        text = path.read_text()
+        return [para for para in text.split("\n\n")
+                if "wl_egress_cg" in para or "wl_inspect_cg" in para]
+
+    def test_no_tracked_file_claims_the_responder_is_exempted(self):
+        """The responder is NOT a member of either cgroup set, and no comment
+        may say it is.
+
+        Four tracked files document these sets and three of them claimed the
+        membership was two per workload, the inspector and the responder.
+        Nothing arms the second: there is no vm_resolve_cgroup, and the
+        responder's unit emits no nft command at all.
+
+        The claim is harmless while the responder stays as it is -- it
+        originates nothing, so it needs no exemption -- and that is exactly
+        what makes it dangerous to leave standing. The next change that gives
+        the responder an outbound socket would have it dropped by the default
+        deny and redirected into the inspector, with comments in three files
+        asserting that cannot happen.
+        """
+        root = Path(__file__).resolve().parent.parent
+        for parts in self.CGROUP_SET_FILES:
+            path = root.joinpath(*parts)
+            for para in self._cgroup_paragraphs(path):
+                flat = self._normalise(para)
+                if "responder" not in flat and "-resolve.service" not in flat:
+                    continue
+                self.assertTrue(
+                    any(phrase in flat for phrase in self.DENIALS),
+                    f"{path.name} has a paragraph naming a cgroup set and the "
+                    f"responder with nothing denying membership:\n{para}")
+
+    def test_the_kernel_policy_never_names_the_responder_unit(self):
+        """The structural half, which needs no reading of prose.
+
+        Neither .nft file has any business naming workload-<name>-resolve.
+        service: no rule keys on that cgroup, no element is armed for it, and
+        the one comment that did name it was describing a path nothing
+        resolves. A file that starts naming it again is a file whose comments
+        have drifted back, whatever words they use.
+        """
+        root = Path(__file__).resolve().parent.parent
+        for parts in (("nftables", "workload-filter.nft"),
+                      ("nftables", "workload-proxy.nft")):
+            path = root.joinpath(*parts)
+            hits = [line.strip() for line in path.read_text().splitlines()
+                    if "-resolve.service" in line]
+            # The lines, not the file: assertNotIn on a whole .nft prints the
+            # entire policy into the failure, which buries the one line that
+            # changed.
+            self.assertEqual([], hits, f"{path.name} names the responder unit")
 
     def test_the_service_runs_as_the_workload_user(self):
         self.assertIn("User=_wl-web", self.service.splitlines())

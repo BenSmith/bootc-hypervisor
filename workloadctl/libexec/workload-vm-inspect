@@ -19,7 +19,7 @@ never started a filtered VM has no table of either kind. Applying both at
 start makes an RPM upgrade self-heal on the next start instead of the next
 reboot: a rebuild that changes a skeleton's object layout is picked up by the
 next workload start, not left to a reboot the operator will never think to
-This helper touches both tables, so it applies both skeletons.
+perform. This helper touches both tables, so it applies both skeletons.
 
 WHAT IS NEVER TORN DOWN
 
@@ -74,13 +74,17 @@ every start, so the add belongs to the unit that owns the cgroup, and the
 remove to its ExecStopPost — "the only point at which a path still resolves
 to the id being retired". generate_vm_inspect_service emits both lines.
 
-Through rung 1 there was a THIRD cgroup to exempt, and it is worth recording
-why it is gone rather than leaving a reader to find only two where the design
-notes said three. The workload's tinyproxy had to be in wl_inspect_cg as well:
-its upstream CONNECT leg was tcp dport 443 from the same uid and would
-otherwise have been redirected into a listener that only logs. Rung 2 deleted
-tinyproxy, so the members are now the inspector and the responder, each armed
-by its own unit and neither able to arm the other's.
+Through rung 1 there was a SECOND cgroup to exempt, and it is worth recording
+why it is gone rather than leaving a reader to find one where the design notes
+said two. The workload's tinyproxy had to be in wl_inspect_cg as well: its
+upstream CONNECT leg was tcp dport 443 from the same uid and would otherwise
+have been redirected into a listener that only logs. Rung 2 deleted tinyproxy,
+so the inspector is the ONE member of each set, and the synthesising responder
+is deliberately not the second: it originates nothing, so it opens no socket
+for either set to exempt. Nothing in the tree arms an element for it and there
+is no vm_resolve_cgroup to arm one with. If it ever gains an outbound socket it
+needs an element in BOTH sets, added by its own unit -- see the set comments in
+nftables/workload-filter.nft and nftables/workload-proxy.nft.
 
 EXIT CODES
 

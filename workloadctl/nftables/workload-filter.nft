@@ -330,14 +330,15 @@ add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg ct di
 # 127.0.0.1 never leaves the guest's own stack.
 add rule inet workload_filter output meta skuid @wl_filtered oif lo counter accept
 
-# The re-originators' own egress. `level 2` is exact because each unit pins
-# Slice=workloads.slice, making its cgroup path always
-# workloads.slice/workload-<name>-inspect.service (or -resolve.service) — two
-# components, whatever the workload's [resources].slice says. An element
-# resolves to a cgroup id at add time and systemd creates a fresh cgroup on
-# each start, so each unit's own ExecStartPre adds the current one and its
-# ExecStopPost removes it — the only point at which a path still resolves to
-# the id being retired.
+# The re-originator's own egress — the inspector's, and only its: see the set's
+# own comment for why the synthesising responder is not a second member.
+# `level 2` is exact because the inspector's unit pins Slice=workloads.slice,
+# making its cgroup path always
+# workloads.slice/workload-<name>-inspect.service — two components, whatever
+# the workload's [resources].slice says. An element resolves to a cgroup id at
+# add time and systemd creates a fresh cgroup on each start, so that unit's own
+# ExecStartPre adds the current one and its ExecStopPost removes it — the only
+# point at which a path still resolves to the id being retired.
 add rule inet workload_filter output socket cgroupv2 level 2 @wl_egress_cg counter accept
 
 # HTTP/3, which is dropped and must not be dropped silently. The redirect

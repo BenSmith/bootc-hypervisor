@@ -60,6 +60,8 @@ from vm import (
     NFT_SET_INSPECT_SELF6, VM_INSPECT_PORT_CLEARTEXT,
     VM_INSPECT_PORT_TLS, VM_INSPECT_ORIG_CLEARTEXT, VM_INSPECT_ORIG_TLS,
     vm_inspect_address, vm_uses_inspect,
+    VM_RESOLVE_PORT, vm_resolve_address, vm_resolve_policy_path,
+    vm_uses_resolve,
 )
 from podman import PodmanError
 from workloadctl_core import WorkloadManager, require_root
@@ -1291,7 +1293,12 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
                 f"Re-arm both: {restart}")
 
     if socket_active is PROBE:
-        socket_active = service_active(unit)
+        # Unpack, exactly as capture_check has to: service_active returns
+        # (active, state) and a bare tuple is always truthy, so the arm below
+        # never fired on a live host -- an inspect socket that was down was
+        # reported as listening. The injected-argument tests pass a bool and
+        # skip this line, which is why the same defect reached two checks.
+        socket_active, _ = service_active(unit)
 
     if not socket_active:
         return ("vm_inspect", False,
@@ -1341,6 +1348,81 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
             f"{addr.v4}/[{addr.v6}] ports {VM_INSPECT_PORT_CLEARTEXT} "
             f"(cleartext) and {VM_INSPECT_PORT_TLS} (tls), {unit} listening"
             f"{tail}")
+
+
+def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE
+                     ) -> tuple[str, bool, str] | None:
+    """Report whether a VM's synthesising responder can actually answer it.
+
+    Returns None for workloads with no responder (not a VM, bridged,
+    unfiltered, or `resolver = "none"`), so no line is emitted.
+
+    The same argument vm_inspect_check makes for checking its socket
+    separately, one step worse. The guest's resolver list has EXACTLY ONE
+    entry, so a responder that is not there is not a degraded lookup path --
+    it is the whole of DNS for that guest. Nothing else in `diagnose` would
+    say so: `vm_egress` reports the VM correctly filtered, `vm_inspect`
+    reports its traffic correctly redirected, `status` is green, and inside
+    the guest every name fails to resolve. That reads as a broken guest.
+
+    Two ways it happens on a VM that booted fine, which is why this is not
+    covered by the VM unit's Requires= on the socket:
+
+      - The socket is Accept=no, so systemd's trigger limit applies and
+        hitting it fails the socket unit PERMANENTLY until something restarts
+        it. The service's own Restart=on-failure does not rebind it -- only
+        the socket can, and it is the thing that failed.
+      - The answer document is written by the VM's own ExecStartPre
+        (workload-vm-filter up) and read by the responder at start. The
+        responder is socket-activated, so a missing document is not noticed
+        until the guest's first query, and then it fails the START -- on a
+        query the guest has already made.
+
+    Observations are injectable (PROBE sentinel) so the verdict logic is
+    testable without a live host.
+    """
+    if not vm_uses_resolve(config.config):
+        return None
+    try:
+        uid = config.uid
+    except Exception:
+        # No user yet, so no units either: generation precedes user creation,
+        # and a first `enable` reaches this before _wl-<name> exists. Check 1
+        # already reports that. vm_inspect_check guards the same way, and
+        # without it the address in the healthy line below raises straight out
+        # of collect_diagnose_checks, which catches nothing -- one unresolvable
+        # uid would take the whole command down rather than skip one line.
+        return None
+
+    name = config.name
+    unit = f"workload-{name}-resolve.socket"
+    restart = f"systemctl restart {unit}"
+
+    if socket_active is PROBE:
+        # Unpacked. See vm_inspect_check: the bare tuple is always truthy.
+        socket_active, _ = service_active(unit)
+    if not socket_active:
+        return ("vm_resolve", False,
+                f"{unit} is not listening, and it is this guest's ONLY "
+                f"nameserver — every name in the guest fails to resolve while "
+                f"the VM runs, its egress stays filtered and every other line "
+                f"here passes. Inside the guest that reads as a broken guest. "
+                f"Start it: {restart}")
+
+    path = vm_resolve_policy_path(name)
+    if policy_present is PROBE:
+        policy_present = os.path.exists(path)
+    if not policy_present:
+        return ("vm_resolve", False,
+                f"{unit} is listening but {path} is missing, so the responder "
+                f"will fail its start on the guest's first query rather than "
+                f"answer it — and it is socket-activated, so nothing has "
+                f"noticed yet. The document is written by this VM's own "
+                f"prestart: systemctl restart workload-{name}.service")
+
+    return ("vm_resolve", True,
+            f"synthesising responder on {vm_resolve_address(uid)}:"
+            f"{VM_RESOLVE_PORT}, {unit} listening, answers from {path}")
 
 
 def _inspect_self_counter(uid):
@@ -2033,6 +2115,11 @@ def collect_diagnose_checks(config, manager: WorkloadManager):
         inspect_result = vm_inspect_check(config)
         if inspect_result:
             _check(*inspect_result)
+        # After the inspector's line, because that is the order the guest
+        # meets them in: it resolves a name, then dials what it was told.
+        resolve_result = vm_resolve_check(config)
+        if resolve_result:
+            _check(*resolve_result)
 
     # Not gated on is_vm: the host-side vantage works on every substrate,
     # because `meta skuid` does not care what produced the socket.

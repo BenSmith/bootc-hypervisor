@@ -1215,6 +1215,71 @@ class TestCleartextPerRequest(unittest.TestCase):
         self.assertIn(b"200 OK", got)
         self.assertIn(b"403 Forbidden", got)
 
+    def test_an_http_10_request_never_reuses_its_upstream(self):
+        """rebuild_request tells the origin `Connection: close` for an
+        HTTP/1.0 request -- deliberately, because speaking 1.1 upstream on a
+        1.0 guest's behalf invites a chunked response the guest has never
+        heard of. A socket we asked the origin to close must not then be
+        handed to the next request.
+
+        RFC 9112 §9.6 requires the origin to echo `close`, and when it does
+        _relay_response ends the whole client connection. An origin that
+        omits it -- 1.0 origins do -- used to leave the entry cached and dead,
+        and the guest's next request for the same name died as `relay failed`
+        instead of being redialled. Two dials for two requests is the whole
+        assertion.
+        """
+        _, got, ups = self._run(
+            ["a.example"],
+            b"GET /one HTTP/1.0\r\nHost: a.example\r\n"
+            b"Connection: keep-alive\r\n\r\n"
+            b"GET /two HTTP/1.0\r\nHost: a.example\r\n"
+            b"Connection: keep-alive\r\n\r\n",
+            [_OK, _OK])
+        self.assertEqual([addr for addr, _ in ups],
+                         [("a.example", 80), ("a.example", 80)])
+        self.assertIn(b"/one", ups[0][1])
+        self.assertNotIn(b"/two", ups[0][1])
+        self.assertIn(b"/two", ups[1][1])
+        # And the guest got both answers -- the point of the redial.
+        self.assertEqual(got.count(b"200 OK"), 2)
+
+    def test_a_transient_upstream_is_in_no_map_for_the_sweep_to_find(self):
+        """Why the exchange has to close it itself.
+
+        _serve_cleartext's `finally` closes what is in `upstreams`, and a
+        transient upstream is deliberately not in it -- so nothing else on any
+        path out would close it, and a leaked host socket owned by the workload
+        uid would live as long as the client connection. The closure sits in
+        _serve_one_request's own finally; this pins the premise it rests on.
+        """
+        mod = _mod()
+        listener = mod.Listener([], io.StringIO(),
+                                policy=mod.Policy(tls="splice",
+                                                  hosts=("a.example",)))
+        near, far = self._pair()
+        upstreams = {}
+        with unittest.mock.patch.object(socket, "create_connection",
+                                        return_value=near):
+            up = listener._upstream_for("a.example", upstreams,
+                                        reusable=False)
+        self.assertIs(up.sock, near)
+        self.assertEqual({}, upstreams)
+        del far
+
+    def test_an_http_11_request_still_reuses_one_upstream(self):
+        """The other direction of the same change: 1.1 requests carry
+        `Connection: keep-alive` upstream and must still share one socket, or
+        the fix above has turned reuse off for everything."""
+        _, _, ups = self._run(
+            ["a.example"],
+            b"GET /one HTTP/1.1\r\nHost: a.example\r\n\r\n"
+            b"GET /two HTTP/1.1\r\nHost: a.example\r\n\r\n",
+            [_OK, _OK])
+        self.assertEqual([addr for addr, _ in ups], [("a.example", 80)])
+        self.assertIn(b"/one", ups[0][1])
+        self.assertIn(b"/two", ups[0][1])
+
     def test_two_allowed_hosts_get_two_upstreams(self):
         """Upstreams are keyed by the authorised NAME, never by the client
         connection: no request is ever sent down one an earlier request

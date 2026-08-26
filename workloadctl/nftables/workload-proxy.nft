@@ -51,18 +51,24 @@ add table inet workload_proxy
 add map inet workload_proxy wl_inspect4 { type uid . inet_service : ipv4_addr . inet_service ; }
 add map inet workload_proxy wl_inspect6 { type uid . inet_service : ipv6_addr . inet_service ; }
 
-# The processes that RE-ORIGINATE workload-uid traffic -- the inspector and the
-# synthesising responder -- rather than the guest's traffic arriving through
-# passt. Their own dials to 80/443 must not be translated, or they loop into the
-# listener they are dialing past. Through rung 1 tinyproxy's upstream CONNECT
-# leg was a third member; it is gone with the service.
+# The process that RE-ORIGINATES workload-uid traffic -- the egress inspector --
+# rather than the guest's traffic arriving through passt. Its own dials to
+# 80/443 must not be translated, or they loop into the listener they are
+# dialing past. Through rung 1 tinyproxy's upstream CONNECT leg was a second
+# member; it is gone with the service.
+#
+# ONE MEMBER PER WORKLOAD, exactly as wl_egress_cg holds one, and the
+# synthesising responder is deliberately not the second: it originates nothing
+# -- no upstream socket, no dial to translate -- so there is nothing here to
+# except. Nothing in the tree arms an element for it. If it ever gains one it
+# must be added HERE AND to wl_egress_cg in the other table, by its own unit.
 #
 # Declared in THIS table rather than reusing workload_filter's wl_egress_cg
 # because nftables sets are table-scoped: the cross-table reference is a load
 # error ("No such file or directory ... did you mean set 'wl_egress_cg' in
-# table inet 'workload_filter'?"), not a style error. Each unit adds and removes
-# an element here as well as in wl_egress_cg -- both, or it either reaches
-# nothing or dials into itself.
+# table inet 'workload_filter'?"), not a style error. The inspector's unit adds
+# and removes an element here as well as in wl_egress_cg -- both, or it either
+# reaches nothing or dials into itself.
 add set inet workload_proxy wl_inspect_cg { typeof socket cgroupv2 level 2 ; }
 
 add chain inet workload_proxy proxy_dnat { type nat hook output priority dstnat; policy accept; }

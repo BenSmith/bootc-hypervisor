@@ -618,11 +618,11 @@ class SeedContractError(RuntimeError):
 # ambiguity, and it would arrive on upgrade rather than on a fresh install.
 VM_ADVERTISED_IFACE = "workload-proxy"
 
-# The host-side processes that re-originate a workload's egress — the egress
-# inspector and the synthesising responder — run as the workload's own user, so
-# `meta skuid` cannot separate their traffic from the guest's, and under
-# default-deny the drop catches them too, leaving the workload's own enforcement
-# path unable to reach anything. The control group is the discriminator that
+# The host-side process that re-originates a workload's egress — the egress
+# inspector, and it alone; the synthesising responder re-originates nothing,
+# see below — runs as the workload's own user, so `meta skuid` cannot separate
+# its traffic from the guest's, and under default-deny the drop catches it too,
+# leaving the workload's own enforcement path unable to reach anything. The control group is the discriminator that
 # survives the shared uid: systemd assigns it, a guest can neither enter nor
 # forge it, and it widens no destination or port, so a guest that dials 443
 # past the inspector is still dropped.
@@ -648,9 +648,10 @@ NFT_PROXY_TABLE = "inet workload_proxy"
 # The transparent redirect's objects (§7.1). The two maps carry one element per
 # workload per redirected port, keyed uid . original port -> (listener address,
 # listener port), one map per family because `dnat ip` and `dnat ip6` are
-# different translations in the inet family; the set exempts the processes that
-# re-originate workload-uid traffic so their own dials are not translated into
-# the listener they are dialing past. All three live in table
+# different translations in the inet family; the set exempts the ONE process
+# that re-originates workload-uid traffic -- the inspector, on the same terms
+# and for the same reason as wl_egress_cg above -- so its own dials are not
+# translated into the listener it is dialing past. All three live in table
 # inet workload_proxy and are declared in workload-proxy.nft.
 NFT_MAP_INSPECT4 = "wl_inspect4"
 NFT_MAP_INSPECT6 = "wl_inspect6"
