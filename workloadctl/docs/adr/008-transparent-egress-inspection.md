@@ -25,6 +25,13 @@ its own CA, made once and never rotated, living in its state directory under its
 own uid. The `Host`-binding half of decision 5 is in — a request naming any host
 but the one the session's certificate was minted for is answered `421`.
 
+Decision 1's non-HTTP arm is in as well: a terminated connection whose first
+bytes do not begin a request line is closed rather than answered, since an HTTP
+response written into a protocol that is not HTTP is worse than silence. What
+is deferred with the policy is the distinguishable log line advising `splice`
+and the per-host figure split by whether a `policy` entry named the host — the
+split is the value, and `policy` does not exist yet.
+
 **What has not.** The POLICY, which is what termination was for:
 
 - **Decision 5's method and path matching.** The only thing a terminated request

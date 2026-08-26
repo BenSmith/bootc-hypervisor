@@ -417,6 +417,13 @@ name = "schema-reference"
 #              a private root has to be added to the host's anchors, not the
 #              guest's.
 #
+#              A third thing it will not carry: 443 is read as HTTP/1.1, so a
+#              host this guest speaks some OTHER protocol to over 443 -- a
+#              database wire protocol, a tunnel, HTTP/2 -- has its connection
+#              CLOSED. Under "splice" those bytes went through untouched. The
+#              journal names it (`reason='not HTTP'`); the guest sees only a
+#              close. `tls = "splice"` on the workload is the answer.
+#
 #   "splice" — the inspector reads the SNI out of the ClientHello, matches it
 #              against .hosts, and replays those exact bytes upstream. Nothing
 #              is decrypted, no CA is involved, and the guest needs no trust

@@ -1,4 +1,4 @@
-"""workload-vm-inspect-listener: the terminated TLS plane (rung 3 T5).
+"""workload-vm-inspect-listener: the terminated TLS plane (rung 3 T5, T6).
 
 Rung 2's plane spliced: it read a name and replayed the guest's own bytes. This
 one TERMINATES -- the listener completes the guest's handshake with a leaf its
@@ -666,6 +666,136 @@ class TestThePeekLeavesTheHelloWhereItWas(unittest.TestCase):
         with self.assertRaises(mod.HelloUnreadable):
             mod.read_client_hello(ours, peek=True)
         self.assertLess(time.monotonic() - started, 10.0)
+
+
+class TestWhatCountsAsTheStartOfARequest(unittest.TestCase):
+    """The predicate on its own. Three-valued, and each value earns its place.
+
+    True and False are the two verdicts; None is `not enough bytes yet`, which
+    is what lets the caller stop waiting the moment the answer is settled
+    instead of always waiting for a full method's worth of bytes.
+    """
+
+    def check(self, start, expected):
+        self.assertIs(_mod().is_http_request_start(start), expected,
+                      f"for {start!r}")
+
+    def test_a_request_line_is_one(self):
+        for start in (b"GET / HTTP/1.1", b"POST /x", b"OPTIONS *",
+                      b"BASELINE-CONTROL /a"):
+            self.check(start, True)
+
+    def test_a_binary_first_byte_is_not(self):
+        for start in (b"\x16\x03\x01\x02\x00",      # TLS inside the session
+                      b"\x00\x00\x00\x00",
+                      b"\x10\x1a\x00\x04MQTT"):
+            self.check(start, False)
+
+    def test_a_text_protocol_that_is_not_http_is_not(self):
+        # SSH gets three uppercase letters in before the hyphen-digit that
+        # gives it away, which is why the check cannot stop at byte one.
+        self.check(b"SSH-2.0-OpenSSH_9.6", False)
+        self.check(b"PING\r\n", False)
+
+    def test_a_prefix_too_short_to_judge_is_undecided(self):
+        for start in (b"", b"G", b"GE", b"OPTION"):
+            self.check(start, None)
+
+    def test_a_run_longer_than_any_method_is_not_a_method(self):
+        self.check(b"A" * _mod().HTTP_METHOD_MAX, False)
+
+    def test_the_h2_preface_is_left_to_the_parser(self):
+        """`PRI * HTTP/2.0` IS a request line; what it is not is one this
+        listener speaks. It gets the parser's 400, not a close -- and the
+        preface-and-frame check that would do better belongs with the
+        [[vm.network.http2]] key that does not exist yet."""
+        self.check(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", True)
+
+    def test_a_leading_space_is_not_a_method(self):
+        self.check(b" GET / HTTP/1.1", False)
+
+    def test_a_lowercase_method_is_refused_in_the_harmless_direction(self):
+        """Named, not lamented. The alphabet is the one every registered method
+        is spelled with; a lowercase extension method would be closed here
+        rather than answered, and widening this is one character."""
+        self.check(b"get / HTTP/1.1", False)
+
+
+@unittest.skipUnless(_have_openssl(), "openssl is not installed")
+class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
+    """Rung 3 T6. Before termination these bytes were spliced and neither end
+    noticed; now this listener is the one reading them."""
+
+    NOT_HTTP = bytes(range(32)) + b"\x00" * 8
+
+    def test_the_guest_gets_nothing_back_and_the_origin_sees_nothing(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, out = self._listener(mod, origin)
+        response, _ = self._exchange(listener, origin, request=self.NOT_HTTP)
+        self.assertEqual(response, b"",
+                         "a close, not an HTTP response written into a "
+                         "protocol that is not HTTP")
+        self.assertEqual(origin.requests, [])
+        self.assertIn("reason='not HTTP", out.getvalue())
+
+    def test_it_is_counted_as_not_http_and_not_as_an_unreadable_request(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin)
+        self._exchange(listener, origin, request=self.NOT_HTTP)
+        reasons = listener.status()["drop_reasons"]
+        self.assertEqual(reasons[mod.DROP_NOT_HTTP], 1)
+        self.assertEqual(reasons[mod.DROP_UNREADABLE_REQUEST], 0)
+        self.assertEqual(reasons[mod.DROP_TIMED_OUT], 0)
+
+    def test_a_malformed_but_recognisable_request_still_gets_its_400(self):
+        """The check must not swallow the case it looks most like. A request
+        line that begins as one and then fails to parse is an HTTP peer making
+        an HTTP mistake, and it gets an answer it can read."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin)
+        response, _ = self._exchange(
+            listener, origin,
+            request=b"GET /\x01\x02 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        self.assertTrue(response.startswith(b"HTTP/1.1 400 "), response[:40])
+        self.assertEqual(
+            listener.status()["drop_reasons"][mod.DROP_NOT_HTTP], 0)
+
+    def test_a_decidable_prefix_does_not_wait_for_a_whole_method(self):
+        """A peer that sends four bytes and then waits is answered on those
+        four. Without the `until` this costs a decision timeout to decide
+        something already decided."""
+        mod = _mod()
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(5.0)
+        guest.sendall(b"\x00\x01\x02\x03")
+        stream = mod._Stream(ours)
+        started = time.monotonic()
+        start = stream.peek_start(
+            until=lambda buf: mod.is_http_request_start(buf) is not None)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIs(mod.is_http_request_start(start), False)
+
+    def test_the_peeked_bytes_are_still_there_for_the_parser(self):
+        """The peek does not consume: an HTTP connection reaches the request
+        loop with its head intact, which is why there is no MSG_PEEK here."""
+        mod = _mod()
+        ours, guest = _tcp_pair()
+        self.addCleanup(ours.close)
+        self.addCleanup(guest.close)
+        ours.settimeout(5.0)
+        head = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        guest.sendall(head)
+        stream = mod._Stream(ours)
+        stream.peek_start()
+        self.assertEqual(stream.read_head(), head)
 
 
 if __name__ == "__main__":

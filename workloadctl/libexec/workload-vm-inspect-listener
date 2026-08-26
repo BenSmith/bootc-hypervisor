@@ -594,6 +594,16 @@ MESSAGE_HEAD_MAX = 32768
 # slot.
 CHUNK_LINE_MAX = 4096
 
+# The longest method spelling worth waiting for before deciding that what is
+# being read is not an HTTP request at all, plus the space that ends it.
+# Sixteen covers every method anyone has registered (BASELINE-CONTROL, RFC
+# 3253, is the long one). Nothing rejects a longer method on the strength of
+# this number alone: it only bounds how many bytes the check below waits for
+# before it stops being undecided, and the parser -- which has the whole
+# request line -- is what actually refuses.
+HTTP_METHOD_MAX = 16
+HTTP_START_MAX = HTTP_METHOD_MAX + 1
+
 # How much of a refused request's body is read and discarded before the 403, in
 # bytes. Past it the connection is closed instead: draining exists so the NEXT
 # request is read from where a request starts, and a guest that answers a
@@ -801,6 +811,41 @@ class _Stream:
             return b""
         out, self._buf = self._buf, b""
         return out
+
+    def peek_start(self, n=HTTP_START_MAX, until=None):
+        """Up to n bytes from the front of the stream, LEFT where they are.
+
+        Unlike every other read here this one does not consume: the caller is
+        deciding whether the connection is worth handing to the parser, and the
+        parser needs the bytes. They stay in this buffer, so the read_head that
+        follows finds them without a second syscall -- there is no MSG_PEEK
+        here and there does not need to be, because the buffer IS the peek.
+
+        `until` is asked, after each read that added something, whether the
+        bytes so far already settle whatever the caller is deciding; the first
+        True ends the wait. Without it a peer that sends four bytes and then
+        waits for us holds its slot for the whole decision timeout to answer a
+        question that was answerable at byte four.
+
+        A short read is not an error. This returns whatever arrived within the
+        socket's own timeout, including b"", and swallows the two exceptions a
+        fill raises rather than reporting them: everything it can go wrong on
+        goes wrong again in the read_head immediately after, where the
+        disposition for it already exists and is already counted. THE COST of
+        that is one extra decision-timeout wait for a peer that completes a
+        handshake and then says nothing at all -- five seconds of one of
+        MAX_CONNECTIONS slots, not a leak, and the alternative is duplicating
+        the loop's timeout and EOF arms here to save it.
+        """
+        while len(self._buf) < n:
+            if until is not None and self._buf and until(self._buf):
+                break
+            try:
+                if not self._fill():
+                    break
+            except RequestUnreadable:
+                break
+        return self._buf[:n]
 
 
 def _reject_controls(text, what, *, tab_ok):
@@ -1074,6 +1119,46 @@ def request_framing(headers):
     return Framing("none")
 
 
+def is_http_request_start(start):
+    """Whether these first bytes begin an HTTP/1.1 request line: True, False,
+    or None for not enough bytes to say yet.
+
+    Deliberately liberal, and deliberately not a second parser. It answers one
+    question -- is this connection speaking HTTP at all -- and every reading
+    that is still open stays open: a prefix that has not yet reached a space is
+    undecided, and undecided is HTTP here, because the parser downstream has
+    the whole request line and a 400 to say so with. Only a byte that no method
+    is spelled with, or a run of them longer than any method is, is a no.
+
+    WHY THIS EXISTS AT ALL. Before termination, a connection on 443 that was
+    not HTTP was spliced and neither end noticed. Now the listener has
+    completed the handshake and is the one reading, so a guest speaking
+    anything else over 443 -- a database wire protocol, a tunnel, gRPC that
+    ignored the ALPN it was offered -- is read as a request that will never
+    arrive, and it holds a slot until the head ceiling or the clock ends it.
+    Answering it 400 is worse than closing: those bytes are an HTTP response
+    written into a protocol that is not HTTP, and what the peer makes of them
+    is anyone's guess.
+
+    THE METHOD ALPHABET is A-Z and the hyphen, which is what every registered
+    method is spelled with. It is narrower than the token grammar a method is
+    allowed to use, and that is the point: this is a heuristic that has to be
+    wrong in the harmless direction, and its whole job is telling an ASCII
+    request line from a binary first byte. An extension method in lowercase
+    would be closed here rather than 400'd -- named, accepted, and cheap to
+    widen if one ever turns up.
+    """
+    for i, ch in enumerate(start):
+        if ch == 0x20:
+            return i > 0            # a method, then the space that ends it
+        if not (0x41 <= ch <= 0x5A or ch == 0x2D):
+            return False
+    # Ran out of bytes without a space. Undecided -- unless there were already
+    # more of them than any method is long, in which case whatever is being
+    # spelled is not one.
+    return None if len(start) < HTTP_METHOD_MAX else False
+
+
 def parse_request(head, scheme=SCHEME_HTTP):
     """A Request from a request head, normalised and framed, or raise."""
     start, headers = _split_head(head)
@@ -1291,6 +1376,7 @@ DROP_CLIENT_CERT = "upstream wants a client certificate"
 DROP_MISDIRECTED = "host does not match the server name"
 DROP_THROTTLED = "mint rationed"
 DROP_MINT_FAILED = "could not mint a leaf"
+DROP_NOT_HTTP = "not HTTP"
 
 DROP_REASONS = (
     DROP_NOT_ALLOWLISTED,
@@ -1306,6 +1392,7 @@ DROP_REASONS = (
     DROP_MISDIRECTED,
     DROP_THROTTLED,
     DROP_MINT_FAILED,
+    DROP_NOT_HTTP,
 )
 
 # Where a drop whose reason is not in DROP_REASONS is counted. Emitted only when
@@ -1974,6 +2061,8 @@ class Listener:
         client = _Stream(tls_conn)
         upstreams = {host: upstream}
         try:
+            if not self._is_http(client, tls_conn, where, host):
+                return
             first = True
             while self._serve_one_request(client, tls_conn, where, upstreams,
                                           first, scheme=SCHEME_HTTPS,
@@ -1982,6 +2071,45 @@ class Listener:
         finally:
             for up in upstreams.values():
                 up.sock.close()
+
+    def _is_http(self, client, conn, where, host):
+        """Whether this terminated connection is speaking HTTP. Closed if not.
+
+        Closed, and not answered. See is_http_request_start for why an HTTP
+        response is the wrong thing to write into a protocol that is not HTTP,
+        and note that the guest gets no reason either way -- it is inside a
+        session we completed, so a close here is a close it can see and cannot
+        interpret.
+
+        WHAT THIS RUNG DOES NOT DO, so the next one inherits a list rather than
+        a gap: the log line below is the ordinary drop line, not a
+        distinguishable one telling the operator to splice the host; there is
+        no per-host figure split by whether a policy entry named it, because
+        policy entries do not exist yet; and a host meant to speak h2 is read
+        the same as any other, because [[vm.network.http2]] does not exist
+        either and a preface check without it would make that key mean EXEMPT
+        rather than SPEAKS H2.
+
+        THE COST IS REAL AND ARRIVES BEFORE THE REMEDY. A host that speaks
+        something other than HTTP over 443 stops working the moment a workload
+        terminates, and until the policy rung lands the only evidence is a
+        closed connection and this line in the journal. The remedy for a
+        workload that has such a host is `tls = "splice"` on the workload.
+        """
+        conn.settimeout(CONNECTION_TIMEOUT)
+        start = client.peek_start(
+            until=lambda buf: is_http_request_start(buf) is not None)
+        if is_http_request_start(start) is not False:
+            # True is HTTP and None is undecided, which includes the b"" of a
+            # peer that said nothing at all. Both go on to the loop below,
+            # which owns the ways they end -- a 400, a clean close, a timeout
+            # -- with the dispositions they already have.
+            return True
+        self.counters.record_drop(DROP_NOT_HTTP, host)
+        self._log(f"drop {where} host={host} reason='not HTTP: this session "
+                  f"was terminated and {start[:8]!r} does not begin a request "
+                  f"line; splice this workload if the host needs it'")
+        return False
 
     def _dial_failure_reason(self, host: str) -> str:
         """Why an upstream dial to an ALLOWLISTED name failed, as far as this
