@@ -20,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from pathlib import Path, PurePosixPath
@@ -39,7 +40,8 @@ from vm import (VM_SOCKET_DIR, VM_DEFAULT_GUEST_USER, VM_GUEST_HOME_BASE,
                 VM_GUEST_UID, VM_CA_BUNDLE_AVAILABLE, VM_CA_BUNDLE_PATH,
                 VM_CA_ENV_VARS,
                 VM_SEED_CONTRACT_EXIT, SeedContractError, find_ovmf_vars,
-                vm_broker_env, vm_ca_env, vm_uses_inspect)
+                vm_broker_env, vm_ca_env, vm_ca_cert_path, vm_ca_dir,
+                vm_ca_key_path, vm_ca_openssl_argv, vm_uses_inspect)
 from secrets_template import substitute_template
 
 
@@ -952,6 +954,60 @@ def generate_vm_host_keypair(pw, name: str):
     log(f"  Generated VM host keypair: {key_path}")
 
 
+def generate_vm_egress_ca(pw, name: str):
+    """Generate this workload's egress CA if absent, or raise with openssl's words.
+
+    Symmetric to generate_vm_host_keypair, and here for the same reason it is:
+    the seed ISO carries this certificate, so "before the seed" has to be a fact
+    about one function rather than an ordering between units. Both are called a
+    few lines above build_cloud_init_iso in the same process.
+
+    Idempotent, and the guard is what keeps it so. Re-minting would invalidate
+    the anchor already installed in a provisioned guest exactly as churning the
+    host key would invalidate the SSH pin -- and worse, because cloud-init runs
+    once per instance-id, so the replacement never arrives and every HTTPS
+    request fails validation on a VM `diagnose` calls healthy.
+
+    Generated for every filtered VM whatever `tls` says. Gating it on
+    tls = "inspect" would turn the emergency splice into a one-way door: the
+    seed is fingerprinted over its rendered text, so dropping the CA out of it
+    rotates the instance-id and re-provisions the guest in the middle of the
+    incident the hatch exists for.
+    """
+    ca_dir = vm_ca_dir(workload_state_dir(name))
+    key_path = vm_ca_key_path(workload_state_dir(name))
+    cert_path = vm_ca_cert_path(workload_state_dir(name))
+
+    if key_path.exists() and cert_path.exists():
+        return  # already minted -- keep the guest's anchor valid
+
+    ca_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chown(ca_dir, pw.pw_uid, pw.pw_gid)
+
+    result = subprocess.run(
+        vm_ca_openssl_argv(name, key_path, cert_path, now=time.time()),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # Same both-streams reasoning as _ssh_keygen: openssl splits its
+        # diagnostics across stdout and stderr depending on the failure, so
+        # reporting one of them yields an empty message on some runs.
+        said = " / ".join(s.strip() for s in (result.stdout, result.stderr)
+                          if s.strip())
+        raise RuntimeError(
+            f"openssl (egress CA) failed: "
+            f"{said or f'no output, exit {result.returncode}'}")
+
+    os.chown(key_path, pw.pw_uid, pw.pw_gid)
+    os.chmod(key_path, 0o600)
+    os.chown(cert_path, pw.pw_uid, pw.pw_gid)
+    # The certificate is 0644 and the key is 0600: the certificate is a public
+    # anchor that the seed builder and `diagnose` both read, and the private
+    # half is the only part worth protecting.
+    os.chmod(cert_path, 0o644)
+    log(f"  Generated egress CA: {cert_path}")
+
+
 def _read_vm_host_private_key(pw) -> str:
     """Return the PEM of the VM host private key, or '' if not generated yet."""
     priv = Path(pw.pw_dir) / ".ssh" / "vm_host_ed25519_key"
@@ -1708,6 +1764,17 @@ def _ensure_user(name: str) -> int:
         except Exception as e:
             log(f"  ERROR: Failed to generate VM host keypair for {name}: {e}")
             return 1
+
+        # The egress CA, for the same reason and at the same point: the seed
+        # carries it, so it must exist before the ISO is built. Filtered VMs
+        # only -- an `egress = "open"` workload has no inspector to present
+        # anything, so a CA would be a key with no purpose.
+        if vm_uses_inspect(config):
+            try:
+                generate_vm_egress_ca(pw, name)
+            except Exception as e:
+                log(f"  ERROR: Failed to generate egress CA for {name}: {e}")
+                return 1
 
         try:
             build_cloud_init_iso(

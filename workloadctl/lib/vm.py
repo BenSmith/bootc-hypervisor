@@ -15,6 +15,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1190,6 +1191,102 @@ VM_CA_ENV_VARS = (
     "GIT_SSL_CAINFO",
     "PIP_CERT",
 )
+
+# --- The per-workload egress CA ---
+#
+# One CA per workload, generated like the SSH host keypair: idempotent, made
+# once, NEVER churned, and created before the seed ISO that carries it.
+#
+# Per-workload scoping is what makes the key affordable. It lives in the
+# workload's state directory owned by _wl-<name> -- the same uid QEMU runs as --
+# and the only party trusting it is the guest that uid already owns, so a guest
+# escape stealing it gains the ability to impersonate sites TO ITSELF. A single
+# host-wide CA shared by every workload would be a genuine crown jewel.
+#
+# `backup` never captures state/, so the key is in no archive and needs no
+# exclusion rule.
+
+VM_CA_DIR_NAME = "ca"
+VM_CA_KEY_NAME = "egress-ca.key"
+VM_CA_CERT_NAME = "egress-ca.crt"
+
+# Ten years. The number follows from never rotating rather than from any threat
+# estimate: a CA that expires is a CA that must be replaced, replacing it means
+# re-provisioning the guest (cloud-init runs once per instance-id), so the
+# validity is the real upper bound on a VM's life. Ten years puts that boundary
+# beyond the hardware's, which is the point -- anything shorter schedules a
+# total outage, every HTTPS request failing validation on a VM `diagnose` calls
+# healthy, for a date nobody wrote down.
+#
+# Distance is not the same as invisibility: the CA report carries notAfter and
+# `diagnose` warns inside the last year, so a workload that lives long enough
+# to reach it gets a re-provision SCHEDULED rather than discovered.
+VM_CA_VALIDITY_DAYS = 3650
+
+# notBefore is backdated an hour for clock skew. Measured 2026-08-26: guest
+# drift is ~10 ppm (about five minutes a year), so this covers roughly 1,200
+# years of it -- and exactly ONE HOUR of a vCPU pause, which a guest loses
+# permanently. The backdate is not what makes pauses survivable; the mint-time
+# clock check is. See tests/manual/clock_rig.py.
+VM_CA_BACKDATE_SECONDS = 3600
+
+
+def vm_ca_dir(state_dir) -> Path:
+    """Where this workload's egress CA lives, given its state directory."""
+    return Path(state_dir) / VM_CA_DIR_NAME
+
+
+def vm_ca_key_path(state_dir) -> Path:
+    return vm_ca_dir(state_dir) / VM_CA_KEY_NAME
+
+
+def vm_ca_cert_path(state_dir) -> Path:
+    return vm_ca_dir(state_dir) / VM_CA_CERT_NAME
+
+
+def vm_ca_subject(name: str) -> str:
+    """The CA's subject. Names the workload, because an operator reading a
+    certificate error inside a guest needs to know which CA it came from."""
+    return f"/CN=workloadctl egress CA ({name})"
+
+
+def vm_ca_openssl_argv(name: str, key_path, cert_path, *, now: float) -> list[str]:
+    """One `openssl req -x509` invocation that mints the CA.
+
+    THE THREE EXTENSIONS ARE NOT DECORATION. Measured 2026-08-16: Python 3.14's
+    ssl (OpenSSL 3.5) rejects a chain whose CA lacks a Subject Key Identifier
+    with `certificate verify failed: Missing Authority Key Identifier`, and
+    then -- once that is added -- with `CA cert does not include key usage
+    extension`. curl, Go and Node accept the same CA without any of them, so a
+    CA missing them works everywhere until a Python client tries, and presents
+    as a trust failure indistinguishable from "the guest never installed our
+    CA". They are asserted by parsing the certificate, not by matching this
+    argv: what matters is what OpenSSL emitted, not what we asked for.
+
+    `-not_before` is used rather than letting notBefore default to now, so the
+    hour of skew tolerance is a property of the certificate rather than of when
+    the process happened to run. Requires OpenSSL 3.5, which is what Fedora 43
+    and 44 ship.
+
+    ECDSA P-256 to match the leaves: RSA-2048 minting is slow enough to be
+    noticeable on a cold cache.
+    """
+    not_before = time.strftime(
+        "%Y%m%d%H%M%SZ", time.gmtime(now - VM_CA_BACKDATE_SECONDS))
+    return [
+        "openssl", "req", "-x509",
+        "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+        "-noenc",
+        "-keyout", str(key_path),
+        "-out", str(cert_path),
+        "-days", str(VM_CA_VALIDITY_DAYS),
+        "-not_before", not_before,
+        "-subj", vm_ca_subject(name),
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        "-addext", "subjectKeyIdentifier=hash",
+    ]
+
 
 # Whether there is a bundle at VM_CA_BUNDLE_PATH for those variables to name.
 # Rung 3 mints the CA, writes the bundle into the seed, and flips this to True;
