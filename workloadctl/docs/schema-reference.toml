@@ -588,6 +588,44 @@ name = "schema-reference"
 # host   = "git.local"
 # reason = "homelab forge; clone and API over HTTPS"
 #
+# Optional: allowlisted hosts that must NOT be intercepted.
+# Type: array of [[vm.network.splice]] tables, each with `host` and `reason`
+# Default: []
+# The per-host form of tls = "splice", and the escape hatch to reach for first.
+# Under the default tls = "inspect" the inspector terminates the guest's TLS
+# with a certificate the guest trusts because the workload's CA is in its trust
+# store. Some clients cannot be made to trust it — one that pins a certificate,
+# or that verifies a signed transparency log rather than a chain — and some
+# hosts on 443 are not speaking HTTP at all. A host listed here keeps its
+# end-to-end TLS: the inspector reads the name out of the ClientHello, matches
+# it against .hosts, and then relays the guest's own bytes without ever holding
+# a key to the session.
+#
+# WHAT YOU GIVE UP IS EVERYTHING INSIDE THE SESSION. A spliced host is enforced
+# by its name alone, checked once at the front of the connection — no Host
+# binding, no method or path policy, and no visibility into what was asked for.
+# That is why it carries a `reason`: it is a hole, and the file should say who
+# decided to open it and why.
+#
+# It applies on a plain restart — no re-provisioning, because the CA is seeded
+# into every filtered VM whatever tls says, so turning inspection back on later
+# needs nothing from the guest either.
+#
+# `host` is an fnmatch pattern like .hosts, with the same apex trap:
+# "*.example.com" does not cover "example.com".
+#
+# An entry matching no allowlisted name is an ERROR, not a no-op — it means you
+# believe a host is reachable that is not, and the host you meant to exempt is
+# being inspected instead. That failure arrives as a TLS error rather than as a
+# policy message, which is exactly what this key exists to avoid.
+#
+# REQUIRES egress = "filtered". Entries are accepted and inert under
+# tls = "splice", where every host is spliced already.
+#
+# [[vm.network.splice]]
+# host   = "sum.golang.org"
+# reason = "client verifies a signed log, not the chain; cannot take our CA"
+#
 # Capture is a command, not a schema key: `workloadctl pcap <name>`. passt's own
 # --pcap has no size limit, no rotation and no runtime toggle — it writes until
 # the process exits — which is the wrong shape for a persistent setting. See

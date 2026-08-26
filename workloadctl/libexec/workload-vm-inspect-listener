@@ -294,11 +294,23 @@ class Policy(NamedTuple):
     tls: str
     hosts: tuple
     internal: tuple = ()
+    splice: tuple = ()
 
     @property
     def summary(self) -> str:
         return (f"tls={self.tls} hosts={len(self.hosts)} "
-                f"internal={len(self.internal)}")
+                f"internal={len(self.internal)} splice={len(self.splice)}")
+
+    def splices(self, host: str) -> bool:
+        """Whether this host is exempt from termination.
+
+        True on the whole-workload mode as well as the per-host list, so that
+        every caller asks one question. Splitting it -- `tls == "splice"` in one
+        place and a list check in another -- is how a path gets one of the two
+        and reads correct: the connection is spliced by the mode and terminated
+        by the list, or the reverse, depending on which branch it took.
+        """
+        return self.tls == "splice" or vm_hostname_match(host, self.splice)
 
 
 def load_policy(path):
@@ -325,8 +337,16 @@ def load_policy(path):
     # key existed is a policy with no internal entries, which is the common
     # case and not an error. `hosts` gets no such tolerance because there the
     # empty reading and the missing reading are different configurations.
+    splice = doc.get("splice") or []
+    if not isinstance(splice, list):
+        raise ValueError(f"{path}: 'splice' is not a list")
+    # NOT normalised here, unlike `internal`: these are fnmatch PATTERNS and
+    # vm_hostname_match normalises both sides at the point of comparison.
+    # Normalising a pattern early is harmless today and would silently stop
+    # being so the moment a pattern could carry something a hostname cannot.
     return Policy(tls=doc.get("tls") or VM_TLS_DEFAULT, hosts=tuple(hosts),
-                  internal=tuple(vm_normalise_hostname(h) for h in internal))
+                  internal=tuple(vm_normalise_hostname(h) for h in internal),
+                  splice=tuple(splice))
 
 
 # --- the ClientHello peek ---
@@ -2031,6 +2051,13 @@ class Listener:
         broken resolver from something speaking a non-TLS protocol at the TLS
         port.
         """
+        # Whether this LISTENER can terminate at all, which is the mode. Which
+        # of its connections it actually terminates is a per-host question
+        # taken below, once there is a name -- so the hello is PEEKED whenever
+        # the mode allows termination, not only when this connection will get
+        # it. A consuming read here would leave a spliced host's own hello
+        # already off the socket, and the splice property is that the origin
+        # completes its handshake with the guest's bytes.
         inspect = self._policy.tls == "inspect"
         if inspect and self._minter is None:
             # Unreachable through main(), which refuses to start in this state.
@@ -2061,7 +2088,15 @@ class Listener:
         host = vm_normalise_hostname(hello.server_name)
         allowed = vm_hostname_match(host, self._policy.hosts)
         self.counters.record_hello(hello, allowed)
-        if inspect:
+        # THE ALLOWLIST DECISION COMES FIRST, and the parenthesisation is what
+        # says so. A name on the splice list and on no allowlist is refused,
+        # not spliced -- and on a terminating listener it is refused the way
+        # every other denial is, bump-then-403, rather than by a close the
+        # guest cannot read. The reverse order looks equivalent and is not: a
+        # `splice` PATTERN can cover names `hosts` does not (`*.example.com`
+        # spliced, one name of it allowlisted), and validation cannot catch
+        # that because the pattern does match allowlisted names.
+        if inspect and not (allowed and self._policy.splices(host)):
             self._serve_tls_inspect(conn, where, host, allowed)
             return
         if not allowed:
@@ -2086,9 +2121,18 @@ class Listener:
             # the splice property: the server sees the guest's own ClientHello,
             # so the handshake it completes is with the guest, and this process
             # never holds a key to it.
-            upstream.sendall(raw)
+            #
+            # Nothing to replay when the hello was PEEKED -- a per-host splice
+            # on a terminating listener -- because the bytes are still on the
+            # socket and the relay below reads them first. Sending `raw` there
+            # too would deliver the hello TWICE and the origin would fail the
+            # handshake on the duplicate, which presents as the spliced host
+            # being broken by the exemption that was supposed to fix it.
+            if not inspect:
+                upstream.sendall(raw)
             self.counters.record_splice()
-            self._log(f"splice {where} host={host}")
+            self._log(f"splice {where} host={host}"
+                      f"{' per-host' if inspect else ''}")
             self._relay(conn, upstream)
         finally:
             upstream.close()

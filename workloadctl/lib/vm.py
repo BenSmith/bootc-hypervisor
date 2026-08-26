@@ -777,6 +777,14 @@ def vm_inspect_policy(net: dict) -> dict:
     the kernel's wl_internal_ok4/6 elements are the one enforcement point, and a
     second one in userspace could disagree with them while both looked right.
 
+    `splice` is the [[vm.network.splice]] host patterns, and unlike `internal`
+    it DOES decide something: a name it matches is spliced rather than
+    terminated, on a workload whose `tls` is otherwise "inspect". It is carried
+    even when tls is "splice", where it changes nothing, so that the document
+    describes the file rather than the file filtered through the mode -- a
+    listener restarted onto a different `tls` reads a document that already
+    says what the per-host list was.
+
     It is here so that a FAILED upstream dial to a private address can be
     attributed. An allowlisted name that resolved into private space with no
     entry is the wildcard trap firing; one WITH an entry is a host that is
@@ -787,6 +795,7 @@ def vm_inspect_policy(net: dict) -> dict:
         "tls": net.get("tls", VM_TLS_DEFAULT),
         "hosts": vm_allowed_hosts(net),
         "internal": vm_internal_hosts(net),
+        "splice": vm_splice_hosts(net),
     }
 
 
@@ -1105,6 +1114,26 @@ def vm_internal_hosts(net: dict) -> list[str]:
     So: tolerate what validation owns, fail loudly on what only start can know.
     """
     entries = net.get("internal", [])
+    if not isinstance(entries, list):
+        return []
+    return [e["host"].strip() for e in entries
+            if isinstance(e, dict) and isinstance(e.get("host"), str)
+            and e["host"].strip()]
+
+
+def vm_splice_hosts(net: dict) -> list[str]:
+    """The host patterns in [[vm.network.splice]], in file order.
+
+    HLD §11's second escape hatch: one host that must not be terminated,
+    exempted on a plain restart. The third hatch -- `tls = "splice"` for the
+    whole workload -- is a different key and this list is not consulted under
+    it, because there everything is spliced already.
+
+    Shape-tolerant for the reason vm_internal_hosts is: validate_vm_network
+    owns the shape and the boot generator skips a workload that does not
+    validate, so a malformed entry cannot reach here on the boot path.
+    """
+    entries = net.get("splice", [])
     if not isinstance(entries, list):
         return []
     return [e["host"].strip() for e in entries
@@ -2485,6 +2514,79 @@ def vm_resolve_policy(net: dict, uid: int, resolved=None) -> dict:
 
 
 
+def _patterns_overlap(a: str, b: str) -> bool:
+    """Whether two fnmatch host patterns can name a host in common.
+
+    Approximate, and deliberately approximate in the ACCEPTING direction: it
+    answers yes when either pattern matches the other read as a literal, which
+    is exact whenever at least one of the two carries no wildcard and is a
+    good-enough over-approximation when both do. `*.a.example.com` and
+    `*.b.example.com` overlap on nothing and this says so; `*.example.com` and
+    `*.com` overlap and this says so too.
+
+    Used for the "this entry matches no allowlisted name" rules, where the two
+    sides are an entry's `host` and an allowlist pattern and only one of them is
+    ordinarily a wildcard. Wrong in the accepting direction means a dead entry
+    occasionally survives validation; wrong the other way would refuse a config
+    that works, which is the expensive mistake for a rule whose whole job is to
+    catch a typo.
+    """
+    a = vm_normalise_hostname(a)
+    b = vm_normalise_hostname(b)
+    if not a or not b:
+        return False
+    return (a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a))
+
+
+def _validate_host_reason_entries(entries, key: str, reason_clause: str):
+    """Shape-check an array of [[vm.network.<key>]] `host`/`reason` tables.
+
+    Returns (hosts, errors). `hosts` holds the stripped `host` of every entry
+    whose host was well-formed, in file order, so a caller can apply the rule
+    that is its own -- which for all three users of this helper is some form of
+    "this entry matches nothing, and a dead bypass fails silently".
+
+    Shared because `internal`, `splice` and `http2` are the same table with the
+    same two keys and the same two failure directions, and three copies of this
+    drifted in review before there was one. What is NOT shared is the sentence
+    each key gives for a missing `reason` (`reason_clause`) or for a dead entry:
+    those name what the operator was trying to do, which is the whole value of
+    the message.
+    """
+    errors: list[str] = []
+    hosts: list[str] = []
+    if not isinstance(entries, list):
+        errors.append(
+            f"[vm.network].{key} must be an array of [[vm.network.{key}]] "
+            f"tables, got {type(entries).__name__}")
+        return hosts, errors
+    for item in entries:
+        if not isinstance(item, dict):
+            errors.append(
+                f"[vm.network].{key} entries are tables with `host` and "
+                f"`reason`, got {item!r}")
+            continue
+        unknown = sorted(set(item) - {"host", "reason"})
+        if unknown:
+            errors.append(
+                f"[vm.network].{key}: unknown key(s) {', '.join(unknown)}; an "
+                f"entry carries `host` and `reason` only")
+        if "host" not in item:
+            errors.append(f"[vm.network].{key}: entry {item!r} has no `host`")
+            continue
+        host = item.get("host")
+        problems = _validate_proxy_host(host)
+        if problems:
+            errors.extend(f"[vm.network].{key}: {p}" for p in problems)
+            continue
+        host = host.strip()
+        hosts.append(host)
+        if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+            errors.append(f"[vm.network].{key}: {host!r} has no `reason`; "
+                          f"{reason_clause}")
+    return hosts, errors
+
+
 def _validate_egress(net: dict) -> list[str]:
     """Validate [vm.network].egress and .allow.
 
@@ -2550,53 +2652,52 @@ def _validate_egress(net: dict) -> list[str]:
                 f"[vm.network].tls must be one of "
                 f"{', '.join(repr(m) for m in VM_TLS_MODES)}, got {tls!r}")
 
-    internal = net.get("internal", [])
-    internal_hosts: list[str] = []
-    if not isinstance(internal, list):
-        errors.append(
-            f"[vm.network].internal must be an array of "
-            f"[[vm.network.internal]] tables, got {type(internal).__name__}")
-        internal = []
-    else:
-        for item in internal:
-            if not isinstance(item, dict):
-                errors.append(
-                    f"[vm.network].internal entries are tables with `host` and "
-                    f"`reason`, got {item!r}")
-                continue
-            unknown = sorted(set(item) - {"host", "reason"})
-            if unknown:
-                errors.append(
-                    f"[vm.network].internal: unknown key(s) "
-                    f"{', '.join(unknown)}; an entry carries `host` and "
-                    f"`reason` only")
-            if "host" not in item:
-                errors.append(
-                    f"[vm.network].internal: entry {item!r} has no `host`")
-                continue
-            host = item.get("host")
-            problems = _validate_proxy_host(host)
-            if problems:
-                errors.extend(f"[vm.network].internal: {p}" for p in problems)
-                continue
-            host = host.strip()
-            internal_hosts.append(host)
-            if not isinstance(item.get("reason"), str) or not item["reason"].strip():
-                errors.append(
-                    f"[vm.network].internal: {host!r} has no `reason`; it is a "
-                    f"bypass of the internal-destination drop and carries one "
-                    f"like `allow` does")
-            # A dead entry here fails in the direction nobody notices until the
-            # host is needed: the guest gets `403 <host> resolves to an internal
-            # address` on the one destination the entry existed to permit. An
-            # error, for the same reason an `allow` element that arms nothing is.
-            if not any(host == pattern or fnmatch.fnmatch(host, pattern)
-                       for pattern in hosts if isinstance(pattern, str)):
-                errors.append(
-                    f"[vm.network].internal: {host!r} is on no list — nothing "
-                    f"in .hosts allowlists it, so the entry excepts a "
-                    f"destination the guest is refused before the exception is "
-                    f"reached. Add it to .hosts, or drop this entry")
+    internal_hosts, internal_errors = _validate_host_reason_entries(
+        net.get("internal", []), "internal",
+        "it is a bypass of the internal-destination drop and carries one "
+        "like `allow` does")
+    errors.extend(internal_errors)
+    for host in internal_hosts:
+        # A dead entry here fails in the direction nobody notices until the
+        # host is needed: the guest gets `403 <host> resolves to an internal
+        # address` on the one destination the entry existed to permit. An
+        # error, for the same reason an `allow` element that arms nothing is.
+        if not any(host == pattern or fnmatch.fnmatch(host, pattern)
+                   for pattern in hosts if isinstance(pattern, str)):
+            errors.append(
+                f"[vm.network].internal: {host!r} is on no list — nothing "
+                f"in .hosts allowlists it, so the entry excepts a "
+                f"destination the guest is refused before the exception is "
+                f"reached. Add it to .hosts, or drop this entry")
+
+    # HLD §11 hatch 2. A host here is spliced on a workload that otherwise
+    # terminates, which is the remedy every non-HTTP refusal names -- so the
+    # key has to exist before the messages that tell an operator to type it.
+    splice_hosts, splice_errors = _validate_host_reason_entries(
+        net.get("splice", []), "splice",
+        "it exempts a host from inspection and carries one like `allow` does")
+    errors.extend(splice_errors)
+    for host in splice_hosts:
+        # A dead entry fails in the opposite direction to a dead `internal`
+        # one, which is why the two rules are written out separately rather
+        # than shared: an ignored `splice` line gets you inspection you did not
+        # want, on the host you exempted precisely because it cannot take it.
+        if not any(_patterns_overlap(host, pattern)
+                   for pattern in hosts if isinstance(pattern, str)):
+            errors.append(
+                f"[vm.network].splice: {host!r} matches no allowlisted name — "
+                f"nothing in .hosts covers it, so the entry exempts a host the "
+                f"guest is refused before the exemption is reached. That is a "
+                f"belief about what is reachable that the config contradicts. "
+                f"Add it to .hosts, or drop this entry")
+
+    # ACCEPTED, NOT WARNED, under tls = "splice", and the silence is the
+    # decision. Every host is spliced there, so these entries ask for something
+    # that is already true -- the config's intent is satisfied, not
+    # contradicted, which is the test every other "key with no effect" refusal
+    # in this function applies. And the mode they would fire under is HLD §11's
+    # third hatch, reached in the middle of an incident by an operator whose
+    # toolchain is broken: new output there is a cost with nothing to buy.
     # NOT rejected under `tls = "splice"`, unlike `policy` will be, and the
     # asymmetry is deliberate rather than an oversight: the internal-destination
     # check lives on the inspector's UPSTREAM leg, which a spliced connection
@@ -2606,7 +2707,7 @@ def _validate_egress(net: dict) -> list[str]:
     # §5.3: `bridge` means a real LAN identity, and nothing of ours is in that
     # guest's data path — no host socket, so no uid to match on.
     if "bridge" in net:
-        for key in ("egress", "allow", "tls", "internal"):
+        for key in ("egress", "allow", "tls", "internal", "splice"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .bridge set — a "
@@ -2658,7 +2759,7 @@ def _validate_egress(net: dict) -> list[str]:
     # same reason .hosts is: a key accepted and then not applied is a config
     # that reports a confinement it does not have.
     if egress != "filtered":
-        for key in ("tls", "internal"):
+        for key in ("tls", "internal", "splice"):
             if key in net:
                 errors.append(
                     f"[vm.network].{key} has no effect with .egress = "
@@ -2683,6 +2784,8 @@ def _validate_egress(net: dict) -> list[str]:
             named.append(".hosts")
         if internal_hosts:
             named.append(".internal")
+        if splice_hosts:
+            named.append(".splice")
         if any(e.host for e in allow_entries):
             # An `allow` entry written by name is in the same position: its
             # answer comes from the static map the responder serves, and
@@ -2762,7 +2865,7 @@ def vm_network_warnings(net: dict) -> list[str]:
         return warnings
     egress = net.get("egress", VM_EGRESS_DEFAULT)
 
-    for key in ("hosts", "internal"):
+    for key in ("hosts", "internal", "splice"):
         entries = net.get(key, [])
         if not isinstance(entries, list):
             continue

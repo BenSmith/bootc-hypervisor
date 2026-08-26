@@ -2224,6 +2224,93 @@ class TestRung2Schema(unittest.TestCase):
             "tls": "splice",
             "internal": [{"host": "git.local", "reason": "the forge"}]}), [])
 
+    # --- splice (per host; HLD §11 hatch 2) ---
+
+    def test_a_splice_host_the_allowlist_covers_is_accepted(self):
+        self.assertEqual(self._egress({
+            "hosts": ["sum.golang.org"],
+            "splice": [{"host": "sum.golang.org",
+                        "reason": "verifies a signed log, not the chain"}]}),
+            [])
+
+    def test_a_splice_entry_matching_no_allowlisted_name_is_refused(self):
+        """A dead `splice` entry fails opposite to a dead `internal` one.
+
+        The host is inspected -- which is what its client cannot survive, and
+        why somebody wrote the exemption. The failure arrives as a TLS error
+        rather than as a policy message, which is the §5 case whose whole point
+        was to be diagnosable.
+        """
+        errors = self._egress({
+            "hosts": ["github.com"],
+            "splice": [{"host": "sum.golang.org", "reason": "a signed log"}]})
+        self.assertTrue(any("matches no allowlisted name" in e
+                            for e in errors), errors)
+
+    def test_a_wildcard_in_hosts_covers_a_splice_entry(self):
+        self.assertEqual(self._egress({
+            "hosts": ["*.golang.org"],
+            "splice": [{"host": "sum.golang.org", "reason": "a signed log"}]}),
+            [])
+
+    def test_a_wildcard_splice_entry_over_an_exact_allowlist_is_accepted(self):
+        """The overlap test runs BOTH ways round, and only one of them is the
+        obvious one. `*.golang.org` covers an allowlisted `sum.golang.org`, so
+        the entry is live -- a check that only asked whether the allowlist
+        pattern matches the entry's host would call this dead and refuse a
+        working config."""
+        self.assertEqual(self._egress({
+            "hosts": ["sum.golang.org"],
+            "splice": [{"host": "*.golang.org", "reason": "a signed log"}]}),
+            [])
+
+    def test_splice_requires_a_reason(self):
+        errors = self._egress({"hosts": ["sum.golang.org"],
+                               "splice": [{"host": "sum.golang.org"}]})
+        self.assertTrue(any("reason" in e for e in errors), errors)
+
+    def test_splice_refuses_a_key_it_does_not_know(self):
+        errors = self._egress({
+            "hosts": ["sum.golang.org"],
+            "splice": [{"host": "sum.golang.org", "reason": "r",
+                        "address": "x"}]})
+        self.assertTrue(any("unknown key" in e for e in errors), errors)
+
+    def test_splice_is_refused_under_open_and_beside_a_bridge(self):
+        """Nothing is redirected under either, so there is no intercepted
+        connection for a per-host exemption to describe."""
+        for net in ({"egress": "open",
+                     "splice": [{"host": "x.example.com", "reason": "r"}]},
+                    {"bridge": "br0",
+                     "splice": [{"host": "x.example.com", "reason": "r"}]}):
+            errors = self._egress(net)
+            self.assertTrue(any("no effect" in e and "splice" in e
+                                for e in errors), (net, errors))
+
+    def test_splice_entries_are_ACCEPTED_under_tls_splice(self):
+        """Silence here is a decision, not an oversight.
+
+        Under `tls = "splice"` every host is spliced already, so these entries
+        ask for something that is true -- the config's intent is satisfied, not
+        contradicted, which is the test every other "key with no effect"
+        refusal in this function applies. And the mode is HLD §11's third
+        hatch, reached mid-incident by an operator whose toolchain is broken:
+        new output there costs something and buys nothing.
+        """
+        self.assertEqual(self._egress({
+            "hosts": ["sum.golang.org"],
+            "tls": "splice",
+            "splice": [{"host": "sum.golang.org", "reason": "a signed log"}]}),
+            [])
+
+    def test_resolver_none_beside_splice_is_refused(self):
+        errors = self._egress({
+            "resolver": "none",
+            "hosts": ["sum.golang.org"],
+            "splice": [{"host": "sum.golang.org", "reason": "a signed log"}]})
+        self.assertTrue(any(".splice" in e and "resolver" in e
+                            for e in errors), errors)
+
     # --- allow ---
 
     def test_a_bare_string_allow_is_refused_by_shape(self):

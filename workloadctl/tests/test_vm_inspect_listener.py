@@ -695,6 +695,151 @@ class TestTlsPlane(unittest.TestCase):
         self.assertNotIn("not allowlisted", out.getvalue())
 
 
+class TestPerHostSplice(unittest.TestCase):
+    """[[vm.network.splice]] -- HLD §11 hatch 2, on a terminating listener.
+
+    The key exists before the messages that name it: every non-HTTP refusal
+    this rung writes tells the operator to splice the host, and a remedy
+    `validate` rejects is worse than no remedy at all.
+    """
+
+    def _listener(self, hosts, splice, tls="inspect"):
+        mod = _mod()
+        out = io.StringIO()
+        listener = mod.Listener(
+            [], out,
+            policy=mod.Policy(tls=tls, hosts=tuple(hosts),
+                              splice=tuple(splice)),
+            minter=unittest.mock.Mock())
+        return mod, listener, out
+
+    def _client(self, payload):
+        guest, ours = socket.socketpair()
+        self.addCleanup(guest.close)
+        self.addCleanup(ours.close)
+        guest.sendall(payload)
+        ours.settimeout(2.0)
+        return ours, guest
+
+    def test_the_whole_workload_mode_splices_every_host(self):
+        """One question, asked in one place. `tls == "splice"` in one branch
+        and a list check in another is how a path gets one of the two and
+        reads correct at its own call site."""
+        mod = _mod()
+        policy = mod.Policy(tls="splice", hosts=("a.example",), splice=())
+        self.assertTrue(policy.splices("a.example"))
+        self.assertTrue(policy.splices("anything.at.all"))
+
+    def test_the_per_host_list_is_matched_as_patterns(self):
+        mod = _mod()
+        policy = mod.Policy(tls="inspect", hosts=("*.golang.org",),
+                            splice=("*.golang.org",))
+        self.assertTrue(policy.splices("sum.golang.org"))
+        self.assertFalse(policy.splices("github.com"))
+
+    def test_a_spliced_host_on_a_terminating_listener_is_not_terminated(self):
+        mod, listener, out = self._listener(
+            ["sum.golang.org"], ["sum.golang.org"])
+        conn, guest = self._client(_hello_bytes(server_name="sum.golang.org"))
+        guest.shutdown(socket.SHUT_WR)
+        upstream, far = socket.socketpair()
+        self.addCleanup(upstream.close)
+        self.addCleanup(far.close)
+        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
+            with unittest.mock.patch.object(
+                    socket, "create_connection", return_value=upstream):
+                listener._serve_tls(conn, "plane=tls")
+        term.assert_not_called()
+        self.assertIn("splice", out.getvalue())
+        self.assertIn("host=sum.golang.org", out.getvalue())
+
+    def test_the_peeked_hello_reaches_the_origin_ONCE_and_unmodified(self):
+        """The seam the peek opens, and the one that fails silently.
+
+        On a terminating listener the hello is PEEKED -- it has to be, because
+        the splice decision needs the name that is inside it -- so the bytes
+        are still on the socket when the relay starts. Replaying `raw` as well
+        delivers the hello twice, the origin fails the handshake on the
+        duplicate, and the host somebody exempted precisely because it was
+        breaking breaks in a new way that looks the same.
+        """
+        _, listener, _ = self._listener(["example.com"], ["example.com"])
+        raw = _hello_bytes(_grease_extension())
+        conn, guest = self._client(raw)
+        guest.shutdown(socket.SHUT_WR)
+        upstream, far = socket.socketpair()
+        self.addCleanup(upstream.close)
+        self.addCleanup(far.close)
+        with unittest.mock.patch.object(
+                socket, "create_connection", return_value=upstream):
+            listener._serve_tls(conn, "plane=tls")
+        far.settimeout(2.0)
+        upstream.close()
+        received = b""
+        while True:
+            try:
+                chunk = far.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            received += chunk
+        self.assertEqual(received, raw)
+
+    def test_a_host_not_on_the_splice_list_is_still_terminated(self):
+        _, listener, _ = self._listener(
+            ["a.example", "b.example"], ["a.example"])
+        conn, guest = self._client(_hello_bytes(server_name="b.example"))
+        guest.shutdown(socket.SHUT_WR)
+        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
+            listener._serve_tls(conn, "plane=tls")
+        term.assert_called_once()
+        self.assertEqual(term.call_args.args[2], "b.example")
+
+    def test_a_spliced_name_on_no_allowlist_gets_the_READABLE_refusal(self):
+        """The allowlist decision comes first, and the order is not cosmetic.
+
+        A `splice` PATTERN can cover names `hosts` does not -- `*.example.com`
+        spliced with one name of it allowlisted -- and validation cannot catch
+        that, because the pattern does match allowlisted names. Splicing first
+        would answer such a name with a silent close where every other denial
+        on this listener is a bump-then-403 the guest can read.
+        """
+        _, listener, _ = self._listener(
+            ["good.example.com"], ["*.example.com"])
+        conn, guest = self._client(_hello_bytes(server_name="evil.example.com"))
+        guest.shutdown(socket.SHUT_WR)
+        with unittest.mock.patch.object(listener, "_serve_tls_inspect") as term:
+            with unittest.mock.patch.object(socket, "create_connection") as dial:
+                listener._serve_tls(conn, "plane=tls")
+        dial.assert_not_called()
+        term.assert_called_once()
+        self.assertEqual(term.call_args.args[3], False)   # `allowed`
+
+    def test_the_document_carries_the_splice_list_through(self):
+        """Both halves against each other, not against a literal: a listener
+        reading a key the helper does not write splices nothing while the
+        config says it does."""
+        mod = _mod()
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "inspect.json")
+        with open(path, "w") as f:
+            json.dump(vm_inspect_policy({
+                "hosts": ["sum.golang.org"],
+                "splice": [{"host": "sum.golang.org", "reason": "a log"}]}), f)
+        self.assertEqual(mod.load_policy(path).splice, ("sum.golang.org",))
+
+    def test_the_list_is_carried_even_under_tls_splice(self):
+        """The document describes the FILE, not the file filtered through the
+        mode -- so a listener restarted onto `inspect` reads a document that
+        already says what the per-host list was."""
+        doc = vm_inspect_policy({
+            "tls": "splice", "hosts": ["sum.golang.org"],
+            "splice": [{"host": "sum.golang.org", "reason": "a log"}]})
+        self.assertEqual(doc["splice"], ["sum.golang.org"])
+
+
 class TestLogInjection(unittest.TestCase):
     """A name the guest wrote must not be able to write a line of this log.
 
