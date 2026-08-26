@@ -116,6 +116,8 @@ OPCODE_QUERY = 0
 
 RCODE_NOERROR = 0
 RCODE_FORMERR = 1
+# "the query was fine, we were not" -- see serve_datagram's catch-all.
+RCODE_SERVFAIL = 2
 RCODE_NOTIMP = 4
 
 TYPE_A = 1
@@ -527,6 +529,37 @@ def serve_datagram(sock, policy, counters=None):
             return
         log(f"  malformed query from {peer}: {exc}")
         reply = error_response(query, RCODE_FORMERR)
+    except Exception as exc:  # noqa: BLE001
+        # ANYTHING else is a bug in this program, and the width of this arm is
+        # the point rather than a shortcut. Without it the exception unwinds
+        # through serve() and main() to the top-level handler and the process
+        # exits: Restart=on-failure brings it back, the socket re-triggers it,
+        # the same query arrives again and it exits again. That is a crash loop
+        # in the guest's ONLY nameserver, presenting as "DNS stopped working"
+        # with the cause a stack trace deep in the journal.
+        #
+        # handle_stream has caught this since it was written -- its
+        # `except (OSError, struct.error)` wraps the same build_answer call --
+        # so the identical query drops one TCP connection and kills the process
+        # over UDP, which is the transport essentially every lookup uses. The
+        # asymmetry was the defect; this is the side that was wrong.
+        #
+        # The reachable trigger today is a hand-edited or corrupted answer
+        # document: pack_address raises OSError on a bad literal and Policy
+        # does not validate the static map. Policy already normalises names on
+        # the premise that this file gets edited by hand, and emit_status's
+        # equally wide arm already carries the principle -- nothing peripheral
+        # may take down the responder.
+        #
+        # SERVFAIL, not FORMERR: the query was fine, we were not. Not counted
+        # as malformed either, because that figure means "the guest sent
+        # rubbish" and an operator reading a rising count would look at the
+        # guest instead of at the journal line below, which is the evidence.
+        if len(query) < 2:
+            return
+        log(f"  WARNING: could not answer a query from {peer}: "
+            f"{type(exc).__name__}: {exc}")
+        reply = error_response(query, RCODE_SERVFAIL)
     try:
         sock.sendto(reply, peer)
     except OSError as exc:

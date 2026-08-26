@@ -28,6 +28,7 @@ from vm import (
     nft_drop_counter, nft_element_counter, nft_set_elements,
     parse_vm_allow, vm_allow_reserved_reason, vm_filter_commands,
     vm_filter_delete_command, vm_inspect_address, vm_owned_elements,
+    vm_resolve_address,
 )
 from workload_lib import UID_MAX, UID_MIN
 
@@ -1531,12 +1532,23 @@ class TestResolveDiagnose(unittest.TestCase):
             net["bridge"] = bridge
         cfg = {"vm": {"network": dict(net)}} if is_vm else {"container": {}}
         return SimpleNamespace(name="vm1", uid=uid, vm_bridge=bridge,
-                               vm_network=net, config=cfg)
+                               vm_network=net, config=cfg,
+                               service_name="workload-vm1.service")
 
     def _run(self, config=None, **kw):
         kw.setdefault("socket_active", True)
         kw.setdefault("policy_present", True)
+        kw.setdefault("vm_active", True)
+        # None is "nothing written, or nothing to read", which the check
+        # treats as nothing to say. The arm itself is exercised by the tests
+        # that pass a fragment.
+        kw.setdefault("netdev_dns", None)
         return self.mod.vm_resolve_check(config or self._config(), **kw)
+
+    def _fragment(self, address):
+        """A passt fragment of the shape workload-vm-netdev writes."""
+        return (f"dns-forward=192.168.0.1,dns=192.168.0.1,"
+                f"dns-host={address},param=--dns,param=::1")
 
     # --- applicability: the same predicate the generator uses ---
 
@@ -1604,6 +1616,105 @@ class TestResolveDiagnose(unittest.TestCase):
             _, passed, _ = self._run(socket_active=self.mod.PROBE)
         probe.assert_called_once_with("workload-vm1-resolve.socket")
         self.assertFalse(passed)
+
+    # --- the guest was never told to ask it ---
+
+    def test_dhcp_dns_off_fails_though_the_responder_is_perfect(self):
+        """The failure no other line can see. The socket is listening, the
+        answer document is loaded, the redirect is armed and the guest was
+        handed no nameserver at all -- and workload-vm-netdev fails CLOSED
+        rather than falling back to the host's resolvers, so nothing masks
+        it."""
+        _, passed, msg = self._run(netdev_dns="dhcp-dns=off")
+        self.assertFalse(passed)
+        self.assertIn("never told to ask it", msg)
+        self.assertIn("dhcp-dns=off", msg)
+        self.assertIn(str(vm_resolve_address(10001)), msg)
+        self.assertIn("IPv4 default route", msg)
+
+    def test_a_fragment_naming_another_address_fails(self):
+        """Not just the absence of a responder: a `dns-host=` that names some
+        OTHER address is a fragment left by an instance started under
+        different config, and the guest is asking a responder that is not
+        this workload's."""
+        _, passed, msg = self._run(
+            netdev_dns=self._fragment(vm_resolve_address(10002)))
+        self.assertFalse(passed)
+        self.assertIn("never told to ask it", msg)
+
+    def test_a_fragment_naming_this_responder_passes(self):
+        _, passed, msg = self._run(
+            netdev_dns=self._fragment(vm_resolve_address(10001)))
+        self.assertTrue(passed)
+        self.assertIn("advertised to the guest", msg)
+
+    def test_a_stopped_vm_is_not_judged_on_its_last_start(self):
+        """The fragment describes the LAST start, so on a stopped VM it is a
+        decision that may not be the next one. Skipped, not failed -- and the
+        two host-side arms above stay meaningful either way."""
+        _, passed, msg = self._run(vm_active=False, netdev_dns="dhcp-dns=off")
+        self.assertTrue(passed)
+        self.assertNotIn("never told", msg)
+
+    def test_an_unreadable_fragment_is_not_a_fault_of_its_own(self):
+        """A diagnostic must not invent a failure out of a missing
+        diagnostic: an absent file is the normal state of a VM that has never
+        started."""
+        _, passed, _ = self._run(netdev_dns=None)
+        self.assertTrue(passed)
+
+    def test_the_vm_probe_unpacks_what_service_active_returns(self):
+        """The third place the bare-tuple truthiness bug could land. Left at
+        PROBE deliberately: an injected bool skips the unpack, which is how
+        the same defect reached two checks before."""
+        with mock.patch.object(self.mod, "service_active",
+                               return_value=(False, "inactive")) as probe:
+            _, passed, msg = self._run(vm_active=self.mod.PROBE,
+                                       netdev_dns="dhcp-dns=off")
+        probe.assert_called_once_with("workload-vm1.service")
+        self.assertTrue(passed)
+        self.assertNotIn("never told", msg)
+
+
+class TestNetdevDnsFragment(unittest.TestCase):
+    """Reading back what passt was actually told.
+
+    One read of one short file at a path the VM's own ExecStartPre replaces on
+    every start. It is read rather than recomputed on purpose: recomputing
+    answers what the fragment WOULD be now, and the guest is running on what
+    it WAS then.
+    """
+
+    def setUp(self):
+        import cmd_diagnose
+        self.mod = cmd_diagnose
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        patcher = mock.patch.object(self.mod, "workload_env_dir",
+                                    return_value=Path(self.dir))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write(self, text):
+        Path(self.dir, "workload-vm1.passt").write_text(text)
+
+    def test_the_assignment_is_read_back(self):
+        self._write("WL_PASST_DNS=dns-forward=10.0.0.1,dns-host=127.130.1.4\n")
+        self.assertEqual(self.mod._netdev_dns_fragment("vm1"),
+                         "dns-forward=10.0.0.1,dns-host=127.130.1.4")
+
+    def test_a_value_carrying_equals_signs_survives(self):
+        """Every fragment does -- `dns-forward=`, `param=--dns`. A split on
+        every `=` rather than the first would truncate it to `dns-forward`."""
+        self._write("WL_PASST_DNS=dhcp-dns=off\n")
+        self.assertEqual(self.mod._netdev_dns_fragment("vm1"), "dhcp-dns=off")
+
+    def test_a_missing_file_is_none(self):
+        self.assertIsNone(self.mod._netdev_dns_fragment("vm1"))
+
+    def test_a_file_without_the_assignment_is_none(self):
+        self._write("SOMETHING_ELSE=1\n")
+        self.assertIsNone(self.mod._netdev_dns_fragment("vm1"))
 
 
 class TestInspectMapKeyShapes(unittest.TestCase):

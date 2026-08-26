@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from vm import (
@@ -658,6 +659,79 @@ class _RefusingSocket:
 
     def sendto(self, data, _peer):
         self.sent = data
+
+
+class TestUdpSurvivesABugInItself(unittest.TestCase):
+    """A query this program cannot answer must not end this program.
+
+    The datagram path caught only Malformed, so anything else unwound through
+    serve() and main() to the top-level handler and the process exited --
+    whereupon Restart=on-failure brought it back, the socket re-triggered it,
+    the same query arrived and it exited again. A crash loop in the guest's
+    ONLY nameserver, presenting as "DNS stopped working".
+
+    handle_stream has always caught this on the TCP side, so the identical
+    query dropped one connection over TCP and killed the process over UDP --
+    the transport essentially every lookup uses. The asymmetry was the defect.
+
+    The reachable trigger is a hand-edited answer document: pack_address
+    raises OSError on a bad literal and Policy does not validate the static
+    map, which is why the first test builds exactly that rather than patching
+    a function.
+    """
+
+    def setUp(self):
+        self.mod = _module()
+
+    def _serve(self, policy, msg=None):
+        sock = _RefusingSocket(msg or query("broken.example", TYPE_A))
+        counters = self.mod.Counters()
+        self.mod.serve_datagram(sock, policy, counters=counters)
+        return sock, counters
+
+    def test_a_corrupt_static_literal_does_not_end_the_process(self):
+        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        sock, _ = self._serve(policy)
+        self.assertEqual(Reply(sock.sent).rcode, 2)      # SERVFAIL
+
+    def test_it_is_servfail_and_not_formerr(self):
+        """The query was fine; we were not. FORMERR would send an operator
+        looking at the guest for a query the guest got right."""
+        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        sock, _ = self._serve(policy)
+        self.assertNotEqual(Reply(sock.sent).rcode, 1)
+
+    def test_the_failure_is_not_counted_as_malformed(self):
+        """That figure means `the guest sent rubbish`, and a rising count
+        would point at the guest instead of at the journal line, which is the
+        evidence."""
+        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        _, counters = self._serve(policy)
+        self.assertEqual(counters.snapshot()["queries"]["malformed"], 0)
+
+    def test_the_journal_carries_the_exception_type(self):
+        policy = _policy(self.mod, static={"broken.example": ("not-an-ip",)})
+        self._serve(policy)
+        self.assertTrue(any("could not answer" in line
+                            for line in self.mod.logged))
+
+    def test_the_arm_is_wide_enough_for_a_bug_that_is_not_an_oserror(self):
+        """The point of the arm is that it does not enumerate what a bug in
+        this program can raise."""
+        policy = _policy(self.mod)
+        with mock.patch.object(self.mod, "build_answer",
+                               side_effect=ZeroDivisionError("boom")):
+            sock, _ = self._serve(policy)
+        self.assertEqual(Reply(sock.sent).rcode, 2)
+
+    def test_a_query_too_short_to_reply_to_is_dropped_not_answered(self):
+        """Same disposition the Malformed arm has: under two bytes there is no
+        id to echo, so there is nothing to reply to."""
+        policy = _policy(self.mod)
+        with mock.patch.object(self.mod, "build_answer",
+                               side_effect=ZeroDivisionError("boom")):
+            sock, _ = self._serve(policy, msg=b"\x01")
+        self.assertIsNone(sock.sent)
 
 
 class TestUdpBudget(unittest.TestCase):

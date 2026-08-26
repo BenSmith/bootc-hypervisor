@@ -326,6 +326,25 @@ def down(name: str) -> int:
     for argv in vm_inspect_element_commands(uid, "delete"):
         run(argv)
 
+    # NOT the two cgroup exemptions (wl_inspect_cg, wl_egress_cg), and their
+    # absence here is a decision rather than an oversight -- substrate_vm's
+    # teardown calls this helper precisely for the case where the units' own
+    # stop path never ran, so a reader will come looking for them.
+    #
+    # They cannot be removed from here. The delete names the cgroup PATH, and
+    # by the time a purge runs the inspect service is gone, so the path
+    # resolves to nothing and nft refuses the element. The one moment it does
+    # resolve is that service's own ExecStopPost, which is where the removes
+    # live.
+    #
+    # What survives is inert, which is why this is a note and not a gap. An
+    # element resolves to a cgroup ID at add time and kernfs IDs are not
+    # reused, so a leftover names an ID nothing will hold again and matches no
+    # packet -- the opposite of the uid-keyed elements above, where the uid IS
+    # reissued by get_next_uid and a leftover is armed for whoever gets it
+    # next. That difference is the whole reason this helper is called on purge
+    # at all. Two dead set entries per unclean stop, cleared at reboot.
+
     # The `internal` exemptions, purged by uid. The config is deliberately not
     # consulted here: it names hosts, the set holds addresses, and the mapping
     # between them is a fact about DNS at this instant rather than about this

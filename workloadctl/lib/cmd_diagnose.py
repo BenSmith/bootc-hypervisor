@@ -31,6 +31,7 @@ from workload_lib import (
     units_outdated,
     units_from_other_build,
     workload_data_dir,
+    workload_env_dir,
     workload_root_dir,
     WORKLOADCTL_VERSION,
     WORKLOADS_BASE,
@@ -1350,7 +1351,37 @@ def vm_inspect_check(config, *, elements4=PROBE, elements6=PROBE,
             f"{tail}")
 
 
-def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE
+def _netdev_dns_fragment(name: str) -> str | None:
+    """What passt was told about DNS at this VM's last start, or None.
+
+    One line, at a path the VM's own ExecStartPre replaces on every start:
+
+        /run/workload-env/workload-<name>.passt
+        WL_PASST_DNS=dns-forward=<gw>,dns=<gw>,dns-host=127.130.x.y,...
+
+    None when the file is unreadable or carries no such assignment, which the
+    caller treats as "nothing to say" rather than as a fault -- an absent file
+    is the normal state of a VM that has never started, and a diagnostic must
+    not invent a failure out of a missing diagnostic.
+
+    Cheap on purpose: one read of one short file, no systemctl, no subprocess.
+    It is the decision that actually reached QEMU, which is why this is worth
+    reading rather than recomputing -- recomputing would answer what the
+    fragment WOULD be now, and the guest is running on what it WAS then.
+    """
+    try:
+        text = (workload_env_dir() / f"workload-{name}.passt").read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "WL_PASST_DNS":
+            return value.strip()
+    return None
+
+
+def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE,
+                     vm_active=PROBE, netdev_dns=PROBE
                      ) -> tuple[str, bool, str] | None:
     """Report whether a VM's synthesising responder can actually answer it.
 
@@ -1377,6 +1408,18 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE
         responder is socket-activated, so a missing document is not noticed
         until the guest's first query, and then it fails the START -- on a
         query the guest has already made.
+
+    And a third, one layer out, which the first two cannot see: a responder
+    that is bound, loaded and correct, on a guest that was never told to ask
+    it. `workload-vm-netdev` decides what passt advertises, and it fails CLOSED
+    -- no IPv4 default route, or a uid it could not derive, and the guest is
+    given `dhcp-dns=off` rather than the host's real nameservers. That is the
+    right call (handing a filtered guest the host's resolvers is the leak
+    synthesis exists to remove) and it is silent: the explanation goes to the
+    journal at VM start and nothing reads it back. So the last arm compares
+    what the guest was actually told against this workload's own responder,
+    which also catches a `dns-host=` naming some OTHER address -- a fragment
+    left by an instance started under different config.
 
     Observations are injectable (PROBE sentinel) so the verdict logic is
     testable without a live host.
@@ -1420,9 +1463,42 @@ def vm_resolve_check(config, *, socket_active=PROBE, policy_present=PROBE
                 f"noticed yet. The document is written by this VM's own "
                 f"prestart: systemctl restart workload-{name}.service")
 
-    return ("vm_resolve", True,
-            f"synthesising responder on {vm_resolve_address(uid)}:"
-            f"{VM_RESOLVE_PORT}, {unit} listening, answers from {path}")
+    address = vm_resolve_address(uid)
+    told = f"synthesising responder on {address}:{VM_RESOLVE_PORT}, " \
+           f"{unit} listening, answers from {path}"
+
+    # Gated on the VM being up, like the other VM-runtime observations here:
+    # the fragment describes the LAST start, so on a stopped VM it is a
+    # decision that may not be the next one, and reporting it would be a
+    # verdict on history. Skipped, not failed -- the two arms above are about
+    # the host and stay meaningful either way.
+    if vm_active is PROBE:
+        vm_active, _ = service_active(config.service_name)
+    if not vm_active:
+        return ("vm_resolve", True, told)
+
+    if netdev_dns is PROBE:
+        netdev_dns = _netdev_dns_fragment(name)
+    if netdev_dns is None:
+        # Nothing written, or nothing to read. Not a fault of its own; see
+        # _netdev_dns_fragment.
+        return ("vm_resolve", True, told)
+
+    if f"dns-host={address}" not in netdev_dns:
+        return ("vm_resolve", False,
+                f"the responder is listening and loaded, but this guest was "
+                f"never told to ask it: passt was started with "
+                f"{netdev_dns!r}, which does not point at {address}. The "
+                f"guest resolves NOTHING while every other line here passes — "
+                f"and it fails closed on purpose, so there is no fallback to "
+                f"the host's nameservers to mask it. Usually the host had no "
+                f"IPv4 default route when the VM started (there is no address "
+                f"to advertise and intercept); "
+                f"`journalctl -u workload-{name}.service` carries the reason "
+                f"workload-vm-netdev gave. Fix the host's routing, then: "
+                f"systemctl restart workload-{name}.service")
+
+    return ("vm_resolve", True, f"{told}, advertised to the guest by passt")
 
 
 def _inspect_self_counter(uid):

@@ -2120,9 +2120,23 @@ def generate_vm_inspect_service(config, user_name: str) -> str:
     # Remove both exemptions on stop, kill and failure. ExecStopPost so a
     # killed or failed inspector still withdraws them; `-+` tolerant because
     # the elements are legitimately absent when the start failed before
-    # arming them. Both lines, always: a leftover element points at a cgroup
-    # id that nothing else holds and would arm the next process systemd places
-    # in a same-named path.
+    # arming them. Both lines, always -- but NOT because a leftover would
+    # exempt the wrong process. It would not: the docstring above is the
+    # governing fact, and it cuts both ways. An element resolves to a cgroup
+    # ID at add time, kernfs IDs are not reused, and systemd makes a fresh
+    # cgroup on every start -- so an element left behind names an ID nothing
+    # will ever hold again and matches no packet. It is inert, unlike every
+    # uid-keyed element this design has, where the uid IS reissued and a
+    # leftover is armed for whoever gets it next.
+    #
+    # What a leftover costs is the set growing by two per unclean stop for the
+    # life of the boot, and an operator reading `nft list set` being unable to
+    # tell a live exemption from a dead one. Stated as hygiene rather than as
+    # a security property, because the removal is not always POSSIBLE -- the
+    # delete names the cgroup path, and once the service is gone the path does
+    # not resolve. This is the only moment it does, which is the whole reason
+    # the remove lives here and not on the socket's helper. See
+    # workload-vm-inspect's `down`, which cannot do it and says so.
     for cmd in (
         vm_inspect_cgroup_command(name, "delete"),
         vm_inspect_cgroup_filter_command(name, "delete"),
