@@ -798,5 +798,45 @@ class TestNonHttpInsideATerminatedSessionIsClosed(TerminationCase):
         self.assertEqual(stream.read_head(), head)
 
 
+@unittest.skipUnless(_have_openssl(), "openssl is not installed")
+class TestWhatTheStatusFileCarriesFromARealExchange(TerminationCase):
+    """Rung 3 T8, through the seam rather than over the counters. A figure that
+    is only ever moved by a test calling record_drop is a figure nothing on the
+    live path is known to move."""
+
+    def test_an_unverifiable_upstream_names_the_host_it_could_not_verify(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin, trust=False)
+        self._exchange(listener, origin)
+        snap = listener.status()
+        self.assertEqual(snap["per_host"][mod.DROP_UNVERIFIED],
+                         {self.HOST: 1})
+
+    def test_the_ca_an_operator_must_install_is_in_the_status(self):
+        """Rung 5 compares this against the anchor in the guest. Nothing else
+        produces the value -- this process is what mints with it."""
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin)
+        self._exchange(listener, origin)
+        ca = listener.status()["mint"]["ca"]
+        self.assertRegex(ca["sha256"], r"^([0-9A-F]{2}:){31}[0-9A-F]{2}$")
+        self.assertGreater(ca["not_after"], time.time())
+
+    def test_a_denied_name_moves_the_denial_half_of_the_mint_figures(self):
+        origin = _Origin(self.origin_pem)
+        self.addCleanup(origin.close)
+        mod = _mod()
+        listener, _ = self._listener(mod, origin, hosts=("elsewhere.example",))
+        self._exchange(listener, origin)
+        mint = listener.status()["mint"]
+        self.assertEqual((mint["mints"], mint["denied_mints"]), (1, 1))
+        self.assertEqual(mint["denials"], 1)
+        self.assertEqual(mint["working_set"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -417,6 +417,15 @@ name = "schema-reference"
 #              a private root has to be added to the host's anchors, not the
 #              guest's.
 #
+#              THE OPTIONAL CLIENT CERTIFICATE IS THE QUIET ONE. A host that
+#              merely OFFERS client authentication does not fail: the session
+#              completes without one and the guest is simply unauthenticated,
+#              so the symptom is a host that starts answering 401 or 403 --
+#              its own, not this inspector's -- only under termination, while
+#              it worked under "splice" and works from anywhere else. No
+#              counter can see it, because nothing failed. If a host regresses
+#              that way after a workload starts terminating, splice it.
+#
 #              A third thing it will not carry: 443 is read as HTTP/1.1, so a
 #              host this guest speaks some OTHER protocol to over 443 -- a
 #              database wire protocol, a tunnel, HTTP/2 -- has its connection

@@ -36,6 +36,8 @@ which is why they need a cache and a bucket of their own rather than a constant.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import os
 import subprocess
@@ -51,6 +53,18 @@ from vm import (
     vm_ca_cert_path, vm_ca_key_path, vm_leaf_openssl_argv,
     vm_normalise_hostname,
 )
+from vm_clock import CLOCK_FAILED, CLOCK_RESYNCED, CLOCK_UNAVAILABLE
+
+# Which clock_check outcomes get a counter, and which counter each lands in.
+# CLOCK_OK deliberately has none: it is what every healthy mint returns, so a
+# figure tracking it would track the mint count and say nothing further. The
+# other three each describe a different thing being wrong, and one of them --
+# CLOCK_UNAVAILABLE -- describes the remedy itself not being present.
+_CLOCK_STATS = {
+    CLOCK_RESYNCED: "clock_resyncs",
+    CLOCK_UNAVAILABLE: "clock_unavailable",
+    CLOCK_FAILED: "clock_failed",
+}
 
 # --- sizes ---
 #
@@ -300,6 +314,38 @@ class LeafCache:
             return name in self._entries
 
 
+def _pem_fingerprint(path: Path) -> str | None:
+    """The SHA-256 fingerprint of the certificate in a PEM, or None.
+
+    Decoded here rather than shelled out to openssl. A fingerprint is a hash of
+    the DER, the DER is what the base64 between the PEM markers decodes to, and
+    hashlib is already imported -- so the subprocess this would otherwise cost
+    on every status write buys nothing. Formatted in the colon-separated
+    uppercase hex `openssl x509 -fingerprint -sha256` prints, because the value
+    exists to be compared against that output by eye.
+
+    Only the FIRST certificate in the file, which for a CA PEM is the CA.
+    """
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    marker = "-----BEGIN CERTIFICATE-----"
+    start = text.find(marker)
+    end = text.find("-----END CERTIFICATE-----", start + 1)
+    if start == -1 or end == -1:
+        return None
+    body = text[start + len(marker):end]
+    try:
+        der = base64.b64decode("".join(body.split()), validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not der:
+        return None
+    digest = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+
 def _pem_not_after(path: Path) -> float | None:
     """The notAfter of the certificate in a PEM, as a unix timestamp.
 
@@ -349,11 +395,26 @@ class Minter:
         # each other. See the class docstring on LeafCache.
         self.denials = LeafCache(
             DENIAL_CACHE_MAX, self.state_dir / DENIAL_DIR_NAME)
+        # THE DENIAL FIGURES ARE SUBSETS, not a second dimension: `mints` and
+        # `hits` count both caches, and `denied_mints`/`denied_hits` count the
+        # denial-only half of the same events. Reporting them as disjoint pairs
+        # would make the total a sum an operator has to compute; reporting only
+        # the totals loses the split, and the SPLIT IS THE SIGNAL -- legitimate
+        # traffic mints a handful of working-set leaves and then lives on hits,
+        # while a guest driving the minter shows up almost entirely in the
+        # denial half. Same number, two very different workloads.
         self.stats = {
-            "mints": 0, "hits": 0, "throttled": 0,
-            "refused": 0, "failed": 0, "clock_resyncs": 0,
+            "mints": 0, "denied_mints": 0,
+            "hits": 0, "denied_hits": 0,
+            "throttled": 0, "refused": 0, "failed": 0,
+            # Four outcomes, not one. `clock_unavailable` is the one that
+            # matters to `diagnose`: it means this guest has no agent to ask,
+            # so the mint-time clock remedy is INERT here -- the failure it
+            # exists to prevent is still possible and nothing else says so.
+            "clock_resyncs": 0, "clock_unavailable": 0, "clock_failed": 0,
         }
         self._lock = threading.Lock()
+        self._ca_identity = None
 
     def leaf(self, server_name: str, *, denied: bool) -> Leaf:
         """A leaf for one exact name. Raises rather than returning a sentinel.
@@ -377,6 +438,8 @@ class Minter:
         cached = cache.get(name, now=now)
         if cached is not None:
             self.stats["hits"] += 1
+            if denied:
+                self.stats["denied_hits"] += 1
             return cached
 
         if denied:
@@ -390,14 +453,58 @@ class Minter:
 
         # On a miss only, and after the bucket: a guest cannot make this run
         # more often than it can make us mint.
-        if self._clock_check() == "resynced":
-            self.stats["clock_resyncs"] += 1
+        outcome = self._clock_check()
+        if outcome in _CLOCK_STATS:
+            self.stats[_CLOCK_STATS[outcome]] += 1
 
-        leaf = self._mint(name, cache)
+        leaf = self._mint(name, cache, denied=denied)
         cache.put(leaf)
         return leaf
 
-    def _mint(self, name: str, cache: LeafCache) -> Leaf:
+    def ca_identity(self) -> dict:
+        """This workload's CA, as the two facts an operator can act on.
+
+        The SHA-256 fingerprint over the DER, spelled the way `openssl x509
+        -fingerprint -sha256` spells it, so it can be compared by eye against
+        the anchor installed in the guest -- which is rung 5's comparison, but
+        this is the only place the value has a producer, because this is what
+        mints with it.
+
+        `notAfter` is here for one reason: a ten-year validity is invisible
+        until something prints the date it ends on. Distant is not the same as
+        safe, and an operator who can see 2036 can decide whether that is what
+        they meant.
+
+        Read once and remembered. The CA does not rotate -- decision 4 of ADR
+        008 -- so re-reading it per status write would be a syscall per tick to
+        confirm a constant. Every failure degrades to None rather than raising:
+        this runs on the status path, and a status file is never worth a
+        connection.
+        """
+        if self._ca_identity is None:
+            cert = vm_ca_cert_path(self.state_dir)
+            self._ca_identity = {
+                "sha256": _pem_fingerprint(cert),
+                "not_after": _pem_not_after(cert),
+            }
+        return dict(self._ca_identity)
+
+    def snapshot(self) -> dict:
+        """Everything this minter reports, counters and live sizes together.
+
+        The sizes are read here rather than counted as they change: a cache
+        that evicts on insert would need every eviction mirrored into a counter
+        to stay honest, and the length IS the honest figure.
+        """
+        with self._lock:
+            out = dict(self.stats)
+        out["working_set"] = len(self.working_set)
+        out["denials"] = len(self.denials)
+        out["tokens"] = round(self.bucket.tokens, 2)
+        out["ca"] = self.ca_identity()
+        return out
+
+    def _mint(self, name: str, cache: LeafCache, *, denied: bool) -> Leaf:
         """Sign one leaf and land it as a single PEM, atomically.
 
         Minted into a temporary directory and moved into place, so a reader that
@@ -440,6 +547,8 @@ class Minter:
             os.replace(staged, target)
 
         self.stats["mints"] += 1
+        if denied:
+            self.stats["denied_mints"] += 1
         not_after = _pem_not_after(target)
         if not_after is None:
             # A leaf we just minted and cannot read back is not a leaf.

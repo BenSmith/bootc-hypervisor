@@ -1526,6 +1526,26 @@ DROP_REASONS = (
     DROP_NOT_HTTP,
 )
 
+# The reasons that also get a PER-HOST figure, and the only ones that do.
+#
+# Each is a refusal an operator acts on by NAME: the host to add an
+# [[vm.network.internal]] entry for, the host whose private root has to go into
+# this host's anchors, the host that needs client certificates and therefore
+# `tls = "splice"`, and the host that is not speaking HTTP and therefore needs
+# the same. A per-host figure for `not allowlisted` is deliberately absent --
+# the guest picks those names, there is no bound on how many it invents, and
+# the answer is already the allowlist itself rather than a list to read.
+#
+# Every one of these is a BOUNDED top-N with a counted overflow, because the
+# keys are guest-chosen: unbounded, a guest inflating the report damages the
+# host's Prometheus label cardinality rather than its own workload.
+PER_HOST_REASONS = (
+    DROP_INTERNAL,
+    DROP_UNVERIFIED,
+    DROP_CLIENT_CERT,
+    DROP_NOT_HTTP,
+)
+
 # Where a drop whose reason is not in DROP_REASONS is counted. Emitted only when
 # it is non-zero, for the reason `(other)` is: a bucket reading zero on every
 # healthy workload trains an operator to skip the line, and this is the line
@@ -1588,6 +1608,19 @@ class Counters:
     connection carrying forty authorised requests, which is the reading `spliced`
     can never produce.
 
+    THE PER-HOST MAPS ARE A DIFFERENT KIND OF FIGURE
+
+    `dispositions` and `drop_reasons` answer "what happened, how often".
+    `per_host` answers "to which host", and only for the four reasons whose
+    remedy is written against a name -- an internal destination missing an
+    entry, an upstream this host cannot verify, a host wanting a client
+    certificate, and a host not speaking HTTP. The last two are the operator's
+    list of `splice` candidates, which is the whole reason they are per host.
+
+    They are bounded top-N with a counted overflow because the keys come from
+    the guest. `per_host_totals` is exact regardless: the top-N can lose which
+    names, never how many.
+
     `bumped` IS NOT A DISPOSITION and is reported outside that map on purpose.
     A bump is a refusal DELIVERED THROUGH a completed handshake, so it is
     already counted in `dropped` under its own reason; the figure says how the
@@ -1608,7 +1641,11 @@ class Counters:
         self._unclassified = 0
         self.ech_seen = 0
         self.ech_alarm = 0
-        self.internal_refusals = BoundedCounts(top_n)
+        self.per_host = {reason: BoundedCounts(top_n)
+                         for reason in PER_HOST_REASONS}
+        # The rung 2 name for one of them, kept because it is the one an
+        # operator may already have grepped for.
+        self.internal_refusals = self.per_host[DROP_INTERNAL]
         # The lists as LOADED, not as written in the file: `drift` cannot see
         # them, and the question an operator has is what this process is
         # actually enforcing.
@@ -1679,8 +1716,8 @@ class Counters:
                 # hold unconditionally or an operator reconciling the two maps
                 # is reconciling against a number that quietly lost rows.
                 self._unclassified += 1
-            if reason == DROP_INTERNAL and host:
-                self.internal_refusals.add(host)
+            if host and reason in self.per_host:
+                self.per_host[reason].add(host)
 
     def snapshot(self, *, open_now: int, refused: int) -> dict:
         with self._lock:
@@ -1694,6 +1731,11 @@ class Counters:
                 "bumped": self.bumped,
                 "internal_refusals": self.internal_refusals.snapshot(),
                 "internal_refusals_total": self.internal_refusals.total,
+                "per_host": {reason: counts.snapshot()
+                             for reason, counts in self.per_host.items()},
+                "per_host_totals": {reason: counts.total
+                                    for reason, counts in
+                                    self.per_host.items()},
                 "concurrency": {"open": open_now, "refused": refused},
                 "lists": dict(self.lists),
             }
@@ -2712,10 +2754,14 @@ class Listener:
         snap = self.counters.snapshot(open_now=self._ceiling.held,
                                       refused=self.rejected)
         if self._minter is not None:
-            # The minter's own figures, verbatim. `hits` against `mints` is what
-            # says whether the working set is doing its job, and `clock_resyncs`
-            # is the only place a guest whose clock we repaired shows up at all.
-            snap["mint"] = dict(self._minter.stats)
+            # The minter's own figures, live sizes and CA identity included.
+            # `hits` against `mints` says whether the working set is doing its
+            # job; the `denied_*` subsets say which half of the traffic is
+            # driving it; `throttled` is the only thing that names why a
+            # workload under sustained abuse stopped getting readable 403s;
+            # and `clock_unavailable` is the only thing that says the
+            # mint-time clock remedy is inert in this guest.
+            snap["mint"] = self._minter.snapshot()
         return snap
 
     def write_status(self):

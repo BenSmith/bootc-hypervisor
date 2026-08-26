@@ -560,5 +560,101 @@ class TestTheClockCheckIsNotOptional(unittest.TestCase):
             vm_mint.Minter("wl-test", "/nonexistent")
 
 
+class TestWhatTheMinterReports(_MinterCase):
+    """Rung 3 T8. The figures exist here because this is where the events are;
+    rendering them is a later rung's work over numbers that by then exist."""
+
+    def test_the_denial_figures_are_subsets_of_the_totals(self):
+        """The split is the signal: legitimate traffic mints a few working-set
+        leaves and then lives on hits, while a guest driving the minter shows
+        up almost entirely in the denial half."""
+        minter = self.minter()
+        minter.leaf("good.example", denied=False)
+        minter.leaf("good.example", denied=False)          # a hit
+        minter.leaf("bad.example", denied=True)
+        minter.leaf("bad.example", denied=True)            # a denial hit
+        snap = minter.snapshot()
+        self.assertEqual(snap["mints"], 2)
+        self.assertEqual(snap["denied_mints"], 1)
+        self.assertEqual(snap["hits"], 2)
+        self.assertEqual(snap["denied_hits"], 1)
+
+    def test_the_two_caches_are_sized_separately(self):
+        minter = self.minter()
+        minter.leaf("good.example", denied=False)
+        minter.leaf("bad.example", denied=True)
+        snap = minter.snapshot()
+        self.assertEqual((snap["working_set"], snap["denials"]), (1, 1))
+
+    def test_a_guest_with_no_agent_is_counted_as_such(self):
+        """The figure `diagnose` needs. A guest with no qemu-guest-agent is a
+        SUPPORTED configuration in which the mint-time clock remedy is inert --
+        the failure it exists to prevent is still possible, and nothing else
+        says so."""
+        minter = self.minter(clock_check=lambda: "unavailable")
+        minter.leaf("example.com", denied=False)
+        snap = minter.snapshot()
+        self.assertEqual(snap["clock_unavailable"], 1)
+        self.assertEqual(snap["clock_resyncs"], 0)
+        self.assertEqual(snap["clock_failed"], 0)
+
+    def test_each_clock_outcome_lands_in_its_own_figure(self):
+        for outcome, key in (("resynced", "clock_resyncs"),
+                             ("failed", "clock_failed"),
+                             ("unavailable", "clock_unavailable")):
+            with self.subTest(outcome=outcome):
+                minter = self.minter(clock_check=lambda o=outcome: o)
+                minter.leaf(f"{outcome}.example", denied=False)
+                self.assertEqual(minter.snapshot()[key], 1)
+
+    def test_a_healthy_clock_gets_no_figure_of_its_own(self):
+        """It would track the mint count and say nothing further."""
+        minter = self.minter()
+        minter.leaf("example.com", denied=False)
+        snap = minter.snapshot()
+        self.assertEqual(
+            [snap[k] for k in ("clock_resyncs", "clock_unavailable",
+                               "clock_failed")], [0, 0, 0])
+
+    def test_the_ca_fingerprint_is_the_one_openssl_prints(self):
+        """The value exists to be compared by eye against the anchor installed
+        in the guest, so it has to be spelled the way the tool an operator will
+        reach for spells it."""
+        minter = self.minter()
+        printed = _certificate(vm.vm_ca_cert_path(self.state),
+                               "-fingerprint", "-sha256").strip()
+        _, _, expected = printed.partition("=")
+        self.assertEqual(minter.ca_identity()["sha256"], expected)
+
+    def test_the_ca_not_after_is_a_readable_date(self):
+        """A ten-year validity is invisible until something prints the date it
+        ends on."""
+        minter = self.minter()
+        not_after = minter.ca_identity()["not_after"]
+        self.assertIsInstance(not_after, float)
+        self.assertGreater(not_after, time.time() + 365 * 24 * 3600)
+
+    def test_the_ca_is_read_once_and_remembered(self):
+        """It does not rotate, so re-reading it per status write would be
+        syscalls to confirm a constant."""
+        minter = self.minter()
+        first = minter.ca_identity()
+        vm.vm_ca_cert_path(self.state).unlink()
+        self.assertEqual(minter.ca_identity(), first)
+
+    def test_an_unreadable_ca_costs_the_figure_and_not_the_status(self):
+        """A status file is never worth a connection."""
+        vm.vm_ca_cert_path(self.state).write_text("not a certificate\n")
+        minter = self.minter()
+        self.assertEqual(minter.ca_identity(),
+                         {"sha256": None, "not_after": None})
+
+    def test_the_snapshot_is_a_copy(self):
+        """A caller that mutated it would be mutating the counters."""
+        minter = self.minter()
+        minter.snapshot()["mints"] = 99
+        self.assertEqual(minter.snapshot()["mints"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

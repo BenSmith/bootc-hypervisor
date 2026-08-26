@@ -2016,6 +2016,57 @@ class TestCounters(unittest.TestCase):
         listener.counters.record_splice()
         self.assertEqual(listener.status()["dispositions"]["spliced"], 1)
 
+    def test_every_per_host_reason_has_its_own_map(self):
+        """Rung 3 T8. Each of these is a refusal an operator acts on by NAME --
+        an entry to add, a root to install, a workload to splice -- so the
+        figure has to say which host, not only how many."""
+        mod, listener, _ = self._listener()
+        for reason in mod.PER_HOST_REASONS:
+            listener.counters.record_drop(reason, "named.example")
+        per_host = listener.status()["per_host"]
+        self.assertEqual(sorted(per_host), sorted(mod.PER_HOST_REASONS))
+        for reason in mod.PER_HOST_REASONS:
+            self.assertEqual(per_host[reason], {"named.example": 1}, reason)
+
+    def test_the_reasons_an_operator_acts_on_by_name_are_the_ones_split(self):
+        """`not allowlisted` deliberately gets NO per-host map: the guest picks
+        those names, there is no bound on how many it invents, and the answer is
+        the allowlist itself rather than a list to read."""
+        mod, listener, _ = self._listener()
+        self.assertNotIn(mod.DROP_NOT_ALLOWLISTED, mod.PER_HOST_REASONS)
+        self.assertNotIn(mod.DROP_MISDIRECTED, mod.PER_HOST_REASONS)
+        listener.counters.record_drop(mod.DROP_NOT_ALLOWLISTED, "a.example")
+        self.assertNotIn(mod.DROP_NOT_ALLOWLISTED,
+                         listener.status()["per_host"])
+
+    def test_the_splice_candidates_are_countable_per_host(self):
+        """The two reasons whose remedy is `tls = "splice"` on the workload."""
+        mod, listener, _ = self._listener()
+        listener.counters.record_drop(mod.DROP_CLIENT_CERT, "mtls.example")
+        listener.counters.record_drop(mod.DROP_NOT_HTTP, "pg.example")
+        listener.counters.record_drop(mod.DROP_NOT_HTTP, "pg.example")
+        per_host = listener.status()["per_host"]
+        self.assertEqual(per_host[mod.DROP_CLIENT_CERT], {"mtls.example": 1})
+        self.assertEqual(per_host[mod.DROP_NOT_HTTP], {"pg.example": 2})
+
+    def test_the_totals_survive_the_bound_the_names_do_not(self):
+        """A top-N can lose WHICH names; it must never lose HOW MANY."""
+        mod, listener, _ = self._listener()
+        for i in range(200):
+            listener.counters.record_drop(mod.DROP_UNVERIFIED, f"h{i}.example")
+        snap = listener.status()
+        self.assertLessEqual(len(snap["per_host"][mod.DROP_UNVERIFIED]), 21)
+        self.assertEqual(snap["per_host_totals"][mod.DROP_UNVERIFIED], 200)
+
+    def test_a_drop_with_no_host_moves_only_the_reason(self):
+        """Not every refusal knows a name -- a ceiling rejection has none --
+        and inventing a key for it would be a host that never existed."""
+        mod, listener, _ = self._listener()
+        listener.counters.record_drop(mod.DROP_NOT_HTTP)
+        snap = listener.status()
+        self.assertEqual(snap["per_host"][mod.DROP_NOT_HTTP], {})
+        self.assertEqual(snap["drop_reasons"][mod.DROP_NOT_HTTP], 1)
+
 
 class TestInternalAttribution(unittest.TestCase):
     """Two failures arrive as one OSError, and telling them apart is the whole
